@@ -1,51 +1,44 @@
-# run_analysis.py
+#!/usr/bin/env python3
 
-import os
-import json
 import sys
-import pathlib
+import logging
+import pprint
 
-# --- Import the agent from the package ---
-from exp_agents.microscopy_agent import GeminiMicroscopyAnalysisAgent
-# -----------------------------------------
+try:
+    import config
+except ImportError:
+    print("Error: config.py not found. Please ensure it exists.")
+    sys.exit(1)
+
+from exp_agents.microscopy_agent import GeminiMicroscopyAnalysisAgent as AnalysisAgent
+from sim_agents.ase_agent import StructureGenerator
+
 
 # --- Interactive Selection Function ---
-# (Keep the select_recommendation_interactive function definition here,
-#  as it's part of this script's interactive workflow)
-def select_recommendation_interactive(recommendations: list, manual_choice: int | None = None) -> dict | None:
+def select_recommendation_interactive(recommendations: list) -> dict | None:
+    """
+    Displays recommendations and prompts the user to select one.
+    Relies on interactive prompt or default for non-interactive envs.
+    """
     if not recommendations:
         print("No recommendations available to select from.")
         return None
-    # (Keep implementation including manual_choice check, isatty check, input loop)
-    # --- Check for Manual Override ---
-    if manual_choice is not None:
-        try:
-            choice_index = int(manual_choice) - 1
-            if 0 <= choice_index < len(recommendations):
-                selected = recommendations[choice_index]
-                print(f"--- Manually Selected Recommendation #{manual_choice} ---")
-                print(f"  Description: {selected.get('description')}")
-                print("-------------------------------------------\n")
-                return selected
-            else:
-                print(f"Warning: Manual choice ({manual_choice}) is out of range (1-{len(recommendations)}). Falling back.")
-        except ValueError:
-            print(f"Warning: Manual choice '{manual_choice}' is not a valid number. Falling back.")
 
+    # --- Display Options More Concisely ---
     print("\n--- Available Structure Recommendations ---")
     for i, rec in enumerate(recommendations):
-         print(f"[{i+1}] Priority: {rec.get('priority', 'N/A')}")
-         print(f"    Description: {rec.get('description', 'N/A')}\n")
+        print(f"[{i+1}] (Priority: {rec.get('priority', 'N/A')}) {rec.get('description', 'N/A')}")
+    print("-" * 35) # Separator
 
+    # --- Interactive Prompt Loop ---
     while True:
         try:
             if not sys.stdin.isatty():
-                 print("Warning: Cannot prompt for input in a non-interactive environment.")
+                 print("\nWarning: Cannot prompt for input in a non-interactive environment.")
                  print("Selecting the highest priority recommendation by default.")
-                 # Ensure recommendations list isn't empty before indexing
                  return recommendations[0] if recommendations else None
 
-            choice = input(f"Enter the number (1-{len(recommendations)}) of the recommendation to select, or 'q' to quit: ").strip().lower()
+            choice = input(f"Enter the number (1-{len(recommendations)}) to select, or 'q' to quit: ").strip().lower()
 
             if choice == 'q': print("Selection cancelled."); return None
             if not choice.isdigit(): print("Invalid input. Please enter a number."); continue
@@ -53,82 +46,118 @@ def select_recommendation_interactive(recommendations: list, manual_choice: int 
             choice_index = int(choice) - 1
             if 0 <= choice_index < len(recommendations):
                 selected = recommendations[choice_index]
-                print(f"\n--- You selected recommendation #{choice}: ---")
-                print(f"  Description: {selected.get('description')}")
-                print("-------------------------------------------\n")
+                print(f"\n--- Selection Confirmed: Recommendation #{choice} (Priority: {selected.get('priority', 'N/A')}) ---")
                 return selected
             else:
-                print(f"Invalid number. Please enter a number between 1 and {len(recommendations)}.")
+                print(f"Invalid number. Please enter between 1 and {len(recommendations)}.")
         except KeyboardInterrupt: print("\nSelection cancelled by user."); return None
         except EOFError: print("\nInput stream closed..."); return recommendations[0] if recommendations else None
-        except Exception as e: print(f"An error occurred: {e}"); return None
+        except Exception as e: logging.error(f"An error occurred during selection: {e}"); return None
 # --- End Selection Function ---
 
 
+# ===========================================
+#                  MAIN WORKFLOW
+# ===========================================
 if __name__ == "__main__":
-    # --- Configuration ---
-    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-    # <<< Set this manually to choose, or leave as None for default/interactive mode >>>
-    MANUAL_SELECTION_NUMBER = None # e.g., set to 1
 
-    IMAGE_PATH = "MoS2_1.png" # <<< SET THIS PATH
-    SYSTEM_INFO = {
-        "material_type": "MoS2 monolayer",
-        "synthesis_details": "V-doped MoS2 films were synthesized on c-plane sapphire substrates using a custom-built MOCVD system. Mo(CO)6 (99.99% purity, Sigma-Aldrich) and V(C5H5)2 (99.99% purity, Sigma-Aldrich) powders are placed into stainless steel bubblers and serve as the Mo and V precursors, respectively. During synthesis, the pressure inside the bubblers are kept constant at 735 torr, and the temperature is set to 24°C for Mo(CO)6 and 50°C for V(C5H5)2 to maintain a constant precursor vapor pressure. Concentration of Mo and V precursor in the growth chamber can be tightly controlled by introducing precise flow of H2 carrier gas through the bubblers. A high-purity H2S gas lecture bottle (99.5%, Sigma-Aldrich) is used as the sulfur source. Growths are carried out at a growth temperature of 1000°C and a pressure of 50 torr, using a multistep growth process",
-        "microscopy_type": "HAADF-STEM",
-        "image_path": "MoS2_1.png",
-        "experimental_details": {
-            "voltage": "60 kV",
-            "probe_current": "30 pA"
-        }
-    }
-    MODEL = "gemini-2.5-pro-exp-03-25" # Or your preferred model
-    # -----------------------
+    # --- Use Config for Logging ---
+    logging.basicConfig(level=config.LOGGING_LEVEL, format=config.LOGGING_FORMAT)
 
-    if not GOOGLE_API_KEY:
-        print("Error: GOOGLE_API_KEY environment variable not set.")
-        exit(1)
-
-    if not pathlib.Path(IMAGE_PATH).is_file():
-         print(f"Error: Image file not found at '{IMAGE_PATH}'")
-         exit(1)
-
-    # --- Workflow Execution ---
+    # --- Pre-run Checks (using config) ---
     try:
-        print(f"Initializing agent with model: {MODEL}")
-        # Instantiate the imported agent
-        agent = GeminiMicroscopyAnalysisAgent(api_key=GOOGLE_API_KEY, model_name=MODEL)
+        config.validate_config() # Optionally run validation from config
+    except Exception as config_err:
+        logging.error(f"{config_err}", exc_info=False) # Log config error without traceback
+        sys.exit(1)
+    # -----------------------------------
 
-        print(f"Analyzing image: {IMAGE_PATH}...")
-        analysis_result = agent.analyze_microscopy_image(IMAGE_PATH, system_info=SYSTEM_INFO)
+    selected_recommendation = None
 
-        print("\n--- Analysis Result ---")
+    # === Workflow Step 1: Image Analysis ===
+    try:
+        logging.info("--- Starting Step 1: Image Analysis ---")
+        logging.info(f"Initializing analysis agent with model: {config.ANALYSIS_AGENT_MODEL}")
+        analysis_agent = AnalysisAgent(
+            api_key=config.GOOGLE_API_KEY,
+            model_name=config.ANALYSIS_AGENT_MODEL
+        )
+
+        logging.info(f"Analyzing image: {config.IMAGE_PATH}...")
+        analysis_result = analysis_agent.analyze_microscopy_image(
+            config.IMAGE_PATH,
+            system_info=config.SYSTEM_INFO
+        )
+
+        logging.info("--- Analysis Result Received ---")
         if "error" not in analysis_result:
-             print(json.dumps(analysis_result, indent=2))
+             logging.debug("Full Analysis JSON:\n%s", pprint.pformat(analysis_result))
+             print("\n--- Analysis Summary ---")
+             print(analysis_result.get("full_analysis", "No detailed analysis text found."))
+             print("-" * 22)
 
-             # --- SELECTION STEP ---
              if analysis_result.get("recommendations"):
+                  logging.info("Proceeding to recommendation selection.")
+                  # --- Updated Function Call (no manual_choice) ---
                   selected_recommendation = select_recommendation_interactive(
-                      analysis_result["recommendations"],
-                      manual_choice=MANUAL_SELECTION_NUMBER # Pass the manual choice
+                      analysis_result["recommendations"]
                   )
-
-                  if selected_recommendation:
-                       print("--- Ready for Next Step ---")
-                       print("Selected Recommendation Data:")
-                       print(json.dumps(selected_recommendation, indent=2))
-                       print("\nThis 'selected_recommendation' dictionary can now be passed to the next LLM or function.")
-                       # (Add call to next step here)
-                  else:
-                       print("No recommendation was selected for the next step.")
+                  # -------------------------------------------------
              else:
-                  print("Analysis completed, but no recommendations were found to select from.")
-
+                  logging.warning("Analysis completed, but no recommendations were found.")
         else:
-             print("Analysis failed. Result:")
-             print(json.dumps(analysis_result, indent=2))
+             logging.error("Analysis step failed.")
+             print("\n--- Analysis Failed ---")
+             pprint.pprint(analysis_result)
+             print("-" * 21)
 
-        print("--- End Script ---")
+    except ValueError as ve:
+        logging.error(f"Configuration Error during Analysis step: {ve}")
+    except Exception as e:
+        logging.exception("An unexpected error occurred during Analysis step:")
 
-    except ValueError as ve: print(f"Configuration Error: {ve}")
-    except Exception as e: print(f"An unexpected error occurred during script execution: {e}")
+    # === Workflow Step 2: Structure Generation ===
+    if selected_recommendation:
+        try:
+            logging.info("--- Starting Step 2: Structure Generation ---")
+            selected_description = selected_recommendation.get("description")
+
+            if not selected_description:
+                logging.error("Selected recommendation is missing 'description'. Cannot proceed.")
+            else:
+                logging.info(f"Using selected description: '{selected_description}'")
+                generator_input_data = {"description": selected_description}
+
+                logging.info(f"Initializing structure generator: {config.GENERATOR_AGENT_MODEL}")
+                generator = StructureGenerator(
+                    api_key=config.GOOGLE_API_KEY,
+                    model_name=config.GENERATOR_AGENT_MODEL,
+                    executor_timeout=config.GENERATOR_SCRIPT_TIMEOUT,
+                    generated_script_dir=config.GENERATED_SCRIPT_DIR
+                )
+
+                logging.info("Calling structure generator...")
+                generator_result = generator.generate(generator_input_data)
+
+                print("\n--- Structure Generation Result ---")
+                pprint.pprint(generator_result)
+                print("-" * 33)
+
+                gen_status = generator_result.get("status", "unknown")
+                if gen_status == "success":
+                    logging.info(f"Generation successful. Output: {generator_result.get('output_file')}")
+                else:
+                    logging.error(f"Generation status: {gen_status}. Message: {generator_result.get('message')}")
+
+        except ValueError as ve:
+             logging.error(f"Configuration Error during Generation step: {ve}")
+        except Exception as e:
+             logging.exception("An unexpected error occurred during Generation step:")
+
+    elif analysis_result and "error" not in analysis_result:
+        logging.info("--- Skipping Step 2: Generation (No recommendation selected) ---")
+    else:
+        logging.info("--- Skipping Step 2: Generation (Analysis step failed) ---")
+
+    logging.info("--- End Full Workflow ---")
+    print("\n--- End Full Workflow ---")
