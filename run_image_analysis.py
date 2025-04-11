@@ -64,14 +64,6 @@ if __name__ == "__main__":
     # --- Use Config for Logging ---
     logging.basicConfig(level=config.LOGGING_LEVEL, format=config.LOGGING_FORMAT)
 
-    # --- Pre-run Checks (using config) ---
-    try:
-        config.validate_config() # Optionally run validation from config
-    except Exception as config_err:
-        logging.error(f"{config_err}", exc_info=False) # Log config error without traceback
-        sys.exit(1)
-    # -----------------------------------
-
     selected_recommendation = None
 
     # === Workflow Step 1: Image Analysis ===
