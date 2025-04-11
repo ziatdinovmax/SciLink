@@ -113,12 +113,22 @@ if __name__ == "__main__":
         try:
             logging.info("--- Starting Step 2: Structure Generation ---")
             selected_description = selected_recommendation.get("description")
+            additional_instructions = getattr(config, 'GENERATOR_ADDITIONAL_INSTRUCTIONS', None)
 
             if not selected_description:
                 logging.error("Selected recommendation is missing 'description'. Cannot proceed.")
             else:
-                logging.info(f"Using selected description: '{selected_description}'")
-                generator_input_data = {"description": selected_description}
+                combined_input_description = selected_description
+                if additional_instructions:
+                    logging.info(f"Adding additional instructions from config: '{additional_instructions}'")
+                    # Combine them (simple concatenation with a separator)
+                    combined_input_description += f". Additional Instructions: {additional_instructions}"
+                else:
+                    logging.info("No additional generator instructions found in config.")
+
+                logging.info(f"Using combined input for generation: '{combined_input_description}'")
+                # Pass the combined string as the description
+                generator_input_data = {"description": combined_input_description}
 
                 logging.info(f"Initializing structure generator: {config.GENERATOR_AGENT_MODEL}")
                 generator = StructureGenerator(

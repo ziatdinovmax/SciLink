@@ -9,15 +9,17 @@ SYSTEM_INFO = {
     "material_type": "MoS2 monolayer",
     "synthesis_details": "V-doped MoS2 films were synthesized on c-plane sapphire substrates using a custom-built MOCVD system. Mo(CO)6 (99.99% purity, Sigma-Aldrich) and V(C5H5)2 (99.99% purity, Sigma-Aldrich) powders are placed into stainless steel bubblers and serve as the Mo and V precursors, respectively. During synthesis, the pressure inside the bubblers are kept constant at 735 torr, and the temperature is set to 24°C for Mo(CO)6 and 50°C for V(C5H5)2 to maintain a constant precursor vapor pressure. Concentration of Mo and V precursor in the growth chamber can be tightly controlled by introducing precise flow of H2 carrier gas through the bubblers. A high-purity H2S gas lecture bottle (99.5%, Sigma-Aldrich) is used as the sulfur source. Growths are carried out at a growth temperature of 1000°C and a pressure of 50 torr, using a multistep growth process",
     "microscopy_type": "HAADF-STEM",
-    "image_path": str(pathlib.Path(IMAGE_PATH).resolve()), # Store absolute path for context
+    "image_path": str(pathlib.Path(IMAGE_PATH).resolve()),
     "experimental_details": {
         "voltage": "60 kV",
         "probe_current": "30 pA"
     }
 }
 
-ANALYSIS_AGENT_MODEL = "gemini-2.5-pro-exp-03-25"# Model for analysis step
+ANALYSIS_AGENT_MODEL = "gemini-2.5-pro-exp-03-25"  # Model for analysis step
 GENERATOR_AGENT_MODEL = "gemini-2.5-pro-exp-03-25"  # Model for structure generation step
+
+GENERATOR_ADDITIONAL_INSTRUCTIONS = "Save the structure in POSCAR format."
 
 # ------------------------------------------
 
