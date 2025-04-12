@@ -3,7 +3,7 @@ import os
 import logging
 import pathlib
 
-IMAGE_PATH = "MoS2_1.png" # <<< SET PATH TO YOUR IMAGE
+IMAGE_PATH = "data/MoS2_tem.png" # <<< SET PATH TO YOUR IMAGE
 
 SYSTEM_INFO = {
     "material_type": "MoS2 monolayer",
