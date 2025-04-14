@@ -10,7 +10,7 @@ from .utils import save_generated_script
 
 # Define constants or get from config if not imported
 # DEFAULT_TIMEOUT = 120 # Already imported from executor
-MAX_CORRECTION_ATTEMPTS = 3
+MAX_CORRECTION_ATTEMPTS = 5
 
 class StructureGenerator:
     """
