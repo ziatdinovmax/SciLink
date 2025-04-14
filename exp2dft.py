@@ -24,12 +24,14 @@ def select_recommendation_interactive(recommendations: list) -> dict | None:
         print("No recommendations available to select from.")
         return None
 
-    # --- Display Options More Concisely ---
+    # --- Display Options With Scientific Justification ---
     print("\n--- Available Structure Recommendations ---")
     for i, rec in enumerate(recommendations):
-        print(f"[{i+1}] (Priority: {rec.get('priority', 'N/A')}) {rec.get('description', 'N/A')}")
-    print("-" * 35) # Separator
-
+        print(f"\n[{i+1}] (Priority: {rec.get('priority', 'N/A')})")
+        print(f"Description: {rec.get('description', 'N/A')}")
+        print(f"Scientific justification: {rec.get('scientific_interest', 'N/A')}")
+        print("-" * 50)  # Separator between recommendations
+    
     # --- Interactive Prompt Loop ---
     while True:
         try:
@@ -46,7 +48,10 @@ def select_recommendation_interactive(recommendations: list) -> dict | None:
             choice_index = int(choice) - 1
             if 0 <= choice_index < len(recommendations):
                 selected = recommendations[choice_index]
-                print(f"\n--- Selection Confirmed: Recommendation #{choice} (Priority: {selected.get('priority', 'N/A')}) ---")
+                print(f"\n--- Selection Confirmed: Recommendation #{choice} ---")
+                print(f"Priority: {selected.get('priority', 'N/A')}")
+                print(f"Description: {selected.get('description', 'N/A')}")
+                print(f"Scientific justification: {selected.get('scientific_interest', 'N/A')}")
                 return selected
             else:
                 print(f"Invalid number. Please enter between 1 and {len(recommendations)}.")
