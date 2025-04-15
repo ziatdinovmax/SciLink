@@ -3,8 +3,8 @@ import os
 import logging
 import json
 
-IMAGE_PATH = "data/GO_cafm.tif"  # <<< SET PATH TO YOUR IMAGE
-SYSTEM_INFO_PATH = "data/GO_cafm.json"  # <<< SET PATH TO ASSOCIATE METADATA
+IMAGE_PATH = "data/GH_stm.tif"  # <<< SET PATH TO YOUR IMAGE
+SYSTEM_INFO_PATH = "data/GH_stm.json"  # <<< SET PATH TO ASSOCIATE METADATA
 
 ANALYSIS_AGENT_MODEL = "gemini-2.5-pro-exp-03-25"  # Model for analysis step
 GENERATOR_AGENT_MODEL = "gemini-2.5-pro-exp-03-25"  # Model for structure generation step
@@ -17,7 +17,7 @@ GENERATOR_ADDITIONAL_INSTRUCTIONS = "Save the structure in POSCAR format."
 with open(SYSTEM_INFO_PATH, 'r') as f:
     SYSTEM_INFO = json.load(f)
 
-# --- API KEY ---
+# ---GEMINI API KEY ---
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 # --- Paths ---
@@ -30,3 +30,7 @@ GENERATOR_SCRIPT_TIMEOUT = 180 # Timeout for ASE script execution (seconds)
 # --- Logging ---
 LOGGING_LEVEL = logging.INFO
 LOGGING_FORMAT = '%(asctime)s - %(levelname)s - %(message)s'
+
+# --- OWL Literature Agent Configuration ---
+FUTUREHOUSE_API_KEY = os.getenv("FUTUREHOUSE_API_KEY")
+OWL_MAX_WAIT_TIME = 300  # Maximum number of retries for checking OWL task status
