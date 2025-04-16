@@ -1,5 +1,5 @@
 # SciLinkLLM
-A framework aimed at bridging experimental observations with computational materials modeling using large language models. For now it is limited to microscopy images.
+A framework aimed at bridging experimental observations with computational materials modeling and literature analysis using large language models. For now it is limited to microscopy images.
 
 ## Workflows
 
