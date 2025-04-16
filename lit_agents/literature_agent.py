@@ -1,4 +1,3 @@
-# lit_agents/literature_agent.py
 import os
 import logging
 import json
@@ -10,7 +9,7 @@ except ImportError:
     logging.error("Error: futurehouse_client is not installed. Please install it with pip.")
     raise
 
-class OWLLiteratureAgent:
+class OwlLiteratureAgent:
     """
     Agent for querying scientific literature using the OWL system
     through the FutureHouse API client.

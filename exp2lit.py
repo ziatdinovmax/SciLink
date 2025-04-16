@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import sys
 import logging
 import pprint
@@ -21,7 +19,7 @@ logging.getLogger('urllib3').setLevel(logging.WARNING)  # Also suppress underlyi
 
 
 from exp_agents.microscopy_agent import GeminiMicroscopyAnalysisAgent as AnalysisAgent
-from lit_agents.literature_agent import OWLLiteratureAgent
+from lit_agents.literature_agent import OwlLiteratureAgent
 
 # Add FUTUREHOUSE_API_KEY to config if not already there
 if not hasattr(config, 'FUTUREHOUSE_API_KEY'):
