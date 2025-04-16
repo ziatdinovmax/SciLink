@@ -3,8 +3,8 @@ import os
 import logging
 import json
 
-IMAGE_PATH = "data/GO_cafm.tif"  # <<< SET PATH TO YOUR IMAGE
-SYSTEM_INFO_PATH = "data/GO_cafm.json"  # <<< SET PATH TO ASSOCIATE METADATA
+IMAGE_PATH = "data/MoS2_tem.png"  # <<< SET PATH TO YOUR IMAGE
+SYSTEM_INFO_PATH = "data/MoS2_tem.json"  # <<< SET PATH TO ASSOCIATE METADATA
 
 ANALYSIS_AGENT_MODEL = "gemini-2.5-pro-exp-03-25"  # Model for analysis step
 GENERATOR_AGENT_MODEL = "gemini-2.5-pro-exp-03-25"  # Model for structure generation step
