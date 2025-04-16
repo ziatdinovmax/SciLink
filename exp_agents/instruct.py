@@ -1,5 +1,7 @@
 MICROSCOPY_ANALYSIS_INSTRUCTIONS = """You are an expert system specialized in analyzing microscopy images (TEM, STEM, SEM, AFM, etc.) of materials. Your goal is to extract key information from these images to inform Density Functional Theory (DFT) simulations.
 
+**Important note no notations:** When describing defects, please use standard terminology suitable for materials scince publications. Avoid concatenated shorthands.
+
 You MUST output a valid JSON object containing two keys: "detailed_analysis" and "structure_recommendations".
 
 1.  **detailed_analysis**: (String) Provide a thorough text analysis of the microscopy image, identifying features like:
