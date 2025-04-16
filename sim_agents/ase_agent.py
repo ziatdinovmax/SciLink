@@ -1,15 +1,12 @@
 import os
 import logging
 
-# Import refactored components using relative imports
 from .llm_client import LLMClient
-from .executors import AseExecutor, DEFAULT_TIMEOUT # Import constants if needed
-from .tools import define_ase_tool, ASE_EXECUTE_TOOL_NAME # Import tool func and name
+from .executors import AseExecutor, DEFAULT_TIMEOUT
+from .tools import define_ase_tool, ASE_EXECUTE_TOOL_NAME
 from .instruct import INITIAL_PROMPT_TEMPLATE, CORRECTION_PROMPT_TEMPLATE
 from .utils import save_generated_script
 
-# Define constants or get from config if not imported
-# DEFAULT_TIMEOUT = 120 # Already imported from executor
 MAX_CORRECTION_ATTEMPTS = 5
 
 class StructureGenerator:
@@ -17,11 +14,11 @@ class StructureGenerator:
     Orchestrates the workflow for generating atomic structures using
     an LLM and an ASE script executor, with retries for correction.
     """
-    TOOL_NAME = ASE_EXECUTE_TOOL_NAME # Use imported constant
+    TOOL_NAME = ASE_EXECUTE_TOOL_NAME
 
     def __init__(self, api_key: str, model_name: str,
                  executor_timeout: int = DEFAULT_TIMEOUT,
-                 generated_script_dir: str = "generated_scripts"): # Added param
+                 generated_script_dir: str = "generated_scripts"): 
         self.llm_client = LLMClient(api_key=api_key, model_name=model_name)
         self.ase_executor = AseExecutor(timeout=executor_timeout)
         self.ase_tool = define_ase_tool()
@@ -40,7 +37,7 @@ class StructureGenerator:
 
     def _build_correction_prompt(self, original_request: str, failed_script: str, error_message: str) -> str:
         """Builds the correction prompt using the template."""
-        max_error_len = 2000 # Example limit
+        max_error_len = 2000 
         if len(error_message) > max_error_len:
             error_message = error_message[:max_error_len] + "\n[... Error message truncated ...]"
         return CORRECTION_PROMPT_TEMPLATE.format(
@@ -103,7 +100,7 @@ class StructureGenerator:
 
         logging.info(f"Starting structure generation for: '{description}'")
         current_prompt = self._build_initial_prompt(description)
-        tools_list = [self.ase_tool] # Renamed variable for clarity
+        tools_list = [self.ase_tool] 
         last_error_message = "No attempts made."
         last_script_content = None
         final_script_path = None
@@ -158,7 +155,6 @@ class StructureGenerator:
                             failed_script=script_content,
                             error_message=last_error_message
                         )
-                        # Loop continues
 
                 elif text_content: # Handle text response from LLM
                     last_error_message = f"LLM responded with text instead of script call on attempt {attempt}."
