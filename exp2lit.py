@@ -13,12 +13,78 @@ except ImportError:
     print("Error: config.py not found. Please ensure it exists.")
     sys.exit(1)
 
+logging.basicConfig(level=config.LOGGING_LEVEL, format=config.LOGGING_FORMAT)
+
+# Suppress FutureHouse client INFO logs
+logging.getLogger('futurehouse_client').setLevel(logging.WARNING)
+logging.getLogger('urllib3').setLevel(logging.WARNING)  # Also suppress underlying HTTP library logs
+
+
 from exp_agents.microscopy_agent import GeminiMicroscopyAnalysisAgent as AnalysisAgent
 from lit_agents.literature_agent import OWLLiteratureAgent
 
 # Add FUTUREHOUSE_API_KEY to config if not already there
 if not hasattr(config, 'FUTUREHOUSE_API_KEY'):
     config.FUTUREHOUSE_API_KEY = os.getenv("FUTUREHOUSE_API_KEY")
+
+def select_claims_interactive(claims):
+    """
+    Allows user to interactively select which claims to search for in the literature.
+    
+    Args:
+        claims: List of claim objects
+        
+    Returns:
+        List of selected claim objects
+    """
+    if not claims:
+        print("No claims available to select from.")
+        return []
+        
+    print("\n--- Select Claims for Literature Search ---")
+    print("Enter comma-separated numbers of claims to search, or 'all' for all claims.")
+    print("Examples: '1,3,5' or 'all'")
+    
+    # Display the available claims
+    for i, claim in enumerate(claims):
+        print(f"\n[{i+1}] Claim:")
+        print(f"   {claim.get('claim', 'No claim text')}")
+        print(f"   Has Anyone Question: {claim.get('has_anyone_question', 'No question formulated')}")
+        print("-" * 70)
+    
+    # Get user selection
+    try:
+        selection = input("\nSelect claims to search (or 'all'): ").strip().lower()
+        
+        if selection == 'all':
+            print(f"Selected all {len(claims)} claims.")
+            return claims
+            
+        # Parse the comma-separated list of numbers
+        try:
+            indices = [int(idx.strip()) - 1 for idx in selection.split(',')]
+            selected_claims = []
+            
+            for idx in indices:
+                if 0 <= idx < len(claims):
+                    selected_claims.append(claims[idx])
+                else:
+                    print(f"Warning: Index {idx+1} is out of range and will be skipped.")
+            
+            if not selected_claims:
+                print("No valid claims were selected. Exiting.")
+                sys.exit(0)
+                
+            print(f"Selected {len(selected_claims)} claims.")
+            return selected_claims
+            
+        except ValueError:
+            print("Invalid selection format. Please use comma-separated numbers or 'all'.")
+            return select_claims_interactive(claims)  # Try again
+            
+    except KeyboardInterrupt:
+        print("\nSelection canceled by user. Exiting.")
+        sys.exit(0)
 
 # ===========================================
 #                  MAIN WORKFLOW
@@ -79,6 +145,9 @@ if __name__ == "__main__":
             json.dump(claims, f, indent=2)
         logging.info(f"Claims saved to: {claims_file}")
         
+        # Let user select which claims to search
+        selected_claims = select_claims_interactive(claims)
+        
     except ValueError as ve:
         logging.error(f"Configuration Error during Analysis step: {ve}")
         sys.exit(1)
@@ -97,18 +166,18 @@ if __name__ == "__main__":
             max_wait_time=config.OWL_MAX_WAIT_TIME,
         )
         
-        # Process each claim with OWL
+        # Process each selected claim with OWL
         literature_results = []
-        print("\n--- Starting Literature Search for Each Claim ---")
+        print(f"\n--- Starting Literature Search for {len(selected_claims)} Selected Claims ---")
         
-        for i, claim in enumerate(claims):
+        for i, claim in enumerate(selected_claims):
             has_anyone_question = claim.get("has_anyone_question")
             if not has_anyone_question:
                 logging.warning(f"Claim {i+1} does not have a 'has_anyone_question'. Skipping.")
                 print(f"\n[{i+1}] Skipping claim due to missing question format.")
                 continue
                 
-            print(f"\n[{i+1}] Searching literature for:")
+            print(f"\n[{i+1}/{len(selected_claims)}] Searching literature for:")
             print(f"   {has_anyone_question}")
             
             # Query OWL for this claim
@@ -139,7 +208,7 @@ if __name__ == "__main__":
         
         # Display summary of findings
         print("\n--- Literature Search Summary ---")
-        print(f"Total claims analyzed: {len(claims)}")
+        print(f"Total claims analyzed: {len(selected_claims)}")
         print(f"Successfully searched: {sum(1 for r in literature_results if r['owl_result']['status'] == 'success')}")
         print(f"Failed searches: {sum(1 for r in literature_results if r['owl_result']['status'] != 'success')}")
         
@@ -148,10 +217,9 @@ if __name__ == "__main__":
         known_claims = []
         
         for result in literature_results:
-            if result['owl_result']['status'] == 'success':
-                answer = result['owl_result']['formatted_answer'].lower()
-                # Simple heuristic - can be improved with more sophisticated analysis
-                if any(phrase in answer for phrase in ["no evidence", "no research", "not found", "no studies"]):
+            if result['owl_result']['status'] == "success":
+                answer = json.loads(result['owl_result']["json"])['answer'].lower()
+                if 'yes' in answer[:3]:
                     novel_claims.append(result['original_claim']['claim'])
                 else:
                     known_claims.append(result['original_claim']['claim'])

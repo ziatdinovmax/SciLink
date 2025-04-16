@@ -99,6 +99,7 @@ class OWLLiteratureAgent:
                         "status": "success",
                         "task_id": task_id,
                         "formatted_answer": task_status.formatted_answer,
+                        "json": task_status.model_dump_json(),
                         "has_successful_answer": getattr(task_status, 'has_successful_answer', True),
                         "search_results": getattr(task_status, 'search_results', []),
                         "query": has_anyone_question

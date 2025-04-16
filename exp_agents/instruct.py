@@ -53,7 +53,7 @@ You MUST output a valid JSON object containing two keys: "detailed_analysis" and
     * Heterostructure interfaces
     * Surface adsorption sites
 
-2.  **scientific_claims**: (List of Objects) Generate 5-15 specific scientific claims based on your analysis that can be used to search literature for similar observations. Each object must have the following keys:
+2.  **scientific_claims**: (List of Objects) Generate 3-5 specific scientific claims based on your analysis that can be used to search literature for similar observations. Each object must have the following keys:
     * **claim**: (String) A single, focused scientific claim written as a complete sentence about a specific observation from the microscopy image.
     * **scientific_impact**: (String) A brief explanation of why this claim would be scientifically significant if confirmed through literature search or further experimentation.
     * **has_anyone_question**: (String) A direct question starting with "Has anyone" that reformulates the claim as a research question.
