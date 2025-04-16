@@ -11,13 +11,6 @@ except ImportError:
     print("Error: config.py not found. Please ensure it exists.")
     sys.exit(1)
 
-logging.basicConfig(level=config.LOGGING_LEVEL, format=config.LOGGING_FORMAT)
-
-# Suppress FutureHouse client INFO logs
-logging.getLogger('futurehouse_client').setLevel(logging.WARNING)
-logging.getLogger('urllib3').setLevel(logging.WARNING)  # Also suppress underlying HTTP library logs
-
-
 from exp_agents.microscopy_agent import GeminiMicroscopyAnalysisAgent as AnalysisAgent
 from lit_agents.literature_agent import OwlLiteratureAgent
 
@@ -159,7 +152,7 @@ if __name__ == "__main__":
         
         # Initialize the literature agent
         logging.info("Initializing OWL literature agent...")
-        lit_agent = OWLLiteratureAgent(
+        lit_agent = OwlLiteratureAgent(
             api_key=config.FUTUREHOUSE_API_KEY,
             max_wait_time=config.OWL_MAX_WAIT_TIME,
         )
@@ -217,7 +210,7 @@ if __name__ == "__main__":
         for result in literature_results:
             if result['owl_result']['status'] == "success":
                 answer = json.loads(result['owl_result']["json"])['answer'].lower()
-                if 'yes' in answer[:3]:
+                if 'no' in answer[:3]:
                     novel_claims.append(result['original_claim']['claim'])
                 else:
                     known_claims.append(result['original_claim']['claim'])
