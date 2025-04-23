@@ -3,8 +3,8 @@ import os
 import logging
 import json
 
-IMAGE_PATH = "data/MoS2_tem.png"  # <<< SET PATH TO YOUR IMAGE
-SYSTEM_INFO_PATH = "data/MoS2_tem.json"  # <<< SET PATH TO ASSOCIATE METADATA
+IMAGE_PATH = "data/GH_stm.tif"  # <<< SET PATH TO YOUR IMAGE
+SYSTEM_INFO_PATH = "data/GH_stm.json"  # <<< SET PATH TO ASSOCIATE METADATA
 
 ANALYSIS_AGENT_MODEL = "gemini-2.5-pro-exp-03-25"  # Model for analysis step
 GENERATOR_AGENT_MODEL = "gemini-2.5-pro-exp-03-25"  # Model for structure generation step
@@ -34,3 +34,15 @@ LOGGING_FORMAT = '%(asctime)s - %(levelname)s - %(message)s'
 # --- OWL Literature Agent Configuration ---
 FUTUREHOUSE_API_KEY = os.getenv("FUTUREHOUSE_API_KEY")
 OWL_MAX_WAIT_TIME = 400  # Maximum number of retries for checking OWL task status
+
+# --- FFT NMF Configuration ---
+FFT_NMF_ENABLED = True # Set to False to disable this analysis step
+FFT_NMF_WINDOW_SIZE_X = 64
+FFT_NMF_WINDOW_SIZE_Y = 64
+FFT_NMF_WINDOW_STEP_X = 16
+FFT_NMF_WINDOW_STEP_Y = 16
+FFT_NMF_INTERPOLATION_FACTOR = 2
+FFT_NMF_ZOOM_FACTOR = 2
+FFT_NMF_HAMMING_FILTER = True
+FFT_NMF_COMPONENTS = 3 # Number of NMF components
+FFT_NMF_OUTPUT_DIR = "fft_nmf_results" # Subdirectory for results

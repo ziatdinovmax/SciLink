@@ -66,3 +66,67 @@ def convert_numpy_to_jpeg_bytes(image_array: np.ndarray, quality: int = 85) -> b
     except Exception as e:
         print(f"Error converting NumPy array to JPEG bytes: {e}")
         raise # Re-raise the exception to be handled by the caller
+
+
+def normalize_and_convert_to_image_bytes(array: np.ndarray, mode='L', format='JPEG', quality=85, log_scale=False) -> bytes:
+    """
+    Normalizes a 2D numpy array and converts it to image bytes (e.g., grayscale JPEG).
+
+    Args:
+        array: The 2D numpy array to convert.
+        mode: The PIL image mode (e.g., 'L' for grayscale).
+        format: The output image format ('JPEG', 'PNG').
+        quality: The quality setting for JPEG (1-95).
+        log_scale: Apply log1p scaling before normalization (good for FFT magnitudes).
+
+    Returns:
+        Image data as bytes.
+    """
+    if array.ndim != 2:
+        # If we get e.g. (1, H, W), try squeezing
+        if array.ndim == 3 and array.shape[0] == 1:
+            array = np.squeeze(array, axis=0)
+        else:
+             raise ValueError(f"Input array must be 2D, but got shape {array.shape}")
+
+    try:
+        # Make a copy to avoid modifying the original array
+        processed_array = array.copy().astype(np.float32) # Ensure float for calculations
+
+        # Optional log scaling
+        if log_scale:
+            processed_array = np.log1p(processed_array)
+
+        # Handle potential NaN/Inf values introduced by log or present in input
+        if not np.all(np.isfinite(processed_array)):
+             max_finite = np.max(processed_array[np.isfinite(processed_array)]) if np.any(np.isfinite(processed_array)) else 1.0
+             min_finite = np.min(processed_array[np.isfinite(processed_array)]) if np.any(np.isfinite(processed_array)) else 0.0
+             processed_array = np.nan_to_num(processed_array, nan=min_finite, posinf=max_finite, neginf=min_finite)
+
+        # Normalize to 0-1 range
+        min_val, max_val = np.min(processed_array), np.max(processed_array)
+        if max_val > min_val:
+            normalized_array = (processed_array - min_val) / (max_val - min_val)
+        else:
+            # Handle flat array case (all values the same)
+            normalized_array = np.zeros_like(processed_array)
+
+        # Scale to 0-255 and convert to uint8
+        uint8_array = (normalized_array * 255).astype(np.uint8)
+
+        # Convert to PIL Image
+        pil_img = Image.fromarray(uint8_array, mode=mode) # 'L' for grayscale
+
+        # Save to bytes buffer
+        buffered = BytesIO()
+        if format.upper() == 'JPEG':
+             pil_img.save(buffered, format="JPEG", quality=quality)
+        elif format.upper() == 'PNG':
+             pil_img.save(buffered, format="PNG") # PNG is lossless
+        else:
+             raise ValueError(f"Unsupported image format: {format}")
+
+        return buffered.getvalue()
+
+    except Exception as e:
+        raise # Re-raise to be handled by the calling method
