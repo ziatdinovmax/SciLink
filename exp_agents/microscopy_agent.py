@@ -8,7 +8,7 @@ import numpy as np
 import google.generativeai as genai
 from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockThreshold
 
-from .instruct import MICROSCOPY_ANALYSIS_INSTRUCTIONS, MICROSCOPY_CLAIMS_INSTRUCTIONS
+from .instruct import MICROSCOPY_ANALYSIS_INSTRUCTIONS, MICROSCOPY_CLAIMS_INSTRUCTIONS, FFT_NMF_PARAMETER_ESTIMATION_INSTRUCTIONS
 from .utils import load_image, preprocess_image, convert_numpy_to_jpeg_bytes, normalize_and_convert_to_image_bytes
 from .fft_nmf_analyzer import SlidingFFTNMF
 
@@ -32,6 +32,7 @@ class GeminiMicroscopyAnalysisAgent:
         self.logger = logging.getLogger(__name__)
         self.fft_nmf_settings = fft_nmf_settings
         self.RUN_FFT_NMF = fft_nmf_settings.get('FFT_NMF_ENABLED', False) if fft_nmf_settings else False
+        self.FFT_NMF_AUTO_PARAMS = fft_nmf_settings.get('FFT_NMF_AUTO_PARAMS', False) if fft_nmf_settings else False
 
     def analyze_microscopy_image(self, image_path: str, system_info: dict | str | None = None):
         try:
@@ -43,7 +44,19 @@ class GeminiMicroscopyAnalysisAgent:
             # Run optional FFT+NMF analysis
             components_array, abundances_array = None, None
             if self.RUN_FFT_NMF:
-                components_array, abundances_array = self._run_fft_nmf_analysis(image_path)
+                ws = None
+                nc = None
+                if self.FFT_NMF_AUTO_PARAMS:
+                    ws, nc = self._get_fft_nmf_params_from_llm(image_blob, system_info) 
+                # Use config defaults if LLM fails or auto-params is off
+                if ws is None:
+                    ws = self.fft_nmf_settings.get('FFT_NMF_WINDOW_SIZE_X', preprocessed_img_array.shape[0]//16)
+                if nc is None:
+                    nc = self.fft_nmf_settings.get('FFT_NMF_COMPONENTS', 4)
+                # Calculate step size (ensure minimum of 1)
+                step = max(1, ws // 4)
+                # Run analysis with determined params
+                components_array, abundances_array = self._run_fft_nmf_analysis(image_path, ws, nc, step)
 
             prompt_parts = [MICROSCOPY_ANALYSIS_INSTRUCTIONS]
             analysis_request_text = "\nPlease analyze the following microscopy image"
@@ -156,7 +169,19 @@ class GeminiMicroscopyAnalysisAgent:
             # Run optional FFT+NMF analysis
             components_array, abundances_array = None, None
             if self.RUN_FFT_NMF:
-                components_array, abundances_array = self._run_fft_nmf_analysis(image_path)
+                ws = None
+                nc = None
+                if self.FFT_NMF_AUTO_PARAMS:
+                    ws, nc = self._get_fft_nmf_params_from_llm(image_blob, system_info) 
+                # Use config defaults if LLM fails or auto-params is off
+                if ws is None:
+                    ws = self.fft_nmf_settings.get('FFT_NMF_WINDOW_SIZE_X', preprocessed_img_array.shape[0]//16)
+                if nc is None:
+                    nc = self.fft_nmf_settings.get('FFT_NMF_COMPONENTS', 4)
+                # Calculate step size (ensure minimum of 1)
+                step = max(1, ws // 4)
+                # Run analysis with determined params
+                components_array, abundances_array = self._run_fft_nmf_analysis(image_path, ws, nc, step)
 
             # Use the claims-focused instructions
             prompt_parts = [MICROSCOPY_CLAIMS_INSTRUCTIONS]
@@ -260,7 +285,7 @@ class GeminiMicroscopyAnalysisAgent:
             return {"error": "An unexpected error occurred during analysis", "details": str(e)}
         
 
-    def _run_fft_nmf_analysis(self, image_path: str) -> tuple[np.ndarray | None, np.ndarray | None]:
+    def _run_fft_nmf_analysis(self, image_path: str, window_size: int, n_components: int, window_step: int) -> tuple[np.ndarray | None, np.ndarray | None]:
         """
         Runs the Sliding FFT + NMF analysis if enabled and available.
         Returns tuple (components_array, abundances_array) or (None, None).
@@ -275,14 +300,14 @@ class GeminiMicroscopyAnalysisAgent:
             fft_output_base = os.path.join(fft_output_dir, f"{safe_base_name}_analysis")
 
             analyzer = SlidingFFTNMF(
-                    window_size_x=self.fft_nmf_settings.get('FFT_NMF_WINDOW_SIZE_X', 64),
-                    window_size_y=self.fft_nmf_settings.get('FFT_NMF_WINDOW_SIZE_Y', 64),
-                    window_step_x=self.fft_nmf_settings.get('FFT_NMF_WINDOW_STEP_X', 16),
-                    window_step_y=self.fft_nmf_settings.get('FFT_NMF_WINDOW_STEP_Y', 16),
+                    window_size_x=window_size,
+                    window_size_y=window_size,
+                    window_step_x=window_step,
+                    window_step_y=window_step,
                     interpolation_factor=self.fft_nmf_settings.get('FFT_NMF_INTERPOLATION_FACTOR', 2),
                     zoom_factor=self.fft_nmf_settings.get('FFT_NMF_ZOOM_FACTOR', 2),
                     hamming_filter=self.fft_nmf_settings.get('FFT_NMF_HAMMING_FILTER', True),
-                    components=self.fft_nmf_settings.get('FFT_NMF_COMPONENTS', 4)
+                    components=n_components
             )
             components, abundances = analyzer.analyze_image(image_path, output_path=fft_output_base)
 
@@ -293,3 +318,95 @@ class GeminiMicroscopyAnalysisAgent:
             self.logger.error(f"Sliding FFT + NMF analysis failed: {fft_e}", exc_info=True)
 
         return None, None # Return None if disabled or failed
+    
+
+    def _get_fft_nmf_params_from_llm(self, image_blob, system_info) -> tuple[int | None, int | None]:
+        """
+        Makes a separate LLM call to estimate FFT/NMF parameters (window_size, n_components).
+        """
+        self.logger.info("Attempting to get FFT/NMF parameters from LLM...")
+
+        # 1. Construct the Prompt
+        prompt_parts = [FFT_NMF_PARAMETER_ESTIMATION_INSTRUCTIONS]
+        prompt_parts.append("\nImage to analyze for parameters:\n")
+        prompt_parts.append(image_blob)
+
+        if system_info:
+            system_info_text = "\n\nAdditional System Information:\n"
+            if isinstance(system_info, str):
+                try:
+                    # Try parsing if it's a JSON string, otherwise use raw
+                    system_info_text += json.dumps(json.loads(system_info), indent=2)
+                except json.JSONDecodeError:
+                    system_info_text += system_info
+            elif isinstance(system_info, dict):
+                system_info_text += json.dumps(system_info, indent=2)
+            else:
+                system_info_text += str(system_info)
+            prompt_parts.append(system_info_text)
+
+        # Final instruction reinforcing the output format
+        prompt_parts.append("\n\nOutput ONLY the JSON object with 'window_size' and 'n_components'.")
+
+        # 2. Configure API Call for JSON Response
+        # Explicitly ask the API to return JSON. This improves reliability.
+        param_gen_config = GenerationConfig(response_mime_type="application/json")
+
+        # 3. Call the LLM
+        try:
+            response = self.model.generate_content(
+                contents=prompt_parts,
+                generation_config=param_gen_config,
+                safety_settings=self.safety_settings, # Reuse safety settings
+            )
+            self.logger.debug(f"LLM parameter estimation raw response: {response}") # Log raw for debugging
+
+            # 4. Parse and Validate the Response
+            # Check for safety blocks first
+            if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
+                 block_reason = response.prompt_feedback.block_reason
+                 self.logger.error(f"LLM parameter estimation request blocked by safety filters: {block_reason}")
+                 return None, None # Fallback
+
+            # Check for unexpected finish reasons
+            if response.candidates and response.candidates[0].finish_reason != 1: # Assuming 1 is STOP/normal
+                finish_reason = response.candidates[0].finish_reason
+                self.logger.warning(f"LLM parameter estimation finished unexpectedly: {finish_reason}. Trying to parse anyway.")
+                # Don't necessarily return None yet, might still have parsable text
+
+            # Attempt to parse the JSON payload
+            raw_text = response.text
+            result_json = json.loads(raw_text) # This should work if API respects mime type
+
+            window_size = result_json.get("window_size")
+            n_components = result_json.get("n_components")
+
+            # --- Validation ---
+            valid = True
+            if not isinstance(window_size, int) or window_size <= 0:
+                self.logger.warning(f"LLM returned invalid window_size: {window_size} (Type: {type(window_size)})")
+                valid = False
+
+            if not isinstance(n_components, int) or not (2 <= n_components <= 10):
+                self.logger.warning(f"LLM returned invalid n_components: {n_components} (Type: {type(n_components)}). Expected int between 2-10.")
+                valid = False
+            # --- End Validation ---
+
+            if valid:
+                 self.logger.info(f"LLM successfully suggested parameters: window_size={window_size}, n_components={n_components}")
+                 return window_size, n_components
+            else:
+                 self.logger.warning("LLM parameter suggestions failed validation. Falling back to defaults.")
+                 return None, None
+
+        # Handle specific errors during parsing or API call
+        except json.JSONDecodeError as json_e:
+            self.logger.error(f"LLM parameter estimation response was not valid JSON: {json_e}. Raw text: '{raw_text[:500]}...'")
+            return None, None
+        except (AttributeError, IndexError, ValueError, TypeError) as parse_e:
+             self.logger.error(f"Error parsing or validating LLM parameter response: {parse_e}", exc_info=True)
+             return None, None
+        # Handle broader API or network errors
+        except Exception as e:
+            self.logger.error(f"LLM call for FFT/NMF parameters failed unexpectedly: {e}", exc_info=True)
+            return None, None # Fallback on any error

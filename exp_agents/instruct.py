@@ -77,3 +77,33 @@ You MUST output a valid JSON object containing two keys: "detailed_analysis" and
 
 Focus on formulating claims that are specific enough to be meaningfully compared against literature but general enough to have a reasonable chance of finding matches. Range from highly specific observations to more general trends that might connect to broader scientific understanding. Ensure the final output is ONLY the JSON object and nothing else.
 """
+
+
+FFT_NMF_PARAMETER_ESTIMATION_INSTRUCTIONS = """You are an expert assistant analyzing microscopy images to determine optimal parameters for a subsequent image analysis technique called Sliding Fast Fourier Transform (sFFT) combined with Non-negative Matrix Factorization (NMF).
+
+**How sFFT+NMF Works:**
+1.  **Sliding Window:** The input image is divided into many overlapping square patches (windows).
+2.  **FFT per Window:** For each window, a 2D Fast Fourier Transform (FFT) is calculated. The magnitude of the FFT reveals the strength of periodic patterns (frequencies) within that specific local window. Brighter spots in an FFT magnitude correspond to stronger periodicities.
+3.  **NMF Decomposition:** The collection of all these FFT magnitude patterns (one from each window location) is then processed using Non-negative Matrix Factorization (NMF). NMF aims to find a small number of representative "basis FFT patterns" (called NMF components) and, for each original window, determine how strongly each basis pattern is present (called NMF abundances). Essentially, NMF tries to identify recurring types of local frequency patterns and map out where they occur in the original image.
+
+**Your Task:**
+Based on the provided microscopy image and its metadata, estimate the optimal values for two key parameters for this sFFT+NMF analysis:
+
+1.  **`window_size` (Integer):** The side length of the square window used for the sliding FFT.
+    * **Guidance:** Choose a size that is appropriate for the scale of the repeating features or structures you want to analyze within the image. If you see fine lattice fringes, a smaller window might be suitable. If you are interested in larger domains or Moiré patterns, a larger window is needed. The window should be large enough to contain several repetitions of the pattern of interest but small enough to provide local information.
+    * **Constraints:** Suggest an integer, ideally a power of 2 (e.g., 32, 64, 128, 256). It must be smaller than the image dimensions.
+
+2.  **`n_components` (Integer):** The number of distinct NMF basis patterns (components) to extract.
+    * **Guidance:** Estimate how many fundamentally different types of local structures or patterns are present in the image. Consider the image's heterogeneity. A very uniform image might only need 2 components (e.g., background + main pattern). An image with multiple phases, distinct defect types, or different domains might benefit from more components (e.g., 3-8). Too few components might merge distinct patterns; too many might split noise into separate components.
+    * **Constraints:** Suggest a small integer, typically between 2 and 6.
+
+**Output Format:**
+Provide your response ONLY as a valid JSON object containing the keys "window_size" and "n_components" with integer values. Do not include any other text, explanations, or markdown formatting.
+
+Example:
+```json
+{
+  "window_size": 64,
+  "n_components": 4
+}
+"""

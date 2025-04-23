@@ -5,11 +5,7 @@ import logging
 import pprint
 import json
 
-try:
-    import config
-except ImportError:
-    print("Error: config.py not found. Please ensure it exists.")
-    sys.exit(1)
+import config
 
 from exp_agents.microscopy_agent import GeminiMicroscopyAnalysisAgent as AnalysisAgent
 
@@ -17,6 +13,7 @@ from exp_agents.microscopy_agent import GeminiMicroscopyAnalysisAgent as Analysi
 # Prepare FFT+NMF settings dictionary
 fft_nmf_settings = {
     'FFT_NMF_ENABLED': getattr(config, 'FFT_NMF_ENABLED', False),
+    'FFT_NMF_AUTO_PARAMS': getattr(config, 'FFT_NMF_AUTO_PARAMS', False),
     'FFT_NMF_WINDOW_SIZE_X': getattr(config, 'FFT_NMF_WINDOW_SIZE_X', 64),
     'FFT_NMF_WINDOW_SIZE_Y': getattr(config, 'FFT_NMF_WINDOW_SIZE_Y', 64),
     'FFT_NMF_WINDOW_STEP_X': getattr(config, 'FFT_NMF_WINDOW_STEP_X', 16),
