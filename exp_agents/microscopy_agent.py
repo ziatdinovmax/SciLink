@@ -47,7 +47,9 @@ class GeminiMicroscopyAnalysisAgent:
                 ws = None
                 nc = None
                 if self.FFT_NMF_AUTO_PARAMS:
-                    ws, nc = self._get_fft_nmf_params_from_llm(image_blob, system_info) 
+                    ws, nc, explanation = self._get_fft_nmf_params_from_llm(image_blob, system_info) 
+                if explanation:
+                    self.logger.info(f"LLM Explanation for FFT/NMF params: {explanation}")
                 # Use config defaults if LLM fails or auto-params is off
                 if ws is None:
                     ws = self.fft_nmf_settings.get('FFT_NMF_WINDOW_SIZE_X', preprocessed_img_array.shape[0]//16)
@@ -172,7 +174,9 @@ class GeminiMicroscopyAnalysisAgent:
                 ws = None
                 nc = None
                 if self.FFT_NMF_AUTO_PARAMS:
-                    ws, nc = self._get_fft_nmf_params_from_llm(image_blob, system_info) 
+                    ws, nc, explanation = self._get_fft_nmf_params_from_llm(image_blob, system_info) 
+                if explanation:
+                    self.logger.info(f"LLM Explanation for FFT/NMF params: {explanation}")
                 # Use config defaults if LLM fails or auto-params is off
                 if ws is None:
                     ws = self.fft_nmf_settings.get('FFT_NMF_WINDOW_SIZE_X', preprocessed_img_array.shape[0]//16)
@@ -346,7 +350,7 @@ class GeminiMicroscopyAnalysisAgent:
             prompt_parts.append(system_info_text)
 
         # Final instruction reinforcing the output format
-        prompt_parts.append("\n\nOutput ONLY the JSON object with 'window_size' and 'n_components'.")
+        prompt_parts.append("\n\nOutput ONLY the JSON object with 'window_size', 'n_components', and 'explanation'")
 
         # 2. Configure API Call for JSON Response
         # Explicitly ask the API to return JSON. This improves reliability.
@@ -380,24 +384,30 @@ class GeminiMicroscopyAnalysisAgent:
 
             window_size = result_json.get("window_size")
             n_components = result_json.get("n_components")
+            explanation = result_json.get("explanation")
 
             # --- Validation ---
-            valid = True
+            params_valid = True
             if not isinstance(window_size, int) or window_size <= 0:
                 self.logger.warning(f"LLM returned invalid window_size: {window_size} (Type: {type(window_size)})")
-                valid = False
+                params_valid = False
 
             if not isinstance(n_components, int) or not (2 <= n_components <= 10):
                 self.logger.warning(f"LLM returned invalid n_components: {n_components} (Type: {type(n_components)}). Expected int between 2-10.")
-                valid = False
+                params_valid = False
+
+            explanation_valid = isinstance(explanation, str) and explanation.strip() != ""
+            if not explanation_valid:
+                self.logger.warning(f"LLM did not provide a valid explanation string: {explanation}")
+                explanation = None # Set explanation to None if invalid, but params might still be okay
             # --- End Validation ---
 
-            if valid:
+            if params_valid:
                  self.logger.info(f"LLM successfully suggested parameters: window_size={window_size}, n_components={n_components}")
-                 return window_size, n_components
+                 return window_size, n_components, explanation
             else:
                  self.logger.warning("LLM parameter suggestions failed validation. Falling back to defaults.")
-                 return None, None
+                 return None, None, None # Fallback if essential params are invalid
 
         # Handle specific errors during parsing or API call
         except json.JSONDecodeError as json_e:

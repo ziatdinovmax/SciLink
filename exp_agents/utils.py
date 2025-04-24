@@ -2,6 +2,7 @@ import cv2
 from PIL import Image
 import numpy as np
 from io import BytesIO
+import os
 
 
 MAX_IMG_DIM = 1024
@@ -9,11 +10,30 @@ MAX_IMG_DIM = 1024
 def load_image(image_path):
     """Load an image from file."""
     try:
-        # Try standard image loading
-        img = cv2.imread(image_path)
-        if img is None:
-            raise ValueError(f"Could not load image from {image_path}")
-        return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # Convert from BGR to RGB
+        _, ext = os.path.splitext(image_path)
+        ext = ext.lower()
+
+        if ext == '.npy':
+            # Load .npy file, assuming it's always 2D grayscale based
+            img_array = np.load(image_path)
+            if img_array.dtype == np.uint8:
+                # If it's already uint8, return directly
+                return img_array
+            else:
+                float_array = img_array.astype(np.float64)
+                min_val, max_val = np.min(float_array), np.max(float_array)
+                normalized_array = (float_array - min_val) / (max_val - min_val)
+                # Scale 0-255 and convert to uint8
+                uint8_array = (normalized_array * 255).astype(np.uint8)
+                return uint8_array
+
+        else:
+            # Standard image loading (can be grayscale or color)
+            img = cv2.imread(image_path)
+            if img is None:
+                raise ValueError(f"Could not load image from {image_path}")
+            return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # Convert from BGR to RGB
+    
     except Exception as e:
         print(f"Error loading image: {e}")
         raise

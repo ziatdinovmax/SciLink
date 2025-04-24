@@ -91,19 +91,16 @@ Based on the provided microscopy image and its metadata, estimate the optimal va
 
 1.  **`window_size` (Integer):** The side length of the square window used for the sliding FFT.
     * **Guidance:** Choose a size that is appropriate for the scale of the repeating features or structures you want to analyze within the image. If you see fine lattice fringes, a smaller window might be suitable. If you are interested in larger domains or Moiré patterns, a larger window is needed. The window should be large enough to contain several repetitions of the pattern of interest but small enough to provide local information.
-    * **Constraints:** Suggest an integer, ideally a power of 2 (e.g., 32, 64, 128, 256). It must be smaller than the image dimensions.
+    * **Constraints:** Suggest an integer, ideally a power of 2. It must be smaller than the image dimensions.
 
 2.  **`n_components` (Integer):** The number of distinct NMF basis patterns (components) to extract.
-    * **Guidance:** Estimate how many fundamentally different types of local structures or patterns are present in the image. Consider the image's heterogeneity. A very uniform image might only need 2 components (e.g., background + main pattern). An image with multiple phases, distinct defect types, or different domains might benefit from more components (e.g., 3-8). Too few components might merge distinct patterns; too many might split noise into separate components.
-    * **Constraints:** Suggest a small integer, typically between 2 and 6.
+    * **Guidance:** Estimate how many fundamentally different types of local structures or patterns are present in the image. Consider the image's heterogeneity. A very uniform image might only need 2 components (e.g., background + main pattern). An image with multiple phases, distinct defect types, or different domains might benefit from more components. Too few components might merge distinct patterns; too many might split noise into separate components.
+    * **Constraints:** Suggest a small integer
+
+3.  **`explanation` (String):** Provide a brief explanation for your choice of `window_size` and `n_components`, referencing specific features visible in the image or general image complexity, ideally in the context of this specific material system.
+
 
 **Output Format:**
-Provide your response ONLY as a valid JSON object containing the keys "window_size" and "n_components" with integer values. Do not include any other text, explanations, or markdown formatting.
+Provide your response ONLY as a valid JSON object containing the keys "window_size", "n_components", and "explanation with integer values. Do not include any other text, explanations, or markdown formatting.
 
-Example:
-```json
-{
-  "window_size": 64,
-  "n_components": 4
-}
 """

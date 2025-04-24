@@ -6,6 +6,8 @@ from skimage.util import view_as_windows
 from skimage import io, color
 import os
 
+from .utils import load_image
+
 
 class SlidingFFTNMF:
     
@@ -199,17 +201,7 @@ class SlidingFFTNMF:
         
         # Read the image
         print(f"Reading image: {image_path}")
-        try:
-            image = io.imread(image_path)
-        except Exception as e:
-            print(f"Error reading image: {e}")
-            print("Trying to read with alternative method...")
-            try:
-                from PIL import Image
-                with Image.open(image_path) as img:
-                    image = np.array(img)
-            except Exception as e2:
-                raise ValueError(f"Could not read image file: {e2}")
+        image = load_image(image_path)
             
         if output_path is None:
             base_dir = os.path.dirname(image_path)
