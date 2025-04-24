@@ -1,15 +1,12 @@
-import sys
+#!/usr/bin/env python3
+# 
+# import sys
 import logging
 import pprint
 import os
 import json
-import time
 
-try:
-    import config
-except ImportError:
-    print("Error: config.py not found. Please ensure it exists.")
-    sys.exit(1)
+import config
 
 from exp_agents.microscopy_agent import GeminiMicroscopyAnalysisAgent as AnalysisAgent
 from lit_agents.literature_agent import OwlLiteratureAgent
@@ -17,22 +14,6 @@ from lit_agents.literature_agent import OwlLiteratureAgent
 # Add FUTUREHOUSE_API_KEY to config if not already there
 if not hasattr(config, 'FUTUREHOUSE_API_KEY'):
     config.FUTUREHOUSE_API_KEY = os.getenv("FUTUREHOUSE_API_KEY")
-
-
-# Prepare FFT+NMF settings dictionary
-fft_nmf_settings = {
-    'FFT_NMF_ENABLED': getattr(config, 'FFT_NMF_ENABLED', False),
-    'FFT_NMF_AUTO_PARAMS': getattr(config, 'FFT_NMF_AUTO_PARAMS', False),
-    'FFT_NMF_WINDOW_SIZE_X': getattr(config, 'FFT_NMF_WINDOW_SIZE_X', 64),
-    'FFT_NMF_WINDOW_SIZE_Y': getattr(config, 'FFT_NMF_WINDOW_SIZE_Y', 64),
-    'FFT_NMF_WINDOW_STEP_X': getattr(config, 'FFT_NMF_WINDOW_STEP_X', 16),
-    'FFT_NMF_WINDOW_STEP_Y': getattr(config, 'FFT_NMF_WINDOW_STEP_Y', 16),
-    'FFT_NMF_INTERPOLATION_FACTOR': getattr(config, 'FFT_NMF_INTERPOLATION_FACTOR', 2),
-    'FFT_NMF_ZOOM_FACTOR': getattr(config, 'FFT_NMF_ZOOM_FACTOR', 2),
-    'FFT_NMF_HAMMING_FILTER': getattr(config, 'FFT_NMF_HAMMING_FILTER', True),
-    'FFT_NMF_COMPONENTS': getattr(config, 'FFT_NMF_COMPONENTS', 4),
-    'FFT_NMF_OUTPUT_DIR': getattr(config, 'FFT_NMF_OUTPUT_DIR', 'fft_nmf_results')
-}
 
 
 def select_claims_interactive(claims):
@@ -109,7 +90,7 @@ if __name__ == "__main__":
         analysis_agent = AnalysisAgent(
             api_key=config.GOOGLE_API_KEY,
             model_name=config.ANALYSIS_AGENT_MODEL,
-            fft_nmf_settings=fft_nmf_settings
+            fft_nmf_settings=config.FFT_NMF_SETTINGS
         )
 
         logging.info(f"Analyzing image for claims: {config.IMAGE_PATH}...")

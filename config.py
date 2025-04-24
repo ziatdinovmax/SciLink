@@ -3,13 +3,16 @@ import os
 import logging
 import json
 
-IMAGE_PATH = "data/GH_stm.tif"  # <<< SET PATH TO YOUR IMAGE
-SYSTEM_INFO_PATH = "data/GH_stm.json"  # <<< SET PATH TO ASSOCIATE METADATA
+IMAGE_PATH = "data/oxide_catalyst.npy"  # <<< SET PATH TO YOUR IMAGE
+SYSTEM_INFO_PATH = "data/oxide_catalyst.json"  # <<< SET PATH TO ASSOCIATE METADATA
 
 ANALYSIS_AGENT_MODEL = "gemini-2.5-pro-exp-03-25"  # Model for analysis step
 GENERATOR_AGENT_MODEL = "gemini-2.5-pro-exp-03-25"  # Model for structure generation step
 
 GENERATOR_ADDITIONAL_INSTRUCTIONS = "Save the structure in POSCAR format."
+
+FFT_NMF_ENABLED = True # Set to False to disable this analysis step
+FFT_NMF_AUTO_PARAMS = True # Set to True to use LLM for deciding WINDOW_SIZE, STEP, and COMPONENTS params
 
 # ------------------------------------------
 
@@ -36,14 +39,16 @@ FUTUREHOUSE_API_KEY = os.getenv("FUTUREHOUSE_API_KEY")
 OWL_MAX_WAIT_TIME = 400  # Maximum number of retries for checking OWL task status
 
 # --- FFT NMF Configuration ---
-FFT_NMF_ENABLED = True # Set to False to disable this analysis step
-FFT_NMF_AUTO_PARAMS = True # Set to True to use LLM for WINDOW_SIZE, STEP, and COMPONENTS params, False to use fixed values below
-FFT_NMF_WINDOW_SIZE_X = 64
-FFT_NMF_WINDOW_SIZE_Y = 64
-FFT_NMF_WINDOW_STEP_X = 16
-FFT_NMF_WINDOW_STEP_Y = 16
-FFT_NMF_INTERPOLATION_FACTOR = 2
-FFT_NMF_ZOOM_FACTOR = 2
-FFT_NMF_HAMMING_FILTER = True
-FFT_NMF_COMPONENTS = 3 # Number of NMF components
-FFT_NMF_OUTPUT_DIR = "fft_nmf_results" # Subdirectory for results
+FFT_NMF_SETTINGS = {
+    'FFT_NMF_ENABLED': FFT_NMF_ENABLED,
+    'FFT_NMF_AUTO_PARAMS': FFT_NMF_AUTO_PARAMS,
+    'window_size_x': 64,
+    'window_size_y': 64,
+    'window_step_x': 16,
+    'window_step_y': 16,
+    'interpolation_factor': 2,
+    'zoom_factor': 2,
+    'hamming_filter': True,
+    'components': 4,
+    'output_dir': "fft_nmf_results"
+}
