@@ -37,6 +37,7 @@ OWL_MAX_WAIT_TIME = 400  # Maximum number of retries for checking OWL task statu
 
 # --- FFT NMF Configuration ---
 FFT_NMF_ENABLED = True # Set to False to disable this analysis step
+FFT_NMF_AUTO_PARAMS = True # Set to True to use LLM for WINDOW_SIZE, STEP, and COMPONENTS params, False to use fixed values below
 FFT_NMF_WINDOW_SIZE_X = 64
 FFT_NMF_WINDOW_SIZE_Y = 64
 FFT_NMF_WINDOW_STEP_X = 16
