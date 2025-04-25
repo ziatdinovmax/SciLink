@@ -79,9 +79,8 @@ if __name__ == "__main__":
         )
 
         logging.info(f"Analyzing image: {config.IMAGE_PATH}...")
-        analysis_result = analysis_agent.analyze_microscopy_image(
-            config.IMAGE_PATH,
-            system_info=config.SYSTEM_INFO
+        analysis_result = analysis_agent.analyze_microscopy_image_for_structure_recommendations(
+            config.IMAGE_PATH, system_info=config.SYSTEM_INFO
         )
 
         logging.info("--- Analysis Result Received ---")
