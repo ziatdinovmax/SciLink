@@ -308,9 +308,9 @@ class GeminiMicroscopyAnalysisAgent:
                     window_size_y=window_size,
                     window_step_x=window_step,
                     window_step_y=window_step,
-                    interpolation_factor=self.fft_nmf_settings.get('FFT_NMF_INTERPOLATION_FACTOR', 2),
-                    zoom_factor=self.fft_nmf_settings.get('FFT_NMF_ZOOM_FACTOR', 2),
-                    hamming_filter=self.fft_nmf_settings.get('FFT_NMF_HAMMING_FILTER', True),
+                    interpolation_factor=self.fft_nmf_settings.get('interpolation_factor', 2),
+                    zoom_factor=self.fft_nmf_settings.get('zoom_factor', 2),
+                    hamming_filter=self.fft_nmf_settings.get('hamming_filter', True),
                     components=n_components
             )
             components, abundances = analyzer.analyze_image(image_path, output_path=fft_output_base)
