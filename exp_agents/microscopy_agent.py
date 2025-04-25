@@ -34,10 +34,10 @@ class GeminiMicroscopyAnalysisAgent:
         self.RUN_FFT_NMF = fft_nmf_settings.get('FFT_NMF_ENABLED', False) if fft_nmf_settings else False
         self.FFT_NMF_AUTO_PARAMS = fft_nmf_settings.get('FFT_NMF_AUTO_PARAMS', False) if fft_nmf_settings else False
 
-    def analyze_microscopy_image(self, image_path: str, system_info: dict | str | None = None):
+    def analyze_microscopy_image_for_structure_recommendations(self, image_path: str, system_info: dict | str | None = None):
         try:
-            pil_image = load_image(image_path)
-            preprocessed_img_array = preprocess_image(pil_image)
+            loaded_image = load_image(image_path)
+            preprocessed_img_array = preprocess_image(loaded_image)
             image_bytes = convert_numpy_to_jpeg_bytes(preprocessed_img_array)
             image_blob = {"mime_type": "image/jpeg", "data": image_bytes}
 
@@ -163,8 +163,8 @@ class GeminiMicroscopyAnalysisAgent:
         Uses the claims-focused instructions rather than the structure recommendations.
         """
         try:
-            pil_image = load_image(image_path)
-            preprocessed_img_array = preprocess_image(pil_image)
+            loaded_image = load_image(image_path)
+            preprocessed_img_array = preprocess_image(loaded_image)
             image_bytes = convert_numpy_to_jpeg_bytes(preprocessed_img_array)
             image_blob = {"mime_type": "image/jpeg", "data": image_bytes}
 
