@@ -184,12 +184,30 @@ class GeminiMicroscopyAnalysisAgent:
             self.logger.exception(f"An unexpected error occurred before LLM call: {e}")
             return None, {"error": "An unexpected error occurred during analysis setup", "details": str(e)}
 
-    def analyze_microscopy_image_for_structure_recommendations(self, image_path: str, system_info: dict | str | None = None):
+    def analyze_microscopy_image_for_structure_recommendations(
+            self,
+            image_path: str,
+            system_info: dict | str | None = None,
+            additional_prompt_context: str | None = None):
         """
         Analyze microscopy image to generate DFT structure recommendations.
         """
+
+        base_instructions = MICROSCOPY_ANALYSIS_INSTRUCTIONS
+        final_instruction_prompt = base_instructions
+
+        if additional_prompt_context:
+            # Append the dynamic context. Clear demarcation helps the LLM.
+            final_instruction_prompt = f"""{base_instructions}
+
+        ## Special Considerations for This Analysis (Based on Literature Review):
+        {additional_prompt_context}
+
+        Please ensure your DFT structure recommendations and scientific justifications specifically address or investigate these special considerations alongside your general analysis of the image features. The priority should be given to structures that elucidate these highlighted aspects.
+        """
+
         result_json, error_dict = self._analyze_image_base(
-            image_path, system_info, MICROSCOPY_ANALYSIS_INSTRUCTIONS
+            image_path, system_info, final_instruction_prompt
         )
 
         if error_dict:
