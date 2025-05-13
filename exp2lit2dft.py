@@ -162,8 +162,6 @@ The image was initially analyzed as follows: "{initial_analysis_text}"
 if __name__ == "__main__":
     logging.basicConfig(level=config.LOGGING_LEVEL, format=config.LOGGING_FORMAT)
     logging.info("--- Starting Experiment to Literature to DFT (exp2lit2dft) Workflow ---")
-    current_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    logging.info(f"Workflow started on: {current_date}")
 
 
     # Initialize agents
