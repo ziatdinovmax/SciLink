@@ -6,8 +6,9 @@ import json
 IMAGE_PATH = "data/oxide_catalyst.npy"  # <<< SET PATH TO YOUR IMAGE
 SYSTEM_INFO_PATH = "data/oxide_catalyst.json"  # <<< SET PATH TO ASSOCIATE METADATA
 
-ANALYSIS_AGENT_MODEL = "gemini-2.5-pro-exp-03-25"  # Model for analysis step
-GENERATOR_AGENT_MODEL = "gemini-2.5-pro-exp-03-25"  # Model for structure generation step
+ANALYSIS_AGENT_MODEL = "gemini-2.5-pro-preview-05-06"  # Model for analysis step
+GENERATOR_AGENT_MODEL = "gemini-2.5-pro-preview-05-06"  # Model for structure generation step
+VALIDATOR_AGENT_MODEL = "gemini-2.5-pro-preview-05-06" # Model for structure validation
 
 GENERATOR_ADDITIONAL_INSTRUCTIONS = "Save the structure in POSCAR format."
 
@@ -29,6 +30,7 @@ GENERATED_SCRIPT_DIR = "generated_scripts"
 
 # --- Agent Parameters ---
 GENERATOR_SCRIPT_TIMEOUT = 180 # Timeout for ASE script execution (seconds)
+MAX_REFINEMENT_CYCLES = 2 # Maximum number of refinement cycles (initial generation + N refinements)
 
 # --- Logging ---
 LOGGING_LEVEL = logging.INFO
