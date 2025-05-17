@@ -12,7 +12,7 @@ from .instruct import (
 from .utils import save_generated_script
 
 # Max attempts for *internal* script execution error correction
-MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS = 2 
+MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS = 5 
 
 class StructureGenerator:
     TOOL_NAME = ASE_EXECUTE_TOOL_NAME
