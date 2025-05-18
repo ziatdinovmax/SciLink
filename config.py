@@ -3,8 +3,8 @@ import os
 import logging
 import json
 
-IMAGE_PATH = "data/oxide_catalyst.npy"  # <<< SET PATH TO YOUR IMAGE
-SYSTEM_INFO_PATH = "data/oxide_catalyst.json"  # <<< SET PATH TO ASSOCIATE METADATA
+IMAGE_PATH = "data/MoS2_tem.png"  # <<< SET PATH TO YOUR IMAGE
+SYSTEM_INFO_PATH = "data/MoS2_tem.json"  # <<< SET PATH TO ASSOCIATE METADATA
 
 ANALYSIS_AGENT_MODEL = "gemini-2.5-pro-preview-05-06"  # Model for analysis step
 GENERATOR_AGENT_MODEL = "gemini-2.5-pro-preview-05-06"  # Model for structure generation step
