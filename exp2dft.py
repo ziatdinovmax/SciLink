@@ -172,7 +172,12 @@ if __name__ == "__main__":
                     )
 
                     print("\n--- Structure Generation Script Attempt Result ---")
-                    pprint.pprint(generator_result)
+                    # Create a copy of the result to modify for printing
+                    result_to_print = generator_result.copy()
+                    # Remove script content keys if they exist, for cleaner printing
+                    result_to_print.pop("final_script_content", None)
+                    result_to_print.pop("last_attempted_script_content", None)
+                    pprint.pprint(result_to_print)
                     print("-" * 33)
 
                     if generator_result.get("status") == "success":
