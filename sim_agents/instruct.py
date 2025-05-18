@@ -53,7 +53,7 @@ Based on all the provided information, you MUST output a valid JSON object with 
 
 1.  `"overall_assessment"`: (String) A brief (2-3 sentences) overall assessment of the generated structure's suitability as a starting point for DFT relaxation, its adherence to the original request, and its fundamental physical/chemical soundness.
 2.  `"identified_issues_detail"`: (List of Strings) A list of ALL specific issues you identified that would make it a poor input for DFT or that deviate from the user's request. This includes:
-    * Discrepancies from the "Original User Request" (e.g., wrong defect type and placement, wrong supercell).
+    * Discrepancies from the "Original User Request" (e.g., wrong phase, wrong defect type and placement).
     * Gross physical or chemical unreasonableness (e.g., severe atomic clashes that relaxation might not fix, fundamentally wrong bonding indicative of incorrect script logic).
     * Stoichiometry errors if the request implied a specific composition.
     * For slabs/surfaces: clearly insufficient vacuum that would lead to self-interaction in DFT.
