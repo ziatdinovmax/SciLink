@@ -3,8 +3,8 @@ import os
 import logging
 import json
 
-IMAGE_PATH = "data/MoS2_tem.png"  # <<< SET PATH TO YOUR IMAGE
-SYSTEM_INFO_PATH = "data/MoS2_tem.json"  # <<< SET PATH TO ASSOCIATE METADATA
+IMAGE_PATH = "data/GH_stm.tif"  # <<< SET PATH TO YOUR IMAGE
+SYSTEM_INFO_PATH = "data/GH_stm.json"  # <<< SET PATH TO ASSOCIATE METADATA
 
 ANALYSIS_AGENT_MODEL = "gemini-2.5-pro-preview-05-06"  # Model for analysis step
 GENERATOR_AGENT_MODEL = "gemini-2.5-pro-preview-05-06"  # Model for structure generation step
@@ -13,7 +13,7 @@ VALIDATOR_AGENT_MODEL = "gemini-2.5-pro-preview-05-06" # Model for structure val
 
 GENERATOR_ADDITIONAL_INSTRUCTIONS = "Save the structure in POSCAR format."
 
-FFT_NMF_ENABLED = False # Set to False to disable this analysis step
+FFT_NMF_ENABLED = True # Set to False to disable this analysis step
 FFT_NMF_AUTO_PARAMS = True # Set to True to use LLM for deciding WINDOW_SIZE, STEP, and COMPONENTS params
 
 # ------------------------------------------

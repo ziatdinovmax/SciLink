@@ -319,35 +319,54 @@ if __name__ == "__main__":
     step4_success = False
     try:
         logger.info("\n--- Step 4: Generating DFT Recommendations ---")
-        additional_context_string = generate_additional_context_for_dft_prompt(
-            initial_comprehensive_analysis_text,
-            novel_claims_details_for_dft_context
-        )
-        if additional_context_string:
-            logger.info("Calling analysis agent with appended novelty context for DFT recommendations.")
-        else:
-            logger.info("Calling analysis agent with base instructions for general DFT recommendations (no specific novelty context).")
         
+        # Prepare the novelty context string (this part is mostly the same as your current helper)
+        novelty_context_for_agent = None
+        if novel_claims_details_for_dft_context:
+            novelty_section_text = "The following claims/observations, derived from the initial image analysis, have been identified through literature review as potentially novel or under-explored:\n"
+            for detail in novel_claims_details_for_dft_context:
+                novelty_section_text += f"- {detail}\n"
+            # The prompt for the agent will now be TEXT_ONLY_DFT_RECOMMENDATION_INSTRUCTIONS,
+            # which already guides it on how to use this novelty information.
+            # So, we just need to pass this section as the 'additional_prompt_context'.
+            novelty_context_for_agent = novelty_section_text 
+            logger.info("Calling analysis agent with cached analysis and novelty context for DFT recommendations.")
+        else:
+            logger.info("No specific novelty insights from literature. DFT recommendations will be based on the initial general analysis text.")
+            # Provide a generic context if no novel claims. The TEXT_ONLY prompt should handle this.
+            novelty_context_for_agent = "No specific novel claims were identified or prioritized from literature search. Please make DFT recommendations based on the most scientifically interesting aspects of the provided initial image analysis."
+
         dft_recommendations_result = analysis_agent.analyze_microscopy_image_for_structure_recommendations(
-            config.IMAGE_PATH,
+            image_path=None, # Crucial: Set to None to trigger text-only path
             system_info=config.SYSTEM_INFO,
-            additional_prompt_context=additional_context_string 
+            additional_prompt_context=novelty_context_for_agent, # This is the "Special Considerations" string
+            cached_detailed_analysis=initial_comprehensive_analysis_text # Pass the cached analysis
         )
+
         if "error" in dft_recommendations_result:
             logger.error(f"Step 4 Failed: DFT recommendation generation. Error: {dft_recommendations_result.get('details', dft_recommendations_result.get('error'))}")
         else:
-            final_analysis_text_for_dft = dft_recommendations_result.get("full_analysis", "No analysis text from DFT recommendation step.")
+            # Use the consistent output key from the agent
+            reasoning_or_analysis_text = dft_recommendations_result.get("analysis_summary_or_reasoning", "No analysis text from DFT recommendation step.")
             dft_recommendations = dft_recommendations_result.get("recommendations", [])
-            print("\n--- Analysis Summary for DFT Recommendations (Potentially Novelty-Informed) ---")
-            print(final_analysis_text_for_dft)
+            
+            print("\n--- Reasoning for DFT Recommendations (Based on Textual Analysis & Novelty) ---")
+            print(reasoning_or_analysis_text)
+            
             if not dft_recommendations:
                 logger.warning("No DFT structure recommendations were generated in Step 4.")
             else:
                 logger.info(f"Generated {len(dft_recommendations)} DFT recommendations.")
+            
             dft_recs_output_file = "exp2lit2dft_dft_recommendations.json"
+            # Save the result which includes the reasoning and recommendations
+            full_dft_recs_output = {
+                "reasoning_for_recommendations": reasoning_or_analysis_text,
+                "recommendations": dft_recommendations
+            }
             with open(dft_recs_output_file, 'w') as f_dft_recs:
-                json.dump(dft_recommendations_result, f_dft_recs, indent=2)
-            logger.info(f"DFT recommendations saved to: {dft_recs_output_file}")
+                json.dump(full_dft_recs_output, f_dft_recs, indent=2)
+            logger.info(f"DFT recommendations and reasoning saved to: {dft_recs_output_file}")
             step4_success = True
     except Exception as e:
         logger.exception("An unexpected error occurred during Step 4 (DFT Recommendation):")
