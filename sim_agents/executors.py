@@ -8,9 +8,14 @@ import logging
 DEFAULT_TIMEOUT = 120
 
 class AseExecutor:
-    def __init__(self, timeout: int = DEFAULT_TIMEOUT):
+    def __init__(self, timeout: int = DEFAULT_TIMEOUT, mp_api_key: str = None):
         self.timeout = timeout
+        self.mp_api_key = mp_api_key or os.getenv("MP_API_KEY")
         logging.info(f"AseExecutor initialized with timeout: {self.timeout}s")
+        if self.mp_api_key:
+            logging.info("MP API key configured for script execution")
+        else:
+            logging.warning("No MP API key - scripts using Materials Project may fail")
 
     def execute_script(self, script_content: str) -> dict:
         logging.info("Attempting to execute generated ASE script...")
@@ -22,12 +27,18 @@ class AseExecutor:
                 temp_script_file = tf.name
             logging.debug(f"Temporary script saved to: {temp_script_file}")
 
+            env = os.environ.copy()
+            if self.mp_api_key:
+                env['MP_API_KEY'] = self.mp_api_key
+                logging.debug("Added MP_API_KEY to script execution environment")
+
             result = subprocess.run(
                 ['python', temp_script_file],
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
-                check=False # Important: Don't raise CalledProcessError immediately
+                env=env,  # Pass environment with API key
+                check=False
             )
 
             logging.debug("--- Script Execution Finished ---")
