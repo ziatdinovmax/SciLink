@@ -13,7 +13,7 @@ from .instruct import (
     DOCS_ENHANCED_INITIAL_PROMPT_TEMPLATE,
     DOCS_ENHANCED_CORRECTION_PROMPT_TEMPLATE
 )
-from .utils import save_generated_script
+from .utils import save_generated_script, MaterialsProjectHelper
 
 MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS = 5 
 
@@ -21,7 +21,7 @@ class StructureGenerator:
     def __init__(self, api_key: str, model_name: str,
                  executor_timeout: int = DEFAULT_TIMEOUT,
                  generated_script_dir: str = "generated_scripts",
-                 gb_docs_path: str = None):
+                 gb_docs_path: str = None, mp_api_key: str = None):
         """
         Initialize StructureGenerator with ASE and GB tools.
         
@@ -49,7 +49,8 @@ class StructureGenerator:
                          "twist", "tilt", "bicrystal", "rotation axis", "aimsgb"]
             )
         ]
-        
+
+        self.mp_helper = MaterialsProjectHelper(api_key=mp_api_key)
         self.logger.info(f"StructureGenerator initialized with {len(self.tools)} tools")
 
     def _select_tool(self, request_text: str) -> ToolWithDocs:
@@ -65,22 +66,22 @@ class StructureGenerator:
         self.logger.info(f"Selected default {ase_tool.name} tool")
         return ase_tool
 
-    def _build_initial_prompt(self, description: str) -> str:
-        """Build initial prompt with tool-specific documentation if available."""
+    def _build_initial_prompt(self, description: str, use_fallback: bool = False) -> str:
+        """Build initial prompt with tool-specific documentation and MP integration."""
         selected_tool = self._select_tool(description)
         tool_name = next(iter(selected_tool.tool.function_declarations)).name
         
-        if selected_tool.docs_content:
-            self.logger.info(f"Using documentation-enhanced prompt for {selected_tool.name}")
-            return DOCS_ENHANCED_INITIAL_PROMPT_TEMPLATE.format(
-                description=description,
-                tool_name=tool_name,
-                documentation=selected_tool.docs_content
-            )
+        # ADD MP integration to documentation
+        enhanced_docs = selected_tool.docs_content
+        if enhanced_docs and self.mp_helper.enabled:
+            enhanced_docs += self.mp_helper.get_common_materials_info()  # ADD THIS LINE
+        
+        # Rest of method unchanged...
+        if use_fallback or not enhanced_docs:
+            return INITIAL_PROMPT_TEMPLATE.format(description=description, tool_name=tool_name)
         else:
-            return INITIAL_PROMPT_TEMPLATE.format(
-                description=description, 
-                tool_name=tool_name
+            return DOCS_ENHANCED_INITIAL_PROMPT_TEMPLATE.format(
+                description=description, tool_name=tool_name, documentation=enhanced_docs
             )
 
     def _build_script_execution_error_correction_prompt(self, original_request: str, failed_script: str, error_message: str) -> str:

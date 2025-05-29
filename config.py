@@ -41,6 +41,10 @@ LOGGING_FORMAT = '%(asctime)s - %(levelname)s - %(message)s'
 FUTUREHOUSE_API_KEY = os.getenv("FUTUREHOUSE_API_KEY")
 OWL_MAX_WAIT_TIME = 400  # Maximum number of retries for checking OWL task status
 
+# Materials Project API Key
+MP_API_KEY = os.getenv("MP_API_KEY")
+
+
 # --- FFT NMF Configuration ---
 FFT_NMF_SETTINGS = {
     'FFT_NMF_ENABLED': FFT_NMF_ENABLED,
