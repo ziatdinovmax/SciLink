@@ -4,10 +4,9 @@ import tempfile
 import os
 import logging
 
-# Consider making DEFAULT_TIMEOUT configurable via __init__ or config file
 DEFAULT_TIMEOUT = 120
 
-class AseExecutor:
+class StructureExecutor:
     def __init__(self, timeout: int = DEFAULT_TIMEOUT, mp_api_key: str = None):
         self.timeout = timeout
         self.mp_api_key = mp_api_key or os.getenv("MP_API_KEY")

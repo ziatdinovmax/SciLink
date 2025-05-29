@@ -10,7 +10,7 @@ import os
 import config
 from exp_agents.microscopy_agent import GeminiMicroscopyAnalysisAgent
 from lit_agents.literature_agent import OwlLiteratureAgent
-from sim_agents.ase_agent import StructureGenerator
+from sim_agents.structure_agent import StructureGenerator
 from sim_agents.val_agent import StructureValidatorAgent 
 
 

@@ -2,7 +2,7 @@ import logging
 from typing import Optional, Tuple
 
 from .llm_client import LLMClient
-from .executors import AseExecutor, DEFAULT_TIMEOUT
+from .executors import StructureExecutor, DEFAULT_TIMEOUT
 from .tools import (
     ToolWithDocs, define_ase_tool, define_gb_tool,
 )
@@ -29,7 +29,7 @@ class StructureGenerator:
             gb_docs_path: Path to aimsgb documentation file (optional)
         """
         self.llm_client = LLMClient(api_key=api_key, model_name=model_name)
-        self.ase_executor = AseExecutor(timeout=executor_timeout, mp_api_key=mp_api_key)
+        self.ase_executor = StructureExecutor(timeout=executor_timeout, mp_api_key=mp_api_key)
         self.generated_script_dir = generated_script_dir
         self.logger = logging.getLogger(__name__)
         

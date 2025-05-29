@@ -60,7 +60,7 @@ def save_generated_script(script_content: str, description: str, attempt: int, o
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         # Sanitize description for use in filename
         safe_desc = "".join(c if c.isalnum() else "_" for c in description[:30]).rstrip("_")
-        filename = f"ase_script_{safe_desc}_attempt{attempt}_{timestamp}.py"
+        filename = f"script_{safe_desc}_attempt{attempt}_{timestamp}.py"
         saved_script_path = os.path.join(output_dir, filename)
 
         with open(saved_script_path, "w", encoding="utf-8") as f:
