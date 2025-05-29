@@ -1,3 +1,8 @@
+-----------
+Source Code
+-----------
+
+
 Directory structure:
 └── aimsgb/
     ├── COPYRIGHT.rst
@@ -15,41 +20,6 @@ Directory structure:
     └── .github/
         └── workflows/
             └── testing.yml
-
-================================================
-FILE: COPYRIGHT.rst
-================================================
-Copyright (C) 2018 The Regents of the University of California
- 
-All Rights Reserved. Permission to copy, modify, and distribute this software and
-its documentation for educational, research and non-profit purposes, without fee,
-and without a written agreement is hereby granted, provided that the above copyright
-notice, this paragraph and the following three paragraphs appear in all copies.
-Permission to make commercial use of this software may be obtained by contacting:
- 
-Office of Innovation and Commercialization
-9500 Gilman Drive, Mail Code 0910
-University of California
-La Jolla, CA 92093-0910
-(858) 534-5815
-innovation@ucsd.edu
- 
-This software program and documentation are copyrighted by The Regents of the
-University of California. The software program and documentation are supplied
-“as is”, without any accompanying services from The Regents. The Regents does not
-warrant that the operation of the program will be uninterrupted or error-free.
-The end-user understands that the program was developed for research purposes and
-is advised not to rely exclusively on the program for any reason.
- 
-IN NO EVENT SHALL THE UNIVERSITY OF CALIFORNIA BE LIABLE TO ANY PARTY FOR DIRECT,
-INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, INCLUDING LOST PROFITS,
-ARISING OUT OF THE USE OF THIS SOFTWARE AND ITS DOCUMENTATION, EVEN IF THE
-UNIVERSITY OF CALIFORNIA HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. THE
-UNIVERSITY OF CALIFORNIA SPECIFICALLY DISCLAIMS ANY WARRANTIES, INCLUDING, BUT NOT
-LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
-PURPOSE. THE SOFTWARE PROVIDED HEREUNDER IS ON AN “AS IS” BASIS, AND THE UNIVERSITY
-OF CALIFORNIA HAS NO OBLIGATIONS TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS,
-OR MODIFICATIONS.
 
 
 
@@ -98,173 +68,6 @@ Usage
 ==================
 Refer to the `documentation
 <https://aimsgb-docs.readthedocs.io/en/latest/>`_ for more details.
-
-How to cite aimsgb
-==================
-
-If you use aimsgb in your research, please consider citing the following work:
-
-    Jianli Cheng, Jian Luo, Kesong Yang. *Aimsgb: An algorithm and open-source python
-    library to generate periodic grain boundary structures.* Computational Materials
-    Science, 2018, 155, 92-103. `doi:10.1016/j.commatsci.2018.08.029
-    <https://doi.org/10.1016/j.commatsci.2018.08.029>`_
-
-
-Copyright
-=========
-Copyright (C) 2018 The Regents of the University of California
-
-All Rights Reserved. Permission to copy, modify, and distribute this software and its documentation for educational, research and non-profit purposes, without fee, and without a written agreement is hereby granted, provided that the above copyright notice, this paragraph and the following three paragraphs appear in all copies. Permission to make commercial use of this software may be obtained by contacting:
-
-Office of Innovation and Commercialization
-9500 Gilman Drive, Mail Code 0910
-University of California
-La Jolla, CA 92093-0910
-(858) 534-5815
-innovation@ucsd.edu
-
-This software program and documentation are copyrighted by The Regents of the University of California. The software program and documentation are supplied “as is”, without any accompanying services from The Regents. The Regents does not warrant that the operation of the program will be uninterrupted or error-free. The end-user understands that the program was developed for research purposes and is advised not to rely exclusively on the program for any reason.
-
-IN NO EVENT SHALL THE UNIVERSITY OF CALIFORNIA BE LIABLE TO ANY PARTY FOR DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, INCLUDING LOST PROFITS, ARISING OUT OF THE USE OF THIS SOFTWARE AND ITS DOCUMENTATION, EVEN IF THE UNIVERSITY OF CALIFORNIA HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. THE UNIVERSITY OF CALIFORNIA SPECIFICALLY DISCLAIMS ANY WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE. THE SOFTWARE PROVIDED HEREUNDER IS ON AN “AS IS” BASIS, AND THE UNIVERSITY OF CALIFORNIA HAS NO OBLIGATIONS TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
-
-
-Authors
-=======
-Dr. Jianli Cheng (chengjianli90@gmail.com)
-
-Prof. Kesong Yang  (kesong@ucsd.edu)
-
-About the aimsgb Development Team
-=================================
-http://materials.ucsd.edu/
-
-
-
-================================================
-FILE: setup.cfg
-================================================
-[metadata]
-description-file = README.rst
-
-
-
-================================================
-FILE: setup.py
-================================================
-from setuptools import setup, find_namespace_packages
-
-
-long_desc = """
-Introduction
-============
-aimsgb, an efficient and open-source Python library for generating atomic coordinates in periodic grain boundary models. It is designed to
-construct various grain boundary structures from cubic and non-cubic initial
-configurations. A convenient command line tool has also been provided to enable
-easy and fast construction of tilt and twist boundaries by assigining the degree
-of fit (Σ), rotation axis, grain boundary plane and initial crystal structure.
-aimsgb is expected to greatly accelerate the theoretical investigation of
-grain boundary properties and facilitate the experimental analysis of grain
-boundary structures as well.
-
-A reference for the usage of aimsGB software is:
-Jianli Cheng, Jian Luo, and Kesong Yang, Aimsgb: An Algorithm and OPen-Source Python Library to Generate Periodic Grain Boundary Structures, Comput. Mater. Sci. 155, 92-103, (2018). 
-DOI:10.1016/j.commatsci.2018.08.029  
-
-Install aimsgb
-==============
-1. Clone the latest version from github::
-
-    git clone git@github.com:ksyang2013/aimsgb.git
-
-2. Navigate to aimsgb folder::
-
-    cd aimsgb
-
-3. Type in the root of the repo::
-
-    pip install .
-
-4. or to install the package in development mode::
-
-    pip install -e .
-
-
-How to cite aimsgb
-==================
-
-If you use aimsgb in your research, please consider citing the following work:
-
-    Jianli Cheng, Jian Luo, Kesong Yang. *Aimsgb: An algorithm and open-source python
-    library to generate periodic grain boundary structures.* Computational Materials
-    Science, 2018, 155, 92-103. `doi:10.1016/j.commatsci.2018.08.029
-    <https://doi.org/10.1016/j.commatsci.2018.08.029>`_
-
-
-Copyright
-=========
-Copyright (C) 2018 The Regents of the University of California
-
-All Rights Reserved. Permission to copy, modify, and distribute this software and its documentation for educational, research and non-profit purposes, without fee, and without a written agreement is hereby granted, provided that the above copyright notice, this paragraph and the following three paragraphs appear in all copies. Permission to make commercial use of this software may be obtained by contacting:
-
-Office of Innovation and Commercialization
-9500 Gilman Drive, Mail Code 0910
-University of California
-La Jolla, CA 92093-0910
-(858) 534-5815
-innovation@ucsd.edu
-
-This software program and documentation are copyrighted by The Regents of the University of California. The software program and documentation are supplied “as is”, without any accompanying services from The Regents. The Regents does not warrant that the operation of the program will be uninterrupted or error-free. The end-user understands that the program was developed for research purposes and is advised not to rely exclusively on the program for any reason.
-
-IN NO EVENT SHALL THE UNIVERSITY OF CALIFORNIA BE LIABLE TO ANY PARTY FOR DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, INCLUDING LOST PROFITS, ARISING OUT OF THE USE OF THIS SOFTWARE AND ITS DOCUMENTATION, EVEN IF THE UNIVERSITY OF CALIFORNIA HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. THE UNIVERSITY OF CALIFORNIA SPECIFICALLY DISCLAIMS ANY WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE. THE SOFTWARE PROVIDED HEREUNDER IS ON AN “AS IS” BASIS, AND THE UNIVERSITY OF CALIFORNIA HAS NO OBLIGATIONS TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
-
-
-Authors
-=======
-Dr. Jianli Cheng (jic198@ucsd.edu)
-New Email: jianlicheng@lbl.gov
-
-Prof. Kesong Yang  (kesong@ucsd.edu)
-
-About the aimsgb Development Team
-=================================
-http://materials.ucsd.edu/
-"""
-
-setup(
-    name="aimsgb",
-    packages=find_namespace_packages(exclude=["*.tests"]),
-    version="1.1.1",
-    python_requires=">=3.9",
-    setup_requires=["setuptools>=18.0"],
-    install_requires=["pymatgen", "mp_api", "numpy", "pytest"],
-    include_package_data=True,
-    author="Jianli Cheng and Kesong YANG",
-    maintainer="Jianli Cheng, Sicong JIANG, and Kesong YANG",
-    maintainer_email="chengjianli90@gmail.com, sij014@ucsd.edu, kesong@ucsd.edu",
-    url="http://aimsgb.org",
-    description="aimsgb is a python library for generatng the atomic "
-                "coordinates of periodic grain boundaries."
-                "Copyright © 2018 The Regents of the University of California."
-                "All Rights Reserved. See more in Copyright.",
-    long_description=long_desc,
-    keywords=["material science", "grain boundary", "molecular simulation"],
-    classifiers=[
-        "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.9",
-        "Programming Language :: Python :: 3.10",
-        "Development Status :: 4 - Beta",
-        "Intended Audience :: Science/Research",
-        "Operating System :: OS Independent",
-        "Topic :: Scientific/Engineering :: Physics",
-        "Topic :: Scientific/Engineering :: Chemistry",
-        "Topic :: Software Development :: Libraries :: Python Modules"
-    ],
-    entry_points={
-        'console_scripts': [
-            'aimsgb = aimsgb.agb:main',
-        ]
-    }
-)
 
 
 
@@ -1531,5 +1334,817 @@ jobs:
         with:
           skip-existing: true
           verbose: true        
+
+
+
+
+----------------------
+Oficial Documentation
+----------------------
+
+================================================
+FILE: README.md
+================================================
+### Document for aimsgb
+
+aimsgb is an efficient and open-source Python library for generating atomic coordinates in periodic grain boundary models. It is designed to
+construct various grain boundary structures from cubic and non-cubic initial
+configurations. A convenient command line tool has also been provided to enable
+easy and fast construction of tilt and twist boundaries by assigining the degree
+of fit (Σ), rotation axis, grain boundary plane and initial crystal structure.
+
+
+================================================
+FILE: requirements.txt
+================================================
+sphinx-tabs
+sphinx_rtd_theme
+sphinx-copybutton
+
+
+================================================
+FILE: docs/make.bat
+================================================
+@ECHO OFF
+
+pushd %~dp0
+
+REM Command file for Sphinx documentation
+
+if "%SPHINXBUILD%" == "" (
+	set SPHINXBUILD=sphinx-build
+)
+set SOURCEDIR=source
+set BUILDDIR=build
+
+%SPHINXBUILD% >NUL 2>NUL
+if errorlevel 9009 (
+	echo.
+	echo.The 'sphinx-build' command was not found. Make sure you have Sphinx
+	echo.installed, then set the SPHINXBUILD environment variable to point
+	echo.to the full path of the 'sphinx-build' executable. Alternatively you
+	echo.may add the Sphinx directory to PATH.
+	echo.
+	echo.If you don't have Sphinx installed, grab it from
+	echo.https://www.sphinx-doc.org/
+	exit /b 1
+)
+
+if "%1" == "" goto help
+
+%SPHINXBUILD% -M %1 %SOURCEDIR% %BUILDDIR% %SPHINXOPTS% %O%
+goto end
+
+:help
+%SPHINXBUILD% -M help %SOURCEDIR% %BUILDDIR% %SPHINXOPTS% %O%
+
+:end
+popd
+
+
+
+================================================
+FILE: docs/Makefile
+================================================
+# Minimal makefile for Sphinx documentation
+#
+
+# You can set these variables from the command line, and also
+# from the environment for the first two.
+SPHINXOPTS    ?=
+SPHINXBUILD   ?= sphinx-build
+SOURCEDIR     = source
+BUILDDIR      = build
+
+# Put it first so that "make" without argument is like "make help".
+help:
+	@$(SPHINXBUILD) -M help "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
+
+.PHONY: help Makefile
+
+# Catch-all target: route all unknown targets to Sphinx using the new
+# "make mode" option.  $(O) is meant as a shortcut for $(SPHINXOPTS).
+%: Makefile
+	@$(SPHINXBUILD) -M $@ "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
+
+
+
+
+================================================
+FILE: docs/source/aimsgb.rst
+================================================
+aimsgb package
+==============
+
+Submodules
+----------
+
+aimsgb.agb module
+-----------------
+
+.. automodule:: aimsgb.agb
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+aimsgb.grain module
+-------------------
+
+.. automodule:: aimsgb.grain
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+aimsgb.grain\_bound module
+--------------------------
+
+.. automodule:: aimsgb.grain_bound
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+aimsgb.utils module
+-------------------
+
+.. automodule:: aimsgb.utils
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+Module contents
+---------------
+
+.. automodule:: aimsgb
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+
+
+================================================
+FILE: docs/source/conf.py
+================================================
+import os
+import sys
+import pathlib
+
+
+# sys.path.insert(0, pathlib.Path(__file__).parents[2].resolve().as_posix())
+sys.path.insert(0, os.path.abspath('../aimsgb'))
+# Configuration file for the Sphinx documentation builder.
+#
+# For the full list of built-in configuration values, see the documentation:
+# https://www.sphinx-doc.org/en/master/usage/configuration.html
+
+# -- Project information -----------------------------------------------------
+# https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
+
+project = 'aimsgb'
+copyright = '2023, Jianli Cheng'
+author = 'Jianli Cheng'
+release = '0.1.2'
+
+# -- General configuration ---------------------------------------------------
+# https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
+
+templates_path = ['_templates']
+extensions = [
+    'sphinx.ext.duration',
+    'sphinx.ext.doctest',
+    'sphinx.ext.autodoc',
+    'sphinx.ext.viewcode',
+    'sphinx.ext.napoleon',
+    'sphinx_copybutton',
+]
+
+
+
+# -- Options for HTML output -------------------------------------------------
+# https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
+
+html_theme = 'sphinx_rtd_theme'
+html_static_path = ['_static']
+
+
+
+================================================
+FILE: docs/source/figures.pptx
+================================================
+[Non-text file]
+
+
+================================================
+FILE: docs/source/index.rst
+================================================
+.. aimsgb documentation master file.
+
+Welcome to aimsgb's documentation!
+==================================
+aimsgb is an efficient and open-source Python library for generating atomic coordinates in periodic grain boundary models. It is designed to
+construct various grain boundary structures from cubic and non-cubic initial
+configurations. A convenient command line tool has also been provided to enable
+easy and fast construction of tilt and twist boundaries by assigining the degree
+of fit (Σ), rotation axis, grain boundary plane and initial crystal structure.
+
+We also provide a web-based GUI to access aimsgb framework: `aimsgb.org
+<http://aimsgb.org/>`_
+
+Getting started
+===============
+
+   .. container:: tocdescr
+
+      .. container:: descr
+
+         :doc:`install`
+
+      .. container:: descr
+
+         :doc:`gui/index`
+
+      .. container:: descr
+
+         :doc:`python/index`
+
+.. toctree::
+   :caption: Getting Started
+   :maxdepth: 1
+   :hidden:
+
+   install
+
+.. toctree::
+   :caption: Sections
+   :maxdepth: 2
+   :hidden:
+
+   gui/index
+   python/index
+
+* :ref:`genindex`
+* :ref:`modindex`
+* :ref:`search`
+
+
+================================================
+FILE: docs/source/install.rst
+================================================
+============
+Installation
+============
+
+Method 1: Use Pip
+-----------------
+The easiest way to install aimsgb is to simply run a one-liner in pip::
+
+   pip install aimsgb
+
+Method 2: Use Git to install
+----------------------------
+1. Clone the latest version from github::
+
+    git clone https://github.com/ksyang2013/aimsgb.git
+
+2. Navigate to aimsgb folder::
+
+    cd aimsgb
+
+3. Type in the root of the repo::
+
+    pip install .
+
+4. or to install the package in development mode::
+
+    pip install -e .
+
+==================
+How to cite aimsgb
+==================
+
+If you use aimsgb in your research, please consider citing the following work:
+
+    Jianli Cheng, Jian Luo, Kesong Yang. *Aimsgb: An algorithm and open-source python
+    library to generate periodic grain boundary structures.* Computational Materials
+    Science, 2018, 155, 92-103. `doi:10.1016/j.commatsci.2018.08.029
+    <https://doi.org/10.1016/j.commatsci.2018.08.029>`_
+
+
+================================================
+FILE: docs/source/modules.rst
+================================================
+aimsgb
+======
+
+.. toctree::
+   :maxdepth: 4
+
+   aimsgb
+
+
+
+================================================
+FILE: docs/source/usage.rst
+================================================
+Usage
+=====
+
+.. _installation:
+
+Installation
+------------
+
+To use aimsgb, first install it using ``pip``::
+    
+    pip install aimsgb
+
+Let's take Fe Σ5[001]/(120) tilt grain boundary as an example. The initial structure is a BCC lattice structure.::
+
+    from aimsgb import GrainBoundary, Grain
+
+    s = Grain.from_file("POSCAR_Fe") 
+    gb = GrainBoundary([0, 0, 1], 5, [1, 2, 0], s)
+    structure = gb.build_gb()
+
+.. image:: images/POSCAR_Fe_5_sym.png
+
+If you need a bigger supercell for each grain, say 2 unit cells::
+
+    gb = GrainBoundary([0, 0, 1], 5, [1, 2, 0], s, uc_a=2, uc_b=2)
+    structure = gb.build_gb()
+
+.. image:: _static/POSCAR_Fe_5_sym_2.png
+
+
+================================================
+FILE: docs/source/gui/BCC_Fe.rst
+================================================
+===============
+BCC Fe
+===============
+
+Let's take Fe Σ5[001]/(120) tilt grain boundary as an example. The initial structure is a `BCC lattice structure
+<https://next-gen.materialsproject.org/materials/mp-13?material_ids=mp-13>`_. Enter ``001`` for the **Rotation axis**, 
+``5`` for the **Σ**, and ``1 2 0`` for the **GB plane**, and upload an :download:`initial structure <images/POSCAR_Fe>`.
+Remember to add the space between the integers in ``1 2 0``. The default output formate is ``poscar`` for VASP calculations.
+
+.. image:: images/Fe_fig1.png
+    :width: 800px
+
+Then click **Build**, you will see the following page. You can either copy & past the output or directly **Download** the file.
+
+.. image:: images/Fe_fig2.png
+    :width: 800px
+
+
+================================================
+FILE: docs/source/gui/FCC_Ni.rst
+================================================
+===============
+FCC Ni
+===============
+
+Let's take Ni Σ7[111]/(1 -3 2) tilt grain boundary as an example. The initial structure is an `FCC lattice structure
+<https://next-gen.materialsproject.org/materials/mp-23?chemsys=Ni>`_. Enter ``111`` for the **Rotation axis**, 
+``7`` for the **Σ**, and ``1 -3 0`` for the **GB plane**, and upload an :download:`initial structure <images/Ni.cif>`.
+Remember to add the space between the integers in ``1 -3 0``. The default output formate is ``poscar`` for VASP calculations.
+
+.. image:: images/Ni_fig1.png
+    :width: 800px
+
+Then click **Build**, you will see the following page. You can either copy & past the output or directly **Download** the file.
+
+.. image:: images/Ni_fig2.png
+    :width: 800px
+
+
+================================================
+FILE: docs/source/gui/index.rst
+================================================
+============
+GUI example
+============
+
+.. toctree::
+    :maxdepth: 1
+
+    BCC_Fe
+    FCC_Ni
+    SrTiO3
+
+More to come.
+
+
+================================================
+FILE: docs/source/gui/SrTiO3.rst
+================================================
+===============
+SrTiO3
+===============
+
+Let's take SrTiO3 Σ3[110]/(1-12) tilt grain boundary as an example. The initial structure is a `cubic structure
+<https://next-gen.materialsproject.org/materials/mp-5229?formula=SrTiO3>`_. Enter ``110`` for the **Rotation axis**, 
+``3`` for the **Σ**, and ``1 -1 2`` for the **GB plane**, and upload an :download:`initial structure <images/SrTiO3.cif>`.
+Remember to add the space between the integers in ``1 -1 2``. The default output formate is ``poscar`` for VASP calculations.
+
+.. image:: images/SrTiO3_fig1.png
+    :width: 800px
+
+Then click **Build**, you will see the following page. You can either copy & past the output or directly **Download** the file.
+
+.. image:: images/SrTiO3_fig2.png
+    :width: 800px
+
+In VASP calculations of interface models, we often want to fix some layers in the bulk. The web app provides a method to fix some layers in each grain. 
+For example, if we want to fix 3 center layers in each grain, we can enter ``3`` for the **Fix center layers**.
+
+.. image:: images/SrTiO3_fig3.png
+    :width: 800px
+
+Then click **Build**, you will see the following page. 
+
+.. image:: images/SrTiO3_fig4.png
+    :width: 800px
+
+Please note that the default tolerance factor to determnine if sites are in the same layer is 0.25 Angstrom.
+
+
+================================================
+FILE: docs/source/gui/images/Ni.cif
+================================================
+# generated using pymatgen
+data_Ni
+_symmetry_space_group_name_H-M   'P 1'
+_cell_length_a   3.47514587
+_cell_length_b   3.47514587
+_cell_length_c   3.47514587
+_cell_angle_alpha   90.00000000
+_cell_angle_beta   90.00000000
+_cell_angle_gamma   90.00000000
+_symmetry_Int_Tables_number   1
+_chemical_formula_structural   Ni
+_chemical_formula_sum   Ni4
+_cell_volume   41.96808136
+_cell_formula_units_Z   4
+loop_
+ _symmetry_equiv_pos_site_id
+ _symmetry_equiv_pos_as_xyz
+  1  'x, y, z'
+loop_
+ _atom_site_type_symbol
+ _atom_site_label
+ _atom_site_symmetry_multiplicity
+ _atom_site_fract_x
+ _atom_site_fract_y
+ _atom_site_fract_z
+ _atom_site_occupancy
+  Ni  Ni0  1  0.00000000  0.00000000  0.00000000  1
+  Ni  Ni1  1  0.00000000  0.50000000  0.50000000  1
+  Ni  Ni2  1  0.50000000  0.00000000  0.50000000  1
+  Ni  Ni3  1  0.50000000  0.50000000  0.00000000  1
+
+
+
+================================================
+FILE: docs/source/gui/images/POSCAR_Fe
+================================================
+Fe2
+1.0
+        2.8481159210         0.0000000000         0.0000000000
+        0.0000000000         2.8481159210         0.0000000000
+        0.0000000000         0.0000000000         2.8481159210
+   Fe
+    2
+Direct
+     0.000000000         0.000000000         0.000000000
+     0.500000000         0.500000000         0.500000000
+
+
+
+================================================
+FILE: docs/source/gui/images/SrTiO3.cif
+================================================
+# generated using pymatgen
+data_SrTiO3
+_symmetry_space_group_name_H-M   'P 1'
+_cell_length_a   3.91270131
+_cell_length_b   3.91270131
+_cell_length_c   3.91270131
+_cell_angle_alpha   90.00000000
+_cell_angle_beta   90.00000000
+_cell_angle_gamma   90.00000000
+_symmetry_Int_Tables_number   1
+_chemical_formula_structural   SrTiO3
+_chemical_formula_sum   'Sr1 Ti1 O3'
+_cell_volume   59.90045031
+_cell_formula_units_Z   1
+loop_
+ _symmetry_equiv_pos_site_id
+ _symmetry_equiv_pos_as_xyz
+  1  'x, y, z'
+loop_
+ _atom_site_type_symbol
+ _atom_site_label
+ _atom_site_symmetry_multiplicity
+ _atom_site_fract_x
+ _atom_site_fract_y
+ _atom_site_fract_z
+ _atom_site_occupancy
+  Sr  Sr0  1  0.00000000  0.00000000  0.00000000  1
+  Ti  Ti1  1  0.50000000  0.50000000  0.50000000  1
+  O  O2  1  0.50000000  0.00000000  0.50000000  1
+  O  O3  1  0.50000000  0.50000000  0.00000000  1
+  O  O4  1  0.00000000  0.50000000  0.50000000  1
+
+
+
+================================================
+FILE: docs/source/python/BCC_Fe.rst
+================================================
+===============
+BCC Fe
+===============
+
+Let's take Fe Σ5[001]/(120) tilt grain boundary as an example. The initial structure is a `BCC lattice structure
+<https://next-gen.materialsproject.org/materials/mp-13?material_ids=mp-13>`_::
+
+    from aimsgb import GrainBoundary, Grain
+
+    s_input = Grain.from_file("POSCAR_Fe") 
+    gb = GrainBoundary([0, 0, 1], 5, [1, 2, 0], s_input)
+    structure = Grain.stack_grains(gb.grain_a, gb.grain_b, direction=gb.direction)
+    
+.. image:: images/Fe_fig1.png
+    :width: 400px
+
+``s_input`` can also be created using ``from_mp_id`` method by giving an ``mp_id`` from `Materials Project <https://materialsproject.org/>`_. 
+The ``mp_id`` of a BCC Fe is `mp-13`::
+
+    s_input = Grain.from_mp_id("mp-13") 
+
+To construct a bigger supercell for each grain, say 2 unit cells::
+
+    gb = GrainBoundary([0, 0, 1], 5, [1, 2, 0], s_input, uc_a=2, uc_b=2)
+    structure = Grain.stack_grains(gb.grain_a, gb.grain_b, direction=gb.direction)
+
+.. image:: images/Fe_fig2.png
+    :width: 400px
+
+To construct a Fe Σ5[001]/(001) twist grain boundary::
+
+    gb = GrainBoundary([0, 0, 1], 5, [0, 0, 1], s_input)
+    structure = Grain.stack_grains(gb.grain_a, gb.grain_b, direction=gb.direction)
+
+.. image:: images/Fe_fig3.png
+    :width: 400px
+
+It's possible to shift one of the grain along the grain boundary plane. For example, 
+let's say we want to have one of the grain shifted for 0.2 Å along a-axis::
+
+    gb = GrainBoundary([0, 0, 1], 5, [1, 2, 0], s_input)
+    gb.grain_a.translate_sites(range(len(gb.grain_a)), [0.2, 0, 0])
+    structure = Grain.stack_grains(gb.grain_a, gb.grain_b, direction=gb.direction)
+
+.. image:: images/Fe_fig4.png
+    :width: 400px
+
+
+================================================
+FILE: docs/source/python/FCC_Ni.rst
+================================================
+===============
+FCC Ni
+===============
+
+Let's take Ni Σ7[111]/(1 -3 2) tilt grain boundary as an example. The initial structure is an `FCC lattice structure
+<shttps://next-gen.materialsproject.org/materials/mp-23?chemsys=Ni>`_::
+
+    from aimsgb import GrainBoundary, Grain
+
+    s_input = Grain.from_file("POSCAR_Ni") 
+    gb = GrainBoundary([1, 1, 1], 7, [1, -3, 2], s_input)
+    structure = Grain.stack_grains(gb.grain_a, gb.grain_b, direction=gb.direction)
+    
+.. image:: images/Ni_fig1.png
+    :width: 400px
+
+``s_input`` can also be created using ``from_mp_id`` method by giving an ``mp_id`` from `Materials Project <https://materialsproject.org/>`_. 
+The ``mp_id`` of an FCC Ni is `mp-23`::
+
+    s_input = Grain.from_mp_id("mp-23") 
+
+
+
+================================================
+FILE: docs/source/python/Find_GB.rst
+================================================
+=====================
+Find Grain Boundaries
+=====================
+
+In this example, I will show you how to print out available Σ, rotation angles, grain boundary (GB) planes, and coincident site lattice (CSL) matrices from a 
+given rotation axis. The purpose of this method is to provide you the grain boundary information. For example, if you are not sure what the GB plane is for a 
+GB you want to generate, you can find this information in :class:`GBInformation`, which is a :class:`dict` object. Let's say you want to create a Σ3[110] GB, but you are not sure what the available 
+GB planes are. To find this information
+
+.. code-block:: python
+
+    from aimsgb import GBInformation
+
+    print(GBInformation([1, 1, 0], 30).__str__())
+
+    Grain boundary information for rotation axis: 110
+    Show the sigma values up to 30 (Note: * means twist GB, Theta is the rotation angle)
+    |  Sigma  |  Theta  | GB plane   | CSL matrix   |
+    |---------+---------+------------+--------------|
+    |    3    |  70.53  | (-1 1 1)   | -1  1  1     |
+    |         |         | (1 -1 2)   | 1 -1  1      |
+    |         |         | (1 1 0)*   | 1  2  0      |
+    |    9    |  38.94  | (-1 1 -4)  | -1 -2  1     |
+    |         |         | (-2 2 1)   | 1  2  1      |
+    |         |         | (1 1 0)*   | -4  1  0     |
+    |   11    |  50.48  | (-3 3 2)   | -3  1  1     |
+    |         |         | (1 -1 3)   | 3 -1  1      |
+    |         |         | (1 1 0)*   | 2  3  0      |
+    |   17    |  86.63  | (3 -3 -4)  | 3 -2  1      |
+    |         |         | (-2 2 -3)  | -3  2  1     |
+    |         |         | (1 1 0)*   | -4 -3  0     |
+    |   19    |  26.53  | (-3 3 1)   | -3  1  1     |
+    |         |         | (1 -1 6)   | 3 -1  1      |
+    |         |         | (1 1 0)*   | 1  6  0      |
+    |   27    |  31.59  | (-5 5 2)   | -5  1  1     |
+    |         |         | (1 -1 5)   | 5 -1  1      |
+    |         |         | (1 1 0)*   | 2  5  0      |
+
+
+Here, I print out the GB information with Σ up to 30. As you can see, the available GB planes for a Σ3[110] GB are ``(-1 1 1)``, ``(1 -1 2)``, and ``(1 1 0)``. 
+``(-1 1 1)`` and ``(1 -1 2)`` are for tilt GB and ``(1 1 0)`` is for twist GB. 
+
+
+================================================
+FILE: docs/source/python/Graphene.rst
+================================================
+==================
+Graphene 
+==================
+
+Let's take graphene Σ5[001]/(120) tilt grain boundary as an example. The initial structure can be found from `Materials Project
+<https://next-gen.materialsproject.org/materials/mp-48?material_ids=mp-48>`_::
+
+    from aimsgb import GrainBoundary, Grain
+
+    s_input = Grain.from_file("POSCAR_C") 
+    gb = GrainBoundary([0, 0, 1], 5, [1, 2, 0], s_input)
+    structure = Grain.stack_grains(gb.grain_a, gb.grain_b, direction=gb.direction)
+
+.. image:: images/C_fig1.png
+    :width: 400px
+.. image:: images/C_fig2.png
+    :width: 400px
+
+``s_input`` can also be created using ``from_mp_id`` method by giving an ``mp_id`` from `Materials Project <https://materialsproject.org/>`_. 
+The ``mp_id`` of C is `mp-48`::
+
+    s_input = Grain.from_mp_id("mp-48") 
+
+The structure above has two layers of graphenes. To remove the top layer along the c-axis::
+
+    structure.delete_bt_layer('t', direction=2)
+    
+.. image:: images/C_fig3.png
+    :width: 400px
+
+Here, ``t`` means the top layer. ``direction`` is the direction to sort the sites by layers. 0: a, 1: b, 2: c
+
+
+================================================
+FILE: docs/source/python/index.rst
+================================================
+===============
+Python examples
+===============
+
+
+.. toctree::
+    :maxdepth: 1
+
+    BCC_Fe
+    FCC_Ni
+    MoS2
+    Graphene
+    SrTiO3
+    LiNiO2
+    Find_GB
+
+More to come.
+
+
+================================================
+FILE: docs/source/python/LiNiO2.rst
+================================================
+==================
+LiNiO2
+==================
+
+Let's take LiNiO2 Σ13[001]/(230) tilt grain boundary as an example. The initial structure can be downloaded from this `Materials Project link
+<https://next-gen.materialsproject.org/materials/mp-25411?formula=LiNiO2>`_::
+    from aimsgb import GrainBoundary, Grain
+
+    s_input = Grain.from_file("POSCAR_LiNiO2") 
+    gb = GrainBoundary([0, 0, 1], 13, [2, 3, 0], s_input)
+    structure = Grain.stack_grains(gb.grain_a, gb.grain_b, direction=gb.direction)
+
+.. image:: images/LiNiO2_fig1.png
+    :width: 400px
+
+``s_input`` can also be created using ``from_mp_id`` method by giving an ``mp_id`` from `Materials Project <https://materialsproject.org/>`_. 
+The ``mp_id`` of LiNiO2 is `mp-25411`::
+
+    s_input = Grain.from_mp_id("mp-25411") 
+
+
+================================================
+FILE: docs/source/python/MoS2.rst
+================================================
+==================
+MoS2 
+==================
+
+Let's take MoS2 Σ5[001]/(130) tilt grain boundary as an example. The initial structure can be downloaded from this `Materials Project link
+<https://next-gen.materialsproject.org/materials/mp-2815?formula=MoS2>`_::
+
+    from aimsgb import GrainBoundary, Grain
+
+    s_input = Grain.from_file("POSCAR_MoS2") 
+    gb = GrainBoundary([0, 0, 1], 5, [1, 3, 0], s_input)
+    structure = Grain.stack_grains(gb.grain_a, gb.grain_b, direction=gb.direction)
+
+.. image:: images/MoS2_fig1.png
+    :width: 400px
+
+``s_input`` can also be created using ``from_mp_id`` method by giving an ``mp_id`` from `Materials Project <https://materialsproject.org/>`_. 
+The ``mp_id`` of MoS2 is `mp-2815`::
+
+    s_input = Grain.from_mp_id("mp-2815") 
+
+Notice that some atoms at the grain boundary sit too close to each other. Let's add 1 Å distance between the grains::
+
+    structure = Grain.stack_grains(gb.grain_a, gb.grain_b, gap=1, direction=gb.direction)
+
+.. image:: images/MoS2_fig2.png
+    :width: 400px
+
+
+
+================================================
+FILE: docs/source/python/SrTiO3.rst
+================================================
+===============
+SrTiO3
+===============
+
+Let's take SrTiO3 Σ3[110]/(1-12) tilt grain boundary as an example. The initial structure is a `cubic structure
+<https://next-gen.materialsproject.org/materials/mp-5229?formula=SrTiO3>`_::
+    
+    from aimsgb import GrainBoundary, Grain
+
+    s_input = Grain.from_file("POSCAR_SrTiO3") 
+    gb = GrainBoundary([1, 1, 0], 3, [1, -1, 2], s_input)
+    structure = Grain.stack_grains(gb.grain_a, gb.grain_b, direction=gb.direction)
+
+.. image:: images/SrTiO3_fig1.png
+    :width: 400px
+
+``s_input`` can also be created using ``from_mp_id`` method by giving an ``mp_id`` from `Materials Project <https://materialsproject.org/>`_. 
+The ``mp_id`` of a cubic SrTiO3 is `mp-5229`::
+
+    s_input = Grain.from_mp_id("mp-5229") 
+
+In VASP calculations of interface models, we often want to fix some layers in the bulk. ``aimsgb`` provides a method to fix some layers in each grain. 
+First, let's check the number of layers in each grain::
+
+    layers = gb.grain_a.sort_sites_in_layers(direction=gb.direction)
+    print(len(layers))
+
+We can see that there are 12 layers in each grain. Please note that the default tolerance factor to determnine if sites are in the same layer is 0.25 Angstrom.
+You can change the tolerance factor by giving a ``tol`` argument::
+
+    layers = gb.grain_a.sort_sites_in_layers(direction=gb.direction, tol=1)
+    print(len(layers))
+
+We can see that there are 6 layers in each grain. 
+
+.. image:: images/SrTiO3_fig2.png
+    :width: 400px
+
+Next, let's fix layer 2 and 3 in each grain::
+
+    gb.grain_a.fix_sites_in_layers([2, 3], direction=gb.direction, tol=1)
+    gb.grain_b.fix_sites_in_layers([2, 3], direction=gb.direction, tol=1)
+    structure = Grain.stack_grains(gb.grain_a, gb.grain_b, direction=gb.direction)
+    structure.to(filename="POSCAR")
+
+We can see that ``Selective dynamics`` has been added in the ``POSCAR`` file.
+
+
 
 
