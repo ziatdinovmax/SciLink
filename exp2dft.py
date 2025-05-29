@@ -146,7 +146,8 @@ if __name__ == "__main__":
                     api_key=config.GOOGLE_API_KEY,
                     model_name=config.GENERATOR_AGENT_MODEL,
                     executor_timeout=config.GENERATOR_SCRIPT_TIMEOUT,
-                    generated_script_dir=config.GENERATED_SCRIPT_DIR
+                    generated_script_dir=config.GENERATED_SCRIPT_DIR,
+                    gb_docs_path=getattr(config, 'GB_DOCS_PATH', None)
                 )
                 structure_validator = StructureValidatorAgent(
                     api_key=config.GOOGLE_API_KEY,

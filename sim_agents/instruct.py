@@ -64,6 +64,54 @@ Ensure your output is ONLY the valid JSON object described above. Do not include
 """
 
 
+DOCS_ENHANCED_INITIAL_PROMPT_TEMPLATE = """
+## SPECIALIZED LIBRARY DOCUMENTATION:
+{documentation}
+
+## USER REQUEST:
+"{description}"
+
+## YOUR TASK:
+Based on the specialized library documentation provided above, generate a Python script to fulfill the user request:
+
+1. Parse the user request and use the exact syntax, classes, and methods shown in the documentation above
+2. Generate a *complete* and *executable* Python script with proper imports as documented
+3. The script MUST save the final structure to a file
+4. CRITICALLY: Print exactly: `STRUCTURE_SAVED:<filename.ext>` after successful saving
+5. Call the '{tool_name}' function with the complete script as 'script_content'
+
+Follow the patterns, syntax, and best practices shown in the documentation above.
+"""
+
+
+DOCS_ENHANCED_CORRECTION_PROMPT_TEMPLATE = """
+## SPECIALIZED LIBRARY DOCUMENTATION:
+{documentation}
+
+## ORIGINAL REQUEST:
+"{original_request}"
+
+## FAILED SCRIPT:
+```python
+{failed_script}
+```
+
+## ERROR MESSAGE:
+{error_message}
+
+## YOUR TASK:
+Using the specialized library documentation above, generate a corrected script that:
+
+1. Fixes the specific error shown above
+2. Uses proper syntax and methods as documented above
+3. Fulfills the original request: "{original_request}"
+4. Saves the structure and prints 'STRUCTURE_SAVED:<filename>'
+5. Call the '{tool_name}' function with the corrected script content
+
+Reference the documentation above for correct usage patterns and syntax.
+"""
+
+
 SCRIPT_CORRECTION_FROM_VALIDATION_TEMPLATE = """
 The user's original request for an atomic structure was: "{original_request}"
 

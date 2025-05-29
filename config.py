@@ -55,3 +55,7 @@ FFT_NMF_SETTINGS = {
     'components': 4,
     'output_dir': "fft_nmf_results"
 }
+
+# Path to GB code documentation
+GB_DOCS_PATH = "sim_agents/docs/aimsgb.txt"  # Path to aimsgb documentation
+
