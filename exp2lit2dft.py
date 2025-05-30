@@ -461,7 +461,8 @@ if __name__ == "__main__":
                     validator_feedback_for_refinement = structure_validator.validate_structure_and_script(
                         structure_file_path=final_generated_structure_file_path, 
                         generating_script_content=current_script_content_for_validation,
-                        original_request=combined_request_for_generator 
+                        original_request=combined_request_for_generator,
+                        tool_documentation=structure_generator._select_tool(combined_request_for_generator).docs_content  # ← Add this line 
                     )
 
                     print("\n--- [Cycle {}] Structure Validation Result ---".format(overall_cycle_num + 1))

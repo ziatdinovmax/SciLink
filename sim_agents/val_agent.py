@@ -39,12 +39,25 @@ class StructureValidatorAgent:
             return None, [f"ASE could not parse structure file '{structure_file_path}'. Error: {e}"]
 
     def _get_llm_validation_and_hints(self, original_request: str, generating_script_content: str,
-                                      structure_file_path: str) -> dict:
+                                  structure_file_path: str, tool_documentation: str = None) -> dict:
         """
         Uses an LLM to perform full validation (including semantic and geometric) and get script modification hints.
         """
+        
+        # Format tool documentation section
+        doc_section = ""
+        if tool_documentation:
+            doc_section = f"""
+    ## SPECIALIZED LIBRARY DOCUMENTATION:
+    {tool_documentation}
+
+    Please consider this documentation when validating the structure and providing script modification hints.
+    Use the proper syntax, classes, and methods shown in the documentation above when suggesting improvements.
+
+    """
 
         prompt = VALIDATOR_PROMPT_TEMPLATE.format(
+            tool_documentation=doc_section,
             original_request=original_request,
             generating_script_content=generating_script_content,
             structure_file_path=structure_file_path,
@@ -97,7 +110,8 @@ class StructureValidatorAgent:
                 "script_modification_hints": []
             }
 
-    def validate_structure_and_script(self, structure_file_path: str, generating_script_content: str, original_request: str) -> dict:
+    def validate_structure_and_script(self, structure_file_path: str, generating_script_content: str, 
+                                 original_request: str, tool_documentation: str = None) -> dict:
         """
         Main validation method. Relies on LLM for all checks.
         Returns a dictionary with validation status, issues, and script modification hints.
@@ -120,11 +134,12 @@ class StructureValidatorAgent:
             self.logger.error(f"Validation aborted: Structure file unparsable. Issues: {parsing_issues}")
             return final_feedback
 
-        # 2. Get LLM-based full validation (semantic, geometric, etc.) and script modification hints
+        # 2. Get LLM-based full validation with optional tool documentation
         llm_feedback = self._get_llm_validation_and_hints(
             original_request=original_request,
             generating_script_content=generating_script_content,
-            structure_file_path=structure_file_path
+            structure_file_path=structure_file_path,
+            tool_documentation=tool_documentation 
         )
 
         final_feedback["overall_assessment"] = llm_feedback.get("overall_assessment", "LLM assessment missing or failed.")

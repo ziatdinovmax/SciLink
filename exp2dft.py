@@ -209,7 +209,8 @@ if __name__ == "__main__":
                         validator_feedback_for_refinement = structure_validator.validate_structure_and_script(
                             structure_file_path=generated_structure_file,
                             generating_script_content=current_script_content_for_validation,
-                            original_request=combined_request_for_agents # Pass the combined request
+                            original_request=combined_request_for_agents, # Pass the combined request
+                            tool_documentation=getattr(structure_generator._select_tool(combined_request_for_agents), 'docs_content', None)
                         )
 
                         print("\n--- Structure Validation Result ---")
