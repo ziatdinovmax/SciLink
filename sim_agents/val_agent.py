@@ -24,24 +24,54 @@ class StructureValidatorAgent:
         self.logger = logging.getLogger(__name__)
         self.logger.info(f"StructureValidatorAgent initialized with model: {self.model_name} (LLM-only validation).")
 
-    def _check_file_parsable_and_load(self, structure_file_path: str) -> tuple[object | None, list]: # object is ase.Atoms
-        """Checks if the structure file is parsable by ASE and loads it."""
+    def _read_structure_file_content(self, structure_file_path: str) -> str:
+        """
+        Read the raw content of the structure file for LLM analysis.
+        """
+        try:
+            with open(structure_file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Limit content size for LLM context window
+            max_chars = 8000  # Adjust based on your needs
+            if len(content) > max_chars:
+                content = content[:max_chars] + "\n\n[... File truncated for context limits ...]"
+                self.logger.warning(f"Structure file content truncated from {len(content)} to {max_chars} characters")
+            
+            return content
+            
+        except Exception as e:
+            self.logger.error(f"Failed to read structure file content: {e}")
+            return f"Error reading file: {str(e)}"
+
+    def _check_file_parsable_and_load(self, structure_file_path: str) -> tuple[object | None, list, str]:
+        """
+        Checks if the structure file is parsable by ASE and reads raw content for LLM.
+        """
         try:
             atoms = ase_read(structure_file_path)
             if not atoms or len(atoms) == 0:
                 msg = f"Structure file '{structure_file_path}' is empty or could not be parsed into a valid ASE Atoms object."
                 self.logger.warning(msg)
-                return None, [msg]
+                return None, [msg], ""
+            
             self.logger.info(f"Successfully parsed structure file: {structure_file_path}, {len(atoms)} atoms.")
-            return atoms, []
+            
+            # Read raw file content for LLM analysis
+            file_content = self._read_structure_file_content(structure_file_path)
+            
+            return atoms, [], file_content
+            
         except Exception as e:
             self.logger.error(f"Failed to parse structure file '{structure_file_path}' with ASE: {e}")
-            return None, [f"ASE could not parse structure file '{structure_file_path}'. Error: {e}"]
+            return None, [f"ASE could not parse structure file '{structure_file_path}'. Error: {e}"], ""
+
 
     def _get_llm_validation_and_hints(self, original_request: str, generating_script_content: str,
-                                  structure_file_path: str, tool_documentation: str = None) -> dict:
+                                     structure_file_path: str, structure_file_content: str = "", 
+                                     tool_documentation: str = None) -> dict:
         """
-        Uses an LLM to perform full validation (including semantic and geometric) and get script modification hints.
+        Uses an LLM to perform full validation including analysis of the actual structure file content.
         """
         
         # Format tool documentation section
@@ -55,13 +85,25 @@ class StructureValidatorAgent:
     Use the proper syntax, classes, and methods shown in the documentation above when suggesting improvements.
 
     """
+        
+        # Format structure file content section
+        structure_section = ""
+        if structure_file_content:
+            structure_section = f"""
+
+    ## ACTUAL STRUCTURE FILE CONTENT:
+    ```
+    {structure_file_content}
+    ```
+
+    """
 
         prompt = VALIDATOR_PROMPT_TEMPLATE.format(
             tool_documentation=doc_section,
             original_request=original_request,
             generating_script_content=generating_script_content,
             structure_file_path=structure_file_path,
-        )
+        ) + structure_section
         
         self.logger.info("Sending request to Validator LLM for full validation and script hints...")
         self.logger.debug(f"Validator LLM Prompt (first 500 chars):\n{prompt[:500]}...")
@@ -116,8 +158,8 @@ class StructureValidatorAgent:
         Main validation method. Relies on LLM for all checks.
         Returns a dictionary with validation status, issues, and script modification hints.
         """
-        self.logger.info(f"Starting LLM-only validation for structure '{structure_file_path}' based on request: '{original_request[:100]}...'")
-        
+        self.logger.info(f"Starting LLM-based validation with structure file analysis for '{structure_file_path}'")
+    
         final_feedback = {
             "status": "error", 
             "original_structure_file": structure_file_path,
@@ -126,20 +168,21 @@ class StructureValidatorAgent:
             "script_modification_hints": []
         }
 
-        # 1. Load structure and perform initial parsability check
-        atoms_obj, parsing_issues = self._check_file_parsable_and_load(structure_file_path)
+        # 1. Load structure and read file content for LLM
+        atoms_obj, parsing_issues, structure_file_content = self._check_file_parsable_and_load(structure_file_path)
         if atoms_obj is None:
             final_feedback["overall_assessment"] = "Structure file is unparsable or invalid."
             final_feedback["all_identified_issues"] = parsing_issues
             self.logger.error(f"Validation aborted: Structure file unparsable. Issues: {parsing_issues}")
             return final_feedback
 
-        # 2. Get LLM-based full validation with optional tool documentation
+        # 2. Get LLM-based validation with actual file content
         llm_feedback = self._get_llm_validation_and_hints(
             original_request=original_request,
             generating_script_content=generating_script_content,
             structure_file_path=structure_file_path,
-            tool_documentation=tool_documentation 
+            structure_file_content=structure_file_content, # Pass raw file content to LLM
+            tool_documentation=tool_documentation
         )
 
         final_feedback["overall_assessment"] = llm_feedback.get("overall_assessment", "LLM assessment missing or failed.")

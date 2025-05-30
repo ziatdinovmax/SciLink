@@ -47,21 +47,21 @@ If this is a grain boundary, interface, or surface structure, be aware that atom
     ```python
     {generating_script_content}
     ```
-3.  **Path to Generated Structure File:** The path to the file (e.g., POSCAR, XYZ) produced by the script. You should assume the structure from this file has been loaded and is being analyzed.
-    Example: "{structure_file_path}"
+3.  **Structure File Content:** The actual content of the generated structure file (provided below if available).
 
 **Your Task & Output Format:**
 
-Based on all the provided information, you MUST output a valid JSON object with the following keys:
+Based on all the provided information, including analysis of the actual structure file content, you MUST output a valid JSON object with the following keys:
 
-1.  `"overall_assessment"`: (String) A brief (2-3 sentences) overall assessment of the generated structure's suitability as a starting point for DFT relaxation, its adherence to the original request, and its fundamental physical/chemical soundness.
-2.  `"identified_issues_detail"`: (List of Strings) A list of ALL specific issues you identified that would make it a poor input for DFT or that deviate from the user's request. This includes:
-    * Discrepancies from the "Original User Request" (e.g., wrong phase, wrong defect type and placement).
+1.  `"overall_assessment"`: (String) A brief (2-3 sentences) overall assessment of the generated structure's suitability as a starting point for DFT relaxation, its adherence to the original request, and its fundamental physical/chemical soundness. Consider both the script logic and the actual structural content.
+2.  `"identified_issues_detail"`: (List of Strings) A list of ALL specific issues you identified that would make it a poor input for DFT or that deviate from the user's request. Analyze the structure file content for:
+    * Discrepancies from the "Original User Request" (e.g., wrong composition, missing defects, incorrect phase).
     * Gross physical or chemical unreasonableness (e.g., severe atomic clashes that relaxation might not fix, fundamentally wrong bonding indicative of incorrect script logic).
-    * Stoichiometry errors if the request implied a specific composition.
-    * For slabs/surfaces: clearly insufficient vacuum that would lead to self-interaction in DFT.
-    If no such critical issues are found, this should be an empty list. (Minor deviations in bond lengths/angles that relaxation would fix are not primary issues here unless they indicate a fundamental script error).
-3.  `"script_modification_hints"`: (List of Strings) Actionable suggestions on how the *provided script* could be modified to address the identified critical issues and better match the original request for an initial DFT input structure. These hints should be targeted at improving the script's logic for structure generation, function calls, or parameters. If specialized library documentation is provided above, use that library's specific syntax and methods in your suggestions. If the structure is a good starting point, provide an empty list.
+    * Stoichiometry errors if the request implied a specific composition. 
+    * For slabs/surfaces: insufficient vacuum gaps, wrong surface termination, incorrect layer stacking.
+    * Any other obvious issues visible in the structure file that would cause significant DFT problems.
+    If no such critical issues are found, this should be an empty list.
+3.  `"script_modification_hints"`: (List of Strings) Actionable suggestions on how the *provided script* could be modified to address the identified critical issues and better match the original request. Base these suggestions on your analysis of both the script and the resulting structure file content. If specialized library documentation is provided above, use that library's specific syntax and methods in your suggestions. If the structure is a good starting point, provide an empty list.
 
 Ensure your output is ONLY the valid JSON object described above. Do not include any other text, explanations, or markdown formatting outside the JSON structure.
 """
