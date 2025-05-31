@@ -8,7 +8,7 @@ import google.generativeai as genai
 from google.generativeai.types import GenerationConfig
 
 from .instruct import VALIDATOR_PROMPT_TEMPLATE, INCAR_VALIDATION_INSTRUCTIONS
-from ..lit_agents.literature_agent import IncarLiteratureAgent
+from lit_agents.literature_agent import IncarLiteratureAgent
 
 
 class StructureValidatorAgent:
