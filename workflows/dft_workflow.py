@@ -6,7 +6,7 @@ from typing import Optional, Dict, Any
 from sim_agents.structure_agent import StructureGenerator
 from sim_agents.val_agent import StructureValidatorAgent
 from sim_agents.vasp_agent import VaspInputAgent
-from sim_agents import IncarValidatorAgent
+from sim_agents.val_agent import IncarValidatorAgent
 
 
 class DFTWorkflow:
