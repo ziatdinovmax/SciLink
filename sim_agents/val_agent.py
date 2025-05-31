@@ -212,8 +212,8 @@ class StructureValidatorAgent:
 class IncarValidatorAgent:
     """Agent that validates and suggests improvements to VASP INCAR files using literature."""
 
-    def __init__(self, api_key: str = None, model_name: str = "gemini-1.5-pro", 
-                 futurehouse_api_key: str = None, max_wait_time: int = 300):
+    def __init__(self, api_key: str = None, model_name: str = "gemini-2.5-pro-preview-05-06", 
+                 futurehouse_api_key: str = None, max_wait_time: int = 500):
         if not api_key:
             api_key = os.environ.get("GOOGLE_API_KEY")
         if not api_key:
