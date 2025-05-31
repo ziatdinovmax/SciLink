@@ -146,8 +146,7 @@ class IncarLiteratureAgent:
 
 INCAR content:
 {incar_content}
-
-Please evaluate if these parameters are appropriate based on literature."""
+"""
 
         try:
             # Submit to CROW
