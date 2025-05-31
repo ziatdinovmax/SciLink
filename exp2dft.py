@@ -10,6 +10,7 @@ from exp_agents.microscopy_agent import GeminiMicroscopyAnalysisAgent as Analysi
 from sim_agents.structure_agent import StructureGenerator
 # Import the new validator agent
 from sim_agents.val_agent import StructureValidatorAgent
+from sim_agents.utils import ask_user_proceed_or_refine
 
 
 # --- Interactive Selection Function (remains the same) ---
@@ -225,24 +226,46 @@ if __name__ == "__main__":
                             final_outcome_achieved = True
                             break 
                         elif validation_status == "needs_correction":
-                            logger.warning(f"Validation found issues requiring script correction: {validator_feedback_for_refinement.get('all_identified_issues')}")
-                            if overall_cycle_num < config.MAX_REFINEMENT_CYCLES:
-                                logger.info("Preparing for next refinement cycle based on validation feedback...")
+                            logger.warning(f"Validation found issues: {validator_feedback_for_refinement.get('all_identified_issues')}")
+                            
+                            # ASK USER FOR DECISION
+                            user_decision = ask_user_proceed_or_refine(
+                                validation_feedback=validator_feedback_for_refinement,
+                                structure_file=generated_structure_file
+                            )
+                            
+                            if user_decision == 'proceed':
+                                logger.info("User chose to proceed with current structure despite validation issues.")
+                                print(f"\n✓ PROCEEDING: Using structure at {generated_structure_file}")
+                                print(f"Generating script: {final_generating_script_path}")
+                                final_outcome_achieved = True
+                                break
+                                
+                            elif overall_cycle_num < config.MAX_REFINEMENT_CYCLES:
+                                logger.info("User chose refinement. Preparing for next refinement cycle...")
+                                # Continue to next cycle
                             else:
-                                logger.error("Maximum refinement cycles reached. Structure may still have issues.")
-                                print(f"\nWARNING: Max refinement cycles reached. Structure at {generated_structure_file} (from script {final_generating_script_path}) may have unresolved validation issues.")
-                                final_outcome_achieved = True 
-                                break 
+                                logger.error("Maximum refinement cycles reached but user requested refinement.")
+                                print(f"\n⚠ WARNING: Max refinement cycles reached. Cannot refine further.")
+                                print(f"Final structure: {generated_structure_file}")
+                                print(f"Script: {final_generating_script_path}")
+                                
+                                # Ask for final decision
+                                print("\nFinal options:")
+                                print("  [p] PROCEED - Use current structure")
+                                final_choice = input("Choice [p]: ").strip().lower()
+                                if final_choice in ['p', 'proceed', '']:  # Default to proceed
+                                    print(f"\n✓ PROCEEDING: Using structure at {generated_structure_file}")
+                                    final_outcome_achieved = True
+                                else:
+                                    print(f"\n⏹ WORKFLOW STOPPED")
+                                    final_outcome_achieved = True
+                                break
                         else: 
                             logger.error(f"Structure validation process encountered an error: {validator_feedback_for_refinement.get('overall_assessment')}. Aborting refinement.")
                             print(f"\nERROR: Validation process failed. Last structure at {generated_structure_file} (from script {final_generating_script_path}).")
                             final_outcome_achieved = True 
-                            break
-                    else: 
-                        logger.error(f"Structure script generation failed in cycle {overall_cycle_num + 1}. Error: {generator_result.get('message')}")
-                        print(f"\nERROR: Script generation failed. Last attempted script (if any): {generator_result.get('last_attempted_script_path')}")
-                        final_generating_script_path = generator_result.get("last_attempted_script_path") 
-                        break 
+                            break 
 
                 if final_outcome_achieved:
                     if validator_feedback_for_refinement and validator_feedback_for_refinement.get("status") == "success":
