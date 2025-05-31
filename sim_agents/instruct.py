@@ -139,3 +139,80 @@ Your task is to generate a **new, corrected, complete, and executable Python ASE
 6.  CRITICALLY: Immediately after successfully saving the file, the script MUST print *exactly* this confirmation line to standard output: `STRUCTURE_SAVED:<filename.ext>` (replace `<filename.ext>` with the actual filename used).
 7.  Call the '{tool_name}' function/tool with the *entire new corrected Python script content* as the 'script_content' argument. Do not add any explanatory text before or after the function call itself in your response.
 """
+
+
+VASP_INPUT_GENERATION_INSTRUCTIONS = """You are an expert computational materials scientist specializing in VASP (Vienna Ab-initio Simulation Package) calculations.
+
+Your task is to generate appropriate INCAR and KPOINTS files based on:
+1. The provided POSCAR structure file content
+2. The original user request describing the scientific objective
+
+**GUIDELINES FOR VASP INPUT GENERATION:**
+
+## INCAR File Guidelines:
+- **ENCUT**: Set based on POTCAR requirements (typically 400-600 eV, higher for accurate forces/stress)
+- **PREC**: Use "Accurate" for production calculations, "Normal" for testing
+- **ALGO**: "Normal" for most cases, "VeryFast" for large systems, "All" for difficult convergence
+- **ISMEAR**: 
+  - -5 (tetrahedron) for static calculations and DOS
+  - 0 (Gaussian) for insulators/semiconductors with appropriate SIGMA
+  - 1 (Methfessel-Paxton) for metals
+- **Relaxation parameters**: IBRION, ISIF, NSW, EDIFFG based on what needs to be relaxed
+- **Electronic convergence**: EDIFF (typically 1E-6 for forces, 1E-8 for accurate energies)
+- **Special considerations**:
+  - Surface/slab: LDIPOL, DIPOL for dipole corrections
+  - Magnetic systems: ISPIN=2, MAGMOM
+  - Hybrid functionals: HSE06 parameters if needed
+  - van der Waals: DFT-D3 corrections if appropriate
+
+## KPOINTS File Guidelines:
+- **Grid density**: Balance accuracy vs computational cost
+- **Monkhorst-Pack**: Most common, specify grid and shift
+- **Gamma-centered**: For even grids, often more efficient
+- **Special cases**:
+  - 2D/surface systems: 1 k-point along vacuum direction
+  - 1D systems: 1 k-point in confined directions
+  - Large supercells: Gamma-point only might be sufficient
+- **Convergence**: Ensure k-point density is converged for the property of interest
+
+## Calculation Type Recognition:
+Based on the user request, determine the appropriate calculation type:
+- **Structure relaxation**: Full optimization of atomic positions and/or cell
+- **Static calculation**: Single-point energy at fixed geometry
+- **Electronic structure**: Band structure, DOS calculations
+- **Optical properties**: Dielectric function, absorption
+- **Defect calculations**: Special considerations for charged defects
+- **Surface calculations**: Slab models with vacuum and dipole corrections
+
+## Parameter Selection Logic:
+1. **Identify the main scientific objective** from the user request
+2. **Analyze the structure type** (bulk, surface, 2D, defective, etc.) from the POSCAR
+3. **Choose appropriate calculation workflow** (relax → static → analysis)
+4. **Set parameters based on required accuracy** vs computational efficiency
+5. **Include relevant physical effects** (magnetism, van der Waals, etc.)
+
+## Structure Analysis:
+From the POSCAR content provided below, analyze:
+- System size and composition
+- Dimensionality (bulk, surface/slab, 2D, etc.)
+- Presence of vacuum gaps
+- Chemical elements (check for magnetic species)
+- Cell parameters and symmetry
+
+## INPUT DATA:
+
+**POSCAR Structure File:**
+{poscar_content}
+
+**Scientific Objective:**
+{original_request}
+
+## Output Requirements:
+You MUST provide a JSON response with exactly these keys:
+{
+  "incar": "complete INCAR file content",
+  "kpoints": "complete KPOINTS file content", 
+  "summary": "brief calculation description"
+}
+
+Analyze the provided POSCAR structure and user request, then generate appropriate VASP input files following the guidelines above."""
