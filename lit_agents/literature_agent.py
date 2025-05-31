@@ -120,3 +120,59 @@ class OwlLiteratureAgent:
             error_msg = f"An unexpected error occurred during OWL query: {str(e)}"
             logging.exception(error_msg)
             return {"status": "error", "message": error_msg}
+        
+
+
+class IncarLiteratureAgent:
+    """
+    Agent for validating VASP INCAR parameters against literature using CROW
+    agent through the FutureHouse API client.
+    """
+
+    def __init__(self, api_key: str = None, max_wait_time: int = 300):
+        if not api_key:
+            api_key = os.environ.get("FUTUREHOUSE_API_KEY")
+        if not api_key:
+            raise ValueError("API key required")
+        
+        self.client = FutureHouseClient(api_key=api_key)
+        self.max_wait_time = max_wait_time
+        self.logger = logging.getLogger(__name__)
+
+    def validate_incar(self, incar_content: str, system_description: str) -> dict:
+        """Validate INCAR parameters against literature."""
+        
+        query = f"""Are these VASP INCAR parameters good for {system_description}?
+
+INCAR content:
+{incar_content}
+
+Please evaluate if these parameters are appropriate based on literature."""
+
+        try:
+            # Submit to CROW
+            task_data = {"name": JobNames.CROW, "query": query}
+            task_id = self.client.create_task(task_data)
+            
+            # Wait for completion
+            import time
+            start_time = time.time()
+            
+            while time.time() - start_time < self.max_wait_time:
+                task_status = self.client.get_task(task_id)
+                
+                if task_status.status == "success":
+                    return {
+                        "status": "success",
+                        "response": task_status.formatted_answer,
+                        "task_id": task_id
+                    }
+                elif task_status.status in ["FAILED", "ERROR", "error"]:
+                    return {"status": "error", "message": f"CROW failed: {task_status.status}"}
+                
+                sleep(10)
+            
+            return {"status": "timeout", "message": f"Timed out after {self.max_wait_time}s"}
+            
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
