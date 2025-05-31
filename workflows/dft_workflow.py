@@ -3,10 +3,10 @@ import logging
 from typing import Optional, Dict, Any
 
 # Import all the agents
-from ..sim_agents.structure_agent import StructureGenerator
-from ..sim_agents.val_agent import StructureValidatorAgent
-from ..sim_agents.vasp_agent import VaspInputAgent
-from ..sim_agents import IncarValidatorAgent
+from sim_agents.structure_agent import StructureGenerator
+from sim_agents.val_agent import StructureValidatorAgent
+from sim_agents.vasp_agent import VaspInputAgent
+from sim_agents import IncarValidatorAgent
 
 
 class DFTWorkflow:
