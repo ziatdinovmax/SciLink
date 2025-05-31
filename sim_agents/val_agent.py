@@ -7,7 +7,8 @@ from ase.io import read as ase_read
 import google.generativeai as genai
 from google.generativeai.types import GenerationConfig
 
-from .instruct import VALIDATOR_PROMPT_TEMPLATE
+from .instruct import VALIDATOR_PROMPT_TEMPLATE, INCAR_VALIDATION_INSTRUCTIONS
+from ..lit_agents.literature_agent import IncarLiteratureAgent
 
 
 class StructureValidatorAgent:
@@ -204,3 +205,129 @@ class StructureValidatorAgent:
         
         self.logger.debug(f"Final LLM-only validation feedback for '{structure_file_path}': {final_feedback}")
         return final_feedback
+
+
+
+
+class IncarValidatorAgent:
+    """Agent that validates and suggests improvements to VASP INCAR files using literature."""
+
+    def __init__(self, api_key: str = None, model_name: str = "gemini-1.5-pro", 
+                 futurehouse_api_key: str = None, max_wait_time: int = 300):
+        if not api_key:
+            api_key = os.environ.get("GOOGLE_API_KEY")
+        if not api_key:
+            raise ValueError("Google API key required")
+        
+        genai.configure(api_key=api_key)
+        self.model = genai.GenerativeModel(model_name)
+        self.generation_config = GenerationConfig(response_mime_type="application/json")
+        self.logger = logging.getLogger(__name__)
+        
+        # Initialize literature agent
+        self.literature_agent = IncarLiteratureAgent(
+            api_key=futurehouse_api_key, 
+            max_wait_time=max_wait_time
+        )
+
+    def validate_and_improve_incar(self, incar_content: str, system_description: str) -> dict:
+        """Validate INCAR parameters and suggest improvements based on literature."""
+        
+        # Step 1: Get literature review
+        self.logger.info("Getting literature review of INCAR parameters...")
+        lit_result = self.literature_agent.validate_incar(incar_content, system_description)
+        
+        if lit_result["status"] != "success":
+            return {
+                "status": "error",
+                "message": f"Literature review failed: {lit_result.get('message')}",
+                "validation_status": "unknown"
+            }
+        
+        # Step 2: Analyze literature review and suggest improvements
+        self.logger.info("Analyzing literature review for potential improvements...")
+        
+        prompt = f"""{INCAR_VALIDATION_INSTRUCTIONS}
+
+## ORIGINAL INCAR:
+{incar_content}
+
+## SYSTEM DESCRIPTION:
+{system_description}
+
+## LITERATURE REVIEW:
+{lit_result['response']}
+
+Analyze the literature review and suggest specific parameter adjustments if needed."""
+
+        try:
+            response = self.model.generate_content(prompt, generation_config=self.generation_config)
+            result = json.loads(response.text)
+            
+            # Add literature review to result
+            result.update({
+                "status": "success",
+                "literature_review": lit_result['response'],
+                "literature_task_id": lit_result.get('task_id')
+            })
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Error analyzing literature review: {e}")
+            return {
+                "status": "error", 
+                "message": f"Analysis failed: {str(e)}",
+                "literature_review": lit_result['response']
+            }
+
+    def save_validation_report(self, validation_result: dict, output_dir: str = ".") -> dict:
+        """Save validation report and revised INCAR if needed."""
+        if validation_result.get("status") != "success":
+            return {"error": "Validation was not successful"}
+        
+        os.makedirs(output_dir, exist_ok=True)
+        saved_files = {}
+        
+        try:
+            # Save validation report
+            report_path = os.path.join(output_dir, "incar_validation_report.json")
+            with open(report_path, 'w') as f:
+                json.dump(validation_result, f, indent=2, default=str)
+            saved_files["validation_report"] = report_path
+            
+            # Save revised INCAR if adjustments were made
+            if (validation_result.get("validation_status") == "needs_adjustment" and 
+                validation_result.get("revised_incar")):
+                
+                revised_path = os.path.join(output_dir, "INCAR_revised")
+                with open(revised_path, 'w') as f:
+                    f.write(validation_result["revised_incar"])
+                saved_files["revised_incar"] = revised_path
+                
+                # Also save adjustment summary
+                summary_path = os.path.join(output_dir, "incar_adjustments.txt")
+                with open(summary_path, 'w') as f:
+                    f.write("INCAR Parameter Adjustments\n")
+                    f.write("=" * 30 + "\n\n")
+                    f.write(f"Overall Assessment: {validation_result.get('overall_assessment', 'N/A')}\n\n")
+                    
+                    adjustments = validation_result.get("suggested_adjustments", [])
+                    if adjustments:
+                        f.write("Suggested Changes:\n")
+                        for adj in adjustments:
+                            f.write(f"\n• {adj.get('parameter')}:\n")
+                            f.write(f"  Current: {adj.get('current_value')}\n")
+                            f.write(f"  Suggested: {adj.get('suggested_value')}\n")
+                            f.write(f"  Reason: {adj.get('reason')}\n")
+                    else:
+                        f.write("No specific adjustments suggested.\n")
+                        
+                saved_files["adjustment_summary"] = summary_path
+            
+            self.logger.info(f"Validation report saved: {saved_files}")
+            return saved_files
+            
+        except Exception as e:
+            self.logger.error(f"Error saving validation files: {e}")
+            return {"error": f"Save failed: {str(e)}"}

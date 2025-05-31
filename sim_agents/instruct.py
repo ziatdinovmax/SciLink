@@ -216,3 +216,34 @@ You MUST provide a JSON response with exactly these keys:
 }}
 
 Analyze the provided POSCAR structure and user request, then generate appropriate VASP input files following the guidelines above."""
+
+
+
+INCAR_VALIDATION_INSTRUCTIONS = """You are an expert VASP computational materials scientist. 
+
+Your task is to analyze a literature review of VASP INCAR parameters and suggest specific adjustments if needed.
+
+You will receive:
+1. The original INCAR file content
+2. A literature review assessment of these parameters
+3. The system description
+
+Based on the literature review, determine if any parameters should be adjusted and provide specific recommendations.
+
+You MUST respond with a JSON object containing:
+{{
+  "validation_status": "good" or "needs_adjustment",
+  "overall_assessment": "brief summary of the literature findings",
+  "suggested_adjustments": [
+    {{
+      "parameter": "PARAMETER_NAME",
+      "current_value": "current value",
+      "suggested_value": "suggested value", 
+      "reason": "explanation based on literature"
+    }}
+  ],
+  "revised_incar": "complete revised INCAR content if adjustments needed, or null if no changes"
+}}
+
+Focus on actionable parameter changes. Only suggest adjustments if the literature clearly indicates issues.
+"""
