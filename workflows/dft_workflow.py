@@ -1,4 +1,5 @@
 import os
+import sys
 import logging
 from typing import Optional, Dict, Any
 
@@ -11,7 +12,7 @@ from sim_agents.val_agent import IncarValidatorAgent
 
 class DFTWorkflow:
     """
-    Complete DFT inputs preparation workflow:
+    Workflow for generating DFT input structures: 
     User request → Structure → Validation → VASP inputs → Literature validation → Improvements -> Final VASP inputs
     """
     
@@ -21,7 +22,7 @@ class DFTWorkflow:
                  output_dir: str = "vasp_workflow_output",
                  max_refinement_cycles: int = 2):
         """
-        Initialize the complete VASP workflow.
+        Initialize the complete DFT workflow.
         
         Args:
             google_api_key: Google API key for Gemini models
@@ -31,13 +32,21 @@ class DFTWorkflow:
             output_dir: Directory to save all outputs
             max_refinement_cycles: Max structure refinement cycles
         """
+        
+        # Setup logging
+        logging.basicConfig(
+            level=logging.INFO, 
+            format='%(levelname)s: %(name)s: %(message)s', 
+            force=True, 
+            stream=sys.stdout
+        )
+        self.logger = logging.getLogger(__name__)
+
         self.google_api_key = google_api_key
         self.futurehouse_api_key = futurehouse_api_key
         self.output_dir = output_dir
         self.max_refinement_cycles = max_refinement_cycles
         
-        # Setup logging
-        self.logger = logging.getLogger(__name__)
         
         # Initialize agents
         self.structure_generator = StructureGenerator(
@@ -83,7 +92,7 @@ class DFTWorkflow:
             "final_status": "started"
         }
         
-        self.logger.info(f"Starting complete VASP workflow for: {user_request}")
+        self.logger.info(f"Starting complete DFT workflow for: {user_request}")
         
         # Step 1: Structure Generation and Validation
         structure_result = self._generate_and_validate_structure(user_request)
@@ -120,13 +129,16 @@ class DFTWorkflow:
         workflow_result["final_status"] = "success"
         workflow_result["output_directory"] = self.output_dir
         
-        self.logger.info(f"Complete VASP workflow finished successfully: {self.output_dir}")
+        self.logger.info(f"Complete DFT workflow finished successfully: {self.output_dir}")
         return workflow_result
     
     def _generate_and_validate_structure(self, user_request: str) -> Dict[str, Any]:
         """Generate and validate atomic structure."""
         
         self.logger.info("Step 1: Structure generation and validation")
+        
+        previous_script_content = None
+        validator_feedback = None
         
         for cycle in range(self.max_refinement_cycles + 1):
             self.logger.info(f"Structure cycle {cycle + 1}/{self.max_refinement_cycles + 1}")
@@ -135,7 +147,9 @@ class DFTWorkflow:
             gen_result = self.structure_generator.generate_script(
                 original_user_request=user_request,
                 attempt_number_overall=cycle + 1,
-                is_refinement_from_validation=(cycle > 0)
+                is_refinement_from_validation=(cycle > 0),
+                previous_script_content=previous_script_content if cycle > 0 else None,
+                validator_feedback=validator_feedback if cycle > 0 else None
             )
             
             if gen_result["status"] != "success":
@@ -147,6 +161,7 @@ class DFTWorkflow:
             
             structure_file = gen_result["output_file"]
             script_content = gen_result["final_script_content"]
+            previous_script_content = script_content  # Store for next cycle
             
             # Validate structure
             val_result = self.structure_validator.validate_structure_and_script(
@@ -154,6 +169,8 @@ class DFTWorkflow:
                 generating_script_content=script_content,
                 original_request=user_request
             )
+            
+            validator_feedback = val_result  # Store for next cycle
             
             if val_result["status"] == "success":
                 return {
@@ -248,7 +265,7 @@ class DFTWorkflow:
     def get_summary(self, workflow_result: Dict[str, Any]) -> str:
         """Get a human-readable summary of the workflow results."""
         
-        summary = f"VASP Workflow Summary\n{'='*20}\n"
+        summary = f"DFT Workflow Summary\n{'='*20}\n"
         summary += f"Request: {workflow_result['user_request']}\n"
         summary += f"Status: {workflow_result['final_status']}\n"
         summary += f"Steps completed: {', '.join(workflow_result['steps_completed'])}\n"
