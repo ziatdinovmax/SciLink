@@ -16,7 +16,7 @@ class StructureExecutor:
         else:
             logging.warning("No MP API key - scripts using Materials Project may fail")
 
-    def execute_script(self, script_content: str) -> dict:
+    def execute_script(self, script_content: str, working_dir: str = None) -> dict:
         logging.info("Attempting to execute generated ASE script...")
         # ** SECURITY RISK **: Executes arbitrary code. Ensure sandboxing!
         temp_script_file = None
@@ -31,6 +31,11 @@ class StructureExecutor:
                 env['MP_API_KEY'] = self.mp_api_key
                 logging.debug("Added MP_API_KEY to script execution environment")
 
+            original_cwd = os.getcwd()
+            if working_dir:
+                os.makedirs(working_dir, exist_ok=True)
+                os.chdir(working_dir)
+            
             result = subprocess.run(
                 ['python', temp_script_file],
                 capture_output=True,
@@ -88,6 +93,7 @@ class StructureExecutor:
             logging.exception(error_msg)
             return {"status": "error", "message": error_msg}
         finally:
+            os.chdir(original_cwd)
             if temp_script_file and os.path.exists(temp_script_file):
                 try:
                     os.remove(temp_script_file)

@@ -231,7 +231,7 @@ class StructureGenerator:
                         break
 
                     self.logger.info(f"Executing script: {final_script_path_this_attempt}")
-                    exec_result = self.ase_executor.execute_script(current_script_being_processed)
+                    exec_result = self.ase_executor.execute_script(current_script_being_processed, working_dir=self.generated_script_dir)
 
                     if exec_result["status"] == "success":
                         self.logger.info(f"Script executed successfully (Overall Cycle {attempt_number_overall}, Internal Exec Attempt {internal_exec_attempt}).")
