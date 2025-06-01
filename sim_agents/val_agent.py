@@ -23,7 +23,7 @@ class StructureValidatorAgent:
         self.model = genai.GenerativeModel(self.model_name)
         self.generation_config = GenerationConfig(response_mime_type="application/json")
         self.logger = logging.getLogger(__name__)
-        self.logger.info(f"StructureValidatorAgent initialized with model: {self.model_name} (LLM-only validation).")
+        self.logger.info(f"StructureValidatorAgent initialized with model: {self.model_name}.")
 
     def _read_structure_file_content(self, structure_file_path: str) -> str:
         """
