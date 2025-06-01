@@ -1,6 +1,7 @@
 import os
 import sys
 import logging
+from io import StringIO
 from typing import Optional, Dict, Any
 
 # Import all the agents
@@ -34,12 +35,17 @@ class DFTWorkflow:
         """
 
         # Setup logging
+        self.log_capture = StringIO()
         logging.basicConfig(
             level=logging.INFO, 
-            format='%(levelname)s: %(name)s: %(message)s', 
+            format='%(asctime)s - %(levelname)s: %(name)s: %(message)s', 
             force=True, 
-            stream=sys.stdout
+            handlers=[
+                logging.StreamHandler(sys.stdout),  # Display in console
+                logging.StreamHandler(self.log_capture)  # Capture to string
+            ]
         )
+
         self.logger = logging.getLogger(__name__)
 
         self.google_api_key = google_api_key
@@ -130,6 +136,7 @@ class DFTWorkflow:
         workflow_result["output_directory"] = self.output_dir
         
         self.logger.info(f"Complete DFT workflow finished successfully: {self.output_dir}")
+        self._save_workflow_log() # Save complete log
         return workflow_result
     
     def _generate_and_validate_structure(self, user_request: str) -> Dict[str, Any]:
@@ -171,7 +178,7 @@ class DFTWorkflow:
             
             # Validate structure
             val_result = self.structure_validator.validate_structure_and_script(
-                structure_file_path=structure_file,
+                structure_file_path=full_structure_path,
                 generating_script_content=script_content,
                 original_request=user_request
             )
@@ -302,3 +309,21 @@ class DFTWorkflow:
                     summary += f"✓ Literature validation: No improvements needed\n"
         
         return summary
+
+    def _save_workflow_log(self) -> str:
+        """Save all captured logs to a file."""
+        try:
+            log_content = self.log_capture.getvalue()
+            log_path = os.path.join(self.output_dir, "workflow_log.txt")
+            
+            with open(log_path, 'w') as f:
+                f.write(f"DFT Workflow Complete Log\n")
+                f.write(f"{'='*30}\n\n")
+                f.write(log_content)
+            
+            print(f"📝 Complete workflow log saved: {log_path}")
+            return log_path
+            
+        except Exception as e:
+            print(f"Warning: Could not save workflow log: {e}")
+            return ""
