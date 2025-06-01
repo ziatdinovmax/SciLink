@@ -2,6 +2,7 @@ import os
 import sys
 import logging
 from io import StringIO
+import json
 from typing import Optional, Dict, Any
 
 # Import all the agents
@@ -135,8 +136,14 @@ class DFTWorkflow:
         workflow_result["final_status"] = "success"
         workflow_result["output_directory"] = self.output_dir
         
+        # Create final files manifest
+        final_manifest = self._create_final_files_manifest(workflow_result)
+        workflow_result["final_manifest"] = final_manifest
+        
+        # Save complete log
+        self._save_workflow_log()
+        
         self.logger.info(f"Complete DFT workflow finished successfully: {self.output_dir}")
-        self._save_workflow_log() # Save complete log
         return workflow_result
     
     def _generate_and_validate_structure(self, user_request: str) -> Dict[str, Any]:
@@ -288,14 +295,26 @@ class DFTWorkflow:
         if "structure_generation" in workflow_result:
             struct_result = workflow_result["structure_generation"]
             if struct_result["status"] == "success":
-                summary += f"✓ Structure: {struct_result['final_structure_path']}\n"
+                struct_file = os.path.basename(struct_result['final_structure_path'])
+                summary += f"✓ Final Structure: {struct_file}\n"
                 summary += f"  Refinement cycles: {struct_result['cycles_used']}\n"
+                summary += f"  Location: {workflow_result.get('output_directory', '.')}/\n"
         
         # VASP generation summary  
         if "vasp_generation" in workflow_result:
             vasp_result = workflow_result["vasp_generation"]
             if vasp_result["status"] == "success":
-                summary += f"✓ VASP files: INCAR, KPOINTS generated\n"
+                summary += f"✓ VASP Input Files:\n"
+                
+                # Determine which INCAR to highlight
+                if ("incar_improvement" in workflow_result and 
+                    workflow_result["incar_improvement"].get("improvement_application", {}).get("status") == "success"):
+                    summary += f"  - INCAR_improved (literature-validated) ⭐\n"
+                    summary += f"  - INCAR (original)\n"
+                else:
+                    summary += f"  - INCAR\n"
+                
+                summary += f"  - KPOINTS\n"
                 summary += f"  Calculation: {vasp_result['summary']}\n"
         
         # Improvement summary
@@ -307,6 +326,17 @@ class DFTWorkflow:
                     summary += f"✓ Literature improvements: {adj_count} adjustments applied\n"
                 else:
                     summary += f"✓ Literature validation: No improvements needed\n"
+        
+        # Add final files section
+        if "final_manifest" in workflow_result:
+            manifest = workflow_result["final_manifest"]
+            if manifest.get("ready_for_vasp"):
+                summary += f"\n📋 FINAL FILES FOR VASP:\n"
+                final_files = manifest["final_files"]
+                summary += f"  Structure: {final_files.get('structure', 'N/A')}\n"
+                summary += f"  INCAR: {final_files.get('incar', 'N/A')}\n"
+                summary += f"  KPOINTS: {final_files.get('kpoints', 'N/A')}\n"
+                summary += f"  Directory: {manifest['output_directory']}/\n"
         
         return summary
 
@@ -327,3 +357,50 @@ class DFTWorkflow:
         except Exception as e:
             print(f"Warning: Could not save workflow log: {e}")
             return ""
+        
+    def _create_final_files_manifest(self, workflow_result: Dict[str, Any]) -> Dict[str, str]:
+        """Create a JSON manifest of final files."""
+        
+        manifest = {
+            "workflow_status": workflow_result["final_status"],
+            "user_request": workflow_result["user_request"],
+            "output_directory": self.output_dir,
+            "final_files": {},
+            "ready_for_vasp": False
+        }
+        
+        # Determine final structure file
+        if ("structure_generation" in workflow_result and 
+            workflow_result["structure_generation"]["status"] == "success"):
+            structure_path = workflow_result["structure_generation"]["final_structure_path"]
+            manifest["final_files"]["structure"] = os.path.basename(structure_path)
+        
+        # Determine final VASP input files
+        if ("vasp_generation" in workflow_result and 
+            workflow_result["vasp_generation"]["status"] == "success"):
+            
+            # Check if improved INCAR exists
+            if ("incar_improvement" in workflow_result and 
+                workflow_result["incar_improvement"].get("improvement_application", {}).get("status") == "success"):
+                manifest["final_files"]["incar"] = "INCAR_improved"
+                manifest["literature_validated"] = True
+            else:
+                manifest["final_files"]["incar"] = "INCAR"
+                manifest["literature_validated"] = False
+                
+            manifest["final_files"]["kpoints"] = "KPOINTS"
+            
+            # Mark as ready if we have all required files
+            if all(key in manifest["final_files"] for key in ["structure", "incar", "kpoints"]):
+                manifest["ready_for_vasp"] = True
+        
+        # Save manifest
+        try:
+            manifest_path = os.path.join(self.output_dir, "final_files_manifest.json")
+            with open(manifest_path, 'w') as f:
+                json.dump(manifest, f, indent=2)
+            self.logger.info(f"Final files manifest saved: {manifest_path}")
+        except Exception as e:
+            self.logger.error(f"Failed to save manifest: {e}")
+            
+        return manifest
