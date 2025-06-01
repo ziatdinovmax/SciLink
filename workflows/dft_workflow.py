@@ -32,7 +32,7 @@ class DFTWorkflow:
             output_dir: Directory to save all outputs
             max_refinement_cycles: Max structure refinement cycles
         """
-        
+
         # Setup logging
         logging.basicConfig(
             level=logging.INFO, 
@@ -162,6 +162,12 @@ class DFTWorkflow:
             structure_file = gen_result["output_file"]
             script_content = gen_result["final_script_content"]
             previous_script_content = script_content  # Store for next cycle
+
+            # Construct full path to structure file
+            if os.path.isabs(structure_file):
+                full_structure_path = structure_file
+            else:
+                full_structure_path = os.path.join(self.output_dir, structure_file)
             
             # Validate structure
             val_result = self.structure_validator.validate_structure_and_script(
@@ -175,7 +181,7 @@ class DFTWorkflow:
             if val_result["status"] == "success":
                 return {
                     "status": "success",
-                    "final_structure_path": structure_file,
+                    "final_structure_path": full_structure_path,
                     "final_script_path": gen_result["final_script_path"],
                     "cycles_used": cycle + 1,
                     "validation_result": val_result
@@ -188,7 +194,7 @@ class DFTWorkflow:
                 self.logger.warning("Max refinement cycles reached, proceeding with current structure")
                 return {
                     "status": "success",
-                    "final_structure_path": structure_file,
+                    "final_structure_path": full_structure_path,
                     "final_script_path": gen_result["final_script_path"], 
                     "cycles_used": cycle + 1,
                     "validation_result": val_result,
