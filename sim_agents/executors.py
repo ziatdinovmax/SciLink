@@ -57,7 +57,8 @@ class StructureExecutor:
                         break
                 if output_file and os.path.exists(output_file):
                      logging.info(f"Script executed successfully. Output file found: {output_file}")
-                     return {"status": "success", "output_file": output_file}
+                     full_output_path = os.path.abspath(output_file)
+                     return {"status": "success", "output_file": full_output_path}
                 elif output_file:
                      error_msg = f"Script reported saving to {output_file}, but file not found."
                      logging.error(error_msg)
