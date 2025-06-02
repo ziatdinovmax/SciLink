@@ -148,7 +148,6 @@ if __name__ == "__main__":
                     model_name=config.GENERATOR_AGENT_MODEL,
                     executor_timeout=config.GENERATOR_SCRIPT_TIMEOUT,
                     generated_script_dir=config.GENERATED_SCRIPT_DIR,
-                    tool_configs=config._TOOL_CONFIGS,
                     mp_api_key=getattr(config, 'MP_API_KEY', None)
                 )
                 structure_validator = StructureValidatorAgent(
