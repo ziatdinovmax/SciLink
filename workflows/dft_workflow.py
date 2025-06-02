@@ -158,8 +158,9 @@ class DFTWorkflow:
             self.logger.info(f"Structure cycle {cycle + 1}/{self.max_refinement_cycles + 1}")
             
             # Generate structure
+
             gen_result = self.structure_generator.generate_script(
-                original_user_request=user_request,
+                original_user_request=user_request + ". Save the structure in POSCAR format.",
                 attempt_number_overall=cycle + 1,
                 is_refinement_from_validation=(cycle > 0),
                 previous_script_content=previous_script_content if cycle > 0 else None,
