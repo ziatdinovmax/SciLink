@@ -19,39 +19,79 @@ MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS = 5
 
 class StructureGenerator:
     def __init__(self, api_key: str, model_name: str,
-                 executor_timeout: int = DEFAULT_TIMEOUT,
-                 generated_script_dir: str = "generated_scripts",
-                 gb_docs_path: str = None, mp_api_key: str = None):
+                executor_timeout: int = DEFAULT_TIMEOUT,
+                generated_script_dir: str = "generated_scripts",
+                mp_api_key: str = None):
         """
-        Initialize StructureGenerator with ASE and GB tools.
-        
-        Args:
-            gb_docs_path: Path to aimsgb documentation file (optional)
+        Initialize StructureGenerator. Tools are automatically discovered.
         """
         self.llm_client = LLMClient(api_key=api_key, model_name=model_name)
         self.ase_executor = StructureExecutor(timeout=executor_timeout, mp_api_key=mp_api_key)
         self.generated_script_dir = generated_script_dir
         self.logger = logging.getLogger(__name__)
         
-        # Initialize tools with their documentation
-        self.tools = [
-            ToolWithDocs(
-                name="ASE",
-                tool_func=define_ase_tool,
-                docs_path=None,  # ASE doesn't need additional docs
-                keywords=[]  # ASE is the default fallback
-            ),
-            ToolWithDocs(
-                name="GrainBoundary", 
-                tool_func=define_gb_tool,
-                docs_path=gb_docs_path,
-                keywords=["grain boundary", "grain-boundary", "gb ", "sigma", "csl", 
-                         "twist", "tilt", "bicrystal", "rotation axis", "aimsgb"]
-            )
-        ]
-
+        # Auto-discover and initialize tools
+        self.tools = self._auto_discover_tools()
+        
         self.mp_helper = MaterialsProjectHelper(api_key=mp_api_key)
         self.logger.info(f"StructureGenerator initialized with {len(self.tools)} tools")
+
+    def _auto_discover_tools(self) -> list:
+        """
+        Automatically discover and initialize all available tools.
+        No user configuration required.
+        """
+        from .tools import define_ase_tool, define_gb_tool
+        import config
+        import os
+        
+        # Get tool configs from config (internal)
+        tool_configs = getattr(config, '_TOOL_CONFIGS', {})
+        
+        # Map function names to actual functions
+        tool_function_map = {
+            "define_ase_tool": define_ase_tool,
+            "define_gb_tool": define_gb_tool,
+            # Add new tool functions here as they're created
+        }
+        
+        tools = []
+        
+        # Always include ASE as the default fallback tool
+        tools.append(ToolWithDocs(
+            name="ASE",
+            tool_func=define_ase_tool,
+            docs_path=None,
+            keywords=[]  # Empty keywords means it's the fallback
+        ))
+        
+        # Auto-add configured tools
+        for tool_name, config_dict in tool_configs.items():
+            if tool_name == "ASE":
+                continue  # Skip ASE, already added
+            
+            func_name = config_dict.get("tool_func")
+            tool_func = tool_function_map.get(func_name)
+            
+            if tool_func is None:
+                self.logger.warning(f"Tool function '{func_name}' not found for tool '{tool_name}'. Skipping.")
+                continue
+            
+            # Check if docs file exists
+            docs_path = config_dict.get("docs_path")
+            if docs_path and not os.path.exists(docs_path):
+                self.logger.warning(f"Documentation file not found: {docs_path}. Tool '{tool_name}' will work without docs.")
+            
+            tools.append(ToolWithDocs(
+                name=tool_name,
+                tool_func=tool_func,
+                docs_path=docs_path,
+                keywords=config_dict.get("keywords", [])
+            ))
+            
+            self.logger.info(f"Auto-discovered tool: {tool_name}")
+        
+        return tools
 
     def _select_tool(self, request_text: str) -> ToolWithDocs:
         """Select the appropriate tool based on request content."""
@@ -74,7 +114,7 @@ class StructureGenerator:
         # ADD MP integration to documentation
         enhanced_docs = selected_tool.docs_content
         if enhanced_docs and self.mp_helper.enabled:
-            enhanced_docs += self.mp_helper.get_common_materials_info()  # ADD THIS LINE
+            enhanced_docs += self.mp_helper.get_common_materials_info()
         
         # Rest of method unchanged...
         if use_fallback or not enhanced_docs:

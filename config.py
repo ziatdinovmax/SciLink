@@ -60,6 +60,14 @@ FFT_NMF_SETTINGS = {
     'output_dir': "fft_nmf_results"
 }
 
-# Path to GB code documentation
-GB_DOCS_PATH = "sim_agents/docs/aimsgb.txt"  # Path to aimsgb documentation
+
+_TOOL_CONFIGS = {
+    "GrainBoundary": {
+        "docs_path": "sim_agents/docs/aimsgb.txt",
+        "keywords": ["grain boundary", "grain-boundary", "gb ", "sigma", "csl", 
+                    "twist", "tilt", "bicrystal", "rotation axis", "aimsgb"],
+        "tool_func": "define_gb_tool"
+    }
+    # Future tools will go here
+}
 
