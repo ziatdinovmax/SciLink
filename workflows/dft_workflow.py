@@ -22,7 +22,8 @@ class DFTWorkflow:
                  generator_model: str = "gemini-2.5-pro-preview-05-06", 
                  validator_model: str = "gemini-2.5-pro-preview-05-06",
                  output_dir: str = "vasp_workflow_output",
-                 max_refinement_cycles: int = 2):
+                 max_refinement_cycles: int = 2,
+                 mp_api_key: str = None):
         """
         Initialize the complete DFT workflow.
         
@@ -59,7 +60,8 @@ class DFTWorkflow:
         self.structure_generator = StructureGenerator(
             api_key=google_api_key,
             model_name=generator_model,
-            generated_script_dir=output_dir
+            generated_script_dir=output_dir,
+            mp_api_key=mp_api_key
         )
         
         self.structure_validator = StructureValidatorAgent(
