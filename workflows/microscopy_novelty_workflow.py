@@ -308,7 +308,7 @@ class MicroscopyNoveltyAssessmentWorkflow:
             print(f"Warning: Could not save workflow log: {e}")
     
     def _generate_dft_recommendations(self, initial_analysis_text: str, novel_claims: List[str]) -> Dict[str, Any]:
-        """Generate DFT recommendations based on novelty analysis (adapted from exp2lit2dft.py)."""
+        """Generate DFT recommendations based on novelty analysis"""
         
         # Generate novelty context for DFT recommendations
         novelty_context = None
@@ -324,7 +324,7 @@ class MicroscopyNoveltyAssessmentWorkflow:
         else:
             novelty_context = "No specific novel claims were identified or prioritized from literature search. Please make DFT recommendations based on the most scientifically interesting aspects of the provided initial image analysis."
         
-        # Generate DFT recommendations using text-only path (same as exp2lit2dft.py)
+        # Generate DFT recommendations using text-only path
         dft_recommendations_result = self.analysis_agent.analyze_microscopy_image_for_structure_recommendations(
             image_path=None,  # Text-only path
             system_info=config.SYSTEM_INFO,
