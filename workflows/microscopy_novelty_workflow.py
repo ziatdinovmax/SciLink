@@ -126,16 +126,32 @@ class MicroscopyNoveltyAssessmentWorkflow:
                 workflow_result["final_status"] = "failed_analysis"
                 return workflow_result
 
+            logging.info("--- Analysis Result Received ---")
+            print("\n--- Analysis Summary ---")
+            print(analysis_result.get("full_analysis", "No detailed analysis text found."))
+            print("-" * 22)
+
             claims = analysis_result.get("claims", [])
             if not claims:
                 logging.warning("Analysis completed, but no claims were found.")
                 workflow_result["final_status"] = "no_claims"
                 return workflow_result
 
+            # Format and print the claims
+            print("\n--- Generated Scientific Claims ---")
+            for i, claim in enumerate(claims):
+                print(f"\n[{i+1}] Claim:")
+                print(f"   {claim.get('claim', 'No claim text')}")
+                print(f"   Scientific Impact: {claim.get('scientific_impact', 'No impact specified')}")
+                print(f"   Has Anyone Question: {claim.get('has_anyone_question', 'No question formulated')}")
+                print(f"   Keywords: {', '.join(claim.get('keywords', []))}")
+                print("-" * 70)
+
             # Save claims to JSON file for reference
             claims_file = os.path.join(self.output_dir, "generated_claims.json")
             with open(claims_file, 'w') as f:
                 json.dump(claims, f, indent=2)
+            logging.info(f"Claims saved to: {claims_file}")
             
             workflow_result["claims_generation"] = {
                 "status": "success",
