@@ -65,7 +65,7 @@ def select_claims_interactive(claims):
         return []
 
 
-class MicroscopyNoveltyAssessmentWorkflow:
+class NoveltyAssessmentWorkflow:
     """
     Workflow for analyzing experimental results and assessing their novelty.
     Based on exp2lit.py structure.
@@ -74,7 +74,8 @@ class MicroscopyNoveltyAssessmentWorkflow:
     def __init__(self, google_api_key: str, futurehouse_api_key: str,
                  analysis_model: str = "gemini-2.5-pro-preview-05-06",
                  output_dir: str = "novelty_assessment_output",
-                 max_wait_time: int = 400):
+                 max_wait_time: int = 400,
+                 analysis_enabled: bool = True):
         
         # Setup logging
         self.log_capture = StringIO()
@@ -91,11 +92,15 @@ class MicroscopyNoveltyAssessmentWorkflow:
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
         
+        # Handle FFT/NMF settings
+        fft_nmf_settings = config.FFT_NMF_SETTINGS.copy()
+        fft_nmf_settings['FFT_NMF_ENABLED'] = analysis_enabled
+        
         # Initialize agents (same as exp2lit.py)
         self.analysis_agent = GeminiMicroscopyAnalysisAgent(
             api_key=google_api_key,
             model_name=analysis_model,
-            fft_nmf_settings=config.FFT_NMF_SETTINGS
+            fft_nmf_settings=fft_nmf_settings
         )
         
         self.lit_agent = OwlLiteratureAgent(
