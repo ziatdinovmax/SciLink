@@ -66,14 +66,16 @@ def select_claims_interactive(claims):
 
 class MicroscopyNoveltyAssessmentWorkflow:
     """
-    Workflow for analyzing experimental microscopy results and assessing their novelty.
+    Workflow for analyzing experimental results and assessing their novelty.
+    Based on exp2lit.py structure.
     """
     
     def __init__(self, google_api_key: str, futurehouse_api_key: str,
                  analysis_model: str = "gemini-2.5-pro-preview-05-06",
                  output_dir: str = "novelty_assessment_output",
                  max_wait_time: int = 400,
-                 analysis_enabled: bool = True):
+                 analysis_enabled: bool = True,
+                 dft_recommendations: bool = False):
         
         # Setup logging
         self.log_capture = StringIO()
@@ -88,6 +90,7 @@ class MicroscopyNoveltyAssessmentWorkflow:
         )
         
         self.output_dir = output_dir
+        self.dft_recommendations = dft_recommendations
         os.makedirs(output_dir, exist_ok=True)
         
         # Handle FFT/NMF settings
@@ -258,12 +261,32 @@ class MicroscopyNoveltyAssessmentWorkflow:
             
             workflow_result["novelty_assessment"] = novelty_assessment
             workflow_result["steps_completed"].append("novelty_assessment")
-            workflow_result["final_status"] = "success"
             
         except Exception as e:
             logging.exception("An unexpected error occurred during Novelty Assessment:")
             workflow_result["final_status"] = "error_novelty"
             return workflow_result
+
+        # === Step 4: DFT Recommendations (Optional) ===
+        if self.dft_recommendations:
+            try:
+                logging.info("--- Starting Step 4: DFT Recommendations Based on Novelty ---")
+                
+                dft_result = self._generate_dft_recommendations(
+                    workflow_result["claims_generation"]["full_analysis"],
+                    novel_claims
+                )
+                workflow_result["dft_recommendations"] = dft_result
+                workflow_result["steps_completed"].append("dft_recommendations")
+                
+            except Exception as e:
+                logging.exception("An unexpected error occurred during DFT Recommendations:")
+                workflow_result["dft_recommendations"] = {
+                    "status": "error",
+                    "message": f"DFT recommendations failed: {str(e)}"
+                }
+
+        workflow_result["final_status"] = "success"
 
         # Save workflow log
         self._save_workflow_log()
@@ -283,6 +306,74 @@ class MicroscopyNoveltyAssessmentWorkflow:
                 
         except Exception as e:
             print(f"Warning: Could not save workflow log: {e}")
+    
+    def _generate_dft_recommendations(self, initial_analysis_text: str, novel_claims: List[str]) -> Dict[str, Any]:
+        """Generate DFT recommendations based on novelty analysis (adapted from exp2lit2dft.py)."""
+        
+        # Generate novelty context for DFT recommendations
+        novelty_context = None
+        if novel_claims:
+            novelty_section_text = "The following claims/observations, derived from the initial image analysis, have been identified through literature review as potentially novel or under-explored:\n"
+            for claim in novel_claims:
+                novelty_section_text += f"- {claim}\n"
+            novelty_section_text += ("\nYour primary goal for the DFT recommendations below should be to propose structures and simulations "
+                                   "that can rigorously investigate these novel aspects. Explain this link clearly in your scientific "
+                                   "justification for each recommended structure. If some image features are significant but not covered "
+                                   "by these novel claims, you may also include recommendations for them, but prioritize novelty.")
+            novelty_context = novelty_section_text
+        else:
+            novelty_context = "No specific novel claims were identified or prioritized from literature search. Please make DFT recommendations based on the most scientifically interesting aspects of the provided initial image analysis."
+        
+        # Generate DFT recommendations using text-only path (same as exp2lit2dft.py)
+        dft_recommendations_result = self.analysis_agent.analyze_microscopy_image_for_structure_recommendations(
+            image_path=None,  # Text-only path
+            system_info=config.SYSTEM_INFO,
+            additional_prompt_context=novelty_context,
+            cached_detailed_analysis=initial_analysis_text
+        )
+        
+        if "error" in dft_recommendations_result:
+            return {
+                "status": "error",
+                "message": f"DFT recommendation generation failed: {dft_recommendations_result.get('details', dft_recommendations_result.get('error'))}"
+            }
+        
+        reasoning_text = dft_recommendations_result.get("analysis_summary_or_reasoning", "No reasoning provided")
+        recommendations = dft_recommendations_result.get("recommendations", [])
+        
+        print("\n--- DFT Structure Recommendations (Based on Novelty Analysis) ---")
+        print(reasoning_text)
+        print("-" * 65)
+        
+        if recommendations:
+            print("\n--- Recommended DFT Structures ---")
+            for i, rec in enumerate(recommendations):
+                print(f"\n[{i+1}] (Priority: {rec.get('priority', 'N/A')})")
+                print(f"Description: {rec.get('description', 'N/A')}")
+                print(f"Scientific justification: {rec.get('scientific_interest', 'N/A')}")
+                print("-" * 50)
+        else:
+            print("\nNo DFT structure recommendations were generated.")
+        
+        # Save DFT recommendations
+        dft_file = os.path.join(self.output_dir, "dft_recommendations.json")
+        dft_output = {
+            "reasoning_for_recommendations": reasoning_text,
+            "recommendations": recommendations,
+            "novelty_context": novelty_context
+        }
+        with open(dft_file, 'w') as f:
+            json.dump(dft_output, f, indent=2)
+        
+        logging.info(f"DFT recommendations saved to: {dft_file}")
+        
+        return {
+            "status": "success",
+            "recommendations": recommendations,
+            "reasoning": reasoning_text,
+            "dft_file": dft_file,
+            "total_recommendations": len(recommendations)
+        }
     
     def get_summary(self, workflow_result: Dict[str, Any]) -> str:
         """Get a human-readable summary of the workflow results."""
@@ -311,5 +402,10 @@ class MicroscopyNoveltyAssessmentWorkflow:
                 summary += "Previously Reported Findings:\n"
                 for i, claim in enumerate(known_claims, 1):
                     summary += f"  {i}. {claim}\n"
+                summary += "\n"
+        
+        if "dft_recommendations" in workflow_result and workflow_result["dft_recommendations"].get("status") == "success":
+            dft_result = workflow_result["dft_recommendations"]
+            summary += f"DFT Recommendations: {dft_result.get('total_recommendations', 0)} structures recommended\n"
         
         return summary
