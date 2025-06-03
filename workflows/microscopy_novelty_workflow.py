@@ -231,11 +231,11 @@ class MicroscopyNoveltyAssessmentWorkflow:
             return workflow_result
 
         # === Step 3: Novelty Assessment ===
+        novel_claims = []
         try:
             logging.info("--- Starting Step 3: Novelty Assessment ---")
             
             # Display summary of findings (same logic as exp2lit.py)
-            novel_claims = []
             known_claims = []
             
             for result in literature_results:
@@ -261,6 +261,24 @@ class MicroscopyNoveltyAssessmentWorkflow:
             
             workflow_result["novelty_assessment"] = novelty_assessment
             workflow_result["steps_completed"].append("novelty_assessment")
+            
+            # Display literature search summary
+            print("\n--- Literature Search Summary ---")
+            print(f"Total claims analyzed: {len(selected_claims)}")
+            print(f"Successfully searched: {sum(1 for r in literature_results if r['owl_result']['status'] == 'success')}")
+            print(f"Failed searches: {sum(1 for r in literature_results if r['owl_result']['status'] != 'success')}")
+            
+            if novel_claims:
+                print("\nPotentially Novel Findings:")
+                for i, claim in enumerate(novel_claims):
+                    print(f"  {i+1}. {claim}")
+                    
+            if known_claims:
+                print("\nPreviously Reported Findings:")
+                for i, claim in enumerate(known_claims):
+                    print(f"  {i+1}. {claim}")
+            
+            print("-" * 50)
             
         except Exception as e:
             logging.exception("An unexpected error occurred during Novelty Assessment:")
@@ -311,7 +329,6 @@ class MicroscopyNoveltyAssessmentWorkflow:
         """Generate DFT recommendations based on novelty analysis"""
         
         # Generate novelty context for DFT recommendations
-        novelty_context = None
         if novel_claims:
             novelty_section_text = "The following claims/observations, derived from the initial image analysis, have been identified through literature review as potentially novel or under-explored:\n"
             for claim in novel_claims:
