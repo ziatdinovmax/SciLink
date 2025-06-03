@@ -13,7 +13,7 @@ from lit_agents.literature_agent import OwlLiteratureAgent
 def select_claims_interactive(claims):
     """
     Allows user to interactively select which claims to search for in the literature.
-    (Copied from exp2lit.py)
+    (Simplified from exp2lit.py)
     """
     if not claims:
         print("No claims available to select from.")
@@ -23,12 +23,11 @@ def select_claims_interactive(claims):
     print("Enter comma-separated numbers of claims to search, or 'all' for all claims.")
     print("Examples: '1,3,5' or 'all'")
     
-    # Display the available claims
+    # Display only the "Has Anyone" questions
     for i, claim in enumerate(claims):
-        print(f"\n[{i+1}] Claim:")
-        print(f"   {claim.get('claim', 'No claim text')}")
-        print(f"   Has Anyone Question: {claim.get('has_anyone_question', 'No question formulated')}")
-        print("-" * 70)
+        print(f"\n[{i+1}] {claim.get('has_anyone_question', 'No question formulated')}")
+    
+    print("-" * 70)
     
     # Get user selection
     try:
@@ -65,10 +64,9 @@ def select_claims_interactive(claims):
         return []
 
 
-class NoveltyAssessmentWorkflow:
+class MicroscopyNoveltyAssessmentWorkflow:
     """
-    Workflow for analyzing experimental results and assessing their novelty.
-    Based on exp2lit.py structure.
+    Workflow for analyzing experimental microscopy results and assessing their novelty.
     """
     
     def __init__(self, google_api_key: str, futurehouse_api_key: str,
