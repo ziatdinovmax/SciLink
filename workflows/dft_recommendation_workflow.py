@@ -69,9 +69,38 @@ class DFTRecommendationsWorkflow:
             "novel_claims": novel_claims
         }
         
+        # Display results
+        self._display_results(output["reasoning"], output["recommendations"], novel_claims)
+        
+        # Save results
         output_file = os.path.join(self.output_dir, "dft_recommendations.json")
         with open(output_file, 'w') as f:
             json.dump(output, f, indent=2)
         
         self.logger.info(f"Generated {len(output['recommendations'])} DFT recommendations")
         return {"status": "success", "output_file": output_file, **output}
+    
+    def _display_results(self, reasoning: str, recommendations: List[Dict], novel_claims: List[str]):
+        """Display the generated DFT recommendations."""
+        
+        print("\n" + "="*60)
+        print("DFT STRUCTURE RECOMMENDATIONS")
+        print("="*60)
+        
+        print(f"\nNovel claims processed: {len(novel_claims)}")
+        print(f"Total recommendations: {len(recommendations)}")
+        
+        print(f"\n--- Reasoning ---")
+        print(reasoning)
+        print("-" * 40)
+        
+        if recommendations:
+            print("\n--- Recommended Structures ---")
+            for i, rec in enumerate(recommendations, 1):
+                print(f"\n[{i}] Priority: {rec.get('priority', 'N/A')}")
+                print(f"    {rec.get('description', 'N/A')}")
+                print(f"    Justification: {rec.get('scientific_interest', 'N/A')}")
+        else:
+            print("\n⚠️  No recommendations generated")
+        
+        print("\n" + "="*60)
