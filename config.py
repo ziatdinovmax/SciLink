@@ -41,6 +41,10 @@ LOGGING_FORMAT = '%(asctime)s - %(levelname)s - %(message)s'
 FUTUREHOUSE_API_KEY = os.getenv("FUTUREHOUSE_API_KEY")
 OWL_MAX_WAIT_TIME = 400  # Maximum number of retries for checking OWL task status
 
+# Materials Project API Key
+MP_API_KEY = os.getenv("MP_API_KEY")
+
+
 # --- FFT NMF Configuration ---
 FFT_NMF_SETTINGS = {
     'FFT_NMF_ENABLED': FFT_NMF_ENABLED,
@@ -55,3 +59,15 @@ FFT_NMF_SETTINGS = {
     'components': 4,
     'output_dir': "fft_nmf_results"
 }
+
+
+_TOOL_CONFIGS = {
+    "GrainBoundary": {
+        "docs_path": "sim_agents/docs/aimsgb.txt",
+        "keywords": ["grain boundary", "grain-boundary", "gb ", "sigma", "csl", 
+                    "twist", "tilt", "bicrystal", "rotation axis", "aimsgb"],
+        "tool_func": "define_gb_tool"
+    }
+    # Future tools will go here
+}
+

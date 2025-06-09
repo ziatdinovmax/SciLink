@@ -4,15 +4,19 @@ import tempfile
 import os
 import logging
 
-# Consider making DEFAULT_TIMEOUT configurable via __init__ or config file
 DEFAULT_TIMEOUT = 120
 
-class AseExecutor:
-    def __init__(self, timeout: int = DEFAULT_TIMEOUT):
+class StructureExecutor:
+    def __init__(self, timeout: int = DEFAULT_TIMEOUT, mp_api_key: str = None):
         self.timeout = timeout
+        self.mp_api_key = mp_api_key or os.getenv("MP_API_KEY")
         logging.info(f"AseExecutor initialized with timeout: {self.timeout}s")
+        if self.mp_api_key:
+            logging.info("MP API key configured for script execution")
+        else:
+            logging.warning("No MP API key - scripts using Materials Project may fail")
 
-    def execute_script(self, script_content: str) -> dict:
+    def execute_script(self, script_content: str, working_dir: str = None) -> dict:
         logging.info("Attempting to execute generated ASE script...")
         # ** SECURITY RISK **: Executes arbitrary code. Ensure sandboxing!
         temp_script_file = None
@@ -22,12 +26,23 @@ class AseExecutor:
                 temp_script_file = tf.name
             logging.debug(f"Temporary script saved to: {temp_script_file}")
 
+            env = os.environ.copy()
+            if self.mp_api_key:
+                env['MP_API_KEY'] = self.mp_api_key
+                logging.debug("Added MP_API_KEY to script execution environment")
+
+            original_cwd = os.getcwd()
+            if working_dir:
+                os.makedirs(working_dir, exist_ok=True)
+                os.chdir(working_dir)
+            
             result = subprocess.run(
                 ['python', temp_script_file],
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
-                check=False # Important: Don't raise CalledProcessError immediately
+                env=env,  # Pass environment with API key
+                check=False
             )
 
             logging.debug("--- Script Execution Finished ---")
@@ -42,7 +57,8 @@ class AseExecutor:
                         break
                 if output_file and os.path.exists(output_file):
                      logging.info(f"Script executed successfully. Output file found: {output_file}")
-                     return {"status": "success", "output_file": output_file}
+                     full_output_path = os.path.abspath(output_file)
+                     return {"status": "success", "output_file": full_output_path}
                 elif output_file:
                      error_msg = f"Script reported saving to {output_file}, but file not found."
                      logging.error(error_msg)
@@ -78,6 +94,7 @@ class AseExecutor:
             logging.exception(error_msg)
             return {"status": "error", "message": error_msg}
         finally:
+            os.chdir(original_cwd)
             if temp_script_file and os.path.exists(temp_script_file):
                 try:
                     os.remove(temp_script_file)

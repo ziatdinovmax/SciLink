@@ -271,7 +271,7 @@ class GeminiMicroscopyAnalysisAgent:
         output_analysis_key = "full_analysis" # Default for image-based path
 
         if cached_detailed_analysis and additional_prompt_context:
-            self.logger.info("Generating DFT recommendations from cached analysis and novelty context (text-only).")
+            self.logger.info("Generating DFT recommendations from cached analysis and novelty context.")
             instruction_prompt_text = TEXT_ONLY_DFT_RECOMMENDATION_INSTRUCTIONS # Use the new text-only prompt
             output_analysis_key = "detailed_reasoning_for_recommendations" # Expected from new prompt
 

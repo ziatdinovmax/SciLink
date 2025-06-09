@@ -120,3 +120,92 @@ class OwlLiteratureAgent:
             error_msg = f"An unexpected error occurred during OWL query: {str(e)}"
             logging.exception(error_msg)
             return {"status": "error", "message": error_msg}
+        
+
+
+class IncarLiteratureAgent:
+    """Agent for validating VASP INCAR parameters against literature using CROW."""
+
+    def __init__(self, api_key: str = None, max_wait_time: int = 300):
+        if not api_key:
+            api_key = os.environ.get("FUTUREHOUSE_API_KEY")
+        if not api_key:
+            raise ValueError("API key required")
+        
+        self.client = FutureHouseClient(api_key=api_key)
+        self.max_wait_time = max_wait_time
+        self.logger = logging.getLogger(__name__)
+
+    def validate_incar(self, incar_content: str, system_description: str) -> dict:
+        """Validate INCAR parameters against literature."""
+        
+        # Clean system description - remove additional instructions
+        clean_description = self._clean_system_description(system_description)
+        
+        query = f"""Are these VASP INCAR parameters appropriate for {clean_description}?
+
+{incar_content}"""
+
+        try:
+            # Submit to CROW
+            task_data = {"name": JobNames.CROW, "query": query}
+            task_id = self.client.create_task(task_data)
+            
+            # Wait for completion
+            import time
+            start_time = time.time()
+            
+            while time.time() - start_time < self.max_wait_time:
+                task_status = self.client.get_task(task_id)
+                
+                if task_status.status == "success":
+                    # Clean response to remove repeated question
+                    clean_response = self._clean_response(task_status.formatted_answer, query)
+                    return {
+                        "status": "success", 
+                        "response": clean_response,
+                        "task_id": task_id
+                    }
+                elif task_status.status in ["FAILED", "ERROR", "error"]:
+                    return {"status": "error", "message": f"CROW failed: {task_status.status}"}
+                
+                sleep(10)
+            
+            return {"status": "timeout", "message": f"Timed out after {self.max_wait_time}s"}
+            
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def _clean_system_description(self, description: str) -> str:
+        """Remove additional instructions from system description."""
+        # Remove common additional instruction patterns
+        patterns_to_remove = [
+            r"\.?\s*Additional Instructions?:.*",
+            r"\.?\s*Save.*format\.?",
+            r"\.?\s*Output.*format\.?",
+        ]
+        
+        import re
+        cleaned = description
+        for pattern in patterns_to_remove:
+            cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+        
+        return cleaned.strip()
+
+    def _clean_response(self, response: str, original_query: str) -> str:
+        """Remove repeated question from CROW response."""
+        if not response:
+            return response
+            
+        # If response starts with "Question:" remove everything up to the actual answer
+        if response.startswith("Question:"):
+            lines = response.split('\n')
+            # Find where the actual answer starts (after the question block)
+            answer_start = 0
+            for i, line in enumerate(lines):
+                if line.strip() and not line.startswith("Question:") and not line.startswith("INCAR content:"):
+                    answer_start = i
+                    break
+            response = '\n'.join(lines[answer_start:])
+        
+        return response.strip()

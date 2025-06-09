@@ -10,8 +10,9 @@ import os
 import config
 from exp_agents.microscopy_agent import GeminiMicroscopyAnalysisAgent
 from lit_agents.literature_agent import OwlLiteratureAgent
-from sim_agents.ase_agent import StructureGenerator
+from sim_agents.structure_agent import StructureGenerator
 from sim_agents.val_agent import StructureValidatorAgent 
+from sim_agents.utils import ask_user_proceed_or_refine
 
 
 def select_claims_interactive(claims: list) -> list:
@@ -187,7 +188,8 @@ if __name__ == "__main__":
             api_key=config.GOOGLE_API_KEY,
             model_name=config.GENERATOR_AGENT_MODEL,
             executor_timeout=config.GENERATOR_SCRIPT_TIMEOUT,
-            generated_script_dir=config.GENERATED_SCRIPT_DIR
+            generated_script_dir=config.GENERATED_SCRIPT_DIR,
+            mp_api_key=getattr(config, 'MP_API_KEY', None)
         )
         # Initialize StructureValidatorAgent here as it will be needed in Step 6
         structure_validator = StructureValidatorAgent(
@@ -459,7 +461,8 @@ if __name__ == "__main__":
                     validator_feedback_for_refinement = structure_validator.validate_structure_and_script(
                         structure_file_path=final_generated_structure_file_path, 
                         generating_script_content=current_script_content_for_validation,
-                        original_request=combined_request_for_generator 
+                        original_request=combined_request_for_generator,
+                        tool_documentation=structure_generator._select_tool(combined_request_for_generator).docs_content  # ← Add this line 
                     )
 
                     print("\n--- [Cycle {}] Structure Validation Result ---".format(overall_cycle_num + 1))
@@ -475,13 +478,40 @@ if __name__ == "__main__":
                         break 
                     elif validation_status == "needs_correction":
                         logger.warning(f"Validation found issues: {validator_feedback_for_refinement.get('all_identified_issues')}")
-                        if overall_cycle_num < config.MAX_REFINEMENT_CYCLES:
-                            logger.info("Proceeding to next refinement cycle...")
+                        
+                        # ASK USER FOR DECISION
+                        user_decision = ask_user_proceed_or_refine(
+                            validation_feedback=validator_feedback_for_refinement,
+                            structure_file=final_generated_structure_file_path
+                        )
+                        
+                        if user_decision == 'proceed':
+                            logger.info("User chose to proceed with current structure despite validation issues.")
+                            print(f"\n✓ PROCEEDING: Using structure at {final_generated_structure_file_path}")
+                            print(f"Generating script: {final_generating_script_path}")
+                            final_outcome_achieved = True
+                            break
+                            
+                        elif overall_cycle_num < config.MAX_REFINEMENT_CYCLES:
+                            logger.info("User chose refinement. Proceeding to next refinement cycle...")
+                            # Continue to next cycle
                         else:
-                            logger.error("Max refinement cycles reached. Structure may have issues.")
-                            print(f"\nWARNING: Max refinement cycles reached. Structure at {final_generated_structure_file_path} (from script {final_generating_script_path}) may have unresolved issues.")
-                            final_outcome_achieved = True 
-                            break 
+                            logger.error("Max refinement cycles reached but user requested refinement.")
+                            print(f"\n⚠ WARNING: Max refinement cycles reached. Cannot refine further.")
+                            print(f"Final structure: {final_generated_structure_file_path}")
+                            print(f"Script: {final_generating_script_path}")
+                            
+                            # Ask for final decision
+                            print("\nFinal options:")
+                            print("  [p] PROCEED - Use current structure")
+                            final_choice = input("Choice [p]: ").strip().lower()
+                            if final_choice in ['p', 'proceed', '']:  # Default to proceed
+                                print(f"\n✓ PROCEEDING: Using structure at {final_generated_structure_file_path}")
+                                final_outcome_achieved = True
+                            else:
+                                print(f"\n⏹ WORKFLOW STOPPED")
+                                final_outcome_achieved = True
+                            break
                     else: 
                         logger.error(f"Validation error: {validator_feedback_for_refinement.get('overall_assessment')}. Aborting.")
                         print(f"\nERROR: Validation process failed. Last structure: {final_generated_structure_file_path}")
