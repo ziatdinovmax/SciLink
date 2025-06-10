@@ -25,7 +25,7 @@ class GeminiMicroscopyAnalysisAgent:
     Refactored to support both image-based and text-based DFT recommendations.
     """
 
-    def __init__(self, api_key: str | None = None, model_name: str = "gemini-1.5-pro-preview-0514", fft_nmf_settings: dict | None = None): # Updated model name as an example
+    def __init__(self, api_key: str | None = None, model_name: str = "gemini-2.5-pro-preview-05-06", fft_nmf_settings: dict | None = None): # Updated model name as an example
         if api_key is None:
             api_key = os.environ.get("GOOGLE_API_KEY")
         if not api_key:
