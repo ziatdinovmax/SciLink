@@ -16,7 +16,7 @@ from .instruct import (
     TEXT_ONLY_DFT_RECOMMENDATION_INSTRUCTIONS # Ensure this is defined in instruct.py
 )
 from .utils import load_image, preprocess_image, convert_numpy_to_jpeg_bytes, normalize_and_convert_to_image_bytes
-from .fft_nmf_analyzer import SlidingFFTNMF
+from atomai.stat import SlidingFFTNMF
 
 
 class GeminiMicroscopyAnalysisAgent:
@@ -155,25 +155,36 @@ class GeminiMicroscopyAnalysisAgent:
 
     def _run_fft_nmf_analysis(self, image_path: str, window_size: int, n_components: int, window_step: int) -> tuple[np.ndarray | None, np.ndarray | None]:
         try:
-            self.logger.info("--- Starting Sliding FFT + NMF Analysis ---")
+            self.logger.info("--- Starting Sliding FFT + NMF Analysis (AtomAI) ---")
             fft_output_dir = self.fft_nmf_settings.get('output_dir', 'fft_nmf_results')
             os.makedirs(fft_output_dir, exist_ok=True)
             base_name = os.path.splitext(os.path.basename(image_path))[0]
             safe_base_name = "".join(c if c.isalnum() else "_" for c in base_name)
             fft_output_base = os.path.join(fft_output_dir, f"{safe_base_name}_analysis")
+            
+            # Create AtomAI analyzer with auto-parameter calculation support
             analyzer = SlidingFFTNMF(
-                window_size_x=window_size, window_size_y=window_size,
-                window_step_x=window_step, window_step_y=window_step,
+                # Use None to trigger auto-calculation, or use LLM-provided values
+                window_size_x=window_size if window_size and window_size > 0 else None,
+                window_size_y=window_size if window_size and window_size > 0 else None,
+                window_step_x=window_step if window_step and window_step > 0 else None,
+                window_step_y=window_step if window_step and window_step > 0 else None,
+                
+                # Use settings from config
                 interpolation_factor=self.fft_nmf_settings.get('interpolation_factor', 2),
                 zoom_factor=self.fft_nmf_settings.get('zoom_factor', 2),
                 hamming_filter=self.fft_nmf_settings.get('hamming_filter', True),
                 components=n_components
             )
+            
+            # AtomAI's analyze_image method handles both file paths and arrays
             components, abundances = analyzer.analyze_image(image_path, output_path=fft_output_base)
-            self.logger.info(f"FFT+NMF analysis complete. Components: {components.shape}, Abundances: {abundances.shape}")
+            
+            self.logger.info(f"AtomAI FFT+NMF analysis complete. Components: {components.shape}, Abundances: {abundances.shape}")
             return components, abundances
+            
         except Exception as fft_e:
-            self.logger.error(f"Sliding FFT + NMF analysis failed: {fft_e}", exc_info=True)
+            self.logger.error(f"AtomAI Sliding FFT + NMF analysis failed: {fft_e}", exc_info=True)
         return None, None
 
     def _analyze_image_base(self, image_path: str, system_info: dict | str | None, 
@@ -192,14 +203,24 @@ class GeminiMicroscopyAnalysisAgent:
             if self.RUN_FFT_NMF:
                 ws, nc, fft_explanation = None, None, None
                 if self.FFT_NMF_AUTO_PARAMS:
-                    auto_params = self._get_fft_nmf_params_from_llm(image_blob, system_info) # Pass image_blob here
+                    auto_params = self._get_fft_nmf_params_from_llm(image_blob, system_info)
                     if auto_params: ws, nc, fft_explanation = auto_params
                 if fft_explanation: self.logger.info(f"LLM Explanation for FFT/NMF params: {fft_explanation}")
-                if ws is None: ws = self.fft_nmf_settings.get('window_size_x', preprocessed_img_array.shape[0] // 16 if preprocessed_img_array is not None else 64)
-                if nc is None: nc = self.fft_nmf_settings.get('components', 4)
-                step = max(1, ws // 4)
+                
+                # Use LLM params if provided, otherwise fall back to config
+                if ws is None: 
+                    ws = self.fft_nmf_settings.get('window_size_x')  # Could be None for auto-calc
+                if nc is None: 
+                    nc = self.fft_nmf_settings.get('components', 4)  
+                
+                # Calculate step size based on window size (if provided) or use config
+                if ws is not None:
+                    step = max(1, ws // 4)  # Standard practice: step = window_size / 4
+                else:
+                    step = self.fft_nmf_settings.get('window_step_x')  # Could be None for auto-calc
+                
                 components_array, abundances_array = self._run_fft_nmf_analysis(image_path, ws, nc, step)
-
+            
             prompt_parts = [instruction_prompt]
             if additional_top_level_context:
                 prompt_parts.append("\n\n## Special Considerations for This Analysis (Based on Prior Review):\n")
