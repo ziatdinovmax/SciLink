@@ -113,6 +113,16 @@ class MicroscopyNoveltyAssessmentWorkflow:
         """
         Run the complete workflow. Based on exp2lit.py main workflow.
         """
+        
+        if isinstance(system_info, str):
+            # It's a file path, load it
+            import json
+            with open(system_info, 'r') as f:
+                system_info = json.load(f)
+        elif system_info is None:
+            # Use default from config
+            system_info = getattr(config, 'SYSTEM_INFO', None)
+
         workflow_result = {
             "image_path": image_path,
             "steps_completed": [],
