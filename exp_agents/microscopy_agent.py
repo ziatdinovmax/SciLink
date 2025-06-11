@@ -25,7 +25,7 @@ class GeminiMicroscopyAnalysisAgent:
     Refactored to support both image-based and text-based DFT recommendations.
     """
 
-    def __init__(self, api_key: str | None = None, model_name: str = "gemini-2.5-pro-preview-05-06", fft_nmf_settings: dict | None = None): # Updated model name as an example
+    def __init__(self, api_key: str | None = None, model_name: str = "gemini-2.5-pro-preview-05-06", fft_nmf_settings: dict | None = None):
         if api_key is None:
             api_key = os.environ.get("GOOGLE_API_KEY")
         if not api_key:
@@ -156,11 +156,11 @@ class GeminiMicroscopyAnalysisAgent:
     def _run_fft_nmf_analysis(self, image_path: str, window_size: int, n_components: int, window_step: int) -> tuple[np.ndarray | None, np.ndarray | None]:
         try:
             self.logger.info("--- Starting Sliding FFT + NMF Analysis (AtomAI) ---")
-            fft_output_dir = self.fft_nmf_settings.get('output_dir', 'fft_nmf_results')
+            fft_output_dir = self.fft_nmf_settings.get('output_dir', 'microscopy_analysis')
             os.makedirs(fft_output_dir, exist_ok=True)
             base_name = os.path.splitext(os.path.basename(image_path))[0]
             safe_base_name = "".join(c if c.isalnum() else "_" for c in base_name)
-            fft_output_base = os.path.join(fft_output_dir, f"{safe_base_name}_analysis")
+            fft_output_base = os.path.join(fft_output_dir, f"{safe_base_name}_output")
             
             # Create AtomAI analyzer with auto-parameter calculation support
             analyzer = SlidingFFTNMF(
