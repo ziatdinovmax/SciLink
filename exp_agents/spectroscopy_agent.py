@@ -512,6 +512,102 @@ class GeminiSpectroscopyAnalysisAgent:
             self.logger.error(f"Spectral unmixing failed: {e}")
             raise
 
+    def _create_component_abundance_pairs(self, components: np.ndarray, abundance_maps: np.ndarray, 
+                                    system_info: Dict[str, Any] = None, save_plots: bool = True) -> List[bytes]:
+        """
+        Create individual component-abundance pair images with consistent y-scaling for final analysis.
+        Each pair shows one component spectrum alongside its abundance map.
+        
+        Args:
+            components: Array of shape (n_components, n_channels)
+            abundance_maps: Array of shape (height, width, n_components)
+            system_info: System metadata for energy axis creation
+            save_plots: Whether to save plots to disk for inspection
+            
+        Returns:
+            List of image bytes, one for each component-abundance pair
+        """
+        import matplotlib.pyplot as plt
+        from datetime import datetime
+        
+        pair_images = []
+        n_components = components.shape[0]
+        saved_files = []
+        
+        try:
+            # Create energy axis using system info
+            n_channels = components.shape[1]
+            energy_axis, xlabel, has_energy_info = self._create_energy_axis(n_channels, system_info)
+            
+            # Calculate global y-scale for consistent spectrum scaling
+            global_min = np.min(components)
+            global_max = np.max(components)
+            y_margin = (global_max - global_min) * 0.05  # 5% margin
+            y_limits = (global_min - y_margin, global_max + y_margin)
+            
+            self.logger.info(f"Creating {n_components} component-abundance pairs with consistent y-scale: {y_limits}")
+            
+            # Create timestamp for saved files
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            for i in range(n_components):
+                fig, (ax_spectrum, ax_abundance) = plt.subplots(1, 2, figsize=(12, 4))
+                
+                # Left plot: Component spectrum with consistent y-scaling
+                ax_spectrum.plot(energy_axis, components[i, :], 'b-', linewidth=2)
+                ax_spectrum.set_ylim(y_limits)  # Apply consistent y-scaling
+                ax_spectrum.set_xlabel(xlabel)
+                ax_spectrum.set_ylabel('Intensity')
+                ax_spectrum.set_title(f'Component {i+1} Spectrum')
+                ax_spectrum.grid(True, alpha=0.3)
+                
+                # Add energy range info to title if available
+                if has_energy_info:
+                    energy_range = f" ({energy_axis[0]:.0f}-{energy_axis[-1]:.0f} {xlabel.split('(')[1].rstrip(')')})"
+                    ax_spectrum.set_title(f'Component {i+1} Spectrum{energy_range}')
+                
+                # Right plot: Abundance map with proper aspect ratio
+                im = ax_abundance.imshow(abundance_maps[..., i], cmap='viridis', aspect='equal')
+                ax_abundance.set_title(f'Component {i+1} Abundance Map')
+                ax_abundance.axis('off')
+                
+                # Add colorbar for abundance map
+                plt.colorbar(im, ax=ax_abundance, fraction=0.046, pad=0.04, label='Abundance')
+                
+                # Add overall title with y-scale info
+                fig.suptitle(f'Component {i+1} Analysis (Y-scale: {y_limits[0]:.2e} to {y_limits[1]:.2e})', 
+                            fontsize=12, y=0.98)
+                
+                plt.tight_layout()
+                
+                # Save to disk if requested
+                if save_plots:
+                    filename = f"component_{i+1}_pair_{timestamp}.png"
+                    filepath = os.path.join(self.output_dir, filename)
+                    plt.savefig(filepath, dpi=150, bbox_inches='tight')
+                    saved_files.append(filepath)
+                    self.logger.info(f" Saved component pair {i+1}: {filename}")
+                
+                # Save to bytes for LLM
+                buf = BytesIO()
+                plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
+                buf.seek(0)
+                pair_images.append(buf.getvalue())
+                plt.close()
+                
+            self.logger.info(f"Successfully created {len(pair_images)} component-abundance pair images")
+            
+            if save_plots:
+                print(f"\n📊 Component-abundance pairs saved to: {self.output_dir}/")
+                print("    These are the exact plots being sent to the LLM for analysis")
+            
+            return pair_images
+            
+        except Exception as e:
+            self.logger.error(f"Failed to create component-abundance pairs: {e}")
+            return []
+    
+
     def _create_summary_images(self, hspy_data: np.ndarray, components: np.ndarray, 
                          abundance_maps: np.ndarray, system_info: Dict[str, Any] = None) -> List[bytes]:
         """
@@ -646,12 +742,7 @@ class GeminiSpectroscopyAnalysisAgent:
                                     instruction_prompt: str = None, analysis_type: str = "standard") -> Dict[str, Any]:
         """
         Base method for hyperspectral data analysis - shared by both standard analysis and claims generation.
-        
-        Args:
-            data_path: Path to hyperspectral data file
-            system_info: System/experimental information
-            instruction_prompt: Specific LLM instructions to use
-            analysis_type: Type of analysis ("standard" or "claims")
+        Updated to use component-abundance pairs for final analysis.
         """
         # Handle system_info input (can be dict, file path, or None)
         if isinstance(system_info, str):
@@ -673,10 +764,11 @@ class GeminiSpectroscopyAnalysisAgent:
             self.logger.info(f"Performing spectral unmixing for {analysis_desc}...")
             components, abundance_maps = self._perform_spectral_unmixing(hspy_data, system_info)
         
-        # Create summary images for LLM analysis
-        summary_images = []
+        # Create component-abundance pairs for final analysis
+        component_pair_images = []
         if components is not None and abundance_maps is not None:
-            summary_images = self._create_summary_images(hspy_data, components, abundance_maps, system_info)
+            self.logger.info("Creating component-abundance pairs for LLM analysis...")
+            component_pair_images = self._create_component_abundance_pairs(components, abundance_maps, system_info)
         
         # Build prompt for LLM analysis
         prompt_parts = [instruction_prompt or SPECTROSCOPY_ANALYSIS_INSTRUCTIONS]
@@ -694,19 +786,17 @@ class GeminiSpectroscopyAnalysisAgent:
         else:
             prompt_parts.append("- No spectral unmixing performed")
         
-        # Add summary images for LLM interpretation
-        if summary_images:
-            prompt_parts.append("\n\nSpectroscopic Analysis Summary Images:")
-            for i, img_bytes in enumerate(summary_images):
-                if i == 0:
-                    prompt_parts.append(f"\n\nImage {i+1}: Mean spectrum and component spectra")
-                elif i == 1:
-                    prompt_parts.append(f"\n\nImage {i+2}: Spatial abundance maps")
-                else:
-                    prompt_parts.append(f"\n\nImage {i+1}: Additional analysis")
-                prompt_parts.append({"mime_type": "image/jpeg", "data": img_bytes})
+        # Add component-abundance pairs for LLM interpretation
+        if component_pair_images:
+            prompt_parts.append("\n\nSpectral Component Analysis (Individual Component-Abundance Pairs):")
+            prompt_parts.append("Each component is shown with its spectrum (left) and spatial abundance map (right).")
+            prompt_parts.append("All component spectra use the same y-axis scale for direct comparison.")
+            
+            for i, pair_img_bytes in enumerate(component_pair_images):
+                prompt_parts.append(f"\n\nComponent {i+1} Pair (Spectrum + Abundance Map):")
+                prompt_parts.append({"mime_type": "image/jpeg", "data": pair_img_bytes})
         else:
-            prompt_parts.append("\n\n(No spectroscopic analysis images available)")
+            prompt_parts.append("\n\n(No spectroscopic component analysis images available)")
         
         # Add system/experimental information
         if system_info:
@@ -719,7 +809,7 @@ class GeminiSpectroscopyAnalysisAgent:
         prompt_parts.append("\n\nProvide your analysis in the requested JSON format.")
         
         # Send to LLM for analysis
-        self.logger.info(f"Sending hyperspectral {analysis_desc} request to LLM...")
+        self.logger.info(f"Sending hyperspectral {analysis_desc} request to LLM with {len(component_pair_images)} component pairs...")
         response = self.model.generate_content(
             contents=prompt_parts,
             generation_config=self.generation_config,
@@ -751,7 +841,6 @@ class GeminiSpectroscopyAnalysisAgent:
             }
         
         return result_json
-
 
     def _save_claims_results(self, claims_result: Dict[str, Any], output_filename: str = None) -> str:
         """
