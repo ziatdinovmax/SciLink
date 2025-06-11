@@ -27,7 +27,7 @@ class GeminiSpectroscopyAnalysisAgent:
     Integrates with SciLinkLLM framework and includes LLM-guided spectral unmixing.
     """
 
-    def __init__(self, api_key: str | None = None, model_name: str = "gemini-2.5-pro-preview-05-06", 
+    def __init__(self, api_key: str | None = None, model_name: str = "gemini-2.5-pro-preview-06-05", 
                  spectral_unmixing_settings: dict | None = None,
                  output_dir: str = "spectroscopy_output"):
         if api_key is None:
@@ -97,33 +97,14 @@ class GeminiSpectroscopyAnalysisAgent:
 
     def _load_hyperspectral_data(self, data_path: str) -> np.ndarray:
         """
-        Load hyperspectral data from various formats.
-        Supports .npy, .h5, and attempts to load other formats.
+        Load hyperspectral data from numpy array.
+        Assumes data_path points to a .npy file.
         """
         try:
-            if data_path.endswith('.npy'):
-                data = np.load(data_path)
-            elif data_path.endswith('.h5') or data_path.endswith('.hdf5'):
-                import h5py
-                with h5py.File(data_path, 'r') as f:
-                    # Try common keys for hyperspectral data
-                    possible_keys = ['data', 'spectrum', 'hyperspectral', 'cube']
-                    data_key = None
-                    for key in possible_keys:
-                        if key in f.keys():
-                            data_key = key
-                            break
-                    
-                    if data_key is None:
-                        # Use the first dataset found
-                        data_key = list(f.keys())[0]
-                        self.logger.warning(f"No standard hyperspectral key found, using: {data_key}")
-                    
-                    data = f[data_key][:]
-            else:
-                # Try loading as numpy array
-                data = np.load(data_path)
-                
+            if not data_path.endswith('.npy'):
+                raise ValueError(f"Expected .npy file, got: {data_path}")
+            
+            data = np.load(data_path)
             self.logger.info(f"Loaded hyperspectral data with shape: {data.shape}")
             
             # Ensure 3D format (h, w, spectral_channels)
@@ -138,6 +119,32 @@ class GeminiSpectroscopyAnalysisAgent:
         except Exception as e:
             self.logger.error(f"Failed to load hyperspectral data from {data_path}: {e}")
             raise
+
+    def _load_metadata_from_json(self, data_path: str) -> dict:
+        """
+        Load metadata from companion JSON file.
+        Assumes JSON file has same name as .npy file but with .json extension.
+        """
+        import json
+        import os
+        
+        # Get JSON file path (same name as .npy but with .json extension)
+        base_path = os.path.splitext(data_path)[0]
+        json_path = f"{base_path}.json"
+        
+        try:
+            if os.path.exists(json_path):
+                with open(json_path, 'r') as f:
+                    metadata = json.load(f)
+                self.logger.info(f"Loaded metadata from: {json_path}")
+                return metadata
+            else:
+                self.logger.warning(f"No metadata file found at: {json_path}")
+                return {}
+                
+        except Exception as e:
+            self.logger.error(f"Failed to load metadata from {json_path}: {e}")
+            return {}
 
     def _llm_estimate_components_from_system(self, hspy_data: np.ndarray, 
                                            system_info: Dict[str, Any] = None) -> int:
@@ -202,14 +209,19 @@ class GeminiSpectroscopyAnalysisAgent:
             self.logger.error(f"LLM initial estimation failed: {e}")
             return self.spectral_settings.get('n_components', 4)
 
-    def _create_nmf_summary_plot(self, components: np.ndarray, abundance_maps: np.ndarray, n_comp: int) -> bytes:
+    def _create_nmf_summary_plot(self, components: np.ndarray, abundance_maps: np.ndarray, 
+                           n_comp: int, system_info: Dict[str, Any] = None) -> bytes:
         """
         Create a single summary plot showing all components and abundance maps.
-        Similar to your example images.
+        Now includes proper energy axis labeling.
         """
         import matplotlib.pyplot as plt
         
         try:
+            # Create energy axis
+            n_channels = components.shape[1]
+            energy_axis, xlabel, has_energy_info = self._create_energy_axis(n_channels, system_info)
+            
             # Create figure with 2 rows: spectra on top, abundance maps on bottom
             fig, axes = plt.subplots(2, n_comp, figsize=(n_comp * 3, 6))
             
@@ -217,10 +229,10 @@ class GeminiSpectroscopyAnalysisAgent:
                 axes = axes.reshape(2, 1)
             
             for i in range(n_comp):
-                # Top row: Component spectra
-                axes[0, i].plot(components[i, :], 'b-', linewidth=1.5)
+                # Top row: Component spectra with proper energy axis
+                axes[0, i].plot(energy_axis, components[i, :], 'b-', linewidth=1.5)
                 axes[0, i].set_title(f'NMF Component {i+1}', fontsize=10)
-                axes[0, i].set_xlabel('Energy Bin')
+                axes[0, i].set_xlabel(xlabel)
                 if i == 0:
                     axes[0, i].set_ylabel('Intensity')
                 axes[0, i].grid(True, alpha=0.3)
@@ -231,7 +243,12 @@ class GeminiSpectroscopyAnalysisAgent:
                 axes[1, i].axis('off')
                 plt.colorbar(im, ax=axes[1, i], fraction=0.046, pad=0.04)
             
-            plt.suptitle(f'NMF Analysis: {n_comp} Components', fontsize=14, y=0.95)
+            # Add energy info to title if available
+            if has_energy_info:
+                plt.suptitle(f'NMF Analysis: {n_comp} Components (Energy Calibrated)', fontsize=14, y=0.95)
+            else:
+                plt.suptitle(f'NMF Analysis: {n_comp} Components', fontsize=14, y=0.95)
+                
             plt.tight_layout()
             
             # Save to bytes
@@ -246,6 +263,7 @@ class GeminiSpectroscopyAnalysisAgent:
         except Exception as e:
             self.logger.error(f"Failed to create summary plot for {n_comp} components: {e}")
             return None
+
 
     def _llm_compare_visual_results(self, test_images: List[Dict], initial_estimate: int,
                                    system_info: Dict[str, Any] = None) -> int:
@@ -384,7 +402,8 @@ class GeminiSpectroscopyAnalysisAgent:
                 )
                 
                 components, abundance_maps = temp_unmixer.fit(hspy_data)
-                summary_image = self._create_nmf_summary_plot(components, abundance_maps, n_comp)
+                # Pass system_info here!
+                summary_image = self._create_nmf_summary_plot(components, abundance_maps, n_comp, system_info)
                 
                 if summary_image:
                     test_images.append({
@@ -397,6 +416,7 @@ class GeminiSpectroscopyAnalysisAgent:
                 print(f"    ❌ Failed test with {n_comp} components: {e}")
                 self.logger.warning(f"Failed test analysis with {n_comp} components: {e}")
         
+            
         # Save test images for human review
         self._save_component_comparison_plot(test_images, initial_estimate)
         
@@ -492,16 +512,20 @@ class GeminiSpectroscopyAnalysisAgent:
             raise
 
     def _create_summary_images(self, hspy_data: np.ndarray, components: np.ndarray, 
-                             abundance_maps: np.ndarray) -> List[bytes]:
+                         abundance_maps: np.ndarray, system_info: Dict[str, Any] = None) -> List[bytes]:
         """
         Create summary images for LLM analysis including:
         - Mean spectrum
-        - Component spectra
+        - Component spectra  
         - Abundance maps
         """
         import matplotlib.pyplot as plt
         
         images = []
+        
+        # Create energy axis using system info
+        n_channels = hspy_data.shape[-1]
+        energy_axis, xlabel, has_energy_info = self._create_energy_axis(n_channels, system_info)
         
         try:
             # 1. Mean spectrum and component spectra
@@ -509,16 +533,16 @@ class GeminiSpectroscopyAnalysisAgent:
             
             # Mean spectrum
             mean_spectrum = np.mean(hspy_data.reshape(-1, hspy_data.shape[-1]), axis=0)
-            ax1.plot(mean_spectrum, 'k-', linewidth=2, label='Mean Spectrum')
-            ax1.set_xlabel('Channel')
+            ax1.plot(energy_axis, mean_spectrum, 'k-', linewidth=2, label='Mean Spectrum')
+            ax1.set_xlabel(xlabel)
             ax1.set_ylabel('Intensity')
             ax1.set_title('Mean Spectrum')
             ax1.grid(True, alpha=0.3)
             
-            # Component spectra
+            # Component spectra with energy axis
             for i, component in enumerate(components):
-                ax2.plot(component, label=f'Component {i+1}')
-            ax2.set_xlabel('Channel')
+                ax2.plot(energy_axis, component, label=f'Component {i+1}')
+            ax2.set_xlabel(xlabel)
             ax2.set_ylabel('Intensity')
             ax2.set_title('Unmixed Component Spectra')
             ax2.legend()
@@ -563,22 +587,22 @@ class GeminiSpectroscopyAnalysisAgent:
             images.append(buf.getvalue())
             plt.close()
             
-            self.logger.info(f"Created {len(images)} summary images for LLM analysis")
+            self.logger.info(f"Created {len(images)} summary images with proper energy axis")
             return images
             
         except Exception as e:
             self.logger.error(f"Failed to create summary images: {e}")
             return []
 
-    def analyze_hyperspectral_data(self, data_path: str, system_info: Dict[str, Any] | None = None,
-                                 analysis_type: str = "general") -> Dict[str, Any]:
+    def analyze_hyperspectral_data(self, data_path: str,
+                                   metadata_path: str,
+                                   ) -> Dict[str, Any]:
         """
         Analyze hyperspectral data for materials characterization.
         
         Args:
             data_path: Path to hyperspectral data file
-            system_info: Additional metadata about the sample/experiment
-            analysis_type: Type of analysis ("general", "phase_mapping", "defect_analysis", etc.)
+            metadata_path: Additional metadata about the sample/experiment
         
         Returns:
             Dictionary containing analysis results
@@ -587,6 +611,7 @@ class GeminiSpectroscopyAnalysisAgent:
             # Load hyperspectral data
             self.logger.info(f"Loading hyperspectral data from: {data_path}")
             hspy_data = self._load_hyperspectral_data(data_path)
+            system_info = self._load_metadata_from_json(metadata_path)
             
             components = None
             abundance_maps = None
@@ -598,17 +623,13 @@ class GeminiSpectroscopyAnalysisAgent:
             # Create summary images for LLM
             summary_images = []
             if components is not None and abundance_maps is not None:
-                summary_images = self._create_summary_images(hspy_data, components, abundance_maps)
-            
+                summary_images = self._create_summary_images(hspy_data, components, abundance_maps, system_info)
+        
             # Build prompt for LLM analysis
             prompt_parts = [SPECTROSCOPY_ANALYSIS_INSTRUCTIONS]
-            
-            # Add analysis type context
-            if analysis_type != "general":
-                prompt_parts.append(f"\n\nSpecific Analysis Focus: {analysis_type}")
-                prompt_parts.append("Please tailor your analysis to emphasize aspects relevant to this focus area.")
-            
-            prompt_parts.append(f"\n\nHyperspectral Data Information:")
+            energy_info_text = self._build_energy_info_for_prompt(hspy_data, system_info)
+
+            prompt_parts.append(f"\n\nHyperspectral Data Information:\n{energy_info_text}")
             prompt_parts.append(f"- Data shape: {hspy_data.shape}")
             prompt_parts.append(f"- Number of spectral channels: {hspy_data.shape[-1]}")
             prompt_parts.append(f"- Spatial dimensions: {hspy_data.shape[:2]}")
@@ -669,6 +690,34 @@ class GeminiSpectroscopyAnalysisAgent:
             return {"error": "Hyperspectral analysis failed", "details": str(e)}
     
 
+    def _build_energy_info_for_prompt(self, hspy_data: np.ndarray, system_info: dict = None) -> str:
+        """Build energy information string for LLM prompt."""
+        
+        info_lines = [
+            f"- Data shape: {hspy_data.shape}",
+            f"- Spatial dimensions: {hspy_data.shape[:2]}"
+        ]
+        
+        if system_info and "energy_range" in system_info:
+            energy_info = system_info["energy_range"]
+            start = energy_info.get("start")
+            end = energy_info.get("end")
+            units = energy_info.get("units", "eV")
+            
+            if start is not None and end is not None:
+                dispersion = (end - start) / (hspy_data.shape[-1] - 1)
+                info_lines.extend([
+                    f"- Energy range: {start} to {end} {units}",
+                    f"- Number of energy channels: {hspy_data.shape[-1]}",
+                    f"- Energy dispersion: {dispersion:.3f} {units}/channel"
+                ])
+            else:
+                info_lines.append(f"- Number of spectral channels: {hspy_data.shape[-1]} (energy not calibrated)")
+        else:
+            info_lines.append(f"- Number of spectral channels: {hspy_data.shape[-1]} (energy axis not provided)")
+        
+        return "\n".join(info_lines)
+
     def _save_component_reasoning(self, step_name: str, reasoning_data: dict):
         """Save LLM reasoning for human review."""
         from datetime import datetime
@@ -707,6 +756,11 @@ class GeminiSpectroscopyAnalysisAgent:
         import matplotlib.pyplot as plt
         
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # Create energy axis
+        n_channels = components.shape[1]
+        system_info = reasoning_log.get('system_info')  # Get from reasoning log
+        energy_axis, xlabel, has_energy_info = self._create_energy_axis(n_channels, system_info)
         
         # 1. Save detailed reasoning log
         reasoning_file = f"component_selection_log_{timestamp}.json"
@@ -719,7 +773,7 @@ class GeminiSpectroscopyAnalysisAgent:
         fig = plt.figure(figsize=(16, 10))
         
         # Top section: Component spectra
-        ax1 = plt.subplot(2, 1, 1)
+        ax_spectra = plt.subplot(2, 1, 1)
         for i in range(final_n_components):
             plt.plot(components[i], label=f'Component {i+1}', linewidth=2)
         plt.title(f'Final Spectral Components (n={final_n_components})')
@@ -728,19 +782,19 @@ class GeminiSpectroscopyAnalysisAgent:
         plt.legend()
         plt.grid(True, alpha=0.3)
         
-        # Bottom section: Abundance maps
+        # Bottom section: Abundance maps with proper grid
         n_cols = min(4, final_n_components)
         n_rows = (final_n_components + n_cols - 1) // n_cols
         
+        # Create abundance map subplots
         for i in range(final_n_components):
             row = i // n_cols
             col = i % n_cols
-            ax = plt.subplot(2, n_cols, n_cols + 1 + i)
+            ax = plt.subplot(2 * n_rows, n_cols, n_cols + row * n_cols + col + 1)
             im = plt.imshow(abundance_maps[..., i], cmap='viridis')
             plt.title(f'Component {i+1}')
             plt.colorbar(im, fraction=0.046, pad=0.04)
             plt.axis('off')
-        
         plt.tight_layout()
         
         # Save final results plot
@@ -753,6 +807,38 @@ class GeminiSpectroscopyAnalysisAgent:
         print(f"📝 Saved reasoning log: {reasoning_file}")
         
         return results_path, reasoning_path
+    
+
+    def _create_energy_axis(self, n_channels: int, system_info: dict = None) -> tuple[np.ndarray, str, bool]:
+        """
+        Create energy axis from system_info if available, otherwise use channel indices.
+        
+        Returns:
+            tuple: (energy_axis, xlabel, has_energy_info)
+        """
+        if system_info and "energy_range" in system_info:
+            energy_info = system_info["energy_range"]
+            
+            if "start" in energy_info and "end" in energy_info:
+                start = energy_info["start"]
+                end = energy_info["end"]
+                units = energy_info.get("units", "eV")  # Default to eV if not specified
+                
+                # Simple linear conversion
+                energy_axis = np.linspace(start, end, n_channels)
+                xlabel = f"Energy ({units})"
+                has_energy_info = True
+                
+                self.logger.info(f"Using energy axis: {start} to {end} {units}")
+                return energy_axis, xlabel, has_energy_info
+        
+        # Fallback: channel indices
+        energy_axis = np.arange(n_channels)
+        xlabel = "Channel"
+        has_energy_info = False
+        
+        self.logger.info("Using channel indices (no energy range provided)")
+        return energy_axis, xlabel, has_energy_info
 
 
     def generate_analysis_claims(self, data_path: str, system_info: Dict[str, Any] | None = None) -> Dict[str, Any]:
