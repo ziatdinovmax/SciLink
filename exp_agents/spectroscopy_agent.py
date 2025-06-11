@@ -14,7 +14,8 @@ from .utils import convert_numpy_to_jpeg_bytes, normalize_and_convert_to_image_b
 from .instruct import (
     SPECTROSCOPY_ANALYSIS_INSTRUCTIONS, 
     COMPONENT_INITIAL_ESTIMATION_INSTRUCTIONS,
-    COMPONENT_VISUAL_COMPARISON_INSTRUCTIONS
+    COMPONENT_VISUAL_COMPARISON_INSTRUCTIONS,
+    SPECTROSCOPY_CLAIMS_INSTRUCTIONS
 )
 
 # Import atomai's SpectralUnmixer
@@ -593,10 +594,195 @@ class GeminiSpectroscopyAnalysisAgent:
         except Exception as e:
             self.logger.error(f"Failed to create summary images: {e}")
             return []
+        
+    def analyze_hyperspectral_data_for_claims(self, data_path: str, metadata_path: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        """
+        Analyze hyperspectral data to generate scientific claims for literature comparison.
+        Similar to microscopy agent's analyze_microscopy_image_for_claims method.
+        
+        Args:
+            data_path: Path to hyperspectral data file (.npy)
+            metadata_path:  Path to JSON file with experimental metadata
+            
+        Returns:
+            Dictionary containing detailed analysis and scientific claims
+        """
+        try:
+            # Load system info from metadata path
+            system_info = self._load_metadata_from_json(metadata_path)
 
-    def analyze_hyperspectral_data(self, data_path: str,
-                                   metadata_path: str,
-                                   ) -> Dict[str, Any]:
+            # Use the shared analysis workflow but with claims-specific instructions
+            result = self._analyze_hyperspectral_data_base(
+                data_path=data_path,
+                system_info=system_info,
+                instruction_prompt=SPECTROSCOPY_CLAIMS_INSTRUCTIONS,
+                analysis_type="claims"
+            )
+            
+            if "error" in result:
+                return result
+            
+            # Extract claims-specific fields (validation already done in base method)
+            detailed_analysis = result.get("detailed_analysis", "Analysis not provided by LLM.")
+            scientific_claims = result.get("scientific_claims", [])
+            
+            # Log results
+            if not scientific_claims and detailed_analysis != "Analysis not provided by LLM.":
+                self.logger.warning("Spectroscopic claims analysis successful but no valid claims found.")
+            elif not scientific_claims:
+                self.logger.warning("LLM call did not yield valid claims or analysis text for spectroscopic workflow.")
+            else:
+                self.logger.info(f"Successfully generated {len(scientific_claims)} scientific claims from spectroscopic analysis.")
+            
+            return {"full_analysis": detailed_analysis, "claims": scientific_claims}
+            
+        except Exception as e:
+            self.logger.exception(f"Error during hyperspectral claims analysis: {e}")
+            return {"error": "Hyperspectral claims analysis failed", "details": str(e)}
+
+
+
+    def _analyze_hyperspectral_data_base(self, data_path: str, system_info: Dict[str, Any] | None = None,
+                                    instruction_prompt: str = None, analysis_type: str = "standard") -> Dict[str, Any]:
+        """
+        Base method for hyperspectral data analysis - shared by both standard analysis and claims generation.
+        
+        Args:
+            data_path: Path to hyperspectral data file
+            system_info: System/experimental information
+            instruction_prompt: Specific LLM instructions to use
+            analysis_type: Type of analysis ("standard" or "claims")
+        """
+        # Handle system_info input (can be dict, file path, or None)
+        if isinstance(system_info, str):
+            with open(system_info, 'r') as f:
+                system_info = json.load(f)
+        elif system_info is None:
+            system_info = self._load_metadata_from_json(data_path)
+        
+        # Load hyperspectral data
+        analysis_desc = "claims generation" if analysis_type == "claims" else "analysis"
+        self.logger.info(f"Loading hyperspectral data for {analysis_desc}: {data_path}")
+        hspy_data = self._load_hyperspectral_data(data_path)
+        
+        components = None
+        abundance_maps = None
+        
+        # Perform spectral unmixing if enabled
+        if self.run_spectral_unmixing:
+            self.logger.info(f"Performing spectral unmixing for {analysis_desc}...")
+            components, abundance_maps = self._perform_spectral_unmixing(hspy_data, system_info)
+        
+        # Create summary images for LLM analysis
+        summary_images = []
+        if components is not None and abundance_maps is not None:
+            summary_images = self._create_summary_images(hspy_data, components, abundance_maps, system_info)
+        
+        # Build prompt for LLM analysis
+        prompt_parts = [instruction_prompt or SPECTROSCOPY_ANALYSIS_INSTRUCTIONS]
+        
+        # Add data information (shared between both analysis types)
+        energy_info_text = self._build_energy_info_for_prompt(hspy_data, system_info)
+        prompt_parts.append(f"\n\nHyperspectral Data Information:\n{energy_info_text}")
+        
+        # Add spectral unmixing information if available
+        if components is not None:
+            prompt_parts.append(f"- Spectral unmixing method: {self.spectral_settings.get('method', 'nmf').upper()}")
+            prompt_parts.append(f"- Number of spectral components identified: {components.shape[0]}")
+            prompt_parts.append(f"- Component spectra shape: {components.shape}")
+            prompt_parts.append(f"- Spatial abundance maps shape: {abundance_maps.shape}")
+        else:
+            prompt_parts.append("- No spectral unmixing performed")
+        
+        # Add summary images for LLM interpretation
+        if summary_images:
+            prompt_parts.append("\n\nSpectroscopic Analysis Summary Images:")
+            for i, img_bytes in enumerate(summary_images):
+                if i == 0:
+                    prompt_parts.append(f"\n\nImage {i+1}: Mean spectrum and component spectra")
+                elif i == 1:
+                    prompt_parts.append(f"\n\nImage {i+2}: Spatial abundance maps")
+                else:
+                    prompt_parts.append(f"\n\nImage {i+1}: Additional analysis")
+                prompt_parts.append({"mime_type": "image/jpeg", "data": img_bytes})
+        else:
+            prompt_parts.append("\n\n(No spectroscopic analysis images available)")
+        
+        # Add system/experimental information
+        if system_info:
+            prompt_parts.append("\n\nExperimental System Information:")
+            if isinstance(system_info, dict):
+                prompt_parts.append(json.dumps(system_info, indent=2))
+            else:
+                prompt_parts.append(str(system_info))
+        
+        prompt_parts.append("\n\nProvide your analysis in the requested JSON format.")
+        
+        # Send to LLM for analysis
+        self.logger.info(f"Sending hyperspectral {analysis_desc} request to LLM...")
+        response = self.model.generate_content(
+            contents=prompt_parts,
+            generation_config=self.generation_config,
+            safety_settings=self.safety_settings,
+        )
+        
+        # Parse LLM response
+        result_json, error_dict = self._parse_llm_response(response)
+        
+        if error_dict:
+            return error_dict
+        
+        if result_json is None:
+            return {"error": f"Hyperspectral {analysis_desc} failed unexpectedly after LLM processing."}
+        
+        # Add quantitative data if available
+        if components is not None and analysis_type == "standard":
+            result_json["quantitative_analysis"] = {
+                "spectral_unmixing_method": self.spectral_settings.get('method', 'nmf'),
+                "n_components": components.shape[0],
+                "component_spectra_shape": components.shape,
+                "abundance_maps_shape": abundance_maps.shape,
+                "data_statistics": {
+                    "mean_intensity": float(np.mean(hspy_data)),
+                    "std_intensity": float(np.std(hspy_data)),
+                    "min_intensity": float(np.min(hspy_data)),
+                    "max_intensity": float(np.max(hspy_data)),
+                }
+            }
+        
+        return result_json
+
+
+    def _save_claims_results(self, claims_result: Dict[str, Any], output_filename: str = None) -> str:
+        """
+        Save claims analysis results to file for further processing.
+        
+        Args:
+            claims_result: Result dictionary from generate_analysis_claims
+            output_filename: Optional custom filename
+            
+        Returns:
+            Path to saved file
+        """
+        if output_filename is None:
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_filename = f"spectroscopy_claims_{timestamp}.json"
+        
+        output_path = os.path.join(self.output_dir, output_filename)
+        
+        try:
+            with open(output_path, 'w') as f:
+                json.dump(claims_result, f, indent=2, default=str)
+            
+            self.logger.info(f"Claims analysis results saved to: {output_path}")
+            return output_path
+            
+        except Exception as e:
+            self.logger.error(f"Failed to save claims results: {e}")
+            raise
+
+    def analyze_hyperspectral_data(self, data_path: str, metadata_path: str) -> Dict[str, Any]:
         """
         Analyze hyperspectral data for materials characterization.
         
@@ -608,82 +794,22 @@ class GeminiSpectroscopyAnalysisAgent:
             Dictionary containing analysis results
         """
         try:
-            # Load hyperspectral data
-            self.logger.info(f"Loading hyperspectral data from: {data_path}")
-            hspy_data = self._load_hyperspectral_data(data_path)
+            # Load system info from metadata path
             system_info = self._load_metadata_from_json(metadata_path)
             
-            components = None
-            abundance_maps = None
-            
-            # Perform spectral unmixing if enabled
-            if self.run_spectral_unmixing:
-                components, abundance_maps = self._perform_spectral_unmixing(hspy_data, system_info)
-            
-            # Create summary images for LLM
-            summary_images = []
-            if components is not None and abundance_maps is not None:
-                summary_images = self._create_summary_images(hspy_data, components, abundance_maps, system_info)
-        
-            # Build prompt for LLM analysis
-            prompt_parts = [SPECTROSCOPY_ANALYSIS_INSTRUCTIONS]
-            energy_info_text = self._build_energy_info_for_prompt(hspy_data, system_info)
-
-            prompt_parts.append(f"\n\nHyperspectral Data Information:\n{energy_info_text}")
-            prompt_parts.append(f"- Data shape: {hspy_data.shape}")
-            prompt_parts.append(f"- Number of spectral channels: {hspy_data.shape[-1]}")
-            prompt_parts.append(f"- Spatial dimensions: {hspy_data.shape[:2]}")
-            
-            if components is not None:
-                prompt_parts.append(f"- Spectral unmixing method: {self.spectral_settings.get('method', 'nmf').upper()}")
-                prompt_parts.append(f"- Number of components found: {components.shape[0]}")
-            
-            # Add summary images
-            if summary_images:
-                for i, img_bytes in enumerate(summary_images):
-                    prompt_parts.append(f"\n\nSummary Image {i+1}:")
-                    prompt_parts.append({"mime_type": "image/jpeg", "data": img_bytes})
-            
-            # Add system information if provided
-            if system_info:
-                prompt_parts.append("\n\nAdditional System Information:")
-                if isinstance(system_info, dict):
-                    prompt_parts.append(json.dumps(system_info, indent=2))
-                else:
-                    prompt_parts.append(str(system_info))
-            
-            prompt_parts.append("\n\nProvide your analysis in the requested JSON format.")
-            
-            # Send to LLM
-            self.logger.info("Sending hyperspectral analysis request to LLM...")
-            response = self.model.generate_content(
-                contents=prompt_parts,
-                generation_config=self.generation_config,
-                safety_settings=self.safety_settings,
+            # Use the shared base method with standard analysis instructions
+            result = self._analyze_hyperspectral_data_base(
+                data_path=data_path,
+                system_info=system_info,
+                instruction_prompt=SPECTROSCOPY_ANALYSIS_INSTRUCTIONS,
+                analysis_type="standard"
             )
             
-            result_json, error_dict = self._parse_llm_response(response)
-            
-            if error_dict:
-                return error_dict
-            
-            # Enhance results with quantitative data
-            if result_json and components is not None:
-                result_json["quantitative_analysis"] = {
-                    "spectral_unmixing_method": self.spectral_settings.get('method', 'nmf'),
-                    "n_components": components.shape[0],
-                    "component_spectra_shape": components.shape,
-                    "abundance_maps_shape": abundance_maps.shape,
-                    "data_statistics": {
-                        "mean_intensity": float(np.mean(hspy_data)),
-                        "std_intensity": float(np.std(hspy_data)),
-                        "min_intensity": float(np.min(hspy_data)),
-                        "max_intensity": float(np.max(hspy_data)),
-                    }
-                }
+            if "error" in result:
+                return result
             
             self.logger.info("Hyperspectral analysis completed successfully")
-            return result_json
+            return result
             
         except Exception as e:
             self.logger.exception(f"Error during hyperspectral analysis: {e}")
