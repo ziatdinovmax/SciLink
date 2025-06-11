@@ -6,9 +6,9 @@ import json
 IMAGE_PATH = "data/GH_stm.tif"  # <<< SET PATH TO YOUR IMAGE
 SYSTEM_INFO_PATH = "data/GH_stm.json"  # <<< SET PATH TO ASSOCIATE METADATA
 
-ANALYSIS_AGENT_MODEL = "gemini-2.5-pro-preview-05-06"  # Model for analysis step
-GENERATOR_AGENT_MODEL = "gemini-2.5-pro-preview-05-06"  # Model for structure generation step
-VALIDATOR_AGENT_MODEL = "gemini-2.5-pro-preview-05-06" # Model for structure validation
+ANALYSIS_AGENT_MODEL = "gemini-2.5-pro-preview-06-05"  # Model for analysis step
+GENERATOR_AGENT_MODEL = "gemini-2.5-pro-preview-06-05"  # Model for structure generation step
+VALIDATOR_AGENT_MODEL = "gemini-2.5-pro-preview-06-05" # Model for structure validation
 
 
 GENERATOR_ADDITIONAL_INSTRUCTIONS = "Save the structure in POSCAR format."
