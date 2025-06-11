@@ -1054,13 +1054,3 @@ class GeminiSpectroscopyAnalysisAgent:
         
         self.logger.info("Using channel indices (no energy range provided)")
         return energy_axis, xlabel, has_energy_info
-
-
-    def generate_analysis_claims(self, data_path: str, system_info: Dict[str, Any] | None = None) -> Dict[str, Any]:
-        """
-        Generate scientific claims from hyperspectral analysis for literature comparison.
-        Similar to microscopy agent's analyze_microscopy_image_for_claims method.
-        """
-        # This would use modified instructions focused on claim generation
-        # Implementation would be similar to analyze_hyperspectral_data but with different prompt
-        pass
