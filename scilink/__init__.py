@@ -1,5 +1,3 @@
-# scilinkllm/__init__.py
-
 from .auth import set_api_key, show_api_status
 
 def configure(service: str, api_key: str):
@@ -40,6 +38,7 @@ from .workflows.microscopy_novelty_workflow import MicroscopyNoveltyAssessmentWo
 from .workflows.dft_workflow import DFTWorkflow
 from .workflows.spectroscopy_novelty_workflow import SpectroscopyNoveltyAssessmentWorkflow
 from .workflows.dft_recommendation_workflow import DFTRecommendationsWorkflow
+from .workflows.microscopy2dft import Microscopy2DFT
 
 __all__ = [
     'configure', 
@@ -48,5 +47,6 @@ __all__ = [
     'MicroscopyNoveltyAssessmentWorkflow',
     'DFTWorkflow', 
     'SpectroscopyNoveltyAssessmentWorkflow',
-    'DFTRecommendationsWorkflow'
+    'DFTRecommendationsWorkflow',
+    'Microscopy2DFT'
 ]
