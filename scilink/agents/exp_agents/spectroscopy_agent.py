@@ -50,7 +50,8 @@ class GeminiSpectroscopyAnalysisAgent:
             'n_components': 4,
             'normalize': True,
             'enabled': True,
-            'auto_components': True
+            'auto_components': True,
+            'max_iter': 500
         }
         self.spectral_settings = spectral_unmixing_settings if spectral_unmixing_settings else default_settings
         self.run_spectral_unmixing = self.spectral_settings.get('enabled', True)

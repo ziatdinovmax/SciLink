@@ -5,37 +5,41 @@ from io import StringIO
 import json
 from typing import Optional, Dict, Any
 
-# Import all the agents
-from sim_agents.structure_agent import StructureGenerator
-from sim_agents.val_agent import StructureValidatorAgent
-from sim_agents.vasp_agent import VaspInputAgent
-from sim_agents.val_agent import IncarValidatorAgent
+from ..auth import get_api_key, APIKeyNotFoundError
+from ..agents.sim_agents.structure_agent import StructureGenerator
+from ..agents.sim_agents.val_agent import StructureValidatorAgent, IncarValidatorAgent
+from ..agents.sim_agents.vasp_agent import VaspInputAgent
 
 
 class DFTWorkflow:
     """
-    Workflow for generating DFT input structures: 
-    User request → Structure → Validation → VASP inputs → Literature validation → Improvements -> Final VASP inputs
+    Complete DFT workflow: User request → Structure → Validation → VASP inputs
     """
     
-    def __init__(self, google_api_key: str, futurehouse_api_key: str = None,
-                 generator_model: str = "gemini-2.5-pro-preview-05-06", 
-                 validator_model: str = "gemini-2.5-pro-preview-05-06",
-                 output_dir: str = "vasp_workflow_output",
+    def __init__(self, 
+                 google_api_key: str = None,
+                 futurehouse_api_key: str = None,
+                 mp_api_key: str = None,
+                 generator_model: str = "gemini-2.5-pro-preview-06-05",
+                 validator_model: str = "gemini-2.5-pro-preview-06-05",
+                 output_dir: str = "dft_workflow_output",
                  max_refinement_cycles: int = 2,
-                 mp_api_key: str = None):
-        """
-        Initialize the complete DFT workflow.
+                 script_timeout: int = 180):
         
-        Args:
-            google_api_key: Google API key for Gemini models
-            futurehouse_api_key: FutureHouse API key for literature validation (optional)
-            generator_model: Model for structure generation
-            validator_model: Model for structure validation  
-            output_dir: Directory to save all outputs
-            max_refinement_cycles: Max structure refinement cycles
-        """
-
+        # Auto-discover API keys
+        if google_api_key is None:
+            google_api_key = get_api_key('google')
+            if not google_api_key:
+                raise APIKeyNotFoundError('google')
+        
+        if futurehouse_api_key is None:
+            futurehouse_api_key = get_api_key('futurehouse')
+            # Optional for DFT workflow
+        
+        if mp_api_key is None:
+            mp_api_key = get_api_key('materials_project')
+            # Optional - will warn in agents if needed
+        
         # Setup logging
         self.log_capture = StringIO()
         logging.basicConfig(
@@ -43,11 +47,10 @@ class DFTWorkflow:
             format='%(asctime)s - %(levelname)s: %(name)s: %(message)s', 
             force=True, 
             handlers=[
-                logging.StreamHandler(sys.stdout),  # Display in console
-                logging.StreamHandler(self.log_capture)  # Capture to string
+                logging.StreamHandler(sys.stdout),
+                logging.StreamHandler(self.log_capture)
             ]
         )
-
         self.logger = logging.getLogger(__name__)
 
         self.google_api_key = google_api_key
@@ -55,11 +58,11 @@ class DFTWorkflow:
         self.output_dir = output_dir
         self.max_refinement_cycles = max_refinement_cycles
         
-        
-        # Initialize agents
+        # Initialize agents with simplified parameters
         self.structure_generator = StructureGenerator(
             api_key=google_api_key,
             model_name=generator_model,
+            executor_timeout=script_timeout,
             generated_script_dir=output_dir,
             mp_api_key=mp_api_key
         )
@@ -81,6 +84,7 @@ class DFTWorkflow:
             )
         else:
             self.incar_validator = None
+            self.logger.info("Skipping literature validation - no FutureHouse API key provided")
             
         # Create output directory
         os.makedirs(output_dir, exist_ok=True)

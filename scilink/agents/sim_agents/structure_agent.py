@@ -3,9 +3,8 @@ from typing import Optional, Tuple
 
 from .llm_client import LLMClient
 from .executors import StructureExecutor, DEFAULT_TIMEOUT
-from .tools import (
-    ToolWithDocs, define_ase_tool, define_gb_tool,
-)
+from .tools import ToolWithDocs
+
 from .instruct import (
     INITIAL_PROMPT_TEMPLATE, 
     CORRECTION_PROMPT_TEMPLATE, 

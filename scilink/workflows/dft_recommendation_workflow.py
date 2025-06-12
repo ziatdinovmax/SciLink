@@ -1,27 +1,38 @@
 import os
 import json
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
-from exp_agents.microscopy_agent import GeminiMicroscopyAnalysisAgent
-import config
+# Updated imports for new package structure
+from ..auth import get_api_key, APIKeyNotFoundError
+from ..agents.exp_agents.microscopy_agent import GeminiMicroscopyAnalysisAgent
 
 
 class DFTRecommendationsWorkflow:
     """
-    Standalone workflow for generating DFT recommendations from existing 
-    microscopy analysis and novelty assessment results.
+    Standalone workflow for generating DFT recommendations.
     """
     
-    def __init__(self, google_api_key: str, output_dir: str = "dft_output"):
+    def __init__(self, 
+                 google_api_key: str = None,
+                 analysis_model: str = "gemini-2.5-pro-preview-06-05",
+                 output_dir: str = "dft_output"):
+        
+        # Auto-discover API key
+        if google_api_key is None:
+            google_api_key = get_api_key('google')
+            if not google_api_key:
+                raise APIKeyNotFoundError('google')
+        
         self.logger = logging.getLogger(__name__)
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
         
         # Initialize agent for text-only DFT recommendations
+        # No FFT/NMF settings needed for text-only analysis
         self.agent = GeminiMicroscopyAnalysisAgent(
             api_key=google_api_key,
-            model_name="gemini-2.5-pro-preview-05-06"
+            model_name=analysis_model
         )
     
     def run_from_files(self, analysis_file: str, novelty_file: str) -> Dict[str, Any]:
@@ -39,7 +50,8 @@ class DFTRecommendationsWorkflow:
         
         return self.run_from_data(analysis_text, novel_claims)
     
-    def run_from_data(self, analysis_text: str, novel_claims: List[str]) -> Dict[str, Any]:
+    def run_from_data(self, analysis_text: str, novel_claims: List[str], 
+                     system_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Generate DFT recommendations from provided data."""
         
         # Create novelty context
@@ -54,7 +66,7 @@ class DFTRecommendationsWorkflow:
         # Generate recommendations
         result = self.agent.analyze_microscopy_image_for_structure_recommendations(
             image_path=None,  # Text-only mode
-            system_info=getattr(config, 'SYSTEM_INFO', None),
+            system_info=system_info,  # Pass as parameter instead of config
             additional_prompt_context=context,
             cached_detailed_analysis=analysis_text
         )

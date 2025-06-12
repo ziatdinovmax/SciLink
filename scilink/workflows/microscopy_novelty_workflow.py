@@ -5,9 +5,11 @@ import json
 from io import StringIO
 from typing import Dict, Any, List
 
-import config
-from exp_agents.microscopy_agent import GeminiMicroscopyAnalysisAgent
-from lit_agents.literature_agent import OwlLiteratureAgent
+from ..agents.exp_agents.microscopy_agent import GeminiMicroscopyAnalysisAgent
+from ..agents.lit_agents.literature_agent import OwlLiteratureAgent
+
+import warnings
+from ..auth import get_api_key, APIKeyNotFoundError
 
 
 def select_claims_interactive(claims):
@@ -69,13 +71,15 @@ class MicroscopyNoveltyAssessmentWorkflow:
     Workflow for analyzing experimental results and assessing their novelty.
     Based on exp2lit.py structure.
     """
-    
-    def __init__(self, google_api_key: str, futurehouse_api_key: str,
-                 analysis_model: str = "gemini-2.5-pro-preview-05-06",
+    def __init__(self, 
+                 google_api_key: str = None,
+                 futurehouse_api_key: str = None,
+                 analysis_model: str = "gemini-2.5-pro-preview-06-05",
                  output_dir: str = "novelty_assessment_output",
                  max_wait_time: int = 400,
                  analysis_enabled: bool = True,
-                 dft_recommendations: bool = False):
+                 dft_recommendations: bool = False
+                 ):
         
         # Setup logging
         self.log_capture = StringIO()
@@ -89,25 +93,47 @@ class MicroscopyNoveltyAssessmentWorkflow:
             ]
         )
         
+        # Auto-discover API keys if not provided
+        if google_api_key is None:
+            google_api_key = get_api_key('google')
+            if not google_api_key:
+                raise APIKeyNotFoundError('google')
+        
+        if futurehouse_api_key is None:
+            futurehouse_api_key = get_api_key('futurehouse')
+            if not futurehouse_api_key:
+                warnings.warn(
+                    "FutureHouse API key not found. Literature search will be disabled. "
+                    "Set FUTUREHOUSE_API_KEY environment variable or use "
+                    "scilinkllm.configure('futurehouse', 'your-key') to enable literature search."
+                )
+        
         self.output_dir = output_dir
         self.dft_recommendations = dft_recommendations
         os.makedirs(output_dir, exist_ok=True)
         
-        # Handle FFT/NMF settings
-        fft_nmf_settings = config.FFT_NMF_SETTINGS.copy()
-        fft_nmf_settings['FFT_NMF_ENABLED'] = analysis_enabled
+        # Build sFFT/NMF settings for image abalysis
+        fft_nmf_settings = {
+            'FFT_NMF_ENABLED': analysis_enabled,
+            'FFT_NMF_AUTO_PARAMS': True,
+            'components': 3, #  Default value, will be auto-determined if auto_params=True
+            'output_dir': output_dir
+        }
         
-        # Initialize agents (same as exp2lit.py)
+        # Initialize agents
         self.analysis_agent = GeminiMicroscopyAnalysisAgent(
             api_key=google_api_key,
             model_name=analysis_model,
             fft_nmf_settings=fft_nmf_settings
         )
         
-        self.lit_agent = OwlLiteratureAgent(
-            api_key=futurehouse_api_key,
-            max_wait_time=max_wait_time
-        )
+        if futurehouse_api_key:
+            self.lit_agent = OwlLiteratureAgent(
+                api_key=futurehouse_api_key,
+                max_wait_time=max_wait_time
+            )
+        else:
+            self.lit_agent = None
     
     def run_complete_workflow(self, image_path: str, system_info: Dict[str, Any] = None) -> Dict[str, Any]:
         """
@@ -354,7 +380,7 @@ class MicroscopyNoveltyAssessmentWorkflow:
         # Generate DFT recommendations using text-only path
         dft_recommendations_result = self.analysis_agent.analyze_microscopy_image_for_structure_recommendations(
             image_path=None,  # Text-only path
-            system_info=config.SYSTEM_INFO,
+            system_info=None,
             additional_prompt_context=novelty_context,
             cached_detailed_analysis=initial_analysis_text
         )

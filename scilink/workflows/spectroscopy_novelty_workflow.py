@@ -5,9 +5,11 @@ import json
 from io import StringIO
 from typing import Dict, Any, List
 
-import config
-from exp_agents.spectroscopy_agent import GeminiSpectroscopyAnalysisAgent
-from lit_agents.literature_agent import OwlLiteratureAgent
+from ..agents.exp_agents.spectroscopy_agent import GeminiSpectroscopyAnalysisAgent
+from ..agents.lit_agents.literature_agent import OwlLiteratureAgent
+
+import warnings
+from ..auth import get_api_key, APIKeyNotFoundError
 
 
 def select_claims_interactive(claims):
@@ -72,11 +74,26 @@ class SpectroscopyNoveltyAssessmentWorkflow:
     Focuses purely on novelty assessment through literature validation.
     """
     
-    def __init__(self, google_api_key: str, futurehouse_api_key: str,
+    def __init__(self, 
+                 google_api_key: str = None,
+                 futurehouse_api_key: str = None,
                  analysis_model: str = "gemini-2.5-pro-preview-06-05",
                  output_dir: str = "spectroscopy_novelty_output",
                  max_wait_time: int = 400,
                  spectral_unmixing_enabled: bool = True):
+        
+        # Auto-discover API keys
+        if google_api_key is None:
+            google_api_key = get_api_key('google')
+            if not google_api_key:
+                raise APIKeyNotFoundError('google')
+        
+        if futurehouse_api_key is None:
+            futurehouse_api_key = get_api_key('futurehouse')
+            if not futurehouse_api_key:
+                warnings.warn(
+                    "FutureHouse API key not found. Literature search will be disabled."
+                )
         
         # Setup logging
         self.log_capture = StringIO()
@@ -93,13 +110,14 @@ class SpectroscopyNoveltyAssessmentWorkflow:
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
         
-        # Handle spectral unmixing settings
+        # Fixed spectral unmixing settings
         spectral_settings = {
             'method': 'nmf',
-            'n_components': 4,
+            'n_components': 4,  # Default value, will be auto-determined if auto_components=True
             'normalize': True,
             'enabled': spectral_unmixing_enabled,
-            'auto_components': True
+            'auto_components': True,  # Always use auto component selection
+            'max_iter': 500
         }
         
         # Initialize agents
@@ -110,10 +128,13 @@ class SpectroscopyNoveltyAssessmentWorkflow:
             output_dir=output_dir
         )
         
-        self.lit_agent = OwlLiteratureAgent(
-            api_key=futurehouse_api_key,
-            max_wait_time=max_wait_time
-        )
+        if futurehouse_api_key:
+            self.lit_agent = OwlLiteratureAgent(
+                api_key=futurehouse_api_key,
+                max_wait_time=max_wait_time
+            )
+        else:
+            self.lit_agent = None
     
     def run_complete_workflow(self, data_path: str, system_info: Dict[str, Any] = None) -> Dict[str, Any]:
         """
