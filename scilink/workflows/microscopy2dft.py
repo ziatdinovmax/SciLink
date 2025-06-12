@@ -357,6 +357,25 @@ class Microscopy2DFT:
             print(f"      Description: {structure_rec.get('description', 'N/A')}")
             
             try:
+                # Create structure-specific subdirectory
+                structure_name = f"structure_{i:02d}"
+                structure_output_dir = self.output_dir / "generated_structures" / structure_name
+                structure_output_dir.mkdir(parents=True, exist_ok=True)
+                
+                print(f"      📁 Output directory: {structure_name}/")
+                
+                # Create a new DFT workflow instance for this structure
+                structure_dft_workflow = DFTWorkflow(
+                    google_api_key=self.dft_workflow.google_api_key,
+                    futurehouse_api_key=self.dft_workflow.futurehouse_api_key,
+                    mp_api_key=getattr(self.dft_workflow.structure_generator, 'mp_api_key', None),
+                    generator_model=self.dft_workflow.structure_generator.llm_client.model_name,
+                    validator_model=self.dft_workflow.structure_validator.model_name,
+                    output_dir=str(structure_output_dir),  # Structure-specific directory
+                    max_refinement_cycles=self.dft_workflow.max_refinement_cycles,
+                    script_timeout=self.dft_workflow.structure_generator.ase_executor.timeout
+                )
+                
                 # Create detailed request for structure generation
                 user_request = structure_rec.get('description', '')
                 if 'scientific_interest' in structure_rec:
@@ -364,13 +383,15 @@ class Microscopy2DFT:
                 user_request += ". Save the structure in POSCAR format."
                 
                 # Generate the structure
-                struct_result = self.dft_workflow.run_complete_workflow(user_request)
+                struct_result = structure_dft_workflow.run_complete_workflow(user_request)
                 
                 structure_info = {
                     "recommendation": structure_rec,
                     "generation_result": struct_result,
                     "structure_number": i,
-                    "user_request": user_request
+                    "user_request": user_request,
+                    "output_directory": str(structure_output_dir),  # Track the specific directory
+                    "structure_name": structure_name
                 }
                 
                 if struct_result.get('final_status') == 'success':
@@ -381,8 +402,13 @@ class Microscopy2DFT:
                             structure_info["structure_file"] = struct_gen.get('final_structure_path')
                             structure_info["script_file"] = struct_gen.get('final_script_path')
                             structure_info["success"] = True
+                            
+                            # Create a summary file for this structure
+                            self._create_structure_summary(structure_info, structure_output_dir)
+                            
                             filename = os.path.basename(struct_gen.get('final_structure_path', 'unknown'))
                             print(f"      ✅ Structure generated: {filename}")
+                            print(f"      📁 Files saved to: {structure_name}/")
                         else:
                             structure_info["success"] = False
                             error_msg = struct_gen.get('message', 'Unknown error')
@@ -403,7 +429,8 @@ class Microscopy2DFT:
                     "recommendation": structure_rec,
                     "error": str(struct_e),
                     "success": False,
-                    "structure_number": i
+                    "structure_number": i,
+                    "structure_name": f"structure_{i:02d}"
                 })
                 print(f"      ❌ Error generating structure {i}: {struct_e}")
         
@@ -412,6 +439,30 @@ class Microscopy2DFT:
         print(f"\n✅ Structure generation completed: {len(successful)}/{len(generated_structures)} successful")
         
         return generated_structures
+    
+    def _create_structure_summary(self, structure_info: Dict[str, Any], output_dir: Path):
+        """Create a summary file for each generated structure."""
+        
+        summary = {
+            "structure_number": structure_info["structure_number"],
+            "structure_name": structure_info["structure_name"],
+            "recommendation": structure_info["recommendation"],
+            "user_request": structure_info["user_request"],
+            "generation_status": "success" if structure_info["success"] else "failed",
+            "files_generated": [],
+            "output_directory": str(output_dir)
+        }
+        
+        # List all files in the output directory
+        if output_dir.exists():
+            for file_path in output_dir.glob("*"):
+                if file_path.is_file():
+                    summary["files_generated"].append(file_path.name)
+        
+        # Save summary
+        summary_file = output_dir / "structure_summary.json"
+        with open(summary_file, 'w') as f:
+            json.dump(summary, f, indent=2)
     
     def _generate_final_summary(self, pipeline_result: Dict[str, Any]):
         """Generate and display final pipeline summary."""
@@ -437,24 +488,34 @@ class Microscopy2DFT:
             print(f"   ⚛️  DFT recommendations: {recommendations_count}")
             print(f"   🏗️  Structures generated: {len(successful_structures)}")
             
-            print(f"\n📁 Generated Structure Files:")
+            print(f"\n📁 Generated Structure Directories:")
             for i, struct in enumerate(successful_structures, 1):
-                if 'structure_file' in struct:
-                    filename = os.path.basename(struct['structure_file'])
-                    desc = struct['recommendation'].get('description', 'N/A')
-                    print(f"   [{i}] {filename}")
-                    print(f"       {desc}")
+                structure_name = struct.get('structure_name', f'structure_{i:02d}')
+                desc = struct['recommendation'].get('description', 'N/A')
+                print(f"   [{i}] {structure_name}/")
+                print(f"       {desc}")
+                print(f"       📄 Contains: POSCAR, INCAR, KPOINTS, scripts, logs")
             
-            print(f"\n📂 Output Directories:")
-            print(f"   • Main output: {self.output_dir}/")
-            print(f"   • Novelty assessment: {self.output_dir}/novelty_assessment/")
-            print(f"   • DFT recommendations: {self.output_dir}/dft_recommendations/") 
-            print(f"   • Generated structures: {self.output_dir}/generated_structures/")
+            print(f"\n📂 Main Output Directory Structure:")
+            print(f"   {self.output_dir}/")
+            print(f"   ├── novelty_assessment/")
+            print(f"   ├── dft_recommendations/") 
+            print(f"   ├── generated_structures/")
+            for struct in successful_structures:
+                structure_name = struct.get('structure_name', 'structure_XX')
+                print(f"   │   ├── {structure_name}/")
+                print(f"   │   │   ├── POSCAR")
+                print(f"   │   │   ├── INCAR")
+                print(f"   │   │   ├── KPOINTS")
+                print(f"   │   │   ├── structure_summary.json")
+                print(f"   │   │   └── workflow_log.txt")
+            print(f"   └── complete_pipeline_result.json")
         else:
             print(f"⚠️  Pipeline completed but no structures were successfully generated")
             print(f"   📊 Claims generated: {claims_count}")
             print(f"   🔍 Novel findings: {novel_count}")
             print(f"   ⚛️  DFT recommendations: {recommendations_count}")
+
     
     def _save_pipeline_results(self, pipeline_result: Dict[str, Any]):
         """Save complete pipeline results to file."""
