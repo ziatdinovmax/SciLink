@@ -283,7 +283,7 @@ class Microscopy2DFT:
         # Limit to max_structures
         available_recommendations = recommendations[:max_structures]
         
-        if interactive and sys.stdin.isatty():
+        if interactive:
             return self._interactive_structure_selection(available_recommendations)
         else:
             # Auto-select top N
