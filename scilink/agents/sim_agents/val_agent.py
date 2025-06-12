@@ -1,6 +1,7 @@
 import os
 import logging
 import json
+from typing import Dict
 
 from ase.io import read as ase_read
 
@@ -9,6 +10,7 @@ from google.generativeai.types import GenerationConfig
 
 from .instruct import VALIDATOR_PROMPT_TEMPLATE, INCAR_VALIDATION_INSTRUCTIONS
 from ..lit_agents.literature_agent import IncarLiteratureAgent
+from .utils import generate_structure_views
 
 
 class StructureValidatorAgent:
@@ -69,10 +71,11 @@ class StructureValidatorAgent:
 
 
     def _get_llm_validation_and_hints(self, original_request: str, generating_script_content: str,
-                                     structure_file_path: str, structure_file_content: str = "", 
-                                     tool_documentation: str = None) -> dict:
+                                      structure_file_path: str, structure_file_content: str = "", 
+                                      image_paths: Dict[str, str] = None,
+                                      tool_documentation: str = None) -> dict:
         """
-        Uses an LLM to perform full validation including analysis of the actual structure file content.
+        Uses an LLM to perform full validation including analysis of the actual structure file content and images.
         """
         
         # Format tool documentation section
@@ -99,19 +102,36 @@ class StructureValidatorAgent:
 
     """
 
-        prompt = VALIDATOR_PROMPT_TEMPLATE.format(
+        base_prompt = VALIDATOR_PROMPT_TEMPLATE.format(
             tool_documentation=doc_section,
             original_request=original_request,
             generating_script_content=generating_script_content,
             structure_file_path=structure_file_path,
         ) + structure_section
+
+        # --- Build multi-modal prompt ---
+        prompt_parts = [base_prompt]
+        if image_paths:
+            self.logger.info("Adding structure view images to validation prompt.")
+            prompt_parts.append("\n\n## STRUCTURE VISUALIZATION:\n")
+            # Read images into bytes and append
+            for axis, img_path in sorted(image_paths.items()):
+                try:
+                    with open(img_path, 'rb') as f:
+                        img_bytes = f.read()
+                    prompt_parts.append(f"View along {axis.upper()}-axis:")
+                    prompt_parts.append({"mime_type": "image/png", "data": img_bytes})
+                except Exception as e:
+                    self.logger.error(f"Could not read image file {img_path} for prompt: {e}")
+                    prompt_parts.append(f"(Error loading image for {axis}-axis view)")
+
         
         self.logger.info("Sending request to Validator LLM for full validation and script hints...")
-        self.logger.debug(f"Validator LLM Prompt (first 500 chars):\n{prompt[:500]}...")
+        self.logger.debug(f"Validator LLM Prompt (first 500 chars):\n{base_prompt[:500]}...")
 
         try:
             response = self.model.generate_content(
-                contents=[prompt],
+                contents=prompt_parts,
                 generation_config=self.generation_config,
             )
             
@@ -154,9 +174,9 @@ class StructureValidatorAgent:
             }
 
     def validate_structure_and_script(self, structure_file_path: str, generating_script_content: str, 
-                                 original_request: str, tool_documentation: str = None) -> dict:
+                                      original_request: str, tool_documentation: str = None) -> dict:
         """
-        Main validation method. Relies on LLM for all checks.
+        Main validation method. Generates images and relies on LLM for all checks.
         Returns a dictionary with validation status, issues, and script modification hints.
         """
         self.logger.info(f"Starting LLM-based validation with structure file analysis for '{structure_file_path}'")
@@ -177,12 +197,18 @@ class StructureValidatorAgent:
             self.logger.error(f"Validation aborted: Structure file unparsable. Issues: {parsing_issues}")
             return final_feedback
 
-        # 2. Get LLM-based validation with actual file content
+        # 2. Generate images for visual validation
+        image_paths = generate_structure_views(structure_file_path)
+        if not image_paths:
+            self.logger.warning("Could not generate images for visual validation. Proceeding with text-only validation.")
+
+        # 3. Get LLM-based validation with actual file content and images
         llm_feedback = self._get_llm_validation_and_hints(
             original_request=original_request,
             generating_script_content=generating_script_content,
             structure_file_path=structure_file_path,
-            structure_file_content=structure_file_content, # Pass raw file content to LLM
+            structure_file_content=structure_file_content, # Pass raw file content
+            image_paths=image_paths, # Pass generated image paths
             tool_documentation=tool_documentation
         )
 

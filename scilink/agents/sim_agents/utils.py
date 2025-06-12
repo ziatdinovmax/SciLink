@@ -1,8 +1,20 @@
 import os
 import logging
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 from datetime import datetime
+
+try:
+    from ase.io import read as ase_read
+    from ase.io import write as ase_write
+    ASE_AVAILABLE = True
+except ImportError:
+    ASE_AVAILABLE = False
+    # Define dummy functions to avoid runtime errors if ASE is not installed
+    def ase_read(*args, **kwargs):
+        raise ImportError("ASE is not installed. Please install it to use this functionality.")
+    def ase_write(*args, **kwargs):
+        raise ImportError("ASE is not installed. Please install it to use this functionality.")
 
 
 try:
@@ -87,8 +99,8 @@ class MaterialsProjectHelper:
         info += "    Once an mp-id is known (e.g., 'mp-149' for Si), it can be used in ASE scripts like: `atoms = bulk(mpid='mp-149')`.\n"
         info += "\n"
         info += "**Guidance for LLM:** When a material is mentioned:\n"
-        info += "   a. Check the common list above. If found, note the mp-id for use.\n"
-        info += "   b. If not in the common list, state that a search using `search_material_id` is required, specifying the `chemical_query` and appropriate `search_type` for the system to perform.\n"
+        info += "    a. Check the common list above. If found, note the mp-id for use.\n"
+        info += "    b. If not in the common list, state that a search using `search_material_id` is required, specifying the `chemical_query` and appropriate `search_type` for the system to perform.\n"
 
         return info
 
@@ -192,7 +204,7 @@ def ask_user_proceed_or_refine(validation_feedback, structure_file):
     
     print(f"\nOptions:")
     print(f"  [p] PROCEED - Use current structure: {structure_file}")
-    print(f"  [r] REFINE  - Attempt to fix issues")
+    print(f"  [r] REFINE   - Attempt to fix issues")
     
     while True:
         try:
@@ -202,3 +214,53 @@ def ask_user_proceed_or_refine(validation_feedback, structure_file):
             else: print("Please enter 'p' or 'r'")
         except (KeyboardInterrupt, EOFError):
             return 'refine'
+
+
+def generate_structure_views(structure_path: str, output_dir: str = None) -> Dict[str, str]:
+    """
+    Reads a structure file and saves images of the structure along the x, y, and z axes.
+
+    Args:
+        structure_path (str): Path to the POSCAR or other ASE-readable structure file.
+        output_dir (str): Directory to save the images. Defaults to the structure's directory.
+
+    Returns:
+        Dict[str, str]: A dictionary mapping axis ('x', 'y', 'z') to the file path of the generated image.
+    """
+    if not ASE_AVAILABLE:
+        logging.warning("ASE not found, skipping image generation for validation.")
+        return {}
+
+    logger = logging.getLogger(__name__)
+    image_paths = {}
+    try:
+        atoms = ase_read(structure_path)
+    except Exception as e:
+        logger.error(f"Failed to read structure file {structure_path} with ASE: {e}")
+        return image_paths
+
+    if output_dir is None:
+        output_dir = os.path.dirname(structure_path) or '.'
+    os.makedirs(output_dir, exist_ok=True)
+
+    base_name = os.path.splitext(os.path.basename(structure_path))[0]
+
+    # Rotations for views along major axes
+    # ASE's rotation format is 'ax,ay,az'
+    rotations = {
+        'x': '0y,90x,0z',  # View from +x
+        'y': '-90x,0y,0z', # View from +y
+        'z': '0x,0y,0z'    # View from +z (default)
+    }
+
+    logger.info(f"Generating structure view images for {structure_path}...")
+    for axis, rotation in rotations.items():
+        try:
+            output_path = os.path.join(output_dir, f"{base_name}_view_{axis}.png")
+            ase_write(output_path, atoms, format='png', rotation=rotation)
+            image_paths[axis] = output_path
+            logger.info(f"Saved structure view: {output_path}")
+        except Exception as e:
+            logger.error(f"Failed to write image for {axis}-axis view: {e}")
+
+    return image_paths
