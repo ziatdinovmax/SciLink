@@ -38,7 +38,7 @@ from .workflows.microscopy_novelty_workflow import MicroscopyNoveltyAssessmentWo
 from .workflows.dft_workflow import DFTWorkflow
 from .workflows.spectroscopy_novelty_workflow import SpectroscopyNoveltyAssessmentWorkflow
 from .workflows.dft_recommendation_workflow import DFTRecommendationsWorkflow
-from .workflows.microscopy2dft import Microscopy2DFT
+from .workflows.experiment2dft import Experimental2DFT
 
 __all__ = [
     'configure', 
@@ -48,5 +48,5 @@ __all__ = [
     'DFTWorkflow', 
     'SpectroscopyNoveltyAssessmentWorkflow',
     'DFTRecommendationsWorkflow',
-    'Microscopy2DFT'
+    'Experimental2DFT'
 ]

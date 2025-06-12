@@ -8,6 +8,7 @@ from pathlib import Path
 
 # Import other workflows
 from .microscopy_novelty_workflow import MicroscopyNoveltyAssessmentWorkflow
+from .spectroscopy_novelty_workflow import SpectroscopyNoveltyAssessmentWorkflow
 from .dft_recommendation_workflow import DFTRecommendationsWorkflow
 from .dft_workflow import DFTWorkflow
 
@@ -15,16 +16,18 @@ from .dft_workflow import DFTWorkflow
 from ..auth import get_api_key, APIKeyNotFoundError
 
 
-class Microscopy2DFT:
+class Experimental2DFT:
     """
-    Complete pipeline from microscopy data to atomic structures.
+    Complete pipeline from experimental data (microscopy or spectroscopy) to atomic structures.
     
     This workflow orchestrates the entire process:
-    1. Microscopy analysis with novelty assessment
+    1. Experimental data analysis with novelty assessment (microscopy or spectroscopy)
     2. DFT structure recommendations based on novelty
     3. Interactive or automatic structure selection
     4. Atomic structure generation with validation
     5. Complete results summary
+    
+    Supports both microscopy images and hyperspectral/spectroscopy data.
     """
     
     def __init__(self, 
@@ -34,11 +37,12 @@ class Microscopy2DFT:
                  analysis_model: str = "gemini-2.5-pro-preview-06-05",
                  generator_model: str = "gemini-2.5-pro-preview-06-05",
                  validator_model: str = "gemini-2.5-pro-preview-06-05",
-                 output_dir: str = "complete_pipeline_output",
+                 output_dir: str = "complete_experimental_pipeline_output",
                  max_wait_time: int = 400,
                  max_refinement_cycles: int = 2,
                  script_timeout: int = 300,
-                 analysis_enabled: bool = True):
+                 microscopy_analysis_enabled: bool = True,
+                 spectroscopy_analysis_enabled: bool = True):
         
         # Auto-discover API keys
         if google_api_key is None:
@@ -76,13 +80,22 @@ class Microscopy2DFT:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         # Initialize sub-workflows
-        self.novelty_workflow = MicroscopyNoveltyAssessmentWorkflow(
+        self.microscopy_workflow = MicroscopyNoveltyAssessmentWorkflow(
             google_api_key=google_api_key,
             futurehouse_api_key=futurehouse_api_key,
             analysis_model=analysis_model,
-            output_dir=str(self.output_dir / "novelty_assessment"),
+            output_dir=str(self.output_dir / "microscopy_novelty_assessment"),
             max_wait_time=max_wait_time,
-            analysis_enabled=analysis_enabled
+            analysis_enabled=microscopy_analysis_enabled
+        )
+        
+        self.spectroscopy_workflow = SpectroscopyNoveltyAssessmentWorkflow(
+            google_api_key=google_api_key,
+            futurehouse_api_key=futurehouse_api_key,
+            analysis_model=analysis_model,
+            output_dir=str(self.output_dir / "spectroscopy_novelty_assessment"),
+            max_wait_time=max_wait_time,
+            spectral_unmixing_enabled=spectroscopy_analysis_enabled
         )
         
         self.dft_rec_workflow = DFTRecommendationsWorkflow(
@@ -102,10 +115,11 @@ class Microscopy2DFT:
             script_timeout=script_timeout
         )
         
-        self.logger.info("CompleteExperimentalPipelineWorkflow initialized")
+        self.logger.info("Experimental2DFT workflow initialized")
     
     def run_complete_pipeline(self, 
-                             image_path: Union[str, Path],
+                             data_path: Union[str, Path],
+                             data_type: str,
                              system_info: Union[str, Path, Dict[str, Any]],
                              interactive: bool = True,
                              auto_select_top_n: int = 2,
@@ -114,7 +128,8 @@ class Microscopy2DFT:
         Run the complete experimental pipeline.
         
         Args:
-            image_path: Path to microscopy image
+            data_path: Path to experimental data (image for microscopy, .npy for spectroscopy)
+            data_type: Type of data - either 'microscopy' or 'spectroscopy'
             system_info: Path to system metadata JSON file or dict
             interactive: Whether to allow interactive structure selection
             auto_select_top_n: Number of top recommendations to auto-select in non-interactive mode
@@ -124,20 +139,25 @@ class Microscopy2DFT:
             Complete pipeline results dictionary
         """
         
+        # Validate data type
+        if data_type not in ['microscopy', 'spectroscopy']:
+            raise ValueError("data_type must be either 'microscopy' or 'spectroscopy'")
+        
         pipeline_result = {
-            "input_image": str(image_path),
+            "input_data": str(data_path),
+            "data_type": data_type,
             "input_system_info": str(system_info) if not isinstance(system_info, dict) else system_info,
             "steps_completed": [],
             "final_status": "started",
             "generated_structures": []
         }
         
-        self.logger.info("🚀 Starting Complete Experimental → Structure Pipeline")
-        print("🚀 Starting Complete Experimental → Structure Pipeline")
+        self.logger.info(f"🚀 Starting Complete {data_type.title()} → Structure Pipeline")
+        print(f"🚀 Starting Complete {data_type.title()} → Structure Pipeline")
         print("=" * 60)
         
-        # Step 1: Novelty Assessment
-        novelty_result = self._run_novelty_assessment(image_path, system_info)
+        # Step 1: Novelty Assessment (data type specific)
+        novelty_result = self._run_novelty_assessment(data_path, data_type, system_info)
         pipeline_result["novelty_assessment"] = novelty_result
         
         if novelty_result.get('final_status') != 'success':
@@ -191,33 +211,79 @@ class Microscopy2DFT:
         
         return pipeline_result
     
-    def _run_novelty_assessment(self, image_path: Union[str, Path], 
+    def run_microscopy_pipeline(self, 
+                               image_path: Union[str, Path],
+                               system_info: Union[str, Path, Dict[str, Any]],
+                               interactive: bool = True,
+                               auto_select_top_n: int = 2,
+                               max_structures: int = 5) -> Dict[str, Any]:
+        """
+        Convenience method for microscopy data analysis.
+        """
+        return self.run_complete_pipeline(
+            data_path=image_path,
+            data_type='microscopy',
+            system_info=system_info,
+            interactive=interactive,
+            auto_select_top_n=auto_select_top_n,
+            max_structures=max_structures
+        )
+    
+    def run_spectroscopy_pipeline(self, 
+                                 data_path: Union[str, Path],
+                                 system_info: Union[str, Path, Dict[str, Any]],
+                                 interactive: bool = True,
+                                 auto_select_top_n: int = 2,
+                                 max_structures: int = 5) -> Dict[str, Any]:
+        """
+        Convenience method for spectroscopy data analysis.
+        """
+        return self.run_complete_pipeline(
+            data_path=data_path,
+            data_type='spectroscopy',
+            system_info=system_info,
+            interactive=interactive,
+            auto_select_top_n=auto_select_top_n,
+            max_structures=max_structures
+        )
+    
+    def _run_novelty_assessment(self, 
+                               data_path: Union[str, Path], 
+                               data_type: str,
                                system_info: Union[str, Path, Dict[str, Any]]) -> Dict[str, Any]:
-        """Run microscopy analysis with novelty assessment."""
+        """Run novelty assessment based on data type."""
         
-        print("\n📊 STEP 1: Microscopy Analysis & Novelty Assessment")
+        print(f"\n📊 STEP 1: {data_type.title()} Analysis & Novelty Assessment")
         print("-" * 50)
         
         try:
-            novelty_result = self.novelty_workflow.run_complete_workflow(
-                image_path=str(image_path),
-                system_info=system_info
-            )
+            if data_type == 'microscopy':
+                novelty_result = self.microscopy_workflow.run_complete_workflow(
+                    image_path=str(data_path),
+                    system_info=system_info
+                )
+            elif data_type == 'spectroscopy':
+                novelty_result = self.spectroscopy_workflow.run_complete_workflow(
+                    data_path=str(data_path),
+                    system_info=system_info
+                )
+            else:
+                raise ValueError(f"Unsupported data type: {data_type}")
             
             if novelty_result.get('final_status') == 'success':
                 claims_count = len(novelty_result.get("claims_generation", {}).get("claims", []))
                 novel_count = len(novelty_result.get("novelty_assessment", {}).get("potentially_novel", []))
                 
-                print(f"✅ Novelty assessment completed")
+                print(f"✅ {data_type.title()} novelty assessment completed")
                 print(f"   📋 Generated {claims_count} claims")
                 print(f"   🔍 Found {novel_count} potentially novel findings")
             else:
-                print(f"❌ Novelty assessment failed: {novelty_result.get('final_status')}")
+                print(f"❌ {data_type.title()} novelty assessment failed: {novelty_result.get('final_status')}")
             
             return novelty_result
             
         except Exception as e:
-            self.logger.exception("Failed in novelty assessment step")
+            self.logger.exception(f"Failed in {data_type} novelty assessment step")
             return {"final_status": f"error: {str(e)}"}
     
     def _run_dft_recommendations(self, novelty_result: Dict[str, Any], 
@@ -390,7 +456,7 @@ class Microscopy2DFT:
                     "generation_result": struct_result,
                     "structure_number": i,
                     "user_request": user_request,
-                    "output_directory": str(structure_output_dir),  # Track the specific directory
+                    "output_directory": str(structure_output_dir),
                     "structure_name": structure_name
                 }
                 
@@ -467,7 +533,9 @@ class Microscopy2DFT:
     def _generate_final_summary(self, pipeline_result: Dict[str, Any]):
         """Generate and display final pipeline summary."""
         
-        print("\n📋 PIPELINE SUMMARY")
+        data_type = pipeline_result.get("data_type", "experimental")
+        
+        print(f"\n📋 {data_type.upper()} PIPELINE SUMMARY")
         print("=" * 60)
         
         # Extract key metrics
@@ -482,7 +550,7 @@ class Microscopy2DFT:
         successful_structures = [s for s in structures if s.get('success', False)]
         
         if successful_structures:
-            print(f"🎉 Pipeline completed successfully!")
+            print(f"🎉 {data_type.title()} pipeline completed successfully!")
             print(f"   📊 Claims generated: {claims_count}")
             print(f"   🔍 Novel findings: {novel_count}")
             print(f"   ⚛️  DFT recommendations: {recommendations_count}")
@@ -498,7 +566,7 @@ class Microscopy2DFT:
             
             print(f"\n📂 Main Output Directory Structure:")
             print(f"   {self.output_dir}/")
-            print(f"   ├── novelty_assessment/")
+            print(f"   ├── {data_type}_novelty_assessment/")
             print(f"   ├── dft_recommendations/") 
             print(f"   ├── generated_structures/")
             for struct in successful_structures:
@@ -511,12 +579,11 @@ class Microscopy2DFT:
                 print(f"   │   │   └── workflow_log.txt")
             print(f"   └── complete_pipeline_result.json")
         else:
-            print(f"⚠️  Pipeline completed but no structures were successfully generated")
+            print(f"⚠️  {data_type.title()} pipeline completed but no structures were successfully generated")
             print(f"   📊 Claims generated: {claims_count}")
             print(f"   🔍 Novel findings: {novel_count}")
             print(f"   ⚛️  DFT recommendations: {recommendations_count}")
 
-    
     def _save_pipeline_results(self, pipeline_result: Dict[str, Any]):
         """Save complete pipeline results to file."""
         
@@ -538,10 +605,13 @@ class Microscopy2DFT:
     def get_summary(self, pipeline_result: Dict[str, Any]) -> str:
         """Get a human-readable summary of the pipeline results."""
         
-        summary = f"Complete Experimental Pipeline Summary\n{'='*40}\n"
+        data_type = pipeline_result.get("data_type", "experimental")
+        
+        summary = f"Complete {data_type.title()} Pipeline Summary\n{'='*40}\n"
         summary += f"Status: {pipeline_result.get('final_status', 'Unknown')}\n"
+        summary += f"Data type: {data_type}\n"
         summary += f"Steps completed: {', '.join(pipeline_result.get('steps_completed', []))}\n"
-        summary += f"Input image: {os.path.basename(str(pipeline_result.get('input_image', 'Unknown')))}\n\n"
+        summary += f"Input data: {os.path.basename(str(pipeline_result.get('input_data', 'Unknown')))}\n\n"
         
         # Novelty assessment summary
         novelty_result = pipeline_result.get("novelty_assessment", {})
