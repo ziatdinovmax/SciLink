@@ -1,13 +1,10 @@
 import google.generativeai as genai
-
 import os
 import logging
-
 
 # Define constants for tool names
 ASE_EXECUTE_TOOL_NAME = "execute_ase_script"
 GB_EXECUTE_TOOL_NAME = "execute_gb_script"
-
 
 def define_ase_tool():
     """Defines the Tool structure for the ASE script execution function."""
@@ -41,7 +38,6 @@ def define_ase_tool():
         ]
     )
 
-
 def define_gb_tool():
     """Defines the grain boundary tool (requires aimsgb documentation)."""
     return genai.protos.Tool(
@@ -73,6 +69,23 @@ def define_gb_tool():
         ]
     )
 
+# Tool configurations - moved from config.py
+TOOL_CONFIGS = {
+    "GrainBoundary": {
+        "docs_path": "docs/aimsgb.txt",  # Relative to sim_agents directory
+        "keywords": ["grain boundary", "grain-boundary", "gb ", "sigma", "csl", 
+                    "twist", "tilt", "bicrystal", "rotation axis", "aimsgb"],
+        "tool_func": "define_gb_tool"
+    }
+    # Future tools can be added here
+}
+
+# Tool function mapping
+TOOL_FUNCTION_MAP = {
+    "define_ase_tool": define_ase_tool,
+    "define_gb_tool": define_gb_tool,
+    # Add new tool functions here as they're created
+}
 
 class ToolWithDocs:
     """Container for a tool and its optional documentation."""
@@ -92,24 +105,36 @@ class ToolWithDocs:
     
     def _load_docs(self) -> str:
         """Load documentation from file if it exists."""
-        if not self.docs_path or not os.path.exists(self.docs_path):
-            logging.warning(f"Documentation file not found: {self.docs_path}")
+        if not self.docs_path:
             return None
+            
+        # Try different path resolutions
+        possible_paths = [
+            self.docs_path,  # As provided
+            os.path.join(os.path.dirname(__file__), self.docs_path),  # Relative to this file
+            os.path.join(os.path.dirname(__file__), "../..", self.docs_path),  # From package root
+        ]
         
-        try:
-            with open(self.docs_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            
-            # Optionally truncate if too long
-            max_length = 15000
-            if len(content) > max_length:
-                content = content[:max_length] + "\n\n[... Documentation truncated ...]"
-                logging.info(f"Truncated {self.name} docs from {len(content)} to {max_length} chars")
-            
-            return content
-        except Exception as e:
-            logging.error(f"Failed to load docs for {self.name} from {self.docs_path}: {e}")
-            return None
+        for path in possible_paths:
+            if os.path.exists(path):
+                try:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    
+                    # Optionally truncate if too long
+                    max_length = 15000
+                    if len(content) > max_length:
+                        content = content[:max_length] + "\n\n[... Documentation truncated ...]"
+                        logging.info(f"Truncated {self.name} docs from {len(content)} to {max_length} chars")
+                    
+                    logging.info(f"Loaded docs for {self.name} from: {path}")
+                    return content
+                except Exception as e:
+                    logging.error(f"Failed to read docs for {self.name} from {path}: {e}")
+                    continue
+        
+        logging.warning(f"Documentation file not found for {self.name}: {self.docs_path}")
+        return None
     
     def matches_request(self, request_text: str) -> bool:
         """Check if this tool matches the request based on keywords."""
@@ -118,3 +143,38 @@ class ToolWithDocs:
         
         request_lower = request_text.lower()
         return any(keyword in request_lower for keyword in self.keywords)
+
+def get_available_tools():
+    """Get all available tools with their configurations."""
+    tools = []
+    
+    # Always include ASE as the default fallback tool
+    tools.append(ToolWithDocs(
+        name="ASE",
+        tool_func=define_ase_tool,
+        docs_path=None,
+        keywords=[]  # Empty keywords means it's the fallback
+    ))
+    
+    # Add configured tools
+    for tool_name, config_dict in TOOL_CONFIGS.items():
+        if tool_name == "ASE":
+            continue  # Skip ASE, already added
+        
+        func_name = config_dict.get("tool_func")
+        tool_func = TOOL_FUNCTION_MAP.get(func_name)
+        
+        if tool_func is None:
+            logging.warning(f"Tool function '{func_name}' not found for tool '{tool_name}'. Skipping.")
+            continue
+        
+        tools.append(ToolWithDocs(
+            name=tool_name,
+            tool_func=tool_func,
+            docs_path=config_dict.get("docs_path"),
+            keywords=config_dict.get("keywords", [])
+        ))
+        
+        logging.info(f"Registered tool: {tool_name}")
+    
+    return tools

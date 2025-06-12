@@ -3,8 +3,7 @@ from typing import Optional, Tuple
 
 from .llm_client import LLMClient
 from .executors import StructureExecutor, DEFAULT_TIMEOUT
-from .tools import ToolWithDocs
-
+from .tools import get_available_tools
 from .instruct import (
     INITIAL_PROMPT_TEMPLATE, 
     CORRECTION_PROMPT_TEMPLATE, 
@@ -29,70 +28,12 @@ class StructureGenerator:
         self.generated_script_dir = generated_script_dir
         self.logger = logging.getLogger(__name__)
         
-        # Auto-discover and initialize tools
-        self.tools = self._auto_discover_tools()
+        self.tools = get_available_tools()
         
         self.mp_helper = MaterialsProjectHelper(api_key=mp_api_key)
         self.logger.info(f"StructureGenerator initialized with {len(self.tools)} tools")
 
-    def _auto_discover_tools(self) -> list:
-        """
-        Automatically discover and initialize all available tools.
-        No user configuration required.
-        """
-        from .tools import define_ase_tool, define_gb_tool
-        import config
-        import os
-        
-        # Get tool configs from config (internal)
-        tool_configs = getattr(config, '_TOOL_CONFIGS', {})
-        
-        # Map function names to actual functions
-        tool_function_map = {
-            "define_ase_tool": define_ase_tool,
-            "define_gb_tool": define_gb_tool,
-            # Add new tool functions here as they're created
-        }
-        
-        tools = []
-        
-        # Always include ASE as the default fallback tool
-        tools.append(ToolWithDocs(
-            name="ASE",
-            tool_func=define_ase_tool,
-            docs_path=None,
-            keywords=[]  # Empty keywords means it's the fallback
-        ))
-        
-        # Auto-add configured tools
-        for tool_name, config_dict in tool_configs.items():
-            if tool_name == "ASE":
-                continue  # Skip ASE, already added
-            
-            func_name = config_dict.get("tool_func")
-            tool_func = tool_function_map.get(func_name)
-            
-            if tool_func is None:
-                self.logger.warning(f"Tool function '{func_name}' not found for tool '{tool_name}'. Skipping.")
-                continue
-            
-            # Check if docs file exists
-            docs_path = config_dict.get("docs_path")
-            if docs_path and not os.path.exists(docs_path):
-                self.logger.warning(f"Documentation file not found: {docs_path}. Tool '{tool_name}' will work without docs.")
-            
-            tools.append(ToolWithDocs(
-                name=tool_name,
-                tool_func=tool_func,
-                docs_path=docs_path,
-                keywords=config_dict.get("keywords", [])
-            ))
-            
-            self.logger.info(f"Auto-discovered tool: {tool_name}")
-        
-        return tools
-
-    def _select_tool(self, request_text: str) -> ToolWithDocs:
+    def _select_tool(self, request_text: str):
         """Select the appropriate tool based on request content."""
         # Check specialized tools first
         for tool in self.tools:
