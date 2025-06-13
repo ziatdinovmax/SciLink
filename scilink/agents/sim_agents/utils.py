@@ -2,6 +2,8 @@ import os
 import logging
 from typing import Optional, List, Dict
 
+import numpy as np
+
 from datetime import datetime
 
 try:
@@ -219,13 +221,7 @@ def ask_user_proceed_or_refine(validation_feedback, structure_file):
 def generate_structure_views(structure_path: str, output_dir: str = None) -> Dict[str, str]:
     """
     Reads a structure file and saves images of the structure along the x, y, and z axes.
-
-    Args:
-        structure_path (str): Path to the POSCAR or other ASE-readable structure file.
-        output_dir (str): Directory to save the images. Defaults to the structure's directory.
-
-    Returns:
-        Dict[str, str]: A dictionary mapping axis ('x', 'y', 'z') to the file path of the generated image.
+    Now with automatic centering for better visualization.
     """
     if not ASE_AVAILABLE:
         logging.warning("ASE not found, skipping image generation for validation.")
@@ -233,8 +229,13 @@ def generate_structure_views(structure_path: str, output_dir: str = None) -> Dic
 
     logger = logging.getLogger(__name__)
     image_paths = {}
+    
     try:
         atoms = ase_read(structure_path)
+        
+        # ADD: Center the structure for better visualization
+        atoms = _center_structure_for_visualization(atoms)  # <- ADD UNDERSCORE HERE
+        
     except Exception as e:
         logger.error(f"Failed to read structure file {structure_path} with ASE: {e}")
         return image_paths
@@ -246,7 +247,6 @@ def generate_structure_views(structure_path: str, output_dir: str = None) -> Dic
     base_name = os.path.splitext(os.path.basename(structure_path))[0]
 
     # Rotations for views along major axes
-    # ASE's rotation format is 'ax,ay,az'
     rotations = {
         'x': '0y,90x,0z',  # View from +x
         'y': '-90x,0y,0z', # View from +y
@@ -264,3 +264,121 @@ def generate_structure_views(structure_path: str, output_dir: str = None) -> Dic
             logger.error(f"Failed to write image for {axis}-axis view: {e}")
 
     return image_paths
+
+def _center_structure_for_visualization(atoms):
+    """Center structure in cell for better visualization"""
+    positions = atoms.get_positions()
+    cell = atoms.get_cell()
+    
+    # Center of mass
+    center_of_mass = positions.mean(axis=0)
+    
+    # Cell center  
+    cell_center = cell.sum(axis=0) / 2
+    
+    # Shift to center
+    shift = cell_center - center_of_mass
+    atoms.translate(shift)
+    atoms.wrap()  # Keep atoms in cell
+    
+    return atoms
+
+def _get_optimal_rotations(atoms):
+    """Automatically determine optimal viewing angles with simple heuristics"""
+    
+    cell = atoms.get_cell()
+    positions = atoms.get_positions()
+    
+    # Quick checks using existing ASE functionality
+    
+    # 1. Check for slab structure (large vacuum gap)
+    if _is_slab_structure(cell, positions):
+        return _get_slab_rotations(cell)
+    
+    # 2. Check for highly anisotropic cell
+    elif _is_anisotropic(cell):
+        return _get_anisotropic_rotations(cell)
+    
+    # 3. Check for layered structure
+    elif _is_layered_structure(atoms):
+        return _get_layered_rotations(cell)
+    
+    # 4. Default: use orthogonal views
+    else:
+        return {
+            'x': '0y,90x,0z',
+            'y': '-90x,0y,0z', 
+            'z': '0x,0y,0z'
+        }
+
+def _is_slab_structure(cell, positions):
+    """Detect slab by checking for vacuum gap > 5 Å"""
+    cell_lengths = np.linalg.norm(cell, axis=1)
+    z_extent = positions[:, 2].max() - positions[:, 2].min()
+    
+    # If cell is much larger than atomic extent in one direction = slab
+    return any(length > z_extent + 5.0 for length in cell_lengths)
+
+def _get_slab_rotations(cell):
+    """Views optimized for slab structures"""
+    # Find the longest cell vector (likely the vacuum direction)
+    lengths = np.linalg.norm(cell, axis=1)
+    vacuum_dir = np.argmax(lengths)
+    
+    if vacuum_dir == 2:  # vacuum along z
+        return {
+            'surface': '0x,0y,0z',      # Top view of surface
+            'edge1': '90x,0y,0z',       # Edge view 1  
+            'edge2': '0x,90y,0z'        # Edge view 2
+        }
+    elif vacuum_dir == 1:  # vacuum along y
+        return {
+            'surface': '90x,0y,0z',
+            'edge1': '0x,0y,0z', 
+            'edge2': '0x,0y,90z'
+        }
+    else:  # vacuum_dir == 0, vacuum along x
+        return {
+            'surface': '0x,90y,0z',
+            'edge1': '0x,0y,0z',
+            'edge2': '90x,0y,0z'
+        }
+
+def _is_anisotropic(cell):
+    """Check if cell is highly anisotropic"""
+    lengths = np.linalg.norm(cell, axis=1)
+    ratio = lengths.max() / lengths.min()
+    return ratio > 2.0  # If one direction is 2x larger than another
+
+def _get_anisotropic_rotations(cell):
+    """Views aligned with cell vectors for anisotropic structures"""
+    # Find principal directions
+    lengths = np.linalg.norm(cell, axis=1)
+    
+    # Sort by length to identify short/long directions
+    sorted_indices = np.argsort(lengths)
+    
+    return {
+        'along_short': f'0x,0y,{90 if sorted_indices[0] != 2 else 0}z',
+        'along_medium': f'{90 if sorted_indices[1] == 0 else 0}x,{90 if sorted_indices[1] == 1 else 0}y,0z',
+        'along_long': f'{90 if sorted_indices[2] == 0 else 0}x,{90 if sorted_indices[2] == 1 else 0}y,{90 if sorted_indices[2] == 2 else 0}z'
+    }
+
+def _is_layered_structure(atoms):
+    """Simple check for layered materials based on z-coordinates"""
+    positions = atoms.get_positions()
+    z_coords = positions[:, 2]
+    
+    # Check if atoms form distinct layers (gaps > 2 Å between groups)
+    sorted_z = np.sort(z_coords)
+    gaps = np.diff(sorted_z)
+    
+    return np.any(gaps > 2.0)  # Significant gaps indicate layers
+
+def _get_layered_rotations(cell):
+    """Views for layered structures"""
+    return {
+        'layers': '90x,0y,0z',      # Side view to see layers
+        'in_plane': '0x,0y,0z',     # Top view of layer plane
+        'oblique': '45x,0y,45z'     # Oblique view for 3D perspective
+    }
