@@ -127,7 +127,7 @@ class ToolWithDocs:
                         content = f.read()
                     
                     # Optionally truncate if too long
-                    max_length = 15000
+                    max_length = 150000
                     if len(content) > max_length:
                         content = content[:max_length] + "\n\n[... Documentation truncated ...]"
                         logging.info(f"Truncated {self.name} docs from {len(content)} to {max_length} chars")
