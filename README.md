@@ -10,7 +10,7 @@ SciLinkLLM uses a system of intelligent agents to automate the research cycle fr
 
 ## Core Concepts
 
-- Agent-Based Architecture: The framework is built on a collection of specialized agents, each designed for a specific scientific task:
+- 🤖 Agent-Based Architecture: The framework is built on a collection of specialized agents, each designed for a specific scientific task:
 
    - 🔬 Experimental Agents: Analyze microscopy images or spectroscopy data to extract features and generate scientific claims.
    - 📚 Literature Agent: Queries scientific databases (via FutureHouse's OWL) to validate claims and assess novelty.
