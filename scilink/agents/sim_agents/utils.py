@@ -6,6 +6,8 @@ import numpy as np
 
 from datetime import datetime
 
+from ...auth import get_api_key 
+
 try:
     from ase.io import read as ase_read
     from ase.io import write as ase_write
@@ -38,7 +40,7 @@ class MaterialsProjectHelper:
     """Minimal MP helper for automatic material resolution by searching for mp-ids."""
 
     def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key or os.getenv("MP_API_KEY")
+        self.api_key = api_key or get_api_key('materials_project') or os.getenv("MP_API_KEY")
         self.enabled = MP_API_AVAILABLE and bool(self.api_key)
         self.logger = logging.getLogger(__name__)
 

@@ -3,13 +3,14 @@ import subprocess
 import tempfile
 import os
 import logging
+from ...auth import get_api_key
 
 DEFAULT_TIMEOUT = 120
 
 class StructureExecutor:
     def __init__(self, timeout: int = DEFAULT_TIMEOUT, mp_api_key: str = None):
         self.timeout = timeout
-        self.mp_api_key = mp_api_key or os.getenv("MP_API_KEY")
+        self.mp_api_key = mp_api_key or get_api_key('materials_project') or os.getenv("MP_API_KEY")
         logging.info(f"AseExecutor initialized with timeout: {self.timeout}s")
         if self.mp_api_key:
             logging.info("MP API key configured for script execution")
