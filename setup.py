@@ -50,7 +50,7 @@ setup(
     ],
     python_requires=">=3.11",
     install_requires=[
-        "google-generativeai>=0.8.5"
+        "google-generativeai>=0.8.5",
         "atomai>=0.8.1",
         "futurehouse-client>=0.3.19",
         "ase>=0.8.5",
