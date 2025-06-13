@@ -71,6 +71,11 @@ def define_gb_tool():
 
 # Tool configurations - moved from config.py
 TOOL_CONFIGS = {
+    "ASE": {
+        "docs_path": "docs/asebuild.txt",  # Path to ASE build documentation
+        "keywords": [],  # Empty keywords = default fallback tool
+        "tool_func": "define_ase_tool"
+    },
     "GrainBoundary": {
         "docs_path": "docs/aimsgb.txt",  # Relative to sim_agents directory
         "keywords": ["grain boundary", "grain-boundary", "gb ", "sigma", "csl", 
@@ -148,19 +153,8 @@ def get_available_tools():
     """Get all available tools with their configurations."""
     tools = []
     
-    # Always include ASE as the default fallback tool
-    tools.append(ToolWithDocs(
-        name="ASE",
-        tool_func=define_ase_tool,
-        docs_path=None,
-        keywords=[]  # Empty keywords means it's the fallback
-    ))
-    
-    # Add configured tools
+    # Add configured tools (including ASE with documentation)
     for tool_name, config_dict in TOOL_CONFIGS.items():
-        if tool_name == "ASE":
-            continue  # Skip ASE, already added
-        
         func_name = config_dict.get("tool_func")
         tool_func = TOOL_FUNCTION_MAP.get(func_name)
         
