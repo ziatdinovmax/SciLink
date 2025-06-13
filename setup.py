@@ -49,16 +49,13 @@ setup(
         "Operating System :: OS Independent",
     ],
     python_requires=">=3.11",
-    install_requires=read_requirements(),
-    extras_require={
-        "full": [
-            "google-generativeai>=0.8.5"
-            "atomai>=0.8.1",
-            "futurehouse-client>=0.3.19",
-            "ase>=0.8.5",
-            "aimsgb>=1.1.1",
-        ],
-    },
+    install_requires=[
+        "google-generativeai>=0.8.5"
+        "atomai>=0.8.1",
+        "futurehouse-client>=0.3.19",
+        "ase>=0.8.5",
+        "aimsgb>=1.1.1",
+    ],
     include_package_data=True,
     package_data={
         "scilink": [
