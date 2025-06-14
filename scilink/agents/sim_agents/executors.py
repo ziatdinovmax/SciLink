@@ -14,6 +14,8 @@ import logging
 
 from ...auth import get_api_key
 
+DEFAULT_TIMEOUT = 120
+
 # Add your security functions directly to this file
 def is_in_colab():
     """Check for Google Colab environment."""
@@ -119,7 +121,7 @@ You MUST restart SciLink inside a container or virtual machine.
 
 # Modified StructureExecutor class
 class StructureExecutor:
-    def __init__(self, timeout: int = 120, mp_api_key: str = None, 
+    def __init__(self, timeout: int = DEFAULT_TIMEOUT, mp_api_key: str = None, 
                  enforce_sandbox: bool = True, allow_unsafe_override: bool = False):
         self.timeout = timeout
         self.mp_api_key = mp_api_key or get_api_key('materials_project') or os.getenv("MP_API_KEY")
