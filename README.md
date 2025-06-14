@@ -6,7 +6,7 @@ A Python framework for connecting experimental materials science (microscopy, sp
 
 ## Overview
 
-SciLinkLLM uses a system of intelligent agents to automate the research cycle from experimental observation to computational insight. It streamlines the process of analyzing experimental data, assessing the novelty of findings against the scientific literature, and setting up computational simulations to investigate those findings.
+SciLink uses a system of intelligent agents to automate the research cycle from experimental observation to computational insight. It streamlines the process of analyzing experimental data, assessing the novelty of findings against the scientific literature, and setting up computational simulations to investigate those findings.
 
 ## Core Concepts
 
@@ -23,7 +23,7 @@ SciLinkLLM uses a system of intelligent agents to automate the research cycle fr
 
 ### Standard Installation
 ```bash
-pip install scilinkllm
+pip install scilink
 ```
 
 ### Development Installation
@@ -38,7 +38,7 @@ pip install -e .[full]
 ### 1. Configure API Keys
 
 ```python
-import scilinkllm
+import scilink
 
 # Configure required API keys
 scilinkllm.configure('google', 'your-google-api-key')
