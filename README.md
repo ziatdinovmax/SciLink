@@ -2,7 +2,7 @@
 
 A Python framework for connecting experimental materials science (microscopy, spectroscopy) with computational modeling (DFT) and automated literature analysis using Large Language Models.
 
-![SciLink Logo](scilink-logo.svg)
+![SciLink Logo](misc/scilink_logo_v2.svg)
 
 ## Overview
 
