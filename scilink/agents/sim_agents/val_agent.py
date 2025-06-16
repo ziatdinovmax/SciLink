@@ -36,7 +36,7 @@ class StructureValidatorAgent:
                 content = f.read()
             
             # Limit content size for LLM context window
-            max_chars = 8000  # Adjust based on your needs
+            max_chars = 10000
             if len(content) > max_chars:
                 content = content[:max_chars] + "\n\n[... File truncated for context limits ...]"
                 self.logger.warning(f"Structure file content truncated from {len(content)} to {max_chars} characters")
