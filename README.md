@@ -41,8 +41,8 @@ pip install -e .[full]
 import scilink
 
 # Configure required API keys
-scilinkllm.configure('google', 'your-google-api-key')
-scilinkllm.configure('futurehouse', 'your-futurehouse-key')  # Optional
+scilink.configure('google', 'your-google-api-key')
+scilink.configure('futurehouse', 'your-futurehouse-key')  # Optional
 ```
 
 ### 2. Analyze Microscopy Data
