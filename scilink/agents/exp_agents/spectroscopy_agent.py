@@ -692,7 +692,9 @@ class GeminiSpectroscopyAnalysisAgent:
             self.logger.error(f"Failed to create summary images: {e}")
             return []
         
-    def analyze_hyperspectral_data_for_claims(self, data_path: str, metadata_path: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    def analyze_hyperspectral_data_for_claims(self, data_path: str, metadata_path: Dict[str, Any] | None = None,
+                                              structure_image_path: str = None, structure_system_info: Dict[str, Any] = None
+                                              ) -> Dict[str, Any]:
         """
         Analyze hyperspectral data to generate scientific claims for literature comparison.
         Similar to microscopy agent's analyze_microscopy_image_for_claims method.
@@ -700,6 +702,8 @@ class GeminiSpectroscopyAnalysisAgent:
         Args:
             data_path: Path to hyperspectral data file (.npy)
             metadata_path:  Path to JSON file with experimental metadata
+            structure_image_path: Optional path to 2D greyscale structure image for context
+            structure_system_info: Optional metadata for the structure image
             
         Returns:
             Dictionary containing detailed analysis and scientific claims
@@ -713,7 +717,9 @@ class GeminiSpectroscopyAnalysisAgent:
                 data_path=data_path,
                 system_info=system_info,
                 instruction_prompt=SPECTROSCOPY_CLAIMS_INSTRUCTIONS,
-                analysis_type="claims"
+                analysis_type="claims",
+                structure_image_path=structure_image_path,
+                structure_system_info=structure_system_info
             )
             
             if "error" in result:
@@ -740,7 +746,9 @@ class GeminiSpectroscopyAnalysisAgent:
 
 
     def _analyze_hyperspectral_data_base(self, data_path: str, system_info: Dict[str, Any] | None = None,
-                                    instruction_prompt: str = None, analysis_type: str = "standard") -> Dict[str, Any]:
+                                    instruction_prompt: str = None, analysis_type: str = "standard",
+                                    structure_image_path: str = None, structure_system_info: Dict[str, Any] = None
+                                    ) -> Dict[str, Any]:
         """
         Base method for hyperspectral data analysis - shared by both standard analysis and claims generation.
         Updated to use component-abundance pairs for final analysis.
@@ -786,6 +794,34 @@ class GeminiSpectroscopyAnalysisAgent:
             prompt_parts.append(f"- Spatial abundance maps shape: {abundance_maps.shape}")
         else:
             prompt_parts.append("- No spectral unmixing performed")
+
+        # Add structure image if provided
+        if structure_image_path and os.path.exists(structure_image_path):
+            try:
+                from .utils import convert_numpy_to_jpeg_bytes, load_image, preprocess_image
+                
+                # Load and preprocess structure image
+                structure_img = load_image(structure_image_path)
+                processed_structure = preprocess_image(structure_img)
+                structure_img_bytes = convert_numpy_to_jpeg_bytes(processed_structure)
+                
+                prompt_parts.append("\n\nStructural Context Image:")
+                prompt_parts.append("This structural image provides spatial context to aid in interpreting the spectroscopic analysis. Analyze how different spatial features in the structure image correspond to different spectroscopic components, noting both the spatial patterns and spectroscopic characteristics")
+                prompt_parts.append({"mime_type": "image/jpeg", "data": structure_img_bytes})
+                
+                # Add structure system info if provided
+                if structure_system_info:
+                    prompt_parts.append("\n\nStructural Context Metadata:")
+                    if isinstance(structure_system_info, dict):
+                        prompt_parts.append(json.dumps(structure_system_info, indent=2))
+                    else:
+                        prompt_parts.append(str(structure_system_info))
+                
+                self.logger.info("Added structure image to analysis prompt")
+            except Exception as e:
+                self.logger.warning(f"Failed to load structure image: {e}")
+        elif structure_image_path:
+            self.logger.warning(f"Structure image not found: {structure_image_path}")
         
         # Add component-abundance pairs for LLM interpretation
         if component_pair_images:
@@ -872,13 +908,18 @@ class GeminiSpectroscopyAnalysisAgent:
             self.logger.error(f"Failed to save claims results: {e}")
             raise
 
-    def analyze_hyperspectral_data(self, data_path: str, metadata_path: str) -> Dict[str, Any]:
+    def analyze_hyperspectral_data(self, data_path: str, metadata_path: str,
+                                   structure_image_path: str = None,
+                                   structure_system_info: Dict[str, Any] = None
+                                   ) -> Dict[str, Any]:
         """
         Analyze hyperspectral data for materials characterization.
         
         Args:
             data_path: Path to hyperspectral data file
             metadata_path: Additional metadata about the sample/experiment
+            structure_image_path: Optional path to 2D greyscale structure image for context
+            structure_system_info: Optional metadata for the structure image
         
         Returns:
             Dictionary containing analysis results
@@ -892,7 +933,9 @@ class GeminiSpectroscopyAnalysisAgent:
                 data_path=data_path,
                 system_info=system_info,
                 instruction_prompt=SPECTROSCOPY_ANALYSIS_INSTRUCTIONS,
-                analysis_type="standard"
+                analysis_type="standard",
+                structure_image_path=structure_image_path,
+                structure_system_info=structure_system_info
             )
             
             if "error" in result:

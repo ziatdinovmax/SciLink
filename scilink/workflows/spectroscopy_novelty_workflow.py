@@ -4,6 +4,7 @@ import logging
 import json
 from io import StringIO
 from typing import Dict, Any, List
+from pathlib import Path
 
 from ..agents.exp_agents.spectroscopy_agent import GeminiSpectroscopyAnalysisAgent
 from ..agents.lit_agents.literature_agent import OwlLiteratureAgent
@@ -136,7 +137,10 @@ class SpectroscopyNoveltyAssessmentWorkflow:
         else:
             self.lit_agent = None
     
-    def run_complete_workflow(self, data_path: str, system_info: Dict[str, Any] = None) -> Dict[str, Any]:
+    def run_complete_workflow(self, data_path: str, system_info: Dict[str, Any] = None,
+                              structure_image_path: str = None,
+                              structure_system_info: Dict[str, Any] = None
+                              ) -> Dict[str, Any]:
         """
         Run the complete spectroscopy novelty assessment workflow.
         """
@@ -152,7 +156,10 @@ class SpectroscopyNoveltyAssessmentWorkflow:
             logging.info("--- Starting Step 1: Spectroscopic Analysis for Scientific Claims ---")
             
             analysis_result = self.analysis_agent.analyze_hyperspectral_data_for_claims(
-                data_path, metadata_path=system_info
+                data_path,
+                metadata_path=system_info,
+                structure_image_path=structure_image_path, 
+                structure_system_info=structure_system_info 
             )
 
             if "error" in analysis_result:

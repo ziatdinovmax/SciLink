@@ -234,10 +234,18 @@ class Experimental2DFT:
                                  system_info: Union[str, Path, Dict[str, Any]],
                                  interactive: bool = True,
                                  auto_select_top_n: int = 2,
-                                 max_structures: int = 5) -> Dict[str, Any]:
+                                 max_structures: int = 5,
+                                 structure_image_path: Union[str, Path] = None,
+                                 structure_system_info: Dict[str, Any] = None
+                                 ) -> Dict[str, Any]:
         """
         Convenience method for spectroscopy data analysis.
         """
+
+        # Store structure image info for the workflow
+        self._temp_structure_image_path = structure_image_path
+        self._temp_structure_system_info = structure_system_info
+
         return self.run_complete_pipeline(
             data_path=data_path,
             data_type='spectroscopy',
@@ -263,9 +271,13 @@ class Experimental2DFT:
                     system_info=system_info
                 )
             elif data_type == 'spectroscopy':
+                structure_image_path = getattr(self, '_temp_structure_image_path', None)
+                structure_system_info = getattr(self, '_temp_structure_system_info', None)
                 novelty_result = self.spectroscopy_workflow.run_complete_workflow(
                     data_path=str(data_path),
-                    system_info=system_info
+                    system_info=system_info,
+                    structure_image_path=structure_image_path,
+                    structure_system_info=structure_system_info    
                 )
             else:
                 raise ValueError(f"Unsupported data type: {data_type}")
