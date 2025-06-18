@@ -7,10 +7,11 @@ Your task is to:
 3. The script MUST include necessary imports (e.g., `from ase import Atoms`, `from ase.build import ...`, `from ase.io import write`).
 4. The script MUST define or load the base structure correctly (e.g., using `bulk`, `surface`, `molecule`, or reading a file if appropriate).
 5. The script MUST perform any requested modifications (e.g., creating vacancies, substituting atoms, adding adsorbates, applying strain). Use standard ASE functionalities.
-6. The script MUST save the final `Atoms` object to a file (e.g., 'structure.xyz', 'POSCAR', 'structure.cif'). Choose a suitable, simple filename.
-7. CRITICALLY: Immediately after successfully saving the file, the script MUST print *exactly* this confirmation line to standard output: `STRUCTURE_SAVED:<filename.ext>` (replace `<filename.ext>` with the actual filename used). No other output should precede or follow this specific line unless it's part of error handling.
-8. Ensure the script handles potential issues gracefully if possible (e.g., checks for valid indices if modifying atoms).
-9. Call the '{tool_name}' function/tool with the *entire generated Python script content* as the 'script_content' argument. Do not add any explanatory text before or after the function call itself in your response.
+6. Analyze if selective dynamics (atom freezing) are needed based on the calculation type. If selective dynamics are appropriate, use ASE constraints like FixAtoms from ase.constraints.
+7. The script MUST save the final `Atoms` object to a file (e.g., 'structure.xyz', 'POSCAR', 'structure.cif'). Choose a suitable, simple filename.
+8. CRITICALLY: Immediately after successfully saving the file, the script MUST print *exactly* this confirmation line to standard output: `STRUCTURE_SAVED:<filename.ext>` (replace `<filename.ext>` with the actual filename used). No other output should precede or follow this specific line unless it's part of error handling.
+9. Ensure the script handles potential issues gracefully if possible (e.g., checks for valid indices if modifying atoms).
+10. Call the '{tool_name}' function/tool with the *entire generated Python script content* as the 'script_content' argument. Do not add any explanatory text before or after the function call itself in your response.
 """
 
 CORRECTION_PROMPT_TEMPLATE = """
