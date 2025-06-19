@@ -1,17 +1,22 @@
 INITIAL_PROMPT_TEMPLATE = """
-User request: "{description}"
+You are an expert in computational modeling of materials. The user requested to build: "{description}"
 
-Your task is to:
-1. Parse the user request to understand the desired atomic structure (material, phase, defects, surface, etc.).
-2. Generate a *complete* and *executable* Python script using the Atomic Simulation Environment (ASE) library to create this structure.
-3. The script MUST include necessary imports (e.g., `from ase import Atoms`, `from ase.build import ...`, `from ase.io import write`).
-4. The script MUST define or load the base structure correctly (e.g., using `bulk`, `surface`, `molecule`, or reading a file if appropriate).
-5. The script MUST perform any requested modifications (e.g., creating vacancies, substituting atoms, adding adsorbates, applying strain). Use standard ASE functionalities.
-6. Analyze if selective dynamics (atom freezing) are needed based on the calculation type. If selective dynamics are appropriate, use ASE constraints like FixAtoms from ase.constraints.
-7. The script MUST save the final `Atoms` object to a file (e.g., 'structure.xyz', 'POSCAR', 'structure.cif'). Choose a suitable, simple filename.
-8. CRITICALLY: Immediately after successfully saving the file, the script MUST print *exactly* this confirmation line to standard output: `STRUCTURE_SAVED:<filename.ext>` (replace `<filename.ext>` with the actual filename used). No other output should precede or follow this specific line unless it's part of error handling.
-9. Ensure the script handles potential issues gracefully if possible (e.g., checks for valid indices if modifying atoms).
-10. Call the '{tool_name}' function/tool with the *entire generated Python script content* as the 'script_content' argument. Do not add any explanatory text before or after the function call itself in your response.
+First, think step-by-step about how you would create this structure:
+1. What material(s) and crystal structure(s) are needed? (For multi-material systems: identify each component)
+2. What supercell sizes, layer thicknesses, or geometric parameters are required?
+3. What defects, substitutions, or other modifications need to be applied?
+4. How should the materials be combined? (For interfaces/heterostructures: stacking order, lattice matching, strain accommodation)
+5. In what order should these steps be performed?
+
+Then, generate a *complete* and *executable* Python script using the Atomic Simulation Environment (ASE) library to implement your approach:
+1. The script MUST include necessary imports (e.g., `from ase import Atoms`, `from ase.build import ...`, `from ase.io import write`).
+2. The script MUST define or load the base structure correctly (e.g., using `bulk`, `surface`, `molecule`, or reading a file if appropriate).
+3. The script MUST perform any requested modifications (e.g., creating vacancies, substituting atoms, adding adsorbates, applying strain). Use standard ASE functionalities when available.
+4. Analyze if selective dynamics (atom freezing) are needed based on the calculation type. If selective dynamics are appropriate, use ASE constraints like FixAtoms from ase.constraints.
+5. The script MUST save the final `Atoms` object to a file (e.g., 'structure.xyz', 'POSCAR', 'structure.cif'). Choose a suitable, simple filename.
+6. CRITICALLY: Immediately after successfully saving the file, the script MUST print *exactly* this confirmation line to standard output: `STRUCTURE_SAVED:<filename.ext>` (replace `<filename.ext>` with the actual filename used). No other output should precede or follow this specific line unless it's part of error handling.
+7. Ensure the script handles potential issues gracefully if possible (e.g., checks for valid indices if modifying atoms).
+8. Call the '{tool_name}' function/tool with the *entire generated Python script content* as the 'script_content' argument. Do not add any explanatory text before or after the function call itself in your response.
 """
 
 CORRECTION_PROMPT_TEMPLATE = """
