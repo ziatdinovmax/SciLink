@@ -1,7 +1,7 @@
 import os
 import logging
 import json
-from typing import Dict
+from typing import Dict, List, Any
 
 from ase.io import read as ase_read
 
@@ -73,7 +73,9 @@ class StructureValidatorAgent:
     def _get_llm_validation_and_hints(self, original_request: str, generating_script_content: str,
                                       structure_file_path: str, structure_file_content: str = "", 
                                       image_paths: Dict[str, str] = None,
-                                      tool_documentation: str = None) -> dict:
+                                      tool_documentation: str = None,
+                                      previous_validation_results: List[Dict[str, Any]] = None
+                                      ) -> dict:
         """
         Uses an LLM to perform full validation including analysis of the actual structure file content and images.
         """
@@ -100,14 +102,44 @@ class StructureValidatorAgent:
     {structure_file_content}
     ```
 
-    """
+    """ 
+
+        # Add previous validation context if available
+        validation_history_section = ""
+        if previous_validation_results and len(previous_validation_results) > 0:
+            validation_history_section = """
+
+        ## PREVIOUS VALIDATION HISTORY:
+        You have validated previous versions of this structure. Here is the history:
+
+        """
+            for i, prev_result in enumerate(previous_validation_results, 1):
+                validation_history_section += f"""
+        **Cycle {i} Validation:**
+        - Overall Assessment: {prev_result.get('overall_assessment', 'No assessment provided')}
+        - Issues Identified: {prev_result.get('all_identified_issues', [])}
+        - Script Hints Given: {prev_result.get('script_modification_hints', [])}
+
+        """
+            validation_history_section += """
+        **Your task is to:**
+        1. Check if previous issues were resolved
+        2. Identify any persistent issues that still exist
+        3. Find any NEW issues not present in previous cycles
+        4. Provide an overall progress assessment
+
+        Include these categories in your JSON response:
+        - "resolved_issues": List of previous issues that are now fixed
+        - "persistent_issues": List of previous issues that still exist  
+        - "new_issues": List of newly discovered issues
+        """
 
         base_prompt = VALIDATOR_PROMPT_TEMPLATE.format(
             tool_documentation=doc_section,
             original_request=original_request,
             generating_script_content=generating_script_content,
             structure_file_path=structure_file_path,
-        ) + structure_section
+        ) + structure_section + validation_history_section
 
         # --- Build multi-modal prompt ---
         prompt_parts = [base_prompt]
@@ -174,7 +206,9 @@ class StructureValidatorAgent:
             }
 
     def validate_structure_and_script(self, structure_file_path: str, generating_script_content: str, 
-                                      original_request: str, tool_documentation: str = None) -> dict:
+                                      original_request: str, tool_documentation: str = None,
+                                      previous_validation_results: List[Dict[str, Any]] = None
+                                      ) -> dict:
         """
         Main validation method. Generates images and relies on LLM for all checks.
         Returns a dictionary with validation status, issues, and script modification hints.
@@ -207,9 +241,10 @@ class StructureValidatorAgent:
             original_request=original_request,
             generating_script_content=generating_script_content,
             structure_file_path=structure_file_path,
-            structure_file_content=structure_file_content, # Pass raw file content
-            image_paths=image_paths, # Pass generated image paths
-            tool_documentation=tool_documentation
+            structure_file_content=structure_file_content,
+            image_paths=image_paths,
+            tool_documentation=tool_documentation,
+            previous_validation_results=previous_validation_results
         )
 
         final_feedback["overall_assessment"] = llm_feedback.get("overall_assessment", "LLM assessment missing or failed.")

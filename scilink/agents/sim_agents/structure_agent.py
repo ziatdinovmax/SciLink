@@ -158,11 +158,22 @@ class StructureGenerator:
             self.logger.info(f"Starting {selected_tool.name} SCRIPT REFINEMENT (Overall Cycle {attempt_number_overall})")
             if not previous_script_content or not validator_feedback:
                 return {"status": "error", "message": "Internal error: Refinement requires previous script and validation feedback."}
+            
+            # Extract the most recent issues and prioritize persistent ones
+            all_issues = validator_feedback.get("all_identified_issues", [])
+            persistent_issues = validator_feedback.get("persistent_issues", [])
+            new_issues = validator_feedback.get("new_issues", [])
+
+            # Prioritize persistent issues in the prompt
+            prioritized_issues = persistent_issues + new_issues
+            if not prioritized_issues:
+                prioritized_issues = all_issues
+
             current_prompt = self._build_script_correction_from_validation_prompt(
                 original_request=original_user_request,
                 attempted_script_content=previous_script_content,
                 validator_assessment=validator_feedback.get("overall_assessment", "N/A"),
-                validator_issues=validator_feedback.get("all_identified_issues", []),
+                validator_issues=prioritized_issues,
                 validator_hints=validator_feedback.get("script_modification_hints", [])
             )
         else:
