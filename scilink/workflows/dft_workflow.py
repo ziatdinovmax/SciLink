@@ -159,7 +159,6 @@ class DFTWorkflow:
         
         previous_script_content = None
         validator_feedback = None
-        validation_history = []  # Track all validation results
         
         for cycle in range(self.max_refinement_cycles + 1):
             self.logger.info(f"Structure cycle {cycle + 1}/{self.max_refinement_cycles + 1}")
@@ -191,10 +190,9 @@ class DFTWorkflow:
             val_result = self.structure_validator.validate_structure_and_script(
                 structure_file_path=full_structure_path,
                 generating_script_content=script_content,
-                original_request=user_request,
-                previous_validation_results=validation_history
+                original_request=user_request
             )
-  
+            
             validator_feedback = val_result  # Store for next cycle
             
             if val_result["status"] == "success":
@@ -203,8 +201,7 @@ class DFTWorkflow:
                     "final_structure_path": full_structure_path,
                     "final_script_path": gen_result["final_script_path"],
                     "cycles_used": cycle + 1,
-                    "validation_result": val_result,
-                    "validation_history": validation_history
+                    "validation_result": val_result
                 }
             elif cycle < self.max_refinement_cycles:
                 self.logger.warning(f"Validation issues found, refining... {val_result.get('all_identified_issues')}")
