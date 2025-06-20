@@ -20,18 +20,22 @@ class StructureGenerator:
                 executor_timeout: int = DEFAULT_TIMEOUT,
                 generated_script_dir: str = "generated_scripts",
                 mp_api_key: str = None):
-        """
-        Initialize StructureGenerator. Tools are automatically discovered.
-        """
+        """Initialize StructureGenerator with improved logging."""
         self.llm_client = LLMClient(api_key=api_key, model_name=model_name)
         self.ase_executor = StructureExecutor(timeout=executor_timeout, mp_api_key=mp_api_key)
         self.generated_script_dir = generated_script_dir
         self.logger = logging.getLogger(__name__)
         
         self.tools = get_available_tools()
-        
         self.mp_helper = MaterialsProjectHelper(api_key=mp_api_key)
-        self.logger.info(f"StructureGenerator initialized with {len(self.tools)} tools")
+        
+        # Improved initialization message
+        print(f"🔧 Structure Generator Ready")
+        print(f"   📚 Available tools: {len(self.tools)} ({', '.join(t.name for t in self.tools)})")
+        if self.mp_helper.enabled:
+            print(f"   🗃️  Materials Project: Connected")
+        else:
+            print(f"   🗃️  Materials Project: Not configured")
 
     def _select_tool(self, request_text: str):
         """Select the appropriate tool based on request content."""
@@ -56,7 +60,6 @@ class StructureGenerator:
         if enhanced_docs and self.mp_helper.enabled:
             enhanced_docs += self.mp_helper.get_common_materials_info()
         
-        # Rest of method unchanged...
         if use_fallback or not enhanced_docs:
             return INITIAL_PROMPT_TEMPLATE.format(description=description, tool_name=tool_name)
         else:
@@ -114,7 +117,7 @@ class StructureGenerator:
             if not response or not response.candidates:
                 feedback = getattr(response, 'prompt_feedback', None)
                 block_reason = getattr(feedback, 'block_reason', 'Unknown reason')
-                self.logger.warning(f"LLM response empty/no candidates. Block Reason: {block_reason}.")
+                self.logger.warning(f"LLM response empty/no candidates. Block Reason: {block_reason}")
                 return f"[Warning: LLM response was empty or blocked. Reason: {block_reason}]", None
 
             candidate = response.candidates[0]
@@ -128,13 +131,11 @@ class StructureGenerator:
 
             for part in candidate.content.parts:
                 if hasattr(part, 'function_call') and getattr(part.function_call, 'name', None):
-                    self.logger.debug(f"LLM response contains function call: {part.function_call.name}")
                     args_dict = {key: value for key, value in getattr(part.function_call, 'args', {}).items()}
                     return None, {"name": part.function_call.name, "args": args_dict}
             
             text_content = "".join(part.text for part in candidate.content.parts if hasattr(part, 'text')).strip()
             if text_content:
-                self.logger.debug("LLM response contains text content instead of a tool call.")
                 return text_content, None
             
             self.logger.warning(f"LLM response contained neither function call nor text. Finish reason: {finish_reason}")
@@ -148,14 +149,14 @@ class StructureGenerator:
                        is_refinement_from_validation: bool = False,
                        previous_script_content: Optional[str] = None,
                        validator_feedback: Optional[dict] = None) -> dict:
-        """Generate or refine a script using appropriate tool and documentation."""
+        """Generate or refine a script using appropriate tool and documentation with improved output."""
         
         # Select tool and get its info
         selected_tool = self._select_tool(original_user_request)
         tool_name = next(iter(selected_tool.tool.function_declarations)).name
         
         if is_refinement_from_validation:
-            self.logger.info(f"Starting {selected_tool.name} SCRIPT REFINEMENT (Overall Cycle {attempt_number_overall})")
+            print(f"   🔄 Refining script using {selected_tool.name} (cycle {attempt_number_overall})")
             if not previous_script_content or not validator_feedback:
                 return {"status": "error", "message": "Internal error: Refinement requires previous script and validation feedback."}
             current_prompt = self._build_script_correction_from_validation_prompt(
@@ -166,7 +167,7 @@ class StructureGenerator:
                 validator_hints=validator_feedback.get("script_modification_hints", [])
             )
         else:
-            self.logger.info(f"Starting {selected_tool.name} SCRIPT GENERATION (Overall Cycle {attempt_number_overall})")
+            print(f"   🤖 Generating script using {selected_tool.name} (cycle {attempt_number_overall})")
             current_prompt = self._build_initial_prompt(original_user_request)
 
         tools_list = [selected_tool.tool]
@@ -175,23 +176,25 @@ class StructureGenerator:
         
         # Internal correction loop for script execution errors
         for internal_exec_attempt in range(1, MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS + 1):
-            self.logger.info(f"--- Script Generation/LLM Call (Overall Cycle {attempt_number_overall}, Internal Exec Attempt {internal_exec_attempt}) ---")
             
             generated_script_this_llm_call = None
             final_script_path_this_attempt = None
 
             try:
+                # Show progress for multiple attempts
+                if internal_exec_attempt > 1:
+                    print(f"      🔧 Fixing script issues (attempt {internal_exec_attempt}/{MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS})")
+                
                 llm_response = self.llm_client.generate_with_tools(current_prompt, tools_list)
                 text_content, function_call = self._parse_llm_response(llm_response)
 
                 if function_call and function_call["name"] == tool_name:
                     generated_script_this_llm_call = function_call["args"].get("script_content")
                     if not generated_script_this_llm_call:
-                        last_error_message_internal = f"LLM tool call missing 'script_content' (Overall Cycle {attempt_number_overall}, Internal Exec Attempt {internal_exec_attempt})."
+                        last_error_message_internal = f"LLM tool call missing 'script_content' (attempt {internal_exec_attempt})"
                         self.logger.error(last_error_message_internal)
                         if internal_exec_attempt == MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS: 
                             break
-                        self.logger.warning("Retrying LLM call with the same prompt due to missing script content.")
                         continue
 
                     current_script_being_processed = generated_script_this_llm_call
@@ -206,31 +209,42 @@ class StructureGenerator:
                     )
                     
                     if not final_script_path_this_attempt:
-                        last_error_message_internal = f"Failed to save script (Overall Cycle {attempt_number_overall}, Internal Exec Attempt {internal_exec_attempt})."
+                        last_error_message_internal = f"Failed to save script (attempt {internal_exec_attempt})"
                         self.logger.error(last_error_message_internal)
                         break
 
-                    self.logger.info(f"Executing script: {final_script_path_this_attempt}")
+                    # Execute script with progress indication
+                    if internal_exec_attempt == 1:
+                        print(f"      ⚙️  Executing script...")
+                    else:
+                        print(f"      ⚙️  Re-executing corrected script...")
+                        
                     exec_result = self.ase_executor.execute_script(current_script_being_processed, working_dir=self.generated_script_dir)
 
                     if exec_result["status"] == "success":
-                        self.logger.info(f"Script executed successfully (Overall Cycle {attempt_number_overall}, Internal Exec Attempt {internal_exec_attempt}).")
+                        print(f"      ✅ Script executed successfully")
                         return {
                             "status": "success",
-                            "message": "Script generated and executed successfully.",
+                            "message": f"Script generated and executed successfully on attempt {internal_exec_attempt}",
                             "output_file": exec_result.get("output_file"),
                             "final_script_path": final_script_path_this_attempt,
                             "final_script_content": current_script_being_processed,
-                            "tool_used": selected_tool.name
+                            "tool_used": selected_tool.name,
+                            "execution_attempts": internal_exec_attempt
                         }
                     else:
-                        last_error_message_internal = exec_result.get("message", f"Unknown script execution error (Internal Exec Attempt {internal_exec_attempt})")
-                        self.logger.warning(f"Script execution failed: {last_error_message_internal}")
+                        last_error_message_internal = exec_result.get("message", f"Unknown script execution error (attempt {internal_exec_attempt})")
+                        
                         if internal_exec_attempt == MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS:
+                            print(f"      ❌ Script execution failed after {MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS} attempts")
                             self.logger.error("Max internal script execution correction attempts reached.")
                             break
                         
-                        self.logger.info("Building prompt for SCRIPT EXECUTION ERROR correction.")
+                        # Show what went wrong for user awareness
+                        error_summary = self._summarize_error(last_error_message_internal)
+                        print(f"      ⚠️  Execution failed: {error_summary}")
+                        print(f"         Attempting to fix...")
+                        
                         current_prompt = self._build_script_execution_error_correction_prompt(
                             original_request=original_user_request,
                             failed_script=current_script_being_processed,
@@ -239,30 +253,58 @@ class StructureGenerator:
                         continue
 
                 elif text_content:
-                    last_error_message_internal = f"LLM responded with text instead of tool call (Internal Exec Attempt {internal_exec_attempt}). Text: {text_content[:200]}..."
-                    self.logger.warning(last_error_message_internal)
+                    last_error_message_internal = f"LLM responded with text instead of tool call (attempt {internal_exec_attempt})"
                     if internal_exec_attempt == MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS: 
                         break
-                    self.logger.warning("Retrying LLM call with the same prompt.")
                     continue
 
                 else:
-                    last_error_message_internal = text_content if text_content else f"LLM gave unusable response (Internal Exec Attempt {internal_exec_attempt})."
+                    last_error_message_internal = text_content if text_content else f"LLM gave unusable response (attempt {internal_exec_attempt})"
                     self.logger.error(last_error_message_internal)
                     break
 
             except Exception as e: 
-                self.logger.exception(f"Unexpected error during script generation/execution (Internal Exec Attempt {internal_exec_attempt}): {e}")
+                self.logger.exception(f"Unexpected error during script generation/execution (attempt {internal_exec_attempt}): {e}")
                 last_error_message_internal = f"Unexpected workflow error: {e}"
                 break
         
         # Internal loop finished without success
-        self.logger.error(f"Failed to generate executable script after {MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS} internal attempts (Overall Cycle {attempt_number_overall}).")
+        print(f"      ❌ Failed to generate working script after {MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS} attempts")
         return {
             "status": "error",
-            "message": f"Failed to generate executable script. Last internal error: {last_error_message_internal}",
+            "message": f"Failed to generate executable script after {MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS} attempts",
             "last_error": last_error_message_internal,
             "last_attempted_script_path": final_script_path_this_attempt if 'final_script_path_this_attempt' in locals() else None,
             "last_attempted_script_content": current_script_being_processed,
             "tool_attempted": selected_tool.name
         }
+
+    def _summarize_error(self, error_message: str) -> str:
+        """Create a brief, user-friendly error summary."""
+        error_lower = error_message.lower()
+        
+        # Common error patterns
+        if "modulenotfounderror" in error_lower or "import" in error_lower:
+            return "Missing Python module/import"
+        elif "nameerror" in error_lower:
+            return "Undefined variable or function"
+        elif "syntaxerror" in error_lower:
+            return "Python syntax error"
+        elif "indexerror" in error_lower:
+            return "Array/list index out of range"
+        elif "keyerror" in error_lower:
+            return "Dictionary key not found"
+        elif "typeerror" in error_lower:
+            return "Incorrect data type usage"
+        elif "valueerror" in error_lower:
+            return "Invalid value or parameter"
+        elif "filenotfounderror" in error_lower:
+            return "File or path not found"
+        elif "timeout" in error_lower:
+            return "Script execution timeout"
+        elif "structure_saved" in error_lower:
+            return "Missing output confirmation"
+        else:
+            # Extract first line of error for brevity
+            first_line = error_message.split('\n')[0]
+            return first_line[:80] + "..." if len(first_line) > 80 else first_line

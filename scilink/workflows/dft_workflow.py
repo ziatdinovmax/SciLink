@@ -40,7 +40,7 @@ class DFTWorkflow:
             mp_api_key = get_api_key('materials_project')
             # Optional - will warn in agents if needed
         
-        # Setup logging
+        # Setup logging with better formatting
         self.log_capture = StringIO()
         logging.basicConfig(
             level=logging.INFO, 
@@ -84,7 +84,7 @@ class DFTWorkflow:
             )
         else:
             self.incar_validator = None
-            self.logger.info("Skipping literature validation - no FutureHouse API key provided")
+            print("ℹ️  Literature validation disabled (no FutureHouse API key)")
             
         # Create output directory
         os.makedirs(output_dir, exist_ok=True)
@@ -92,12 +92,6 @@ class DFTWorkflow:
     def run_complete_workflow(self, user_request: str) -> Dict[str, Any]:
         """
         Run the complete workflow from user request to final VASP inputs.
-        
-        Args:
-            user_request: User's structure/calculation request
-            
-        Returns:
-            Dictionary with all workflow results
         """
         workflow_result = {
             "user_request": user_request,
@@ -105,38 +99,58 @@ class DFTWorkflow:
             "final_status": "started"
         }
         
-        self.logger.info(f"Starting complete DFT workflow for: {user_request}")
+        print(f"\n🚀 DFT Workflow Starting")
+        print(f"{'='*60}")
+        print(f"📝 Request: {user_request}")
+        print(f"📁 Output:  {self.output_dir}/")
+        print(f"{'='*60}")
         
         # Step 1: Structure Generation and Validation
+        print(f"\n🏗️  STEP 1: Structure Generation & Validation")
+        print(f"{'─'*50}")
+        
         structure_result = self._generate_and_validate_structure(user_request)
         workflow_result["structure_generation"] = structure_result
         
         if structure_result["status"] != "success":
+            print(f"❌ Structure generation failed: {structure_result.get('message', 'Unknown error')}")
             workflow_result["final_status"] = "failed_structure_generation"
             return workflow_result
         
         workflow_result["steps_completed"].append("structure_generation")
         structure_path = structure_result["final_structure_path"]
         
+        print(f"✅ Structure generated: {os.path.basename(structure_path)}")
+        if structure_result.get("warning"):
+            print(f"⚠️  {structure_result['warning']}")
+        
         # Step 2: VASP Input Generation
+        print(f"\n⚛️  STEP 2: VASP Input Generation")
+        print(f"{'─'*50}")
+        
         vasp_result = self._generate_vasp_inputs(structure_path, user_request)
         workflow_result["vasp_generation"] = vasp_result
         
         if vasp_result["status"] != "success":
+            print(f"❌ VASP generation failed: {vasp_result.get('message', 'Unknown error')}")
             workflow_result["final_status"] = "failed_vasp_generation"
             return workflow_result
             
         workflow_result["steps_completed"].append("vasp_generation")
+        print(f"✅ VASP inputs generated: INCAR, KPOINTS")
+        print(f"📋 Calculation type: {vasp_result.get('summary', 'N/A')}")
         
         # Step 3: Literature Validation and Improvements (optional)
         if self.incar_validator:
+            print(f"\n📚 STEP 3: Literature Validation")
+            print(f"{'─'*50}")
+            
             improvement_result = self._validate_and_improve_incar(
                 vasp_result, structure_path, user_request
             )
             workflow_result["incar_improvement"] = improvement_result
             workflow_result["steps_completed"].append("incar_improvement")
         else:
-            self.logger.info("Skipping literature validation - no FutureHouse API key provided")
             workflow_result["incar_improvement"] = {"status": "skipped", "message": "No FutureHouse API key"}
         
         workflow_result["final_status"] = "success"
@@ -149,25 +163,31 @@ class DFTWorkflow:
         # Save complete log
         self._save_workflow_log()
         
-        self.logger.info(f"Complete DFT workflow finished successfully: {self.output_dir}")
+        # Final summary
+        self._print_final_summary(workflow_result)
+        
         return workflow_result
     
     def _generate_and_validate_structure(self, user_request: str) -> Dict[str, Any]:
-        """Generate and validate atomic structure."""
-        
-        self.logger.info("Step 1: Structure generation and validation")
+        """Generate and validate atomic structure with improved output formatting."""
         
         previous_script_content = None
         validator_feedback = None
         
         for cycle in range(self.max_refinement_cycles + 1):
-            self.logger.info(f"Structure cycle {cycle + 1}/{self.max_refinement_cycles + 1}")
+            cycle_num = cycle + 1
+            total_cycles = self.max_refinement_cycles + 1
+            
+            if cycle == 0:
+                print(f"🔨 Generating structure (attempt {cycle_num}/{total_cycles})")
+            else:
+                print(f"🔄 Refining structure (attempt {cycle_num}/{total_cycles})")
+                print(f"   Addressing: {len(validator_feedback.get('all_identified_issues', []))} validation issues")
             
             # Generate structure
-
             gen_result = self.structure_generator.generate_script(
                 original_user_request=user_request + ". Save the structure in POSCAR format.",
-                attempt_number_overall=cycle + 1,
+                attempt_number_overall=cycle_num,
                 is_refinement_from_validation=(cycle > 0),
                 previous_script_content=previous_script_content if cycle > 0 else None,
                 validator_feedback=validator_feedback if cycle > 0 else None
@@ -176,54 +196,86 @@ class DFTWorkflow:
             if gen_result["status"] != "success":
                 return {
                     "status": "error",
-                    "message": f"Structure generation failed: {gen_result.get('message')}",
-                    "cycle": cycle + 1
+                    "message": f"Structure generation failed on cycle {cycle_num}: {gen_result.get('message')}",
+                    "cycle": cycle_num
                 }
             
-            structure_file = gen_result["output_file"] # absolute path
+            structure_file = gen_result["output_file"]
             script_content = gen_result["final_script_content"]
-            previous_script_content = script_content  # Store for next cycle
-
-            full_structure_path = structure_file
+            previous_script_content = script_content
+            
+            print(f"   ✅ Structure file: {os.path.basename(structure_file)}")
+            print(f"   🐍 Script: {os.path.basename(gen_result['final_script_path'])}")
             
             # Validate structure
+            print(f"🔍 Validating structure...")
             val_result = self.structure_validator.validate_structure_and_script(
-                structure_file_path=full_structure_path,
+                structure_file_path=structure_file,
                 generating_script_content=script_content,
                 original_request=user_request
             )
             
-            validator_feedback = val_result  # Store for next cycle
+            validator_feedback = val_result
+            
+            # Format validation results nicely
+            self._print_validation_results(val_result, cycle_num)
             
             if val_result["status"] == "success":
                 return {
                     "status": "success",
-                    "final_structure_path": full_structure_path,
+                    "final_structure_path": structure_file,
                     "final_script_path": gen_result["final_script_path"],
-                    "cycles_used": cycle + 1,
+                    "cycles_used": cycle_num,
                     "validation_result": val_result
                 }
             elif cycle < self.max_refinement_cycles:
-                self.logger.warning(f"Validation issues found, refining... {val_result.get('all_identified_issues')}")
+                print(f"🔄 Issues found, attempting refinement...")
                 continue
             else:
-                # Max cycles reached, proceed anyway
-                self.logger.warning("Max refinement cycles reached, proceeding with current structure")
+                print(f"⚠️  Max refinement cycles reached, proceeding with current structure")
                 return {
                     "status": "success",
-                    "final_structure_path": full_structure_path,
+                    "final_structure_path": structure_file,
                     "final_script_path": gen_result["final_script_path"], 
-                    "cycles_used": cycle + 1,
+                    "cycles_used": cycle_num,
                     "validation_result": val_result,
                     "warning": "Structure may have validation issues"
                 }
         
         return {"status": "error", "message": "Structure generation loop failed"}
     
+    def _print_validation_results(self, val_result: Dict[str, Any], cycle_num: int):
+        """Print validation results in a user-friendly format."""
+        
+        if val_result["status"] == "success":
+            print(f"   ✅ Validation passed")
+            return
+        
+        # Format issues nicely
+        issues = val_result.get("all_identified_issues", [])
+        hints = val_result.get("script_modification_hints", [])
+        assessment = val_result.get("overall_assessment", "No assessment provided")
+        
+        print(f"   ⚠️  Validation found {len(issues)} issue(s):")
+        print(f"\n   📋 Overall Assessment:")
+        print(f"      {assessment}")
+        
+        if issues:
+            print(f"\n   🔍 Specific Issues:")
+            for i, issue in enumerate(issues, 1):
+                print(f"      {i}. {issue}")
+        
+        if hints:
+            print(f"\n   💡 Suggested Improvements:")
+            for i, hint in enumerate(hints, 1):
+                print(f"      {i}. {hint}")
+        
+        print()  # Add spacing
+    
     def _generate_vasp_inputs(self, structure_path: str, user_request: str) -> Dict[str, Any]:
         """Generate VASP INCAR and KPOINTS files."""
         
-        self.logger.info("Step 2: VASP input generation")
+        print(f"📝 Generating VASP input files...")
         
         # Generate initial VASP inputs
         vasp_result = self.vasp_agent.generate_vasp_inputs(
@@ -244,7 +296,7 @@ class DFTWorkflow:
                                    structure_path: str, user_request: str) -> Dict[str, Any]:
         """Validate INCAR against literature and apply improvements."""
         
-        self.logger.info("Step 3: Literature validation and INCAR improvement")
+        print(f"📖 Validating INCAR parameters against literature...")
         
         # Validate against literature
         validation_result = self.incar_validator.validate_and_improve_incar(
@@ -253,11 +305,23 @@ class DFTWorkflow:
         )
         
         if validation_result["status"] != "success":
+            print(f"❌ Literature validation failed: {validation_result.get('message')}")
             return validation_result
         
         # Check if improvements are needed
         if validation_result["validation_status"] == "needs_adjustment":
-            self.logger.info("Literature suggests improvements, applying them...")
+            adjustments = validation_result.get("suggested_adjustments", [])
+            print(f"💡 Literature suggests {len(adjustments)} improvement(s):")
+            
+            for i, adj in enumerate(adjustments, 1):
+                param = adj.get("parameter", "Unknown")
+                current = adj.get("current_value", "N/A")
+                suggested = adj.get("suggested_value", "N/A")
+                reason = adj.get("reason", "No reason provided")
+                print(f"   {i}. {param}: {current} → {suggested}")
+                print(f"      Reason: {reason}")
+            
+            print(f"\n🔧 Applying improvements...")
             
             # Apply improvements
             improvement_result = self.vasp_agent.apply_improvements(
@@ -271,10 +335,13 @@ class DFTWorkflow:
             validation_result["improvement_application"] = improvement_result
             
             if improvement_result["status"] == "success":
-                self.logger.info(f"Successfully applied {improvement_result['adjustments_count']} improvements")
+                print(f"   ✅ Applied {improvement_result['adjustments_count']} improvements")
+                print(f"   📄 Saved as: INCAR_improved")
+            else:
+                print(f"   ❌ Failed to apply improvements: {improvement_result.get('message')}")
             
         else:
-            self.logger.info("No improvements needed - INCAR parameters look good!")
+            print(f"✅ INCAR parameters look good - no improvements needed")
             validation_result["improvement_application"] = {
                 "status": "no_changes",
                 "message": "No improvements needed"
@@ -284,6 +351,60 @@ class DFTWorkflow:
         self.incar_validator.save_validation_report(validation_result, self.output_dir)
         
         return validation_result
+    
+    def _print_final_summary(self, workflow_result: Dict[str, Any]):
+        """Print a clean final summary."""
+        
+        print(f"\n🎉 DFT Workflow Complete!")
+        print(f"{'='*60}")
+        
+        # Basic info
+        status = workflow_result.get('final_status')
+        steps = workflow_result.get('steps_completed', [])
+        
+        print(f"📋 Status: {status}")
+        print(f"✅ Steps: {' → '.join(steps)}")
+        print(f"📁 Output: {self.output_dir}/")
+        
+        # Structure info
+        if "structure_generation" in workflow_result:
+            struct_result = workflow_result["structure_generation"]
+            if struct_result["status"] == "success":
+                cycles = struct_result.get('cycles_used', 1)
+                structure_file = os.path.basename(struct_result['final_structure_path'])
+                print(f"🏗️  Structure: {structure_file} (refined {cycles} cycle{'s' if cycles > 1 else ''})")
+        
+        # VASP info
+        if "vasp_generation" in workflow_result:
+            vasp_result = workflow_result["vasp_generation"]
+            if vasp_result["status"] == "success":
+                calc_type = vasp_result.get('summary', 'DFT calculation')
+                print(f"⚛️  VASP: {calc_type}")
+        
+        # Literature validation info
+        if "incar_improvement" in workflow_result:
+            imp_result = workflow_result["incar_improvement"]
+            if imp_result["status"] == "success":
+                if imp_result["validation_status"] == "needs_adjustment":
+                    adj_count = len(imp_result.get("suggested_adjustments", []))
+                    print(f"📚 Literature: {adj_count} parameter improvement{'s' if adj_count > 1 else ''} applied")
+                else:
+                    print(f"📚 Literature: Parameters validated, no changes needed")
+        
+        # Final files
+        print(f"\n📄 Ready for VASP:")
+        manifest = workflow_result.get("final_manifest", {})
+        if manifest.get("ready_for_vasp"):
+            files = manifest["final_files"]
+            structure_file = files.get('structure', 'POSCAR')
+            incar_file = files.get('incar', 'INCAR')
+            kpoints_file = files.get('kpoints', 'KPOINTS')
+            
+            print(f"   • {structure_file}")
+            print(f"   • {incar_file}{' ⭐ (literature-optimized)' if manifest.get('literature_validated') else ''}")
+            print(f"   • {kpoints_file}")
+        
+        print(f"{'='*60}")
     
     def get_summary(self, workflow_result: Dict[str, Any]) -> str:
         """Get a human-readable summary of the workflow results."""
@@ -402,7 +523,6 @@ class DFTWorkflow:
             manifest_path = os.path.join(self.output_dir, "final_files_manifest.json")
             with open(manifest_path, 'w') as f:
                 json.dump(manifest, f, indent=2)
-            self.logger.info(f"Final files manifest saved: {manifest_path}")
         except Exception as e:
             self.logger.error(f"Failed to save manifest: {e}")
             
