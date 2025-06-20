@@ -6,7 +6,7 @@ A Python framework for connecting experimental materials science (microscopy, sp
 
 ## Overview
 
-SciLink uses a system of intelligent agents to automate the research cycle from experimental observation to computational insight. It streamlines the process of analyzing experimental data, assessing the novelty of findings against the scientific literature, and setting up computational simulations to investigate those findings.
+SciLink uses a system of intelligent agents to automate the research cycle from experimental observation to computational modeling. It streamlines the process of analyzing experimental data, assessing the novelty of findings against the scientific literature, and setting up computational simulations to investigate those findings.
 
 ## Core Concepts
 
