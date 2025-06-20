@@ -23,7 +23,7 @@ class DFTWorkflow:
                  generator_model: str = "gemini-2.5-pro-preview-06-05",
                  validator_model: str = "gemini-2.5-pro-preview-06-05",
                  output_dir: str = "dft_workflow_output",
-                 max_refinement_cycles: int = 2,
+                 max_refinement_cycles: int = 4,
                  script_timeout: int = 180):
         
         # Auto-discover API keys
