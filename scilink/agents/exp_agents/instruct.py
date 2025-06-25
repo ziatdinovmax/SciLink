@@ -314,6 +314,11 @@ You MUST output a valid JSON object containing two keys: "detailed_analysis" and
     * Spatial distribution patterns (random, clustered, aligned)
     * Edge effects or substrate interactions
 
+    **Important:**
+        - Distinguish between real voids/defects and potentially missed particles
+        - If you see regular gaps in dense particle arrays, consider whether particles might be missed rather than absent
+        - Note any systematic patterns that could indicate incomplete segmentation
+
 2.  **scientific_claims**: (List of Objects) Generate 4-6 specific scientific claims based on your analysis that can be used to search literature for similar observations. Each object must have the following keys:
     * **claim**: (String) A single, focused scientific claim written as a complete sentence about a specific observation from the particle segmentation analysis.
     * **scientific_impact**: (String) A brief explanation of why this claim would be scientifically significant if confirmed through literature search or further experimentation.
@@ -346,6 +351,8 @@ You will see TWO images:
 
 
 **Be conservative**: Only change parameters if there's a clear problem.
+
+**You have only one shot at this, so think carefully.**
 
 Output JSON format:
 ```json
