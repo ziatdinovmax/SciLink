@@ -1,6 +1,5 @@
 import json
 import os
-from io import BytesIO
 from PIL import Image
 import logging
 import numpy as np
@@ -12,7 +11,7 @@ from .instruct import (
     SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS,
     PARTICLE_ANALYSIS_REFINE_INSTRUCTIONS,
 )
-from .utils import load_image, preprocess_image, convert_numpy_to_jpeg_bytes, normalize_and_convert_to_image_bytes
+from .utils import load_image, preprocess_image, convert_numpy_to_jpeg_bytes
 
 from ...auth import get_api_key, APIKeyNotFoundError
 

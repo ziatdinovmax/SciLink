@@ -1,19 +1,16 @@
 import json
 import os
-from io import BytesIO
-from PIL import Image
 import logging
 import numpy as np
 
 import google.generativeai as genai
 from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockThreshold
 
-# Import all necessary instructions
 from .instruct import (
     MICROSCOPY_ANALYSIS_INSTRUCTIONS,
     MICROSCOPY_CLAIMS_INSTRUCTIONS,
     FFT_NMF_PARAMETER_ESTIMATION_INSTRUCTIONS,
-    TEXT_ONLY_DFT_RECOMMENDATION_INSTRUCTIONS # Ensure this is defined in instruct.py
+    TEXT_ONLY_DFT_RECOMMENDATION_INSTRUCTIONS
 )
 from .utils import load_image, preprocess_image, convert_numpy_to_jpeg_bytes, normalize_and_convert_to_image_bytes
 from atomai.stat import SlidingFFTNMF
