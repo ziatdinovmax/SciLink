@@ -38,10 +38,12 @@ def load_image(image_path):
         print(f"Error loading image: {e}")
         raise
 
-def preprocess_image(image, max_dim=MAX_IMG_DIM):
+def preprocess_image(image: np.ndarray, max_dim: int = MAX_IMG_DIM) -> tuple[np.ndarray, float]:
     """
     Preprocess microscopy image for better analysis and ensure it's within model context limits.
+    Returns the preprocessed image and the scaling factor used for resizing.
     """
+    scale_factor = 1.0
     # Resize if the image is too large
     h, w = image.shape[:2]
     if max(h, w) > max_dim:
@@ -52,6 +54,7 @@ def preprocess_image(image, max_dim=MAX_IMG_DIM):
         else:
             new_w = max_dim
             new_h = int(h * (max_dim / w))
+        scale_factor = h / new_h  # or w / new_w
         
         # Resize the image
         image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
@@ -71,7 +74,7 @@ def preprocess_image(image, max_dim=MAX_IMG_DIM):
     denoised = cv2.GaussianBlur(enhanced, (3, 3), 0)
     
     # Return the preprocessed image
-    return denoised
+    return denoised, scale_factor
 
 
 def convert_numpy_to_jpeg_bytes(image_array: np.ndarray, quality: int = 85) -> bytes:

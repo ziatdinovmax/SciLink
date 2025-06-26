@@ -192,7 +192,7 @@ class GeminiMicroscopyAnalysisAgent:
         """
         try:
             loaded_image = load_image(image_path)
-            preprocessed_img_array = preprocess_image(loaded_image)
+            preprocessed_img_array, _ = preprocess_image(loaded_image)
             image_bytes = convert_numpy_to_jpeg_bytes(preprocessed_img_array)
             image_blob = {"mime_type": "image/jpeg", "data": image_bytes}
 

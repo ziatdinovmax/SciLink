@@ -802,7 +802,7 @@ class GeminiSpectroscopyAnalysisAgent:
                 
                 # Load and preprocess structure image
                 structure_img = load_image(structure_image_path)
-                processed_structure = preprocess_image(structure_img)
+                processed_structure, _ = preprocess_image(structure_img)
                 structure_img_bytes = convert_numpy_to_jpeg_bytes(processed_structure)
                 
                 prompt_parts.append("\n\nStructural Context Image:")

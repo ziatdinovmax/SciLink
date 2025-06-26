@@ -162,8 +162,8 @@ class GeminiSAMMicroscopyAnalysisAgent:
                 raw_image = np.mean(raw_image, axis=2).astype(np.uint8)
 
             # Use preprocessed (resized) image for BOTH SAM and LLM
-            image_array = preprocess_image(raw_image)
-            self.original_preprocessed_image = image_array
+            image_array, scale_factor = preprocess_image(raw_image)
+            self.original_preprocessed_image = image_array # This is the rescaled image
 
                     
             # Initial analysis parameters from config or defaults
@@ -245,14 +245,15 @@ class GeminiSAMMicroscopyAnalysisAgent:
             particles_df = ParticleAnalyzer.particles_to_dataframe(sam_result)
             
             if not particles_df.empty:
+                scale_factor_area = scale_factor ** 2
                 summary_stats = {
                     'total_particles': sam_result['total_count'],
                     
                     # Size statistics
-                    'mean_area': float(particles_df['area'].mean()),
-                    'std_area': float(particles_df['area'].std()),
-                    'area_range': [float(particles_df['area'].min()), float(particles_df['area'].max())],
-                    'area_percentiles': [float(particles_df['area'].quantile(q)) for q in [0.25, 0.5, 0.75]],
+                    'mean_area_pixels': float(particles_df['area'].mean()) * scale_factor_area,
+                    'std_area_pixels': float(particles_df['area'].std()) * scale_factor_area,
+                    'area_range_pixels': [float(particles_df['area'].min()) * scale_factor_area, float(particles_df['area'].max()) * scale_factor_area],
+                    'area_percentiles_pixels': [p * scale_factor_area for p in particles_df['area'].quantile([0.25, 0.5, 0.75]).tolist()],
                     
                     # Shape statistics
                     'mean_circularity': float(particles_df['circularity'].mean()),
@@ -268,17 +269,18 @@ class GeminiSAMMicroscopyAnalysisAgent:
                     'solidity_range': [float(particles_df['solidity'].min()), float(particles_df['solidity'].max())],
                     
                     # Derived size statistics
-                    'mean_equiv_diameter': float(particles_df['equiv_diameter'].mean()),
-                    'std_equiv_diameter': float(particles_df['equiv_diameter'].std()),
-                    'equiv_diameter_range': [float(particles_df['equiv_diameter'].min()), float(particles_df['equiv_diameter'].max())],
+                    'mean_equiv_diameter_pixels': float(particles_df['equiv_diameter'].mean()) * scale_factor,
+                    'std_equiv_diameter_pixels': float(particles_df['equiv_diameter'].std()) * scale_factor,
+                    'equiv_diameter_range_pixels': [float(particles_df['equiv_diameter'].min()) * scale_factor, float(particles_df['equiv_diameter'].max()) * scale_factor],
                     
-                    'mean_perimeter': float(particles_df['perimeter'].mean()),
-                    'std_perimeter': float(particles_df['perimeter'].std()),
-                    'perimeter_range': [float(particles_df['perimeter'].min()), float(particles_df['perimeter'].max())],
+                    'mean_perimeter_pixels': float(particles_df['perimeter'].mean()) * scale_factor,
+                    'std_perimeter_pixels': float(particles_df['perimeter'].std()) * scale_factor,
+                    'perimeter_range_pixels': [float(particles_df['perimeter'].min()) * scale_factor, float(particles_df['perimeter'].max()) * scale_factor],
                     
                     # Analysis metadata
                     'final_parameters': current_params,
-                    'refinement_cycles_completed': min(cycle + 1 if 'cycle' in locals() else 0, self.refinement_cycles)
+                    'refinement_cycles_completed': min(cycle + 1 if 'cycle' in locals() else 0, self.refinement_cycles),
+                    'image_rescaling_factor': scale_factor if scale_factor != 1.0 else "None (original dimensions used)"
                 }
             else:
                 # Handle empty results
@@ -291,7 +293,8 @@ class GeminiSAMMicroscopyAnalysisAgent:
                     'mean_equiv_diameter': 0, 'std_equiv_diameter': 0, 'equiv_diameter_range': [0, 0],
                     'mean_perimeter': 0, 'std_perimeter': 0, 'perimeter_range': [0, 0],
                     'final_parameters': current_params,
-                    'refinement_cycles_completed': min(cycle + 1 if 'cycle' in locals() else 0, self.refinement_cycles)
+                    'refinement_cycles_completed': min(cycle + 1 if 'cycle' in locals() else 0, self.refinement_cycles),
+                    'image_rescaling_factor': scale_factor if scale_factor != 1.0 else "None (original dimensions used)"
                 }
             
             total_cycles = summary_stats['refinement_cycles_completed']
@@ -410,8 +413,8 @@ class GeminiSAMMicroscopyAnalysisAgent:
         """
         try:
             loaded_image = load_image(image_path)
-            preprocessed_img_array = preprocess_image(loaded_image)
-            image_bytes = convert_numpy_to_jpeg_bytes(preprocessed_img_array)
+            preprocessed_img_array, _ = preprocess_image(loaded_image)
+            image_bytes = convert_numpy_to_jpeg_bytes(preprocessed_img_array) # This is the rescaled image
             image_blob = {"mime_type": "image/jpeg", "data": image_bytes}
 
             sam_overlay, sam_stats = None, None
@@ -433,12 +436,12 @@ class GeminiSAMMicroscopyAnalysisAgent:
                 prompt_parts.append(f"Detected {sam_stats['total_particles']} particles with comprehensive morphological analysis:")
                 
                 # Size statistics
-                prompt_parts.append(f"\n**Size Analysis:**")
-                prompt_parts.append(f"- Mean area: {sam_stats['mean_area']:.1f} ± {sam_stats['std_area']:.1f} pixels")
-                prompt_parts.append(f"- Area range: {sam_stats['area_range'][0]:.0f} to {sam_stats['area_range'][1]:.0f} pixels")
-                prompt_parts.append(f"- Area quartiles (Q1, Q2, Q3): {sam_stats['area_percentiles'][0]:.0f}, {sam_stats['area_percentiles'][1]:.0f}, {sam_stats['area_percentiles'][2]:.0f} pixels")
-                prompt_parts.append(f"- Mean equivalent diameter: {sam_stats['mean_equiv_diameter']:.1f} ± {sam_stats['std_equiv_diameter']:.1f} pixels")
-                prompt_parts.append(f"- Mean perimeter: {sam_stats['mean_perimeter']:.1f} ± {sam_stats['std_perimeter']:.1f} pixels")
+                prompt_parts.append(f"\n**Size Analysis (in original image pixels):**")
+                prompt_parts.append(f"- Mean area: {sam_stats['mean_area_pixels']:.1f} ± {sam_stats['std_area_pixels']:.1f} pixels²")
+                prompt_parts.append(f"- Area range: {sam_stats['area_range_pixels'][0]:.0f} to {sam_stats['area_range_pixels'][1]:.0f} pixels²")
+                prompt_parts.append(f"- Area quartiles (Q1, Q2, Q3): {sam_stats['area_percentiles_pixels'][0]:.0f}, {sam_stats['area_percentiles_pixels'][1]:.0f}, {sam_stats['area_percentiles_pixels'][2]:.0f} pixels²")
+                prompt_parts.append(f"- Mean equivalent diameter: {sam_stats['mean_equiv_diameter_pixels']:.1f} ± {sam_stats['std_equiv_diameter_pixels']:.1f} pixels")
+                prompt_parts.append(f"- Mean perimeter: {sam_stats['mean_perimeter_pixels']:.1f} ± {sam_stats['std_perimeter_pixels']:.1f} pixels")
                 
                 # Shape statistics
                 prompt_parts.append(f"\n**Shape Analysis:**")
@@ -446,6 +449,10 @@ class GeminiSAMMicroscopyAnalysisAgent:
                 prompt_parts.append(f"- Mean aspect ratio: {sam_stats['mean_aspect_ratio']:.2f} ± {sam_stats['std_aspect_ratio']:.2f} (range: {sam_stats['aspect_ratio_range'][0]:.2f} to {sam_stats['aspect_ratio_range'][1]:.2f})")
                 prompt_parts.append(f"- Mean solidity: {sam_stats['mean_solidity']:.3f} ± {sam_stats['std_solidity']:.3f} (range: {sam_stats['solidity_range'][0]:.3f} to {sam_stats['solidity_range'][1]:.3f})")
                 
+                # Add rescaling info to prompt
+                if sam_stats.get('image_rescaling_factor') != "None (original dimensions used)":
+                    prompt_parts.append(f"\n**Note:** Original image was rescaled by a factor of {sam_stats['image_rescaling_factor']:.2f} for analysis. All size statistics have been converted back to original pixel units.")
+
                 # Include refinement info if available
                 if sam_stats.get('refinement_cycles_completed', 0) > 0:
                     prompt_parts.append(f"\n**Analysis Parameters:**")
