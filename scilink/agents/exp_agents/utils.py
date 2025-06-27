@@ -3,6 +3,9 @@ from PIL import Image
 import numpy as np
 from io import BytesIO
 import os
+import glob
+
+import atomai as aoi
 
 
 MAX_IMG_DIM = 1024
@@ -153,3 +156,51 @@ def normalize_and_convert_to_image_bytes(array: np.ndarray, mode='L', format='JP
 
     except Exception as e:
         raise # Re-raise to be handled by the calling method
+
+
+def rescale_for_model(image, current_fov_nm, target_pixel_size_A=0.25): # 0.2-0.3 seems to be the optimal range
+    """
+    Rescale to achieve target pixel size while keeping field of view constant
+    """
+
+    import cv2
+
+    # Calculate target image size to achieve desired pixel size
+    target_size_px = int((current_fov_nm * 10) / target_pixel_size_A)
+    
+    # Calculate scale factor
+    scale_factor = target_size_px / image.shape[0]
+    
+    print(f"Current: {image.shape[0]}px, Target: {target_size_px}px")
+    print(f"Scale factor: {scale_factor:.3f} ({'upsize' if scale_factor > 1 else 'downsize'})")
+    
+    # Choose interpolation
+    if scale_factor > 1.5:
+        interpolation = cv2.INTER_CUBIC  # Upscaling
+    elif scale_factor < 0.7:
+        interpolation = cv2.INTER_AREA   # Downscaling  
+    else:
+        interpolation = cv2.INTER_LINEAR # Moderate scaling
+    
+    rescaled_image = cv2.resize(image, (target_size_px, target_size_px), 
+                               interpolation=interpolation)
+    
+    # Verify final pixel size
+    final_pixel_size = (current_fov_nm * 10) / target_size_px
+    
+    return rescaled_image, scale_factor, final_pixel_size
+
+
+def predict_with_ensemble(dir_path, image, thresh=0.8):
+
+    all_predictions = []
+    model_files = glob.glob(os.path.join(dir_path,'atomnet3*.tar'))
+    for model_file in model_files:
+        model = aoi.load_model(model_file)
+        prediction = model.predict(image)[0]
+        all_predictions.append(prediction)
+    prediction_mean = np.mean(np.stack(all_predictions), axis=0)
+    coord_class = aoi.predictors.Locator(thresh=thresh).run(prediction_mean)
+
+    # Return the coordinates and the squeezed (2D) heatmap, which is ready for visualization.
+    return prediction_mean.squeeze(), coord_class

@@ -1,0 +1,513 @@
+import json
+import os
+import logging
+import numpy as np
+from io import BytesIO
+import cv2 # For grayscale conversion in _run_gmm_analysis
+import matplotlib.pyplot as plt # For visualizations
+import matplotlib.cm as cm # For visualizations
+
+import google.generativeai as genai
+from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockThreshold
+
+from .instruct import (
+    ATOMISTIC_MICROSCOPY_ANALYSIS_INSTRUCTIONS, # New instruction prompt
+    ATOMISTIC_MICROSCOPY_CLAIMS_INSTRUCTIONS, # New instruction prompt
+    GMM_PARAMETER_ESTIMATION_INSTRUCTIONS, # New instruction prompt
+)
+from .utils import load_image, preprocess_image, convert_numpy_to_jpeg_bytes, predict_with_ensemble # predict_with_ensemble is new
+
+from ...auth import get_api_key, APIKeyNotFoundError
+
+import atomai as aoi # For imlocal and gmm
+
+class GeminiAtomisticMicroscopyAnalysisAgent:
+    """
+    Agent for analyzing microscopy images using a neural network ensemble for atom finding
+    and Gaussian Mixture Model (GMM) clustering for local atomic structure classification.
+    """
+
+    def __init__(self, google_api_key: str | None = None, model_name: str = "gemini-2.5-pro-preview-06-05", atomistic_analysis_settings: dict | None = None):
+        # Initialize Google Generative AI
+        if google_api_key is None:
+            google_api_key = get_api_key('google')
+            if not google_api_key:
+                raise APIKeyNotFoundError('google')
+        genai.configure(api_key=google_api_key)
+        
+        self.model = genai.GenerativeModel(model_name)
+        self.generation_config = GenerationConfig(response_mime_type="application/json")
+        self.safety_settings = {
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+        }
+        self.logger = logging.getLogger(__name__)
+        self.atomistic_analysis_settings = atomistic_analysis_settings if atomistic_analysis_settings else {}
+        self.RUN_GMM = self.atomistic_analysis_settings.get('GMM_ENABLED', True)
+        self.GMM_AUTO_PARAMS = self.atomistic_analysis_settings.get('GMM_AUTO_PARAMS', True)
+        self.save_visualizations = self.atomistic_analysis_settings.get('save_visualizations', False)
+        self.original_preprocessed_image = None # Store for potential visualization
+
+    def _parse_llm_response(self, response) -> tuple[dict | None, dict | None]:
+        """
+        Parses the LLM response, expecting JSON.
+        """
+        result_json = None
+        error_dict = None
+        raw_text = None
+        json_string = None
+
+        try:
+            raw_text = response.text
+            first_brace_index = raw_text.find('{')
+            last_brace_index = raw_text.rfind('}')
+            if first_brace_index != -1 and last_brace_index != -1 and last_brace_index > first_brace_index:
+                json_string = raw_text[first_brace_index : last_brace_index + 1]
+                result_json = json.loads(json_string)
+            else:
+                raise ValueError("Could not find valid JSON object delimiters '{' and '}' in the response text.")
+
+        except (json.JSONDecodeError, AttributeError, IndexError, ValueError) as e:
+            error_details = str(e)
+            error_raw_response = raw_text if raw_text is not None else getattr(response, 'text', 'N/A')
+            self.logger.error(f"Error parsing Gemini JSON response: {e}")
+            parsed_substring_for_log = json_string if json_string else 'N/A'
+            self.logger.debug(f"Attempted to parse substring: {parsed_substring_for_log[:500]}...")
+            self.logger.debug(f"Original Raw response text: {error_raw_response[:500]}...")
+
+            if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
+                block_reason = response.prompt_feedback.block_reason
+                self.logger.error(f"Request blocked due to: {block_reason}")
+                error_dict = {"error": f"Content blocked by safety filters", "details": f"Reason: {block_reason}"}
+            elif response.candidates and response.candidates[0].finish_reason != 1: # 1 == Stop
+                finish_reason = response.candidates[0].finish_reason
+                self.logger.error(f"Generation finished unexpectedly: {finish_reason}")
+                error_dict = {"error": f"Generation finished unexpectedly: {finish_reason}", "details": error_details, "raw_response": error_raw_response}
+            else:
+                error_dict = {"error": "Failed to parse valid JSON from LLM response", "details": error_details, "raw_response": error_raw_response}
+        except Exception as e:
+            self.logger.exception(f"Unexpected error processing response: {e}")
+            error_dict = {"error": "Unexpected error processing LLM response", "details": str(e)}
+        
+        return result_json, error_dict
+
+    def _generate_json_from_text_parts(self, prompt_parts: list) -> tuple[dict | None, dict | None]:
+        """
+        Internal helper to generate JSON from a list of textual prompt parts.
+        """
+        try:
+            self.logger.debug(f"Sending text-only prompt to LLM. Total parts: {len(prompt_parts)}")
+            response = self.model.generate_content(
+                contents=prompt_parts,
+                generation_config=self.generation_config,
+                safety_settings=self.safety_settings,
+            )
+            return self._parse_llm_response(response)
+        except Exception as e:
+            self.logger.exception(f"An unexpected error occurred during text-based LLM call: {e}")
+            return None, {"error": "An unexpected error occurred during text-based LLM call", "details": str(e)}
+
+    def _get_gmm_params_from_llm(self, image_blob, system_info) -> tuple[float | None, int | None, str | None]:
+        """
+        Asks the LLM to suggest GMM parameters based on the image and system info.
+
+        Returns:
+            tuple: (window_size_nm, n_components, explanation)
+                window_size_nm (float): Suggested window size in nanometers.
+                n_components (int): Suggested number of GMM components.
+                explanation (str): LLM's reasoning for the parameters.
+        """
+        self.logger.info("Attempting to get GMM parameters from LLM...")
+        prompt_parts = [GMM_PARAMETER_ESTIMATION_INSTRUCTIONS]
+        prompt_parts.append("\nImage to analyze for parameters:\n")
+        prompt_parts.append(image_blob)
+        if system_info:
+            system_info_text = "\n\nAdditional System Information:\n"
+            if isinstance(system_info, str):
+                try: system_info_text += json.dumps(json.loads(system_info), indent=2)
+                except json.JSONDecodeError: system_info_text += system_info
+            elif isinstance(system_info, dict): system_info_text += json.dumps(system_info, indent=2)
+            else: system_info_text += str(system_info)[:1000]
+            prompt_parts.append(system_info_text)
+        prompt_parts.append("\n\nBased on the material science context, output ONLY the JSON object with 'window_size_nm', 'n_components', and 'explanation'.")
+        param_gen_config = GenerationConfig(response_mime_type="application/json")
+        try:
+            response = self.model.generate_content(
+                contents=prompt_parts,
+                generation_config=param_gen_config,
+                safety_settings=self.safety_settings,
+            )
+            self.logger.debug(f"LLM GMM parameter estimation raw response: {response}")
+            if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
+                self.logger.error(f"LLM GMM parameter estimation blocked: {response.prompt_feedback.block_reason}")
+                return None, None, None
+            if response.candidates and response.candidates[0].finish_reason != 1:
+                self.logger.warning(f"LLM GMM parameter estimation finished unexpectedly: {response.candidates[0].finish_reason}")
+
+            raw_text_params = response.text
+            result_json_params = json.loads(raw_text_params)
+            window_size_nm = result_json_params.get("window_size_nm")
+            n_components = result_json_params.get("n_components")
+            explanation = result_json_params.get("explanation", "No explanation provided.")
+            params_valid = True
+            if not isinstance(window_size_nm, (float, int)) or window_size_nm <= 0:
+                self.logger.warning(f"LLM invalid window_size_nm: {window_size_nm}")
+                params_valid = False; window_size_nm = None
+            # Constraints for n_components for GMM are typically smaller than NMF
+            if not isinstance(n_components, int) or not (1 <= n_components <= 8): # Adjusted constraint
+                self.logger.warning(f"LLM invalid n_components: {n_components}")
+                params_valid = False; n_components = None
+            if not isinstance(explanation, str) or not explanation.strip():
+                explanation = "Invalid/empty explanation from LLM."
+            if params_valid:
+                self.logger.info(f"LLM suggested params: window_size_nm={window_size_nm}, n_components={n_components}")
+                return window_size_nm, n_components, explanation
+            return None, None, explanation
+        except Exception as e:
+            self.logger.error(f"LLM call for GMM params failed: {e}", exc_info=True)
+            return None, None, None
+
+    def _run_gmm_analysis(self, image_path: str, model_dir_path: str, window_size: int, n_components: int) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+        """
+        Performs atom finding using a neural network ensemble and then GMM clustering
+        on local patches around detected atoms.
+        
+        Returns:
+            tuple: (nn_output, coordinates, centroids, coords_class)
+                nn_output (np.ndarray): Heatmap from NN ensemble.
+                coordinates (np.ndarray): Detected atom coordinates.
+                centroids (np.ndarray): Mean images of GMM classes (n_components, h, w, 1).
+                coords_class (np.ndarray): Nx3 array of xy coordinates and corresponding gmm classes.
+        """
+        try:
+            self.logger.info("--- Starting NN Ensemble + GMM Analysis ---")
+            
+            expdata = load_image(image_path)
+            # Ensure it's grayscale for analysis
+            if len(expdata.shape) == 3:
+                expdata = cv2.cvtColor(expdata, cv2.COLOR_RGB2GRAY)
+
+            # 1. Make an ensemble prediction with neural nets
+            if not model_dir_path or not os.path.isdir(model_dir_path):
+                self.logger.error(f"Model directory not provided or does not exist: {model_dir_path}")
+                return None, None, None, None
+            
+            self.logger.info(f"Running NN ensemble prediction from models in: {model_dir_path}")
+            nn_output, coordinates = predict_with_ensemble(model_dir_path, expdata)
+            if coordinates is None or len(coordinates) == 0:
+                self.logger.warning("NN ensemble did not detect any coordinates. Aborting GMM analysis.")
+                return None, None, None, None
+            self.logger.info(f"Detected {len(coordinates)} atomic coordinates.")
+
+            # 2. Run sliding window + GMM analysis
+            self.logger.info(f"Extracting local patches with window size: {window_size}")
+            # atomai expects (N, H, W, 1) for imlocal input
+            if expdata.ndim == 2:
+                expdata_reshaped = expdata[None, ..., None] # Add batch and channel dims
+            else: # Should not happen after grayscale conversion
+                self.logger.error("Image data for GMM is not 2D after preprocessing.")
+                return None, None, None, None
+            
+            imstack = aoi.stat.imlocal(expdata_reshaped, coordinates, window_size=window_size)
+            
+            self.logger.info(f"Running GMM with {n_components} components.")
+            centroids, _, coords_class = imstack.gmm(n_components)
+
+            # Atomai's GMM returns classes starting from 1. Adjust to be 0-indexed for consistency.
+            if coords_class is not None and coords_class.shape[1] > 2:
+                coords_class[:, 2] = coords_class[:, 2] - 1
+            
+            self.logger.info("GMM analysis complete.")
+            # centroids are (n_components, h, w, 1)
+            # coords_class is (N, 3) with x, y, class_id
+            # nn_output is (H, W)
+            return nn_output, coordinates, centroids, coords_class
+
+        except Exception as gmm_e:
+            self.logger.error(f"NN+GMM analysis failed: {gmm_e}", exc_info=True)
+            return None, None, None, None
+
+    def _save_gmm_visualization_to_disk(self, plot_bytes: bytes, label: str):
+        """
+        Save visualization images to disk.
+        """
+        try:
+            from datetime import datetime
+            
+            output_dir = "atomistic_analysis_visualizations"
+            os.makedirs(output_dir, exist_ok=True)
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f") # Add microseconds for uniqueness
+            # Sanitize label for filename
+            filename = f"{label.replace(' ', '_').replace('(', '').replace(')', '')}_{timestamp}.jpeg"
+            filepath = os.path.join(output_dir, filename)
+            
+            with open(filepath, 'wb') as f:
+                f.write(plot_bytes)
+            
+            self.logger.info(f"📸 Saved GMM visualization: {filepath}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to save GMM visualization: {e}")
+
+    def _create_gmm_visualization(self, original_image: np.ndarray, nn_output: np.ndarray, coords_class: np.ndarray, centroids: np.ndarray) -> list[dict]:
+        """
+        Creates visualizations for GMM analysis:
+        1. GMM Centroids (mean local structures)
+        2. Classified Atom Map (atoms on original image, colored by class)
+        
+        Args:
+            original_image (np.ndarray): The preprocessed original image (2D grayscale).
+            coords_class (np.ndarray): Nx3 array of xy coordinates and corresponding gmm classes.
+            nn_output (np.ndarray): Heatmap from NN ensemble (raw DCNN prediction).
+            centroids (np.ndarray): Mean images of GMM classes (n_components, h, w, 1).
+            
+        Returns:
+            list[dict]: A list of dictionaries, each containing 'label' and 'bytes' for an image.
+        """
+        all_images_for_llm = []
+
+        # 0. Plot of NN Ensemble Heatmap overlaid on original image
+        fig_nn, ax_nn = plt.subplots(1, 1, figsize=(8, 8))
+        ax_nn.imshow(original_image, cmap='gray')
+        # Overlay the NN output heatmap with transparency
+        ax_nn.imshow(nn_output, cmap='hot', alpha=0.5) 
+        ax_nn.set_title("NN Ensemble Prediction Heatmap")
+        ax_nn.axis('off')
+        plt.tight_layout()
+        
+        buf_nn = BytesIO()
+        plt.savefig(buf_nn, format='jpeg')
+        buf_nn.seek(0)
+        image_data_nn = buf_nn.getvalue()
+        all_images_for_llm.append({'label': 'NN Ensemble Prediction Heatmap', 'bytes': image_data_nn})
+        plt.close(fig_nn)
+
+        n_components = centroids.shape[0]
+
+        # 1. Plot of GMM centroids
+        n_cols = min(4, n_components)
+        n_rows = (n_components + n_cols - 1) // n_cols
+        fig_c, axes_c = plt.subplots(n_rows, n_cols, figsize=(n_cols * 2, n_rows * 2))
+        if n_rows == 1 and n_cols == 1: axes_c = np.array([axes_c]) # Handle single subplot case
+        axes_c = axes_c.flatten()
+        for i in range(n_components):
+            axes_c[i].imshow(centroids[i, :, :, 0], cmap='viridis') # Centroids are (h, w, 1)
+            axes_c[i].set_title(f'Class {i}')
+            axes_c[i].axis('off')
+        for i in range(n_components, len(axes_c)): # Hide unused subplots
+            axes_c[i].axis('off')
+        fig_c.suptitle("GMM Centroids (Mean Local Structures)")
+        plt.tight_layout()
+        
+        buf = BytesIO()
+        plt.savefig(buf, format='jpeg') # Save to buffer for LLM
+        buf.seek(0)
+        image_data_c = buf.getvalue()
+        all_images_for_llm.append({'label': 'GMM Centroids (Mean Local Structures)', 'bytes': image_data_c})
+
+        plt.close(fig_c)
+
+        # 2. Plot of classified coordinates on original image
+        fig_coords, ax_coords = plt.subplots(1, 1, figsize=(8, 8))
+        ax_coords.imshow(original_image, cmap='gray')
+        
+        colors = cm.get_cmap('viridis', n_components) # Get distinct colors for classes
+        for i in range(n_components):
+            class_coords = coords_class[coords_class[:, 2] == i]
+            # atomai returns coordinates as (row, col) which is (y, x).
+            # matplotlib.pyplot.scatter expects (x, y), so we swap the columns.
+            ax_coords.scatter(class_coords[:, 1], class_coords[:, 0], color=colors(i), label=f'Class {i}', s=10, alpha=0.8)
+        
+        ax_coords.legend()
+        ax_coords.set_title("Spatially-Resolved GMM Classes")
+        ax_coords.axis('off')
+        plt.tight_layout()
+
+        buf = BytesIO()
+        plt.savefig(buf, format='jpeg') # Save to buffer for LLM
+        buf.seek(0)
+        image_data_coords = buf.getvalue()
+        all_images_for_llm.append({'label': 'Classified Atom Map', 'bytes': image_data_coords})
+        plt.close(fig_coords)
+
+        # Save to disk if enabled
+        if self.save_visualizations:
+            for img_info in all_images_for_llm:
+                self._save_gmm_visualization_to_disk(img_info['bytes'], img_info['label'])
+
+        return all_images_for_llm
+
+    def _analyze_image_base(self, image_path: str, system_info: dict | str | None, 
+                            instruction_prompt: str, 
+                            additional_top_level_context: str | None = None) -> tuple[dict | None, dict | None]:
+        """
+        Internal helper for image-based analysis, including optional NN+GMM.
+        """
+        try:
+            # Handle system_info input (can be dict, file path, or None)
+            if isinstance(system_info, str):
+                try:
+                    with open(system_info, 'r') as f:
+                        system_info = json.load(f)
+                except (FileNotFoundError, json.JSONDecodeError) as e:
+                    self.logger.error(f"Error loading system_info from {system_info}: {e}")
+                    system_info = {} # Proceed without system info if loading fails
+            elif system_info is None:
+                system_info = {} # Ensure it's a dict for easier access later
+
+            loaded_image = load_image(image_path)
+
+            # Determine physical scale (nm/pixel) from metadata, mirroring spectroscopy agent's approach
+            nm_per_pixel = None
+            if isinstance(system_info, dict) and 'spatial_info' in system_info and isinstance(system_info.get('spatial_info'), dict):
+                spatial = system_info['spatial_info']
+                fov_x = spatial.get("field_of_view_x")
+                units = spatial.get("field_of_view_units", "nm") # Default to nm
+
+                if fov_x is not None and isinstance(fov_x, (int, float)) and fov_x > 0:
+                    h, w = loaded_image.shape[:2]
+                    
+                    # Convert provided units to nm for consistent calculations
+                    scale_to_nm = 1.0
+                    if units.lower() in ['um', 'micrometer', 'micrometers']:
+                        scale_to_nm = 1000.0
+                    elif units.lower() in ['a', 'angstrom', 'angstroms']:
+                        scale_to_nm = 0.1
+                    
+                    fov_in_nm = fov_x * scale_to_nm
+                    
+                    if w > 0:
+                        nm_per_pixel = fov_in_nm / w
+                        self.logger.info(f"Calculated nm/pixel from FOV: {fov_x} {units} / {w} px = {nm_per_pixel:.4f} nm/pixel")
+                    else:
+                        self.logger.warning("Cannot calculate scale from FOV because image width is 0.")
+                else:
+                    self.logger.warning(f"Invalid or missing 'field_of_view_x' in spatial_info: {fov_x}. Physical scale not applied.")
+
+            preprocessed_img_array, _ = preprocess_image(loaded_image)
+            self.original_preprocessed_image = preprocessed_img_array # Store for GMM visualization
+            image_bytes = convert_numpy_to_jpeg_bytes(preprocessed_img_array)
+            image_blob = {"mime_type": "image/jpeg", "data": image_bytes}
+
+            nn_output, coordinates, centroids, coords_class = None, None, None, None
+            if self.RUN_GMM:
+                ws_nm, nc, gmm_explanation = None, None, None
+                model_dir_path = self.atomistic_analysis_settings.get('model_dir_path')
+                if not model_dir_path:
+                    self.logger.error("GMM analysis enabled, but 'model_dir_path' not provided in atomistic_analysis_settings.")
+                else:
+                    if self.GMM_AUTO_PARAMS:
+                        auto_params = self._get_gmm_params_from_llm(image_blob, system_info)
+                        if auto_params: ws_nm, nc, gmm_explanation = auto_params
+                    if gmm_explanation: self.logger.info(f"LLM Explanation for GMM params: {gmm_explanation}")
+                    
+                    # Determine window size in pixels. Prioritize LLM physical size, then fall back to config.
+                    ws_pixels = self.atomistic_analysis_settings.get('window_size', 32) # Default pixel size
+                    if ws_nm is not None:
+                        if nm_per_pixel is not None and nm_per_pixel > 0:
+                            calculated_ws_pixels = int(round(ws_nm / nm_per_pixel))
+                            # atomai's imlocal works best with even window sizes
+                            if calculated_ws_pixels % 2 != 0:
+                                calculated_ws_pixels += 1
+                            # Ensure a minimum size
+                            ws_pixels = max(8, calculated_ws_pixels)
+                            self.logger.info(f"Using LLM-suggested physical window size: {ws_nm:.2f} nm -> {ws_pixels} pixels.")
+                        else:
+                            self.logger.warning(f"LLM suggested a physical window size ({ws_nm} nm), but image scale (nm/pixel) is unknown. Falling back to default pixel window size of {ws_pixels} px.")
+                    else:
+                        self.logger.info(f"Using default/configured window size of {ws_pixels} pixels.")
+
+                    if nc is None: nc = self.atomistic_analysis_settings.get('n_components', 4) # Default n_components
+                    
+                    nn_output, coordinates, centroids, coords_class = self._run_gmm_analysis(image_path, model_dir_path, ws_pixels, nc)
+            
+            prompt_parts = [instruction_prompt]
+            if additional_top_level_context:
+                prompt_parts.append("\n\n## Special Considerations for This Analysis (Based on Prior Review):\n")
+                prompt_parts.append(additional_top_level_context)
+                prompt_parts.append("\nPlease ensure your DFT structure recommendations and scientific justifications specifically address or investigate these special considerations alongside your general analysis of the image features. The priority should be given to structures that elucidate these highlighted aspects.\n")
+            
+            analysis_request_text = "\nPlease analyze the following microscopy image"
+            if system_info: analysis_request_text += " using the additional context provided."
+            analysis_request_text += "\n\nPrimary Microscopy Image:\n"
+            prompt_parts.append(analysis_request_text)
+            prompt_parts.append(image_blob)
+
+            if centroids is not None and coords_class is not None:
+                prompt_parts.append("\n\nSupplemental Analysis Data (NN Prediction + GMM Clustering):")
+                
+                # Create and add visualizations
+                gmm_visualizations = self._create_gmm_visualization(preprocessed_img_array, nn_output, coords_class, centroids)
+                for viz in gmm_visualizations:
+                    prompt_parts.append(f"\n{viz['label']}:")
+                    prompt_parts.append({"mime_type": "image/jpeg", "data": viz['bytes']})
+                self.logger.info(f"Adding {len(gmm_visualizations)} GMM visualizations to prompt.")
+
+            else:
+                prompt_parts.append("\n\n(No supplemental NN/GMM analysis results are provided or it was disabled/failed)")
+
+            if system_info:
+                system_info_text = "\n\nAdditional System Information (Metadata):\n"
+                if isinstance(system_info, str):
+                    try: system_info_text += json.dumps(json.loads(system_info), indent=2)
+                    except json.JSONDecodeError: system_info_text += system_info
+                elif isinstance(system_info, dict): system_info_text += json.dumps(system_info, indent=2)
+                else: system_info_text += str(system_info)
+                prompt_parts.append(system_info_text)
+            
+            prompt_parts.append("\n\nProvide your analysis strictly in the requested JSON format.")
+            
+            response = self.model.generate_content(
+                contents=prompt_parts,
+                generation_config=self.generation_config,
+                safety_settings=self.safety_settings,
+            )
+            return self._parse_llm_response(response)
+
+        except FileNotFoundError:
+            self.logger.error(f"Image file not found: {image_path}")
+            return None, {"error": "Image file not found", "details": f"Path: {image_path}"}
+        except ImportError as e: # Should not happen if dependencies are met
+            self.logger.error(f"Missing dependency for image processing: {e}")
+            return None, {"error": "Missing image processing dependency", "details": str(e)}
+        except Exception as e:
+            self.logger.exception(f"An unexpected error occurred during image analysis setup or GMM analysis: {e}")
+            return None, {"error": "An unexpected error occurred during analysis setup", "details": str(e)}
+
+    def analyze_microscopy_image_for_claims(self, image_path: str, system_info: dict | str | None = None):
+        """
+        Analyze microscopy image to generate scientific claims for literature comparison.
+        This path always uses image-based analysis with NN+GMM.
+        """
+        result_json, error_dict = self._analyze_image_base(
+            image_path, system_info, ATOMISTIC_MICROSCOPY_CLAIMS_INSTRUCTIONS
+        )
+
+        if error_dict:
+            return error_dict
+        if result_json is None:
+            return {"error": "Atomistic microscopy analysis for claims failed unexpectedly after LLM processing."}
+
+        detailed_analysis = result_json.get("detailed_analysis", "Analysis not provided by LLM.")
+        scientific_claims = result_json.get("scientific_claims", [])
+        valid_claims = []
+
+        if not isinstance(scientific_claims, list):
+            self.logger.warning(f"'scientific_claims' from LLM was not a list: {scientific_claims}")
+            scientific_claims = []
+
+        for claim in scientific_claims:
+            if isinstance(claim, dict) and all(k in claim for k in ["claim", "scientific_impact", "has_anyone_question", "keywords"]):
+                if isinstance(claim.get("keywords"), list):
+                    valid_claims.append(claim)
+                else:
+                    self.logger.warning(f"Claim skipped due to 'keywords' not being a list: {claim}")
+            else:
+                self.logger.warning(f"Claim skipped due to missing keys or incorrect dict format: {claim}")
+        
+        if not valid_claims and not detailed_analysis == "Analysis not provided by LLM.":
+            self.logger.warning("Atomistic microscopy analysis for claims successful ('detailed_analysis' provided) but no valid claims found or parsed.")
+        elif not valid_claims:
+             self.logger.warning("LLM call did not yield valid claims or analysis text for atomistic microscopy claims workflow.")
+
+        return {"full_analysis": detailed_analysis, "claims": valid_claims}
