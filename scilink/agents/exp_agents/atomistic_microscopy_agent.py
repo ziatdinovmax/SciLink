@@ -255,6 +255,7 @@ class GeminiAtomisticMicroscopyAnalysisAgent:
         1. GMM Centroids (mean local structures)
         2. Classified Atom Map (atoms on original image, colored by class)
         3. Nearest-Neighbor Distance Map (atoms on original image, colored by NN distance)
+        4. Nearest-Neighbor Distance Histogram
         
         Args:
             original_image (np.ndarray): The preprocessed original image (2D grayscale).
@@ -360,6 +361,22 @@ class GeminiAtomisticMicroscopyAnalysisAgent:
             image_data_nn_dist = buf_nn_dist.getvalue()
             all_images_for_llm.append({'label': 'Nearest-Neighbor Distance Map', 'bytes': image_data_nn_dist})
             plt.close(fig_nn_dist)
+
+        # 4. Plot of nearest-neighbor distances histogram
+        if nn_distances is not None:
+            fig_hist, ax_hist = plt.subplots(figsize=(6, 4))
+            ax_hist.hist(nn_distances, bins='auto', color='skyblue', edgecolor='black')
+            ax_hist.set_title("Nearest-Neighbor Distance Distribution")
+            ax_hist.set_xlabel(f"Distance ({nn_dist_units})")
+            ax_hist.set_ylabel("Frequency (Number of Atoms)")
+            plt.tight_layout()
+
+            buf_hist = BytesIO()
+            plt.savefig(buf_hist, format='jpeg')
+            buf_hist.seek(0)
+            image_data_hist = buf_hist.getvalue()
+            all_images_for_llm.append({'label': 'Nearest-Neighbor Distance Histogram', 'bytes': image_data_hist})
+            plt.close(fig_hist)
 
         # Save to disk if enabled
         if self.save_visualizations:
