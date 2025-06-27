@@ -204,3 +204,33 @@ def predict_with_ensemble(dir_path, image, thresh=0.8):
 
     # Return the coordinates and the squeezed (2D) heatmap, which is ready for visualization.
     return prediction_mean.squeeze(), coord_class
+
+
+def analyze_nearest_neighbor_distances(coordinates, pixel_scale=1.0):
+    """
+    Calculates the nearest-neighbor distance for each coordinate.
+
+    Args:
+        coordinates (np.ndarray): Nx2 array of (y, x) coordinates of atoms.
+        pixel_scale (float): Conversion factor from pixels to real units (e.g., nm/pixel).
+
+    Returns:
+        np.ndarray: A 1D array of nearest-neighbor distances for each coordinate,
+                    or None if there are not enough coordinates.
+    """
+    from scipy.spatial import KDTree
+    import numpy as np
+
+    if coordinates is None or len(coordinates) < 2:
+        print("Warning: Not enough coordinates to compute nearest-neighbor distances.")
+        return None
+
+    # Build a KD-tree for efficient nearest-neighbor search
+    tree = KDTree(coordinates)
+
+    # Query the KD-tree for the nearest neighbor of each atom (excluding itself)
+    distances, _ = tree.query(coordinates, k=2)
+    # The nearest-neighbor distance is the second element (first is distance to self, which is 0)
+    nearest_neighbor_distances = distances[:, 1] * pixel_scale
+
+    return nearest_neighbor_distances

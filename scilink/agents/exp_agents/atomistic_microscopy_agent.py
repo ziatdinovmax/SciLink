@@ -15,7 +15,7 @@ from .instruct import (
     ATOMISTIC_MICROSCOPY_CLAIMS_INSTRUCTIONS, # New instruction prompt
     GMM_PARAMETER_ESTIMATION_INSTRUCTIONS, # New instruction prompt
 )
-from .utils import load_image, preprocess_image, convert_numpy_to_jpeg_bytes, predict_with_ensemble # predict_with_ensemble is new
+from .utils import load_image, preprocess_image, convert_numpy_to_jpeg_bytes, predict_with_ensemble, analyze_nearest_neighbor_distances, normalize_and_convert_to_image_bytes # predict_with_ensemble is new
 
 from ...auth import get_api_key, APIKeyNotFoundError
 
@@ -249,17 +249,20 @@ class GeminiAtomisticMicroscopyAnalysisAgent:
         except Exception as e:
             self.logger.error(f"Failed to save GMM visualization: {e}")
 
-    def _create_gmm_visualization(self, original_image: np.ndarray, nn_output: np.ndarray, coords_class: np.ndarray, centroids: np.ndarray) -> list[dict]:
+    def _create_gmm_visualization(self, original_image: np.ndarray, nn_output: np.ndarray, coords_class: np.ndarray, centroids: np.ndarray, nn_distances: np.ndarray | None, nn_dist_units: str) -> list[dict]:
         """
         Creates visualizations for GMM analysis:
         1. GMM Centroids (mean local structures)
         2. Classified Atom Map (atoms on original image, colored by class)
+        3. Nearest-Neighbor Distance Map (atoms on original image, colored by NN distance)
         
         Args:
             original_image (np.ndarray): The preprocessed original image (2D grayscale).
             coords_class (np.ndarray): Nx3 array of xy coordinates and corresponding gmm classes.
             nn_output (np.ndarray): Heatmap from NN ensemble (raw DCNN prediction).
             centroids (np.ndarray): Mean images of GMM classes (n_components, h, w, 1).
+            nn_distances (np.ndarray | None): 1D array of nearest-neighbor distances for each atom.
+            nn_dist_units (str): The units for the nearest-neighbor distances (e.g., 'nm' or 'pixels').
             
         Returns:
             list[dict]: A list of dictionaries, each containing 'label' and 'bytes' for an image.
@@ -330,6 +333,34 @@ class GeminiAtomisticMicroscopyAnalysisAgent:
         all_images_for_llm.append({'label': 'Classified Atom Map', 'bytes': image_data_coords})
         plt.close(fig_coords)
 
+        # 3. Plot of nearest-neighbor distances as a scatter plot
+        if nn_distances is not None and coords_class is not None:
+            fig_nn_dist, ax_nn_dist = plt.subplots(1, 1, figsize=(8, 8))
+            ax_nn_dist.imshow(original_image, cmap='gray')
+
+            # atomai returns coordinates as (row, col) which is (y, x).
+            # matplotlib.pyplot.scatter expects (x, y), so we swap the columns.
+            x_coords = coords_class[:, 1]
+            y_coords = coords_class[:, 0]
+            
+            # Create the scatter plot, coloring points by distance
+            scatter = ax_nn_dist.scatter(x_coords, y_coords, c=nn_distances, cmap='inferno', s=10, alpha=0.9)
+            
+            # Add a colorbar
+            cbar = fig_nn_dist.colorbar(scatter, ax=ax_nn_dist, fraction=0.046, pad=0.04)
+            cbar.set_label(f'Nearest-Neighbor Distance ({nn_dist_units})')
+            
+            ax_nn_dist.set_title("Nearest-Neighbor Distance Map")
+            ax_nn_dist.axis('off')
+            plt.tight_layout()
+
+            buf_nn_dist = BytesIO()
+            plt.savefig(buf_nn_dist, format='jpeg')
+            buf_nn_dist.seek(0)
+            image_data_nn_dist = buf_nn_dist.getvalue()
+            all_images_for_llm.append({'label': 'Nearest-Neighbor Distance Map', 'bytes': image_data_nn_dist})
+            plt.close(fig_nn_dist)
+
         # Save to disk if enabled
         if self.save_visualizations:
             for img_info in all_images_for_llm:
@@ -337,7 +368,7 @@ class GeminiAtomisticMicroscopyAnalysisAgent:
 
         return all_images_for_llm
 
-    def _analyze_image_base(self, image_path: str, system_info: dict | str | None, 
+    def _analyze_image_base(self, image_path: str, system_info: dict | str | None,
                             instruction_prompt: str, 
                             additional_top_level_context: str | None = None) -> tuple[dict | None, dict | None]:
         """
@@ -436,13 +467,24 @@ class GeminiAtomisticMicroscopyAnalysisAgent:
             if centroids is not None and coords_class is not None:
                 prompt_parts.append("\n\nSupplemental Analysis Data (NN Prediction + GMM Clustering):")
                 
+                # Nearest-neighbor distance analysis
+                nn_distances = None
+                nn_dist_units = "pixels"
+                if coords_class is not None and len(coords_class) > 1:
+                    final_coordinates = coords_class[:, :2] # (y, x)
+                    scale = nm_per_pixel if nm_per_pixel else 1.0
+                    if nm_per_pixel:
+                        nn_dist_units = "nm"
+                    nn_distances = analyze_nearest_neighbor_distances(final_coordinates, pixel_scale=scale)
+
                 # Create and add visualizations
-                gmm_visualizations = self._create_gmm_visualization(preprocessed_img_array, nn_output, coords_class, centroids)
+                gmm_visualizations = self._create_gmm_visualization(
+                    preprocessed_img_array, nn_output, coords_class, centroids, nn_distances, nn_dist_units
+                )
                 for viz in gmm_visualizations:
                     prompt_parts.append(f"\n{viz['label']}:")
                     prompt_parts.append({"mime_type": "image/jpeg", "data": viz['bytes']})
                 self.logger.info(f"Adding {len(gmm_visualizations)} GMM visualizations to prompt.")
-
             else:
                 prompt_parts.append("\n\n(No supplemental NN/GMM analysis results are provided or it was disabled/failed)")
 
