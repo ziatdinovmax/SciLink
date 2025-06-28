@@ -305,3 +305,58 @@ def analyze_nearest_neighbor_distances(coordinates, pixel_scale=1.0):
     nearest_neighbor_distances = distances[:, 1] * pixel_scale
 
     return nearest_neighbor_distances
+
+
+def download_file_with_gdown(file_id, output_path):
+    """
+    Downloads a file from Google Drive using gdown.
+
+    Args:
+        file_id (str): The ID of the Google Drive file.
+        output_path (str): The local path where the file will be saved.
+    """
+
+    import gdown
+
+    try:
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        
+        # gdown.download handles the direct download link construction and large file quirks
+        gdown.download(id=file_id, output=output_path, quiet=False, fuzzy=True) # fuzzy=True for slightly more relaxed ID matching
+        
+        print(f"File downloaded to: {output_path}")
+        return output_path
+    except Exception as e:
+        print(f"An error occurred during download: {e}")
+        return None
+
+def unzip_file(zip_filepath, extract_to_dir):
+    """
+    Unzips a file to a specified directory.
+
+    Args:
+        zip_filepath (str): The path to the zip file.
+        extract_to_dir (str): The directory where contents will be extracted.
+    """
+
+    import zipfile
+
+    if not os.path.exists(zip_filepath):
+        print(f"Error: Zip file not found at {zip_filepath}")
+        return False
+
+    print(f"Unzipping '{zip_filepath}' to '{extract_to_dir}'...")
+    try:
+        os.makedirs(extract_to_dir, exist_ok=True)
+
+        with zipfile.ZipFile(zip_filepath, 'r') as zip_ref:
+            zip_ref.extractall(extract_to_dir)
+        print(f"Successfully unzipped to: {extract_to_dir}")
+        return True
+    except zipfile.BadZipFile:
+        print(f"Error: '{zip_filepath}' is not a valid zip file or is corrupted.")
+        return False
+    except Exception as e:
+        print(f"An error occurred during unzipping: {e}")
+        return False

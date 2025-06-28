@@ -55,6 +55,7 @@ setup(
         "futurehouse-client>=0.3.19",
         "ase>=0.8.5",
         "aimsgb>=1.1.1",
+        "gdown>=5.2.0",
     ],
     include_package_data=True,
     package_data={
