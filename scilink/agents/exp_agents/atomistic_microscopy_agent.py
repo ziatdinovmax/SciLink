@@ -15,7 +15,7 @@ from .instruct import (
     ATOMISTIC_MICROSCOPY_CLAIMS_INSTRUCTIONS, # New instruction prompt
     GMM_PARAMETER_ESTIMATION_INSTRUCTIONS, # New instruction prompt
 )
-from .utils import load_image, preprocess_image, convert_numpy_to_jpeg_bytes, predict_with_ensemble, analyze_nearest_neighbor_distances, normalize_and_convert_to_image_bytes # predict_with_ensemble is new
+from .utils import load_image, preprocess_image, convert_numpy_to_jpeg_bytes, predict_with_ensemble, analyze_nearest_neighbor_distances, normalize_and_convert_to_image_bytes, rescale_for_model # predict_with_ensemble is new
 
 from ...auth import get_api_key, APIKeyNotFoundError
 
@@ -45,6 +45,7 @@ class GeminiAtomisticMicroscopyAnalysisAgent:
         self.RUN_GMM = self.atomistic_analysis_settings.get('GMM_ENABLED', True)
         self.GMM_AUTO_PARAMS = self.atomistic_analysis_settings.get('GMM_AUTO_PARAMS', True)
         self.save_visualizations = self.atomistic_analysis_settings.get('save_visualizations', False)
+        self.refine_positions = self.atomistic_analysis_settings.get('refine_positions', True)
         self.original_preprocessed_image = None # Store for potential visualization
 
     def _parse_llm_response(self, response) -> tuple[dict | None, dict | None]:
@@ -166,7 +167,7 @@ class GeminiAtomisticMicroscopyAnalysisAgent:
             self.logger.error(f"LLM call for GMM params failed: {e}", exc_info=True)
             return None, None, None
 
-    def _run_gmm_analysis(self, image_path: str, model_dir_path: str, window_size: int, n_components: int) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+    def _run_gmm_analysis(self, image_array: np.ndarray, model_dir_path: str, window_size: int, n_components: int) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None, np.ndarray | None]:
         """
         Performs atom finding using a neural network ensemble and then GMM clustering
         on local patches around detected atoms.
@@ -174,17 +175,15 @@ class GeminiAtomisticMicroscopyAnalysisAgent:
         Returns:
             tuple: (nn_output, coordinates, centroids, coords_class)
                 nn_output (np.ndarray): Heatmap from NN ensemble.
-                coordinates (np.ndarray): Detected atom coordinates.
+                coordinates (np.ndarray): Detected atom coordinates (N, 3) with initial class.
                 centroids (np.ndarray): Mean images of GMM classes (n_components, h, w, 1).
-                coords_class (np.ndarray): Nx3 array of xy coordinates and corresponding gmm classes.
+                coords_class (np.ndarray): Nx3 array of (y, x) coordinates and corresponding GMM classes.
         """
         try:
             self.logger.info("--- Starting NN Ensemble + GMM Analysis ---")
             
-            expdata = load_image(image_path)
-            # Ensure it's grayscale for analysis
-            if len(expdata.shape) == 3:
-                expdata = cv2.cvtColor(expdata, cv2.COLOR_RGB2GRAY)
+            # Image is already loaded, rescaled, and preprocessed.
+            expdata = image_array
 
             # 1. Make an ensemble prediction with neural nets
             if not model_dir_path or not os.path.isdir(model_dir_path):
@@ -192,11 +191,17 @@ class GeminiAtomisticMicroscopyAnalysisAgent:
                 return None, None, None, None
             
             self.logger.info(f"Running NN ensemble prediction from models in: {model_dir_path}")
-            nn_output, coordinates = predict_with_ensemble(model_dir_path, expdata)
+            nn_output, coordinates = predict_with_ensemble(
+                model_dir_path,
+                expdata,
+                refine=self.refine_positions
+            )
             if coordinates is None or len(coordinates) == 0:
                 self.logger.warning("NN ensemble did not detect any coordinates. Aborting GMM analysis.")
                 return None, None, None, None
             self.logger.info(f"Detected {len(coordinates)} atomic coordinates.")
+            if self.refine_positions:
+                self.logger.info("Atomic positions refined to sub-pixel accuracy using 2D Gaussian fitting.")
 
             # 2. Run sliding window + GMM analysis
             self.logger.info(f"Extracting local patches with window size: {window_size}")
@@ -207,18 +212,32 @@ class GeminiAtomisticMicroscopyAnalysisAgent:
                 self.logger.error("Image data for GMM is not 2D after preprocessing.")
                 return None, None, None, None
             
-            imstack = aoi.stat.imlocal(expdata_reshaped, coordinates, window_size=window_size)
+            # Format for imlocal: it expects a dictionary {class_id: coordinates_array}
+            coordinates_for_imlocal = {0: coordinates}
+            imstack = aoi.stat.imlocal(expdata_reshaped, coordinates_for_imlocal, window_size=window_size)
             
             self.logger.info(f"Running GMM with {n_components} components.")
-            centroids, _, coords_class = imstack.gmm(n_components)
+            centroids, _, gmm_output_coords_and_class = imstack.gmm(n_components)
 
-            # Atomai's GMM returns classes starting from 1. Adjust to be 0-indexed for consistency.
-            if coords_class is not None and coords_class.shape[1] > 2:
+            # The GMM analysis may discard atoms near the image edge.
+            # We use the returned coordinates from GMM for GMM-specific visualizations.
+            # We use the original full list of refined coordinates for other analyses (e.g., NN distances).
+            coords_class = gmm_output_coords_and_class
+            if coords_class is not None:
+                # Make GMM classes 0-indexed for consistency
                 coords_class[:, 2] = coords_class[:, 2] - 1
-            
+                num_initial = len(coordinates)
+                num_gmm = len(coords_class)
+                if num_initial != num_gmm:
+                    self.logger.info(
+                        f"GMM analysis processed {num_gmm} atoms out of {num_initial} initial detections "
+                        f"(difference is {num_initial - num_gmm}, likely due to atoms near image edges). "
+                        "Visualizations will be adjusted accordingly."
+                    )
+
             self.logger.info("GMM analysis complete.")
             # centroids are (n_components, h, w, 1)
-            # coords_class is (N, 3) with x, y, class_id
+            # coords_class is (N, 3) with y, x, class_id
             # nn_output is (H, W)
             return nn_output, coordinates, centroids, coords_class
 
@@ -249,7 +268,7 @@ class GeminiAtomisticMicroscopyAnalysisAgent:
         except Exception as e:
             self.logger.error(f"Failed to save GMM visualization: {e}")
 
-    def _create_gmm_visualization(self, original_image: np.ndarray, nn_output: np.ndarray, coords_class: np.ndarray, centroids: np.ndarray, nn_distances: np.ndarray | None, nn_dist_units: str) -> list[dict]:
+    def _create_gmm_visualization(self, original_image: np.ndarray, nn_output: np.ndarray, coords_class: np.ndarray, full_coords: np.ndarray, centroids: np.ndarray, nn_distances: np.ndarray | None, nn_dist_units: str) -> list[dict]:
         """
         Creates visualizations for GMM analysis:
         1. GMM Centroids (mean local structures)
@@ -260,6 +279,7 @@ class GeminiAtomisticMicroscopyAnalysisAgent:
         Args:
             original_image (np.ndarray): The preprocessed original image (2D grayscale).
             coords_class (np.ndarray): Nx3 array of xy coordinates and corresponding gmm classes.
+            full_coords (np.ndarray): The full list of refined coordinates before GMM processing.
             nn_output (np.ndarray): Heatmap from NN ensemble (raw DCNN prediction).
             centroids (np.ndarray): Mean images of GMM classes (n_components, h, w, 1).
             nn_distances (np.ndarray | None): 1D array of nearest-neighbor distances for each atom.
@@ -335,14 +355,18 @@ class GeminiAtomisticMicroscopyAnalysisAgent:
         plt.close(fig_coords)
 
         # 3. Plot of nearest-neighbor distances as a scatter plot
-        if nn_distances is not None and coords_class is not None:
+        # This plot uses the full coordinate list to match the nn_distances array
+        if nn_distances is not None and full_coords is not None:
+            if len(nn_distances) != len(full_coords):
+                self.logger.warning(f"Mismatch in NN distance plot: {len(nn_distances)} distances vs {len(full_coords)} coordinates. Skipping plot.")
+                return all_images_for_llm # Return what we have so far
             fig_nn_dist, ax_nn_dist = plt.subplots(1, 1, figsize=(8, 8))
             ax_nn_dist.imshow(original_image, cmap='gray')
 
             # atomai returns coordinates as (row, col) which is (y, x).
             # matplotlib.pyplot.scatter expects (x, y), so we swap the columns.
-            x_coords = coords_class[:, 1]
-            y_coords = coords_class[:, 0]
+            x_coords = full_coords[:, 1]
+            y_coords = full_coords[:, 0]
             
             # Create the scatter plot, coloring points by distance
             scatter = ax_nn_dist.scatter(x_coords, y_coords, c=nn_distances, cmap='inferno', s=10, alpha=0.9)
@@ -407,6 +431,7 @@ class GeminiAtomisticMicroscopyAnalysisAgent:
 
             # Determine physical scale (nm/pixel) from metadata, mirroring spectroscopy agent's approach
             nm_per_pixel = None
+            fov_in_nm = None
             if isinstance(system_info, dict) and 'spatial_info' in system_info and isinstance(system_info.get('spatial_info'), dict):
                 spatial = system_info['spatial_info']
                 fov_x = spatial.get("field_of_view_x")
@@ -432,7 +457,20 @@ class GeminiAtomisticMicroscopyAnalysisAgent:
                 else:
                     self.logger.warning(f"Invalid or missing 'field_of_view_x' in spatial_info: {fov_x}. Physical scale not applied.")
 
-            preprocessed_img_array, _ = preprocess_image(loaded_image)
+            # --- Rescale image for optimal NN performance ---
+            image_for_analysis = loaded_image
+            if fov_in_nm is not None:
+                rescaled_image, _, final_pixel_size_A = rescale_for_model(image_for_analysis, fov_in_nm)
+                # Update image and scale for subsequent steps
+                image_for_analysis = rescaled_image
+                nm_per_pixel = final_pixel_size_A / 10.0 # Update nm_per_pixel to the new value
+                self.logger.info(f"Image rescaled for optimal NN performance. New pixel size: {nm_per_pixel*10:.3f} Å/px.")
+            else:
+                self.logger.warning("Field of view not provided. Skipping image rescaling for optimal NN performance. Analysis will proceed on the original image scale.")
+
+            # Preprocess the (potentially rescaled) image
+            preprocessed_img_array, _ = preprocess_image(image_for_analysis)
+
             self.original_preprocessed_image = preprocessed_img_array # Store for GMM visualization
             image_bytes = convert_numpy_to_jpeg_bytes(preprocessed_img_array)
             image_blob = {"mime_type": "image/jpeg", "data": image_bytes}
@@ -467,7 +505,7 @@ class GeminiAtomisticMicroscopyAnalysisAgent:
 
                     if nc is None: nc = self.atomistic_analysis_settings.get('n_components', 4) # Default n_components
                     
-                    nn_output, coordinates, centroids, coords_class = self._run_gmm_analysis(image_path, model_dir_path, ws_pixels, nc)
+                    nn_output, coordinates, centroids, coords_class = self._run_gmm_analysis(preprocessed_img_array, model_dir_path, ws_pixels, nc)
             
             prompt_parts = [instruction_prompt]
             if additional_top_level_context:
@@ -485,18 +523,19 @@ class GeminiAtomisticMicroscopyAnalysisAgent:
                 prompt_parts.append("\n\nSupplemental Analysis Data (NN Prediction + GMM Clustering):")
                 
                 # Nearest-neighbor distance analysis
+                # This uses the FULL list of refined coordinates for a complete picture.
                 nn_distances = None
                 nn_dist_units = "pixels"
-                if coords_class is not None and len(coords_class) > 1:
-                    final_coordinates = coords_class[:, :2] # (y, x)
+                if coordinates is not None and len(coordinates) > 1:
+                    final_coordinates_2d = coordinates[:, :2] # (y, x)
                     scale = nm_per_pixel if nm_per_pixel else 1.0
                     if nm_per_pixel:
                         nn_dist_units = "nm"
-                    nn_distances = analyze_nearest_neighbor_distances(final_coordinates, pixel_scale=scale)
+                    nn_distances = analyze_nearest_neighbor_distances(final_coordinates_2d, pixel_scale=scale)
 
                 # Create and add visualizations
                 gmm_visualizations = self._create_gmm_visualization(
-                    preprocessed_img_array, nn_output, coords_class, centroids, nn_distances, nn_dist_units
+                    preprocessed_img_array, nn_output, coords_class, coordinates, centroids, nn_distances, nn_dist_units
                 )
                 for viz in gmm_visualizations:
                     prompt_parts.append(f"\n{viz['label']}:")
