@@ -247,10 +247,21 @@ def refine_coordinates_gaussian_fit(image_data, coordinates, window_size=7):
     return np.array(refined_coords)
 
 def predict_with_ensemble(dir_path, image, thresh=0.8, refine=True):
+    import logging
+    logger = logging.getLogger(__name__)
 
     all_predictions = []
-    model_files = glob.glob(os.path.join(dir_path,'atomnet3*.tar'))
+    model_pattern = os.path.join(dir_path, 'atomnet3*.tar')
+    logger.info(f"Searching for DCNN model files with pattern: {model_pattern}")
+    model_files = glob.glob(model_pattern)
+
+    if not model_files:
+        logger.error(f"No model files found in '{dir_path}' matching the pattern 'atomnet3*.tar'.")
+        raise FileNotFoundError(f"Could not find any DCNN model files ('atomnet3*.tar') in the specified directory: {dir_path}")
+
+    logger.info(f"Found {len(model_files)} models for ensemble prediction.")
     for model_file in model_files:
+        logger.debug(f"Loading model: {model_file}")
         model = aoi.load_model(model_file)
         prediction = model.predict(image)[0]
         all_predictions.append(prediction)
@@ -320,8 +331,12 @@ def download_file_with_gdown(file_id, output_path):
 
     try:
         # Create directory if it doesn't exist
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        
+        parent_dir = os.path.dirname(output_path)
+        # If parent_dir is an empty string, it means the file is in the current directory.
+        # We only need to create the directory if a path is specified.
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+
         # gdown.download handles the direct download link construction and large file quirks
         gdown.download(id=file_id, output=output_path, quiet=False, fuzzy=True) # fuzzy=True for slightly more relaxed ID matching
         

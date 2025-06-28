@@ -6,6 +6,7 @@ from io import BytesIO
 import cv2 # For grayscale conversion in _run_gmm_analysis
 import matplotlib.pyplot as plt # For visualizations
 import matplotlib.cm as cm # For visualizations
+import glob
 
 import google.generativeai as genai
 from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockThreshold
@@ -15,7 +16,7 @@ from .instruct import (
     ATOMISTIC_MICROSCOPY_CLAIMS_INSTRUCTIONS, # New instruction prompt
     GMM_PARAMETER_ESTIMATION_INSTRUCTIONS, # New instruction prompt
 )
-from .utils import load_image, preprocess_image, convert_numpy_to_jpeg_bytes, predict_with_ensemble, analyze_nearest_neighbor_distances, normalize_and_convert_to_image_bytes, rescale_for_model # predict_with_ensemble is new
+from .utils import load_image, preprocess_image, convert_numpy_to_jpeg_bytes, predict_with_ensemble, analyze_nearest_neighbor_distances, normalize_and_convert_to_image_bytes, rescale_for_model, download_file_with_gdown, unzip_file # predict_with_ensemble is new
 
 from ...auth import get_api_key, APIKeyNotFoundError
 
@@ -42,6 +43,12 @@ class GeminiAtomisticMicroscopyAnalysisAgent:
         }
         self.logger = logging.getLogger(__name__)
         self.atomistic_analysis_settings = atomistic_analysis_settings if atomistic_analysis_settings else {}
+        
+        # --- Model Download Configuration ---
+        self.DCNN_MODEL_GDRIVE_ID = '16LFMIEADO3XI8uNqiUoKKlrzWlc1_Q-p'
+        self.DEFAULT_MODEL_DIR = "dcnn_trained"
+        # ---
+        
         self.RUN_GMM = self.atomistic_analysis_settings.get('GMM_ENABLED', True)
         self.GMM_AUTO_PARAMS = self.atomistic_analysis_settings.get('GMM_AUTO_PARAMS', True)
         self.save_visualizations = self.atomistic_analysis_settings.get('save_visualizations', False)
@@ -409,6 +416,70 @@ class GeminiAtomisticMicroscopyAnalysisAgent:
 
         return all_images_for_llm
 
+    def _get_or_download_model_path(self) -> str | None:
+        """
+        Manages finding or downloading the DCNN models.
+        It checks for a user-provided path, a default path, or downloads the models.
+        It also robustly handles common nested directory structures within zip files.
+
+        Returns:
+            A validated path to the DCNN models, or None if they cannot be found or acquired.
+        """
+        user_provided_path = self.atomistic_analysis_settings.get('model_dir_path')
+
+        if user_provided_path:
+            if not os.path.isdir(user_provided_path):
+                self.logger.error(f"The provided 'model_dir_path' ('{user_provided_path}') does not exist or is not a directory.")
+                return None
+            # If user provides a path, we trust they know what they are doing and don't search deeper.
+            self.logger.info(f"Using user-provided model path: {user_provided_path}")
+            return user_provided_path
+        
+        # No user path, so we manage the default path.
+        default_path = self.DEFAULT_MODEL_DIR
+
+        # If default path doesn't exist, download and unzip.
+        if not os.path.isdir(default_path):
+            self.logger.warning(f"Default model directory '{default_path}' not found. Attempting to download and unzip from Google Drive.")
+            zip_filename = f"{self.DEFAULT_MODEL_DIR}.zip"
+            
+            downloaded_zip_path = download_file_with_gdown(self.DCNN_MODEL_GDRIVE_ID, zip_filename)
+            
+            if not downloaded_zip_path or not os.path.exists(downloaded_zip_path):
+                self.logger.error("Failed to download the model.")
+                return None
+
+            unzip_success = unzip_file(downloaded_zip_path, default_path)
+            
+            # Clean up the zip file
+            try:
+                os.remove(downloaded_zip_path)
+                self.logger.info(f"Cleaned up downloaded zip file: {downloaded_zip_path}")
+            except OSError as e:
+                self.logger.warning(f"Could not remove zip file {downloaded_zip_path}: {e}")
+
+            if not unzip_success:
+                self.logger.error(f"Failed to unzip model from '{downloaded_zip_path}'.")
+                return None
+        
+        # At this point, the default_path directory should exist. Now, find the actual model files within it.
+        try:
+            # Check for models in the root of the unzipped directory.
+            if glob.glob(os.path.join(default_path, 'atomnet3*.tar')):
+                return default_path
+            
+            # If not in root, search one level deeper in subdirectories.
+            for item in os.listdir(default_path):
+                sub_path = os.path.join(default_path, item)
+                if os.path.isdir(sub_path) and glob.glob(os.path.join(sub_path, 'atomnet3*.tar')):
+                    self.logger.info(f"Found models in nested directory. Adjusting model path to '{sub_path}'.")
+                    return sub_path
+        except FileNotFoundError:
+            self.logger.error(f"The model directory '{default_path}' does not exist, cannot search for models.")
+        
+        self.logger.error(f"Could not find model files ('atomnet3*.tar') in '{default_path}' or its immediate subdirectories.")
+        return None
+
     def _analyze_image_base(self, image_path: str, system_info: dict | str | None,
                             instruction_prompt: str, 
                             additional_top_level_context: str | None = None) -> tuple[dict | None, dict | None]:
@@ -478,10 +549,12 @@ class GeminiAtomisticMicroscopyAnalysisAgent:
             nn_output, coordinates, centroids, coords_class = None, None, None, None
             if self.RUN_GMM:
                 ws_nm, nc, gmm_explanation = None, None, None
-                model_dir_path = self.atomistic_analysis_settings.get('model_dir_path')
+                model_dir_path = self._get_or_download_model_path()
+
                 if not model_dir_path:
-                    self.logger.error("GMM analysis enabled, but 'model_dir_path' not provided in atomistic_analysis_settings.")
+                    self.logger.error("GMM analysis will be skipped because a valid model directory is not available.")
                 else:
+                    self.logger.info(f"Using DCNN models from: {model_dir_path}")
                     if self.GMM_AUTO_PARAMS:
                         auto_params = self._get_gmm_params_from_llm(image_blob, system_info)
                         if auto_params: ws_nm, nc, gmm_explanation = auto_params
