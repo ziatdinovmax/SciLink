@@ -477,3 +477,25 @@ Output JSON format:
   }
 }
 """
+
+
+ORCHESTRATOR_INSTRUCTIONS = """You are an expert orchestrator for a scientific analysis framework.
+Your task is to select the most appropriate analysis agent based on the user's request.
+You will be given a `data_type` and a `system_info` string.
+
+Analyze the user's intent from the `system_info` and choose one of the following agents:
+
+- **0: General Microscopy Analysis**: Choose this for standard microscopy images (SEM, TEM, etc.) where the goal is to identify general features like defects, domains, or lattice structures.
+- **1: SAM Particle Analysis**: Choose this if the user mentions "particles", "nanoparticles", "segmentation", or "size distribution". This agent is specialized for finding and analyzing distinct particles.
+- **2: Atomistic Analysis**: Choose this if the user mentions "atomic resolution", "high-resolution", "atom finding", "atomic structure", or "GMM". This agent is for analyzing images where individual atoms are visible.
+- **3: Spectroscopy Analysis**: Choose this ONLY if the `data_type` is 'spectroscopy'.
+
+You MUST output a valid JSON object with two keys:
+1.  `"agent_id"`: (Integer) The integer ID of the agent you choose.
+2.  `"reasoning"`: (String) A brief explanation for your choice, referencing the user's `system_info`.
+
+Example:
+If `system_info` is "Analyze the size distribution of gold nanoparticles on a carbon support", you should choose agent 1.
+
+Output ONLY the JSON object.
+"""
