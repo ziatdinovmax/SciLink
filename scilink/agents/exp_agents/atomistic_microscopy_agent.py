@@ -51,8 +51,9 @@ class GeminiAtomisticMicroscopyAnalysisAgent:
         
         self.RUN_GMM = self.atomistic_analysis_settings.get('GMM_ENABLED', True)
         self.GMM_AUTO_PARAMS = self.atomistic_analysis_settings.get('GMM_AUTO_PARAMS', True)
-        self.save_visualizations = self.atomistic_analysis_settings.get('save_visualizations', False)
-        self.refine_positions = self.atomistic_analysis_settings.get('refine_positions', True)
+        self.save_visualizations = self.atomistic_analysis_settings.get('save_visualizations', True)
+        self.refine_positions = self.atomistic_analysis_settings.get('refine_positions', False)
+        self.max_refinement_shift = self.atomistic_analysis_settings.get('max_refinement_shift', 1.5)
         self.original_preprocessed_image = None # Store for potential visualization
 
     def _parse_llm_response(self, response) -> tuple[dict | None, dict | None]:
@@ -201,7 +202,8 @@ class GeminiAtomisticMicroscopyAnalysisAgent:
             nn_output, coordinates = predict_with_ensemble(
                 model_dir_path,
                 expdata,
-                refine=self.refine_positions
+                refine=self.refine_positions,
+                max_refinement_shift=self.max_refinement_shift
             )
             if coordinates is None or len(coordinates) == 0:
                 self.logger.warning("NN ensemble did not detect any coordinates. Aborting GMM analysis.")

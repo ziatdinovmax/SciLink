@@ -202,7 +202,7 @@ def _2d_gaussian(xy, amplitude, y0, x0, sigma_y, sigma_x, offset):
     )
     return g.ravel()
 
-def refine_coordinates_gaussian_fit(image_data, coordinates, window_size=7):
+def refine_coordinates_gaussian_fit(image_data, coordinates, window_size=7, max_refinement_shift=1.5):
     """
     Refines atomic coordinates to sub-pixel precision using 2D Gaussian fitting.
 
@@ -210,6 +210,7 @@ def refine_coordinates_gaussian_fit(image_data, coordinates, window_size=7):
         image_data (np.ndarray): The image data to fit on (e.g., original image).
         coordinates (np.ndarray): Nx2 array of coarse (y, x) coordinates from Locator.
         window_size (int): The size of the fitting window around each coordinate.
+        max_refinement_shift (float): The maximum distance (in pixels) the center can shift during fitting.
 
     Returns:
         np.ndarray: Refined coordinates.
@@ -235,18 +236,26 @@ def refine_coordinates_gaussian_fit(image_data, coordinates, window_size=7):
 
         try:
             initial_guess = (patch.max(), y_int, x_int, 1, 1, patch.min())
-            popt, _ = curve_fit(_2d_gaussian, (y_grid, x_grid), patch.ravel(), p0=initial_guess)
+            
+            # Define bounds to constrain the fit and prevent it from jumping to another atom.
+            # params: amplitude, y0, x0, sigma_y, sigma_x, offset
+            lower_bounds = [0, y_int - max_refinement_shift, x_int - max_refinement_shift, 0.5, 0.5, 0]
+            upper_bounds = [patch.max() * 1.5, y_int + max_refinement_shift, x_int + max_refinement_shift, half_w, half_w, patch.max()]
+            bounds = (lower_bounds, upper_bounds)
+
+            popt, _ = curve_fit(_2d_gaussian, (y_grid, x_grid), patch.ravel(), p0=initial_guess, bounds=bounds)
             y_refined, x_refined = popt[1], popt[2]
-            if (y_min <= y_refined < y_max) and (x_min <= x_refined < x_max):
+            # The bounds in curve_fit should already handle this, but an extra check for patch boundaries is good practice.
+            if (y_min <= y_refined < y_max) and (x_min <= x_refined < x_max): # Check if it's within the patch
                  refined_coords.append([y_refined, x_refined])
             else:
-                 refined_coords.append([y_int, x_int])
+                 refined_coords.append([y_int, x_int]) # Revert to original if fit is outside patch
         except (RuntimeError, ValueError):
             refined_coords.append([y_int, x_int])
 
     return np.array(refined_coords)
 
-def predict_with_ensemble(dir_path, image, thresh=0.8, refine=True):
+def predict_with_ensemble(dir_path, image, thresh=0.8, refine=True, max_refinement_shift=1.5):
     import logging
     logger = logging.getLogger(__name__)
 
@@ -280,7 +289,7 @@ def predict_with_ensemble(dir_path, image, thresh=0.8, refine=True):
 
     if refine:
         coarse_coords_2d = coarse_coords_with_class[:, :2]
-        refined_coords_2d = refine_coordinates_gaussian_fit(image, coarse_coords_2d)
+        refined_coords_2d = refine_coordinates_gaussian_fit(image, coarse_coords_2d, max_refinement_shift=max_refinement_shift)
         final_coords = np.concatenate((refined_coords_2d, coarse_coords_with_class[:, 2][:, np.newaxis]), axis=1)
     else:
         final_coords = coarse_coords_with_class
