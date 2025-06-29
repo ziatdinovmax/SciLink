@@ -13,6 +13,9 @@ from .instruct import (
     TEXT_ONLY_DFT_RECOMMENDATION_INSTRUCTIONS
 )
 from .utils import load_image, preprocess_image, convert_numpy_to_jpeg_bytes, normalize_and_convert_to_image_bytes
+
+from ...auth import get_api_key, APIKeyNotFoundError
+
 from atomai.stat import SlidingFFTNMF
 
 
@@ -22,12 +25,14 @@ class GeminiMicroscopyAnalysisAgent:
     Refactored to support both image-based and text-based DFT recommendations.
     """
 
-    def __init__(self, api_key: str | None = None, model_name: str = "gemini-2.5-pro-preview-05-06", fft_nmf_settings: dict | None = None):
-        if api_key is None:
-            api_key = os.environ.get("GOOGLE_API_KEY")
-        if not api_key:
-            raise ValueError("API key not provided and GOOGLE_API_KEY environment variable is not set.")
-        genai.configure(api_key=api_key)
+    def __init__(self, google_api_key: str | None = None, model_name: str = "gemini-2.5-pro-preview-06-05", fft_nmf_settings: dict | None = None):
+        # Auto-discover API key
+        if google_api_key is None:
+            google_api_key = get_api_key('google')
+            if not google_api_key:
+                raise APIKeyNotFoundError('google')
+        genai.configure(api_key=google_api_key)
+
         self.model = genai.GenerativeModel(model_name)
         self.generation_config = GenerationConfig(response_mime_type="application/json")
         self.safety_settings = {
