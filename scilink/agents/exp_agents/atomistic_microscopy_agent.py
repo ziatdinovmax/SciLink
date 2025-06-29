@@ -272,10 +272,10 @@ class GeminiAtomisticMicroscopyAnalysisAgent:
             with open(filepath, 'wb') as f:
                 f.write(plot_bytes)
             
-            self.logger.info(f"📸 Saved GMM visualization: {filepath}")
+            self.logger.info(f"📸 Saved analysis visualization: {filepath}")
             
         except Exception as e:
-            self.logger.error(f"Failed to save GMM visualization: {e}")
+            self.logger.error(f"Failed to save analysis visualization: {e}")
 
     def _create_gmm_visualization(self, original_image: np.ndarray, nn_output: np.ndarray, coords_class: np.ndarray, full_coords: np.ndarray, centroids: np.ndarray, nn_distances: np.ndarray | None, nn_dist_units: str) -> list[dict]:
         """
@@ -615,7 +615,7 @@ class GeminiAtomisticMicroscopyAnalysisAgent:
                 for viz in gmm_visualizations:
                     prompt_parts.append(f"\n{viz['label']}:")
                     prompt_parts.append({"mime_type": "image/jpeg", "data": viz['bytes']})
-                self.logger.info(f"Adding {len(gmm_visualizations)} GMM visualizations to prompt.")
+                self.logger.info(f"Adding {len(gmm_visualizations)} analysis visualizations to prompt.")
             else:
                 prompt_parts.append("\n\n(No supplemental NN/GMM analysis results are provided or it was disabled/failed)")
 
@@ -683,4 +683,4 @@ class GeminiAtomisticMicroscopyAnalysisAgent:
         elif not valid_claims:
              self.logger.warning("LLM call did not yield valid claims or analysis text for atomistic microscopy claims workflow.")
 
-        return {"full_analysis": detailed_analysis, "claims": valid_claims}
+        return {"detailed_analysis": detailed_analysis, "scientific_claims": valid_claims}

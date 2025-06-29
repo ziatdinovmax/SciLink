@@ -609,4 +609,4 @@ class GeminiSAMMicroscopyAnalysisAgent:
         elif not valid_claims:
              self.logger.warning("LLM call did not yield valid claims or analysis text for SAM claims workflow.")
 
-        return {"full_analysis": detailed_analysis, "claims": valid_claims}
+        return {"detailed_analysis": detailed_analysis, "scientific_claims": valid_claims}
