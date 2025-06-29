@@ -737,7 +737,7 @@ class GeminiSpectroscopyAnalysisAgent:
             else:
                 self.logger.info(f"Successfully generated {len(scientific_claims)} scientific claims from spectroscopic analysis.")
             
-            return {"full_analysis": detailed_analysis, "claims": scientific_claims}
+            return {"detailed_analysis": detailed_analysis, "scientific_claims": scientific_claims}
             
         except Exception as e:
             self.logger.exception(f"Error during hyperspectral claims analysis: {e}")

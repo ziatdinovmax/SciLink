@@ -307,7 +307,7 @@ class Experimental2DFT:
         
         try:
             # Extract data from novelty assessment
-            analysis_text = novelty_result["claims_generation"]["full_analysis"]
+            analysis_text = novelty_result["claims_generation"]["detailed_analysis"]
             novel_claims = novelty_result.get("novelty_assessment", {}).get("potentially_novel", [])
             
             # Load system info if it's a file path

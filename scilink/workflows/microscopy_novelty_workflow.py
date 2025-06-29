@@ -215,10 +215,10 @@ class MicroscopyNoveltyAssessmentWorkflow:
 
             logging.info("--- Analysis Result Received ---")
             print("\n--- Analysis Summary ---")
-            print(analysis_result.get("full_analysis", "No detailed analysis text found."))
+            print(analysis_result.get("detailed_analysis", "No detailed analysis text found."))
             print("-" * 22)
 
-            claims = analysis_result.get("claims", [])
+            claims = analysis_result.get("scientific_claims", [])
             if not claims:
                 logging.warning("Analysis completed, but no claims were found.")
                 workflow_result["final_status"] = "no_claims"
@@ -244,7 +244,7 @@ class MicroscopyNoveltyAssessmentWorkflow:
                 "status": "success",
                 "claims": claims,
                 "claims_file": claims_file,
-                "full_analysis": analysis_result.get("full_analysis", "")
+                "detailed_analysis": analysis_result.get("detailed_analysis", "")
             }
             workflow_result["steps_completed"].append("claims_generation")
             
@@ -372,7 +372,7 @@ class MicroscopyNoveltyAssessmentWorkflow:
                 logging.info("--- Starting Step 4: DFT Recommendations Based on Novelty ---")
                 
                 dft_result = self._generate_dft_recommendations(
-                    workflow_result["claims_generation"]["full_analysis"],
+                    workflow_result["claims_generation"]["detailed_analysis"],
                     novel_claims
                 )
                 workflow_result["dft_recommendations"] = dft_result
