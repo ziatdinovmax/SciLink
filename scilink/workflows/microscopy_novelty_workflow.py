@@ -422,8 +422,16 @@ class MicroscopyNoveltyAssessmentWorkflow:
         else:
             novelty_context = "No specific novel claims were identified or prioritized from literature search. Please make DFT recommendations based on the most scientifically interesting aspects of the provided initial image analysis."
         
+        # Instantiate a text-only analysis agent for this step.
+        # This ensures we use the correct agent with the text-only prompt,
+        # regardless of which agent was used for the initial image analysis.
+        dft_agent = GeminiMicroscopyAnalysisAgent(
+            google_api_key=self.google_api_key,
+            model_name=self.analysis_model
+        )
+        
         # Generate DFT recommendations using text-only path
-        dft_recommendations_result = self.analysis_agent.analyze_microscopy_image_for_structure_recommendations(
+        dft_recommendations_result = dft_agent.analyze_microscopy_image_for_structure_recommendations(
             image_path=None,  # Text-only path
             system_info=None,
             additional_prompt_context=novelty_context,
