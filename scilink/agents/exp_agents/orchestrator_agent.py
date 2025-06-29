@@ -3,19 +3,19 @@ import json
 import google.generativeai as genai
 from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockThreshold
 
-from .microscopy_agent import GeminiMicroscopyAnalysisAgent
-from .sam_microscopy_agent import GeminiSAMMicroscopyAnalysisAgent
-from .atomistic_microscopy_agent import GeminiAtomisticMicroscopyAnalysisAgent
-from .spectroscopy_agent import GeminiSpectroscopyAnalysisAgent
+from .microscopy_agent import MicroscopyAnalysisAgent
+from .sam_microscopy_agent import SAMMicroscopyAnalysisAgent
+from .atomistic_microscopy_agent import AtomisticMicroscopyAnalysisAgent
+from .spectroscopy_agent import SpectroscopyAnalysisAgent
 from .instruct import ORCHESTRATOR_INSTRUCTIONS
 from ...auth import get_api_key, APIKeyNotFoundError
 
 # Mapping from integer ID to the corresponding agent class
 AGENT_MAP = {
-    0: GeminiMicroscopyAnalysisAgent,
-    1: GeminiSAMMicroscopyAnalysisAgent,
-    2: GeminiAtomisticMicroscopyAnalysisAgent,
-    3: GeminiSpectroscopyAnalysisAgent,
+    0: MicroscopyAnalysisAgent,
+    1: SAMMicroscopyAnalysisAgent,
+    2: AtomisticMicroscopyAnalysisAgent,
+    3: SpectroscopyAnalysisAgent,
 }
 
 class OrchestratorAgent:
@@ -49,7 +49,7 @@ class OrchestratorAgent:
             else:
                 raise ValueError("Could not find valid JSON object in response.")
         except (json.JSONDecodeError, ValueError) as e:
-            self.logger.error(f"Error parsing Gemini JSON response: {e}")
+            self.logger.error(f"Error parsing LLM JSON response: {e}")
             error_dict = {"error": "Failed to parse JSON from LLM response", "details": str(e), "raw_response": response.text}
             return None, error_dict
 

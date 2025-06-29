@@ -78,7 +78,7 @@ class AtomisticMicroscopyAnalysisAgent:
         except (json.JSONDecodeError, AttributeError, IndexError, ValueError) as e:
             error_details = str(e)
             error_raw_response = raw_text if raw_text is not None else getattr(response, 'text', 'N/A')
-            self.logger.error(f"Error parsing Gemini JSON response: {e}")
+            self.logger.error(f"Error parsing LLM JSON response: {e}")
             parsed_substring_for_log = json_string if json_string else 'N/A'
             self.logger.debug(f"Attempted to parse substring: {parsed_substring_for_log[:500]}...")
             self.logger.debug(f"Original Raw response text: {error_raw_response[:500]}...")

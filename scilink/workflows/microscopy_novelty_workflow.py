@@ -95,7 +95,7 @@ class MicroscopyNoveltyAssessmentWorkflow:
                 - 2: `AtomisticMicroscopyAnalysisAgent` (Atomistic analysis with GMM)
             google_api_key (str, optional): Google API key. Defaults to auto-discovery.
             futurehouse_api_key (str, optional): FutureHouse API key. Defaults to auto-discovery.
-            analysis_model (str, optional): The name of the Gemini model to use for analysis.
+            analysis_model (str, optional): The name of the generative AI model to use for analysis.
             output_dir (str, optional): Directory to save outputs.
             max_wait_time (int, optional): Max wait time for literature search.
             dft_recommendations (bool, optional): Whether to generate DFT recommendations.

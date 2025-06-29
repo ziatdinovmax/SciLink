@@ -149,8 +149,8 @@ End-to-end automation from experimental data to computational structures:
 
 ### Agents
 
-- `GeminiMicroscopyAnalysisAgent`: AI-powered microscopy analysis
-- `GeminiSpectroscopyAnalysisAgent`: Intelligent spectroscopy processing
+- `MicroscopyAnalysisAgent`: AI-powered microscopy analysis
+- `SpectroscopyAnalysisAgent`: Intelligent spectroscopy processing
 - `StructureGenerator`: Automated atomic structure generation
 - `StructureValidatorAgent`: AI structure validation
 - `OwlLiteratureAgent`: Literature search and validation

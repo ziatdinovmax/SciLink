@@ -24,7 +24,7 @@ from atomai.stat import SpectralUnmixer
 
 class SpectroscopyAnalysisAgent:
     """
-    Agent for analyzing hyperspectral/spectroscopy data using Gemini models.
+    Agent for analyzing hyperspectral/spectroscopy data using generative AI models.
     Integrates with SciLinkLLM framework and includes LLM-guided spectral unmixing.
     """
 
@@ -79,7 +79,7 @@ class SpectroscopyAnalysisAgent:
         except (json.JSONDecodeError, AttributeError, IndexError, ValueError) as e:
             error_details = str(e)
             error_raw_response = raw_text if raw_text is not None else getattr(response, 'text', 'N/A')
-            self.logger.error(f"Error parsing Gemini JSON response: {e}")
+            self.logger.error(f"Error parsing LLM JSON response: {e}")
             
             if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
                 block_reason = response.prompt_feedback.block_reason
