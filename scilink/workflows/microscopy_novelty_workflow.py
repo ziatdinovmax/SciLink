@@ -5,7 +5,10 @@ import json
 from io import StringIO
 from typing import Dict, Any, List
 
+from ..agents.exp_agents.orchestrator_agent import OrchestratorAgent, AGENT_MAP
 from ..agents.exp_agents.microscopy_agent import GeminiMicroscopyAnalysisAgent
+from ..agents.exp_agents.sam_microscopy_agent import GeminiSAMMicroscopyAnalysisAgent
+from ..agents.exp_agents.atomistic_microscopy_agent import GeminiAtomisticMicroscopyAnalysisAgent
 from ..agents.lit_agents.literature_agent import OwlLiteratureAgent
 
 import warnings
@@ -71,16 +74,32 @@ class MicroscopyNoveltyAssessmentWorkflow:
     Workflow for analyzing experimental results and assessing their novelty.
     Based on exp2lit.py structure.
     """
-    def __init__(self, 
+    def __init__(self,
+                 agent_id: int | None = None,
                  google_api_key: str = None,
                  futurehouse_api_key: str = None,
                  analysis_model: str = "gemini-2.5-pro-preview-06-05",
                  output_dir: str = "novelty_assessment_output",
                  max_wait_time: int = 400,
-                 analysis_enabled: bool = True,
                  dft_recommendations: bool = False
                  ):
-        
+        """
+        Initializes the workflow.
+
+        Args:
+            agent_id (int | None, optional): The ID of the agent to use. If None, the
+                OrchestratorAgent will be used to select one. Defaults to None.
+                The available agent IDs for microscopy are:
+                - 0: `GeminiMicroscopyAnalysisAgent` (General microscopy with FFT/NMF)
+                - 1: `GeminiSAMMicroscopyAnalysisAgent` (Particle analysis via SAM)
+                - 2: `GeminiAtomisticMicroscopyAnalysisAgent` (Atomistic analysis with GMM)
+            google_api_key (str, optional): Google API key. Defaults to auto-discovery.
+            futurehouse_api_key (str, optional): FutureHouse API key. Defaults to auto-discovery.
+            analysis_model (str, optional): The name of the Gemini model to use for analysis.
+            output_dir (str, optional): Directory to save outputs.
+            max_wait_time (int, optional): Max wait time for literature search.
+            dft_recommendations (bool, optional): Whether to generate DFT recommendations.
+        """
         # Setup logging
         self.log_capture = StringIO()
         logging.basicConfig(
@@ -93,6 +112,7 @@ class MicroscopyNoveltyAssessmentWorkflow:
             ]
         )
         
+        self.agent_id = agent_id
         # Auto-discover API keys if not provided
         if google_api_key is None:
             google_api_key = get_api_key('google')
@@ -108,24 +128,11 @@ class MicroscopyNoveltyAssessmentWorkflow:
                     "scilinkllm.configure('futurehouse', 'your-key') to enable literature search."
                 )
         
+        self.google_api_key = google_api_key
+        self.analysis_model = analysis_model
         self.output_dir = output_dir
         self.dft_recommendations = dft_recommendations
         os.makedirs(output_dir, exist_ok=True)
-        
-        # Build sFFT/NMF settings for image abalysis
-        fft_nmf_settings = {
-            'FFT_NMF_ENABLED': analysis_enabled,
-            'FFT_NMF_AUTO_PARAMS': True,
-            'components': 3, #  Default value, will be auto-determined if auto_params=True
-            'output_dir': output_dir
-        }
-        
-        # Initialize agents
-        self.analysis_agent = GeminiMicroscopyAnalysisAgent(
-            api_key=google_api_key,
-            model_name=analysis_model,
-            fft_nmf_settings=fft_nmf_settings
-        )
         
         if futurehouse_api_key:
             self.lit_agent = OwlLiteratureAgent(
@@ -155,11 +162,49 @@ class MicroscopyNoveltyAssessmentWorkflow:
             "final_status": "started"
         }
         
-        # === Step 1: Image Analysis for Scientific Claims ===
+        # === Step 1: Select and Run Analysis Agent for Scientific Claims ===
         try:
-            logging.info("--- Starting Step 1: Image Analysis for Scientific Claims ---")
+            logging.info("--- Starting Step 1: Analysis Agent Selection and Execution ---")
+
+            # --- 1a. Select Analysis Agent ---
+            if self.agent_id is not None:
+                if self.agent_id not in AGENT_MAP:
+                    raise ValueError(f"Invalid agent_id: {self.agent_id}. Available agents are: {list(AGENT_MAP.keys())}")
+                selected_agent_id = self.agent_id
+                reasoning = "Agent selected manually by user."
+                logging.info(f"Bypassing orchestrator. Using manually selected agent: {AGENT_MAP[selected_agent_id].__name__}")
+            else:
+                logging.info("Using orchestrator to select the best analysis agent...")
+                orchestrator = OrchestratorAgent(google_api_key=self.google_api_key)
+                selected_agent_id, reasoning = orchestrator.select_agent(
+                    data_type="microscopy",
+                    system_info=system_info,
+                    image_path=image_path
+                )
+                logging.info(f"🧠 Orchestrator Reasoning: {reasoning}")
+
+            if selected_agent_id == -1:
+                logging.error(f"Agent selection failed. Reason: {reasoning}")
+                workflow_result["final_status"] = "failed_orchestration"
+                return workflow_result
+
+            # --- 1b. Instantiate and Run Analysis Agent ---
+            AnalysisAgentClass = AGENT_MAP[selected_agent_id]
+            logging.info(f"✅ Running analysis with: {AnalysisAgentClass.__name__}")
             
-            analysis_result = self.analysis_agent.analyze_microscopy_image_for_claims(
+            agent_kwargs = {
+                'model_name': self.analysis_model
+            }
+            if selected_agent_id == 0: # GeminiMicroscopyAnalysisAgent
+                agent_kwargs['fft_nmf_settings'] = {
+                    'FFT_NMF_ENABLED': True,
+                    'FFT_NMF_AUTO_PARAMS': True,
+                    'components': 3,
+                    'output_dir': self.output_dir
+                }
+            
+            analysis_agent = AnalysisAgentClass(**agent_kwargs)
+            analysis_result = analysis_agent.analyze_microscopy_image_for_claims(
                 image_path, system_info=system_info
             )
 
