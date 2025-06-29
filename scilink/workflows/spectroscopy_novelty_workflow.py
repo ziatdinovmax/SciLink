@@ -6,7 +6,7 @@ from io import StringIO
 from typing import Dict, Any, List
 from pathlib import Path
 
-from ..agents.exp_agents.spectroscopy_agent import GeminiSpectroscopyAnalysisAgent
+from ..agents.exp_agents.spectroscopy_agent import SpectroscopyAnalysisAgent
 from ..agents.lit_agents.literature_agent import OwlLiteratureAgent
 
 import warnings
@@ -122,7 +122,7 @@ class SpectroscopyNoveltyAssessmentWorkflow:
         }
         
         # Initialize agents
-        self.analysis_agent = GeminiSpectroscopyAnalysisAgent(
+        self.analysis_agent = SpectroscopyAnalysisAgent(
             api_key=google_api_key,
             model_name=analysis_model,
             spectral_unmixing_settings=spectral_settings,

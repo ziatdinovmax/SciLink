@@ -55,7 +55,7 @@ class OrchestratorAgent:
 
     def select_agent(self, data_type: str, system_info: dict | str | None = None, image_path: str | None = None) -> tuple[int, str | None]:
         """
-        Selects the appropriate experimental agent by asking the Gemini LLM.
+        Selects the appropriate experimental agent by asking the LLM.
 
         Args:
             data_type: The primary type of data, e.g., 'microscopy' or 'spectroscopy'.

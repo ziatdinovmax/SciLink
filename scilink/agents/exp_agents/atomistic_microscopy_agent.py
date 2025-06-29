@@ -22,7 +22,7 @@ from ...auth import get_api_key, APIKeyNotFoundError
 
 import atomai as aoi # For imlocal and gmm
 
-class GeminiAtomisticMicroscopyAnalysisAgent:
+class AtomisticMicroscopyAnalysisAgent:
     """
     Agent for analyzing microscopy images using a neural network ensemble for atom finding
     and Gaussian Mixture Model (GMM) clustering for local atomic structure classification.

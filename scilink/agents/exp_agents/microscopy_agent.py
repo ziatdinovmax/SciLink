@@ -19,7 +19,7 @@ from ...auth import get_api_key, APIKeyNotFoundError
 from atomai.stat import SlidingFFTNMF
 
 
-class GeminiMicroscopyAnalysisAgent:
+class MicroscopyAnalysisAgent:
     """
     Agent for analyzing microscopy images using Gemini models.
     Refactored to support both image-based and text-based DFT recommendations.

@@ -22,7 +22,7 @@ from .instruct import (
 from atomai.stat import SpectralUnmixer
 
 
-class GeminiSpectroscopyAnalysisAgent:
+class SpectroscopyAnalysisAgent:
     """
     Agent for analyzing hyperspectral/spectroscopy data using Gemini models.
     Integrates with SciLinkLLM framework and includes LLM-guided spectral unmixing.

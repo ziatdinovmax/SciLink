@@ -18,7 +18,7 @@ from ...auth import get_api_key, APIKeyNotFoundError
 from atomai.models import ParticleAnalyzer
 
 
-class GeminiSAMMicroscopyAnalysisAgent:
+class SAMMicroscopyAnalysisAgent:
     """
     Agent for analyzing microscopy images using Segment Anything Model (SAM) and Gemini models.
     Follows the same pattern as the standard microscopy agent but uses SAM for particle segmentation.

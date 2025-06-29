@@ -6,9 +6,9 @@ from io import StringIO
 from typing import Dict, Any, List
 
 from ..agents.exp_agents.orchestrator_agent import OrchestratorAgent, AGENT_MAP
-from ..agents.exp_agents.microscopy_agent import GeminiMicroscopyAnalysisAgent
-from ..agents.exp_agents.sam_microscopy_agent import GeminiSAMMicroscopyAnalysisAgent
-from ..agents.exp_agents.atomistic_microscopy_agent import GeminiAtomisticMicroscopyAnalysisAgent
+from ..agents.exp_agents.microscopy_agent import MicroscopyAnalysisAgent
+from ..agents.exp_agents.sam_microscopy_agent import SAMMicroscopyAnalysisAgent
+from ..agents.exp_agents.atomistic_microscopy_agent import AtomisticMicroscopyAnalysisAgent
 from ..agents.lit_agents.literature_agent import OwlLiteratureAgent
 
 import warnings
@@ -90,9 +90,9 @@ class MicroscopyNoveltyAssessmentWorkflow:
             agent_id (int | None, optional): The ID of the agent to use. If None, the
                 OrchestratorAgent will be used to select one. Defaults to None.
                 The available agent IDs for microscopy are:
-                - 0: `GeminiMicroscopyAnalysisAgent` (General microscopy with FFT/NMF)
-                - 1: `GeminiSAMMicroscopyAnalysisAgent` (Particle analysis via SAM)
-                - 2: `GeminiAtomisticMicroscopyAnalysisAgent` (Atomistic analysis with GMM)
+                - 0: `MicroscopyAnalysisAgent` (General microscopy with FFT/NMF)
+                - 1: `SAMMicroscopyAnalysisAgent` (Particle analysis via SAM)
+                - 2: `AtomisticMicroscopyAnalysisAgent` (Atomistic analysis with GMM)
             google_api_key (str, optional): Google API key. Defaults to auto-discovery.
             futurehouse_api_key (str, optional): FutureHouse API key. Defaults to auto-discovery.
             analysis_model (str, optional): The name of the Gemini model to use for analysis.
@@ -195,7 +195,7 @@ class MicroscopyNoveltyAssessmentWorkflow:
             agent_kwargs = {
                 'model_name': self.analysis_model
             }
-            if selected_agent_id == 0: # GeminiMicroscopyAnalysisAgent
+            if selected_agent_id == 0: # MicroscopyAnalysisAgent
                 agent_kwargs['fft_nmf_settings'] = {
                     'FFT_NMF_ENABLED': True,
                     'FFT_NMF_AUTO_PARAMS': True,
@@ -425,7 +425,7 @@ class MicroscopyNoveltyAssessmentWorkflow:
         # Instantiate a text-only analysis agent for this step.
         # This ensures we use the correct agent with the text-only prompt,
         # regardless of which agent was used for the initial image analysis.
-        dft_agent = GeminiMicroscopyAnalysisAgent(
+        dft_agent = MicroscopyAnalysisAgent(
             google_api_key=self.google_api_key,
             model_name=self.analysis_model
         )
