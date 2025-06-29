@@ -1,6 +1,6 @@
-setuptools>=68.2.2
 google-generativeai>=0.8.5
 atomai>=0.8.1
 futurehouse-client>=0.3.19
 ase>=0.8.5
 aimsgb>=1.1.1
+gdown>=5.2.0
