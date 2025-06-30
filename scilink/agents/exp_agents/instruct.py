@@ -269,8 +269,15 @@ You will receive hyperspectral data along with summary images showing:
 2. Abundance maps showing spatial distribution of spectral components
 3. Additional quantitative information about the data
 
+You may also be provided with a structural image for spatial context. If a structural image is present, 
+first, consider the physical origin of the image contrast based on the experimental technique (e.g., Z-contrast in HAADF-STEM) 
+and any provided metadata. Then, use this understanding to analyze and explain the correlations between 
+the spectroscopic features (components and abundances) and the structural features.
+
 Your goal is to extract scientific insights from the spectroscopic data to understand materials composition, 
 phase distribution, defects, and other chemical/structural features.
+
+**Important Note on Interpretation:** Be cautious and critical in your analysis. Some spectral components from unmixing may represent noise, background variations, or mathematical artifacts rather than distinct physical phases. If a component has a noisy spectrum or a random-looking spatial distribution, explicitly state that it may not be physically meaningful and focus your analysis on the interpretable components.
 
 **Important Note on Terminology:** Use standard spectroscopic and materials science terminology. 
 Be specific about spectral features, peak assignments, and chemical interpretations.
@@ -283,6 +290,7 @@ You MUST output a valid JSON object containing two keys: "detailed_analysis" and
    * Spatial distribution patterns of spectral components and their significance
    * Identification of potential phases, compounds, or materials
    * Assessment of data quality and any artifacts
+   * If a structural image was provided, explicitly state how the correlation between spectroscopic and structural data contributed to your analysis and conclusions.
 
 2. **scientific_insights**: (List of Objects) Generate 2-5 specific scientific insights based on your analysis. Each object must have:
    * **insight**: (String) A focused scientific insight about the material system
@@ -302,8 +310,15 @@ You will receive hyperspectral data along with summary images showing:
 2. Spatial abundance maps showing the distribution of each spectral component
 3. Additional quantitative information about the data
 
+You may also be provided with a structural image for spatial context. If a structural image is present, 
+first, consider the physical origin of the image contrast based on the experimental technique (e.g., Z-contrast in HAADF-STEM) 
+and any provided metadata. Then, use this understanding to analyze and explain the correlations between 
+the spectroscopic features (components and abundances) and the structural features.
+
 Your goal is to extract key spectroscopic observations and formulate precise scientific claims that can be 
 compared against existing literature to assess novelty and significance.
+
+**Important Note on Interpretation:** Be cautious and critical in your analysis. Some spectral components from unmixing may represent noise, background variations, or mathematical artifacts rather than distinct physical phases. If a component has a noisy spectrum or a random-looking spatial distribution, explicitly state that it may not be physically meaningful and focus your analysis and claims on the interpretable components.
 
 **Important Note on Formulation:** Focus on specific, testable spectroscopic observations that could be 
 compared against existing research. Use precise scientific terminology and be specific about spectral features.
@@ -316,6 +331,7 @@ You MUST output a valid JSON object containing two keys: "detailed_analysis" and
    * Spatial distribution patterns of spectral components and their significance
    * Identification of potential phases, compounds, or materials
    * Assessment of data quality and any artifacts
+   * If a structural image was provided, explicitly state how the correlation between spectroscopic and structural data (if any) contributed to your analysis and conclusions.
 
 2. **scientific_claims**: (List of Objects) Generate 4-6 specific scientific claims based on spectroscopic analysis. Each object must have:
    * **claim**: (String) A single, focused scientific claim about a specific spectroscopic observation or finding

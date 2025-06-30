@@ -760,6 +760,15 @@ class SpectroscopyAnalysisAgent:
         elif system_info is None:
             system_info = self._load_metadata_from_json(data_path)
         
+        # Handle structure_system_info input (can be dict, file path, or None)
+        if isinstance(structure_system_info, str) and os.path.exists(structure_system_info):
+            try:
+                with open(structure_system_info, 'r') as f:
+                    structure_system_info = json.load(f)
+            except (FileNotFoundError, json.JSONDecodeError) as e:
+                self.logger.warning(f"Could not load structural metadata from {structure_system_info}: {e}")
+                structure_system_info = {}
+
         # Load hyperspectral data
         analysis_desc = "claims generation" if analysis_type == "claims" else "analysis"
         self.logger.info(f"Loading hyperspectral data for {analysis_desc}: {data_path}")
@@ -798,15 +807,23 @@ class SpectroscopyAnalysisAgent:
         # Add structure image if provided
         if structure_image_path and os.path.exists(structure_image_path):
             try:
-                from .utils import convert_numpy_to_jpeg_bytes, load_image, preprocess_image
+                from .utils import convert_numpy_to_jpeg_bytes, load_image
+                import cv2                
                 
-                # Load and preprocess structure image
+                self.logger.info(f"Loading structural context image: {structure_image_path}")
                 structure_img = load_image(structure_image_path)
-                processed_structure, _ = preprocess_image(structure_img)
-                structure_img_bytes = convert_numpy_to_jpeg_bytes(processed_structure)
                 
-                prompt_parts.append("\n\nStructural Context Image:")
-                prompt_parts.append("This structural image provides spatial context to aid in interpreting the spectroscopic analysis. Analyze how different spatial features in the structure image correspond to different spectroscopic components, noting both the spatial patterns and spectroscopic characteristics")
+                # For the structural context image, we want minimal processing to preserve
+                # the original contrast, unlike primary microscopy analysis. We will just
+                # ensure it's a standard 8-bit grayscale image without aggressive enhancement.
+                if len(structure_img.shape) == 3:
+                    structure_img_gray = cv2.cvtColor(structure_img, cv2.COLOR_RGB2GRAY)
+                else:
+                    structure_img_gray = structure_img # Already grayscale
+                structure_img_bytes = convert_numpy_to_jpeg_bytes(structure_img_gray)
+                
+                prompt_parts.append("\n\n**Structural Context Image for Correlation.**")
+                prompt_parts.append("This is a structural image providing spatial context. Try to correlate the spectroscopic components and their abundance maps with the spatial features in this image.")
                 prompt_parts.append({"mime_type": "image/jpeg", "data": structure_img_bytes})
                 
                 # Add structure system info if provided
