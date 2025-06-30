@@ -391,6 +391,8 @@ COMPONENT_VISUAL_COMPARISON_INSTRUCTIONS = """You are an expert in hyperspectral
 
 You will see visual results from under-sampling and over-sampling relative to an initial estimate. Your task is to decide which approach gives the most meaningful and interpretable results.
 
+**Important Note on Interpretation:** Be cautious and critical in your analysis. Some spectral components from unmixing may represent noise, background variations, or mathematical artifacts rather than distinct physical phases. When evaluating the results, if a component has a noisy spectrum or a random-looking spatial distribution (especially in the over-sampled case), it should be considered a sign of overfitting and not a physically meaningful component.
+
 **Evaluation Criteria:**
 
 **Component Spectra Quality:**
