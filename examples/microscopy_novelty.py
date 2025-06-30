@@ -10,8 +10,9 @@ sys.path.append("../scilink")
 # Use the installed package
 import scilink
 
-scilink.configure('google')
-scilink.configure('futurehouse')
+
+scilink.configure('google', '')
+scilink.configure('futurehouse', '')
 
 
 if __name__ == "__main__":
@@ -20,8 +21,8 @@ if __name__ == "__main__":
                        format='%(asctime)s - %(levelname)s - %(message)s')
 
     # Define image and metadata
-    image_path = "data/nanoparticles.npy"
-    system_info_path = "data/nanoparticles.json"
+    image_path = "data/MoS2_stem.npy"
+    system_info_path = "data/MoS2_stem.json"
 
     if not os.path.exists(image_path) or not os.path.exists(system_info_path):
         print(f"Error: Make sure data files exist at the specified paths.")
