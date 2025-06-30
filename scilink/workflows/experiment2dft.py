@@ -30,7 +30,8 @@ class Experimental2DFT:
     Supports both microscopy images and hyperspectral/spectroscopy data.
     """
     
-    def __init__(self, 
+    def __init__(self,
+                 agent_id: int | None = None,
                  google_api_key: str = None,
                  futurehouse_api_key: str = None,
                  mp_api_key: str = None,
@@ -41,7 +42,6 @@ class Experimental2DFT:
                  max_wait_time: int = 400,
                  max_refinement_cycles: int = 2,
                  script_timeout: int = 300,
-                 microscopy_analysis_enabled: bool = True,
                  spectroscopy_analysis_enabled: bool = True):
         
         # Auto-discover API keys
@@ -81,12 +81,12 @@ class Experimental2DFT:
         
         # Initialize sub-workflows
         self.microscopy_workflow = MicroscopyNoveltyAssessmentWorkflow(
+            agent_id=agent_id,
             google_api_key=google_api_key,
             futurehouse_api_key=futurehouse_api_key,
             analysis_model=analysis_model,
             output_dir=str(self.output_dir / "microscopy_novelty_assessment"),
-            max_wait_time=max_wait_time,
-            analysis_enabled=microscopy_analysis_enabled
+            max_wait_time=max_wait_time
         )
         
         self.spectroscopy_workflow = SpectroscopyNoveltyAssessmentWorkflow(
@@ -307,7 +307,7 @@ class Experimental2DFT:
         
         try:
             # Extract data from novelty assessment
-            analysis_text = novelty_result["claims_generation"]["full_analysis"]
+            analysis_text = novelty_result["claims_generation"]["detailed_analysis"]
             novel_claims = novelty_result.get("novelty_assessment", {}).get("potentially_novel", [])
             
             # Load system info if it's a file path

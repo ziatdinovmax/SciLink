@@ -18,9 +18,9 @@ from ...auth import get_api_key, APIKeyNotFoundError
 from atomai.models import ParticleAnalyzer
 
 
-class GeminiSAMMicroscopyAnalysisAgent:
+class SAMMicroscopyAnalysisAgent:
     """
-    Agent for analyzing microscopy images using Segment Anything Model (SAM) and Gemini models.
+    Agent for analyzing microscopy images using Segment Anything Model (SAM) and generative AI models.
     Follows the same pattern as the standard microscopy agent but uses SAM for particle segmentation.
     """
 
@@ -65,7 +65,7 @@ class GeminiSAMMicroscopyAnalysisAgent:
         except (json.JSONDecodeError, AttributeError, IndexError, ValueError) as e:
             error_details = str(e)
             error_raw_response = raw_text if raw_text is not None else getattr(response, 'text', 'N/A')
-            self.logger.error(f"Error parsing Gemini JSON response: {e}")
+            self.logger.error(f"Error parsing LLM JSON response: {e}")
             parsed_substring_for_log = json_string if json_string else 'N/A'
             self.logger.debug(f"Attempted to parse substring: {parsed_substring_for_log[:500]}...")
             self.logger.debug(f"Original Raw response text: {error_raw_response[:500]}...")
@@ -609,4 +609,4 @@ class GeminiSAMMicroscopyAnalysisAgent:
         elif not valid_claims:
              self.logger.warning("LLM call did not yield valid claims or analysis text for SAM claims workflow.")
 
-        return {"full_analysis": detailed_analysis, "claims": valid_claims}
+        return {"detailed_analysis": detailed_analysis, "scientific_claims": valid_claims}

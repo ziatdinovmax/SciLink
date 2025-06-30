@@ -1,4 +1,5 @@
-from .microscopy_agent import GeminiMicroscopyAnalysisAgent
-from .spectroscopy_agent import GeminiSpectroscopyAnalysisAgent
-from .sam_microscopy_agent import GeminiSAMMicroscopyAnalysisAgent
-from .atomistic_microscopy_agent import GeminiAtomisticMicroscopyAnalysisAgent
+from .microscopy_agent import MicroscopyAnalysisAgent
+from .spectroscopy_agent import SpectroscopyAnalysisAgent
+from .sam_microscopy_agent import SAMMicroscopyAnalysisAgent
+from .orchestrator_agent import OrchestratorAgent, AGENT_MAP
+from .atomistic_microscopy_agent import AtomisticMicroscopyAnalysisAgent

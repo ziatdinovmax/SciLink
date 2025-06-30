@@ -5,7 +5,7 @@ from typing import Dict, Any, List, Optional
 
 # Updated imports for new package structure
 from ..auth import get_api_key, APIKeyNotFoundError
-from ..agents.exp_agents.microscopy_agent import GeminiMicroscopyAnalysisAgent
+from ..agents.exp_agents.microscopy_agent import MicroscopyAnalysisAgent
 
 
 class DFTRecommendationsWorkflow:
@@ -30,7 +30,7 @@ class DFTRecommendationsWorkflow:
         
         # Initialize agent for text-only DFT recommendations
         # No FFT/NMF settings needed for text-only analysis
-        self.agent = GeminiMicroscopyAnalysisAgent(
+        self.agent = MicroscopyAnalysisAgent(
             api_key=google_api_key,
             model_name=analysis_model
         )

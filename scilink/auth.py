@@ -17,7 +17,7 @@ class APIKeyManager:
         
         # Then check environment variables
         env_vars = {
-            'google': ['GOOGLE_API_KEY', 'GEMINI_API_KEY'],
+            'google': ['GOOGLE_API_KEY'],
             'futurehouse': ['FUTUREHOUSE_API_KEY'],
             'materials_project': ['MP_API_KEY', 'MATERIALS_PROJECT_API_KEY']
         }

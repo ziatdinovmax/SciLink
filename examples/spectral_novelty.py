@@ -3,15 +3,18 @@
 import sys
 import logging
 
-# Use the installed package
+sys.path.append("../scilink")
+
 import scilink
 
 
+# Configure APIs
 scilink.configure('google', '')
 scilink.configure('futurehouse', '')
 
 
-def run_spectroscopy_to_dft_workflow(data_path: str, system_info: str):
+def run_spectroscopy_to_dft_workflow(data_path: str, system_info: str,
+                                     structure_image_path: str, structure_image_system_info: str):
     """
     Complete workflow: Spectroscopic analysis → Novelty assessment → DFT recommendations
     """
@@ -27,7 +30,9 @@ def run_spectroscopy_to_dft_workflow(data_path: str, system_info: str):
     
     spectroscopy_result = spectroscopy_workflow.run_complete_workflow(
         data_path=data_path,
-        system_info=system_info
+        system_info=system_info,
+        structure_image_path=structure_image_path,
+        structure_system_info=structure_image_system_info
     )
     
     print("📋 Spectroscopy workflow summary:")
@@ -38,7 +43,7 @@ def run_spectroscopy_to_dft_workflow(data_path: str, system_info: str):
         return spectroscopy_result
     
     # Step 2: Extract data for DFT recommendations
-    analysis_text = spectroscopy_result["claims_generation"]["full_analysis"]
+    analysis_text = spectroscopy_result["claims_generation"]["detailed_analysis"]
     novel_claims = spectroscopy_result["novelty_assessment"]["potentially_novel"]
     
     print(f"\n🧬 Proceeding to DFT recommendations...")
@@ -75,8 +80,10 @@ if __name__ == "__main__":
                        format='%(asctime)s - %(levelname)s - %(message)s')
 
     result = run_spectroscopy_to_dft_workflow(
-        data_path="/Users/ziat263/code/SciLinkLLM/eels.npy",
-        system_info="/Users/ziat263/code/SciLinkLLM/eels.json"
+        data_path="data/eels_plasmon2.npy",
+        system_info="data/eels_plasmon2.json",
+        structure_image_path="data/haadf_plasmon2_resized.npy",
+        structure_image_system_info="data/haadf_plasmon2.json"
     )
     
     print("\n🎉 Spectroscopy → DFT workflow completed!")

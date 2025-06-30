@@ -6,7 +6,7 @@ from io import StringIO
 from typing import Dict, Any, List
 from pathlib import Path
 
-from ..agents.exp_agents.spectroscopy_agent import GeminiSpectroscopyAnalysisAgent
+from ..agents.exp_agents.spectroscopy_agent import SpectroscopyAnalysisAgent
 from ..agents.lit_agents.literature_agent import OwlLiteratureAgent
 
 import warnings
@@ -122,7 +122,7 @@ class SpectroscopyNoveltyAssessmentWorkflow:
         }
         
         # Initialize agents
-        self.analysis_agent = GeminiSpectroscopyAnalysisAgent(
+        self.analysis_agent = SpectroscopyAnalysisAgent(
             api_key=google_api_key,
             model_name=analysis_model,
             spectral_unmixing_settings=spectral_settings,
@@ -169,10 +169,10 @@ class SpectroscopyNoveltyAssessmentWorkflow:
 
             logging.info("--- Spectroscopic Analysis Result Received ---")
             print("\n--- Spectroscopic Analysis Summary ---")
-            print(analysis_result.get("full_analysis", "No detailed analysis text found."))
+            print(analysis_result.get("detailed_analysis", "No detailed analysis text found."))
             print("-" * 22)
 
-            claims = analysis_result.get("claims", [])
+            claims = analysis_result.get("scientific_claims", [])
             if not claims:
                 logging.warning("Analysis completed, but no claims were found.")
                 workflow_result["final_status"] = "no_claims"
@@ -201,7 +201,7 @@ class SpectroscopyNoveltyAssessmentWorkflow:
                 "status": "success",
                 "claims": claims,
                 "claims_file": claims_file,
-                "full_analysis": analysis_result.get("full_analysis", "")
+                "detailed_analysis": analysis_result.get("detailed_analysis", "")
             }
             workflow_result["steps_completed"].append("claims_generation")
             
