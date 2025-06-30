@@ -318,8 +318,6 @@ the spectroscopic features (components and abundances) and the structural featur
 Your goal is to extract key spectroscopic observations and formulate precise scientific claims that can be 
 compared against existing literature to assess novelty and significance.
 
-**Important Note on Interpretation:** Be cautious and critical in your analysis. Some spectral components from unmixing may represent noise, background variations, or mathematical artifacts rather than distinct physical phases. If a component has a noisy spectrum or a random-looking spatial distribution, explicitly state that it may not be physically meaningful and focus your analysis and claims on the interpretable components.
-
 **Important Note on Formulation:** Focus on specific, testable spectroscopic observations that could be 
 compared against existing research. Use precise scientific terminology and be specific about spectral features.
 
