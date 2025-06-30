@@ -4,11 +4,14 @@ import os
 import sys
 import logging
 
+import sys
+sys.path.append("../scilink")
+
 # Use the installed package
 import scilink
 
-scilink.configure('google', 'AIzaSyB9lyiu0D9gZfHyAfKPIFkcU3a7sa9V-kE')
-scilink.configure('futurehouse', '+MZqvbTtjHVywIJ1GWJ8Zw.platformv01.eyJqdGkiOiI1MDZiZjI2OS0wNThmLTRjNDUtYmM1OC1iMDE2NjYyYTBjMGUiLCJzdWIiOiJuaUt3MDBwVk1nUmV4MDhocUg3RTBTRFVXQ3UyIiwiaWF0IjoxNzQ0NzM4OTA5fQ.9xtT+1ZfVaKWHQurUAV69viXqaTh7YSH9nmDZ0DjnQU')
+scilink.configure('google')
+scilink.configure('futurehouse')
 
 
 if __name__ == "__main__":
@@ -17,8 +20,8 @@ if __name__ == "__main__":
                        format='%(asctime)s - %(levelname)s - %(message)s')
 
     # Define image and metadata
-    image_path = "/Users/ziat263/code/SciLinkLLM/data/GH_stm.tif"
-    system_info_path = "/Users/ziat263/code/SciLinkLLM/data/GH_stm.json"
+    image_path = "data/nanoparticles.npy"
+    system_info_path = "data/nanoparticles.json"
 
     if not os.path.exists(image_path) or not os.path.exists(system_info_path):
         print(f"Error: Make sure data files exist at the specified paths.")

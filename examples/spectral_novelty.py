@@ -75,8 +75,8 @@ if __name__ == "__main__":
                        format='%(asctime)s - %(levelname)s - %(message)s')
 
     result = run_spectroscopy_to_dft_workflow(
-        data_path="/Users/ziat263/code/SciLinkLLM/eels.npy",
-        system_info="/Users/ziat263/code/SciLinkLLM/eels.json"
+        data_path="data/eels.npy",
+        system_info="data/eels.json"
     )
     
     print("\n🎉 Spectroscopy → DFT workflow completed!")
