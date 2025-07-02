@@ -14,7 +14,8 @@ from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockT
 from .instruct import (
     ATOMISTIC_MICROSCOPY_ANALYSIS_INSTRUCTIONS,
     ATOMISTIC_MICROSCOPY_CLAIMS_INSTRUCTIONS,
-    GMM_PARAMETER_ESTIMATION_INSTRUCTIONS
+    GMM_PARAMETER_ESTIMATION_INSTRUCTIONS,
+    TEXT_ONLY_DFT_RECOMMENDATION_INSTRUCTIONS 
 )
 from .utils import load_image, preprocess_image, convert_numpy_to_jpeg_bytes, predict_with_ensemble, analyze_nearest_neighbor_distances, normalize_and_convert_to_image_bytes, rescale_for_model, download_file_with_gdown, unzip_file # predict_with_ensemble is new
 
@@ -686,3 +687,102 @@ class AtomisticMicroscopyAnalysisAgent:
              self.logger.warning("LLM call did not yield valid claims or analysis text for atomistic microscopy claims workflow.")
 
         return {"detailed_analysis": detailed_analysis, "scientific_claims": valid_claims}
+    
+    def analyze_microscopy_image_for_structure_recommendations(
+            self,
+            image_path: str | None = None,
+            system_info: dict | str | None = None,
+            additional_prompt_context: str | None = None,
+            cached_detailed_analysis: str | None = None
+    ):
+            """
+            Analyze atomistic microscopy image to generate DFT structure recommendations.
+            Supports both image-based and text-based analysis paths.
+            
+            Args:
+                image_path: Path to the microscopy image (required for image-based analysis)
+                system_info: System metadata (dict, file path, or None)
+                additional_prompt_context: Special considerations/novelty insights for DFT recommendations
+                cached_detailed_analysis: Previously generated analysis text (for text-based path)
+            
+            Returns:
+                Dictionary containing analysis summary/reasoning and DFT structure recommendations
+            """
+            result_json, error_dict = None, None
+            # Determine the key for the main textual output from LLM based on the path taken
+            output_analysis_key = "detailed_analysis"  # Default for image-based path
+
+            if cached_detailed_analysis and additional_prompt_context:
+                self.logger.info("Generating DFT recommendations from cached atomistic analysis and novelty context.")
+                instruction_prompt_text = TEXT_ONLY_DFT_RECOMMENDATION_INSTRUCTIONS  # Import this from instruct.py
+                output_analysis_key = "detailed_reasoning_for_recommendations"  # Expected from text-only prompt
+
+                prompt_list_for_llm = [instruction_prompt_text]
+                prompt_list_for_llm.append("\n\n--- Start of Cached Initial Atomistic Image Analysis ---\n")
+                prompt_list_for_llm.append(cached_detailed_analysis)
+                prompt_list_for_llm.append("\n--- End of Cached Initial Atomistic Image Analysis ---\n")
+
+                prompt_list_for_llm.append("\n\n--- Start of Special Considerations (e.g., Novelty Insights) ---\n")
+                prompt_list_for_llm.append(additional_prompt_context)
+                prompt_list_for_llm.append("\n--- End of Special Considerations ---\n")
+
+                if system_info:
+                    system_info_text_part = "\n\nAdditional System Information (Metadata):\n"
+                    if isinstance(system_info, str):
+                        try: 
+                            system_info_text_part += json.dumps(json.loads(system_info), indent=2)
+                        except json.JSONDecodeError: 
+                            system_info_text_part += system_info
+                    elif isinstance(system_info, dict): 
+                        system_info_text_part += json.dumps(system_info, indent=2)
+                    else: 
+                        system_info_text_part += str(system_info)
+                    prompt_list_for_llm.append(system_info_text_part)
+                
+                prompt_list_for_llm.append("\n\nProvide your DFT structure recommendations strictly in the requested JSON format based on the above atomistic analysis text.")
+                result_json, error_dict = self._generate_json_from_text_parts(prompt_list_for_llm)
+
+            elif image_path:
+                self.logger.info("Generating DFT recommendations from atomistic image analysis.")
+                instruction_prompt_text = ATOMISTIC_MICROSCOPY_ANALYSIS_INSTRUCTIONS  # Use atomistic-specific instructions
+                # additional_prompt_context (novelty string) is passed to _analyze_image_base to be appended
+                result_json, error_dict = self._analyze_image_base(
+                    image_path, system_info, instruction_prompt_text, additional_top_level_context=additional_prompt_context
+                )
+                # output_analysis_key remains "detailed_analysis"
+            else:
+                # Neither path is viable
+                return {"error": "Either image_path or (cached_detailed_analysis AND additional_prompt_context) must be provided for DFT recommendations."}
+
+            if error_dict:
+                return error_dict  # Return error if LLM call or parsing failed
+            if result_json is None:  # Safeguard, should be covered by error_dict
+                return {"error": "Atomistic analysis failed unexpectedly after LLM processing."}
+
+            # Use the determined key to fetch the main textual output from LLM
+            analysis_output_text = result_json.get(output_analysis_key, "Analysis/Reasoning not provided by LLM.")
+            recommendations = result_json.get("structure_recommendations", [])
+            
+            valid_recommendations = []
+            if not isinstance(recommendations, list):
+                self.logger.warning(f"'structure_recommendations' from LLM was not a list: {recommendations}")
+                recommendations = [] 
+
+            for rec in recommendations:
+                if isinstance(rec, dict) and all(k in rec for k in ["description", "scientific_interest", "priority"]):
+                    if isinstance(rec.get("priority"), int):
+                        valid_recommendations.append(rec)
+                    else:
+                        self.logger.warning(f"Recommendation skipped due to invalid priority type (expected int): {rec.get('priority')}. Recommendation: {rec}")
+                else:
+                    self.logger.warning(f"Recommendation skipped due to missing keys or incorrect dict format: {rec}")
+            
+            sorted_recommendations = sorted(valid_recommendations, key=lambda x: x.get("priority", 99))
+
+            if not sorted_recommendations and not analysis_output_text == "Analysis/Reasoning not provided by LLM.":
+                self.logger.warning(f"Atomistic LLM call successful ('{output_analysis_key}' provided) but no valid recommendations found or parsed.")
+            elif not sorted_recommendations:
+                self.logger.warning("Atomistic LLM call did not yield valid recommendations or analysis text.")
+
+            # Return a consistent key for the main textual output for the calling script
+            return {"analysis_summary_or_reasoning": analysis_output_text, "recommendations": sorted_recommendations}
