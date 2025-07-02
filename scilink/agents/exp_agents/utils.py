@@ -268,7 +268,7 @@ def predict_with_ensemble(dir_path, image, thresh=0.8, refine=True, max_refineme
         logger.error(f"No model files found in '{dir_path}' matching the pattern 'atomnet3*.tar'.")
         raise FileNotFoundError(f"Could not find any DCNN model files ('atomnet3*.tar') in the specified directory: {dir_path}")
 
-    logger.info(f"Found {len(model_files)} models for ensemble prediction.")
+    logger.info(f"Found {len(model_files)} models for ensemble prediction.\n")
     for model_file in model_files:
         logger.debug(f"Loading model: {model_file}")
         model = aoi.load_model(model_file)

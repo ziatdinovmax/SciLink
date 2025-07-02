@@ -12,9 +12,9 @@ import google.generativeai as genai
 from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockThreshold
 
 from .instruct import (
-    ATOMISTIC_MICROSCOPY_ANALYSIS_INSTRUCTIONS, # New instruction prompt
-    ATOMISTIC_MICROSCOPY_CLAIMS_INSTRUCTIONS, # New instruction prompt
-    GMM_PARAMETER_ESTIMATION_INSTRUCTIONS, # New instruction prompt
+    ATOMISTIC_MICROSCOPY_ANALYSIS_INSTRUCTIONS,
+    ATOMISTIC_MICROSCOPY_CLAIMS_INSTRUCTIONS,
+    GMM_PARAMETER_ESTIMATION_INSTRUCTIONS
 )
 from .utils import load_image, preprocess_image, convert_numpy_to_jpeg_bytes, predict_with_ensemble, analyze_nearest_neighbor_distances, normalize_and_convert_to_image_bytes, rescale_for_model, download_file_with_gdown, unzip_file # predict_with_ensemble is new
 
@@ -125,7 +125,7 @@ class AtomisticMicroscopyAnalysisAgent:
                 n_components (int): Suggested number of GMM components.
                 explanation (str): LLM's reasoning for the parameters.
         """
-        self.logger.info("Attempting to get GMM parameters from LLM...")
+        self.logger.info("\n\n🤖 -------------------- AGENT STEP: DEFINING ANALYSIS PARAMETERS -------------------- 🤖\n")
         prompt_parts = [GMM_PARAMETER_ESTIMATION_INSTRUCTIONS]
         prompt_parts.append("\nImage to analyze for parameters:\n")
         prompt_parts.append(image_blob)
@@ -188,7 +188,7 @@ class AtomisticMicroscopyAnalysisAgent:
                 coords_class (np.ndarray): Nx3 array of (y, x) coordinates and corresponding GMM classes.
         """
         try:
-            self.logger.info("--- Starting NN Ensemble + GMM Analysis ---")
+            self.logger.info("\n\n🤖 -------------------- AGENT STEP: Starting NN Ensemble + GMM Analysis -------------------- 🤖\n")
             
             # Image is already loaded, rescaled, and preprocessed.
             expdata = image_array
@@ -208,6 +208,7 @@ class AtomisticMicroscopyAnalysisAgent:
             if coordinates is None or len(coordinates) == 0:
                 self.logger.warning("NN ensemble did not detect any coordinates. Aborting GMM analysis.")
                 return None, None, None, None
+            print()
             self.logger.info(f"Detected {len(coordinates)} atomic coordinates.")
             if self.refine_positions:
                 self.logger.info("Atomic positions refined to sub-pixel accuracy using 2D Gaussian fitting.")
@@ -560,7 +561,7 @@ class AtomisticMicroscopyAnalysisAgent:
                     if self.GMM_AUTO_PARAMS:
                         auto_params = self._get_gmm_params_from_llm(image_blob, system_info)
                         if auto_params: ws_nm, nc, gmm_explanation = auto_params
-                    if gmm_explanation: self.logger.info(f"LLM Explanation for GMM params: {gmm_explanation}")
+                    if gmm_explanation: self.logger.info(f"Explanation for the selected parameters: {gmm_explanation}")
                     
                     # Determine window size in pixels. Prioritize LLM physical size, then fall back to config.
                     ws_pixels = self.atomistic_analysis_settings.get('window_size', 32) # Default pixel size
@@ -616,6 +617,7 @@ class AtomisticMicroscopyAnalysisAgent:
                     prompt_parts.append(f"\n{viz['label']}:")
                     prompt_parts.append({"mime_type": "image/jpeg", "data": viz['bytes']})
                 self.logger.info(f"Adding {len(gmm_visualizations)} analysis visualizations to prompt.")
+                self.logger.info("\n\n🤖 -------------------- AGENT STEP: INTERPRETING RESULTS -------------------- 🤖\n")
             else:
                 prompt_parts.append("\n\n(No supplemental NN/GMM analysis results are provided or it was disabled/failed)")
 

@@ -164,7 +164,7 @@ class MicroscopyNoveltyAssessmentWorkflow:
         
         # === Step 1: Select and Run Analysis Agent for Scientific Claims ===
         try:
-            logging.info("--- Starting Step 1: Analysis Agent Selection and Execution ---")
+            logging.info("\n\n 🔄 -------------------- WORKFLOW STEP 1: AGENT SELECTION & AUTOMATED DATA ANALYSIS -------------------- 🔄\n")
 
             # --- 1a. Select Analysis Agent ---
             if self.agent_id is not None:
@@ -181,7 +181,6 @@ class MicroscopyNoveltyAssessmentWorkflow:
                     system_info=system_info,
                     image_path=image_path
                 )
-                logging.info(f"🧠 Orchestrator Reasoning: {reasoning}")
 
             if selected_agent_id == -1:
                 logging.error(f"Agent selection failed. Reason: {reasoning}")
@@ -255,7 +254,7 @@ class MicroscopyNoveltyAssessmentWorkflow:
 
         # === Step 2: Literature Search with OWL ===
         try:
-            logging.info("--- Starting Step 2: Literature Search with OWL ---")
+            logging.info("\n\n\n 🔄 ------------------------- WORKFLOW STEP 2: LITERATURE SEARCH ------------------------- 🔄\n")
             
             # Let user select which claims to search
             selected_claims = select_claims_interactive(claims)
@@ -314,7 +313,7 @@ class MicroscopyNoveltyAssessmentWorkflow:
         # === Step 3: Novelty Assessment ===
         novel_claims = []
         try:
-            logging.info("--- Starting Step 3: Novelty Assessment ---")
+            logging.info("\n\n\n 🔄 ------------------------- WORKFLOW STEP 3: NOVELTY ASSESSMENT ------------------------- 🔄\n")
             
             # Display summary of findings (same logic as exp2lit.py)
             known_claims = []
@@ -369,7 +368,7 @@ class MicroscopyNoveltyAssessmentWorkflow:
         # === Step 4: DFT Recommendations (Optional) ===
         if self.dft_recommendations:
             try:
-                logging.info("--- Starting Step 4: DFT Recommendations Based on Novelty ---")
+                logging.info("\n\n\n 🔄 ------------------------- WORKFLOW STEP 4: DFT RECOMMENDATIONS ------------------------- 🔄\n")
                 
                 dft_result = self._generate_dft_recommendations(
                     workflow_result["claims_generation"]["detailed_analysis"],
