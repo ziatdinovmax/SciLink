@@ -105,6 +105,7 @@ class MicroscopyAnalysisAgent:
             return None, {"error": "An unexpected error occurred during text-based LLM call", "details": str(e)}
 
     def _get_fft_nmf_params_from_llm(self, image_blob, system_info) -> tuple[int | None, int | None, str | None]:
+        self.logger.info("\n\n🤖 -------------------- AGENT STEP: sFFT/NMF PARAMETER ESTIMATION -------------------- 🤖\n")
         self.logger.info("Attempting to get FFT/NMF parameters from LLM...")
         prompt_parts = [FFT_NMF_PARAMETER_ESTIMATION_INSTRUCTIONS]
         prompt_parts.append("\nImage to analyze for parameters:\n")
@@ -157,6 +158,7 @@ class MicroscopyAnalysisAgent:
 
     def _run_fft_nmf_analysis(self, image_path: str, window_size: int, n_components: int, window_step: int) -> tuple[np.ndarray | None, np.ndarray | None]:
         try:
+            self.logger.info("\n\n🤖 -------------------- AGENT STEP: SLIDING FFT + NMF ANALYSIS -------------------- 🤖\n")
             self.logger.info("--- Starting Sliding FFT + NMF Analysis (AtomAI) ---")
             fft_output_dir = self.fft_nmf_settings.get('output_dir', 'microscopy_analysis')
             os.makedirs(fft_output_dir, exist_ok=True)
@@ -265,6 +267,7 @@ class MicroscopyAnalysisAgent:
             
             prompt_parts.append("\n\nProvide your analysis strictly in the requested JSON format.")
             
+            self.logger.info("\n\n🤖 -------------------- AGENT STEP: INTERPRETING RESULTS -------------------- 🤖\n")
             response = self.model.generate_content(
                 contents=prompt_parts,
                 generation_config=self.generation_config,
