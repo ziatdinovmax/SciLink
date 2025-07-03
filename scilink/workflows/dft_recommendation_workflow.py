@@ -31,7 +31,7 @@ class DFTRecommendationsWorkflow:
         # Initialize agent for text-only DFT recommendations
         # No FFT/NMF settings needed for text-only analysis
         self.agent = MicroscopyAnalysisAgent(
-            api_key=google_api_key,
+            google_api_key=google_api_key,
             model_name=analysis_model
         )
     
