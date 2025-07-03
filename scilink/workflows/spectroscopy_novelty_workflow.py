@@ -29,7 +29,6 @@ def select_claims_interactive(claims):
     # Display only the "Has Anyone" questions for spectroscopic claims
     for i, claim in enumerate(claims):
         print(f"\n[{i+1}] {claim.get('has_anyone_question', 'No question formulated')}")
-        print(f"    Evidence: {claim.get('spectroscopic_evidence', 'No evidence specified')[:100]}...")
     
     print("-" * 70)
     
@@ -153,7 +152,7 @@ class SpectroscopyNoveltyAssessmentWorkflow:
         
         # === Step 1: Spectroscopic Analysis for Scientific Claims ===
         try:
-            logging.info("--- Starting Step 1: Spectroscopic Analysis for Scientific Claims ---")
+            logging.info("\n\n 🔄 -------------------- WORKFLOW STEP 1: SPECTROSCOPIC ANALYSIS -------------------- 🔄\n")
             
             analysis_result = self.analysis_agent.analyze_hyperspectral_data_for_claims(
                 data_path,
@@ -212,7 +211,7 @@ class SpectroscopyNoveltyAssessmentWorkflow:
 
         # === Step 2: Literature Search with OWL ===
         try:
-            logging.info("--- Starting Step 2: Literature Search with OWL ---")
+            logging.info("\n\n\n 🔄 ------------------------- WORKFLOW STEP 2: LITERATURE SEARCH ------------------------- 🔄\n")
             
             # Let user select which claims to search
             selected_claims = select_claims_interactive(claims)
@@ -271,7 +270,7 @@ class SpectroscopyNoveltyAssessmentWorkflow:
         # === Step 3: Novelty Assessment ===
         novel_claims = []
         try:
-            logging.info("--- Starting Step 3: Novelty Assessment ---")
+            logging.info("\n\n\n 🔄 ------------------------- WORKFLOW STEP 3: NOVELTY ASSESSMENT ------------------------- 🔄\n")
             
             # Display summary of findings
             known_claims = []

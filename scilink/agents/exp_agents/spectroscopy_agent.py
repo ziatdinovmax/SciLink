@@ -154,6 +154,7 @@ class SpectroscopyAnalysisAgent:
         Step 1: LLM estimates optimal number of components based on system description.
         """
         try:
+            self.logger.info("\n\n🤖 -------------------- AGENT STEP: COMPONENT PARAMETER ESTIMATION -------------------- 🤖\n")
             self.logger.info("Step 1: Getting LLM initial component estimate from system description")
             
             # Build prompt for initial estimation
@@ -273,6 +274,7 @@ class SpectroscopyAnalysisAgent:
         Step 3: LLM compares visual results to make final decision.
         """
         try:
+            self.logger.info("\n\n🤖 ------------------ AGENT STEP: DECIDING ON THE FINAL NUMBER OF COMPONENTS ------------------ 🤖\n")
             self.logger.info("Step 3: LLM comparing visual results for final decision")
             
             # Build prompt for visual comparison
@@ -355,12 +357,7 @@ class SpectroscopyAnalysisAgent:
             "system_info": system_info
         }
         
-        # Console output for human monitoring
-        print("\n🔍 Starting LLM-Guided Component Selection...")
-        print("=" * 50)
-        
         # Step 1: LLM initial estimate based on system description
-        print("Step 1: Getting LLM initial component estimate...")
         initial_estimate = self._llm_estimate_components_from_system(hspy_data, system_info)
         
         # Log and save reasoning
@@ -387,6 +384,7 @@ class SpectroscopyAnalysisAgent:
         ]
         
         reasoning_log["test_range"] = test_components
+        self.logger.info("\n\n🤖 -------------------- AGENT STEP: COMPONENT TESTING -------------------- 🤖\n")
         print(f"Step 2: Testing component numbers: {test_components}")
         
         # Run test analyses
@@ -448,6 +446,7 @@ class SpectroscopyAnalysisAgent:
         self._save_component_reasoning("step3_final_decision", step3_data)
         
         # Step 4: Run final analysis with chosen number
+        self.logger.info("\n\n🤖 -------------------- AGENT STEP: FINAL SPECTRAL UNMIXING -------------------- 🤖\n")
         print("Step 4: Running final analysis...")
         final_unmixer = SpectralUnmixer(
             method=self.spectral_settings.get('method', 'nmf'),
@@ -863,6 +862,7 @@ class SpectroscopyAnalysisAgent:
         prompt_parts.append("\n\nProvide your analysis in the requested JSON format.")
         
         # Send to LLM for analysis
+        self.logger.info("\n\n🤖 -------------------- AGENT STEP: INTERPRETING RESULTS -------------------- 🤖\n")
         self.logger.info(f"Sending hyperspectral {analysis_desc} request to LLM with {len(component_pair_images)} component pairs...")
         response = self.model.generate_content(
             contents=prompt_parts,
