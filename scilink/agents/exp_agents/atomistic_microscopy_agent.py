@@ -11,11 +11,12 @@ import glob
 import google.generativeai as genai
 from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockThreshold
 
+from .recommendation_agent import RecommendationAgent
+
 from .instruct import (
     ATOMISTIC_MICROSCOPY_ANALYSIS_INSTRUCTIONS,
     ATOMISTIC_MICROSCOPY_CLAIMS_INSTRUCTIONS,
     GMM_PARAMETER_ESTIMATION_INSTRUCTIONS,
-    TEXT_ONLY_DFT_RECOMMENDATION_INSTRUCTIONS 
 )
 from .utils import load_image, preprocess_image, convert_numpy_to_jpeg_bytes, predict_with_ensemble, analyze_nearest_neighbor_distances, normalize_and_convert_to_image_bytes, rescale_for_model, download_file_with_gdown, unzip_file # predict_with_ensemble is new
 
@@ -56,6 +57,10 @@ class AtomisticMicroscopyAnalysisAgent:
         self.refine_positions = self.atomistic_analysis_settings.get('refine_positions', False)
         self.max_refinement_shift = self.atomistic_analysis_settings.get('max_refinement_shift', 1.5)
         self.original_preprocessed_image = None # Store for potential visualization
+
+        self.google_api_key = google_api_key 
+        self.model_name = model_name
+        self._recommendation_agent = None
 
     def _parse_llm_response(self, response) -> tuple[dict | None, dict | None]:
         """
@@ -712,36 +717,22 @@ class AtomisticMicroscopyAnalysisAgent:
             # Determine the key for the main textual output from LLM based on the path taken
             output_analysis_key = "detailed_analysis"  # Default for image-based path
 
+            # Text-Only
             if cached_detailed_analysis and additional_prompt_context:
-                self.logger.info("Generating DFT recommendations from cached atomistic analysis and novelty context.")
-                instruction_prompt_text = TEXT_ONLY_DFT_RECOMMENDATION_INSTRUCTIONS  # Import this from instruct.py
-                output_analysis_key = "detailed_reasoning_for_recommendations"  # Expected from text-only prompt
+                self.logger.info("Delegating DFT recommendations to RecommendationAgent.")
 
-                prompt_list_for_llm = [instruction_prompt_text]
-                prompt_list_for_llm.append("\n\n--- Start of Cached Initial Atomistic Image Analysis ---\n")
-                prompt_list_for_llm.append(cached_detailed_analysis)
-                prompt_list_for_llm.append("\n--- End of Cached Initial Atomistic Image Analysis ---\n")
-
-                prompt_list_for_llm.append("\n\n--- Start of Special Considerations (e.g., Novelty Insights) ---\n")
-                prompt_list_for_llm.append(additional_prompt_context)
-                prompt_list_for_llm.append("\n--- End of Special Considerations ---\n")
-
-                if system_info:
-                    system_info_text_part = "\n\nAdditional System Information (Metadata):\n"
-                    if isinstance(system_info, str):
-                        try: 
-                            system_info_text_part += json.dumps(json.loads(system_info), indent=2)
-                        except json.JSONDecodeError: 
-                            system_info_text_part += system_info
-                    elif isinstance(system_info, dict): 
-                        system_info_text_part += json.dumps(system_info, indent=2)
-                    else: 
-                        system_info_text_part += str(system_info)
-                    prompt_list_for_llm.append(system_info_text_part)
+                # Lazy initialization of the recommendation agent
+                if not self._recommendation_agent:
+                    self._recommendation_agent = RecommendationAgent(self.google_api_key, self.model_name)
                 
-                prompt_list_for_llm.append("\n\nProvide your DFT structure recommendations strictly in the requested JSON format based on the above atomistic analysis text.")
-                result_json, error_dict = self._generate_json_from_text_parts(prompt_list_for_llm)
-
+                # Delegate the task to the specialized agent
+                return self._recommendation_agent.generate_dft_recommendations_from_text(
+                    cached_detailed_analysis=cached_detailed_analysis,
+                    additional_prompt_context=additional_prompt_context,
+                    system_info=system_info
+                )
+            
+            # Image-Based
             elif image_path:
                 self.logger.info("Generating DFT recommendations from atomistic image analysis.")
                 instruction_prompt_text = ATOMISTIC_MICROSCOPY_ANALYSIS_INSTRUCTIONS  # Use atomistic-specific instructions
