@@ -80,7 +80,7 @@ class MicroscopyNoveltyAssessmentWorkflow:
                  futurehouse_api_key: str = None,
                  analysis_model: str = "gemini-2.5-pro-preview-06-05",
                  output_dir: str = "novelty_assessment_output",
-                 max_wait_time: int = 400,
+                 max_wait_time: int = 500,
                  dft_recommendations: bool = False
                  ):
         """
