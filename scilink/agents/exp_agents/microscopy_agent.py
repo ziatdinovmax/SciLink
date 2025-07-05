@@ -4,8 +4,9 @@ import logging
 import numpy as np
 
 import google.generativeai as genai
-from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockThreshold
+from google.generativeai.types import GenerationConfig
 
+from .base_agent import BaseAnalysisAgent
 from .recommendation_agent import RecommendationAgent
 
 from .instruct import (
@@ -15,115 +16,46 @@ from .instruct import (
 )
 from .utils import load_image, preprocess_image, convert_numpy_to_jpeg_bytes, normalize_and_convert_to_image_bytes
 
-from ...auth import get_api_key, APIKeyNotFoundError
-
 from atomai.stat import SlidingFFTNMF
 
 
-class MicroscopyAnalysisAgent:
+class MicroscopyAnalysisAgent(BaseAnalysisAgent):
     """
     Agent for analyzing microscopy images using generative AI models.
-    Refactored to support both image-based and text-based DFT recommendations.
     """
 
     def __init__(self, google_api_key: str | None = None, model_name: str = "gemini-2.5-pro-preview-06-05", fft_nmf_settings: dict | None = None):
-        # Auto-discover API key
-        if google_api_key is None:
-            google_api_key = get_api_key('google')
-            if not google_api_key:
-                raise APIKeyNotFoundError('google')
-        genai.configure(api_key=google_api_key)
-
-        self.model = genai.GenerativeModel(model_name)
-        self.generation_config = GenerationConfig(response_mime_type="application/json")
-        self.safety_settings = {
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-        }
-        self.logger = logging.getLogger(__name__)
-        self.fft_nmf_settings = fft_nmf_settings if fft_nmf_settings else {} # Ensure it's a dict
+        super().__init__(google_api_key, model_name)
+        
+        self.fft_nmf_settings = fft_nmf_settings if fft_nmf_settings else {}
         self.RUN_FFT_NMF = self.fft_nmf_settings.get('FFT_NMF_ENABLED', False)
         self.FFT_NMF_AUTO_PARAMS = self.fft_nmf_settings.get('FFT_NMF_AUTO_PARAMS', False)
-
-        self.google_api_key = google_api_key 
-        self.model_name = model_name
         self._recommendation_agent = None
 
-    def _parse_llm_response(self, response) -> tuple[dict | None, dict | None]:
-        """
-        Parses the LLM response, expecting JSON.
-        """
-        result_json = None
-        error_dict = None
-        raw_text = None
-        json_string = None
-
-        try:
-            raw_text = response.text
-            first_brace_index = raw_text.find('{')
-            last_brace_index = raw_text.rfind('}')
-            if first_brace_index != -1 and last_brace_index != -1 and last_brace_index > first_brace_index:
-                json_string = raw_text[first_brace_index : last_brace_index + 1]
-                result_json = json.loads(json_string)
-            else:
-                raise ValueError("Could not find valid JSON object delimiters '{' and '}' in the response text.")
-
-        except (json.JSONDecodeError, AttributeError, IndexError, ValueError) as e:
-            error_details = str(e)
-            error_raw_response = raw_text if raw_text is not None else getattr(response, 'text', 'N/A')
-            self.logger.error(f"Error parsing LLM JSON response: {e}")
-            parsed_substring_for_log = json_string if json_string else 'N/A'
-            self.logger.debug(f"Attempted to parse substring: {parsed_substring_for_log[:500]}...")
-            self.logger.debug(f"Original Raw response text: {error_raw_response[:500]}...")
-
-            if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
-                block_reason = response.prompt_feedback.block_reason
-                self.logger.error(f"Request blocked due to: {block_reason}")
-                error_dict = {"error": f"Content blocked by safety filters", "details": f"Reason: {block_reason}"}
-            elif response.candidates and response.candidates[0].finish_reason != 1: # 1 == Stop
-                finish_reason = response.candidates[0].finish_reason
-                self.logger.error(f"Generation finished unexpectedly: {finish_reason}")
-                error_dict = {"error": f"Generation finished unexpectedly: {finish_reason}", "details": error_details, "raw_response": error_raw_response}
-            else:
-                error_dict = {"error": "Failed to parse valid JSON from LLM response", "details": error_details, "raw_response": error_raw_response}
-        except Exception as e:
-            self.logger.exception(f"Unexpected error processing response: {e}")
-            error_dict = {"error": "Unexpected error processing LLM response", "details": str(e)}
-        
-        return result_json, error_dict
-
-    def _generate_json_from_text_parts(self, prompt_parts: list) -> tuple[dict | None, dict | None]:
-        """
-        Internal helper to generate JSON from a list of textual prompt parts.
-        """
-        try:
-            self.logger.debug(f"Sending text-only prompt to LLM. Total parts: {len(prompt_parts)}")
-            # for i, part in enumerate(prompt_parts): # For detailed logging if needed
-            # self.logger.debug(f"Part {i}: {str(part)[:200]}...")
-            response = self.model.generate_content(
-                contents=prompt_parts,
-                generation_config=self.generation_config,
-                safety_settings=self.safety_settings,
-            )
-            return self._parse_llm_response(response)
-        except Exception as e:
-            self.logger.exception(f"An unexpected error occurred during text-based LLM call: {e}")
-            return None, {"error": "An unexpected error occurred during text-based LLM call", "details": str(e)}
-
     def _get_fft_nmf_params_from_llm(self, image_blob, system_info) -> tuple[int | None, int | None, str | None]:
+        """Get FFT/NMF parameters from LLM based on image analysis."""
         self.logger.info("\n\n🤖 -------------------- AGENT STEP: sFFT/NMF PARAMETER ESTIMATION -------------------- 🤖\n")
         self.logger.info("Attempting to get FFT/NMF parameters from LLM...")
+        
         prompt_parts = [FFT_NMF_PARAMETER_ESTIMATION_INSTRUCTIONS]
         prompt_parts.append("\nImage to analyze for parameters:\n")
         prompt_parts.append(image_blob)
+        
         if system_info:
             system_info_text = "\n\nAdditional System Information:\n"
             if isinstance(system_info, str):
-                try: system_info_text += json.dumps(json.loads(system_info), indent=2)
-                except json.JSONDecodeError: system_info_text += system_info
-            elif isinstance(system_info, dict): system_info_text += json.dumps(system_info, indent=2)
-            else: system_info_text += str(system_info)[:1000]
+                try: 
+                    system_info_text += json.dumps(json.loads(system_info), indent=2)
+                except json.JSONDecodeError: 
+                    system_info_text += system_info
+            elif isinstance(system_info, dict): 
+                system_info_text += json.dumps(system_info, indent=2)
+            else: 
+                system_info_text += str(system_info)[:1000]
             prompt_parts.append(system_info_text)
+            
         prompt_parts.append("\n\nOutput ONLY the JSON object with 'window_size', 'n_components', and 'explanation'")
+        
         param_gen_config = GenerationConfig(response_mime_type="application/json")
         try:
             response = self.model.generate_content(
@@ -131,42 +63,57 @@ class MicroscopyAnalysisAgent:
                 generation_config=param_gen_config,
                 safety_settings=self.safety_settings,
             )
+            
             self.logger.debug(f"LLM parameter estimation raw response: {response}")
+            
             if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
                 self.logger.error(f"LLM parameter estimation blocked: {response.prompt_feedback.block_reason}")
                 return None, None, None
+                
             if response.candidates and response.candidates[0].finish_reason != 1:
                 self.logger.warning(f"LLM parameter estimation finished unexpectedly: {response.candidates[0].finish_reason}")
 
             raw_text_params = response.text
             result_json_params = json.loads(raw_text_params)
+            
             window_size = result_json_params.get("window_size")
             n_components = result_json_params.get("n_components")
             explanation = result_json_params.get("explanation", "No explanation provided.")
+            
+            # Validate parameters
             params_valid = True
             if not isinstance(window_size, int) or window_size <= 0:
                 self.logger.warning(f"LLM invalid window_size: {window_size}")
-                params_valid = False; window_size = None
+                params_valid = False
+                window_size = None
+                
             if not isinstance(n_components, int) or not (1 <= n_components <= 16):
                 self.logger.warning(f"LLM invalid n_components: {n_components}")
-                params_valid = False; n_components = None
+                params_valid = False
+                n_components = None
+                
             if not isinstance(explanation, str) or not explanation.strip():
                 explanation = "Invalid/empty explanation from LLM."
+                
             if params_valid:
                 self.logger.info(f"LLM suggested params: window_size={window_size}, n_components={n_components}")
                 return window_size, n_components, explanation
+                
             return None, None, explanation
+            
         except Exception as e:
             self.logger.error(f"LLM call for FFT/NMF params failed: {e}", exc_info=True)
             return None, None, None
 
-
     def _run_fft_nmf_analysis(self, image_path: str, window_size: int, n_components: int, window_step: int) -> tuple[np.ndarray | None, np.ndarray | None]:
+        """Run sliding FFT + NMF analysis using AtomAI."""
         try:
             self.logger.info("\n\n🤖 -------------------- AGENT STEP: SLIDING FFT + NMF ANALYSIS -------------------- 🤖\n")
             self.logger.info("--- Starting Sliding FFT + NMF Analysis (AtomAI) ---")
+            
             fft_output_dir = self.fft_nmf_settings.get('output_dir', 'microscopy_analysis')
             os.makedirs(fft_output_dir, exist_ok=True)
+            
             base_name = os.path.splitext(os.path.basename(image_path))[0]
             safe_base_name = "".join(c if c.isalnum() else "_" for c in base_name)
             fft_output_base = os.path.join(fft_output_dir, f"{safe_base_name}_output")
@@ -194,16 +141,21 @@ class MicroscopyAnalysisAgent:
             
         except Exception as fft_e:
             self.logger.error(f"AtomAI Sliding FFT + NMF analysis failed: {fft_e}", exc_info=True)
-        return None, None
+            return None, None
 
     def _analyze_image_base(self, image_path: str, system_info: dict | str | None, 
                             instruction_prompt: str, 
                             additional_top_level_context: str | None = None) -> tuple[dict | None, dict | None]:
         """
         Internal helper for image-based analysis, including optional FFT/NMF.
+        Now uses base class methods for common functionality.
         """
         try:
+            # Use base class methods for common operations
+            system_info = self._handle_system_info(system_info)
             loaded_image = load_image(image_path)
+            nm_per_pixel, fov_in_nm = self._calculate_spatial_scale(system_info, loaded_image.shape)
+
             preprocessed_img_array, _ = preprocess_image(loaded_image)
             image_bytes = convert_numpy_to_jpeg_bytes(preprocessed_img_array)
             image_blob = {"mime_type": "image/jpeg", "data": image_bytes}
@@ -213,8 +165,11 @@ class MicroscopyAnalysisAgent:
                 ws, nc, fft_explanation = None, None, None
                 if self.FFT_NMF_AUTO_PARAMS:
                     auto_params = self._get_fft_nmf_params_from_llm(image_blob, system_info)
-                    if auto_params: ws, nc, fft_explanation = auto_params
-                if fft_explanation: self.logger.info(f"LLM Explanation for FFT/NMF params: {fft_explanation}")
+                    if auto_params: 
+                        ws, nc, fft_explanation = auto_params
+                        
+                if fft_explanation: 
+                    self.logger.info(f"LLM Explanation for FFT/NMF params: {fft_explanation}")
                 
                 # Use LLM params if provided, otherwise fall back to config
                 if ws is None: 
@@ -230,28 +185,34 @@ class MicroscopyAnalysisAgent:
                 
                 components_array, abundances_array = self._run_fft_nmf_analysis(image_path, ws, nc, step)
             
+            # Build prompt
             prompt_parts = [instruction_prompt]
+            
             if additional_top_level_context:
                 prompt_parts.append("\n\n## Special Considerations for This Analysis (Based on Prior Review):\n")
                 prompt_parts.append(additional_top_level_context)
                 prompt_parts.append("\nPlease ensure your DFT structure recommendations and scientific justifications specifically address or investigate these special considerations alongside your general analysis of the image features. The priority should be given to structures that elucidate these highlighted aspects.\n")
             
             analysis_request_text = "\nPlease analyze the following microscopy image"
-            if system_info: analysis_request_text += " using the additional context provided."
+            if system_info: 
+                analysis_request_text += " using the additional context provided."
             analysis_request_text += "\n\nPrimary Microscopy Image:\n"
             prompt_parts.append(analysis_request_text)
             prompt_parts.append(image_blob)
 
+            # Add FFT/NMF results if available
             if components_array is not None and abundances_array is not None:
                 prompt_parts.append("\n\nSupplemental Analysis Data (Sliding FFT + NMF Grayscale Images):")
                 num_components = min(components_array.shape[0], abundances_array.shape[0])
                 img_format = 'JPEG'
                 self.logger.info(f"Adding {num_components} NMF components/abundances as {img_format} to prompt.")
+                
                 for i in range(num_components):
                     try:
                         comp_bytes = normalize_and_convert_to_image_bytes(components_array[i], log_scale=True, format=img_format)
                         prompt_parts.append(f"\nNMF Component {i+1} (Frequency Pattern - Grayscale):")
                         prompt_parts.append({"mime_type": f"image/{img_format.lower()}", "data": comp_bytes})
+                        
                         abun_bytes = normalize_and_convert_to_image_bytes(abundances_array[i], log_scale=False, format=img_format)
                         prompt_parts.append(f"\nNMF Abundance Map {i+1} (Spatial Distribution - Grayscale):")
                         prompt_parts.append({"mime_type": f"image/{img_format.lower()}", "data": abun_bytes})
@@ -261,14 +222,10 @@ class MicroscopyAnalysisAgent:
             else:
                 prompt_parts.append("\n\n(No supplemental FFT/NMF image analysis results are provided or FFT/NMF was disabled/failed)")
 
-            if system_info:
-                system_info_text = "\n\nAdditional System Information (Metadata):\n"
-                if isinstance(system_info, str):
-                    try: system_info_text += json.dumps(json.loads(system_info), indent=2)
-                    except json.JSONDecodeError: system_info_text += system_info
-                elif isinstance(system_info, dict): system_info_text += json.dumps(system_info, indent=2)
-                else: system_info_text += str(system_info)
-                prompt_parts.append(system_info_text)
+            # Use base class method for system info prompt section
+            system_info_section = self._build_system_info_prompt_section(system_info)
+            if system_info_section:
+                prompt_parts.append(system_info_section)
             
             prompt_parts.append("\n\nProvide your analysis strictly in the requested JSON format.")
             
@@ -278,12 +235,12 @@ class MicroscopyAnalysisAgent:
                 generation_config=self.generation_config,
                 safety_settings=self.safety_settings,
             )
-            return self._parse_llm_response(response)
+            return self._parse_llm_response(response)  # Using base class method
 
         except FileNotFoundError:
             self.logger.error(f"Image file not found: {image_path}")
             return None, {"error": "Image file not found", "details": f"Path: {image_path}"}
-        except ImportError as e: # Should not happen if dependencies are met
+        except ImportError as e:
             self.logger.error(f"Missing dependency for image processing: {e}")
             return None, {"error": "Missing image processing dependency", "details": str(e)}
         except Exception as e:
@@ -297,11 +254,15 @@ class MicroscopyAnalysisAgent:
             additional_prompt_context: str | None = None,
             cached_detailed_analysis: str | None = None
     ):
+        """
+        Analyze microscopy image to generate DFT structure recommendations.
+        Supports both image-based and text-based analysis paths.
+        Now uses base class validation methods for recommendations.
+        """
         result_json, error_dict = None, None
-        # Determine the key for the main textual output from LLM based on the path taken
         output_analysis_key = "detailed_analysis" 
 
-        # Text-Only
+        # Text-Only path
         if cached_detailed_analysis and additional_prompt_context:
             self.logger.info("Delegating DFT recommendations to RecommendationAgent.")
             
@@ -316,7 +277,7 @@ class MicroscopyAnalysisAgent:
                 system_info=system_info
             )
 
-        # Imaged-based
+        # Image-based path
         elif image_path:
             self.logger.info("Generating DFT recommendations from image analysis.")
             instruction_prompt_text = MICROSCOPY_ANALYSIS_INSTRUCTIONS # Standard image analysis prompt
@@ -324,7 +285,6 @@ class MicroscopyAnalysisAgent:
             result_json, error_dict = self._analyze_image_base(
                 image_path, system_info, instruction_prompt_text, additional_top_level_context=additional_prompt_context
             )
-            # output_analysis_key remains "full_analysis"
         else:
             # Neither path is viable
             return {"error": "Either image_path or (cached_detailed_analysis AND additional_prompt_context) must be provided for DFT recommendations."}
@@ -338,27 +298,13 @@ class MicroscopyAnalysisAgent:
         analysis_output_text = result_json.get(output_analysis_key, "Analysis/Reasoning not provided by LLM.")
         recommendations = result_json.get("structure_recommendations", [])
         
-        valid_recommendations = []
-        if not isinstance(recommendations, list):
-            self.logger.warning(f"'structure_recommendations' from LLM was not a list: {recommendations}")
-            recommendations = [] 
-
-        for rec in recommendations:
-            if isinstance(rec, dict) and all(k in rec for k in ["description", "scientific_interest", "priority"]):
-                if isinstance(rec.get("priority"), int):
-                    valid_recommendations.append(rec)
-                else:
-                    self.logger.warning(f"Recommendation skipped due to invalid priority type (expected int): {rec.get('priority')}. Recommendation: {rec}")
-            else:
-                self.logger.warning(f"Recommendation skipped due to missing keys or incorrect dict format: {rec}")
-        
-        sorted_recommendations = sorted(valid_recommendations, key=lambda x: x.get("priority", 99))
+        # Use base class validation method
+        sorted_recommendations = self._validate_structure_recommendations(recommendations)
 
         if not sorted_recommendations and not analysis_output_text == "Analysis/Reasoning not provided by LLM.":
              self.logger.warning(f"LLM call successful ('{output_analysis_key}' provided) but no valid recommendations found or parsed.")
         elif not sorted_recommendations:
             self.logger.warning("LLM call did not yield valid recommendations or analysis text.")
-
 
         # Return a consistent key for the main textual output for the calling script
         return {"analysis_summary_or_reasoning": analysis_output_text, "recommendations": sorted_recommendations}
@@ -367,6 +313,7 @@ class MicroscopyAnalysisAgent:
         """
         Analyze microscopy image to generate scientific claims for literature comparison.
         This path always uses image-based analysis.
+        Now uses base class validation methods.
         """
         result_json, error_dict = self._analyze_image_base(
             image_path, system_info, MICROSCOPY_CLAIMS_INSTRUCTIONS, additional_top_level_context=None # No special context needed here usually
@@ -379,26 +326,13 @@ class MicroscopyAnalysisAgent:
 
         detailed_analysis = result_json.get("detailed_analysis", "Analysis not provided by LLM.")
         scientific_claims = result_json.get("scientific_claims", [])
-        valid_claims = []
-
-        if not isinstance(scientific_claims, list):
-            self.logger.warning(f"'scientific_claims' from LLM was not a list: {scientific_claims}")
-            scientific_claims = []
-
-        for claim in scientific_claims:
-            if isinstance(claim, dict) and all(k in claim for k in ["claim", "scientific_impact", "has_anyone_question", "keywords"]):
-                # Optionally add validation for keywords being a list of strings etc.
-                if isinstance(claim.get("keywords"), list):
-                    valid_claims.append(claim)
-                else:
-                    self.logger.warning(f"Claim skipped due to 'keywords' not being a list: {claim}")
-            else:
-                self.logger.warning(f"Claim skipped due to missing keys or incorrect dict format: {claim}")
         
+        # Use base class validation method
+        valid_claims = self._validate_scientific_claims(scientific_claims)
+
         if not valid_claims and not detailed_analysis == "Analysis not provided by LLM.":
             self.logger.warning("Analysis for claims successful ('detailed_analysis' provided) but no valid claims found or parsed.")
         elif not valid_claims:
              self.logger.warning("LLM call did not yield valid claims or analysis text for claims workflow.")
-
 
         return {"detailed_analysis": detailed_analysis, "scientific_claims": valid_claims}
