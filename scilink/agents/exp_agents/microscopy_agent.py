@@ -34,7 +34,7 @@ class MicroscopyAnalysisAgent(BaseAnalysisAgent):
 
     def _get_fft_nmf_params_from_llm(self, image_blob, system_info) -> tuple[int | None, int | None, str | None]:
         """Get FFT/NMF parameters from LLM based on image analysis."""
-        self.logger.info("\n\n🤖 -------------------- AGENT STEP: sFFT/NMF PARAMETER ESTIMATION -------------------- 🤖\n")
+        self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP: sFFT/NMF PARAMETER ESTIMATION -------------------- 🤖\n")
         self.logger.info("Attempting to get FFT/NMF parameters from LLM...")
         
         prompt_parts = [FFT_NMF_PARAMETER_ESTIMATION_INSTRUCTIONS]
@@ -108,7 +108,7 @@ class MicroscopyAnalysisAgent(BaseAnalysisAgent):
     def _run_fft_nmf_analysis(self, image_path: str, window_size: int, n_components: int, window_step: int) -> tuple[np.ndarray | None, np.ndarray | None]:
         """Run sliding FFT + NMF analysis using AtomAI."""
         try:
-            self.logger.info("\n\n🤖 -------------------- AGENT STEP: SLIDING FFT + NMF ANALYSIS -------------------- 🤖\n")
+            self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP: SLIDING FFT + NMF ANALYSIS -------------------- 🤖\n")
             self.logger.info("--- Starting Sliding FFT + NMF Analysis (AtomAI) ---")
             
             fft_output_dir = self.fft_nmf_settings.get('output_dir', 'microscopy_analysis')
@@ -229,7 +229,7 @@ class MicroscopyAnalysisAgent(BaseAnalysisAgent):
             
             prompt_parts.append("\n\nProvide your analysis strictly in the requested JSON format.")
             
-            self.logger.info("\n\n🤖 -------------------- AGENT STEP: INTERPRETING RESULTS -------------------- 🤖\n")
+            self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP: INTERPRETING RESULTS -------------------- 🤖\n")
             response = self.model.generate_content(
                 contents=prompt_parts,
                 generation_config=self.generation_config,

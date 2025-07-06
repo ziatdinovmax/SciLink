@@ -63,7 +63,7 @@ class AtomisticMicroscopyAnalysisAgent(BaseAnalysisAgent):
                 n_components (int): Suggested number of GMM components.
                 explanation (str): LLM's reasoning for the parameters.
         """
-        self.logger.info("\n\n🤖 -------------------- AGENT STEP: DEFINING ANALYSIS PARAMETERS -------------------- 🤖\n")
+        self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP: DEFINING ANALYSIS PARAMETERS -------------------- 🤖\n")
         
         prompt_parts = [GMM_PARAMETER_ESTIMATION_INSTRUCTIONS]
         prompt_parts.append("\nImage to analyze for parameters:\n")
@@ -147,7 +147,7 @@ class AtomisticMicroscopyAnalysisAgent(BaseAnalysisAgent):
                 coords_class (np.ndarray): Nx3 array of (y, x) coordinates and corresponding GMM classes.
         """
         try:
-            self.logger.info("\n\n🤖 -------------------- AGENT STEP: Starting NN Ensemble + GMM Analysis -------------------- 🤖\n")
+            self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP: Starting NN Ensemble + GMM Analysis -------------------- 🤖\n")
             
             # Image is already loaded, rescaled, and preprocessed.
             expdata = image_array
@@ -550,7 +550,7 @@ class AtomisticMicroscopyAnalysisAgent(BaseAnalysisAgent):
                     prompt_parts.append({"mime_type": "image/jpeg", "data": viz['bytes']})
                     
                 self.logger.info(f"Adding {len(gmm_visualizations)} analysis visualizations to prompt.")
-                self.logger.info("\n\n🤖 -------------------- AGENT STEP: INTERPRETING RESULTS -------------------- 🤖\n")
+                self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP: INTERPRETING RESULTS -------------------- 🤖\n")
             else:
                 prompt_parts.append("\n\n(No supplemental NN/GMM analysis results are provided or it was disabled/failed)")
 

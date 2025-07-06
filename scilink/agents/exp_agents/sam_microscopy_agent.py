@@ -102,7 +102,7 @@ class SAMMicroscopyAnalysisAgent(BaseAnalysisAgent):
             }
             
             # Run initial analysis
-            self.logger.info("\n\n🤖 -------------------- AGENT STEP: SAM PARTICLE SEGMENTATION -------------------- 🤖\n")
+            self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP: SAM PARTICLE SEGMENTATION -------------------- 🤖\n")
             self.logger.info(f"Running initial SAM analysis with params: {current_params}")
             sam_result = analyzer.analyze(image_array, params=current_params)
             
@@ -113,7 +113,7 @@ class SAMMicroscopyAnalysisAgent(BaseAnalysisAgent):
             
             # Run refinement cycles if requested
             for cycle in range(self.refinement_cycles):
-                self.logger.info(f"\n\n🤖 -------------------- AGENT STEP: PARAMETER REFINEMENT CYCLE {cycle + 1}/{self.refinement_cycles} -------------------- 🤖\n")                
+                self.logger.info(f"\n\n🤖 -------------------- ANALYSIS AGENT STEP: PARAMETER REFINEMENT CYCLE {cycle + 1}/{self.refinement_cycles} -------------------- 🤖\n")                
                 # Create visualization of current result
                 current_overlay = ParticleAnalyzer.visualize_particles(
                     sam_result, 
@@ -167,7 +167,7 @@ class SAMMicroscopyAnalysisAgent(BaseAnalysisAgent):
             )
             
             # Extract comprehensive morphological statistics
-            self.logger.info("\n\n🤖 -------------------- AGENT STEP: MORPHOLOGICAL STATISTICS EXTRACTION -------------------- 🤖\n")
+            self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP: MORPHOLOGICAL STATISTICS EXTRACTION -------------------- 🤖\n")
             self.logger.info(f"Extracting comprehensive morphological statistics for {sam_result['total_count']} particles")
             particles_df = ParticleAnalyzer.particles_to_dataframe(sam_result)
             
@@ -444,7 +444,7 @@ class SAMMicroscopyAnalysisAgent(BaseAnalysisAgent):
             
             prompt_parts.append("\n\nProvide your analysis strictly in the requested JSON format.")
             
-            self.logger.info("\n\n🤖 -------------------- AGENT STEP: INTERPRETING RESULTS -------------------- 🤖\n")
+            self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP: INTERPRETING RESULTS -------------------- 🤖\n")
             response = self.model.generate_content(
                 contents=prompt_parts,
                 generation_config=self.generation_config,
