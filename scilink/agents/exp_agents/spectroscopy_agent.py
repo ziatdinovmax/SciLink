@@ -558,17 +558,36 @@ class SpectroscopyAnalysisAgent(BaseAnalysisAgent):
             self.logger.error(f"Failed to create component-abundance pairs: {e}")
             return []
 
+    def _validate_structure_inputs(self, structure_image_path: str = None, 
+                                 structure_system_info: Dict[str, Any] = None) -> tuple[str, Dict[str, Any]]:
+        """
+        Validate and clean up structure inputs, ensuring consistency.
+        
+        Returns:
+            tuple: (validated_structure_image_path, validated_structure_system_info)
+        """
+        # If structure_system_info provided without structure_image_path, warn and ignore
+        if structure_system_info and not structure_image_path:
+            self.logger.warning("structure_system_info provided but no structure_image_path - ignoring metadata")
+            structure_system_info = None
+        
+        # Validate structure image path exists
+        if structure_image_path and not os.path.exists(structure_image_path):
+            self.logger.warning(f"Structure image not found: {structure_image_path}")
+            structure_image_path = None
+            structure_system_info = None  # Also clear metadata if image doesn't exist
+        
+        return structure_image_path, structure_system_info
+
     def analyze_hyperspectral_data_for_claims(self, data_path: str, metadata_path: Dict[str, Any] | None = None,
-                                              structure_image_path: str = None, structure_system_info: Dict[str, Any] = None
-                                              ) -> Dict[str, Any]:
+                                            structure_image_path: str = None, structure_system_info: Dict[str, Any] = None
+                                            ) -> Dict[str, Any]:
         """
         Analyze hyperspectral data to generate scientific claims for literature comparison.
-        Similar to microscopy agent's analyze_microscopy_image_for_claims method.
-        Now uses base class validation methods.
         
         Args:
             data_path: Path to hyperspectral data file (.npy)
-            metadata_path:  Path to JSON file with experimental metadata
+            metadata_path: Dictionary with experimental metadata OR path to JSON file
             structure_image_path: Optional path to 2D greyscale structure image for context
             structure_system_info: Optional metadata for the structure image
             
@@ -576,8 +595,24 @@ class SpectroscopyAnalysisAgent(BaseAnalysisAgent):
             Dictionary containing detailed analysis and scientific claims
         """
         try:
-            # Load system info from metadata path
-            system_info = self._load_metadata_from_json(metadata_path)
+            # Validate structure inputs
+            structure_image_path, structure_system_info = self._validate_structure_inputs(
+                structure_image_path, structure_system_info
+            )
+            
+            # Handle metadata_path properly - it can be a dict or a string path
+            if isinstance(metadata_path, dict):
+                # Already a dictionary, use it directly
+                system_info = metadata_path
+            elif isinstance(metadata_path, str):
+                # It's a file path, load from JSON
+                system_info = self._load_metadata_from_json(metadata_path)
+            elif metadata_path is None:
+                # Try to load companion JSON file based on data_path
+                system_info = self._load_metadata_from_json(data_path)
+            else:
+                self.logger.warning(f"Invalid metadata_path type: {type(metadata_path)}")
+                system_info = {}
 
             # Use the shared analysis workflow but with claims-specific instructions
             result = self._analyze_hyperspectral_data_base(
@@ -618,8 +653,7 @@ class SpectroscopyAnalysisAgent(BaseAnalysisAgent):
                                     structure_image_path: str = None, structure_system_info: Dict[str, Any] = None
                                     ) -> Dict[str, Any]:
         """
-        Base method for hyperspectral data analysis - shared by both standard analysis and claims generation.
-        Updated to use component-abundance pairs for final analysis and base class methods.
+        Base method for hyperspectral data analysis
         """
         # Use base class method for system info handling
         if isinstance(system_info, str):
@@ -666,7 +700,8 @@ class SpectroscopyAnalysisAgent(BaseAnalysisAgent):
         else:
             prompt_parts.append("- No spectral unmixing performed")
 
-        # Add structure image if provided
+        # Add structure image and overlays if provided (OPTIMIZED VERSION)
+        overlay_bytes = None
         if structure_image_path and os.path.exists(structure_image_path):
             try:
                 from .utils import convert_numpy_to_jpeg_bytes, load_image
@@ -682,30 +717,35 @@ class SpectroscopyAnalysisAgent(BaseAnalysisAgent):
                     structure_img_gray = cv2.cvtColor(structure_img, cv2.COLOR_RGB2GRAY)
                 else:
                     structure_img_gray = structure_img # Already grayscale
-                structure_img_bytes = convert_numpy_to_jpeg_bytes(structure_img_gray)
-                
-                prompt_parts.append("\n\n**Structural Context Image for Correlation.**")
-                prompt_parts.append("This is a structural image providing spatial context. Try to correlate the spectroscopic components and their abundance maps with the spatial features in this image.")
-                prompt_parts.append({"mime_type": "image/jpeg", "data": structure_img_bytes})
 
+                # Try to create abundance overlays first
                 if abundance_maps is not None:
                     overlay_bytes = self._create_structure_abundance_overlays(
                         structure_img_gray, abundance_maps, system_info
                     )
-                    
-                    if overlay_bytes:
-                        prompt_parts.append("\n\n**Structure-Abundance Correlation Overlays (Thresholded):**")
-                        prompt_parts.append("These overlays show where each NMF component is most abundant (top 15% of values) overlaid on the structural image. The first panel shows the original structural image for reference. Each subsequent panel shows the same structure with colored overlays indicating where each component is most concentrated. Look for spatial correlations between these (thresholded) abundance patterns and structural features.")
-                        prompt_parts.append({"mime_type": "image/jpeg", "data": overlay_bytes})
-                        self.logger.info("Added abundance overlays to LLM prompt")
                 
-                # Use base class method for structure system info prompt section
+                if overlay_bytes:
+                    # Use overlays (which include the original structure image as first panel)
+                    prompt_parts.append("\n\n**Structure-Abundance Correlation Analysis:**")
+                    prompt_parts.append("These overlays show where each NMF component is most abundant (top 15% of values) overlaid on the structural image. The first panel shows the original structural image for reference. Each subsequent panel shows the same structure with colored overlays indicating where each component is most concentrated. Look for spatial correlations between these (thresholded) abundance patterns and structural features.")
+                    prompt_parts.append({"mime_type": "image/jpeg", "data": overlay_bytes})
+                    self.logger.info("Added abundance overlays to LLM prompt (includes structure image)")
+                else:
+                    # Fallback: use standalone structure image if overlays failed
+                    structure_img_bytes = convert_numpy_to_jpeg_bytes(structure_img_gray)
+                    prompt_parts.append("\n\n**Structural Context Image for Correlation:**")
+                    prompt_parts.append("This is a structural image providing spatial context. Try to correlate the spectroscopic components and their abundance maps with the spatial features in this image.")
+                    prompt_parts.append({"mime_type": "image/jpeg", "data": structure_img_bytes})
+                    self.logger.info("Added standalone structure image to analysis prompt (overlays failed)")
+                
+                # Add structure system info only if structure image was successfully processed
                 structure_info_section = self._build_system_info_prompt_section(structure_system_info)
                 if structure_info_section:
                     prompt_parts.append("\n\nStructural Context Metadata:")
                     prompt_parts.append(structure_info_section.replace("\n\nAdditional System Information (Metadata):\n", ""))
                 
-                self.logger.info("Added structure image to analysis prompt")
+                self.logger.info("Successfully processed structure image for analysis")
+                
             except Exception as e:
                 self.logger.warning(f"Failed to load structure image: {e}")
         elif structure_image_path:
@@ -811,6 +851,11 @@ class SpectroscopyAnalysisAgent(BaseAnalysisAgent):
             Dictionary containing analysis results
         """
         try:
+            # Validate structure inputs
+            structure_image_path, structure_system_info = self._validate_structure_inputs(
+                structure_image_path, structure_system_info
+            )
+            
             # Load system info from metadata path
             system_info = self._load_metadata_from_json(metadata_path)
             
