@@ -346,6 +346,7 @@ Focus on formulating claims about:
 - Detection of defects, interfaces, or degradation through spectroscopic means
 
 Ensure claims are specific enough to be meaningfully compared against literature but significant enough to be scientifically interesting. 
+Avoid using **overly specific** numbers from the analysis.
 Ensure the final output is ONLY the JSON object.
 """
 
