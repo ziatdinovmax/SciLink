@@ -432,67 +432,66 @@ Focus on visual pattern recognition and physical interpretability.
 """
 
 
-SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS = """You are an expert system specialized in analyzing microscopy images with particle segmentation data from the Segment Anything Model (SAM).
-You will receive the primary microscopy image and supplemental SAM particle segmentation analysis showing detected particles with their boundaries, centroids, and comprehensive morphological statistics including size distributions, shape characteristics, and spatial arrangements.
+SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS = """You are an expert system specialized in analyzing microscopy images.
+You will receive a primary microscopy image and supplemental segmentation analysis, which includes comprehensive morphological statistics on the size distributions, shape characteristics, and spatial arrangements of the detected features.
 
-Your goal is to extract key information from these images and particle data to formulate a set of precise scientific claims that can be used to search existing literature.
+Your goal is to extract key information from these images and segmentation data to formulate a set of precise scientific claims that can be used to search existing literature.
 
-**Important Note on Formulation:** When formulating claims, focus on specific, testable observations about particle characteristics that could be compared against existing research. Use precise scientific terminology, and avoid ambiguous statements. Make each claim distinct and focused on a single phenomenon or observation.
+**Important Note on Formulation:** When formulating claims, focus on specific, testable observations about the system's characteristics that could be compared against existing research. Use precise scientific terminology and avoid ambiguous statements. Make each claim distinct and focused on a single phenomenon or observation.
 
 You MUST output a valid JSON object containing two keys: "detailed_analysis" and "scientific_claims".
 
-1.  **detailed_analysis**: (String) Provide a thorough text analysis of the microscopy data and SAM particle segmentation results. Explicitly correlate features
-    in the original image with the segmented particle population. Identify features like:
-    * Particle size distributions and polydispersity
-    * Particle morphology (circularity, aspect ratio, solidity)
-    * Spatial arrangements and clustering behavior
-    * Surface characteristics and irregularities
-    * Population heterogeneity and subpopulations
-    * Particle aggregation or isolation patterns
-    * Shape defects or unusual morphologies
-    * Size-dependent morphological trends
-    * Spatial distribution patterns (random, clustered, aligned)
-    * Edge effects or substrate interactions
+1.  **detailed_analysis**: (String) Provide a thorough text analysis of the microscopy data and segmentation results. Explicitly correlate features
+    in the original image with the segmented results. Identify and describe characteristics such as:
+    * **Size and Scale**: Feature size distributions, polydispersity, or other measures of size variability.
+    * **Morphology and Shape**: The shape of individual features (e.g., circularity, aspect ratio, solidity, convexity, texture).
+    * **Spatial Distribution**: The arrangement of features within the field of view (e.g., random, clustered, aligned, ordered).
+    * **Orientation and Alignment**: The degree to which features are oriented in a specific direction.
+    * **Population Heterogeneity**: The presence of distinct subpopulations with different characteristics.
+    * **Boundary and Interface Characteristics**: The nature of the edges of features or the interfaces between different regions.
+    * **Defects and Anomalies**: Presence of unusual morphologies, structural defects, or unexpected voids.
+    * **Hierarchical Structures**: The existence of smaller features organizing into larger-scale patterns.
+    * **Correlations**: Relationships between different measured properties, such as size-dependent shape trends.
+    * **Substrate or Boundary Effects**: How features near the edge of the sample or a substrate differ from those in the bulk.
 
     **Important:**
-        - Distinguish between real voids/defects and potentially missed particles
-        - If you see regular gaps in dense particle arrays, consider whether particles might be missed rather than absent
-        - Note any systematic patterns that could indicate incomplete segmentation
+        - Distinguish between true voids/defects and artifacts of the segmentation process (e.g., missed or incompletely segmented features).
+        - If you observe regular gaps in dense arrays, consider if this indicates an ordered structure or a systematic segmentation error.
+        - Note any systematic patterns in the segmentation results that could indicate bias or error in the analysis.
 
 2.  **scientific_claims**: (List of Objects) Generate 4-6 specific scientific claims based on your analysis that can be used to search literature for similar observations. Each object must have the following keys:
-    * **claim**: (String) A single, focused scientific claim written as a complete sentence about a specific observation from the particle segmentation analysis.
-    * **scientific_impact**: (String) A brief explanation of why this claim would be scientifically significant if confirmed through literature search or further experimentation.
-    * **has_anyone_question**: (String) A direct question starting with "Has anyone" that reformulates the claim as a research question.
-    * **keywords**: (List of Strings) 3-5 key scientific terms from the claim that would be most useful in literature searches, including particle-specific terminology.
+    * **claim**: (String) A single, focused scientific claim written as a complete sentence about a specific, quantifiable observation from the segmentation analysis.
+    * **scientific_impact**: (String) A brief explanation of why this claim would be scientifically significant if confirmed, linking it to underlying processes (e.g., formation mechanism, material properties, biological function).
+    * **has_anyone_question**: (String) A direct question starting with "Has anyone observed" that reformulates the claim as a research question.
+    * **keywords**: (List of Strings) 3-5 key scientific terms from the claim that would be most useful in literature searches, including terminology specific to the observed material or biological system.
 
-Focus on formulating claims that are specific enough to be meaningfully compared against literature but general enough to have a reasonable chance of finding matches. Emphasize particle characteristics like size distributions, morphological features, spatial arrangements, and population behaviors that might connect to broader scientific understanding of nanoparticle synthesis, assembly, or behavior. Ensure the final output is ONLY the JSON object and nothing else.
+Focus on formulating claims that are specific enough to be meaningfully compared against existing literature but general enough to facilitate discovery. Emphasize characteristics like size distributions, morphological features, and spatial arrangements that might connect to a broader scientific understanding of the system's synthesis, formation mechanism, or functional properties. Ensure the final output is ONLY the JSON object and nothing else.
 """
 
 
-PARTICLE_ANALYSIS_REFINE_INSTRUCTIONS = """You are a computer vision expert analyzing particle segmentation results.
+SAM_ANALYSIS_REFINE_INSTRUCTIONS = """You are a computer vision expert analyzing segmentation results from a microscopy image.
 
 You will see TWO images:
-1. **ORIGINAL MICROSCOPY IMAGE** - The actual particles to detect
-2. **CURRENT SEGMENTATION RESULT** - Red outlines show detected particles
+1. **ORIGINAL MICROSCOPY IMAGE** - The source image containing the features of interest to be detected.
+2. **CURRENT SEGMENTATION RESULT** - Red outlines show the currently detected features.
 
-**Your task:** Compare these images and decide if changes are needed.
+**Your task:** Compare these images and decide if the segmentation parameters need to be adjusted for better accuracy.
 
-**Key Questions:**
-1. **Quality Check**: Do the red outlines capture individual particle boundaries?
-2. **Missing Particles**: Are obvious particles in the original completely missed?
-3. **False Detections**: Are there red outlines on things that aren't particles?
+**Key Questions to Consider:**
+1. **Segmentation Quality**: Do the red outlines accurately capture the boundaries of the individual features of interest?
+2. **Missing Features**: Are obvious features in the original image completely missed by the segmentation?
+3. **False Detections**: Are there red outlines on background, artifacts, or other elements that are not the intended targets?
 
 **Parameters you can adjust:**
-- `sam_parameters`: "default" (normal), "sensitive" (may findd more particles), "ultra-permissive" (may find even more particles)
-- `use_clahe`: false → true if particle edges are hard to see
-- `min_area`: Increase only if you see tiny noise detections
-- `max_area`: Decrease only if you see huge blobs that aren't single particles
-- `pruning_iou_threshold`: Lower values (0.3-0.4) remove more duplicates, higher values (0.6-0.7) keep more detections. Default is 0.5
+- `sam_parameters`: "default" (standard performance), "sensitive" (may find more features), "ultra-permissive" (maximizes detection, may increase false positives).
+- `use_clahe`: Change from `false` to `true` if the edges or boundaries of the features are low-contrast or hard to distinguish.
+- `min_area`: Increase this value only if the segmentation is detecting tiny, irrelevant noise.
+- `max_area`: Decrease this value only if multiple distinct features are being incorrectly merged into a single large detection.
+- `pruning_iou_threshold`: This controls how overlapping detections are handled. Lower values (e.g., 0.3-0.4) are more aggressive in removing duplicates. Higher values (e.g., 0.6-0.7) are more permissive and keep more detections. The default is 0.5.
 
+**Important**: Be conservative. Only suggest changes if there is a clear and systematic problem with the current segmentation.
 
-**Be conservative**: Only change parameters if there's a clear problem.
-
-**You have only one shot at this, so think carefully.**
+**You have only one opportunity to refine the parameters, so think carefully.**
 
 Output JSON format:
 ```json
@@ -516,7 +515,7 @@ Your decision MUST be based on the visual evidence in the image and accompanying
 
 **Available Agents:**
 - **ID 0: `MicroscopyAnalysisAgent`**: Use for standard microstructure analysis (grains, phases, etc.) where atoms are not resolved. **Also use for atomic-resolution images that are severely disordered (amorphous, very noisy, fragmented)**, where its FFT/NMF analysis is more appropriate than direct atom finding.
-- **ID 1: `SAMMicroscopyAnalysisAgent`**: The correct choice for images containing distinct particles (like nanoparticles). Use this for tasks like measuring size distribution, shape, and arrangement.
+- **ID 1: `SAMMicroscopyAnalysisAgent`**: The correct choice for images containing large, distinct, countable objects. Use this for tasks like measuring the size distribution, shape, and spatial arrangement of features like nanoparticles, cells, pores, or other discrete entities.
 - **ID 2: `AtomisticMicroscopyAnalysisAgent`**: **The primary choice for any high-quality image where individual atoms are clearly visible.** This is the correct agent for analyzing crystalline structures, defects, and interfaces at the atomic scale.
 - **ID 3: `SpectroscopyAnalysisAgent`**: For all 'spectroscopy' data types (no image will be provided).
 
