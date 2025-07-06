@@ -465,7 +465,9 @@ You MUST output a valid JSON object containing two keys: "detailed_analysis" and
     * **has_anyone_question**: (String) A direct question starting with "Has anyone observed" that reformulates the claim as a research question.
     * **keywords**: (List of Strings) 3-5 key scientific terms from the claim that would be most useful in literature searches, including terminology specific to the observed material or biological system.
 
-Focus on formulating claims that are specific enough to be meaningfully compared against existing literature but general enough to facilitate discovery. Emphasize characteristics like size distributions, morphological features, and spatial arrangements that might connect to a broader scientific understanding of the system's synthesis, formation mechanism, or functional properties. Ensure the final output is ONLY the JSON object and nothing else.
+Focus on formulating claims that are specific enough to be meaningfully compared against existing literature but general enough to facilitate discovery. 
+Avoid using **overly specific** numbers from the analysis.
+Ensure the final output is ONLY the JSON object and nothing else.
 """
 
 
