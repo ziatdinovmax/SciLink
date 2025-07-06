@@ -12,6 +12,7 @@ from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockT
 
 from .base_agent import BaseAnalysisAgent
 from .utils import convert_numpy_to_jpeg_bytes, normalize_and_convert_to_image_bytes
+from .utils import create_multi_abundance_overlays
 from .instruct import (
     SPECTROSCOPY_ANALYSIS_INSTRUCTIONS, 
     COMPONENT_INITIAL_ESTIMATION_INSTRUCTIONS,
@@ -686,6 +687,17 @@ class SpectroscopyAnalysisAgent(BaseAnalysisAgent):
                 prompt_parts.append("\n\n**Structural Context Image for Correlation.**")
                 prompt_parts.append("This is a structural image providing spatial context. Try to correlate the spectroscopic components and their abundance maps with the spatial features in this image.")
                 prompt_parts.append({"mime_type": "image/jpeg", "data": structure_img_bytes})
+
+                if abundance_maps is not None:
+                    overlay_bytes = self._create_structure_abundance_overlays(
+                        structure_img_gray, abundance_maps, system_info
+                    )
+                    
+                    if overlay_bytes:
+                        prompt_parts.append("\n\n**Structure-Abundance Correlation Overlays (Thresholded):**")
+                        prompt_parts.append("These overlays show where each NMF component is most abundant (top 15% of values) overlaid on the structural image. The first panel shows the original structural image for reference. Each subsequent panel shows the same structure with colored overlays indicating where each component is most concentrated. Look for spatial correlations between these (thresholded) abundance patterns and structural features.")
+                        prompt_parts.append({"mime_type": "image/jpeg", "data": overlay_bytes})
+                        self.logger.info("Added abundance overlays to LLM prompt")
                 
                 # Use base class method for structure system info prompt section
                 structure_info_section = self._build_system_info_prompt_section(structure_system_info)
@@ -880,6 +892,49 @@ class SpectroscopyAnalysisAgent(BaseAnalysisAgent):
                 f.write(result['image'])
             
             print(f"📊 Saved component test ({result['n_components']} components): {filename}")
+
+    def _create_structure_abundance_overlays(self, structure_img_gray: np.ndarray, 
+                                           abundance_maps: np.ndarray, 
+                                           save_plots: bool = True) -> bytes:
+        """
+        Create abundance overlays on structure image for LLM correlation analysis.
+        
+        Args:
+            structure_img_gray: 2D grayscale structure image
+            abundance_maps: NMF abundance maps (height, width, n_components)
+            save_plots: Whether to save plots to disk for inspection
+            
+        Returns:
+            Image bytes for LLM prompt, or None if failed
+        """
+        try:
+            self.logger.info(f"Creating abundance overlays for {abundance_maps.shape[2]} components")
+            
+            # Create multi-component overlay using the utility function
+            overlay_bytes = create_multi_abundance_overlays(
+                structure_image=structure_img_gray,
+                abundance_maps=abundance_maps,
+                threshold_percentile=85.0,  # Show top 15% of abundance values
+                alpha=0.5,
+                use_simple_colors=True  # Use solid colors for clearer LLM analysis
+            )
+            
+            # Save the overlay that goes to LLM (following existing pattern)
+            if save_plots:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"abundance_overlays_{timestamp}.png"
+                filepath = os.path.join(self.output_dir, filename)
+                
+                with open(filepath, 'wb') as f:
+                    f.write(overlay_bytes)
+                
+                self.logger.info(f" Saved abundance overlays: {filename}")
+            
+            return overlay_bytes
+            
+        except Exception as e:
+            self.logger.warning(f"Failed to create abundance overlays: {e}")
+            return None
     
     def _create_final_results_summary(self, final_n_components: int, components: np.ndarray, 
                                     abundance_maps: np.ndarray, reasoning_log: dict):
