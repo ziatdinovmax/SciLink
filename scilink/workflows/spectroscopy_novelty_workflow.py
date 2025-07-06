@@ -8,6 +8,7 @@ from pathlib import Path
 
 from ..agents.exp_agents.spectroscopy_agent import SpectroscopyAnalysisAgent
 from ..agents.lit_agents.literature_agent import OwlLiteratureAgent
+from ..agents.lit_agents.novelty_scorer import NoveltyScorer, enhanced_novelty_assessment, display_enhanced_novelty_summary
 
 import warnings
 from ..auth import get_api_key, APIKeyNotFoundError
@@ -70,8 +71,6 @@ def select_claims_interactive(claims):
 class SpectroscopyNoveltyAssessmentWorkflow:
     """
     Workflow for analyzing spectroscopic experimental results and assessing their novelty.
-    Based on MicroscopyNoveltyAssessmentWorkflow structure but adapted for hyperspectral data.
-    Focuses purely on novelty assessment through literature validation.
     """
     
     def __init__(self, 
@@ -107,6 +106,7 @@ class SpectroscopyNoveltyAssessmentWorkflow:
             ]
         )
         
+        self.google_api_key = google_api_key
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
         
@@ -268,54 +268,16 @@ class SpectroscopyNoveltyAssessmentWorkflow:
             return workflow_result
 
         # === Step 3: Novelty Assessment ===
-        novel_claims = []
         try:
-            logging.info("\n\n\n 🔄 ------------------------- WORKFLOW STEP 3: NOVELTY ASSESSMENT ------------------------- 🔄\n")
+            novelty_result = self._run_enhanced_novelty_assessment(literature_results)
             
-            # Display summary of findings
-            known_claims = []
+            if novelty_result["status"] != "success":
+                workflow_result["final_status"] = "error_novelty"
+                return workflow_result
             
-            for result in literature_results:
-                if result['owl_result']['status'] == "success":
-                    answer = json.loads(result['owl_result']["json"])['answer'].lower()
-                    if 'no' in answer[:3]:
-                        novel_claims.append(result['original_claim']['claim'])
-                    else:
-                        known_claims.append(result['original_claim']['claim'])
-            
-            # Generate novelty assessment
-            novelty_assessment = {
-                "total_claims_searched": len(literature_results),
-                "successful_searches": sum(1 for r in literature_results if r['owl_result']['status'] == 'success'),
-                "potentially_novel": novel_claims,
-                "known_findings": known_claims
-            }
-            
-            # Save novelty assessment
-            novelty_file = os.path.join(self.output_dir, "spectroscopy_novelty_assessment.json")
-            with open(novelty_file, 'w') as f:
-                json.dump(novelty_assessment, f, indent=2)
-            
+            novelty_assessment = novelty_result["assessment"]
             workflow_result["novelty_assessment"] = novelty_assessment
             workflow_result["steps_completed"].append("novelty_assessment")
-            
-            # Display literature search summary
-            print("\n--- Spectroscopic Literature Search Summary ---")
-            print(f"Total claims analyzed: {len(selected_claims)}")
-            print(f"Successfully searched: {sum(1 for r in literature_results if r['owl_result']['status'] == 'success')}")
-            print(f"Failed searches: {sum(1 for r in literature_results if r['owl_result']['status'] != 'success')}")
-            
-            if novel_claims:
-                print("\nPotentially Novel Spectroscopic Findings:")
-                for i, claim in enumerate(novel_claims):
-                    print(f"  {i+1}. {claim}")
-                    
-            if known_claims:
-                print("\nPreviously Reported Spectroscopic Findings:")
-                for i, claim in enumerate(known_claims):
-                    print(f"  {i+1}. {claim}")
-            
-            print("-" * 50)
             
         except Exception as e:
             logging.exception("An unexpected error occurred during Novelty Assessment:")
@@ -342,34 +304,94 @@ class SpectroscopyNoveltyAssessmentWorkflow:
                 
         except Exception as e:
             print(f"Warning: Could not save workflow log: {e}")
-    
+
+    def _run_enhanced_novelty_assessment(self, literature_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Enhanced novelty assessment with structured scoring."""
+        try:
+            logging.info("\n\n\n 🔄 ------------------------- WORKFLOW STEP 3: NOVELTY ASSESSMENT ------------------------- 🔄\n")
+            
+            # Initialize novelty scorer
+            novelty_scorer = NoveltyScorer(google_api_key=self.google_api_key)
+            
+            # Run enhanced assessment
+            novelty_assessment = enhanced_novelty_assessment(literature_results, novelty_scorer)
+            
+            # Display results with enhanced formatting
+            display_enhanced_novelty_summary(novelty_assessment)
+            
+            # Save enhanced assessment
+            novelty_file = os.path.join(self.output_dir, "enhanced_novelty_assessment.json")
+            with open(novelty_file, 'w') as f:
+                json.dump(novelty_assessment, f, indent=2)
+            
+            return {
+                "status": "success",
+                "assessment": novelty_assessment,
+                "novelty_file": novelty_file
+            }
+            
+        except Exception as e:
+            logging.exception("Enhanced novelty assessment failed:")
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
     def get_summary(self, workflow_result: Dict[str, Any]) -> str:
-        """Get a human-readable summary of the workflow results."""
+        """Get enhanced summary with novelty scoring details."""
         
-        summary = f"Spectroscopy Novelty Assessment Summary\n{'='*35}\n"
-        summary += f"Data: {os.path.basename(workflow_result.get('data_path', 'Unknown'))}\n"
+        summary = f"Enhanced Novelty Assessment Summary\n{'='*35}\n"
+        summary += f"Image: {os.path.basename(workflow_result.get('image_path', 'Unknown'))}\n"
         summary += f"Status: {workflow_result.get('final_status', 'Unknown')}\n"
         summary += f"Steps completed: {', '.join(workflow_result.get('steps_completed', []))}\n\n"
         
         if "novelty_assessment" in workflow_result:
             assessment = workflow_result["novelty_assessment"]
-            summary += f"Literature Search Results:\n"
+            summary += f"Enhanced Literature Assessment:\n"
             summary += f"  Total claims searched: {assessment.get('total_claims_searched', 0)}\n"
-            summary += f"  Successful searches: {assessment.get('successful_searches', 0)}\n\n"
+            summary += f"  Successfully scored: {assessment.get('successful_searches', 0)}\n"
+            summary += f"  Average novelty score: {assessment.get('average_novelty_score', 0):.2f}/5.0\n\n"
             
-            novel_claims = assessment.get("potentially_novel", [])
-            known_claims = assessment.get("known_findings", [])
+            categories = assessment.get("novelty_categories", {})
             
-            if novel_claims:
-                summary += "Potentially Novel Spectroscopic Findings:\n"
-                for i, claim in enumerate(novel_claims, 1):
+            if categories.get("highly_novel"):
+                summary += f"🚀 Highly Novel Findings ({len(categories['highly_novel'])}):\n"
+                for i, claim in enumerate(categories["highly_novel"], 1):
                     summary += f"  {i}. {claim}\n"
                 summary += "\n"
-                
-            if known_claims:
-                summary += "Previously Reported Spectroscopic Findings:\n"
-                for i, claim in enumerate(known_claims, 1):
+            
+            if categories.get("moderately_novel"):
+                summary += f"📊 Moderately Novel Findings ({len(categories['moderately_novel'])}):\n"
+                for i, claim in enumerate(categories["moderately_novel"], 1):
                     summary += f"  {i}. {claim}\n"
                 summary += "\n"
+            
+            if categories.get("minimally_novel"):
+                summary += f"📋 Minimally Novel Findings ({len(categories['minimally_novel'])}):\n"
+                for i, claim in enumerate(categories["minimally_novel"], 1):
+                    summary += f"  {i}. {claim}\n"
+                summary += "\n"
+            
+            if categories.get("not_novel"):
+                summary += f"📚 Known Findings ({len(categories['not_novel'])}):\n"
+                for i, claim in enumerate(categories["not_novel"], 1):
+                    summary += f"  {i}. {claim}\n"
+                summary += "\n"
+        
+        # Add detailed scoring information for high-impact findings
+        if "novelty_assessment" in workflow_result:
+            detailed_scores = workflow_result["novelty_assessment"].get("detailed_scores", [])
+            high_scoring = [r for r in detailed_scores if r.get('novelty_assessment', {}).get('novelty_score', 0) >= 4]
+            
+            if high_scoring:
+                summary += "🔍 High-Impact Findings (Score ≥4):\n"
+                for result in high_scoring:
+                    score_info = result.get('novelty_assessment', {})
+                    score = score_info.get('novelty_score', 0)
+                    explanation = score_info.get('explanation', 'N/A')
+                    claim = result.get('original_claim', {}).get('claim', 'N/A')
+                    
+                    summary += f"  • Score {score}/5: {claim}\n"
+                    summary += f"    Reasoning: {explanation}\n\n"
         
         return summary

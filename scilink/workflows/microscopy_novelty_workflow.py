@@ -10,6 +10,7 @@ from ..agents.exp_agents.microscopy_agent import MicroscopyAnalysisAgent
 from ..agents.exp_agents.sam_microscopy_agent import SAMMicroscopyAnalysisAgent
 from ..agents.exp_agents.atomistic_microscopy_agent import AtomisticMicroscopyAnalysisAgent
 from ..agents.lit_agents.literature_agent import OwlLiteratureAgent
+from ..agents.lit_agents.novelty_scorer import NoveltyScorer, enhanced_novelty_assessment, display_enhanced_novelty_summary
 
 import warnings
 from ..auth import get_api_key, APIKeyNotFoundError
@@ -311,54 +312,17 @@ class MicroscopyNoveltyAssessmentWorkflow:
             return workflow_result
 
         # === Step 3: Novelty Assessment ===
-        novel_claims = []
         try:
-            logging.info("\n\n\n 🔄 ------------------------- WORKFLOW STEP 3: NOVELTY ASSESSMENT ------------------------- 🔄\n")
+            novelty_result = self._run_enhanced_novelty_assessment(literature_results)
             
-            # Display summary of findings (same logic as exp2lit.py)
-            known_claims = []
+            if novelty_result["status"] != "success":
+                workflow_result["final_status"] = "error_novelty"
+                return workflow_result
             
-            for result in literature_results:
-                if result['owl_result']['status'] == "success":
-                    answer = json.loads(result['owl_result']["json"])['answer'].lower()
-                    if 'no' in answer[:3]:
-                        novel_claims.append(result['original_claim']['claim'])
-                    else:
-                        known_claims.append(result['original_claim']['claim'])
             
-            # Generate novelty assessment
-            novelty_assessment = {
-                "total_claims_searched": len(literature_results),
-                "successful_searches": sum(1 for r in literature_results if r['owl_result']['status'] == 'success'),
-                "potentially_novel": novel_claims,
-                "known_findings": known_claims
-            }
-            
-            # Save novelty assessment
-            novelty_file = os.path.join(self.output_dir, "novelty_assessment.json")
-            with open(novelty_file, 'w') as f:
-                json.dump(novelty_assessment, f, indent=2)
-            
+            novelty_assessment = novelty_result["assessment"]
             workflow_result["novelty_assessment"] = novelty_assessment
             workflow_result["steps_completed"].append("novelty_assessment")
-            
-            # Display literature search summary
-            print("\n--- Literature Search Summary ---")
-            print(f"Total claims analyzed: {len(selected_claims)}")
-            print(f"Successfully searched: {sum(1 for r in literature_results if r['owl_result']['status'] == 'success')}")
-            print(f"Failed searches: {sum(1 for r in literature_results if r['owl_result']['status'] != 'success')}")
-            
-            if novel_claims:
-                print("\nPotentially Novel Findings:")
-                for i, claim in enumerate(novel_claims):
-                    print(f"  {i+1}. {claim}")
-                    
-            if known_claims:
-                print("\nPreviously Reported Findings:")
-                for i, claim in enumerate(known_claims):
-                    print(f"  {i+1}. {claim}")
-            
-            print("-" * 50)
             
         except Exception as e:
             logging.exception("An unexpected error occurred during Novelty Assessment:")
@@ -372,7 +336,7 @@ class MicroscopyNoveltyAssessmentWorkflow:
                 
                 dft_result = self._generate_dft_recommendations(
                     workflow_result["claims_generation"]["detailed_analysis"],
-                    novel_claims
+                    workflow_result["novelty_assessment"] 
                 )
                 workflow_result["dft_recommendations"] = dft_result
                 workflow_result["steps_completed"].append("dft_recommendations")
@@ -404,26 +368,74 @@ class MicroscopyNoveltyAssessmentWorkflow:
                 
         except Exception as e:
             print(f"Warning: Could not save workflow log: {e}")
+
+    def _run_enhanced_novelty_assessment(self, literature_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Enhanced novelty assessment with structured scoring"""
+        try:
+            logging.info("\n\n\n 🔄 ------------------------- WORKFLOW STEP 3: NOVELTY ASSESSMENT ------------------------- 🔄\n")
+            
+            # Initialize novelty scorer
+            novelty_scorer = NoveltyScorer(google_api_key=self.google_api_key)
+            
+            # Run enhanced assessment
+            novelty_assessment = enhanced_novelty_assessment(literature_results, novelty_scorer)
+            
+            # Display results with enhanced formatting
+            display_enhanced_novelty_summary(novelty_assessment)
+            
+            # Save enhanced assessment
+            novelty_file = os.path.join(self.output_dir, "microscopy_novelty_assessment.json")
+            with open(novelty_file, 'w') as f:
+                json.dump(novelty_assessment, f, indent=2)
+            
+            return {
+                "status": "success",
+                "assessment": novelty_assessment,
+                "novelty_file": novelty_file
+            }
+            
+        except Exception as e:
+            logging.exception("Enhanced novelty assessment failed:")
+            return {
+                "status": "error",
+                "message": str(e)
+            }
     
-    def _generate_dft_recommendations(self, initial_analysis_text: str, novel_claims: List[str]) -> Dict[str, Any]:
-        """Generate DFT recommendations based on novelty analysis"""
+    def _generate_dft_recommendations(self, initial_analysis_text: str, novelty_assessment: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate DFT recommendations based on enhanced novelty analysis"""
         
-        # Generate novelty context for DFT recommendations
-        if novel_claims:
-            novelty_section_text = "The following claims/observations, derived from the initial image analysis, have been identified through literature review as potentially novel or under-explored:\n"
-            for claim in novel_claims:
-                novelty_section_text += f"- {claim}\n"
-            novelty_section_text += ("\nYour primary goal for the DFT recommendations below should be to propose structures and simulations "
-                                   "that can rigorously investigate these novel aspects. Explain this link clearly in your scientific "
-                                   "justification for each recommended structure. If some image features are significant but not covered "
-                                   "by these novel claims, you may also include recommendations for them, but prioritize novelty.")
+        # Extract high and moderate novelty claims for prioritization
+        high_novel = novelty_assessment.get("novelty_categories", {}).get("highly_novel", [])
+        moderate_novel = novelty_assessment.get("novelty_categories", {}).get("moderately_novel", [])
+        
+        # Generate enhanced novelty context for DFT recommendations
+        if high_novel or moderate_novel:
+            novelty_section_text = "The following claims/observations have been assessed through literature review with their novelty scores:\n\n"
+            
+            if high_novel:
+                novelty_section_text += "HIGH NOVELTY FINDINGS (Scores 4-5):\n"
+                for i, claim in enumerate(high_novel, 1):
+                    novelty_section_text += f"{i}. {claim}\n"
+                novelty_section_text += "\n"
+            
+            if moderate_novel:
+                novelty_section_text += "MODERATE NOVELTY FINDINGS (Score 3):\n"
+                for i, claim in enumerate(moderate_novel, 1):
+                    novelty_section_text += f"{i}. {claim}\n"
+                novelty_section_text += "\n"
+            
+            avg_score = novelty_assessment.get("average_novelty_score", 0)
+            novelty_section_text += f"Average novelty score: {avg_score:.2f}/5.0\n\n"
+            
+            novelty_section_text += ("Your primary goal for the DFT recommendations should be to propose structures and simulations "
+                                "that can rigorously investigate these novel aspects, with priority given to the highest-scoring claims. "
+                                "Explain the connection between each recommended structure and the specific novel findings it would help investigate.")
+            
             novelty_context = novelty_section_text
         else:
-            novelty_context = "No specific novel claims were identified or prioritized from literature search. Please make DFT recommendations based on the most scientifically interesting aspects of the provided initial image analysis."
+            novelty_context = "No high-novelty claims were identified through literature review. Please make DFT recommendations based on the most scientifically interesting aspects of the provided analysis."
         
-        # Instantiate a text-only analysis agent for this step.
-        # This ensures we use the correct agent with the text-only prompt,
-        # regardless of which agent was used for the initial image analysis.
+        # Instantiate a text-only analysis agent for this step
         dft_agent = MicroscopyAnalysisAgent(
             google_api_key=self.google_api_key,
             model_name=self.analysis_model
@@ -446,7 +458,7 @@ class MicroscopyNoveltyAssessmentWorkflow:
         reasoning_text = dft_recommendations_result.get("analysis_summary_or_reasoning", "No reasoning provided")
         recommendations = dft_recommendations_result.get("recommendations", [])
         
-        print("\n--- DFT Structure Recommendations (Based on Novelty Analysis) ---")
+        print("\n--- DFT Structure Recommendations (Enhanced Novelty-Informed) ---")
         print(reasoning_text)
         print("-" * 65)
         
@@ -465,12 +477,17 @@ class MicroscopyNoveltyAssessmentWorkflow:
         dft_output = {
             "reasoning_for_recommendations": reasoning_text,
             "recommendations": recommendations,
-            "novelty_context": novelty_context
+            "novelty_context": novelty_context,
+            "novelty_scores_used": {
+                "high_novel_count": len(high_novel),
+                "moderate_novel_count": len(moderate_novel),
+                "average_score": novelty_assessment.get("average_novelty_score", 0)
+            }
         }
         with open(dft_file, 'w') as f:
             json.dump(dft_output, f, indent=2)
         
-        logging.info(f"DFT recommendations saved to: {dft_file}")
+        logging.info(f"Enhanced DFT recommendations saved to: {dft_file}")
         
         return {
             "status": "success",
@@ -481,33 +498,61 @@ class MicroscopyNoveltyAssessmentWorkflow:
         }
     
     def get_summary(self, workflow_result: Dict[str, Any]) -> str:
-        """Get a human-readable summary of the workflow results."""
+        """Get enhanced summary with novelty scoring details."""
         
-        summary = f"Novelty Assessment Summary\n{'='*25}\n"
+        summary = f"Enhanced Novelty Assessment Summary\n{'='*35}\n"
         summary += f"Image: {os.path.basename(workflow_result.get('image_path', 'Unknown'))}\n"
         summary += f"Status: {workflow_result.get('final_status', 'Unknown')}\n"
         summary += f"Steps completed: {', '.join(workflow_result.get('steps_completed', []))}\n\n"
         
         if "novelty_assessment" in workflow_result:
             assessment = workflow_result["novelty_assessment"]
-            summary += f"Literature Search Results:\n"
+            summary += f"Enhanced Literature Assessment:\n"
             summary += f"  Total claims searched: {assessment.get('total_claims_searched', 0)}\n"
-            summary += f"  Successful searches: {assessment.get('successful_searches', 0)}\n\n"
+            summary += f"  Successfully scored: {assessment.get('successful_searches', 0)}\n"
+            summary += f"  Average novelty score: {assessment.get('average_novelty_score', 0):.2f}/5.0\n\n"
             
-            novel_claims = assessment.get("potentially_novel", [])
-            known_claims = assessment.get("known_findings", [])
+            categories = assessment.get("novelty_categories", {})
             
-            if novel_claims:
-                summary += "Potentially Novel Findings:\n"
-                for i, claim in enumerate(novel_claims, 1):
+            if categories.get("highly_novel"):
+                summary += f"🚀 Highly Novel Findings ({len(categories['highly_novel'])}):\n"
+                for i, claim in enumerate(categories["highly_novel"], 1):
                     summary += f"  {i}. {claim}\n"
                 summary += "\n"
-                
-            if known_claims:
-                summary += "Previously Reported Findings:\n"
-                for i, claim in enumerate(known_claims, 1):
+            
+            if categories.get("moderately_novel"):
+                summary += f"📊 Moderately Novel Findings ({len(categories['moderately_novel'])}):\n"
+                for i, claim in enumerate(categories["moderately_novel"], 1):
                     summary += f"  {i}. {claim}\n"
                 summary += "\n"
+            
+            if categories.get("minimally_novel"):
+                summary += f"📋 Minimally Novel Findings ({len(categories['minimally_novel'])}):\n"
+                for i, claim in enumerate(categories["minimally_novel"], 1):
+                    summary += f"  {i}. {claim}\n"
+                summary += "\n"
+            
+            if categories.get("not_novel"):
+                summary += f"📚 Known Findings ({len(categories['not_novel'])}):\n"
+                for i, claim in enumerate(categories["not_novel"], 1):
+                    summary += f"  {i}. {claim}\n"
+                summary += "\n"
+        
+        # Add detailed scoring information for high-impact findings
+        if "novelty_assessment" in workflow_result:
+            detailed_scores = workflow_result["novelty_assessment"].get("detailed_scores", [])
+            high_scoring = [r for r in detailed_scores if r.get('novelty_assessment', {}).get('novelty_score', 0) >= 4]
+            
+            if high_scoring:
+                summary += "🔍 High-Impact Findings (Score ≥4):\n"
+                for result in high_scoring:
+                    score_info = result.get('novelty_assessment', {})
+                    score = score_info.get('novelty_score', 0)
+                    explanation = score_info.get('explanation', 'N/A')
+                    claim = result.get('original_claim', {}).get('claim', 'N/A')
+                    
+                    summary += f"  • Score {score}/5: {claim}\n"
+                    summary += f"    Reasoning: {explanation}\n\n"
         
         if "dft_recommendations" in workflow_result and workflow_result["dft_recommendations"].get("status") == "success":
             dft_result = workflow_result["dft_recommendations"]
