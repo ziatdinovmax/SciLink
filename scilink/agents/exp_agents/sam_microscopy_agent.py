@@ -11,7 +11,7 @@ from .base_agent import BaseAnalysisAgent
 
 from .instruct import (
     SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS,
-    PARTICLE_ANALYSIS_REFINE_INSTRUCTIONS,
+    SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS,
 )
 from .utils import load_image, preprocess_image, convert_numpy_to_jpeg_bytes
 
@@ -273,7 +273,7 @@ class SAMMicroscopyAnalysisAgent(BaseAnalysisAgent):
             overlay_bytes = convert_numpy_to_jpeg_bytes(overlay_image)
             
             # Build prompt for refinement with BOTH images
-            prompt_parts = [PARTICLE_ANALYSIS_REFINE_INSTRUCTIONS]
+            prompt_parts = [SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS]
             prompt_parts.append(f"\n\nCurrent Analysis Results:")
             prompt_parts.append(f"- Particle count: {particle_count}")
             prompt_parts.append(f"- Current parameters: {json.dumps(current_params, indent=2)}")
