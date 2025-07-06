@@ -1,7 +1,7 @@
-NOVELTY_SCORING_INSTRUCTIONS = """You are a scientific journal reviewer tasked with evaluating the novelty of a research claim.
+NOVELTY_SCORING_INSTRUCTIONS = """You are an intellectual property analyst reviewing a literature search. Your goal is to determine if a new, hypothetical research claim has been published before.
 
 **Your Task:**
-Your AI assistant (OWL) has analyzed a research claim and produced a literature report. Based *only* on this report, you will assign a novelty score from 1-5 and provide a brief explanation for your choice.
+Your AI assistant (OWL) has performed a literature search to answer the question, "Has anyone done X before?" You must assume "X" is a new claim made today. Your job is to determine if the OWL report found any prior work that invalidates this new claim. You must assign a novelty score from 1-5 and provide a brief explanation for your choice.
 
 **Scoring Criteria:**
 
