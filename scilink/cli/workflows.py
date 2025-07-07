@@ -264,7 +264,7 @@ Directory Structure (for novelty command):
     parser.add_argument(
         '--output-dir',
         default='novelty_output',
-        help='Output directory (default: %(default)s)'
+        help='Output directory (default: input_dir/results when using directory input, otherwise %(default)s)'
     )
     parser.add_argument(
         '--dft-recommendations',
@@ -417,8 +417,14 @@ def main():
         elif args.spectroscopy:
             forced_data_type = 'spectroscopy'
     
-    # Handle DFT workflow (doesn't need file discovery)
-    if args.command == 'dft':  # FIXED: Changed from args.dft to args.command == 'dft'
+    # Handle DFT workflow
+    if args.command == 'dft':
+        # For DFT, if no custom output dir specified, use current directory + dft_results
+        if args.output_dir == 'novelty_output':
+            args.output_dir = 'dft_results'
+            if not args.quiet:
+                print_info(f"Using default DFT output directory: {args.output_dir}")
+        
         try:
             result = run_dft_workflow(args, args.path)
             final_status = result.get('final_status', 'unknown')
@@ -524,8 +530,16 @@ def main():
             else:
                 print_info(f"Auto-detected data type: {data_type}")
     
-    # Use environment variable for output dir if available
-    output_dir = os.environ.get('SCILINK_OUTPUT_DIR', args.output_dir)
+    # Determine output directory
+    if input_path.is_dir() and args.output_dir == 'novelty_output':
+        # Use the input directory for output when default output dir is used
+        output_dir = str(input_path / 'results')
+        if not args.quiet:
+            print_info(f"Using input directory for output: {output_dir}")
+    else:
+        # Use specified output dir or environment variable
+        output_dir = os.environ.get('SCILINK_OUTPUT_DIR', args.output_dir)
+    
     args.output_dir = output_dir
     
     # Create output directory
