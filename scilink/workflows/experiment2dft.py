@@ -7,8 +7,7 @@ from typing import Dict, Any, List, Optional, Union
 from pathlib import Path
 
 # Import other workflows
-from .microscopy_novelty_workflow import MicroscopyNoveltyAssessmentWorkflow
-from .spectroscopy_novelty_workflow import SpectroscopyNoveltyAssessmentWorkflow
+from .experiment_novelty_workflow import ExperimentNoveltyAssessment
 from .dft_recommendation_workflow import DFTRecommendationsWorkflow
 from .dft_workflow import DFTWorkflow
 
@@ -79,25 +78,15 @@ class Experimental2DFT:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Initialize sub-workflows
-        self.microscopy_workflow = MicroscopyNoveltyAssessmentWorkflow(
-            agent_id=agent_id,
-            google_api_key=google_api_key,
-            futurehouse_api_key=futurehouse_api_key,
-            analysis_model=analysis_model,
-            output_dir=str(self.output_dir / "microscopy_novelty_assessment"),
-            max_wait_time=max_wait_time
-        )
+        # Store parameters for creating data-specific workflows
+        self.agent_id = agent_id
+        self.google_api_key = google_api_key
+        self.futurehouse_api_key = futurehouse_api_key
+        self.analysis_model = analysis_model
+        self.max_wait_time = max_wait_time
+        self.spectroscopy_analysis_enabled = spectroscopy_analysis_enabled
         
-        self.spectroscopy_workflow = SpectroscopyNoveltyAssessmentWorkflow(
-            google_api_key=google_api_key,
-            futurehouse_api_key=futurehouse_api_key,
-            analysis_model=analysis_model,
-            output_dir=str(self.output_dir / "spectroscopy_novelty_assessment"),
-            max_wait_time=max_wait_time,
-            spectral_unmixing_enabled=spectroscopy_analysis_enabled
-        )
-        
+        # Initialize structure generation workflow
         self.dft_rec_workflow = DFTRecommendationsWorkflow(
             google_api_key=google_api_key,
             analysis_model=analysis_model,
@@ -255,25 +244,45 @@ class Experimental2DFT:
             max_structures=max_structures
         )
     
-    def _run_novelty_assessment(self, 
-                               data_path: Union[str, Path], 
-                               data_type: str,
-                               system_info: Union[str, Path, Dict[str, Any]]) -> Dict[str, Any]:
-        """Run novelty assessment based on data type."""
+    def _run_novelty_assessment(self, data_path: Union[str, Path], data_type: str, system_info: Union[str, Path, Dict[str, Any]]) -> Dict[str, Any]:
+        """Run enhanced novelty assessment using unified workflow."""
         
-        print(f"\n📊 STEP 1: {data_type.title()} Analysis & Novelty Assessment")
+        print(f"\n📊 STEP 1: {data_type.title()} Analysis & Enhanced Novelty Assessment")
         print("-" * 50)
         
         try:
+            # Create data-type specific workflow
             if data_type == 'microscopy':
-                novelty_result = self.microscopy_workflow.run_complete_workflow(
-                    image_path=str(data_path),
+                novelty_workflow = ExperimentNoveltyAssessment(
+                    data_type='microscopy',
+                    agent_id=self.agent_id,
+                    google_api_key=self.google_api_key,
+                    futurehouse_api_key=self.futurehouse_api_key,
+                    analysis_model=self.analysis_model,
+                    output_dir=str(self.output_dir / "microscopy_novelty_assessment"),
+                    max_wait_time=self.max_wait_time
+                )
+                
+                novelty_result = novelty_workflow.run_complete_workflow(
+                    data_path=str(data_path),
                     system_info=system_info
                 )
+                
             elif data_type == 'spectroscopy':
+                novelty_workflow = ExperimentNoveltyAssessment(
+                    data_type='spectroscopy',
+                    google_api_key=self.google_api_key,
+                    futurehouse_api_key=self.futurehouse_api_key,
+                    analysis_model=self.analysis_model,
+                    output_dir=str(self.output_dir / "spectroscopy_novelty_assessment"),
+                    max_wait_time=self.max_wait_time,
+                    spectral_unmixing_enabled=self.spectroscopy_analysis_enabled
+                )
+                
                 structure_image_path = getattr(self, '_temp_structure_image_path', None)
                 structure_system_info = getattr(self, '_temp_structure_system_info', None)
-                novelty_result = self.spectroscopy_workflow.run_complete_workflow(
+                
+                novelty_result = novelty_workflow.run_complete_workflow(
                     data_path=str(data_path),
                     system_info=system_info,
                     structure_image_path=structure_image_path,
@@ -284,31 +293,44 @@ class Experimental2DFT:
             
             if novelty_result.get('final_status') == 'success':
                 claims_count = len(novelty_result.get("claims_generation", {}).get("claims", []))
-                novel_count = len(novelty_result.get("novelty_assessment", {}).get("potentially_novel", []))
                 
-                print(f"✅ {data_type.title()} novelty assessment completed")
+                # Enhanced novelty reporting
+                assessment = novelty_result.get("novelty_assessment", {})
+                avg_score = assessment.get("average_novelty_score", 0)
+                categories = assessment.get("novelty_categories", {})
+                
+                high_novel_count = len(categories.get("highly_novel", []))
+                moderate_novel_count = len(categories.get("moderately_novel", []))
+                
+                print(f"✅ {data_type.title()} enhanced novelty assessment completed")
                 print(f"   📋 Generated {claims_count} claims")
-                print(f"   🔍 Found {novel_count} potentially novel findings")
+                print(f"   📊 Average novelty score: {avg_score:.2f}/5.0")
+                print(f"   🚀 Potentially High novelty findings: {high_novel_count}")
+                print(f"   📈 Moderate novelty findings: {moderate_novel_count}")
             else:
                 print(f"❌ {data_type.title()} novelty assessment failed: {novelty_result.get('final_status')}")
             
             return novelty_result
             
         except Exception as e:
-            self.logger.exception(f"Failed in {data_type} novelty assessment step")
+            self.logger.exception(f"Failed in {data_type} enhanced novelty assessment step")
             return {"final_status": f"error: {str(e)}"}
     
-    def _run_dft_recommendations(self, novelty_result: Dict[str, Any], 
-                                system_info: Union[str, Path, Dict[str, Any]]) -> Dict[str, Any]:
-        """Generate DFT structure recommendations based on novelty findings."""
+    def _run_dft_recommendations(self, novelty_result: Dict[str, Any], system_info: Union[str, Path, Dict[str, Any]]) -> Dict[str, Any]:
+        """Generate DFT structure recommendations based on enhanced novelty findings."""
         
-        print("\n⚛️  STEP 2: DFT Structure Recommendations")
+        print("\n⚛️  STEP 2: DFT Structure Recommendations (Enhanced)")
         print("-" * 50)
         
         try:
-            # Extract data from novelty assessment
+            # Extract data from enhanced novelty assessment
             analysis_text = novelty_result["claims_generation"]["detailed_analysis"]
-            novel_claims = novelty_result.get("novelty_assessment", {}).get("potentially_novel", [])
+            assessment = novelty_result.get("novelty_assessment", {})
+            
+            # Prioritize high and moderate novelty claims
+            high_novel = assessment.get("novelty_categories", {}).get("highly_novel", [])
+            moderate_novel = assessment.get("novelty_categories", {}).get("moderately_novel", [])
+            priority_claims = high_novel + moderate_novel
             
             # Load system info if it's a file path
             if isinstance(system_info, (str, Path)):
@@ -317,21 +339,25 @@ class Experimental2DFT:
             else:
                 system_info_dict = system_info
             
-            # Generate recommendations
+            # Generate recommendations with enhanced context
             dft_result = self.dft_rec_workflow.run_from_data(
                 analysis_text=analysis_text,
-                novel_claims=novel_claims,
+                novel_claims=priority_claims,  # Use prioritized claims
                 system_info=system_info_dict
             )
             
             if dft_result.get('status') == 'success':
                 rec_count = len(dft_result.get('recommendations', []))
-                print(f"✅ Generated {rec_count} DFT structure recommendations")
+                avg_score = assessment.get('average_novelty_score', 0)
                 
-                # Display top recommendations
+                print(f"✅ Generated {rec_count} DFT structure recommendations")
+                print(f"   📊 Based on average novelty score: {avg_score:.2f}/5.0")
+                print(f"   🎯 Prioritizing {len(priority_claims)} high-impact findings")
+                
+                # Display top recommendations with novelty context
                 recommendations = dft_result.get('recommendations', [])
                 if recommendations:
-                    print("\n📋 Top Structure Recommendations:")
+                    print("\n📋 Top Structure Recommendations (Novelty-Informed):")
                     for i, rec in enumerate(recommendations[:5], 1):
                         priority = rec.get('priority', 'N/A')
                         desc = rec.get('description', 'N/A')
@@ -342,7 +368,7 @@ class Experimental2DFT:
             return dft_result
             
         except Exception as e:
-            self.logger.exception("Failed in DFT recommendations step")
+            self.logger.exception("Failed in enhanced DFT recommendations step")
             return {"status": f"error: {str(e)}"}
     
     def _select_structures(self, recommendations: List[Dict[str, Any]], 
@@ -553,7 +579,18 @@ class Experimental2DFT:
         # Extract key metrics
         novelty_result = pipeline_result.get("novelty_assessment", {})
         claims_count = len(novelty_result.get("claims_generation", {}).get("claims", []))
-        novel_count = len(novelty_result.get("novelty_assessment", {}).get("potentially_novel", []))
+        
+        # Handle enhanced novelty assessment structure
+        assessment = novelty_result.get("novelty_assessment", {})
+        if "novelty_categories" in assessment:
+            # Enhanced novelty assessment
+            categories = assessment["novelty_categories"]
+            high_novel_count = len(categories.get("highly_novel", []))
+            moderate_novel_count = len(categories.get("moderately_novel", []))
+            total_novel_count = high_novel_count + moderate_novel_count
+        else:
+            # Legacy format
+            total_novel_count = len(assessment.get("potentially_novel", []))
         
         dft_result = pipeline_result.get("dft_recommendations", {})
         recommendations_count = len(dft_result.get("recommendations", []))
@@ -564,7 +601,7 @@ class Experimental2DFT:
         if successful_structures:
             print(f"🎉 {data_type.title()} pipeline completed successfully!")
             print(f"   📊 Claims generated: {claims_count}")
-            print(f"   🔍 Novel findings: {novel_count}")
+            print(f"   🔍 Novel findings: {total_novel_count}")
             print(f"   ⚛️  DFT recommendations: {recommendations_count}")
             print(f"   🏗️  Structures generated: {len(successful_structures)}")
             
@@ -593,7 +630,7 @@ class Experimental2DFT:
         else:
             print(f"⚠️  {data_type.title()} pipeline completed but no structures were successfully generated")
             print(f"   📊 Claims generated: {claims_count}")
-            print(f"   🔍 Novel findings: {novel_count}")
+            print(f"   🔍 Novel findings: {total_novel_count}")
             print(f"   ⚛️  DFT recommendations: {recommendations_count}")
 
     def _save_pipeline_results(self, pipeline_result: Dict[str, Any]):
@@ -625,14 +662,29 @@ class Experimental2DFT:
         summary += f"Steps completed: {', '.join(pipeline_result.get('steps_completed', []))}\n"
         summary += f"Input data: {os.path.basename(str(pipeline_result.get('input_data', 'Unknown')))}\n\n"
         
-        # Novelty assessment summary
+        # Enhanced novelty assessment summary
         novelty_result = pipeline_result.get("novelty_assessment", {})
         if novelty_result:
             claims_count = len(novelty_result.get("claims_generation", {}).get("claims", []))
-            novel_count = len(novelty_result.get("novelty_assessment", {}).get("potentially_novel", []))
-            summary += f"Novelty Assessment:\n"
+            assessment = novelty_result.get("novelty_assessment", {})
+            
+            summary += f"Enhanced Novelty Assessment:\n"
             summary += f"  Claims generated: {claims_count}\n"
-            summary += f"  Novel findings: {novel_count}\n\n"
+            
+            if "novelty_categories" in assessment:
+                # Enhanced novelty assessment
+                categories = assessment["novelty_categories"]
+                avg_score = assessment.get("average_novelty_score", 0)
+                
+                summary += f"  Average novelty score: {avg_score:.2f}/5.0\n"
+                summary += f"  High novelty findings: {len(categories.get('highly_novel', []))}\n"
+                summary += f"  Moderate novelty findings: {len(categories.get('moderately_novel', []))}\n"
+            else:
+                # Legacy format
+                novel_count = len(assessment.get("potentially_novel", []))
+                summary += f"  Novel findings: {novel_count}\n"
+            
+            summary += "\n"
         
         # DFT recommendations summary
         dft_result = pipeline_result.get("dft_recommendations", {})
