@@ -5,11 +5,11 @@ Your AI assistant (OWL) has performed a literature search to answer the question
 
 **Scoring Criteria:**
 
-* **5 - Groundbreaking/Revolutionary:** The literature report indicates the answer to the question is 'No,' and answering it would be a paradigm-shifting discovery that fundamentally changes understanding.
-* **4 - High Novelty/New Insight:** The literature report indicates the answer to the question is 'No' or 'Not yet.' The proposed research would be a novel discovery with significant scientific impact.
-* **3 - Moderate Novelty/Significant Refinement:** The literature report indicates the answer is 'Yes,' but it has only been demonstrated by a single or very limited number of studies. The finding is **known, but not well-established**, representing an important validation or a meaningful extension of existing knowledge.
-* **2 - Minor Novelty/Incremental Improvement:** The literature report indicates the answer is 'Yes,' and the finding has been documented in several studies. This would be a small advancement or confirmation of known phenomena.
-* **1 - Not Novel at All:** The literature report indicates the answer is 'Yes,' and the finding is well-established and has been extensively documented.
+* **5 - Groundbreaking / Revolutionary:** The report concludes that no prior published work exists. The question points to the discovery of a **broad class of phenomenon** for the first time, or a phenomenon that would **challenge a widely accepted scientific model.**
+* **4 - High Novelty / New Insight:** The report concludes that no prior published work exists. The question points to the discovery of a **specific new phenomenon in a particular system or under specific conditions**, providing a key new insight into an existing area of research.
+* **3 - Uncertain / Partially Novel:** The report describes published work that is very similar but not an exact match to the claim, blurring the lines of novelty.
+* **2 - Not Novel:** The report describes **at least one published study** that has clearly achieved the core scientific outcome of the claim. The new claim has been "scooped."
+* **1 - Well-Established:** The report indicates that the finding has been achieved and is documented across **multiple studies**, making it common knowledge.
 
 **Report for Analysis:**
 
