@@ -107,12 +107,38 @@ class BaseAnalysisAgent:
         
         return system_info
 
+    def _find_spatial_info(self, data: dict) -> dict | None:
+        """
+        Recursively search for spatial_info in a nested dictionary structure.
+        
+        Args:
+            data: Dictionary to search through
+            
+        Returns:
+            The spatial_info dictionary if found, None otherwise
+        """
+        if not isinstance(data, dict):
+            return None
+        
+        # Check if spatial_info exists at current level
+        if 'spatial_info' in data and isinstance(data['spatial_info'], dict):
+            return data['spatial_info']
+        
+        # Recursively search through all nested dictionaries
+        for key, value in data.items():
+            if isinstance(value, dict):
+                result = self._find_spatial_info(value)
+                if result is not None:
+                    return result
+        
+        return None
+
     def _calculate_spatial_scale(self, system_info: dict, image_shape: tuple) -> tuple[float | None, float | None]:
         """
         Calculate nm/pixel and field of view from system metadata.
         
         Args:
-            system_info: Dictionary containing spatial metadata
+            system_info: Dictionary containing spatial metadata (can be nested anywhere)
             image_shape: (height, width) of the loaded image
             
         Returns:
@@ -122,10 +148,12 @@ class BaseAnalysisAgent:
         nm_per_pixel = None
         fov_in_nm = None
         
-        if isinstance(system_info, dict) and 'spatial_info' in system_info and isinstance(system_info.get('spatial_info'), dict):
-            spatial = system_info['spatial_info']
+        # Search for spatial_info anywhere in the nested structure
+        spatial = self._find_spatial_info(system_info)
+        
+        if spatial is not None:
             fov_x = spatial.get("field_of_view_x")
-            units = spatial.get("field_of_view_units", "nm") # Default to nm
+            units = spatial.get("field_of_view_units", "nm")  # Default to nm
 
             if fov_x is not None and isinstance(fov_x, (int, float)) and fov_x > 0:
                 h, w = image_shape[:2]
@@ -141,11 +169,13 @@ class BaseAnalysisAgent:
                 
                 if w > 0:
                     nm_per_pixel = fov_in_nm / w
-                    self.logger.info(f"Calculated nm/pixel from FOV: {fov_x} {units} / {w} px = {nm_per_pixel:.4f} nm/pixel")
+                    self.logger.info(f"Found spatial_info and calculated nm/pixel: {fov_x} {units} / {w} px = {nm_per_pixel:.4f} nm/pixel")
                 else:
                     self.logger.warning("Cannot calculate scale from FOV because image width is 0.")
             else:
                 self.logger.warning(f"Invalid or missing 'field_of_view_x' in spatial_info: {fov_x}. Physical scale not applied.")
+        else:
+            self.logger.info("No spatial_info found in system metadata. Physical scale not applied.")
         
         return nm_per_pixel, fov_in_nm
 
