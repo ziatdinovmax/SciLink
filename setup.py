@@ -57,6 +57,12 @@ setup(
         "aimsgb>=1.1.1",
         "gdown>=5.2.0",
     ],
+    # Add CLI entry points
+    entry_points={
+        'console_scripts': [
+            'scilink=scilink.cli.workflows:main',
+        ],
+    },
     include_package_data=True,
     package_data={
         "scilink": [
