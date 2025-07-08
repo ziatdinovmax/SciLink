@@ -36,6 +36,11 @@ RUN pip install --no-cache-dir .
 # Start from a clean, minimal base image for the final product.
 FROM python:3.11-slim
 
+# Install the missing system dependency libGL.so.1 required by OpenCV.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1-mesa-glx \
+    && rm -rf /var/lib/apt/lists/*
+
 # Create a dedicated, non-root user and group for enhanced security.
 RUN addgroup --system scilinkgroup && adduser --system --ingroup scilinkgroup scilinkuser
 
