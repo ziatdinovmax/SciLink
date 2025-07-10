@@ -9,6 +9,8 @@ Examples:
     scilink novelty my_data/ --dft-recommendations
     scilink novelty image.tif --system-info metadata.json
     scilink dft "Generate graphene supercell with a single vacancy"
+    scilink experiment2dft my_experiment/
+    scilink experiment2dft my_experiment/ --non-interactive --auto-select 3
 """
 
 import argparse
@@ -22,10 +24,12 @@ from typing import Dict, Any, Tuple, Optional
 # Relative imports for scilink package
 try:
     from ..workflows.experiment_novelty_workflow import ExperimentNoveltyAssessment
+    from ..workflows.experiment2dft import Experimental2DFT
 except ImportError:
     # Fallback for direct execution during development
     sys.path.append(str(Path(__file__).parent.parent))
     from workflows.experiment_novelty_workflow import ExperimentNoveltyAssessment
+    from workflows.experiment2dft import Experimental2DFT
 
 
 class Colors:
@@ -184,18 +188,22 @@ Examples:
   scilink novelty image.tif --system-info metadata.json
   scilink novelty my_data/ --dft-recommendations
   
+  # Complete experimental to DFT pipeline (INTERACTIVE BY DEFAULT)
+  scilink experiment2dft my_data/                              # Interactive mode (default)
+  scilink experiment2dft my_data/ --non-interactive            # Automated mode
+  scilink experiment2dft image.tif --auto-select 3            # Still interactive, but sets auto-select for non-interactive
+  scilink experiment2dft spectral_data.npy --non-interactive --auto-select 1
+  
   # DFT structure generation
   scilink dft "Generate a graphene supercell with Stone-Wales defects"
   scilink dft "Create MoS2 monolayer with sulfur vacancies" --output-dir dft_results/
-  
-  # Future workflows (examples)
-  # scilink pipeline my_data/
 
 Commands:
   novelty                Experimental novelty assessment with literature search
+  experiment2dft         Complete pipeline: experiment → novelty → DFT structures
   dft                    Generate DFT structures from text description
 
-Directory Structure (for novelty command):
+Directory Structure (for novelty/experiment2dft commands):
   experiment_data/
   ├── data.{jpg,tif,npy,txt,csv}     # Main experimental data
   ├── metadata.json                  # System information
@@ -207,15 +215,14 @@ Directory Structure (for novelty command):
     # Positional arguments
     parser.add_argument(
         'command',
-        choices=['novelty', 'dft'],
+        choices=['novelty', 'experiment2dft', 'dft'],
         help='Workflow to run'
     )
     parser.add_argument(
         'path',
-        help='Path to experimental data file/directory (for novelty) or text description (for dft)'
+        help='Path to experimental data file/directory (for novelty/experiment2dft) or text description (for dft)'
     )
     
-    # Remove the workflow group since command is now positional
     # Data type options
     parser.add_argument(
         '--microscopy',
@@ -271,10 +278,43 @@ Directory Structure (for novelty command):
         action='store_true',
         help='Generate DFT structure recommendations (for novelty command)'
     )
+    
+    # Structure generation options (for experiment2dft)
+    parser.add_argument(
+        '--interactive',
+        action='store_true',
+        help='Enable interactive structure selection (DEFAULT for experiment2dft)'
+    )
+    parser.add_argument(
+        '--auto-select',
+        type=int,
+        default=2,
+        help='Number of top recommendations to auto-select in non-interactive mode (default: %(default)s)'
+    )
+    parser.add_argument(
+        '--max-structures',
+        type=int,
+        default=5,
+        help='Maximum number of structures to consider (default: %(default)s)'
+    )
+    parser.add_argument(
+        '--max-refinement-cycles',
+        type=int,
+        default=2,
+        help='Maximum structure refinement cycles (default: %(default)s)'
+    )
+    parser.add_argument(
+        '--script-timeout',
+        type=int,
+        default=300,
+        help='Script execution timeout in seconds (default: %(default)s)'
+    )
+    
+    # General options
     parser.add_argument(
         '--non-interactive',
         action='store_true',
-        help='Skip interactive claim selection'
+        help='Skip interactive modes (claim selection, structure selection)'
     )
     parser.add_argument(
         '--wait-time',
@@ -358,8 +398,90 @@ def run_novelty_workflow(args, data_file: str, metadata_file: str, structure_fil
         **analysis_kwargs
     )
     
-    return result  # Add this return statement
+    return result
+
+
+def run_experiment2dft_workflow(args, data_file: str, metadata_file: str, structure_file: str, structure_info_file: str, data_type: str):
+    """Run complete experimental to DFT pipeline"""
     
+    if not args.quiet:
+        print_header("🧬 Complete Experimental → DFT Pipeline")
+        print("-" * 45)
+    
+    # Load system info
+    system_info = None
+    if metadata_file:
+        try:
+            with open(metadata_file, 'r') as f:
+                system_info = json.load(f)
+        except Exception as e:
+            if not args.quiet:
+                print_warning(f"Could not load system info: {e}")
+    
+    # Load structure info
+    structure_system_info = None
+    if structure_info_file:
+        try:
+            with open(structure_info_file, 'r') as f:
+                structure_system_info = json.load(f)
+        except Exception as e:
+            if not args.quiet:
+                print_warning(f"Could not load structure info: {e}")
+    
+    # Create workflow kwargs
+    workflow_kwargs = {
+        'analysis_model': args.model,
+        'generator_model': args.model,
+        'validator_model': args.model,
+        'output_dir': args.output_dir,
+        'max_wait_time': args.wait_time,
+        'max_refinement_cycles': args.max_refinement_cycles,
+        'script_timeout': args.script_timeout,
+        'spectroscopy_analysis_enabled': not args.no_spectral_unmixing
+    }
+    
+    # Add data-type specific parameters
+    if data_type == 'microscopy' and args.agent_id is not None:
+        workflow_kwargs['agent_id'] = args.agent_id
+    
+    # Create workflow
+    workflow = Experimental2DFT(**workflow_kwargs)
+    
+    # Determine interaction mode (interactive is default unless --non-interactive is specified)
+    interactive = not args.non_interactive
+    
+    # Run the appropriate pipeline method based on data type
+    if data_type == 'microscopy':
+        result = workflow.run_microscopy_pipeline(
+            image_path=data_file,
+            system_info=system_info,
+            interactive=interactive,
+            auto_select_top_n=args.auto_select,
+            max_structures=args.max_structures
+        )
+    elif data_type == 'spectroscopy':
+        result = workflow.run_spectroscopy_pipeline(
+            data_path=data_file,
+            system_info=system_info,
+            interactive=interactive,
+            auto_select_top_n=args.auto_select,
+            max_structures=args.max_structures,
+            structure_image_path=structure_file,
+            structure_system_info=structure_system_info
+        )
+    else:
+        # Fallback to generic pipeline
+        result = workflow.run_complete_pipeline(
+            data_path=data_file,
+            data_type=data_type,
+            system_info=system_info,
+            interactive=interactive,
+            auto_select_top_n=args.auto_select,
+            max_structures=args.max_structures
+        )
+    
+    return result
+
 
 def run_dft_workflow(args, user_request: str):
     """Run DFT structure generation workflow"""
@@ -384,8 +506,8 @@ def run_dft_workflow(args, user_request: str):
         generator_model=args.model,
         validator_model=args.model,
         output_dir=args.output_dir,
-        max_refinement_cycles=2,
-        script_timeout=300
+        max_refinement_cycles=getattr(args, 'max_refinement_cycles', 2),
+        script_timeout=getattr(args, 'script_timeout', 300)
     )
     
     # Run complete workflow
@@ -404,21 +526,21 @@ def main():
         print_header("🧬 SciLink - Intelligent Materials Research")
         print_header("=========================================")
     
-    # Handle data type conflicts (only relevant for novelty command)
-    if args.command == 'novelty' and args.microscopy and args.spectroscopy:
+    # Handle data type conflicts (only relevant for data-based commands)
+    if args.command in ['novelty', 'experiment2dft'] and args.microscopy and args.spectroscopy:
         print_error("Cannot specify both --microscopy and --spectroscopy")
         sys.exit(1)
     
-    # Determine data type from flags (only for novelty command)
+    # Determine data type from flags (only for data-based commands)
     forced_data_type = None
-    if args.command == 'novelty':
+    if args.command in ['novelty', 'experiment2dft']:
         if args.microscopy:
             forced_data_type = 'microscopy'
         elif args.spectroscopy:
             forced_data_type = 'spectroscopy'
     
     # Handle DFT workflow (doesn't need file discovery)
-    if args.command == 'dft':  # FIXED: Changed from args.dft to args.command == 'dft'
+    if args.command == 'dft':
         try:
             result = run_dft_workflow(args, args.path)
             final_status = result.get('final_status', 'unknown')
@@ -437,7 +559,7 @@ def main():
                 traceback.print_exc()
             sys.exit(1)
     
-    # Validate path exists (for novelty workflow)
+    # Validate path exists (for data-based workflows)
     input_path = Path(args.path)
     if not input_path.exists():
         print_error(f"Path does not exist: {input_path}")
@@ -534,6 +656,7 @@ def main():
     # Print configuration
     if not args.quiet:
         print_info("Configuration:")
+        print(f"  Command: {args.command}")
         print(f"  Data Type: {data_type}")
         print(f"  Data Path: {data_file}")
         if metadata_file:
@@ -545,20 +668,41 @@ def main():
         print(f"  Output Dir: {output_dir}")
         if args.agent_id is not None:
             print(f"  Agent ID: {args.agent_id}")
-        if args.dft_recommendations:
+        if args.command == 'novelty' and args.dft_recommendations:
             print(f"  DFT Recommendations: Enabled")
+        if args.command == 'experiment2dft':
+            print(f"  Interactive Mode: {not args.non_interactive} (default)")
+            print(f"  Auto-select: {args.auto_select}")
+            print(f"  Max Structures: {args.max_structures}")
         print("-" * 50)
         print()  # Extra space before workflow starts
     
     try:
-        # Route to novelty workflow (DFT was handled earlier)
-        result = run_novelty_workflow(args, data_file, metadata_file, structure_file, structure_info_file, data_type)
+        # Route to appropriate workflow
+        if args.command == 'novelty':
+            result = run_novelty_workflow(args, data_file, metadata_file, structure_file, structure_info_file, data_type)
+        elif args.command == 'experiment2dft':
+            result = run_experiment2dft_workflow(args, data_file, metadata_file, structure_file, structure_info_file, data_type)
+        else:
+            print_error(f"Unknown command: {args.command}")
+            sys.exit(1)
         
         # Handle results
         final_status = result.get('final_status', 'unknown')
         if final_status == 'success':
             if not args.quiet:
                 print("\n🎉 Workflow completed successfully!")
+                
+                # Show additional success info for experiment2dft
+                if args.command == 'experiment2dft':
+                    structures = result.get('generated_structures', [])
+                    successful = [s for s in structures if s.get('success', False)]
+                    if successful:
+                        print_success(f"Generated {len(successful)} atomic structure(s)")
+                        print_info("Ready-to-use VASP input files created:")
+                        for i, struct in enumerate(successful, 1):
+                            structure_name = struct.get('structure_name', f'structure_{i:02d}')
+                            print(f"  • {structure_name}/: POSCAR, INCAR, KPOINTS")
             sys.exit(0)
         else:
             if not args.quiet:
