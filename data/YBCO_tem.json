@@ -3,7 +3,9 @@
     "microscopy_type": "TEM",
     "experimental_details": {
         "spatial_info":{
-            "pixel_size": "35.25 pm"
+            "field_of_view_x": 18.0,
+            "field_of_view_y": 18.0,
+            "field_of_view_units": "nm"
         }
     }
 }

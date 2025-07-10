@@ -76,16 +76,16 @@ class MicroscopyAnalysisAgent(BaseAnalysisAgent):
             raw_text_params = response.text
             result_json_params = json.loads(raw_text_params)
             
-            window_size = result_json_params.get("window_size")
+            window_size_nm = result_json_params.get("window_size_nm")
             n_components = result_json_params.get("n_components")
             explanation = result_json_params.get("explanation", "No explanation provided.")
             
             # Validate parameters
             params_valid = True
-            if not isinstance(window_size, int) or window_size <= 0:
-                self.logger.warning(f"LLM invalid window_size: {window_size}")
+            if not isinstance(window_size_nm, (float, int)) or window_size_nm <= 0:
+                self.logger.warning(f"LLM invalid window_size_nm: {window_size_nm}")
                 params_valid = False
-                window_size = None
+                window_size_nm = None
                 
             if not isinstance(n_components, int) or not (1 <= n_components <= 16):
                 self.logger.warning(f"LLM invalid n_components: {n_components}")
@@ -96,8 +96,8 @@ class MicroscopyAnalysisAgent(BaseAnalysisAgent):
                 explanation = "Invalid/empty explanation from LLM."
                 
             if params_valid:
-                self.logger.info(f"LLM suggested params: window_size={window_size}, n_components={n_components}")
-                return window_size, n_components, explanation
+                self.logger.info(f"LLM suggested params: window_size_nm={window_size_nm}, n_components={n_components}")
+                return window_size_nm, n_components, explanation
                 
             return None, None, explanation
             
@@ -137,6 +137,8 @@ class MicroscopyAnalysisAgent(BaseAnalysisAgent):
             components, abundances = analyzer.analyze_image(image_path, output_path=fft_output_base)
             
             self.logger.info(f"AtomAI FFT+NMF analysis complete. Components: {components.shape}, Abundances: {abundances.shape}")
+            self._save_fft_nmf_plots(components, abundances, image_path)
+
             return components, abundances
             
         except Exception as fft_e:
@@ -162,28 +164,47 @@ class MicroscopyAnalysisAgent(BaseAnalysisAgent):
 
             components_array, abundances_array = None, None
             if self.RUN_FFT_NMF:
-                ws, nc, fft_explanation = None, None, None
+                ws_nm, nc, fft_explanation = None, None, None
                 if self.FFT_NMF_AUTO_PARAMS:
                     auto_params = self._get_fft_nmf_params_from_llm(image_blob, system_info)
                     if auto_params: 
-                        ws, nc, fft_explanation = auto_params
+                        ws_nm, nc, fft_explanation = auto_params
                         
                 if fft_explanation: 
                     self.logger.info(f"LLM Explanation for FFT/NMF params: {fft_explanation}")
                 
-                # Use LLM params if provided, otherwise fall back to config
-                if ws is None: 
-                    ws = self.fft_nmf_settings.get('window_size_x')  # Could be None for auto-calc
+                # Determine window size in pixels. Prioritize LLM physical size, then fall back to config.
+                ws_pixels = self.fft_nmf_settings.get('window_size_x') # Default from config (could be None)
+
+                if ws_nm is not None:
+                    if nm_per_pixel is not None and nm_per_pixel > 0:
+                        calculated_ws_pixels = int(round(ws_nm / nm_per_pixel))
+                        # For optimal FFT performance, find the smallest "good" FFT size
+                        # that is greater than or equal to the calculated physical size.
+                        good_fft_sizes = [16, 24, 32, 48, 64, 80, 96, 120, 128, 
+                                          160, 180, 192, 240, 256, 360, 384, 480, 512]
+                        
+                        # Find the first size in the list that is >= our calculated size
+                        ws_pixels = next((size for size in good_fft_sizes if size >= calculated_ws_pixels), 512) # Default to 512 if too large
+                        
+                        self.logger.info(f"Using LLM-suggested physical window size: {ws_nm:.2f} nm -> {calculated_ws_pixels} pixels. "
+                                         f"Selected optimal FFT size: {ws_pixels} pixels.")
+                        
+                    else:
+                        self.logger.warning(f"LLM suggested a physical window size ({ws_nm} nm), but image scale (nm/pixel) is unknown. Falling back to configured pixel window size.")
+                elif ws_pixels:
+                    self.logger.info(f"Using default/configured window size of {ws_pixels} pixels.")
+
                 if nc is None: 
-                    nc = self.fft_nmf_settings.get('components', 4)  
+                    nc = self.fft_nmf_settings.get('components', 4)
                 
                 # Calculate step size based on window size (if provided) or use config
-                if ws is not None:
-                    step = max(1, ws // 4)  # Standard practice: step = window_size / 4
+                if ws_pixels is not None:
+                    step = max(1, ws_pixels // 4) # Standard practice: step = window_size / 4
                 else:
-                    step = self.fft_nmf_settings.get('window_step_x')  # Could be None for auto-calc
+                    step = self.fft_nmf_settings.get('window_step_x') # Could be None for auto-calc
                 
-                components_array, abundances_array = self._run_fft_nmf_analysis(image_path, ws, nc, step)
+                components_array, abundances_array = self._run_fft_nmf_analysis(image_path, ws_pixels, nc, step)
             
             # Build prompt
             prompt_parts = [instruction_prompt]
@@ -247,6 +268,54 @@ class MicroscopyAnalysisAgent(BaseAnalysisAgent):
             self.logger.exception(f"An unexpected error occurred during image analysis setup or FFT/NMF: {e}")
             return None, {"error": "An unexpected error occurred during analysis setup", "details": str(e)}
 
+    def _save_fft_nmf_plots(self, components: np.ndarray, abundances: np.ndarray, image_path: str):
+        """Creates and saves nice plots for each NMF component and its abundance map."""
+        import matplotlib.pyplot as plt
+        from datetime import datetime
+
+        try:
+            # You can define a separate directory for these visualizations
+            output_dir = self.fft_nmf_settings.get('visualization_dir', 'fft_nmf_visualizations')
+            os.makedirs(output_dir, exist_ok=True)
+            
+            num_components = components.shape[0]
+            self.logger.info(f"Creating and saving {num_components} NMF visualization plots...")
+
+            # --- Create a clean base name and unique timestamp ---
+            base_name = os.path.splitext(os.path.basename(image_path))[0]
+            safe_base_name = "".join(c if c.isalnum() else "_" for c in base_name)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            for i in range(num_components):
+                fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+                fig.suptitle(f'NMF Result {i+1}/{num_components}', fontsize=16)
+
+                # --- Left Plot: NMF Component (FFT pattern) ---
+                # Using a log scale makes the FFT features much more visible
+                comp_img = np.log1p(components[i])
+                ax1.imshow(comp_img, cmap='inferno')
+                ax1.set_title(f'Component {i+1} (FFT Pattern)')
+                ax1.axis('off')
+
+                # --- Right Plot: NMF Abundance Map ---
+                im = ax2.imshow(abundances[i], cmap='inferno')
+                ax2.set_title(f'Abundance Map {i+1} (Spatial Location)')
+                ax2.axis('off')
+                fig.colorbar(im, ax=ax2, label="Abundance", fraction=0.046, pad=0.04)
+
+                plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust layout for the main title
+
+                # --- Save the figure to a file ---
+                plot_filename = f"{safe_base_name}_nmf_plot_{i+1}_{timestamp}.png"
+                plot_filepath = os.path.join(output_dir, plot_filename)
+                plt.savefig(plot_filepath, dpi=150, bbox_inches='tight')
+                plt.close(fig) # Close the figure to free up memory
+
+            self.logger.info(f"✅ Saved NMF visualizations to: {output_dir}")
+
+        except Exception as e:
+            self.logger.error(f"Failed to create or save NMF plots: {e}", exc_info=True)
+    
     def analyze_microscopy_image_for_structure_recommendations(
             self,
             image_path: str | None = None,

@@ -91,19 +91,19 @@ FFT_NMF_PARAMETER_ESTIMATION_INSTRUCTIONS = """You are an expert assistant analy
 **Your Task:**
 Based on the provided microscopy image and its metadata, estimate the optimal values for two key parameters for this sFFT+NMF analysis:
 
-1.  **`window_size` (Integer):** The side length of the square window used for the sliding FFT.
-    * **Guidance:** Choose a size that is appropriate for the scale of the repeating features or structures you want to analyze within the image. If you see fine lattice fringes, a smaller window might be suitable. If you are interested in larger domains or Moiré patterns, a larger window is needed. The window should be large enough to contain several repetitions of the pattern of interest but small enough to provide local information.
-    * **Constraints:** Suggest an integer, ideally a power of 2. It must be smaller than the image dimensions.
+1.  **`window_size_nm` (Float):** The side length in nanometers (nm) of the square window for the sliding FFT.
+    * **Guidance:** Choose a size that is appropriate for the physical scale of the repeating features you want to analyze. If you see fine lattice fringes on the order of 0.5 nm, a window of 2-4 nm might be suitable. If you are interested in larger Moiré patterns spanning 10-20 nm, a larger window is needed. The window should be large enough to contain several repetitions of the pattern of interest. If the image scale (`nm/pixel`) is provided in the metadata, use it to guide your suggestion.
+    * **Constraints:** Suggest a float value representing nanometers.
 
 2.  **`n_components` (Integer):** The number of distinct NMF basis patterns (components) to extract.
     * **Guidance:** Estimate how many fundamentally different types of local structures or patterns are present in the image. Consider the image's heterogeneity. A very uniform image might only need 2 components (e.g., background + main pattern). An image with multiple phases, distinct defect types, or different domains might benefit from more components. Too few components might merge distinct patterns; too many might split noise into separate components.
     * **Constraints:** Suggest a small integer
 
-3.  **`explanation` (String):** Provide a brief explanation for your choice of `window_size` and `n_components`, referencing specific features visible in the image or general image complexity, ideally in the context of this specific material system.
+3.  **`explanation` (String):** Provide a brief explanation for your choice of `window_size_nm` and `n_components`, referencing specific features visible in the image or general image complexity, ideally in the context of this specific material system.
 
 
 **Output Format:**
-Provide your response ONLY as a valid JSON object containing the keys "window_size", "n_components", and "explanation with integer values. Do not include any other text, explanations, or markdown formatting.
+Provide your response ONLY as a valid JSON object containing the keys "window_size_nm", "n_components", and "explanation with integer values. Do not include any other text, explanations, or markdown formatting.
 
 """
 
@@ -147,19 +147,19 @@ GMM_PARAMETER_ESTIMATION_INSTRUCTIONS = """You are an expert assistant analyzing
 **Your Task:**
 Based on the provided microscopy image and its metadata, estimate the optimal values for two key parameters for this analysis:
 
-1.  **`window_size` (Integer):** The side length of the square window to extract around each atom.
-    * **Guidance:** The window should be large enough to capture the local environment that defines the structure, including nearest and possibly next-nearest neighbors. For a simple lattice, this might be just larger than the atom itself. For complex structures or defects, it needs to be larger to capture the relevant surrounding features.
-    * **Constraints:** Suggest an even integer, typically between 16 and 64.
+**`window_size_nm` (Float):** The side length in nanometers (nm) of the square window to extract around each atom.
+    * **Guidance:** The window should be large enough to capture the local environment that defines the structure. For a simple lattice, this might be 2-3 times the nearest-neighbor distance. For complex defects, it might need to be larger. If the image scale (e.g., nm/pixel) is available in the metadata, use that to inform your suggestion.
+    * **Constraints:** Suggest a float value representing the size in nanometers.
 
 2.  **`n_components` (Integer):** The number of distinct GMM classes (clusters) to find.
     * **Guidance:** Estimate how many distinct types of local atomic environments you expect. For a perfect crystal, you might only need 1 or 2 (e.g., bulk vs. surface). If there are different phases, grain boundaries, or multiple types of defects, you will need more components to distinguish them.
-    * **Constraints:** Suggest a small integer, typically between 2 and 8.
-
-3.  **`explanation` (String):** Provide a brief explanation for your choice of `window_size` and `n_components`, referencing specific features visible in the image.
+    * **Constraints:** Suggest a small integer
+    
+3.  **`explanation` (String):** Provide a brief explanation for your choice of `window_size_nm` and `n_components`, referencing specific features visible in the image.
 
 
 **Output Format:**
-Provide your response ONLY as a valid JSON object containing the keys "window_size", "n_components", and "explanation". Do not include any other text, explanations, or markdown formatting.
+Provide your response ONLY as a valid JSON object containing the keys "window_size_nm", "n_components", and "explanation". Do not include any other text, explanations, or markdown formatting.
 
 """
 
