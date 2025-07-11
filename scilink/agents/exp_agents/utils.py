@@ -556,3 +556,65 @@ def create_multi_abundance_overlays(structure_image: np.ndarray,
     plt.close()
     buf.seek(0)
     return buf.getvalue()
+
+
+def extract_atomic_intensities(image_array: np.ndarray, coordinates: np.ndarray, 
+                               box_size: int = 2) -> np.ndarray:
+    """
+    Extract intensity values from small boxes around detected atomic positions.
+    
+    Args:
+        image_array: 2D microscopy image
+        coordinates: Nx2 array of (y, x) atomic coordinates
+        box_size: Size of square box around each atom (e.g., 2 = 2x2 pixels)
+        
+    Returns:
+        1D array of intensity values (one per atom)
+    """
+    if coordinates is None or len(coordinates) == 0:
+        return np.array([])
+    
+    intensities = []
+    h, w = image_array.shape
+    half_box = box_size // 2
+    
+    for y, x in coordinates[:, :2].astype(int):  # Use only y, x coordinates
+        # Define box boundaries
+        y_min = max(0, y - half_box)
+        y_max = min(h, y + half_box + 1)
+        x_min = max(0, x - half_box)
+        x_max = min(w, x + half_box + 1)
+        
+        # Extract intensity (mean of the box)
+        box_intensity = np.mean(image_array[y_min:y_max, x_min:x_max])
+        intensities.append(box_intensity)
+    
+    return np.array(intensities)
+
+
+def create_intensity_histogram_plot(intensities: np.ndarray, n_bins: int = 50) -> bytes:
+    """Create histogram plot of atomic intensities."""
+    fig, ax = plt.subplots(figsize=(8, 6))
+    
+    ax.hist(intensities, bins=n_bins, alpha=0.7, color='skyblue', edgecolor='black')
+    ax.set_xlabel('Intensity')
+    ax.set_ylabel('Number of Atoms')
+    ax.set_title(f'Atomic Intensity Distribution ({len(intensities)} atoms)')
+    ax.grid(True, alpha=0.3)
+    
+    # Add statistics
+    ax.axvline(np.mean(intensities), color='red', linestyle='--', 
+                label=f'Mean: {np.mean(intensities):.2f}')
+    ax.axvline(np.median(intensities), color='orange', linestyle='--', 
+                label=f'Median: {np.median(intensities):.2f}')
+    ax.legend()
+    
+    plt.tight_layout()
+    
+    buf = BytesIO()
+    plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
+    buf.seek(0)
+    image_bytes = buf.getvalue()
+    plt.close()
+    
+    return image_bytes
