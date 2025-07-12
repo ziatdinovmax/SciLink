@@ -592,14 +592,3 @@ class ExperimentNoveltyAssessment:
             "dft_file": str(dft_file),
             "total_recommendations": len(recommendations)
         }
-
-
-# Convenience functions for backward compatibility
-def create_microscopy_novelty_workflow(**kwargs) -> ExperimentNoveltyAssessment:
-    """Create a microscopy novelty assessment workflow."""
-    return ExperimentNoveltyAssessment(data_type='microscopy', **kwargs)
-
-
-def create_spectroscopy_novelty_workflow(**kwargs) -> ExperimentNoveltyAssessment:
-    """Create a spectroscopy novelty assessment workflow."""
-    return ExperimentNoveltyAssessment(data_type='spectroscopy', **kwargs)
