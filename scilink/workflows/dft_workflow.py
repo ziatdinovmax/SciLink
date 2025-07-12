@@ -106,7 +106,7 @@ class DFTWorkflow:
         print(f"{'='*60}")
         
         # Step 1: Structure Generation and Validation
-        print(f"\n🏗️  STEP 1: Structure Generation & Validation")
+        print(f"\n🏗️  WORKFLOW STEP 1: Structure Generation & Validation")
         print(f"{'─'*50}")
         
         structure_result = self._generate_and_validate_structure(user_request)
@@ -125,7 +125,7 @@ class DFTWorkflow:
             print(f"⚠️  {structure_result['warning']}")
         
         # Step 2: VASP Input Generation
-        print(f"\n⚛️  STEP 2: VASP Input Generation")
+        print(f"\n⚛️  WORKFLOW STEP 2: VASP Input Generation")
         print(f"{'─'*50}")
         
         vasp_result = self._generate_vasp_inputs(structure_path, user_request)
@@ -142,7 +142,7 @@ class DFTWorkflow:
         
         # Step 3: Literature Validation and Improvements (optional)
         if self.incar_validator:
-            print(f"\n📚 STEP 3: Literature Validation")
+            print(f"\n📚  WORKFLOW STEP 3: Literature Validation")
             print(f"{'─'*50}")
             
             improvement_result = self._validate_and_improve_incar(

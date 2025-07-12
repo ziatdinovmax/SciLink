@@ -21,25 +21,27 @@ def select_claims_interactive(claims: List[Dict[str, Any]]) -> List[Dict[str, An
     Allows user to interactively select which claims to search for in the literature.
     """
     if not claims:
-        print("No claims available to select from.")
+        print("❌ No claims available to select from.")
         return []
         
-    print("\n--- Select Claims for Literature Search ---")
-    print("Enter comma-separated numbers of claims to search, or 'all' for all claims.")
-    print("Examples: '1,3,5' or 'all'")
+    print(f"\n📋 Claim Selection")
+    print(f"{'─'*50}")
+    print("Select claims for literature search:")
+    print("• Enter comma-separated numbers (e.g., '1,3,5')")
+    print("• Enter 'all' for all claims")
     
-    # Display the "Has Anyone" questions
+    # Display the "Has Anyone" questions with clean formatting
     for i, claim in enumerate(claims):
         print(f"\n[{i+1}] {claim.get('has_anyone_question', 'No question formulated')}")
     
-    print("-" * 70)
+    print(f"{'─'*50}")
     
     # Get user selection
     try:
-        selection = input("\nSelect claims to search (or 'all'): ").strip().lower()
+        selection = input("\n🔍 Select claims to search (or 'all'): ").strip().lower()
         
         if selection == 'all':
-            print(f"Selected all {len(claims)} claims.")
+            print(f"✅ Selected all {len(claims)} claims.")
             return claims
             
         # Parse the comma-separated list of numbers
@@ -51,21 +53,21 @@ def select_claims_interactive(claims: List[Dict[str, Any]]) -> List[Dict[str, An
                 if 0 <= idx < len(claims):
                     selected_claims.append(claims[idx])
                 else:
-                    print(f"Warning: Index {idx+1} is out of range and will be skipped.")
+                    print(f"⚠️  Index {idx+1} is out of range and will be skipped.")
             
             if not selected_claims:
-                print("No valid claims were selected. Exiting.")
+                print("❌ No valid claims were selected.")
                 return []
                 
-            print(f"Selected {len(selected_claims)} claims.")
+            print(f"✅ Selected {len(selected_claims)} claims.")
             return selected_claims
             
         except ValueError:
-            print("Invalid selection format. Please use comma-separated numbers or 'all'.")
+            print("❌ Invalid selection format. Please use comma-separated numbers or 'all'.")
             return select_claims_interactive(claims)  # Try again
             
     except KeyboardInterrupt:
-        print("\nSelection canceled by user. Exiting.")
+        print("\n❌ Selection canceled by user.")
         return []
 
 
@@ -91,7 +93,8 @@ class ExperimentNoveltyAssessment:
                  output_dir: str = "experiment_novelty_output",
                  max_wait_time: int = 500,
                  dft_recommendations: bool = False,
-                 enable_human_feedback: bool = False,
+                 enable_human_feedback: bool = True,
+                 display_agent_logs: bool = True,
                  **analyzer_kwargs):
         """
         Initialize the unified experiment novelty assessment workflow.
@@ -103,6 +106,9 @@ class ExperimentNoveltyAssessment:
             analysis_model: Model name for analysis
             output_dir: Directory for outputs
             max_wait_time: Maximum wait time for literature searches
+            dft_recommendations: Whether to generate DFT recommendations (microscopy only)
+            enable_human_feedback: Whether to enable human feedback in analyzers
+            display_agent_logs: Whether to show detailed agent logs (default: True)
             **analyzer_kwargs: Additional arguments passed to the specific analyzer
         """
         
@@ -126,18 +132,19 @@ class ExperimentNoveltyAssessment:
                     "FutureHouse API key not found. Literature search will be disabled."
                 )
         
-        # Setup logging
+        # Setup logging with better formatting while preserving agent visibility
         self.log_capture = StringIO()
         logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            force=True,
+            level=logging.INFO, 
+            format='%(asctime)s - %(levelname)s: %(name)s: %(message)s', 
+            force=True, 
             handlers=[
-                logging.StreamHandler(sys.stdout),
+                logging.StreamHandler(sys.stdout),  # Show logs for agent visibility
                 logging.StreamHandler(self.log_capture)
             ]
         )
         self.logger = logging.getLogger(__name__)
+        self.display_agent_logs = display_agent_logs
         
         self.google_api_key = google_api_key
         self.analysis_model = analysis_model
@@ -163,8 +170,7 @@ class ExperimentNoveltyAssessment:
             )
         else:
             self.lit_agent = None
-        
-        self.logger.info(f"ExperimentNoveltyAssessment initialized for {data_type} data")
+            print("ℹ️  Literature search disabled (no FutureHouse API key)")
     
     @classmethod
     def register_analyzer(cls, data_type: str, analyzer_class):
@@ -172,7 +178,6 @@ class ExperimentNoveltyAssessment:
         if not issubclass(analyzer_class, BaseExperimentAnalyzer):
             raise TypeError("Analyzer must inherit from BaseExperimentAnalyzer")
         cls.ANALYZER_REGISTRY[data_type] = analyzer_class
-        logging.info(f"Registered analyzer for data type: {data_type}")
     
     @classmethod
     def get_supported_data_types(cls) -> List[str]:
@@ -206,85 +211,192 @@ class ExperimentNoveltyAssessment:
         
         data_type_name = self.analyzer.get_data_type_name()
         
+        print(f"\n🔬 Experiment Novelty Assessment Starting")
+        print(f"{'='*60}")
+        print(f"📊 Data Type: {data_type_name.title()}")
+        print(f"📁 Data File: {os.path.basename(str(data_path))}")
+        print(f"📂 Output:   {self.output_dir}/")
+        print(f"{'='*60}")
+        
         # === Step 1: Experimental Data Analysis ===
-        try:
-            logging.info(f"\n\n 🔄 -------------------- WORKFLOW STEP 1: {data_type_name.upper()} ANALYSIS -------------------- 🔄\n")
+        print(f"\n🔍 WORKFLOW STEP 1: {data_type_name.title()} Analysis")
+        print(f"{'─'*50}")
+        
+        analysis_result = self._analyze_experimental_data(data_path, system_info, **analysis_kwargs)
+        workflow_result["claims_generation"] = analysis_result
+        
+        if analysis_result["status"] != "success":
+            print(f"❌ {data_type_name.title()} analysis failed: {analysis_result.get('message', 'Unknown error')}")
+            workflow_result["final_status"] = "failed_analysis"
+            return workflow_result
+        
+        workflow_result["steps_completed"].append("claims_generation")
+        claims = analysis_result["claims"]
+        
+        print(f"✅ Analysis complete: {len(claims)} scientific claims generated")
+        print(f"📄 Claims saved: {os.path.basename(analysis_result['claims_file'])}")
+        
+        # === Step 2: Literature Search ===
+        if self.lit_agent is None:
+            print(f"⚠️  Literature search skipped (no FutureHouse API key)")
+            workflow_result["final_status"] = "no_literature_search"
+            self._print_final_summary(workflow_result, data_type_name)
+            return workflow_result
+        
+        print(f"\n📚 WORKFLOW STEP 2: Literature Search")
+        print(f"{'─'*50}")
+        
+        literature_result = self._conduct_literature_search(claims)
+        workflow_result["literature_search"] = literature_result
+        
+        if literature_result["status"] != "success":
+            print(f"❌ Literature search failed: {literature_result.get('message', 'Unknown error')}")
+            workflow_result["final_status"] = "failed_literature"
+            return workflow_result
+        
+        workflow_result["steps_completed"].append("literature_search")
+        literature_results = literature_result["results"]
+        
+        print(f"✅ Literature search complete: {len(literature_results)} claims processed")
+        print(f"📄 Results saved: {os.path.basename(literature_result['results_file'])}")
+        
+        # === Step 3: Novelty Assessment ===
+        print(f"\n🎯 WORKFLOW STEP 3: Novelty Assessment")
+        print(f"{'─'*50}")
+        
+        novelty_result = self._assess_novelty(literature_results, data_type_name)
+        workflow_result["novelty_assessment"] = novelty_result["assessment"]
+        
+        if novelty_result["status"] != "success":
+            print(f"❌ Novelty assessment failed: {novelty_result.get('message', 'Unknown error')}")
+            workflow_result["final_status"] = "failed_novelty"
+            return workflow_result
+        
+        workflow_result["steps_completed"].append("novelty_assessment")
+        assessment = novelty_result["assessment"]
+        
+        print(f"✅ Novelty assessment complete")
+        print(f"📊 Average novelty score: {assessment.get('average_novelty_score', 0):.2f}/5.0")
+        print(f"📄 Assessment saved: {os.path.basename(novelty_result['novelty_file'])}")
+        
+        # === Step 4: DFT Recommendations (Optional) ===
+        if self.dft_recommendations and self.data_type == 'microscopy':
+            print(f"\n⚛️  WORKFLOW STEP 4: DFT Recommendations")
+            print(f"{'─'*50}")
             
+            dft_result = self._generate_dft_recommendations(
+                workflow_result["claims_generation"]["detailed_analysis"],
+                workflow_result["novelty_assessment"] 
+            )
+            workflow_result["dft_recommendations"] = dft_result
+            
+            if dft_result["status"] == "success":
+                workflow_result["steps_completed"].append("dft_recommendations")
+                print(f"✅ DFT recommendations generated: {dft_result['total_recommendations']} structures")
+                print(f"📄 Recommendations saved: {os.path.basename(dft_result['dft_file'])}")
+            else:
+                print(f"⚠️  DFT recommendations failed: {dft_result.get('message', 'Unknown error')}")
+        
+        workflow_result["final_status"] = "success"
+        
+        # Save workflow log
+        self._save_workflow_log(data_type_name)
+        
+        # Final summary
+        self._print_final_summary(workflow_result, data_type_name)
+        
+        return workflow_result
+    
+    def _analyze_experimental_data(self, data_path: Union[str, Path], 
+                                  system_info: Dict[str, Any], 
+                                  **analysis_kwargs) -> Dict[str, Any]:
+        """Analyze experimental data and generate claims."""
+        
+        print(f"🔨 Analyzing {self.data_type} data...")
+        if self.display_agent_logs:
+            print(f"   (Agent logs will appear below)")
+            print(f"{'─'*30}")
+        
+        try:
             analysis_result = self.analyzer.analyze_for_claims(
                 str(data_path), 
                 system_info=system_info, 
                 **analysis_kwargs
             )
             
-            if "error" in analysis_result:
-                logging.error(f"{data_type_name.title()} analysis step failed.")
-                workflow_result["final_status"] = "failed_analysis"
-                workflow_result["error"] = analysis_result["error"]
-                return workflow_result
+            if self.display_agent_logs:
+                print(f"{'─'*30}")
             
-            logging.info(f"--- {data_type_name.title()} Analysis Result Received ---")
-            print(f"\n--- {data_type_name.title()} Analysis Summary ---")
-            print(analysis_result.get("detailed_analysis", "No detailed analysis text found."))
-            print("-" * 22)
+            if "error" in analysis_result:
+                return {
+                    "status": "error",
+                    "message": analysis_result["error"]
+                }
             
             claims = analysis_result.get("scientific_claims", [])
             if not claims:
-                logging.warning("Analysis completed, but no claims were found.")
-                workflow_result["final_status"] = "no_claims"
-                return workflow_result
+                return {
+                    "status": "error",
+                    "message": "No scientific claims generated from analysis"
+                }
             
-            # Display claims
-            self._display_claims(claims, data_type_name)
+            # Display claims in DFT-style format
+            self._display_claims_summary(claims)
             
             # Save claims
-            claims_file = self.output_dir / f"generated_{data_type_name}_claims.json"
+            claims_file = self.output_dir / f"generated_{self.data_type}_claims.json"
             with open(claims_file, 'w') as f:
                 json.dump(claims, f, indent=2)
-            logging.info(f"Claims saved to: {claims_file}")
             
-            workflow_result["claims_generation"] = {
+            return {
                 "status": "success",
                 "claims": claims,
                 "claims_file": str(claims_file),
                 "detailed_analysis": analysis_result.get("detailed_analysis", "")
             }
-            workflow_result["steps_completed"].append("claims_generation")
             
         except Exception as e:
-            logging.exception(f"An unexpected error occurred during {data_type_name} analysis step:")
-            workflow_result["final_status"] = "error_analysis"
-            workflow_result["error"] = str(e)
-            return workflow_result
+            if self.display_agent_logs:
+                print(f"{'─'*30}")
+            return {
+                "status": "error",
+                "message": f"Analysis failed: {str(e)}"
+            }
+    
+    def _conduct_literature_search(self, claims: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Conduct literature search for selected claims."""
         
-        # === Step 2: Literature Search ===
-        if self.lit_agent is None:
-            logging.warning("Literature search disabled (no FutureHouse API key)")
-            workflow_result["final_status"] = "no_literature_search"
-            return workflow_result
+        # Interactive claim selection with better formatting
+        selected_claims = select_claims_interactive(claims)
+        
+        if not selected_claims:
+            return {
+                "status": "error",
+                "message": "No claims selected for literature search"
+            }
+        
+        print(f"🔍 Searching literature for {len(selected_claims)} claims...")
+        if self.display_agent_logs:
+            print(f"   (Literature agent logs will appear below)")
+            print(f"{'─'*30}")
         
         try:
-            logging.info("\n\n\n 🔄 ------------------------- WORKFLOW STEP 2: LITERATURE SEARCH ------------------------- 🔄\n")
-            
-            # Interactive claim selection
-            selected_claims = select_claims_interactive(claims)
-            
-            if not selected_claims:
-                workflow_result["final_status"] = "no_claims_selected"
-                return workflow_result
-            
-            # Process each selected claim
             literature_results = []
             
             for i, claim in enumerate(selected_claims):
+                claim_num = i + 1
+                total_claims = len(selected_claims)
+                
                 has_anyone_question = claim.get("has_anyone_question")
                 if not has_anyone_question:
-                    logging.warning(f"Claim {i+1} does not have a 'has_anyone_question'. Skipping.")
+                    print(f"   ⚠️  Claim {claim_num}/{total_claims}: No search question available")
                     continue
                 
-                print(f"\n[{i+1}/{len(selected_claims)}] Searching literature for:")
-                print(f"   {has_anyone_question}")
+                print(f"\n   🔍 Searching claim {claim_num}/{total_claims}...")
+                if not self.display_agent_logs:
+                    print(f"   Question: {has_anyone_question}")
                 
-                # Query literature
+                # Query literature (agent logs will appear here if display_agent_logs=True)
                 owl_result = self.lit_agent.query_literature(has_anyone_question)
                 
                 literature_results.append({
@@ -292,118 +404,55 @@ class ExperimentNoveltyAssessment:
                     "owl_result": owl_result
                 })
                 
-                # Display result
+                # Show brief result
                 if owl_result["status"] == "success":
-                    print(f"\n   Literature Search Complete:")
-                    print(f"   {owl_result['formatted_answer']}")
+                    print(f"   ✅ Search {claim_num}/{total_claims} complete")
                 else:
-                    print(f"   Literature Search Failed: {owl_result.get('message', 'Unknown error')}")
-                
-                print("-" * 70)
+                    print(f"   ❌ Search {claim_num}/{total_claims} failed: {owl_result.get('message', 'Unknown error')}")
+            
+            if self.display_agent_logs:
+                print(f"{'─'*30}")
             
             # Save results
-            results_file = self.output_dir / f"{data_type_name}_literature_search_results.json"
+            results_file = self.output_dir / f"{self.data_type}_literature_search_results.json"
             with open(results_file, 'w') as f:
                 json.dump(literature_results, f, indent=2)
             
-            workflow_result["literature_search"] = {
+            return {
                 "status": "success",
                 "results": literature_results,
                 "results_file": str(results_file)
             }
-            workflow_result["steps_completed"].append("literature_search")
             
         except Exception as e:
-            logging.exception("An unexpected error occurred during Literature Search step:")
-            workflow_result["final_status"] = "error_literature"
-            workflow_result["error"] = str(e)
-            return workflow_result
-        
-        # === Step 3: Novelty Assessment ===
-        try:
-            novelty_result = self._run_enhanced_novelty_assessment(literature_results, data_type_name)
-            
-            if novelty_result["status"] != "success":
-                workflow_result["final_status"] = "error_novelty"
-                workflow_result["error"] = novelty_result.get("message")
-                return workflow_result
-            
-            novelty_assessment = novelty_result["assessment"]
-            workflow_result["novelty_assessment"] = novelty_assessment
-            workflow_result["steps_completed"].append("novelty_assessment")
-            
-        except Exception as e:
-            logging.exception("An unexpected error occurred during Novelty Assessment:")
-            workflow_result["final_status"] = "error_novelty"
-            workflow_result["error"] = str(e)
-            return workflow_result
-        
-        workflow_result["final_status"] = "success"
-        
-        # === Step 4: DFT Recommendations (Optional, mainly for microscopy) ===
-        if self.dft_recommendations and self.data_type == 'microscopy':
-            try:
-                logging.info("\n\n\n 🔄 ------------------------- WORKFLOW STEP 4: DFT RECOMMENDATIONS ------------------------- 🔄\n")
-                
-                dft_result = self._generate_dft_recommendations(
-                    workflow_result["claims_generation"]["detailed_analysis"],
-                    workflow_result["novelty_assessment"] 
-                )
-                workflow_result["dft_recommendations"] = dft_result
-                workflow_result["steps_completed"].append("dft_recommendations")
-                
-            except Exception as e:
-                logging.exception("An unexpected error occurred during DFT Recommendations:")
-                workflow_result["dft_recommendations"] = {
-                    "status": "error",
-                    "message": f"DFT recommendations failed: {str(e)}"
-                }
-        
-        # Save workflow log
-        self._save_workflow_log(data_type_name)
-        
-        return workflow_result
+            if self.display_agent_logs:
+                print(f"{'─'*30}")
+            return {
+                "status": "error",
+                "message": f"Literature search failed: {str(e)}"
+            }
     
-    def _display_claims(self, claims: List[Dict[str, Any]], data_type_name: str):
-        """Display generated claims in a formatted way."""
-        print(f"\n--- Generated {data_type_name.title()} Claims ---")
-        
-        for i, claim in enumerate(claims):
-            print(f"\n[{i+1}] Claim:")
-            print(f"   {claim.get('claim', 'No claim text')}")
-            
-            # Data-type specific evidence field
-            if data_type_name == 'spectroscopy':
-                evidence_key = 'spectroscopic_evidence'
-            else:
-                evidence_key = 'evidence'
-            
-            if evidence_key in claim:
-                print(f"   Evidence: {claim.get(evidence_key, 'No evidence specified')}")
-            
-            print(f"   Scientific Impact: {claim.get('scientific_impact', 'No impact specified')}")
-            print(f"   Has Anyone Question: {claim.get('has_anyone_question', 'No question formulated')}")
-            print(f"   Keywords: {', '.join(claim.get('keywords', []))}")
-            
-            if 'confidence' in claim:
-                print(f"   Confidence: {claim.get('confidence')}")
-            
-            print("-" * 70)
-    
-    def _run_enhanced_novelty_assessment(self, literature_results: List[Dict[str, Any]], 
-                                       data_type_name: str) -> Dict[str, Any]:
+    def _assess_novelty(self, literature_results: List[Dict[str, Any]], 
+                       data_type_name: str) -> Dict[str, Any]:
         """Run enhanced novelty assessment with structured scoring."""
+        
+        print(f"🎯 Scoring novelty based on literature findings...")
+        if self.display_agent_logs:
+            print(f"   (Novelty scorer logs will appear below)")
+            print(f"{'─'*30}")
+        
         try:
-            logging.info("\n\n\n 🔄 ------------------------- WORKFLOW STEP 3: NOVELTY ASSESSMENT ------------------------- 🔄\n")
-            
             # Initialize novelty scorer
             novelty_scorer = NoveltyScorer(google_api_key=self.google_api_key)
             
-            # Run enhanced assessment
+            # Run enhanced assessment (scorer logs will appear here if display_agent_logs=True)
             novelty_assessment = enhanced_novelty_assessment(literature_results, novelty_scorer)
             
-            # Display results
-            display_enhanced_novelty_summary(novelty_assessment)
+            if self.display_agent_logs:
+                print(f"{'─'*30}")
+            
+            # Display results in DFT style
+            self._display_novelty_summary(novelty_assessment)
             
             # Save assessment
             novelty_file = self.output_dir / f"{data_type_name}_enhanced_novelty_assessment.json"
@@ -417,11 +466,96 @@ class ExperimentNoveltyAssessment:
             }
             
         except Exception as e:
-            logging.exception("Enhanced novelty assessment failed:")
+            if self.display_agent_logs:
+                print(f"{'─'*30}")
             return {
                 "status": "error",
-                "message": str(e)
+                "message": f"Novelty assessment failed: {str(e)}"
             }
+    
+    def _display_claims_summary(self, claims: List[Dict[str, Any]]):
+        """Display generated claims in DFT-style format."""
+        
+        print(f"   📋 Generated {len(claims)} scientific claims:")
+        
+        for i, claim in enumerate(claims, 1):
+            claim_text = claim.get('claim', 'No claim text')
+            # Truncate long claims for summary display
+            if len(claim_text) > 80:
+                claim_text = claim_text[:77] + "..."
+            print(f"      {i}. {claim_text}")
+        
+        if claims:
+            keywords_count = sum(len(claim.get('keywords', [])) for claim in claims)
+            print(f"   🏷️  Total keywords identified: {keywords_count}")
+    
+    def _display_novelty_summary(self, assessment: Dict[str, Any]):
+        """Display novelty assessment in DFT-style format."""
+        
+        categories = assessment.get("novelty_categories", {})
+        avg_score = assessment.get("average_novelty_score", 0)
+        
+        print(f"   📊 Novelty scoring complete:")
+        print(f"      Average score: {avg_score:.2f}/5.0")
+        
+        high_novel = categories.get("highly_novel", [])
+        moderate_novel = categories.get("moderately_novel", [])
+        low_novel = categories.get("low_novelty", [])
+        
+        if high_novel:
+            print(f"      🚀 Highly novel findings: {len(high_novel)}")
+        if moderate_novel:
+            print(f"      📈 Moderately novel findings: {len(moderate_novel)}")
+        if low_novel:
+            print(f"      📚 Known findings: {len(low_novel)}")
+    
+    def _print_final_summary(self, workflow_result: Dict[str, Any], data_type_name: str):
+        """Print a clean final summary in DFT style."""
+        
+        print(f"\n🎉 Experiment Novelty Assessment Complete!")
+        print(f"{'='*60}")
+        
+        # Basic info
+        status = workflow_result.get('final_status')
+        steps = workflow_result.get('steps_completed', [])
+        
+        print(f"📋 Status: {status}")
+        print(f"✅ Steps: {' → '.join(steps)}")
+        print(f"📁 Output: {self.output_dir}/")
+        
+        # Claims info
+        if "claims_generation" in workflow_result:
+            claims_result = workflow_result["claims_generation"]
+            if claims_result["status"] == "success":
+                claims_count = len(claims_result['claims'])
+                print(f"🔍 Analysis: {claims_count} scientific claims generated")
+        
+        # Literature info
+        if "literature_search" in workflow_result:
+            lit_result = workflow_result["literature_search"]
+            if lit_result["status"] == "success":
+                search_count = len(lit_result['results'])
+                print(f"📚 Literature: {search_count} claims searched")
+        
+        # Novelty info
+        if "novelty_assessment" in workflow_result:
+            assessment = workflow_result["novelty_assessment"]
+            avg_score = assessment.get('average_novelty_score', 0)
+            categories = assessment.get("novelty_categories", {})
+            high_count = len(categories.get("highly_novel", []))
+            
+            print(f"🎯 Novelty: {avg_score:.2f}/5.0 average score")
+            if high_count > 0:
+                print(f"   🚀 {high_count} highly novel finding{'s' if high_count > 1 else ''}")
+        
+        # DFT info
+        if "dft_recommendations" in workflow_result:
+            dft_result = workflow_result["dft_recommendations"]
+            if dft_result["status"] == "success":
+                rec_count = dft_result.get('total_recommendations', 0)
+                print(f"⚛️  DFT: {rec_count} structure recommendation{'s' if rec_count > 1 else ''}")
+        
+        print(f"{'='*60}")
     
     def _save_workflow_log(self, data_type_name: str):
         """Save the complete workflow log."""
@@ -435,7 +569,7 @@ class ExperimentNoveltyAssessment:
                 f.write(log_content)
                 
         except Exception as e:
-            print(f"Warning: Could not save workflow log: {e}")
+            print(f"⚠️  Could not save workflow log: {e}")
     
     def get_summary(self, workflow_result: Dict[str, Any]) -> str:
         """Get a human-readable summary of the workflow results."""
@@ -474,21 +608,6 @@ class ExperimentNoveltyAssessment:
                 for i, claim in enumerate(categories["moderately_novel"], 1):
                     summary += f"  {i}. {claim}\n"
                 summary += "\n"
-            
-            # Add detailed scoring information for high-impact findings
-            # detailed_scores = assessment.get("detailed_scores", [])
-            # high_scoring = [r for r in detailed_scores if r.get('novelty_assessment', {}).get('novelty_score', 0) >= 4]
-            
-            # if high_scoring:
-            #     summary += "🔍 High-Impact Findings (Score ≥4):\n"
-            #     for result in high_scoring:
-            #         score_info = result.get('novelty_assessment', {})
-            #         score = score_info.get('novelty_score', 0)
-            #         explanation = score_info.get('explanation', 'N/A')
-            #         claim = result.get('original_claim', {}).get('claim', 'N/A')
-                    
-            #         summary += f"  • Score {score}/5: {claim}\n"
-            #         summary += f"    Reasoning: {explanation}\n\n"
         
         # DFT recommendations summary
         if "dft_recommendations" in workflow_result and workflow_result["dft_recommendations"].get("status") == "success":
@@ -500,95 +619,90 @@ class ExperimentNoveltyAssessment:
     def _generate_dft_recommendations(self, initial_analysis_text: str, novelty_assessment: Dict[str, Any]) -> Dict[str, Any]:
         """Generate DFT recommendations based on enhanced novelty analysis (microscopy only)"""
         
-        # Extract high and moderate novelty claims for prioritization
-        high_novel = novelty_assessment.get("novelty_categories", {}).get("highly_novel", [])
-        moderate_novel = novelty_assessment.get("novelty_categories", {}).get("moderately_novel", [])
+        print(f"⚛️  Generating DFT structure recommendations...")
         
-        # Generate enhanced novelty context for DFT recommendations
-        if high_novel or moderate_novel:
-            novelty_section_text = "The following claims/observations have been assessed through literature review with their novelty scores:\n\n"
+        try:
+            # Extract high and moderate novelty claims for prioritization
+            high_novel = novelty_assessment.get("novelty_categories", {}).get("highly_novel", [])
+            moderate_novel = novelty_assessment.get("novelty_categories", {}).get("moderately_novel", [])
             
-            if high_novel:
-                novelty_section_text += "HIGH NOVELTY FINDINGS (Scores 4-5):\n"
-                for i, claim in enumerate(high_novel, 1):
-                    novelty_section_text += f"{i}. {claim}\n"
-                novelty_section_text += "\n"
+            # Generate enhanced novelty context for DFT recommendations
+            if high_novel or moderate_novel:
+                novelty_section_text = "The following claims/observations have been assessed through literature review with their novelty scores:\n\n"
+                
+                if high_novel:
+                    novelty_section_text += "HIGH NOVELTY FINDINGS (Scores 4-5):\n"
+                    for i, claim in enumerate(high_novel, 1):
+                        novelty_section_text += f"{i}. {claim}\n"
+                    novelty_section_text += "\n"
+                
+                if moderate_novel:
+                    novelty_section_text += "MODERATE NOVELTY FINDINGS (Score 3):\n"
+                    for i, claim in enumerate(moderate_novel, 1):
+                        novelty_section_text += f"{i}. {claim}\n"
+                    novelty_section_text += "\n"
+                
+                avg_score = novelty_assessment.get("average_novelty_score", 0)
+                novelty_section_text += f"Average novelty score: {avg_score:.2f}/5.0\n\n"
+                
+                novelty_section_text += ("Your primary goal for the DFT recommendations should be to propose structures and simulations "
+                                    "that can rigorously investigate these novel aspects, with priority given to the highest-scoring claims. "
+                                    "Explain the connection between each recommended structure and the specific novel findings it would help investigate.")
+                
+                novelty_context = novelty_section_text
+            else:
+                novelty_context = "No high-novelty claims were identified through literature review. Please make DFT recommendations based on the most scientifically interesting aspects of the provided analysis."
             
-            if moderate_novel:
-                novelty_section_text += "MODERATE NOVELTY FINDINGS (Score 3):\n"
-                for i, claim in enumerate(moderate_novel, 1):
-                    novelty_section_text += f"{i}. {claim}\n"
-                novelty_section_text += "\n"
+            # Instantiate a text-only analysis agent for this step
+            dft_agent = MicroscopyAnalysisAgent(
+                google_api_key=self.google_api_key,
+                model_name=self.analysis_model
+            )
             
-            avg_score = novelty_assessment.get("average_novelty_score", 0)
-            novelty_section_text += f"Average novelty score: {avg_score:.2f}/5.0\n\n"
+            # Generate DFT recommendations using text-only path
+            dft_recommendations_result = dft_agent.analyze_microscopy_image_for_structure_recommendations(
+                image_path=None,  # Text-only path
+                system_info=None,
+                additional_prompt_context=novelty_context,
+                cached_detailed_analysis=initial_analysis_text
+            )
             
-            novelty_section_text += ("Your primary goal for the DFT recommendations should be to propose structures and simulations "
-                                "that can rigorously investigate these novel aspects, with priority given to the highest-scoring claims. "
-                                "Explain the connection between each recommended structure and the specific novel findings it would help investigate.")
+            if "error" in dft_recommendations_result:
+                return {
+                    "status": "error",
+                    "message": f"DFT recommendation generation failed: {dft_recommendations_result.get('details', dft_recommendations_result.get('error'))}"
+                }
             
-            novelty_context = novelty_section_text
-        else:
-            novelty_context = "No high-novelty claims were identified through literature review. Please make DFT recommendations based on the most scientifically interesting aspects of the provided analysis."
-        
-        # Instantiate a text-only analysis agent for this step
-        dft_agent = MicroscopyAnalysisAgent(
-            google_api_key=self.google_api_key,
-            model_name=self.analysis_model
-        )
-        
-        # Generate DFT recommendations using text-only path
-        dft_recommendations_result = dft_agent.analyze_microscopy_image_for_structure_recommendations(
-            image_path=None,  # Text-only path
-            system_info=None,
-            additional_prompt_context=novelty_context,
-            cached_detailed_analysis=initial_analysis_text
-        )
-        
-        if "error" in dft_recommendations_result:
+            reasoning_text = dft_recommendations_result.get("analysis_summary_or_reasoning", "No reasoning provided")
+            recommendations = dft_recommendations_result.get("recommendations", [])
+            
+            print(f"   ✅ Generated {len(recommendations)} DFT structure recommendations")
+            
+            # Save DFT recommendations
+            dft_file = self.output_dir / "dft_recommendations.json"
+            dft_output = {
+                "reasoning_for_recommendations": reasoning_text,
+                "recommendations": recommendations,
+                "novelty_context": novelty_context,
+                "novelty_scores_used": {
+                    "high_novel_count": len(high_novel),
+                    "moderate_novel_count": len(moderate_novel),
+                    "average_score": novelty_assessment.get("average_novelty_score", 0)
+                }
+            }
+            with open(dft_file, 'w') as f:
+                json.dump(dft_output, f, indent=2)
+            
+            return {
+                "status": "success",
+                "recommendations": recommendations,
+                "reasoning": reasoning_text,
+                "dft_file": str(dft_file),
+                "total_recommendations": len(recommendations)
+            }
+            
+        except Exception as e:
             return {
                 "status": "error",
-                "message": f"DFT recommendation generation failed: {dft_recommendations_result.get('details', dft_recommendations_result.get('error'))}"
+                "message": f"DFT recommendations failed: {str(e)}"
             }
-        
-        reasoning_text = dft_recommendations_result.get("analysis_summary_or_reasoning", "No reasoning provided")
-        recommendations = dft_recommendations_result.get("recommendations", [])
-        
-        print("\n--- DFT Structure Recommendations (Enhanced Novelty-Informed) ---")
-        print(reasoning_text)
-        print("-" * 65)
-        
-        if recommendations:
-            print("\n--- Recommended DFT Structures ---")
-            for i, rec in enumerate(recommendations):
-                print(f"\n[{i+1}] (Priority: {rec.get('priority', 'N/A')})")
-                print(f"Description: {rec.get('description', 'N/A')}")
-                print(f"Scientific justification: {rec.get('scientific_interest', 'N/A')}")
-                print("-" * 50)
-        else:
-            print("\nNo DFT structure recommendations were generated.")
-        
-        # Save DFT recommendations
-        dft_file = self.output_dir / "dft_recommendations.json"
-        dft_output = {
-            "reasoning_for_recommendations": reasoning_text,
-            "recommendations": recommendations,
-            "novelty_context": novelty_context,
-            "novelty_scores_used": {
-                "high_novel_count": len(high_novel),
-                "moderate_novel_count": len(moderate_novel),
-                "average_score": novelty_assessment.get("average_novelty_score", 0)
-            }
-        }
-        with open(dft_file, 'w') as f:
-            json.dump(dft_output, f, indent=2)
-        
-        logging.info(f"Enhanced DFT recommendations saved to: {dft_file}")
-        
-        return {
-            "status": "success",
-            "recommendations": recommendations,
-            "reasoning": reasoning_text,
-            "dft_file": str(dft_file),
-            "total_recommendations": len(recommendations)
-        }

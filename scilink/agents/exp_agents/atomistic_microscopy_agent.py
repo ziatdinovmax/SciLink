@@ -59,7 +59,7 @@ class AtomisticMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         """
         Ask LLM to determine number of components for 1D intensity GMM.
         """
-        self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP 3: INTENSITY GMM COMPONENT SELECTION -------------------- 🤖\n")
+        self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP: INTENSITY GMM COMPONENT SELECTION -------------------- 🤖\n")
         
         prompt_parts = [INTENSITY_GMM_COMPONENT_SELECTION_INSTRUCTIONS]
         prompt_parts.append("\nOriginal microscopy image:")
@@ -199,7 +199,7 @@ class AtomisticMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         """
         Ask LLM to determine number of components for local environment GMM.
         """
-        self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP 5: LOCAL ENVIRONMENT COMPONENT SELECTION -------------------- 🤖\n")
+        self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP: LOCAL ENVIRONMENT COMPONENT SELECTION -------------------- 🤖\n")
         
         prompt_parts = [LOCAL_ENV_COMPONENT_SELECTION_INSTRUCTIONS]
         prompt_parts.append("\nOriginal microscopy image:")
@@ -254,7 +254,7 @@ class AtomisticMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         results = {}
         
         # Step 1: Run NN ensemble to find atoms
-        self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP 1: NEURAL NETWORK ATOM DETECTION -------------------- 🤖\n")
+        self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP: NEURAL NETWORK ATOM DETECTION -------------------- 🤖\n")
         
         nn_output, coordinates = predict_with_ensemble(
             model_dir_path,
@@ -272,7 +272,7 @@ class AtomisticMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         results['coordinates'] = coordinates
         
         # Step 2: Analyze intensities
-        self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP 2: INTENSITY ANALYSIS -------------------- 🤖\n")
+        self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP: INTENSITY ANALYSIS -------------------- 🤖\n")
         
         intensities = extract_atomic_intensities(
             image_array, coordinates, self.intensity_box_size
@@ -296,7 +296,7 @@ class AtomisticMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             self.logger.warning("Using default 3 components for intensity GMM")
         
         # Step 4: Do 1D GMM and plot spatial maps
-        self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP 4: 1D INTENSITY GMM ANALYSIS -------------------- 🤖\n")
+        self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP: 1D INTENSITY GMM ANALYSIS -------------------- 🤖\n")
         
         gmm_labels, spatial_maps = self._perform_1d_intensity_gmm(
             intensities, coordinates, image_array.shape, intensity_gmm_components
@@ -327,7 +327,7 @@ class AtomisticMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             self.logger.warning("Using default 4 components for local environment GMM")
         
         # Step 6: Local environment analysis (same as before)
-        self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP 6: LOCAL ENVIRONMENT GMM ANALYSIS -------------------- 🤖\n")
+        self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP: LOCAL ENVIRONMENT GMM ANALYSIS -------------------- 🤖\n")
         
         # Calculate window size for local environment analysis
         window_size = self.atomistic_analysis_settings.get('window_size', 32)
@@ -368,7 +368,7 @@ class AtomisticMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             results['local_env_coords_class'] = None
         
         # Step 7: Nearest neighbor distance analysis
-        self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP 7: NEAREST NEIGHBOR ANALYSIS -------------------- 🤖\n")
+        self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP: NEAREST NEIGHBOR ANALYSIS -------------------- 🤖\n")
         
         if len(coordinates) > 1:
             final_coordinates_2d = coordinates[:, :2]
@@ -604,7 +604,7 @@ class AtomisticMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 return None, analysis_results
 
             # Create comprehensive visualizations for final LLM analysis
-            self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP 8: CREATING COMPREHENSIVE VISUALIZATIONS -------------------- 🤖\n")
+            self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP: CREATING COMPREHENSIVE VISUALIZATIONS -------------------- 🤖\n")
             
             all_visualizations = self._create_comprehensive_visualization(
                 analysis_results, preprocessed_img_array, nm_per_pixel
@@ -673,7 +673,7 @@ Analysis Summary:
             prompt_parts.append("\n\nProvide your analysis strictly in the requested JSON format.")
             
             # Final LLM analysis
-            self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP 9: FINAL COMPREHENSIVE ANALYSIS -------------------- 🤖\n")
+            self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP: FINAL COMPREHENSIVE ANALYSIS -------------------- 🤖\n")
             response = self.model.generate_content(
                 contents=prompt_parts,
                 generation_config=self.generation_config,
