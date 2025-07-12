@@ -152,8 +152,8 @@ if result['final_status'] == 'success':
 - Validates the structure for physical and chemical reasonableness.
 - Iteratively refines the script if validation fails.
 - Generates INCAR and KPOINTS files.
-- Optionally validates INCAR tags against literature best practices using the IncarValidatorAgent.
-- Note: The AI-driven script generation is powerful but may require refinement for complex or novel structures.
+- Optionally validates INCAR tags against literature best practices
+- *Note:* The AI-driven script generation is powerful but may require refinement for complex or novel structures.
 
 **Experimental2DFT**: The complete, end-to-end pipeline.
 - Runs the ExperimentNoveltyAssessment workflow.
