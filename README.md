@@ -2,23 +2,25 @@
 
 A Python framework for connecting experimental materials science with computational modeling and automated literature analysis using Large Language Models.
 
+![SciLink Logo](misc/scilink_logo_v2.svg)
+
 ## Overview
 
 SciLink employs a system of intelligent agents to automate the research cycle, from experimental observation to computational modeling. It streamlines the analysis of experimental data, assesses the novelty of findings against the scientific literature, and sets up DFT simulations to investigate those findings.
 
 ## Core Concepts
 
-🤖 **Agent-Based Architecture**: The framework is built on a collection of specialized agents, each designed for a specific scientific task:
+- 🤖 **Agent-Based Architecture**: The framework is built on a collection of specialized agents, each designed for a specific scientific task:
 
-🔬 **Experimental Agents**: Analyze microscopy images (including atomic-resolution and particle-based) or spectroscopy data to extract features and generate scientific claims. An OrchestratorAgent automatically selects the best analysis tool for your data.
+    - 🔬 **Experimental Agents**: Analyze microscopy images (including atomic-resolution and particle-based) or spectroscopy data to extract features and generate scientific claims. An OrchestratorAgent automatically selects the best analysis tool for your data.
 
-📚 **Literature Agent**: Queries scientific databases (via FutureHouse's OWL) to validate claims and assess novelty with a nuanced scoring system.
+    - 📚 **Literature Agent**: Queries scientific databases (via FutureHouse's OWL) to validate claims and assess novelty with a nuanced scoring system.
 
-⚛️ **Simulation Agents**: Generate, validate, and refine atomic structures using ASE and specialized tools. They also create and validate VASP input files (INCAR, KPOINTS) against literature best practices.
+    - ⚛️ **Simulation Agents**: Generate, validate, and refine atomic structures using ASE and specialized tools. They also create and validate VASP input files (INCAR, KPOINTS) against literature best practices.
 
-🔄 **Automated Workflows**: High-level workflows chain these agents to perform complex tasks, from data analysis to simulation-ready files, with minimal user intervention.
+- 🔄 **Automated Workflows**: High-level workflows chain these agents to perform complex tasks, from data analysis to simulation-ready files, with minimal user intervention.
 
-🛡️ **Secure by Design**: AI-generated code for creating atomic structures is executed in a security sandbox (Docker, Colab, or VM) to protect your system. The tool will halt if a safe environment is not detected.
+- 🛡️ **Secure by Design**: AI-generated code for creating atomic structures is executed in a security sandbox (Docker, Colab, or VM) to protect your system. The tool will halt if a safe environment is not detected.
 
 ## Installation
 
