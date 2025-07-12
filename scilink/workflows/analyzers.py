@@ -24,11 +24,13 @@ class MicroscopyAnalyzer(BaseExperimentAnalyzer):
     """Analyzer for microscopy data."""
     
     def __init__(self, agent_id: Optional[int] = None, google_api_key: str = None, 
-                 analysis_model: str = "gemini-2.5-pro-preview-06-05", output_dir: str = ""):
+                 analysis_model: str = "gemini-2.5-pro-preview-06-05", output_dir: str = "",
+                 enable_human_feedback: bool = False):
         self.agent_id = agent_id
         self.google_api_key = google_api_key
         self.analysis_model = analysis_model
         self.output_dir = output_dir
+        self.enable_human_feedback = enable_human_feedback
     
     def analyze_for_claims(self, data_path: str, system_info: Dict[str, Any] = None, **kwargs) -> Dict[str, Any]:
         """Analyze microscopy image and generate scientific claims."""
@@ -55,7 +57,9 @@ class MicroscopyAnalyzer(BaseExperimentAnalyzer):
         AnalysisAgentClass = AGENT_MAP[selected_agent_id]
         logging.info(f"✅ Running analysis with: {AnalysisAgentClass.__name__}")
         
-        agent_kwargs = {'model_name': self.analysis_model}
+        agent_kwargs = {'model_name': self.analysis_model, 
+                        'enable_human_feedback': self.enable_human_feedback
+        }
         if selected_agent_id == 0:  # MicroscopyAnalysisAgent
             agent_kwargs['fft_nmf_settings'] = {
                 'FFT_NMF_ENABLED': True,
@@ -75,7 +79,8 @@ class SpectroscopyAnalyzer(BaseExperimentAnalyzer):
     """Analyzer for spectroscopy data."""
     
     def __init__(self, google_api_key: str = None, analysis_model: str = "gemini-2.5-pro-preview-06-05", 
-                 output_dir: str = "", spectral_unmixing_enabled: bool = True):
+                 output_dir: str = "", spectral_unmixing_enabled: bool = True,
+                 enable_human_feedback: bool = False):
         self.google_api_key = google_api_key
         self.analysis_model = analysis_model
         self.output_dir = output_dir
@@ -94,7 +99,8 @@ class SpectroscopyAnalyzer(BaseExperimentAnalyzer):
             api_key=google_api_key,
             model_name=analysis_model,
             spectral_unmixing_settings=spectral_settings,
-            output_dir=output_dir
+            output_dir=output_dir,
+            enable_human_feedback=enable_human_feedback
         )
     
     def analyze_for_claims(self, data_path: str, system_info: Dict[str, Any] = None, **kwargs) -> Dict[str, Any]:

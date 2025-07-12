@@ -91,6 +91,7 @@ class ExperimentNoveltyAssessment:
                  output_dir: str = "experiment_novelty_output",
                  max_wait_time: int = 400,
                  dft_recommendations: bool = False,
+                 enable_human_feedback: bool = False,
                  **analyzer_kwargs):
         """
         Initialize the unified experiment novelty assessment workflow.
@@ -150,6 +151,7 @@ class ExperimentNoveltyAssessment:
             google_api_key=google_api_key,
             analysis_model=analysis_model,
             output_dir=str(self.output_dir),
+            enable_human_feedback=enable_human_feedback,
             **analyzer_kwargs
         )
         

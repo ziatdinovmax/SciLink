@@ -25,17 +25,19 @@ from .utils import (
     extract_atomic_intensities, create_intensity_histogram_plot
 )
 
+from .human_feedback import SimpleFeedbackMixin
+
 import atomai as aoi
 
 
-class AtomisticMicroscopyAnalysisAgent(BaseAnalysisAgent):
+class AtomisticMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
     Agent for analyzing atomistic microscopy images
     """
 
     def __init__(self, google_api_key: str | None = None, model_name: str = "gemini-2.5-pro-preview-06-05", 
-                 atomistic_analysis_settings: dict | None = None):
-        super().__init__(google_api_key, model_name)
+                 atomistic_analysis_settings: dict | None = None, enable_human_feedback: bool = True):
+        super().__init__(google_api_key, model_name, enable_human_feedback=enable_human_feedback)
         
         self.atomistic_analysis_settings = atomistic_analysis_settings if atomistic_analysis_settings else {}
         
@@ -562,6 +564,8 @@ class AtomisticMicroscopyAnalysisAgent(BaseAnalysisAgent):
         Analysis workflow
         """
         try:
+            # Clear any previous stored images
+            self._clear_stored_images()
             # Use base class methods for common operations
             system_info = self._handle_system_info(system_info)
             loaded_image = load_image(image_path)
@@ -609,6 +613,22 @@ class AtomisticMicroscopyAnalysisAgent(BaseAnalysisAgent):
             # Save visualizations to disk if enabled
             for viz in all_visualizations:
                 self._save_visualization_to_disk(viz['bytes'], viz['label'])
+
+            analysis_images = []
+            for viz in all_visualizations:
+                analysis_images.append({
+                    "label": viz['label'],
+                    "data": viz['bytes']
+                })
+
+            analysis_metadata = {
+                "image_path": image_path,
+                "system_info": system_info,
+                "atoms_detected": len(analysis_results.get('coordinates', [])),
+                "num_visualizations": len(all_visualizations),
+                "num_stored_images": len(analysis_images)
+            }
+            self._store_analysis_images(analysis_images, analysis_metadata)
 
             # Build prompt for final LLM analysis
             prompt_parts = [instruction_prompt]
@@ -663,9 +683,11 @@ Analysis Summary:
             return self._parse_llm_response(response)
 
         except FileNotFoundError:
+            self._clear_stored_images()
             self.logger.error(f"Image file not found: {image_path}")
             return None, {"error": "Image file not found", "details": f"Path: {image_path}"}
         except Exception as e:
+            self._clear_stored_images()
             self.logger.exception(f"Atomistic analysis failed: {e}")
             return None, {"error": "Atomistic analysis failed", "details": str(e)}
 
@@ -746,7 +768,12 @@ Analysis Summary:
         elif not valid_claims:
             self.logger.warning("LLM did not yield valid claims or analysis text.")
 
-        return {"detailed_analysis": detailed_analysis, "scientific_claims": valid_claims}
+        initial_result = {"detailed_analysis": detailed_analysis, "scientific_claims": valid_claims}
+        return self._apply_feedback_if_enabled(
+            initial_result,
+            image_path=image_path,
+            system_info=system_info
+        )
     
     def analyze_microscopy_image_for_structure_recommendations(
             self,
@@ -800,3 +827,6 @@ Analysis Summary:
             self.logger.warning("LLM did not yield valid recommendations or analysis text.")
 
         return {"analysis_summary_or_reasoning": analysis_output_text, "recommendations": sorted_recommendations}
+    
+    def _get_claims_instruction_prompt(self) -> str:
+        return ATOMISTIC_MICROSCOPY_CLAIMS_INSTRUCTIONS

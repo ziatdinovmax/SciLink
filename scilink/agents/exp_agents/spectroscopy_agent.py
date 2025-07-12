@@ -20,11 +20,12 @@ from .instruct import (
     SPECTROSCOPY_CLAIMS_INSTRUCTIONS
 )
 
-# Import atomai's SpectralUnmixer
+from .human_feedback import SimpleFeedbackMixin
+
 from atomai.stat import SpectralUnmixer
 
 
-class SpectroscopyAnalysisAgent(BaseAnalysisAgent):
+class SpectroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
     Agent for analyzing hyperspectral/spectroscopy data using generative AI models.
     Refactored to inherit from BaseAnalysisAgent and includes LLM-guided spectral unmixing.
@@ -32,8 +33,9 @@ class SpectroscopyAnalysisAgent(BaseAnalysisAgent):
 
     def __init__(self, api_key: str | None = None, model_name: str = "gemini-2.5-pro-preview-06-05", 
                  spectral_unmixing_settings: dict | None = None,
-                 output_dir: str = "spectroscopy_output"):
-        super().__init__(api_key, model_name)
+                 output_dir: str = "spectroscopy_output",
+                 enable_human_feedback: bool = False):
+        super().__init__(api_key, model_name, enable_human_feedback=enable_human_feedback)
         
         # Spectral unmixing settings
         default_settings = {
@@ -642,11 +644,20 @@ class SpectroscopyAnalysisAgent(BaseAnalysisAgent):
             else:
                 self.logger.info(f"Successfully generated {len(valid_claims)} scientific claims from spectroscopic analysis.")
             
-            return {"detailed_analysis": detailed_analysis, "scientific_claims": valid_claims}
+            initial_result = {"detailed_analysis": detailed_analysis, "scientific_claims": valid_claims}
+            return self._apply_feedback_if_enabled(
+                initial_result,
+                data_path=data_path,
+                system_info=system_info,
+                structure_image_path=structure_image_path
+            )
             
         except Exception as e:
             self.logger.exception(f"Error during hyperspectral claims analysis: {e}")
             return {"error": "Hyperspectral claims analysis failed", "details": str(e)}
+        
+    def _get_claims_instruction_prompt(self) -> str:
+        return SPECTROSCOPY_CLAIMS_INSTRUCTIONS
 
     def _analyze_hyperspectral_data_base(self, data_path: str, system_info: Dict[str, Any] | None = None,
                                     instruction_prompt: str = None, analysis_type: str = "standard",
@@ -655,6 +666,7 @@ class SpectroscopyAnalysisAgent(BaseAnalysisAgent):
         """
         Base method for hyperspectral data analysis
         """
+        self._clear_stored_images()
         # Use base class method for system info handling
         if isinstance(system_info, str):
             system_info = self._handle_system_info(system_info)
@@ -684,6 +696,14 @@ class SpectroscopyAnalysisAgent(BaseAnalysisAgent):
             self.logger.info("Creating component-abundance pairs for LLM analysis...")
             component_pair_images = self._create_component_abundance_pairs(components, abundance_maps, system_info)
         
+        analysis_images = []
+        for i, pair_img_bytes in enumerate(component_pair_images):
+            analysis_images.append({
+                "label": f"Component {i+1} Pair (Spectrum + Abundance Map)",
+                "data": pair_img_bytes
+            })
+
+
         # Build prompt for LLM analysis
         prompt_parts = [instruction_prompt or SPECTROSCOPY_ANALYSIS_INSTRUCTIONS]
         
@@ -700,7 +720,7 @@ class SpectroscopyAnalysisAgent(BaseAnalysisAgent):
         else:
             prompt_parts.append("- No spectral unmixing performed")
 
-        # Add structure image and overlays if provided (OPTIMIZED VERSION)
+        # Add structure image and overlays if provided
         overlay_bytes = None
         if structure_image_path and os.path.exists(structure_image_path):
             try:
@@ -769,6 +789,16 @@ class SpectroscopyAnalysisAgent(BaseAnalysisAgent):
             prompt_parts.append(system_info_section)
         
         prompt_parts.append("\n\nProvide your analysis in the requested JSON format.")
+
+        analysis_metadata = {
+            "data_path": data_path,
+            "system_info": system_info,
+            "spectral_unmixing_enabled": self.run_spectral_unmixing,
+            "n_components": components.shape[0] if components is not None else 0,
+            "structure_image_included": structure_image_path is not None,
+            "num_stored_images": len(analysis_images)
+        }
+        self._store_analysis_images(analysis_images, analysis_metadata)
         
         # Send to LLM for analysis
         self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP: INTERPRETING RESULTS -------------------- 🤖\n")

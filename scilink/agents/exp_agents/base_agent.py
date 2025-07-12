@@ -29,6 +29,9 @@ class BaseAnalysisAgent:
         self.google_api_key = google_api_key 
         self.model_name = model_name
 
+        self._stored_analysis_images = []
+        self._stored_analysis_metadata = {}
+
     def _parse_llm_response(self, response) -> tuple[dict | None, dict | None]:
         """
         Parses the LLM response, expecting JSON.
@@ -239,3 +242,99 @@ class BaseAnalysisAgent:
             system_info_text += str(system_info)
         
         return system_info_text
+    
+    # NEW METHOD: Store analysis images
+    def _store_analysis_images(self, images: list, metadata: dict = None):
+        """Store analysis images for potential reuse in refinement."""
+        self._stored_analysis_images = images.copy() if images else []
+        self._stored_analysis_metadata = metadata or {}
+        self.logger.debug(f"Stored {len(self._stored_analysis_images)} analysis images for potential refinement")
+    
+    # NEW METHOD: Retrieve stored images
+    def _get_stored_analysis_images(self) -> list:
+        """Retrieve stored analysis images."""
+        return self._stored_analysis_images.copy()
+    
+    # NEW METHOD: Clear stored images
+    def _clear_stored_images(self):
+        """Clear stored images to free memory."""
+        self._stored_analysis_images = []
+        self._stored_analysis_metadata = {}
+
+    # NEW METHOD: Refine analysis with feedback
+    def _refine_analysis_with_feedback(self, original_analysis: str, 
+                                     original_claims: list, 
+                                     user_feedback: str,
+                                     instruction_prompt: str,
+                                     stored_images: list = None,
+                                     system_info: dict = None) -> dict:
+        """Use LLM to refine analysis and claims based on user feedback."""
+        try:
+            # Create refinement prompt
+            refinement_prompt = f"""
+    {instruction_prompt}
+
+    ## REFINEMENT TASK
+    You previously generated this analysis and claims:
+
+    ORIGINAL DETAILED ANALYSIS:
+    {original_analysis}
+
+    ORIGINAL CLAIMS:
+    {json.dumps(original_claims, indent=2)}
+
+    A human expert provided this feedback:
+    "{user_feedback}"
+
+    Please refine both the detailed analysis and scientific claims based on this feedback. 
+    Address the points raised, improve accuracy, and adjust emphasis as suggested.
+    Maintain the same JSON output format with "detailed_analysis" and "scientific_claims" keys.
+    """
+            
+            prompt_parts = [refinement_prompt]
+            
+            # Add stored images
+            if stored_images:
+                for img_data in stored_images:
+                    if isinstance(img_data, dict) and 'label' in img_data and 'data' in img_data:
+                        prompt_parts.append(f"\n{img_data['label']}:")
+                        prompt_parts.append({"mime_type": "image/jpeg", "data": img_data['data']})
+                    elif isinstance(img_data, dict) and img_data.get("mime_type") == "image/jpeg":
+                        prompt_parts.append("\nAnalysis image:")
+                        prompt_parts.append(img_data)
+            
+            # Add system info
+            if system_info:
+                system_info_section = self._build_system_info_prompt_section(system_info)
+                if system_info_section:
+                    prompt_parts.append(system_info_section)
+            
+            prompt_parts.append("\nProvide the refined analysis in JSON format.")
+            
+            # Query LLM for refinement
+            self.logger.info("🔄 Refining analysis using stored images...")
+            response = self.model.generate_content(
+                contents=prompt_parts,
+                generation_config=self.generation_config,
+                safety_settings=self.safety_settings,
+            )
+            
+            result_json, error_dict = self._parse_llm_response(response)
+            
+            if error_dict:
+                return {"error": "Refinement failed", "details": error_dict}
+            
+            # Validate refined claims
+            refined_claims = result_json.get("scientific_claims", [])
+            validated_claims = self._validate_scientific_claims(refined_claims)
+            
+            self.logger.info(f"Refinement complete: {len(validated_claims)} validated claims")
+            
+            return {
+                "detailed_analysis": result_json.get("detailed_analysis", original_analysis),
+                "scientific_claims": validated_claims
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Analysis refinement failed: {e}")
+            return {"error": "Refinement failed", "details": str(e)}

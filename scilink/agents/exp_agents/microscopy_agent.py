@@ -9,6 +9,9 @@ from google.generativeai.types import GenerationConfig
 from .base_agent import BaseAnalysisAgent
 from .recommendation_agent import RecommendationAgent
 
+from .human_feedback import SimpleFeedbackMixin
+
+
 from .instruct import (
     MICROSCOPY_ANALYSIS_INSTRUCTIONS,
     MICROSCOPY_CLAIMS_INSTRUCTIONS,
@@ -19,13 +22,15 @@ from .utils import load_image, preprocess_image, convert_numpy_to_jpeg_bytes, no
 from atomai.stat import SlidingFFTNMF
 
 
-class MicroscopyAnalysisAgent(BaseAnalysisAgent):
+class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
-    Agent for analyzing microscopy images using generative AI models.
+    Agent for analyzing microscopy images using generative AI models
     """
 
-    def __init__(self, google_api_key: str | None = None, model_name: str = "gemini-2.5-pro-preview-06-05", fft_nmf_settings: dict | None = None):
-        super().__init__(google_api_key, model_name)
+    def __init__(self,
+                 google_api_key: str | None = None, model_name: str = "gemini-2.5-pro-preview-06-05",
+                 fft_nmf_settings: dict | None = None, enable_human_feedback: bool = True):
+        super().__init__(google_api_key, model_name, enable_human_feedback=enable_human_feedback)
         
         self.fft_nmf_settings = fft_nmf_settings if fft_nmf_settings else {}
         self.RUN_FFT_NMF = self.fft_nmf_settings.get('FFT_NMF_ENABLED', False)
@@ -153,6 +158,8 @@ class MicroscopyAnalysisAgent(BaseAnalysisAgent):
         Now uses base class methods for common functionality.
         """
         try:
+            # Clear any previous stored images
+            self._clear_stored_images()
             # Use base class methods for common operations
             system_info = self._handle_system_info(system_info)
             loaded_image = load_image(image_path)
@@ -161,6 +168,10 @@ class MicroscopyAnalysisAgent(BaseAnalysisAgent):
             preprocessed_img_array, _ = preprocess_image(loaded_image)
             image_bytes = convert_numpy_to_jpeg_bytes(preprocessed_img_array)
             image_blob = {"mime_type": "image/jpeg", "data": image_bytes}
+
+            analysis_images = [
+                {"label": "Primary Microscopy Image", "data": image_bytes}
+            ]
 
             components_array, abundances_array = None, None
             if self.RUN_FFT_NMF:
@@ -237,12 +248,26 @@ class MicroscopyAnalysisAgent(BaseAnalysisAgent):
                         abun_bytes = normalize_and_convert_to_image_bytes(abundances_array[i], log_scale=False, format=img_format)
                         prompt_parts.append(f"\nNMF Abundance Map {i+1} (Spatial Distribution - Grayscale):")
                         prompt_parts.append({"mime_type": f"image/{img_format.lower()}", "data": abun_bytes})
+                    
+                        analysis_images.append({
+                            "label": f"NMF Abundance Map {i+1} (Spatial Distribution - Grayscale)",
+                            "data": abun_bytes
+                        })
+                    
                     except Exception as convert_e:
                         self.logger.error(f"Failed to convert NMF result {i+1} to image bytes: {convert_e}")
                         prompt_parts.append(f"\n(Error converting NMF result {i+1} image for prompt)")
             else:
                 prompt_parts.append("\n\n(No supplemental FFT/NMF image analysis results are provided or FFT/NMF was disabled/failed)")
 
+            analysis_metadata = {
+                "image_path": image_path,
+                "system_info": system_info,
+                "fft_nmf_enabled": self.RUN_FFT_NMF,
+                "num_stored_images": len(analysis_images)
+            }
+            self._store_analysis_images(analysis_images, analysis_metadata)
+            
             # Use base class method for system info prompt section
             system_info_section = self._build_system_info_prompt_section(system_info)
             if system_info_section:
@@ -259,12 +284,15 @@ class MicroscopyAnalysisAgent(BaseAnalysisAgent):
             return self._parse_llm_response(response)  # Using base class method
 
         except FileNotFoundError:
+            self._clear_stored_images()
             self.logger.error(f"Image file not found: {image_path}")
             return None, {"error": "Image file not found", "details": f"Path: {image_path}"}
         except ImportError as e:
+            self._clear_stored_images()
             self.logger.error(f"Missing dependency for image processing: {e}")
             return None, {"error": "Missing image processing dependency", "details": str(e)}
         except Exception as e:
+            self._clear_stored_images()
             self.logger.exception(f"An unexpected error occurred during image analysis setup or FFT/NMF: {e}")
             return None, {"error": "An unexpected error occurred during analysis setup", "details": str(e)}
 
@@ -404,4 +432,12 @@ class MicroscopyAnalysisAgent(BaseAnalysisAgent):
         elif not valid_claims:
              self.logger.warning("LLM call did not yield valid claims or analysis text for claims workflow.")
 
-        return {"detailed_analysis": detailed_analysis, "scientific_claims": valid_claims}
+        initial_result = {"detailed_analysis": detailed_analysis, "scientific_claims": valid_claims}
+        return self._apply_feedback_if_enabled(
+            initial_result, 
+            image_path=image_path, 
+            system_info=system_info
+        )
+    
+    def _get_claims_instruction_prompt(self) -> str:
+        return MICROSCOPY_CLAIMS_INSTRUCTIONS

@@ -9,23 +9,25 @@ from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockT
 
 from .base_agent import BaseAnalysisAgent
 
-from .instruct import (
-    SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS,
-    SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS,
-)
+from .instruct import SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS
+
 from .utils import load_image, preprocess_image, convert_numpy_to_jpeg_bytes
+
+from .human_feedback import SimpleFeedbackMixin
 
 from atomai.models import ParticleAnalyzer
 
 
-class SAMMicroscopyAnalysisAgent(BaseAnalysisAgent):
+class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
     Agent for analyzing microscopy images using Segment Anything Model (SAM) and generative AI models.
     Refactored to inherit from BaseAnalysisAgent and follows the same pattern as other microscopy agents.
     """
 
-    def __init__(self, google_api_key: str | None = None, model_name: str = "gemini-2.5-pro-preview-06-05", sam_settings: dict | None = None):
-        super().__init__(google_api_key, model_name)
+    def __init__(self,
+                 google_api_key: str | None = None, model_name: str = "gemini-2.5-pro-preview-06-05",
+                 sam_settings: dict | None = None, enable_human_feedback: bool = False):
+        super().__init__(google_api_key, model_name, enable_human_feedback=enable_human_feedback)
         
         self.sam_settings = sam_settings if sam_settings else {}
         self.RUN_SAM = self.sam_settings.get('SAM_ENABLED', True)
@@ -363,6 +365,8 @@ class SAMMicroscopyAnalysisAgent(BaseAnalysisAgent):
         Now uses base class methods for common functionality.
         """
         try:
+            # Clear any previous stored images
+            self._clear_stored_images()
             # Use base class methods for common operations
             system_info = self._handle_system_info(system_info)
             loaded_image = load_image(image_path)
@@ -372,10 +376,21 @@ class SAMMicroscopyAnalysisAgent(BaseAnalysisAgent):
             image_bytes = convert_numpy_to_jpeg_bytes(preprocessed_img_array) # This is the rescaled image
             image_blob = {"mime_type": "image/jpeg", "data": image_bytes}
 
+            analysis_images = [
+                {"label": "Primary Microscopy Image", "data": image_bytes}
+            ]
+
             sam_overlay, sam_stats = None, None
             if self.RUN_SAM:
                 sam_overlay, sam_stats = self._run_sam_analysis(image_path, nm_per_pixel=nm_per_pixel)
             
+            if sam_overlay is not None:
+                    sam_overlay_bytes = convert_numpy_to_jpeg_bytes(sam_overlay)
+                    analysis_images.append({
+                        "label": "SAM Particle Segmentation Overlay (particles outlined in red with centroids and labels)",
+                        "data": sam_overlay_bytes
+                    })
+                    
             prompt_parts = [instruction_prompt]
             
             analysis_request_text = "\nPlease analyze the following microscopy image"
@@ -443,6 +458,16 @@ class SAMMicroscopyAnalysisAgent(BaseAnalysisAgent):
                 prompt_parts.append(system_info_section)
             
             prompt_parts.append("\n\nProvide your analysis strictly in the requested JSON format.")
+
+            analysis_metadata = {
+                "image_path": image_path,
+                "system_info": system_info,
+                "sam_enabled": self.RUN_SAM,
+                "particle_count": sam_stats.get('total_particles', 0) if sam_stats else 0,
+                "num_stored_images": len(analysis_images)
+            }
+            self._store_analysis_images(analysis_images, analysis_metadata)
+
             
             self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP: INTERPRETING RESULTS -------------------- 🤖\n")
             response = self.model.generate_content(
@@ -453,12 +478,15 @@ class SAMMicroscopyAnalysisAgent(BaseAnalysisAgent):
             return self._parse_llm_response(response)  # Using base class method
 
         except FileNotFoundError:
+            self._clear_stored_images()
             self.logger.error(f"Image file not found: {image_path}")
             return None, {"error": "Image file not found", "details": f"Path: {image_path}"}
         except ImportError as e:
+            self._clear_stored_images()
             self.logger.error(f"Missing dependency for SAM analysis: {e}")
             return None, {"error": "Missing SAM dependency", "details": str(e)}
         except Exception as e:
+            self._clear_stored_images()
             self.logger.exception(f"An unexpected error occurred during SAM image analysis setup: {e}")
             return None, {"error": "An unexpected error occurred during analysis setup", "details": str(e)}
 
@@ -488,4 +516,12 @@ class SAMMicroscopyAnalysisAgent(BaseAnalysisAgent):
         elif not valid_claims:
              self.logger.warning("LLM call did not yield valid claims or analysis text for SAM claims workflow.")
 
-        return {"detailed_analysis": detailed_analysis, "scientific_claims": valid_claims}
+        initial_result = {"detailed_analysis": detailed_analysis, "scientific_claims": valid_claims}
+        return self._apply_feedback_if_enabled(
+            initial_result,
+            image_path=image_path,
+            system_info=system_info
+        )
+    
+    def _get_claims_instruction_prompt(self) -> str:
+        return SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS
