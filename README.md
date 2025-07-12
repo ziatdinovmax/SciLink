@@ -22,6 +22,22 @@ SciLink employs a system of intelligent agents to automate the research cycle, f
 
 - 🛡️ **Secure by Design**: AI-generated code for creating atomic structures is executed in a security sandbox (Docker, Colab, or VM) to protect your system. The tool will halt if a safe environment is not detected.
 
+## Statement of Need
+
+Have you ever run an experiment where you thought you had discovered something new, only to find out weeks or months later that it had already been reported five years ago? Or perhaps you've stared at a fascinating structure in your experimental images, wishing you could get a theorist's insight, but the thought of initiating a collaboration that might take months to even get going feels exhausting.
+
+SciLink is designed to address those bottlenecks and close the gap between "I think I found something" and "I know what this is and what to do next." It accelerates the research lifecycle by:
+
+- Converting raw experimental data into well-defined scientific claims, enabling immediate and effective literature searches.
+
+- Instantly contextualizing experimental findings within the vast body of scientific literature, giving you a "novelty check" on the spot.
+
+- Bridging the experiment-theory gap, automatically translating your experimental data into simulation-ready computational models.
+
+- Reducing the time-to-insight from weeks and months to minutes and hours, enabling you to rapidly iterate on new ideas while your experiment is still running!
+
+
+
 ## Installation
 
 ### Standard Installation
