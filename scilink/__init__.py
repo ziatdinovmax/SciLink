@@ -33,10 +33,8 @@ def show_config():
     """Show current API key configuration status"""
     show_api_status()
 
-# Import workflows for easy access
-from .workflows.microscopy_novelty_workflow import MicroscopyNoveltyAssessmentWorkflow
+from .workflows import ExperimentNoveltyAssessment
 from .workflows.dft_workflow import DFTWorkflow
-from .workflows.spectroscopy_novelty_workflow import SpectroscopyNoveltyAssessmentWorkflow
 from .workflows.dft_recommendation_workflow import DFTRecommendationsWorkflow
 from .workflows.experiment2dft import Experimental2DFT
 
@@ -49,4 +47,5 @@ __all__ = [
     'SpectroscopyNoveltyAssessmentWorkflow',
     'DFTRecommendationsWorkflow',
     'Experimental2DFT'
+    'ExperimentNoveltyAssessment'
 ]
