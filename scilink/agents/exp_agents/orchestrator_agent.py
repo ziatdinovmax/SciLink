@@ -118,7 +118,8 @@ class OrchestratorAgent:
 
             agent_id = result_json.get('agent_id')
             reasoning = result_json.get('reasoning', 'No reasoning provided.')
-            self.logger.info(f"LLM selected agent ID: {agent_id}. Reasoning: {reasoning}")
+            self.logger.info(f"\n\n🧠 Orchestrator Reasoning: {reasoning}\n")
+
 
             if isinstance(agent_id, int) and agent_id in AGENT_MAP:
                 return agent_id, reasoning

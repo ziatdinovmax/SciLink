@@ -4,6 +4,7 @@ import numpy as np
 from io import BytesIO
 import os
 import glob
+import matplotlib.pyplot as plt
 
 import atomai as aoi
 
@@ -268,7 +269,7 @@ def predict_with_ensemble(dir_path, image, thresh=0.8, refine=True, max_refineme
         logger.error(f"No model files found in '{dir_path}' matching the pattern 'atomnet3*.tar'.")
         raise FileNotFoundError(f"Could not find any DCNN model files ('atomnet3*.tar') in the specified directory: {dir_path}")
 
-    logger.info(f"Found {len(model_files)} models for ensemble prediction.")
+    logger.info(f"Found {len(model_files)} models for ensemble prediction.\n")
     for model_file in model_files:
         logger.debug(f"Loading model: {model_file}")
         model = aoi.load_model(model_file)
@@ -384,3 +385,236 @@ def unzip_file(zip_filepath, extract_to_dir):
     except Exception as e:
         print(f"An error occurred during unzipping: {e}")
         return False
+
+
+def create_abundance_overlay(structure_image: np.ndarray, 
+                           abundance_map: np.ndarray,
+                           threshold_percentile: float = 80.0,
+                           alpha: float = 0.6,
+                           colormap: str = 'hot') -> bytes:
+    """
+    Create a simple overlay of abundance map on structure image for LLM analysis.
+    
+    Args:
+        structure_image: 2D grayscale structure image
+        abundance_map: 2D abundance map from NMF
+        threshold_percentile: Show pixels above this percentile (0-100)
+        alpha: Transparency of overlay (0-1)
+        colormap: Matplotlib colormap name
+    
+    Returns:
+        Image bytes for LLM processing
+    """
+    # Ensure both images are 2D
+    if structure_image.ndim != 2 or abundance_map.ndim != 2:
+        raise ValueError("Both images must be 2D")
+    
+    # Resize abundance map to match structure if needed
+    if structure_image.shape != abundance_map.shape:
+        abundance_map = cv2.resize(abundance_map, 
+                                 (structure_image.shape[1], structure_image.shape[0]))
+    
+    # Normalize structure image to 0-1
+    struct_norm = (structure_image - structure_image.min()) / (structure_image.max() - structure_image.min())
+    
+    # Create threshold mask (use original abundance values)
+    threshold = np.percentile(abundance_map, threshold_percentile)
+    mask = abundance_map >= threshold
+    
+    # Normalize abundance for color mapping
+    if abundance_map.max() > abundance_map.min():
+        abund_norm = (abundance_map - abundance_map.min()) / (abundance_map.max() - abundance_map.min())
+    else:
+        abund_norm = abundance_map
+    
+    # Create overlay image
+    fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+    
+    # Show structure as background
+    ax.imshow(struct_norm, cmap='gray', aspect='equal')
+    
+    # Add colored abundance overlay where above threshold
+    if np.any(mask):
+        overlay_data = np.where(mask, abund_norm, np.nan)  # Use NaN for transparency
+        ax.imshow(overlay_data, cmap=colormap, alpha=alpha, aspect='equal')
+    
+    ax.set_title(f'Structure + Abundance Overlay (>{threshold_percentile}th percentile)')
+    ax.axis('off')
+    
+    # Convert to bytes
+    buf = BytesIO()
+    plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
+    plt.close()
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def create_multi_abundance_overlays(structure_image: np.ndarray,
+                                  abundance_maps: np.ndarray,
+                                  threshold_percentile: float = 80.0,
+                                  alpha: float = 0.6,
+                                  use_simple_colors: bool = True) -> bytes:
+    """
+    Create overlays for all NMF components in a single image for LLM analysis.
+    
+    Args:
+        structure_image: 2D grayscale structure image
+        abundance_maps: 3D array (height, width, n_components)
+        threshold_percentile: Show pixels above this percentile
+        alpha: Transparency of overlays
+        use_simple_colors: If True, use solid colors; if False, use intensity gradients
+    
+    Returns:
+        Image bytes showing structural image + all component overlays
+    """
+    n_components = abundance_maps.shape[2]
+    
+    if use_simple_colors:
+        # Simple solid colors - easier to distinguish, unlimited components
+        colors = ['red', 'blue', 'green', 'purple', 'orange', 'cyan', 'magenta', 'yellow']
+        # Generate more colors if needed
+        while len(colors) < n_components:
+            colors.extend(['darkred', 'darkblue', 'darkgreen', 'indigo', 'brown', 'pink'])
+    else:
+        # Traditional colormaps with intensity gradients
+        colormaps = ['Reds', 'Blues', 'Greens', 'Purples', 'Oranges', 'plasma', 'viridis', 'inferno']
+    
+    # Calculate grid layout: +1 for original structure image
+    total_plots = n_components + 1
+    cols = min(4, total_plots)  # Max 4 columns for readability
+    rows = (total_plots + cols - 1) // cols
+    
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 3.5, rows * 3.5))
+    if rows == 1 and cols == 1:
+        axes = [axes]
+    elif rows == 1 or cols == 1:
+        axes = axes.flatten()
+    else:
+        axes = axes.flatten()
+    
+    # Normalize structure image
+    struct_norm = (structure_image - structure_image.min()) / (structure_image.max() - structure_image.min())
+    
+    # Plot 1: Original structural image
+    axes[0].imshow(struct_norm, cmap='gray', aspect='equal')
+    axes[0].set_title('Original Structure\n(Reference)', fontweight='bold', fontsize=14)
+    axes[0].axis('off')
+    
+    # Plot 2+: Component overlays
+    for i in range(n_components):
+        ax_idx = i + 1  # Offset by 1 for the structure image
+        abundance_map = abundance_maps[..., i]
+        
+        # Resize if needed
+        if structure_image.shape != abundance_map.shape:
+            abundance_map = cv2.resize(abundance_map, 
+                                     (structure_image.shape[1], structure_image.shape[0]))
+        
+        # Threshold
+        threshold = np.percentile(abundance_map, threshold_percentile)
+        mask = abundance_map >= threshold
+        
+        # Create overlay
+        axes[ax_idx].imshow(struct_norm, cmap='gray', aspect='equal')
+        
+        if np.any(mask):
+            if use_simple_colors:
+                # Simple solid color overlay - just show the mask
+                color_array = np.zeros((*mask.shape, 4))  # RGBA
+                if i < len(colors):
+                    from matplotlib.colors import to_rgba
+                    rgba = to_rgba(colors[i])
+                    color_array[mask] = rgba
+                    color_array[mask, 3] = alpha  # Set alpha
+                    axes[ax_idx].imshow(color_array, aspect='equal')
+            else:
+                # Traditional intensity-based overlay
+                if abundance_map.max() > abundance_map.min():
+                    abund_norm = (abundance_map - abundance_map.min()) / (abundance_map.max() - abundance_map.min())
+                else:
+                    abund_norm = abundance_map
+                
+                overlay_data = np.where(mask, abund_norm, np.nan)
+                axes[ax_idx].imshow(overlay_data, cmap=colormaps[i % len(colormaps)], 
+                                  alpha=alpha, aspect='equal')
+        
+        # Calculate coverage
+        coverage = np.sum(mask) / mask.size * 100
+        color_name = colors[i] if use_simple_colors and i < len(colors) else f"comp{i+1}"
+        axes[ax_idx].set_title(f'Component {i+1}\n({color_name}, {coverage:.1f}% coverage)', fontsize=14)
+        axes[ax_idx].axis('off')
+    
+    # Hide unused subplots
+    for i in range(total_plots, len(axes)):
+        axes[i].axis('off')
+    
+    plt.tight_layout()
+    
+    # Convert to bytes
+    buf = BytesIO()
+    plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
+    plt.close()
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def extract_atomic_intensities(image_array: np.ndarray, coordinates: np.ndarray, 
+                               box_size: int = 2) -> np.ndarray:
+    """
+    Extract intensity values from small boxes around detected atomic positions.
+    
+    Args:
+        image_array: 2D microscopy image
+        coordinates: Nx2 array of (y, x) atomic coordinates
+        box_size: Size of square box around each atom (e.g., 2 = 2x2 pixels)
+        
+    Returns:
+        1D array of intensity values (one per atom)
+    """
+    if coordinates is None or len(coordinates) == 0:
+        return np.array([])
+    
+    intensities = []
+    h, w = image_array.shape
+    half_box = box_size // 2
+    
+    for y, x in coordinates[:, :2].astype(int):  # Use only y, x coordinates
+        # Define box boundaries
+        y_min = max(0, y - half_box)
+        y_max = min(h, y + half_box + 1)
+        x_min = max(0, x - half_box)
+        x_max = min(w, x + half_box + 1)
+        
+        # Extract intensity (mean of the box)
+        box_intensity = np.mean(image_array[y_min:y_max, x_min:x_max])
+        intensities.append(box_intensity)
+    
+    return np.array(intensities)
+
+
+def create_intensity_histogram_plot(intensities: np.ndarray, n_bins: int = 50) -> bytes:
+    """Create histogram plot of atomic intensities."""
+    fig, ax = plt.subplots(figsize=(8, 6))
+    
+    ax.hist(intensities, bins=n_bins, alpha=0.7, color='skyblue', edgecolor='black')
+    ax.set_xlabel('Intensity')
+    ax.set_ylabel('Number of Atoms')
+    ax.set_title(f'Atomic Intensity Distribution ({len(intensities)} atoms)')
+    ax.grid(True, alpha=0.3)
+    
+    # Add statistics
+    ax.axvline(np.mean(intensities), color='red', linestyle='--', 
+                label=f'Mean: {np.mean(intensities):.2f}')
+    ax.axvline(np.median(intensities), color='orange', linestyle='--', 
+                label=f'Median: {np.median(intensities):.2f}')
+    ax.legend()
+    
+    plt.tight_layout()
+    
+    buf = BytesIO()
+    plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
+    buf.seek(0)
+    image_bytes = buf.getvalue()
+    plt.close()
+    
+    return image_bytes

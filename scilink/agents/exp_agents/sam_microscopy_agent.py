@@ -7,105 +7,35 @@ import numpy as np
 import google.generativeai as genai
 from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockThreshold
 
-from .instruct import (
-    SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS,
-    PARTICLE_ANALYSIS_REFINE_INSTRUCTIONS,
-)
+from .base_agent import BaseAnalysisAgent
+
+from .instruct import SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS
+
 from .utils import load_image, preprocess_image, convert_numpy_to_jpeg_bytes
 
-from ...auth import get_api_key, APIKeyNotFoundError
+from .human_feedback import SimpleFeedbackMixin
 
 from atomai.models import ParticleAnalyzer
 
 
-class SAMMicroscopyAnalysisAgent:
+class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
     Agent for analyzing microscopy images using Segment Anything Model (SAM) and generative AI models.
-    Follows the same pattern as the standard microscopy agent but uses SAM for particle segmentation.
+    Refactored to inherit from BaseAnalysisAgent and follows the same pattern as other microscopy agents.
     """
 
-    def __init__(self, google_api_key: str | None = None, model_name: str = "gemini-2.5-pro-preview-06-05", sam_settings: dict | None = None):
-        # Auto-discover API key
-        if google_api_key is None:
-            google_api_key = get_api_key('google')
-            if not google_api_key:
-                raise APIKeyNotFoundError('google')
-        genai.configure(api_key=google_api_key)
+    def __init__(self,
+                 google_api_key: str | None = None, model_name: str = "gemini-2.5-pro-preview-06-05",
+                 sam_settings: dict | None = None, enable_human_feedback: bool = False):
+        super().__init__(google_api_key, model_name, enable_human_feedback=enable_human_feedback)
         
-        self.model = genai.GenerativeModel(model_name)
-        self.generation_config = GenerationConfig(response_mime_type="application/json")
-        self.safety_settings = {
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-        }
-        self.logger = logging.getLogger(__name__)
         self.sam_settings = sam_settings if sam_settings else {}
         self.RUN_SAM = self.sam_settings.get('SAM_ENABLED', True)
         self.refinement_cycles = self.sam_settings.get('refinement_cycles', 0)
         self.save_visualizations = self.sam_settings.get('save_visualizations', True)
 
-    def _parse_llm_response(self, response) -> tuple[dict | None, dict | None]:
-        """
-        Parses the LLM response, expecting JSON.
-        """
-        result_json = None
-        error_dict = None
-        raw_text = None
-        json_string = None
-
-        try:
-            raw_text = response.text
-            first_brace_index = raw_text.find('{')
-            last_brace_index = raw_text.rfind('}')
-            if first_brace_index != -1 and last_brace_index != -1 and last_brace_index > first_brace_index:
-                json_string = raw_text[first_brace_index : last_brace_index + 1]
-                result_json = json.loads(json_string)
-            else:
-                raise ValueError("Could not find valid JSON object delimiters '{' and '}' in the response text.")
-
-        except (json.JSONDecodeError, AttributeError, IndexError, ValueError) as e:
-            error_details = str(e)
-            error_raw_response = raw_text if raw_text is not None else getattr(response, 'text', 'N/A')
-            self.logger.error(f"Error parsing LLM JSON response: {e}")
-            parsed_substring_for_log = json_string if json_string else 'N/A'
-            self.logger.debug(f"Attempted to parse substring: {parsed_substring_for_log[:500]}...")
-            self.logger.debug(f"Original Raw response text: {error_raw_response[:500]}...")
-
-            if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
-                block_reason = response.prompt_feedback.block_reason
-                self.logger.error(f"Request blocked due to: {block_reason}")
-                error_dict = {"error": f"Content blocked by safety filters", "details": f"Reason: {block_reason}"}
-            elif response.candidates and response.candidates[0].finish_reason != 1:
-                finish_reason = response.candidates[0].finish_reason
-                self.logger.error(f"Generation finished unexpectedly: {finish_reason}")
-                error_dict = {"error": f"Generation finished unexpectedly: {finish_reason}", "details": error_details, "raw_response": error_raw_response}
-            else:
-                error_dict = {"error": "Failed to parse valid JSON from LLM response", "details": error_details, "raw_response": error_raw_response}
-        except Exception as e:
-            self.logger.exception(f"Unexpected error processing response: {e}")
-            error_dict = {"error": "Unexpected error processing LLM response", "details": str(e)}
-        
-        return result_json, error_dict
-
-    def _generate_json_from_text_parts(self, prompt_parts: list) -> tuple[dict | None, dict | None]:
-        """
-        Internal helper to generate JSON from a list of textual prompt parts.
-        """
-        try:
-            self.logger.debug(f"Sending text-only prompt to LLM. Total parts: {len(prompt_parts)}")
-            response = self.model.generate_content(
-                contents=prompt_parts,
-                generation_config=self.generation_config,
-                safety_settings=self.safety_settings,
-            )
-            return self._parse_llm_response(response)
-        except Exception as e:
-            self.logger.exception(f"An unexpected error occurred during text-based LLM call: {e}")
-            return None, {"error": "An unexpected error occurred during text-based LLM call", "details": str(e)}
-
     def _save_visualization(self, overlay_image: np.ndarray, stage: str, cycle: int, particle_count: int, params: dict):
-        """
-        Save visualization images for each refinement step.
-        """
+        """Save visualization images for each refinement step."""
         try:
             from datetime import datetime
             
@@ -139,9 +69,7 @@ class SAMMicroscopyAnalysisAgent:
             self.logger.error(f"Failed to save visualization: {e}")
 
     def _run_sam_analysis(self, image_path: str, nm_per_pixel: float | None = None) -> tuple[np.ndarray | None, dict | None]:
-        """
-        Run SAM particle segmentation analysis with optional iterative refinement.
-        """
+        """Run SAM particle segmentation analysis with optional iterative refinement."""
         try:
             self.logger.info(f"--- Starting SAM Particle Segmentation Analysis (nm/pixel: {nm_per_pixel}) ---")
             
@@ -165,7 +93,6 @@ class SAMMicroscopyAnalysisAgent:
             image_array, pixel_rescaling_factor_to_original = preprocess_image(raw_image)
             self.original_preprocessed_image = image_array # This is the rescaled image (used for LLM refinement)
 
-                    
             # Initial analysis parameters from config or defaults
             current_params = {
                 "use_clahe": self.sam_settings.get('use_clahe', False),
@@ -177,6 +104,7 @@ class SAMMicroscopyAnalysisAgent:
             }
             
             # Run initial analysis
+            self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP: SAM PARTICLE SEGMENTATION -------------------- 🤖\n")
             self.logger.info(f"Running initial SAM analysis with params: {current_params}")
             sam_result = analyzer.analyze(image_array, params=current_params)
             
@@ -187,8 +115,7 @@ class SAMMicroscopyAnalysisAgent:
             
             # Run refinement cycles if requested
             for cycle in range(self.refinement_cycles):
-                self.logger.info(f"--- Starting refinement cycle {cycle + 1}/{self.refinement_cycles} ---")
-                
+                self.logger.info(f"\n\n🤖 -------------------- ANALYSIS AGENT STEP: PARAMETER REFINEMENT CYCLE {cycle + 1}/{self.refinement_cycles} -------------------- 🤖\n")                
                 # Create visualization of current result
                 current_overlay = ParticleAnalyzer.visualize_particles(
                     sam_result, 
@@ -242,6 +169,8 @@ class SAMMicroscopyAnalysisAgent:
             )
             
             # Extract comprehensive morphological statistics
+            self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP: MORPHOLOGICAL STATISTICS EXTRACTION -------------------- 🤖\n")
+            self.logger.info(f"Extracting comprehensive morphological statistics for {sam_result['total_count']} particles")
             particles_df = ParticleAnalyzer.particles_to_dataframe(sam_result)
             
             if not particles_df.empty:
@@ -337,9 +266,7 @@ class SAMMicroscopyAnalysisAgent:
             return None, None
 
     def _get_refinement_parameters(self, overlay_image: np.ndarray, particle_count: int, current_params: dict) -> dict | None:
-        """
-        Get refinement parameters from LLM based on visual analysis of current results.
-        """
+        """Get refinement parameters from LLM based on visual analysis of current results."""
         try:
             self.logger.info(f"Requesting parameter refinement for {particle_count} particles")
             
@@ -348,7 +275,7 @@ class SAMMicroscopyAnalysisAgent:
             overlay_bytes = convert_numpy_to_jpeg_bytes(overlay_image)
             
             # Build prompt for refinement with BOTH images
-            prompt_parts = [PARTICLE_ANALYSIS_REFINE_INSTRUCTIONS]
+            prompt_parts = [SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS]
             prompt_parts.append(f"\n\nCurrent Analysis Results:")
             prompt_parts.append(f"- Particle count: {particle_count}")
             prompt_parts.append(f"- Current parameters: {json.dumps(current_params, indent=2)}")
@@ -374,7 +301,7 @@ class SAMMicroscopyAnalysisAgent:
                 safety_settings=self.safety_settings,
             )
             
-            result_json, error_dict = self._parse_llm_response(response)
+            result_json, error_dict = self._parse_llm_response(response)  # Using base class method
             
             if error_dict:
                 self.logger.warning(f"LLM refinement request failed: {error_dict}")
@@ -435,60 +362,40 @@ class SAMMicroscopyAnalysisAgent:
                             instruction_prompt: str) -> tuple[dict | None, dict | None]:
         """
         Internal helper for image-based analysis, including optional SAM segmentation.
+        Now uses base class methods for common functionality.
         """
         try:
-            # Handle system_info input (can be dict, file path, or None)
-            if isinstance(system_info, str):
-                try:
-                    with open(system_info, 'r') as f:
-                        system_info = json.load(f)
-                except (FileNotFoundError, json.JSONDecodeError) as e:
-                    self.logger.error(f"Error loading system_info from {system_info}: {e}")
-                    system_info = {} # Proceed without system info if loading fails
-            elif system_info is None:
-                system_info = {} # Ensure it's a dict for easier access later
-
+            # Clear any previous stored images
+            self._clear_stored_images()
+            # Use base class methods for common operations
+            system_info = self._handle_system_info(system_info)
             loaded_image = load_image(image_path)
-
-            # Determine physical scale (nm/pixel) from metadata, mirroring spectroscopy agent's approach
-            nm_per_pixel = None
-            if isinstance(system_info, dict) and 'spatial_info' in system_info and isinstance(system_info.get('spatial_info'), dict):
-                spatial = system_info['spatial_info']
-                fov_x = spatial.get("field_of_view_x")
-                units = spatial.get("field_of_view_units", "nm") # Default to nm
-
-                if fov_x is not None and isinstance(fov_x, (int, float)) and fov_x > 0:
-                    h, w = loaded_image.shape[:2]
-                    
-                    # Convert provided units to nm for consistent calculations
-                    scale_to_nm = 1.0
-                    if units.lower() in ['um', 'micrometer', 'micrometers']:
-                        scale_to_nm = 1000.0
-                    elif units.lower() in ['a', 'angstrom', 'angstroms']:
-                        scale_to_nm = 0.1
-                    
-                    fov_in_nm = fov_x * scale_to_nm
-                    
-                    if w > 0:
-                        nm_per_pixel = fov_in_nm / w
-                        self.logger.info(f"Calculated nm/pixel from FOV: {fov_x} {units} / {w} px = {nm_per_pixel:.4f} nm/pixel")
-                    else:
-                        self.logger.warning("Cannot calculate scale from FOV because image width is 0.")
-                else:
-                    self.logger.warning(f"Invalid or missing 'field_of_view_x' in spatial_info: {fov_x}. Physical scale not applied.")
+            nm_per_pixel, fov_in_nm = self._calculate_spatial_scale(system_info, loaded_image.shape)
 
             preprocessed_img_array, _ = preprocess_image(loaded_image)
             image_bytes = convert_numpy_to_jpeg_bytes(preprocessed_img_array) # This is the rescaled image
             image_blob = {"mime_type": "image/jpeg", "data": image_bytes}
 
+            analysis_images = [
+                {"label": "Primary Microscopy Image", "data": image_bytes}
+            ]
+
             sam_overlay, sam_stats = None, None
             if self.RUN_SAM:
                 sam_overlay, sam_stats = self._run_sam_analysis(image_path, nm_per_pixel=nm_per_pixel)
             
+            if sam_overlay is not None:
+                    sam_overlay_bytes = convert_numpy_to_jpeg_bytes(sam_overlay)
+                    analysis_images.append({
+                        "label": "SAM Particle Segmentation Overlay (particles outlined in red with centroids and labels)",
+                        "data": sam_overlay_bytes
+                    })
+                    
             prompt_parts = [instruction_prompt]
             
             analysis_request_text = "\nPlease analyze the following microscopy image"
-            if system_info: analysis_request_text += " using the additional context provided."
+            if system_info: 
+                analysis_request_text += " using the additional context provided."
             analysis_request_text += "\n\nPrimary Microscopy Image:\n"
             prompt_parts.append(analysis_request_text)
             prompt_parts.append(image_blob)
@@ -545,31 +452,41 @@ class SAMMicroscopyAnalysisAgent:
             else:
                 prompt_parts.append("\n\n(No supplemental SAM particle segmentation analysis results are provided or SAM was disabled/failed)")
 
-            if system_info:
-                system_info_text = "\n\nAdditional System Information (Metadata):\n"
-                if isinstance(system_info, str):
-                    try: system_info_text += json.dumps(json.loads(system_info), indent=2)
-                    except json.JSONDecodeError: system_info_text += system_info
-                elif isinstance(system_info, dict): system_info_text += json.dumps(system_info, indent=2)
-                else: system_info_text += str(system_info)
-                prompt_parts.append(system_info_text)
+            # Use base class method for system info prompt section
+            system_info_section = self._build_system_info_prompt_section(system_info)
+            if system_info_section:
+                prompt_parts.append(system_info_section)
             
             prompt_parts.append("\n\nProvide your analysis strictly in the requested JSON format.")
+
+            analysis_metadata = {
+                "image_path": image_path,
+                "system_info": system_info,
+                "sam_enabled": self.RUN_SAM,
+                "particle_count": sam_stats.get('total_particles', 0) if sam_stats else 0,
+                "num_stored_images": len(analysis_images)
+            }
+            self._store_analysis_images(analysis_images, analysis_metadata)
+
             
+            self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP: INTERPRETING RESULTS -------------------- 🤖\n")
             response = self.model.generate_content(
                 contents=prompt_parts,
                 generation_config=self.generation_config,
                 safety_settings=self.safety_settings,
             )
-            return self._parse_llm_response(response)
+            return self._parse_llm_response(response)  # Using base class method
 
         except FileNotFoundError:
+            self._clear_stored_images()
             self.logger.error(f"Image file not found: {image_path}")
             return None, {"error": "Image file not found", "details": f"Path: {image_path}"}
         except ImportError as e:
+            self._clear_stored_images()
             self.logger.error(f"Missing dependency for SAM analysis: {e}")
             return None, {"error": "Missing SAM dependency", "details": str(e)}
         except Exception as e:
+            self._clear_stored_images()
             self.logger.exception(f"An unexpected error occurred during SAM image analysis setup: {e}")
             return None, {"error": "An unexpected error occurred during analysis setup", "details": str(e)}
 
@@ -577,6 +494,7 @@ class SAMMicroscopyAnalysisAgent:
         """
         Analyze microscopy image to generate scientific claims for literature comparison.
         This path always uses image-based analysis with SAM segmentation.
+        Now uses base class validation methods.
         """
         result_json, error_dict = self._analyze_image_base(
             image_path, system_info, SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS
@@ -589,24 +507,21 @@ class SAMMicroscopyAnalysisAgent:
 
         detailed_analysis = result_json.get("detailed_analysis", "Analysis not provided by LLM.")
         scientific_claims = result_json.get("scientific_claims", [])
-        valid_claims = []
-
-        if not isinstance(scientific_claims, list):
-            self.logger.warning(f"'scientific_claims' from LLM was not a list: {scientific_claims}")
-            scientific_claims = []
-
-        for claim in scientific_claims:
-            if isinstance(claim, dict) and all(k in claim for k in ["claim", "scientific_impact", "has_anyone_question", "keywords"]):
-                if isinstance(claim.get("keywords"), list):
-                    valid_claims.append(claim)
-                else:
-                    self.logger.warning(f"Claim skipped due to 'keywords' not being a list: {claim}")
-            else:
-                self.logger.warning(f"Claim skipped due to missing keys or incorrect dict format: {claim}")
         
+        # Use base class validation method
+        valid_claims = self._validate_scientific_claims(scientific_claims)
+
         if not valid_claims and not detailed_analysis == "Analysis not provided by LLM.":
             self.logger.warning("SAM analysis for claims successful ('detailed_analysis' provided) but no valid claims found or parsed.")
         elif not valid_claims:
              self.logger.warning("LLM call did not yield valid claims or analysis text for SAM claims workflow.")
 
-        return {"detailed_analysis": detailed_analysis, "scientific_claims": valid_claims}
+        initial_result = {"detailed_analysis": detailed_analysis, "scientific_claims": valid_claims}
+        return self._apply_feedback_if_enabled(
+            initial_result,
+            image_path=image_path,
+            system_info=system_info
+        )
+    
+    def _get_claims_instruction_prompt(self) -> str:
+        return SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS

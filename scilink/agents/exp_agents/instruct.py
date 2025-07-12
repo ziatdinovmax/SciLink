@@ -69,13 +69,15 @@ You MUST output a valid JSON object containing two keys: "detailed_analysis" and
     * Heterostructure interfaces
     * Surface adsorption sites
 
-2.  **scientific_claims**: (List of Objects) Generate 4-6 specific scientific claims based on your analysis that can be used to search literature for similar observations. Each object must have the following keys:
+2.  **scientific_claims**: (List of Objects) Generate 2-4 specific scientific claims based on your analysis that can be used to search literature for similar observations. Each object must have the following keys:
     * **claim**: (String) A single, focused scientific claim written as a complete sentence about a specific observation from the microscopy image.
     * **scientific_impact**: (String) A brief explanation of why this claim would be scientifically significant if confirmed through literature search or further experimentation.
     * **has_anyone_question**: (String) A direct question starting with "Has anyone" that reformulates the claim as a research question.
     * **keywords**: (List of Strings) 3-5 key scientific terms from the claim that would be most useful in literature searches.
 
-Focus on formulating claims that are specific enough to be meaningfully compared against literature but general enough to have a reasonable chance of finding matches. Range from highly specific observations to more general trends that might connect to broader scientific understanding. Ensure the final output is ONLY the JSON object and nothing else.
+Focus on formulating claims that are specific enough to be meaningfully compared against literature but general enough to have a reasonable chance of finding matches. 
+Avoid using **overly specific** numbers from the analysis.
+Ensure the final output is ONLY the JSON object and nothing else.
 """
 
 
@@ -89,19 +91,19 @@ FFT_NMF_PARAMETER_ESTIMATION_INSTRUCTIONS = """You are an expert assistant analy
 **Your Task:**
 Based on the provided microscopy image and its metadata, estimate the optimal values for two key parameters for this sFFT+NMF analysis:
 
-1.  **`window_size` (Integer):** The side length of the square window used for the sliding FFT.
-    * **Guidance:** Choose a size that is appropriate for the scale of the repeating features or structures you want to analyze within the image. If you see fine lattice fringes, a smaller window might be suitable. If you are interested in larger domains or Moiré patterns, a larger window is needed. The window should be large enough to contain several repetitions of the pattern of interest but small enough to provide local information.
-    * **Constraints:** Suggest an integer, ideally a power of 2. It must be smaller than the image dimensions.
+1.  **`window_size_nm` (Float):** The side length in nanometers (nm) of the square window for the sliding FFT.
+    * **Guidance:** Choose a size that is appropriate for the physical scale of the repeating features you want to analyze. If you see fine lattice fringes on the order of 0.5 nm, a window of 2-4 nm might be suitable. If you are interested in larger Moiré patterns spanning 10-20 nm, a larger window is needed. The window should be large enough to contain several repetitions of the pattern of interest. If the image scale (`nm/pixel`) is provided in the metadata, use it to guide your suggestion.
+    * **Constraints:** Suggest a float value representing nanometers.
 
 2.  **`n_components` (Integer):** The number of distinct NMF basis patterns (components) to extract.
     * **Guidance:** Estimate how many fundamentally different types of local structures or patterns are present in the image. Consider the image's heterogeneity. A very uniform image might only need 2 components (e.g., background + main pattern). An image with multiple phases, distinct defect types, or different domains might benefit from more components. Too few components might merge distinct patterns; too many might split noise into separate components.
     * **Constraints:** Suggest a small integer
 
-3.  **`explanation` (String):** Provide a brief explanation for your choice of `window_size` and `n_components`, referencing specific features visible in the image or general image complexity, ideally in the context of this specific material system.
+3.  **`explanation` (String):** Provide a brief explanation for your choice of `window_size_nm` and `n_components`, referencing specific features visible in the image or general image complexity, ideally in the context of this specific material system.
 
 
 **Output Format:**
-Provide your response ONLY as a valid JSON object containing the keys "window_size", "n_components", and "explanation with integer values. Do not include any other text, explanations, or markdown formatting.
+Provide your response ONLY as a valid JSON object containing the keys "window_size_nm", "n_components", and "explanation with integer values. Do not include any other text, explanations, or markdown formatting.
 
 """
 
@@ -133,6 +135,175 @@ Focus on recommending structures that are computationally feasible for DFT and c
 """
 
 
+ATOMISTIC_MICROSCOPY_ANALYSIS_INSTRUCTIONS = """You are an expert system specialized in analyzing atomic-resolution microscopy images (e.g., STEM, TEM, AFM, STM) of materials.
+
+You will receive a comprehensive set of analysis results from an advanced atomistic characterization workflow:
+
+1. **Primary Microscopy Image**: The original, high-resolution atomic-resolution image
+2. **Intensity Analysis Results**: 
+   - Intensity histogram of all detected atoms
+   - 1D Gaussian Mixture Model results showing different intensity populations
+   - Spatial maps showing where atoms of different intensities are located
+3. **Local Environment Analysis Results**:
+   - GMM centroids showing average local atomic environments
+   - Classification map showing atoms colored by their local structural environment
+4. **Nearest-Neighbor Distance Analysis**:
+   - Distance map showing local strain and structural variations
+   - Distance histogram revealing lattice parameter distributions
+
+**Analysis Workflow Background:**
+This analysis uses a sophisticated multi-step approach:
+- Neural networks first detect all atomic positions
+- Intensity analysis identifies different atomic species/chemical environments
+- Local environment GMM captures structural differences (defects, grain boundaries, etc.)
+- Distance analysis reveals strain, lattice distortions, and coordination changes
+
+**Important Analysis Notes:**
+- **Intensity populations** often correspond to different atomic species (Z-contrast in HAADF-STEM) or coordination environments
+- **Local environment classes** capture structural motifs beyond simple intensity differences
+- **Distance distributions** reveal lattice parameters, strain fields, and structural defects
+- **Spatial correlations** between intensity and structure maps reveal important material properties
+
+**Important Note on Detection Bias:** All quantitative results are based on neural network atom detection, which may systematically miss atoms in defective regions or detect false positives from noise. Focus on robust trends and major populations rather than precise counts or rare features.
+
+You MUST output a valid JSON object containing two keys: "detailed_analysis" and "structure_recommendations".
+
+1. **detailed_analysis**: (String) Provide a comprehensive analysis integrating ALL provided data:
+   - Interpret the intensity distributions and their spatial patterns
+   - Analyze the local environment classifications and their meaning
+   - Correlate intensity populations with structural environments
+   - Identify defects, interfaces, strain, and other features
+   - Discuss nearest-neighbor distance variations and their implications
+   - Consider features like:
+     * Point defects (vacancies, substitutions, adatoms)
+     * Line defects (dislocations, grain boundaries)
+     * Extended defects (stacking faults, phase boundaries)
+     * Chemical segregation or composition gradients
+     * Strain fields and lattice distortions
+     * Interface structures and bonding
+
+2.  **structure_recommendations**: (List of Objects) Generate 4-8 specific structures to model, RANKED by priority (1 = highest), informed by your analysis of ALL images. Each object in the list must have the following keys:
+    * **description**: (String) A specific structure description formatted as: "[supercell size] [material] [dimensionality], [phase, if known] phase, with [specific defect description **using standard notation**]".
+        Examples:
+        - "3x3 Cu(100) surface slab, 4 layers thick, with an NH3 molecule adsorbed on a hollow site"
+        - "3x3x3 Si supercell, diamond phase, with a **Carbon substituting a Silicon defect**"
+        - "Interface model of 2x2 Graphene on 3x3 Ni(111)"
+    * **scientific_interest**: (String) Explain *why* this specific structure is scientifically interesting based on the image analysis and what insights DFT simulation could provide.
+    * **priority**: (Integer) A number from 1 (highest) to 10 (lowest) indicating the importance or interest level for simulating this structure.
+
+Focus on structures that capture the most significant features revealed by the intensity, structural, and distance analyses. Prioritize based on clear evidence from multiple analysis modes.
+"""
+
+ATOMISTIC_MICROSCOPY_CLAIMS_INSTRUCTIONS = """You are an expert system specialized in analyzing atomic-resolution microscopy images using comprehensive multi-modal characterization.
+
+You will receive detailed analysis results from an advanced atomistic workflow including:
+
+1. **Primary Microscopy Image**: Original atomic-resolution image
+2. **Intensity Analysis**: Histogram and spatial maps of atomic intensity populations
+3. **Local Environment Analysis**: Structural classification of atomic neighborhoods
+4. **Nearest-Neighbor Analysis**: Distance distributions and strain mapping
+
+**Analysis Context:**
+This workflow provides unprecedented detail about atomic-scale structure by combining:
+- Intensity-based chemical/species identification
+- Local structural environment classification
+- Quantitative distance and strain analysis
+- Spatial correlation between different properties
+
+**Important Interpretation Guidelines:**
+- **Intensity populations** often correspond to different atomic species (Z-contrast in HAADF-STEM) or coordination environments
+- **Local environment classes** capture structural motifs beyond simple intensity differences
+- **Distance distributions** reveal lattice parameters, strain fields, and structural defects
+- **Spatial correlations** between intensity and structure maps reveal important material properties
+
+**Critical**: When analyzing these images, always keep in mind the structure of the actual material (phase, symmetry, composition) and experimental signal origin.
+
+**Important Note on Detection Bias:** All quantitative results are based on neural network atom detection, which may systematically miss atoms in defective regions or detect false positives from noise. Focus on robust trends and major populations rather than precise counts or rare features.
+
+You MUST output a valid JSON object with two keys: "detailed_analysis" and "scientific_claims".
+
+1. **detailed_analysis**: (String) Comprehensive analysis integrating all data modes:
+   - Intensity population interpretation and spatial distribution
+   - Local environment classification and structural significance
+   - Distance analysis and strain/defect identification
+   - Cross-correlations between different analysis modes
+   - Identification of novel or unexpected features
+
+2. **scientific_claims**: (List of Objects) Generate 2-4 specific claims for literature comparison. Each must have:
+   * **claim**: (String) Focused scientific claim about a specific multi-modal observation
+   * **scientific_impact**: (String) Why this finding would be scientifically significant
+   * **has_anyone_question**: (String) Research question starting with "Has anyone"
+   * **keywords**: (List of Strings) 3-5 key terms for literature searches
+
+Ensure claims are specific enough for meaningful literature comparison but significant enough to be scientifically interesting.
+Prioritize materials science findings over analysis methodology (don't make more than one claim about analysis methodologies) 
+Avoid using **overly specific** numbers from the analysis.
+Ensure the final output is ONLY the JSON object and nothing else.
+"""
+
+
+INTENSITY_GMM_COMPONENT_SELECTION_INSTRUCTIONS = """You are an expert in analyzing atomic-resolution microscopy images and intensity distributions.
+
+You will receive:
+1. The original atomic-resolution microscopy image
+2. An intensity histogram showing the distribution of pixel intensities at detected atomic positions
+
+Your task is to determine the optimal number of components for 1D Gaussian Mixture Model clustering of the intensity values.
+
+**Background:**
+In atomic-resolution microscopy (STEM, TEM), different atomic species, atomic columns with different numbers of atoms, or atoms in different chemical environments often exhibit different characteristic intensities. A 1D GMM can separate these distinct intensity populations.
+
+**Guidelines for Component Selection:**
+- **Single element, perfect crystal**: 1-2 components (bulk + surface atoms)
+- **Binary/ternary compounds**: 2-4 components (different atomic species)
+- **Defective/disordered systems**: 3-6 components (various local environments)
+- **Complex heterostructures**: 4-8 components (multiple phases/interfaces)
+
+**Important Considerations:**
+- Look at the histogram shape - clear peaks suggest distinct populations
+- Consider the material system described in the metadata
+- Avoid over-fitting (too many components for simple systems)
+- Ensure each component would have sufficient atoms for statistical significance
+
+You MUST output a valid JSON object:
+{
+  "n_components": <integer between 1 and 8>,
+  "reasoning": "<explain your choice based on histogram features and material context>",
+  "expected_populations": "<briefly describe what each component likely represents>"
+}
+"""
+
+LOCAL_ENV_COMPONENT_SELECTION_INSTRUCTIONS = """You are an expert in analyzing local atomic environments in materials using microscopy data.
+
+You will receive:
+1. The original atomic-resolution microscopy image
+2. Intensity histogram and 1D GMM spatial maps showing different intensity populations
+3. System information about the material
+
+Your task is to determine the optimal number of components for local environment Gaussian Mixture Model analysis.
+
+**Background:**
+Local environment GMM analyzes small patches around each atom to identify different types of local atomic arrangements (e.g., bulk sites, defects, grain boundaries, different coordination environments).
+
+**Guidelines for Component Selection:**
+- **Perfect crystal**: 1-2 components (bulk environment, possibly surface)
+- **Crystal with point defects**: 2-4 components (bulk + various defect sites)
+- **Polycrystalline**: 3-6 components (bulk + grain boundaries + corners)
+- **Complex structures/interfaces**: 4-8 components (multiple distinct environments)
+
+**Key Considerations:**
+- The intensity maps show where different atomic species/environments are located
+- Local environment analysis captures structural differences beyond just intensity
+- Consider how the intensity populations might correlate with structural environments
+- Balance detail with interpretability
+
+You MUST output a valid JSON object:
+{
+  "n_components": <integer between 1 and 8>,
+  "reasoning": "<explain your choice based on intensity analysis and expected structural complexity>",
+  "expected_environments": "<briefly describe what local environments each component might capture>"
+}
+"""
 
 
 GMM_PARAMETER_ESTIMATION_INSTRUCTIONS = """You are an expert assistant analyzing microscopy images to determine optimal parameters for a subsequent analysis involving local patch extraction and Gaussian Mixture Model (GMM) clustering.
@@ -145,120 +316,21 @@ GMM_PARAMETER_ESTIMATION_INSTRUCTIONS = """You are an expert assistant analyzing
 **Your Task:**
 Based on the provided microscopy image and its metadata, estimate the optimal values for two key parameters for this analysis:
 
-1.  **`window_size` (Integer):** The side length of the square window to extract around each atom.
-    * **Guidance:** The window should be large enough to capture the local environment that defines the structure, including nearest and possibly next-nearest neighbors. For a simple lattice, this might be just larger than the atom itself. For complex structures or defects, it needs to be larger to capture the relevant surrounding features.
-    * **Constraints:** Suggest an even integer, typically between 16 and 64.
+**`window_size_nm` (Float):** The side length in nanometers (nm) of the square window to extract around each atom.
+    * **Guidance:** The window should be large enough to capture the local environment that defines the structure. For a simple lattice, this might be 2-3 times the nearest-neighbor distance. For complex defects, it might need to be larger. If the image scale (e.g., nm/pixel) is available in the metadata, use that to inform your suggestion.
+    * **Constraints:** Suggest a float value representing the size in nanometers.
 
 2.  **`n_components` (Integer):** The number of distinct GMM classes (clusters) to find.
     * **Guidance:** Estimate how many distinct types of local atomic environments you expect. For a perfect crystal, you might only need 1 or 2 (e.g., bulk vs. surface). If there are different phases, grain boundaries, or multiple types of defects, you will need more components to distinguish them.
-    * **Constraints:** Suggest a small integer, typically between 2 and 8.
-
-3.  **`explanation` (String):** Provide a brief explanation for your choice of `window_size` and `n_components`, referencing specific features visible in the image.
+    * **Constraints:** Suggest a small integer
+    
+3.  **`explanation` (String):** Provide a brief explanation for your choice of `window_size_nm` and `n_components`, referencing specific features visible in the image.
 
 
 **Output Format:**
-Provide your response ONLY as a valid JSON object containing the keys "window_size", "n_components", and "explanation". Do not include any other text, explanations, or markdown formatting.
+Provide your response ONLY as a valid JSON object containing the keys "window_size_nm", "n_components", and "explanation". Do not include any other text, explanations, or markdown formatting.
 
 """
-
-
-ATOMISTIC_MICROSCOPY_ANALYSIS_INSTRUCTIONS = """You are an expert system specialized in analyzing atomistic microscopy images (e.g., STEM, TEM, AFM) of materials.
-You will receive a set of images and data for analysis:
-1.  **Primary Microscopy Image**: The original, high-resolution image (e.g., STEM, TEM, AFM).
-2.  **NN Ensemble Prediction Heatmap**: The primary image overlaid with a heatmap showing the neural network's confidence in atom locations.
-3.  **GMM Class Centroids**: A set of images, where each image is the average local atomic environment for a specific class identified by a Gaussian Mixture Model (GMM).
-4.  **Classified Atom Map**: The primary microscopy image with all detected atoms overlaid and color-coded according to their assigned GMM class.
-5.  **Nearest-Neighbor Distance Map**: The primary image with detected atoms color-coded by their nearest-neighbor distance, revealing local strain and structural variations.
-6.  **Nearest-Neighbor Distance Histogram**: A histogram showing the distribution of nearest-neighbor distances across all detected atoms.
-
-**Note:** Some supplemental analysis images (items 2-6) may not be provided if the underlying analysis step (e.g., atom finding, GMM clustering) fails, is disabled, or is not applicable (e.g., if fewer than two atoms are detected). Your analysis should be robust to missing supplemental data.
-
-This supplemental data is generated by first finding all atoms with a neural network, then clustering their local environments with GMM, and finally analyzing inter-atomic distances.
-
-Your goal is to integrate information from ALL provided images (the primary image and all supplemental analysis)
-along with any metadata to inform Density Functional Theory (DFT) simulations.
-
-**Important note on notations:** When describing defects, please use standard terminology suitable for materials science publications. Avoid concatenated shorthands.
-
-You MUST output a valid JSON object containing two keys: "detailed_analysis" and "structure_recommendations".
-
-1.  **detailed_analysis**: (String) Provide a thorough text analysis of the atomistic microscopy data. Explicitly correlate features
-    in the original image with the GMM centroids and classified atom map, if available.
-    Identify features like:
-    * Point defects (vacancies, substitutions, adatoms) - **Use standard notation as described above.**
-    * Line defects (dislocations, grain boundaries)
-    * Extended defects (stacking faults, phase boundaries)
-    * Lattice distortions or strain
-    * Periodic structures, domains, or phases
-    * Symmetry breaking features
-    * Surface reconstructions
-    * Local chemical composition differences (if discernible)
-    * Dopants or impurities
-    * Concentration gradients
-    * Grain boundary configurations
-    * Heterostructure interfaces
-    * Surface adsorption sites
-    * Distinct local atomic environments identified by GMM classes.
-
-2.  **structure_recommendations**: (List of Objects) Generate 5-10 specific structures to model, RANKED by priority (1 = highest), informed by your analysis of ALL images. Each object in the list must have the following keys:
-    * **description**: (String) A specific structure description formatted as: "[supercell size] [material] [dimensionality], [phase, if known] phase, with [specific defect description **using standard notation**]".
-        Examples:
-        - "3x3 Cu(100) surface slab, 4 layers thick, with an NH3 molecule adsorbed on a hollow site"
-        - "3x3x3 Si supercell, diamond phase, with a **Carbon substituting a Silicon defect**"
-        - "Interface model of 2x2 Graphene on 3x3 Ni(111)"
-    * **scientific_interest**: (String) Explain *why* this specific structure is scientifically interesting based on the image analysis and what insights DFT simulation could provide.
-    * **priority**: (Integer) A number from 1 (highest) to 10 (lowest) indicating the importance or interest level for simulating this structure.
-
-Focus on recommending structures that are computationally feasible for DFT and capture the most scientifically significant features observed in the microscopy image. Prioritize recommendations based on relevance to the image, potential for novel scientific insights, and clarity of the observed feature. Ensure the final output is ONLY the JSON object and nothing else.
-"""
-
-
-ATOMISTIC_MICROSCOPY_CLAIMS_INSTRUCTIONS = """You are an expert system specialized in analyzing atomistic microscopy images (e.g., STEM, TEM, AFM) of materials.
-You will receive a set of images and data for analysis:
-1.  **Primary Microscopy Image**: The original, high-resolution image (e.g., STEM, TEM, AFM).
-2.  **NN Ensemble Prediction Heatmap**: The primary image overlaid with a heatmap showing the neural network's confidence in atom locations.
-3.  **GMM Class Centroids**: A set of images, where each image is the average local atomic environment for a specific class identified by a Gaussian Mixture Model (GMM).
-4.  **Classified Atom Map**: The primary microscopy image with all detected atoms overlaid and color-coded according to their assigned GMM class.
-5.  **Nearest-Neighbor Distance Map**: The primary image with detected atoms color-coded by their nearest-neighbor distance, revealing local strain and structural variations.
-6.  **Nearest-Neighbor Distance Histogram**: A histogram showing the distribution of nearest-neighbor distances across all detected atoms.
-
-**Note:** Some supplemental analysis images (items 2-6) may not be provided if the underlying analysis step (e.g., atom finding, GMM clustering) fails, is disabled, or is not applicable (e.g., if fewer than two atoms are detected). Your analysis should be robust to missing supplemental data.
-
-This supplemental data is generated by first finding all atoms with a neural network, then clustering their local environments with GMM, and finally analyzing inter-atomic distances.
-
-Your goal is to extract key information from these images and formulate a set of precise scientific claims that can be used to search existing literature.
-
-**Important Note on Formulation:** When formulating claims, focus on specific, testable observations that could be compared against existing research. Use precise scientific terminology, and avoid ambiguous statements. Make each claim distinct and focused on a single phenomenon or observation.
-
-You MUST output a valid JSON object containing two keys: "detailed_analysis" and "scientific_claims".
-
-1.  **detailed_analysis**: (String) Provide a thorough text analysis of the atomistic microscopy data. Explicitly correlate features
-    in the original image with the GMM centroids and classified atom map, if available.
-    Identify features like:
-    * Point defects (vacancies, substitutions, adatoms)
-    * Line defects (dislocations, grain boundaries)
-    * Extended defects (stacking faults, phase boundaries)
-    * Lattice distortions or strain
-    * Symmetry breaking features
-    * Surface reconstructions
-    * Local chemical composition differences (if discernible)
-    * Dopants or impurities
-    * Concentration gradients
-    * Grain boundary configurations
-    * Heterostructure interfaces
-    * Surface adsorption sites
-    * Distinct local atomic environments identified by GMM classes.
-
-2.  **scientific_claims**: (List of Objects) Generate 4-6 specific scientific claims based on your analysis that can be used to search literature for similar observations. Each object must have the following keys:
-    * **claim**: (String) A single, focused scientific claim written as a complete sentence about a specific observation from the atomistic microscopy analysis.
-    * **scientific_impact**: (String) A brief explanation of why this claim would be scientifically significant if confirmed through literature search or further experimentation.
-    * **has_anyone_question**: (String) A direct question starting with "Has anyone" that reformulates the claim as a research question.
-    * **keywords**: (List of Strings) 3-5 key scientific terms from the claim that would be most useful in literature searches.
-
-Focus on formulating claims that are specific enough to be meaningfully compared against literature but general enough to have a reasonable chance of finding matches. Range from highly specific observations to more general trends that might connect to broader scientific understanding. Ensure the final output is ONLY the JSON object and nothing else.
-"""
-
-
 
 
 
@@ -331,7 +403,7 @@ You MUST output a valid JSON object containing two keys: "detailed_analysis" and
    * Assessment of data quality and any artifacts
    * If a structural image was provided, explicitly state how the correlation between spectroscopic and structural data (if any) contributed to your analysis and conclusions.
 
-2. **scientific_claims**: (List of Objects) Generate 4-6 specific scientific claims based on spectroscopic analysis. Each object must have:
+2. **scientific_claims**: (List of Objects) Generate 2-4 specific scientific claims based on spectroscopic analysis. Each object must have:
    * **claim**: (String) A single, focused scientific claim about a specific spectroscopic observation or finding
    * **spectroscopic_evidence**: (String) Specific spectral features, peak positions, intensities, or spatial patterns supporting this claim
    * **scientific_impact**: (String) Why this spectroscopic finding would be scientifically significant or novel
@@ -346,6 +418,7 @@ Focus on formulating claims about:
 - Detection of defects, interfaces, or degradation through spectroscopic means
 
 Ensure claims are specific enough to be meaningfully compared against literature but significant enough to be scientifically interesting. 
+Avoid using **overly specific** numbers from the analysis.
 Ensure the final output is ONLY the JSON object.
 """
 
@@ -432,67 +505,68 @@ Focus on visual pattern recognition and physical interpretability.
 """
 
 
-SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS = """You are an expert system specialized in analyzing microscopy images with particle segmentation data from the Segment Anything Model (SAM).
-You will receive the primary microscopy image and supplemental SAM particle segmentation analysis showing detected particles with their boundaries, centroids, and comprehensive morphological statistics including size distributions, shape characteristics, and spatial arrangements.
+SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS = """You are an expert system specialized in analyzing microscopy images.
+You will receive a primary microscopy image and supplemental segmentation analysis, which includes comprehensive morphological statistics on the size distributions, shape characteristics, and spatial arrangements of the detected features.
 
-Your goal is to extract key information from these images and particle data to formulate a set of precise scientific claims that can be used to search existing literature.
+Your goal is to extract key information from these images and segmentation data to formulate a set of precise scientific claims that can be used to search existing literature.
 
-**Important Note on Formulation:** When formulating claims, focus on specific, testable observations about particle characteristics that could be compared against existing research. Use precise scientific terminology, and avoid ambiguous statements. Make each claim distinct and focused on a single phenomenon or observation.
+**Important Note on Formulation:** When formulating claims, focus on specific, testable observations about the system's characteristics that could be compared against existing research. Use precise scientific terminology and avoid ambiguous statements. Make each claim distinct and focused on a single phenomenon or observation.
 
 You MUST output a valid JSON object containing two keys: "detailed_analysis" and "scientific_claims".
 
-1.  **detailed_analysis**: (String) Provide a thorough text analysis of the microscopy data and SAM particle segmentation results. Explicitly correlate features
-    in the original image with the segmented particle population. Identify features like:
-    * Particle size distributions and polydispersity
-    * Particle morphology (circularity, aspect ratio, solidity)
-    * Spatial arrangements and clustering behavior
-    * Surface characteristics and irregularities
-    * Population heterogeneity and subpopulations
-    * Particle aggregation or isolation patterns
-    * Shape defects or unusual morphologies
-    * Size-dependent morphological trends
-    * Spatial distribution patterns (random, clustered, aligned)
-    * Edge effects or substrate interactions
+1.  **detailed_analysis**: (String) Provide a thorough text analysis of the microscopy data and segmentation results. Explicitly correlate features
+    in the original image with the segmented results. Identify and describe characteristics such as:
+    * **Size and Scale**: Feature size distributions, polydispersity, or other measures of size variability.
+    * **Morphology and Shape**: The shape of individual features (e.g., circularity, aspect ratio, solidity, convexity, texture).
+    * **Spatial Distribution**: The arrangement of features within the field of view (e.g., random, clustered, aligned, ordered).
+    * **Orientation and Alignment**: The degree to which features are oriented in a specific direction.
+    * **Population Heterogeneity**: The presence of distinct subpopulations with different characteristics.
+    * **Boundary and Interface Characteristics**: The nature of the edges of features or the interfaces between different regions.
+    * **Defects and Anomalies**: Presence of unusual morphologies, structural defects, or unexpected voids.
+    * **Hierarchical Structures**: The existence of smaller features organizing into larger-scale patterns.
+    * **Correlations**: Relationships between different measured properties, such as size-dependent shape trends.
+    * **Substrate or Boundary Effects**: How features near the edge of the sample or a substrate differ from those in the bulk.
 
     **Important:**
-        - Distinguish between real voids/defects and potentially missed particles
-        - If you see regular gaps in dense particle arrays, consider whether particles might be missed rather than absent
-        - Note any systematic patterns that could indicate incomplete segmentation
+        - Distinguish between true voids/defects and artifacts of the segmentation process (e.g., missed or incompletely segmented features).
+        - If you observe regular gaps in dense arrays, consider if this indicates an ordered structure or a systematic segmentation error.
+        - Note any systematic patterns in the segmentation results that could indicate bias or error in the analysis.
 
-2.  **scientific_claims**: (List of Objects) Generate 4-6 specific scientific claims based on your analysis that can be used to search literature for similar observations. Each object must have the following keys:
-    * **claim**: (String) A single, focused scientific claim written as a complete sentence about a specific observation from the particle segmentation analysis.
-    * **scientific_impact**: (String) A brief explanation of why this claim would be scientifically significant if confirmed through literature search or further experimentation.
-    * **has_anyone_question**: (String) A direct question starting with "Has anyone" that reformulates the claim as a research question.
-    * **keywords**: (List of Strings) 3-5 key scientific terms from the claim that would be most useful in literature searches, including particle-specific terminology.
+2.  **scientific_claims**: (List of Objects) Generate 2-4 specific scientific claims based on your analysis that can be used to search literature for similar observations. Each object must have the following keys:
+    * **claim**: (String) A single, focused scientific claim written as a complete sentence about a specific, quantifiable observation from the segmentation analysis.
+    * **scientific_impact**: (String) A brief explanation of why this claim would be scientifically significant if confirmed, linking it to underlying processes (e.g., formation mechanism, material properties, biological function).
+    * **has_anyone_question**: (String) A direct question starting with "Has anyone observed" that reformulates the claim as a research question.
+    * **keywords**: (List of Strings) 3-5 key scientific terms from the claim that would be most useful in literature searches, including terminology specific to the observed material or biological system.
 
-Focus on formulating claims that are specific enough to be meaningfully compared against literature but general enough to have a reasonable chance of finding matches. Emphasize particle characteristics like size distributions, morphological features, spatial arrangements, and population behaviors that might connect to broader scientific understanding of nanoparticle synthesis, assembly, or behavior. Ensure the final output is ONLY the JSON object and nothing else.
+Focus on formulating claims that are specific enough to be meaningfully compared against existing literature but general enough to facilitate discovery. 
+Avoid using **overly specific** numbers from the analysis.
+Ensure the final output is ONLY the JSON object and nothing else.
 """
 
 
-PARTICLE_ANALYSIS_REFINE_INSTRUCTIONS = """You are a computer vision expert analyzing particle segmentation results.
+SAM_ANALYSIS_REFINE_INSTRUCTIONS = """You are a computer vision expert analyzing segmentation results from a microscopy image.
 
 You will see TWO images:
-1. **ORIGINAL MICROSCOPY IMAGE** - The actual particles to detect
-2. **CURRENT SEGMENTATION RESULT** - Red outlines show detected particles
+1. **ORIGINAL MICROSCOPY IMAGE** - The source image containing the features of interest to be detected.
+2. **CURRENT SEGMENTATION RESULT** - Red outlines show the currently detected features.
 
-**Your task:** Compare these images and decide if changes are needed.
+**Your task:** Compare these images and decide if the segmentation parameters need to be adjusted for better accuracy.
 
-**Key Questions:**
-1. **Quality Check**: Do the red outlines capture individual particle boundaries?
-2. **Missing Particles**: Are obvious particles in the original completely missed?
-3. **False Detections**: Are there red outlines on things that aren't particles?
+**Key Questions to Consider:**
+1. **Segmentation Quality**: Do the red outlines accurately capture the boundaries of the individual features of interest?
+2. **Missing Features**: Are obvious features in the original image completely missed by the segmentation?
+3. **False Detections**: Are there red outlines on background, artifacts, or other elements that are not the intended targets?
 
 **Parameters you can adjust:**
-- `sam_parameters`: "default" (normal), "sensitive" (may findd more particles), "ultra-permissive" (may find even more particles)
-- `use_clahe`: false → true if particle edges are hard to see
-- `min_area`: Increase only if you see tiny noise detections
-- `max_area`: Decrease only if you see huge blobs that aren't single particles
-- `pruning_iou_threshold`: Lower values (0.3-0.4) remove more duplicates, higher values (0.6-0.7) keep more detections. Default is 0.5
+- `sam_parameters`: "default" (standard performance), "sensitive" (may find more features), "ultra-permissive" (maximizes detection, may increase false positives).
+- `use_clahe`: Change from `false` to `true` if the edges or boundaries of the features are low-contrast or hard to distinguish.
+- `min_area`: Increase this value only if the segmentation is detecting tiny, irrelevant noise.
+- `max_area`: Decrease this value only if multiple distinct features are being incorrectly merged into a single large detection.
+- `pruning_iou_threshold`: This controls how overlapping detections are handled. Lower values (e.g., 0.3-0.4) are more aggressive in removing duplicates. Higher values (e.g., 0.6-0.7) are more permissive and keep more detections. The default is 0.5.
 
+**Important**: Be conservative. Only suggest changes if there is a clear and systematic problem with the current segmentation.
 
-**Be conservative**: Only change parameters if there's a clear problem.
-
-**You have only one shot at this, so think carefully.**
+**You have only one opportunity to refine the parameters, so think carefully.**
 
 Output JSON format:
 ```json
@@ -516,7 +590,7 @@ Your decision MUST be based on the visual evidence in the image and accompanying
 
 **Available Agents:**
 - **ID 0: `MicroscopyAnalysisAgent`**: Use for standard microstructure analysis (grains, phases, etc.) where atoms are not resolved. **Also use for atomic-resolution images that are severely disordered (amorphous, very noisy, fragmented)**, where its FFT/NMF analysis is more appropriate than direct atom finding.
-- **ID 1: `SAMMicroscopyAnalysisAgent`**: The correct choice for images containing distinct particles (like nanoparticles). Use this for tasks like measuring size distribution, shape, and arrangement.
+- **ID 1: `SAMMicroscopyAnalysisAgent`**: The correct choice for images containing large, distinct, countable objects. Use this for tasks like measuring the size distribution, shape, and spatial arrangement of features like nanoparticles, cells, pores, or other discrete entities.
 - **ID 2: `AtomisticMicroscopyAnalysisAgent`**: **The primary choice for any high-quality image where individual atoms are clearly visible.** This is the correct agent for analyzing crystalline structures, defects, and interfaces at the atomic scale.
 - **ID 3: `SpectroscopyAnalysisAgent`**: For all 'spectroscopy' data types (no image will be provided).
 

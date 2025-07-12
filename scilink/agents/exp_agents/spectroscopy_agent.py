@@ -10,7 +10,9 @@ from datetime import datetime
 import google.generativeai as genai
 from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockThreshold
 
+from .base_agent import BaseAnalysisAgent
 from .utils import convert_numpy_to_jpeg_bytes, normalize_and_convert_to_image_bytes
+from .utils import create_multi_abundance_overlays
 from .instruct import (
     SPECTROSCOPY_ANALYSIS_INSTRUCTIONS, 
     COMPONENT_INITIAL_ESTIMATION_INSTRUCTIONS,
@@ -18,31 +20,22 @@ from .instruct import (
     SPECTROSCOPY_CLAIMS_INSTRUCTIONS
 )
 
-# Import atomai's SpectralUnmixer
+from .human_feedback import SimpleFeedbackMixin
+
 from atomai.stat import SpectralUnmixer
 
 
-class SpectroscopyAnalysisAgent:
+class SpectroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
     Agent for analyzing hyperspectral/spectroscopy data using generative AI models.
-    Integrates with SciLinkLLM framework and includes LLM-guided spectral unmixing.
+    Refactored to inherit from BaseAnalysisAgent and includes LLM-guided spectral unmixing.
     """
 
     def __init__(self, api_key: str | None = None, model_name: str = "gemini-2.5-pro-preview-06-05", 
                  spectral_unmixing_settings: dict | None = None,
-                 output_dir: str = "spectroscopy_output"):
-        if api_key is None:
-            api_key = os.environ.get("GOOGLE_API_KEY")
-        if not api_key:
-            raise ValueError("API key not provided and GOOGLE_API_KEY environment variable is not set.")
-        
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel(model_name)
-        self.generation_config = GenerationConfig(response_mime_type="application/json")
-        self.safety_settings = {
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-        }
-        self.logger = logging.getLogger(__name__)
+                 output_dir: str = "spectroscopy_output",
+                 enable_human_feedback: bool = False):
+        super().__init__(api_key, model_name, enable_human_feedback=enable_human_feedback)
         
         # Spectral unmixing settings
         default_settings = {
@@ -58,44 +51,6 @@ class SpectroscopyAnalysisAgent:
 
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
-
-    def _parse_llm_response(self, response) -> Tuple[Dict | None, Dict | None]:
-        """Parse the LLM response, expecting JSON."""
-        result_json = None
-        error_dict = None
-        raw_text = None
-        json_string = None
-
-        try:
-            raw_text = response.text
-            first_brace_index = raw_text.find('{')
-            last_brace_index = raw_text.rfind('}')
-            if first_brace_index != -1 and last_brace_index != -1 and last_brace_index > first_brace_index:
-                json_string = raw_text[first_brace_index : last_brace_index + 1]
-                result_json = json.loads(json_string)
-            else:
-                raise ValueError("Could not find valid JSON object delimiters '{' and '}' in the response text.")
-
-        except (json.JSONDecodeError, AttributeError, IndexError, ValueError) as e:
-            error_details = str(e)
-            error_raw_response = raw_text if raw_text is not None else getattr(response, 'text', 'N/A')
-            self.logger.error(f"Error parsing LLM JSON response: {e}")
-            
-            if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
-                block_reason = response.prompt_feedback.block_reason
-                self.logger.error(f"Request blocked due to: {block_reason}")
-                error_dict = {"error": f"Content blocked by safety filters", "details": f"Reason: {block_reason}"}
-            elif response.candidates and response.candidates[0].finish_reason != 1:
-                finish_reason = response.candidates[0].finish_reason
-                self.logger.error(f"Generation finished unexpectedly: {finish_reason}")
-                error_dict = {"error": f"Generation finished unexpectedly: {finish_reason}", "details": error_details}
-            else:
-                error_dict = {"error": "Failed to parse valid JSON from LLM response", "details": error_details}
-        except Exception as e:
-            self.logger.exception(f"Unexpected error processing response: {e}")
-            error_dict = {"error": "Unexpected error processing LLM response", "details": str(e)}
-        
-        return result_json, error_dict
 
     def _load_hyperspectral_data(self, data_path: str) -> np.ndarray:
         """
@@ -154,6 +109,7 @@ class SpectroscopyAnalysisAgent:
         Step 1: LLM estimates optimal number of components based on system description.
         """
         try:
+            self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP: COMPONENT PARAMETER ESTIMATION -------------------- 🤖\n")
             self.logger.info("Step 1: Getting LLM initial component estimate from system description")
             
             # Build prompt for initial estimation
@@ -188,7 +144,7 @@ class SpectroscopyAnalysisAgent:
                 safety_settings=self.safety_settings,
             )
             
-            result_json, error_dict = self._parse_llm_response(response)
+            result_json, error_dict = self._parse_llm_response(response)  # Using base class method
             
             if error_dict:
                 self.logger.warning(f"LLM initial estimation failed: {error_dict}")
@@ -266,13 +222,13 @@ class SpectroscopyAnalysisAgent:
             self.logger.error(f"Failed to create summary plot for {n_comp} components: {e}")
             return None
 
-
     def _llm_compare_visual_results(self, test_images: List[Dict], initial_estimate: int,
                                    system_info: Dict[str, Any] = None) -> int:
         """
         Step 3: LLM compares visual results to make final decision.
         """
         try:
+            self.logger.info("\n\n🤖 ------------------ ANALYSIS AGENT STEP: DECIDING ON THE FINAL NUMBER OF COMPONENTS ------------------ 🤖\n")
             self.logger.info("Step 3: LLM comparing visual results for final decision")
             
             # Build prompt for visual comparison
@@ -311,7 +267,7 @@ class SpectroscopyAnalysisAgent:
                 safety_settings=self.safety_settings,
             )
             
-            result_json, error_dict = self._parse_llm_response(response)
+            result_json, error_dict = self._parse_llm_response(response)  # Using base class method
             
             if error_dict:
                 self.logger.warning(f"LLM visual comparison failed: {error_dict}")
@@ -355,12 +311,7 @@ class SpectroscopyAnalysisAgent:
             "system_info": system_info
         }
         
-        # Console output for human monitoring
-        print("\n🔍 Starting LLM-Guided Component Selection...")
-        print("=" * 50)
-        
         # Step 1: LLM initial estimate based on system description
-        print("Step 1: Getting LLM initial component estimate...")
         initial_estimate = self._llm_estimate_components_from_system(hspy_data, system_info)
         
         # Log and save reasoning
@@ -387,6 +338,7 @@ class SpectroscopyAnalysisAgent:
         ]
         
         reasoning_log["test_range"] = test_components
+        self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP: COMPONENT TESTING -------------------- 🤖\n")
         print(f"Step 2: Testing component numbers: {test_components}")
         
         # Run test analyses
@@ -418,7 +370,6 @@ class SpectroscopyAnalysisAgent:
                 print(f"    ❌ Failed test with {n_comp} components: {e}")
                 self.logger.warning(f"Failed test analysis with {n_comp} components: {e}")
         
-            
         # Save test images for human review
         self._save_component_comparison_plot(test_images, initial_estimate)
         
@@ -448,6 +399,7 @@ class SpectroscopyAnalysisAgent:
         self._save_component_reasoning("step3_final_decision", step3_data)
         
         # Step 4: Run final analysis with chosen number
+        self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP: FINAL SPECTRAL UNMIXING -------------------- 🤖\n")
         print("Step 4: Running final analysis...")
         final_unmixer = SpectralUnmixer(
             method=self.spectral_settings.get('method', 'nmf'),
@@ -607,101 +559,37 @@ class SpectroscopyAnalysisAgent:
         except Exception as e:
             self.logger.error(f"Failed to create component-abundance pairs: {e}")
             return []
-    
 
-    def _create_summary_images(self, hspy_data: np.ndarray, components: np.ndarray, 
-                         abundance_maps: np.ndarray, system_info: Dict[str, Any] = None) -> List[bytes]:
+    def _validate_structure_inputs(self, structure_image_path: str = None, 
+                                 structure_system_info: Dict[str, Any] = None) -> tuple[str, Dict[str, Any]]:
         """
-        Create summary images for LLM analysis including:
-        - Mean spectrum
-        - Component spectra  
-        - Abundance maps
+        Validate and clean up structure inputs, ensuring consistency.
+        
+        Returns:
+            tuple: (validated_structure_image_path, validated_structure_system_info)
         """
-        import matplotlib.pyplot as plt
+        # If structure_system_info provided without structure_image_path, warn and ignore
+        if structure_system_info and not structure_image_path:
+            self.logger.warning("structure_system_info provided but no structure_image_path - ignoring metadata")
+            structure_system_info = None
         
-        images = []
+        # Validate structure image path exists
+        if structure_image_path and not os.path.exists(structure_image_path):
+            self.logger.warning(f"Structure image not found: {structure_image_path}")
+            structure_image_path = None
+            structure_system_info = None  # Also clear metadata if image doesn't exist
         
-        # Create energy axis using system info
-        n_channels = hspy_data.shape[-1]
-        energy_axis, xlabel, has_energy_info = self._create_energy_axis(n_channels, system_info)
-        
-        try:
-            # 1. Mean spectrum and component spectra
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
-            
-            # Mean spectrum
-            mean_spectrum = np.mean(hspy_data.reshape(-1, hspy_data.shape[-1]), axis=0)
-            ax1.plot(energy_axis, mean_spectrum, 'k-', linewidth=2, label='Mean Spectrum')
-            ax1.set_xlabel(xlabel)
-            ax1.set_ylabel('Intensity')
-            ax1.set_title('Mean Spectrum')
-            ax1.grid(True, alpha=0.3)
-            
-            # Component spectra with energy axis
-            for i, component in enumerate(components):
-                ax2.plot(energy_axis, component, label=f'Component {i+1}')
-            ax2.set_xlabel(xlabel)
-            ax2.set_ylabel('Intensity')
-            ax2.set_title('Unmixed Component Spectra')
-            ax2.legend()
-            ax2.grid(True, alpha=0.3)
-            
-            plt.tight_layout()
-            
-            # Save to bytes
-            buf = BytesIO()
-            plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
-            buf.seek(0)
-            images.append(buf.getvalue())
-            plt.close()
-            
-            # 2. Abundance maps
-            n_components = abundance_maps.shape[-1]
-            n_cols = min(4, n_components)
-            n_rows = (n_components + n_cols - 1) // n_cols
-            
-            fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 3, n_rows * 3))
-            if n_rows == 1:
-                axes = axes.reshape(1, -1)
-            
-            for i in range(n_components):
-                row, col = i // n_cols, i % n_cols
-                im = axes[row, col].imshow(abundance_maps[..., i], cmap='viridis')
-                axes[row, col].set_title(f'Component {i+1} Abundance')
-                axes[row, col].axis('off')
-                plt.colorbar(im, ax=axes[row, col], fraction=0.046, pad=0.04)
-            
-            # Hide unused subplots
-            for i in range(n_components, n_rows * n_cols):
-                row, col = i // n_cols, i % n_cols
-                axes[row, col].axis('off')
-            
-            plt.tight_layout()
-            
-            # Save to bytes
-            buf = BytesIO()
-            plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
-            buf.seek(0)
-            images.append(buf.getvalue())
-            plt.close()
-            
-            self.logger.info(f"Created {len(images)} summary images with proper energy axis")
-            return images
-            
-        except Exception as e:
-            self.logger.error(f"Failed to create summary images: {e}")
-            return []
-        
+        return structure_image_path, structure_system_info
+
     def analyze_hyperspectral_data_for_claims(self, data_path: str, metadata_path: Dict[str, Any] | None = None,
-                                              structure_image_path: str = None, structure_system_info: Dict[str, Any] = None
-                                              ) -> Dict[str, Any]:
+                                            structure_image_path: str = None, structure_system_info: Dict[str, Any] = None
+                                            ) -> Dict[str, Any]:
         """
         Analyze hyperspectral data to generate scientific claims for literature comparison.
-        Similar to microscopy agent's analyze_microscopy_image_for_claims method.
         
         Args:
             data_path: Path to hyperspectral data file (.npy)
-            metadata_path:  Path to JSON file with experimental metadata
+            metadata_path: Dictionary with experimental metadata OR path to JSON file
             structure_image_path: Optional path to 2D greyscale structure image for context
             structure_system_info: Optional metadata for the structure image
             
@@ -709,8 +597,24 @@ class SpectroscopyAnalysisAgent:
             Dictionary containing detailed analysis and scientific claims
         """
         try:
-            # Load system info from metadata path
-            system_info = self._load_metadata_from_json(metadata_path)
+            # Validate structure inputs
+            structure_image_path, structure_system_info = self._validate_structure_inputs(
+                structure_image_path, structure_system_info
+            )
+            
+            # Handle metadata_path properly - it can be a dict or a string path
+            if isinstance(metadata_path, dict):
+                # Already a dictionary, use it directly
+                system_info = metadata_path
+            elif isinstance(metadata_path, str):
+                # It's a file path, load from JSON
+                system_info = self._load_metadata_from_json(metadata_path)
+            elif metadata_path is None:
+                # Try to load companion JSON file based on data_path
+                system_info = self._load_metadata_from_json(data_path)
+            else:
+                self.logger.warning(f"Invalid metadata_path type: {type(metadata_path)}")
+                system_info = {}
 
             # Use the shared analysis workflow but with claims-specific instructions
             result = self._analyze_hyperspectral_data_base(
@@ -725,49 +629,53 @@ class SpectroscopyAnalysisAgent:
             if "error" in result:
                 return result
             
-            # Extract claims-specific fields (validation already done in base method)
+            # Extract claims-specific fields
             detailed_analysis = result.get("detailed_analysis", "Analysis not provided by LLM.")
             scientific_claims = result.get("scientific_claims", [])
             
+            # Use base class validation method
+            valid_claims = self._validate_scientific_claims(scientific_claims)
+            
             # Log results
-            if not scientific_claims and detailed_analysis != "Analysis not provided by LLM.":
+            if not valid_claims and detailed_analysis != "Analysis not provided by LLM.":
                 self.logger.warning("Spectroscopic claims analysis successful but no valid claims found.")
-            elif not scientific_claims:
+            elif not valid_claims:
                 self.logger.warning("LLM call did not yield valid claims or analysis text for spectroscopic workflow.")
             else:
-                self.logger.info(f"Successfully generated {len(scientific_claims)} scientific claims from spectroscopic analysis.")
+                self.logger.info(f"Successfully generated {len(valid_claims)} scientific claims from spectroscopic analysis.")
             
-            return {"detailed_analysis": detailed_analysis, "scientific_claims": scientific_claims}
+            initial_result = {"detailed_analysis": detailed_analysis, "scientific_claims": valid_claims}
+            return self._apply_feedback_if_enabled(
+                initial_result,
+                data_path=data_path,
+                system_info=system_info,
+                structure_image_path=structure_image_path
+            )
             
         except Exception as e:
             self.logger.exception(f"Error during hyperspectral claims analysis: {e}")
             return {"error": "Hyperspectral claims analysis failed", "details": str(e)}
-
-
+        
+    def _get_claims_instruction_prompt(self) -> str:
+        return SPECTROSCOPY_CLAIMS_INSTRUCTIONS
 
     def _analyze_hyperspectral_data_base(self, data_path: str, system_info: Dict[str, Any] | None = None,
                                     instruction_prompt: str = None, analysis_type: str = "standard",
                                     structure_image_path: str = None, structure_system_info: Dict[str, Any] = None
                                     ) -> Dict[str, Any]:
         """
-        Base method for hyperspectral data analysis - shared by both standard analysis and claims generation.
-        Updated to use component-abundance pairs for final analysis.
+        Base method for hyperspectral data analysis
         """
-        # Handle system_info input (can be dict, file path, or None)
+        self._clear_stored_images()
+        # Use base class method for system info handling
         if isinstance(system_info, str):
-            with open(system_info, 'r') as f:
-                system_info = json.load(f)
+            system_info = self._handle_system_info(system_info)
         elif system_info is None:
             system_info = self._load_metadata_from_json(data_path)
         
-        # Handle structure_system_info input (can be dict, file path, or None)
+        # Use base class method for structure_system_info handling
         if isinstance(structure_system_info, str) and os.path.exists(structure_system_info):
-            try:
-                with open(structure_system_info, 'r') as f:
-                    structure_system_info = json.load(f)
-            except (FileNotFoundError, json.JSONDecodeError) as e:
-                self.logger.warning(f"Could not load structural metadata from {structure_system_info}: {e}")
-                structure_system_info = {}
+            structure_system_info = self._handle_system_info(structure_system_info)
 
         # Load hyperspectral data
         analysis_desc = "claims generation" if analysis_type == "claims" else "analysis"
@@ -788,6 +696,14 @@ class SpectroscopyAnalysisAgent:
             self.logger.info("Creating component-abundance pairs for LLM analysis...")
             component_pair_images = self._create_component_abundance_pairs(components, abundance_maps, system_info)
         
+        analysis_images = []
+        for i, pair_img_bytes in enumerate(component_pair_images):
+            analysis_images.append({
+                "label": f"Component {i+1} Pair (Spectrum + Abundance Map)",
+                "data": pair_img_bytes
+            })
+
+
         # Build prompt for LLM analysis
         prompt_parts = [instruction_prompt or SPECTROSCOPY_ANALYSIS_INSTRUCTIONS]
         
@@ -804,7 +720,8 @@ class SpectroscopyAnalysisAgent:
         else:
             prompt_parts.append("- No spectral unmixing performed")
 
-        # Add structure image if provided
+        # Add structure image and overlays if provided
+        overlay_bytes = None
         if structure_image_path and os.path.exists(structure_image_path):
             try:
                 from .utils import convert_numpy_to_jpeg_bytes, load_image
@@ -820,21 +737,35 @@ class SpectroscopyAnalysisAgent:
                     structure_img_gray = cv2.cvtColor(structure_img, cv2.COLOR_RGB2GRAY)
                 else:
                     structure_img_gray = structure_img # Already grayscale
-                structure_img_bytes = convert_numpy_to_jpeg_bytes(structure_img_gray)
+
+                # Try to create abundance overlays first
+                if abundance_maps is not None:
+                    overlay_bytes = self._create_structure_abundance_overlays(
+                        structure_img_gray, abundance_maps, system_info
+                    )
                 
-                prompt_parts.append("\n\n**Structural Context Image for Correlation.**")
-                prompt_parts.append("This is a structural image providing spatial context. Try to correlate the spectroscopic components and their abundance maps with the spatial features in this image.")
-                prompt_parts.append({"mime_type": "image/jpeg", "data": structure_img_bytes})
+                if overlay_bytes:
+                    # Use overlays (which include the original structure image as first panel)
+                    prompt_parts.append("\n\n**Structure-Abundance Correlation Analysis:**")
+                    prompt_parts.append("These overlays show where each NMF component is most abundant (top 15% of values) overlaid on the structural image. The first panel shows the original structural image for reference. Each subsequent panel shows the same structure with colored overlays indicating where each component is most concentrated. Look for spatial correlations between these (thresholded) abundance patterns and structural features.")
+                    prompt_parts.append({"mime_type": "image/jpeg", "data": overlay_bytes})
+                    self.logger.info("Added abundance overlays to LLM prompt (includes structure image)")
+                else:
+                    # Fallback: use standalone structure image if overlays failed
+                    structure_img_bytes = convert_numpy_to_jpeg_bytes(structure_img_gray)
+                    prompt_parts.append("\n\n**Structural Context Image for Correlation:**")
+                    prompt_parts.append("This is a structural image providing spatial context. Try to correlate the spectroscopic components and their abundance maps with the spatial features in this image.")
+                    prompt_parts.append({"mime_type": "image/jpeg", "data": structure_img_bytes})
+                    self.logger.info("Added standalone structure image to analysis prompt (overlays failed)")
                 
-                # Add structure system info if provided
-                if structure_system_info:
+                # Add structure system info only if structure image was successfully processed
+                structure_info_section = self._build_system_info_prompt_section(structure_system_info)
+                if structure_info_section:
                     prompt_parts.append("\n\nStructural Context Metadata:")
-                    if isinstance(structure_system_info, dict):
-                        prompt_parts.append(json.dumps(structure_system_info, indent=2))
-                    else:
-                        prompt_parts.append(str(structure_system_info))
+                    prompt_parts.append(structure_info_section.replace("\n\nAdditional System Information (Metadata):\n", ""))
                 
-                self.logger.info("Added structure image to analysis prompt")
+                self.logger.info("Successfully processed structure image for analysis")
+                
             except Exception as e:
                 self.logger.warning(f"Failed to load structure image: {e}")
         elif structure_image_path:
@@ -852,17 +783,25 @@ class SpectroscopyAnalysisAgent:
         else:
             prompt_parts.append("\n\n(No spectroscopic component analysis images available)")
         
-        # Add system/experimental information
-        if system_info:
-            prompt_parts.append("\n\nExperimental System Information:")
-            if isinstance(system_info, dict):
-                prompt_parts.append(json.dumps(system_info, indent=2))
-            else:
-                prompt_parts.append(str(system_info))
+        # Use base class method for system info prompt section
+        system_info_section = self._build_system_info_prompt_section(system_info)
+        if system_info_section:
+            prompt_parts.append(system_info_section)
         
         prompt_parts.append("\n\nProvide your analysis in the requested JSON format.")
+
+        analysis_metadata = {
+            "data_path": data_path,
+            "system_info": system_info,
+            "spectral_unmixing_enabled": self.run_spectral_unmixing,
+            "n_components": components.shape[0] if components is not None else 0,
+            "structure_image_included": structure_image_path is not None,
+            "num_stored_images": len(analysis_images)
+        }
+        self._store_analysis_images(analysis_images, analysis_metadata)
         
         # Send to LLM for analysis
+        self.logger.info("\n\n🤖 -------------------- ANALYSIS AGENT STEP: INTERPRETING RESULTS -------------------- 🤖\n")
         self.logger.info(f"Sending hyperspectral {analysis_desc} request to LLM with {len(component_pair_images)} component pairs...")
         response = self.model.generate_content(
             contents=prompt_parts,
@@ -870,7 +809,7 @@ class SpectroscopyAnalysisAgent:
             safety_settings=self.safety_settings,
         )
         
-        # Parse LLM response
+        # Use base class method for parsing LLM response
         result_json, error_dict = self._parse_llm_response(response)
         
         if error_dict:
@@ -942,6 +881,11 @@ class SpectroscopyAnalysisAgent:
             Dictionary containing analysis results
         """
         try:
+            # Validate structure inputs
+            structure_image_path, structure_system_info = self._validate_structure_inputs(
+                structure_image_path, structure_system_info
+            )
+            
             # Load system info from metadata path
             system_info = self._load_metadata_from_json(metadata_path)
             
@@ -964,7 +908,6 @@ class SpectroscopyAnalysisAgent:
         except Exception as e:
             self.logger.exception(f"Error during hyperspectral analysis: {e}")
             return {"error": "Hyperspectral analysis failed", "details": str(e)}
-    
 
     def _build_energy_info_for_prompt(self, hspy_data: np.ndarray, system_info: dict = None) -> str:
         """Build energy information string for LLM prompt."""
@@ -1024,6 +967,49 @@ class SpectroscopyAnalysisAgent:
                 f.write(result['image'])
             
             print(f"📊 Saved component test ({result['n_components']} components): {filename}")
+
+    def _create_structure_abundance_overlays(self, structure_img_gray: np.ndarray, 
+                                           abundance_maps: np.ndarray, 
+                                           save_plots: bool = True) -> bytes:
+        """
+        Create abundance overlays on structure image for LLM correlation analysis.
+        
+        Args:
+            structure_img_gray: 2D grayscale structure image
+            abundance_maps: NMF abundance maps (height, width, n_components)
+            save_plots: Whether to save plots to disk for inspection
+            
+        Returns:
+            Image bytes for LLM prompt, or None if failed
+        """
+        try:
+            self.logger.info(f"Creating abundance overlays for {abundance_maps.shape[2]} components")
+            
+            # Create multi-component overlay using the utility function
+            overlay_bytes = create_multi_abundance_overlays(
+                structure_image=structure_img_gray,
+                abundance_maps=abundance_maps,
+                threshold_percentile=85.0,  # Show top 15% of abundance values
+                alpha=0.5,
+                use_simple_colors=True  # Use solid colors for clearer LLM analysis
+            )
+            
+            # Save the overlay that goes to LLM (following existing pattern)
+            if save_plots:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"abundance_overlays_{timestamp}.png"
+                filepath = os.path.join(self.output_dir, filename)
+                
+                with open(filepath, 'wb') as f:
+                    f.write(overlay_bytes)
+                
+                self.logger.info(f" Saved abundance overlays: {filename}")
+            
+            return overlay_bytes
+            
+        except Exception as e:
+            self.logger.warning(f"Failed to create abundance overlays: {e}")
+            return None
     
     def _create_final_results_summary(self, final_n_components: int, components: np.ndarray, 
                                     abundance_maps: np.ndarray, reasoning_log: dict):
@@ -1083,7 +1069,6 @@ class SpectroscopyAnalysisAgent:
         print(f"📝 Saved reasoning log: {reasoning_file}")
         
         return results_path, reasoning_path
-    
 
     def _create_energy_axis(self, n_channels: int, system_info: dict = None) -> tuple[np.ndarray, str, bool]:
         """
