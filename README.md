@@ -176,6 +176,10 @@ scilink experiment2dft ./my_data_dir/ --non-interactive --auto-select 2
 scilink dft "a 2x2 Pt(111) surface with a CO molecule adsorbed on a top site"
 ```
 
+## Future Directions
+
+The modular, agent-based architecture of SciLink is designed for growth. Future work will focus on expanding the framework's capabilities by incorporating a wider range of experimental and simulation agents to cover an even broader set of scientific workflows.
+
 ## Requirements
 
 - Python ≥ 3.11
