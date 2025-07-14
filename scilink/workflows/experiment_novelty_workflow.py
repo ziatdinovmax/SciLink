@@ -406,6 +406,25 @@ class ExperimentNoveltyAssessment:
                 # Query literature (agent logs will appear here if display_agent_logs=True)
                 owl_result = self.lit_agent.query_literature(has_anyone_question)
                 
+                if owl_result.get("status") == "success" and owl_result.get("formatted_answer"):
+                    try:
+                        # Create a dedicated directory for these readable responses
+                        responses_dir = self.output_dir / "literature_responses"
+                        responses_dir.mkdir(exist_ok=True)
+                        
+                        response_filename = f"literature_response_claim_{claim_num:02d}.md"
+                        response_filepath = responses_dir / response_filename
+                        
+                        with open(response_filepath, 'w', encoding='utf-8') as f:
+                            f.write(f"# Literature Response for Claim {claim_num}\n\n")
+                            f.write(f"**Question:** {has_anyone_question}\n\n---\n\n")
+                            f.write(owl_result["formatted_answer"])
+                        
+                        # Inform the user about the saved file
+                        print(f"        📄 Saved formatted response: {response_filepath.relative_to(self.output_dir.parent)}")
+                    except Exception as e:
+                        print(f"        ⚠️  Could not save formatted response for claim {claim_num}: {e}")
+
                 literature_results.append({
                     "original_claim": claim,
                     "owl_result": owl_result
