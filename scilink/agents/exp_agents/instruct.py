@@ -265,6 +265,8 @@ In atomic-resolution microscopy (STEM, TEM), different atomic species, atomic co
 - Avoid over-fitting (too many components for simple systems)
 - Ensure each component would have sufficient atoms for statistical significance
 
+**Critical**: When preparing your answer, always consider the structure of the actual material (phase, symmetry, composition) and experimental signal origin.
+
 You MUST output a valid JSON object:
 {
   "n_components": <integer between 1 and 8>,
