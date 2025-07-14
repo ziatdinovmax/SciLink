@@ -342,8 +342,6 @@ class ExperimentNoveltyAssessment:
                     "message": "No scientific claims generated from analysis"
                 }
 
-            self._display_analysis_summary(claims, detailed_analysis)
-
             # Save claims
             claims_file = self.output_dir / f"generated_{self.data_type}_claims.json"
             with open(claims_file, 'w') as f:
@@ -625,6 +623,31 @@ class ExperimentNoveltyAssessment:
         
         return summary
     
+    def _display_dft_recommendations(self, reasoning: str, recommendations: List[Dict], novel_claims: List[str]):
+        """Display the generated DFT recommendations."""
+        
+        print("\n" + "="*60)
+        print("DFT STRUCTURE RECOMMENDATIONS")
+        print("="*60)
+        
+        print(f"\nNovel claims processed: {len(novel_claims)}")
+        print(f"Total recommendations: {len(recommendations)}")
+        
+        print(f"\n--- Reasoning ---")
+        print(reasoning)
+        print("-" * 40)
+        
+        if recommendations:
+            print("\n--- Recommended Structures ---")
+            for i, rec in enumerate(recommendations, 1):
+                print(f"\n[{i}] Priority: {rec.get('priority', 'N/A')}")
+                print(f"    {rec.get('description', 'N/A')}")
+                print(f"    Justification: {rec.get('scientific_interest', 'N/A')}")
+        else:
+            print("\n⚠️  No recommendations generated")
+        
+        print("\n" + "="*60)
+    
     def _generate_dft_recommendations(self, initial_analysis_text: str, novelty_assessment: Dict[str, Any]) -> Dict[str, Any]:
         """Generate DFT recommendations based on enhanced novelty analysis (microscopy only)"""
         
@@ -687,6 +710,8 @@ class ExperimentNoveltyAssessment:
             
             print(f"   ✅ Generated {len(recommendations)} DFT structure recommendations")
             
+            self._display_dft_recommendations(reasoning_text, recommendations, high_novel + moderate_novel)
+
             # Save DFT recommendations
             dft_file = self.output_dir / "dft_recommendations.json"
             dft_output = {
