@@ -286,8 +286,7 @@ class BaseAnalysisAgent:
     A human expert provided this feedback:
     "{user_feedback}"
 
-    Please refine both the detailed analysis and scientific claims based on this feedback. 
-    Address the points raised, improve accuracy, and adjust emphasis as suggested.
+    Use this feedback *thoughtfully* to refine both the detailed analysis and scientific claims. 
     Maintain the same JSON output format with "detailed_analysis" and "scientific_claims" keys.
     """
             

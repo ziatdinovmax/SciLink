@@ -262,7 +262,7 @@ class AtomisticMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             refine=self.refine_positions,
             max_refinement_shift=self.max_refinement_shift
         )
-        
+        print()
         if coordinates is None or len(coordinates) == 0:
             self.logger.warning("No atoms detected by NN ensemble")
             return {"error": "No atoms detected"}

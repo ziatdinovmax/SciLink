@@ -307,52 +307,61 @@ class ExperimentNoveltyAssessment:
         
         return workflow_result
     
-    def _analyze_experimental_data(self, data_path: Union[str, Path], 
-                                  system_info: Dict[str, Any], 
-                                  **analysis_kwargs) -> Dict[str, Any]:
+    def _analyze_experimental_data(self, data_path: Union[str, Path],
+                                     system_info: Dict[str, Any],
+                                     **analysis_kwargs) -> Dict[str, Any]:
         """Analyze experimental data and generate claims."""
-        
+
         print(f"🔨 Analyzing {self.data_type} data...")
         if self.display_agent_logs:
-            print(f"   (Agent logs will appear below)")
+            print(f"    (Agent logs will appear below)")
             print(f"{'─'*30}")
-        
+
         try:
             analysis_result = self.analyzer.analyze_for_claims(
-                str(data_path), 
-                system_info=system_info, 
+                str(data_path),
+                system_info=system_info,
                 **analysis_kwargs
             )
-            
+
             if self.display_agent_logs:
                 print(f"{'─'*30}")
-            
+
             if "error" in analysis_result:
                 return {
                     "status": "error",
                     "message": analysis_result["error"]
                 }
-            
+
             claims = analysis_result.get("scientific_claims", [])
+            detailed_analysis = analysis_result.get("detailed_analysis", "No analysis text provided.")
+
             if not claims:
                 return {
                     "status": "error",
                     "message": "No scientific claims generated from analysis"
                 }
-            
-            # Display claims in DFT-style format
-            self._display_claims_summary(claims)
-            
+
+            self._display_analysis_summary(claims, detailed_analysis)
+
             # Save claims
             claims_file = self.output_dir / f"generated_{self.data_type}_claims.json"
             with open(claims_file, 'w') as f:
-                json.dump(claims, f, indent=2)
-            
+                json.dump(analysis_result, f, indent=2)
+
             return {
                 "status": "success",
                 "claims": claims,
                 "claims_file": str(claims_file),
-                "detailed_analysis": analysis_result.get("detailed_analysis", "")
+                "detailed_analysis": detailed_analysis
+            }
+
+        except Exception as e:
+            if self.display_agent_logs:
+                print(f"{'─'*30}")
+            return {
+                "status": "error",
+                "message": f"Analysis failed: {str(e)}"
             }
             
         except Exception as e:
@@ -473,21 +482,21 @@ class ExperimentNoveltyAssessment:
                 "message": f"Novelty assessment failed: {str(e)}"
             }
     
-    def _display_claims_summary(self, claims: List[Dict[str, Any]]):
-        """Display generated claims in DFT-style format."""
-        
-        print(f"   📋 Generated {len(claims)} scientific claims:")
-        
+    def _display_analysis_summary(self, claims: List[Dict[str, Any]], detailed_analysis: str):
+        """Display generated claims and analysis in DFT-style format."""
+
+        print("\n--- Analysis Summary (After User Feedback) ---")
+        print("\n📋 DETAILED ANALYSIS:")
+        print(detailed_analysis)
+
+        print(f"\n🎯 GENERATED CLAIMS ({len(claims)}):")
         for i, claim in enumerate(claims, 1):
             claim_text = claim.get('claim', 'No claim text')
-            # Truncate long claims for summary display
-            if len(claim_text) > 80:
-                claim_text = claim_text[:77] + "..."
-            print(f"      {i}. {claim_text}")
-        
+            print(f"    {i}. {claim_text}")
+
         if claims:
             keywords_count = sum(len(claim.get('keywords', [])) for claim in claims)
-            print(f"   🏷️  Total keywords identified: {keywords_count}")
+            print(f"    🏷️  Total keywords identified: {keywords_count}")
     
     def _display_novelty_summary(self, assessment: Dict[str, Any]):
         """Display novelty assessment in DFT-style format."""
