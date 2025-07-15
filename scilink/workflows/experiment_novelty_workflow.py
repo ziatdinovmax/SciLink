@@ -342,6 +342,11 @@ class ExperimentNoveltyAssessment:
                     "message": "No scientific claims generated from analysis"
                 }
 
+            if analysis_result.get("human_feedback", {}).get("feedback_provided"):
+                # If feedback was given, display the final, refined results.
+                print("\n--- Analysis Summary (After Applying User Feedback) ---")
+                self._display_analysis_summary(claims, detailed_analysis)
+                
             # Save claims
             claims_file = self.output_dir / f"generated_{self.data_type}_claims.json"
             with open(claims_file, 'w') as f:
