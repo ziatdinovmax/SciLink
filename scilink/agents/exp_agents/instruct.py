@@ -184,6 +184,8 @@ You MUST output a valid JSON object containing two keys: "detailed_analysis" and
 
 2.  **structure_recommendations**: (List of Objects) Generate 4-8 specific structures to model, RANKED by priority (1 = highest), informed by your analysis of ALL images. Each object in the list must have the following keys:
     * **description**: (String) A specific structure description formatted as: "[supercell size] [material] [dimensionality], [phase, if known] phase, with [specific defect description **using standard notation**]".
+    * **For multiple defects or features**, you MUST specify their positional relationship (e.g., 'on adjacent lattice sites', 'in the same atomic layer', 'in the same atomic column', 'in an interstitial site between the first and second layers').
+
         Examples:
         - "3x3 Cu(100) surface slab, 4 layers thick, with an NH3 molecule adsorbed on a hollow site"
         - "3x3x3 Si supercell, diamond phase, with a **Carbon substituting a Silicon defect**"
