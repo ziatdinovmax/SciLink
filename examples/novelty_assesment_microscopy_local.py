@@ -11,8 +11,8 @@ scilink.configure('futurehouse','2skcTZ36nXb9ddgrpJa7rg.platformv01.eyJqdGkiOiI5
 
 
 # Define image and metadata
-image_path = "data/MoS2_stem_Exp-000-2.npy" # GO_cafm.tif, nanoparticles.npy
-system_info_path = "data/MoS2_stem_Exp-000-2.json" # GO_cafm.json, nanoparticles.json
+image_path = "data/MoS2_stem_Exp-000-2.npy" # GO_cafm.tif, nanoparticles.npy, MoS2_stem_Exp-001-5.npy
+system_info_path = "data/MoS2_stem_Exp-000-2.json" # GO_cafm.json, nanoparticles.json, MoS2_stem_Exp-001-5.json
 
 if __name__ == "__main__":
 
@@ -20,6 +20,7 @@ if __name__ == "__main__":
         data_type='microscopy',
         dft_recommendations=True,
         enable_human_feedback=True,
+        local_model = "../../gemma3_27B_QAT_local/gemma-3-27b-it-q4_0.gguf",
     )
 
     result_unified = workflow.run_complete_workflow(

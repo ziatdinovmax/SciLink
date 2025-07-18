@@ -35,7 +35,8 @@ if __name__ == "__main__":
     
     workflow = scilink.workflows.ExperimentNoveltyAssessment(
         data_type='spectroscopy',
-        enable_human_feedback=True
+        enable_human_feedback=True,
+        local_model = "../../gemma3_27B_QAT_local/gemma-3-27b-it-q4_0.gguf",
     )
 
     result_unified = workflow.run_complete_workflow(
