@@ -10,8 +10,8 @@ import zipfile
 import scilink
 
 # Configure APIs
-scilink.configure('google', 'AIzaSyBc0lxq2Rk-f6e0xnG60UKV5zL3YweJkGg')
-scilink.configure('futurehouse','2skcTZ36nXb9ddgrpJa7rg.platformv01.eyJqdGkiOiI5ZDhmMWI0MS01NDRiLTRkMzAtYWIwOC04ODBkMzk1OTk1MjMiLCJzdWIiOiJGSXRVRDBHanRYWUo2Y1lXOGQ3RkJhbFBHZXUxIiwiaWF0IjoxNzQ3NzAxMTAxfQ.W2AQ2Q0mfgJcCvTtXd/SP/6JqOIIGd9Z+dDWyw3T9AQ')
+scilink.configure('google', '')
+scilink.configure('futurehouse','')
 
 
 # Download and extract data files
