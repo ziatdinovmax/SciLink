@@ -23,18 +23,26 @@ class OrchestratorAgent:
     An LLM-powered agent that selects the most appropriate experimental analysis agent
     based on the user's scientific intent.
     """
-    def __init__(self, google_api_key: str | None = None, model_name: str = "gemini-2.5-flash-preview-05-20"):
-        if google_api_key is None:
-            google_api_key = get_api_key('google')
-            if not google_api_key:
-                raise APIKeyNotFoundError('google')
-        genai.configure(api_key=google_api_key)
+    def __init__(self, google_api_key: str | None = None, model_name: str = "gemini-2.5-flash-preview-05-20", local_model: str = None):
+        if local_model is not None:
+            logging.info(f"💻 Using local agent as the orchestrator.")
+            from .llama_wrapper import LocalLlamaModel
+            self.model = LocalLlamaModel(local_model)
+            self.generation_config = None
+            self.safety_settings = None
+        else:
+            logging.info(f"☁️ Using cloud agent as the orchestrator.")
+            if google_api_key is None:
+                google_api_key = get_api_key('google')
+                if not google_api_key:
+                    raise APIKeyNotFoundError('google')
+            genai.configure(api_key=google_api_key)
         
-        self.model = genai.GenerativeModel(model_name)
-        self.generation_config = GenerationConfig(response_mime_type="application/json")
-        self.safety_settings = {
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-        }
+            self.model = genai.GenerativeModel(model_name)
+            self.generation_config = GenerationConfig(response_mime_type="application/json")
+            self.safety_settings = {
+                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+            }
         self.logger = logging.getLogger(__name__)
 
     def _parse_llm_response(self, response) -> tuple[dict | None, dict | None]:

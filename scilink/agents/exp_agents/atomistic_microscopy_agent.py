@@ -35,9 +35,10 @@ class AtomisticMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     Agent for analyzing atomistic microscopy images
     """
 
-    def __init__(self, google_api_key: str | None = None, model_name: str = "gemini-2.5-pro-preview-06-05", 
+    def __init__(self, google_api_key: str | None = None, model_name: str = "gemini-2.5-pro-preview-06-05",
+                 local_model: str = None,
                  atomistic_analysis_settings: dict | None = None, enable_human_feedback: bool = True):
-        super().__init__(google_api_key, model_name, enable_human_feedback=enable_human_feedback)
+        super().__init__(google_api_key, model_name, local_model, enable_human_feedback=enable_human_feedback)
         
         self.atomistic_analysis_settings = atomistic_analysis_settings if atomistic_analysis_settings else {}
         
