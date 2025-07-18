@@ -25,10 +25,12 @@ class MicroscopyAnalyzer(BaseExperimentAnalyzer):
     
     def __init__(self, agent_id: Optional[int] = None, google_api_key: str = None, 
                  analysis_model: str = "gemini-2.5-pro-preview-06-05", output_dir: str = "",
+                 local_model: str = None,
                  enable_human_feedback: bool = False):
         self.agent_id = agent_id
         self.google_api_key = google_api_key
         self.analysis_model = analysis_model
+        self.local_model = local_model
         self.output_dir = output_dir
         self.enable_human_feedback = enable_human_feedback
     
@@ -43,7 +45,7 @@ class MicroscopyAnalyzer(BaseExperimentAnalyzer):
             logging.info(f"Using manually selected agent: {AGENT_MAP[selected_agent_id].__name__}")
         else:
             logging.info("Using orchestrator to select the best analysis agent...")
-            orchestrator = OrchestratorAgent(google_api_key=self.google_api_key)
+            orchestrator = OrchestratorAgent(google_api_key=self.google_api_key, local_model = self.local_model)
             selected_agent_id, reasoning = orchestrator.select_agent(
                 data_type="microscopy",
                 system_info=system_info,
@@ -58,6 +60,7 @@ class MicroscopyAnalyzer(BaseExperimentAnalyzer):
         logging.info(f"✅ Running analysis with: {AnalysisAgentClass.__name__}")
         
         agent_kwargs = {'model_name': self.analysis_model, 
+                        'local_model': self.local_model,
                         'enable_human_feedback': self.enable_human_feedback
         }
         if selected_agent_id == 0:  # MicroscopyAnalysisAgent
@@ -79,10 +82,12 @@ class SpectroscopyAnalyzer(BaseExperimentAnalyzer):
     """Analyzer for spectroscopy data."""
     
     def __init__(self, google_api_key: str = None, analysis_model: str = "gemini-2.5-pro-preview-06-05", 
+                 local_model: str = None,
                  output_dir: str = "", spectral_unmixing_enabled: bool = True,
                  enable_human_feedback: bool = False):
         self.google_api_key = google_api_key
         self.analysis_model = analysis_model
+        self.local_model = local_model,
         self.output_dir = output_dir
         
         # Fixed spectral unmixing settings
@@ -98,6 +103,7 @@ class SpectroscopyAnalyzer(BaseExperimentAnalyzer):
         self.analysis_agent = SpectroscopyAnalysisAgent(
             api_key=google_api_key,
             model_name=analysis_model,
+            local_model=local_model,
             spectral_unmixing_settings=spectral_settings,
             output_dir=output_dir,
             enable_human_feedback=enable_human_feedback
