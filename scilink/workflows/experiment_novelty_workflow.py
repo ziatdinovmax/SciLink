@@ -89,7 +89,8 @@ class ExperimentNoveltyAssessment:
                  data_type: str,
                  google_api_key: str = None,
                  futurehouse_api_key: str = None,
-                 analysis_model: str = "gemini-2.5-pro-preview-06-05",
+                 analysis_model: str = "gemini-2.5-flash-preview-05-20",
+                 local_model: str = None,
                  output_dir: str = "experiment_novelty_output",
                  max_wait_time: int = 500,
                  dft_recommendations: bool = False,
@@ -111,7 +112,6 @@ class ExperimentNoveltyAssessment:
             display_agent_logs: Whether to show detailed agent logs (default: True)
             **analyzer_kwargs: Additional arguments passed to the specific analyzer
         """
-        
         # Validate data type
         if data_type not in self.ANALYZER_REGISTRY:
             available_types = list(self.ANALYZER_REGISTRY.keys())
@@ -148,6 +148,7 @@ class ExperimentNoveltyAssessment:
         
         self.google_api_key = google_api_key
         self.analysis_model = analysis_model
+        self.local_model = local_model
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.dft_recommendations = dft_recommendations
@@ -157,6 +158,7 @@ class ExperimentNoveltyAssessment:
         self.analyzer = analyzer_class(
             google_api_key=google_api_key,
             analysis_model=analysis_model,
+            local_model=local_model,
             output_dir=str(self.output_dir),
             enable_human_feedback=enable_human_feedback,
             **analyzer_kwargs

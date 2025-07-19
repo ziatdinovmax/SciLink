@@ -32,10 +32,11 @@ class SpectroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
 
     def __init__(self, api_key: str | None = None, model_name: str = "gemini-2.5-pro-preview-06-05", 
+                 local_model: str = None,
                  spectral_unmixing_settings: dict | None = None,
                  output_dir: str = "spectroscopy_output",
                  enable_human_feedback: bool = False):
-        super().__init__(api_key, model_name, enable_human_feedback=enable_human_feedback)
+        super().__init__(api_key, model_name, local_model, enable_human_feedback=enable_human_feedback)
         
         # Spectral unmixing settings
         default_settings = {

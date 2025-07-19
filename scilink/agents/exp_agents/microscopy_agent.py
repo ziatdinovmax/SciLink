@@ -29,8 +29,9 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
     def __init__(self,
                  google_api_key: str | None = None, model_name: str = "gemini-2.5-pro-preview-06-05",
+                 local_model: str = None,
                  fft_nmf_settings: dict | None = None, enable_human_feedback: bool = True):
-        super().__init__(google_api_key, model_name, enable_human_feedback=enable_human_feedback)
+        super().__init__(google_api_key, model_name, local_model, enable_human_feedback=enable_human_feedback)
         
         self.fft_nmf_settings = fft_nmf_settings if fft_nmf_settings else {}
         self.RUN_FFT_NMF = self.fft_nmf_settings.get('FFT_NMF_ENABLED', False)
