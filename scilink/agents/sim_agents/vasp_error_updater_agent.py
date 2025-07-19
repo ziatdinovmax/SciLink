@@ -65,7 +65,7 @@ class VaspErrorUpdaterAgent:
         prompt = (
             allowed_line
             + advice_line
-            + f"The VASP run for “{original_request}” failed with:\n\n{snippet}\n\n"
+            + f"The VASP run for \"{original_request}\" failed with:\n\n{snippet}\n\n"
             + f"Original INCAR:\n{incar_txt}\n\n"
             + f"Original KPOINTS:\n{kpoints_txt}\n\n"
             + "Please reply with a JSON object with keys:\n"
