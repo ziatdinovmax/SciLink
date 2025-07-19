@@ -17,16 +17,8 @@ class LocalLlamaModel():
         choice = response['choices'][0]
         response_text = choice['message']['content']
         finish_reason = choice.get('finish_reason', 'stop')
-
-        # Remove the additional characters
-        if "json" in response_text:
-            print("Warning: Removing unexpected 'json' from LLM output.")
-            response_text = response_text.replace("json", "")
-
-        if "```" in response_text:
-            print("Warning: Removing Markdown code block backticks (``` ) from LLM output.")
-            response_text = response_text.replace("```", "")
-            
+        response_text = self.fix_json_format(response_text)
+        
         #Llama_cpp's finish rason is a string instead of int. Let's map them as int.
         finish_reason_map = {
             "stop": 1,
@@ -47,6 +39,17 @@ class LocalLlamaModel():
         )
 
         return final_response
+
+    def fix_json_format(self, response_text):
+        # Remove the additional characters
+        if "json" in response_text:
+            print("Warning: Removing unexpected 'json' from LLM output.")
+            response_text = response_text.replace("json", "")
+
+        if "```" in response_text:
+            print("Warning: Removing Markdown code block backticks (``` ) from LLM output.")
+            response_text = response_text.replace("```", "")
+        return response_text
         
     def prompt_parser(self, genaiList):
         """
