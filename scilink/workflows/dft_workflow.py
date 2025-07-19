@@ -1,14 +1,16 @@
 import os
 import sys
-import logging
-from io import StringIO
 import json
+import logging
+from pathlib import Path
+from io import StringIO
 from typing import Optional, Dict, Any
 
 from ..auth import get_api_key, APIKeyNotFoundError
 from ..agents.sim_agents.structure_agent import StructureGenerator
 from ..agents.sim_agents.val_agent import StructureValidatorAgent, IncarValidatorAgent
 from ..agents.sim_agents.vasp_agent import VaspInputAgent
+from ..agents.sim_agents.vasp_error_updater_agent import VaspErrorUpdaterAgent
 
 
 class DFTWorkflow:
@@ -76,6 +78,12 @@ class DFTWorkflow:
             api_key=google_api_key,
             model_name=generator_model
         )
+
+        # error_log based INCAR/KPOINTS refinement
+        self.vasp_error_updater = VaspErrorUpdaterAgent(
+            api_key=google_api_key,
+            model_name=generator_model
+        )
         
         if futurehouse_api_key:
             self.incar_validator = IncarValidatorAgent(
@@ -89,7 +97,7 @@ class DFTWorkflow:
         # Create output directory
         os.makedirs(output_dir, exist_ok=True)
         
-    def run_complete_workflow(self, user_request: str) -> Dict[str, Any]:
+    def run_complete_workflow(self, user_request: str, log_path: Optional[str] = None) -> Dict[str, Any]:
         """
         Run the complete workflow from user request to final VASP inputs.
         """
@@ -139,10 +147,19 @@ class DFTWorkflow:
         workflow_result["steps_completed"].append("vasp_generation")
         print(f"✅ VASP inputs generated: INCAR, KPOINTS")
         print(f"📋 Calculation type: {vasp_result.get('summary', 'N/A')}")
+
+        # ─── Step 3: Error‑based INCAR/KPOINTS refinement (if you passed a log) ───
+        if log_path:
+            print("\n🔄 WORKFLOW STEP 3: Refining INCAR/KPOINTS from VASP log")
+            ref = self.refine_from_log(user_request, log_path)
+            workflow_result["error_refinement"] = ref
+            workflow_result["steps_completed"].append("error_refinement")
+        else:
+            print("ℹ️  skipping error‑based refinement")
         
-        # Step 3: Literature Validation and Improvements (optional)
+        # Step 4: Literature Validation and Improvements (optional)
         if self.incar_validator:
-            print(f"\n📚  WORKFLOW STEP 3: Literature Validation")
+            print(f"\n📚  WORKFLOW STEP 4: Literature Validation")
             print(f"{'─'*50}")
             
             improvement_result = self._validate_and_improve_incar(
@@ -167,6 +184,59 @@ class DFTWorkflow:
         self._print_final_summary(workflow_result)
         
         return workflow_result
+
+    def refine_from_log(self, original_request: str, log_path: str) -> Dict[str, Any]:
+        """
+        Given a VASP stdout/stderr log file, iteratively refine INCAR/KPOINTS
+        in self.output_dir using VaspErrorUpdaterAgent.
+        """
+        outdir    = Path(self.output_dir)
+        poscar_f  = outdir / "POSCAR"
+        incar_f   = outdir / "INCAR"
+        kpoints_f = outdir / "KPOINTS"
+
+        log_text = Path(log_path).read_text()
+        old_incar   = incar_f.read_text()
+        old_kpoints = kpoints_f.read_text()
+
+        plan = self.vasp_error_updater.refine_inputs(
+            poscar_path=str(poscar_f),
+            incar_path=str(incar_f),
+            kpoints_path=str(kpoints_f),
+            vasp_log=log_text,
+            original_request=original_request
+        )
+        print("Plan:", plan)
+
+        if plan.get("status") == "success":
+            # INCAR backup & overwrite
+            new_incar = plan.get("suggested_incar", "")
+            if new_incar and new_incar != old_incar:
+                ver = 0
+                while (incar_f.with_suffix(f"{incar_f.suffix}.v{ver}")).exists():
+                    ver += 1
+                incar_f.rename(incar_f.with_suffix(f"{incar_f.suffix}.v{ver}"))
+                incar_f.write_text(new_incar)
+                print(f"   • INCAR updated → backed up as INCAR{incar_f.suffix}.v{ver}")
+
+            # KPOINTS backup & overwrite
+            new_kp = plan.get("suggested_kpoints", "")
+            if new_kp and new_kp != old_kpoints:
+                ver = 0
+                while (kpoints_f.with_suffix(f"{kpoints_f.suffix}.v{ver}")).exists():
+                    ver += 1
+                kpoints_f.rename(kpoints_f.with_suffix(f"{kpoints_f.suffix}.v{ver}"))
+                kpoints_f.write_text(new_kp)
+                print(f"   • KPOINTS updated → backed up as KPOINTS{kpoints_f.suffix}.v{ver}")
+        else:
+            print("⚠️  Refinement failed:", plan.get("message"))
+
+        return {
+            "final_incar":   str(incar_f),
+            "final_kpoints": str(kpoints_f),
+            "status":        plan.get("status"),
+            "message":       plan.get("message", "")
+        }
     
     def _generate_and_validate_structure(self, user_request: str) -> Dict[str, Any]:
         """Generate and validate atomic structure with improved output formatting."""
