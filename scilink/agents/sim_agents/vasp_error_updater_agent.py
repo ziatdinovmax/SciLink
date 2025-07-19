@@ -2,7 +2,7 @@ import re
 from pathlib import Path
 from typing import Dict, Any
 
-from ..vasp_agent import VaspInputAgent
+from .vasp_agent import VaspInputAgent
 
 class VaspErrorUpdaterAgent:
     """
