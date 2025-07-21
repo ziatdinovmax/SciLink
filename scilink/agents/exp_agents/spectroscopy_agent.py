@@ -17,7 +17,8 @@ from .instruct import (
     SPECTROSCOPY_ANALYSIS_INSTRUCTIONS, 
     COMPONENT_INITIAL_ESTIMATION_INSTRUCTIONS,
     COMPONENT_VISUAL_COMPARISON_INSTRUCTIONS,
-    SPECTROSCOPY_CLAIMS_INSTRUCTIONS
+    SPECTROSCOPY_CLAIMS_INSTRUCTIONS,
+    SPECTROSCOPY_MEASUREMENT_RECOMMENDATIONS_INSTRUCTIONS
 )
 
 from .human_feedback import SimpleFeedbackMixin
@@ -1101,3 +1102,6 @@ class SpectroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         
         self.logger.info("Using channel indices (no energy range provided)")
         return energy_axis, xlabel, has_energy_info
+    
+    def _get_measurement_recommendations_prompt(self) -> str:
+        return SPECTROSCOPY_MEASUREMENT_RECOMMENDATIONS_INSTRUCTIONS

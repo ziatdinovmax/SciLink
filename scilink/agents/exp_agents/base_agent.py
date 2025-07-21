@@ -253,25 +253,21 @@ class BaseAnalysisAgent:
         
         return system_info_text
     
-    # NEW METHOD: Store analysis images
     def _store_analysis_images(self, images: list, metadata: dict = None):
         """Store analysis images for potential reuse in refinement."""
         self._stored_analysis_images = images.copy() if images else []
         self._stored_analysis_metadata = metadata or {}
         self.logger.debug(f"Stored {len(self._stored_analysis_images)} analysis images for potential refinement")
     
-    # NEW METHOD: Retrieve stored images
     def _get_stored_analysis_images(self) -> list:
         """Retrieve stored analysis images."""
         return self._stored_analysis_images.copy()
     
-    # NEW METHOD: Clear stored images
     def _clear_stored_images(self):
         """Clear stored images to free memory."""
         self._stored_analysis_images = []
         self._stored_analysis_metadata = {}
 
-    # NEW METHOD: Refine analysis with feedback
     def _refine_analysis_with_feedback(self, original_analysis: str, 
                                      original_claims: list, 
                                      user_feedback: str,
@@ -347,3 +343,98 @@ class BaseAnalysisAgent:
         except Exception as e:
             self.logger.error(f"Analysis refinement failed: {e}")
             return {"error": "Refinement failed", "details": str(e)}
+        
+    def _validate_measurement_recommendations(self, recommendations: list) -> list:
+        """Simple validation of measurement recommendations."""
+        valid_recommendations = []
+        
+        if not isinstance(recommendations, list):
+            return valid_recommendations
+        
+        required_keys = ["description", "scientific_justification", "priority"]
+        
+        for rec in recommendations:
+            if isinstance(rec, dict) and all(k in rec for k in required_keys):
+                # Simple validation
+                if isinstance(rec.get("priority"), int) and 1 <= rec.get("priority") <= 5:
+                    valid_recommendations.append(rec)
+        
+        # Sort by priority
+        return sorted(valid_recommendations, key=lambda x: x.get("priority", 5))
+    
+    def generate_measurement_recommendations(self, analysis_result: dict, 
+                                           system_info: dict = None,
+                                           novelty_context: str = None) -> dict:
+        """
+        Generate measurement recommendations using existing analysis results and stored images.
+        """
+        if "error" in analysis_result:
+            return {"error": "Cannot generate recommendations from failed analysis"}
+        
+        try:
+            # Get agent-specific prompt
+            instruction_prompt = self._get_measurement_recommendations_prompt()
+            
+            # Build simple prompt using existing data
+            prompt_parts = [instruction_prompt]
+            
+            # Add analysis results (what's already available)
+            prompt_parts.append("\n\n--- Analysis Results ---")
+            
+            if "detailed_analysis" in analysis_result:
+                prompt_parts.append(f"Detailed Analysis:\n{analysis_result['detailed_analysis']}")
+            
+            if "scientific_claims" in analysis_result:
+                prompt_parts.append(f"\nScientific Claims:")
+                for i, claim in enumerate(analysis_result["scientific_claims"], 1):
+                    prompt_parts.append(f"{i}. {claim.get('claim', 'N/A')}")
+            
+            # Add stored images (what's already available from the analysis)
+            stored_images = self._get_stored_analysis_images()
+            if stored_images:
+                prompt_parts.append(f"\n\nAnalysis Images:")
+                for img_data in stored_images[:3]:  # Limit to 3 images
+                    if isinstance(img_data, dict) and 'label' in img_data and 'data' in img_data:
+                        prompt_parts.append(f"\n{img_data['label']}:")
+                        prompt_parts.append({"mime_type": "image/jpeg", "data": img_data['data']})
+            
+            # Add optional context
+            if novelty_context:
+                prompt_parts.append(f"\n\nNovelty Context: {novelty_context}")
+            
+            if system_info:
+                system_info_section = self._build_system_info_prompt_section(system_info)
+                if system_info_section:
+                    prompt_parts.append(system_info_section)
+            
+            prompt_parts.append("\n\nProvide measurement recommendations in JSON format.")
+            
+            # Query LLM
+            response = self.model.generate_content(
+                contents=prompt_parts,
+                generation_config=self.generation_config,
+                safety_settings=self.safety_settings,
+            )
+            
+            result_json, error_dict = self._parse_llm_response(response)
+            
+            if error_dict:
+                return {"error": "Recommendation generation failed", "details": error_dict}
+            
+            # Validate recommendations
+            recommendations = result_json.get("measurement_recommendations", [])
+            valid_recommendations = self._validate_measurement_recommendations(recommendations)
+            
+            return {
+                "analysis_integration": result_json.get("analysis_integration", ""),
+                "measurement_recommendations": valid_recommendations,
+                "total_recommendations": len(valid_recommendations)
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Recommendation generation failed: {e}")
+            return {"error": "Recommendation generation failed", "details": str(e)}
+
+    def _get_measurement_recommendations_prompt(self) -> str:
+        """Must be implemented by each agent."""
+        raise NotImplementedError("Each agent must implement this method")
