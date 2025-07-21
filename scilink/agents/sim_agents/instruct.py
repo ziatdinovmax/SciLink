@@ -169,6 +169,11 @@ Your task is to generate appropriate INCAR and KPOINTS files based on:
   - Magnetic systems: ISPIN=2, MAGMOM
   - Hybrid functionals: HSE06 parameters if needed
   - van der Waals: DFT-D3 corrections if appropriate
+  - **NOTE (DFT‑D3)**: If you set `IVDW = 11`, you **must** also specify a compatible GGA.
+    Valid choices are:
+      • `GGA = PE`   # PBE  
+      • `GGA = PS`   # PBEsol  
+      • `GGA = RP`   # RPBE
 
 ## KPOINTS File Guidelines:
 - **Grid density**: Balance accuracy vs computational cost
