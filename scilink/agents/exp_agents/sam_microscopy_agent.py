@@ -9,7 +9,7 @@ from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockT
 
 from .base_agent import BaseAnalysisAgent
 
-from .instruct import SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS
+from .instruct import SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS, SAM_MEASUREMENT_RECOMMENDATIONS_INSTRUCTIONS
 
 from .utils import load_image, preprocess_image, convert_numpy_to_jpeg_bytes
 
@@ -526,3 +526,6 @@ class SAMMicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     
     def _get_claims_instruction_prompt(self) -> str:
         return SAM_MICROSCOPY_CLAIMS_INSTRUCTIONS
+    
+    def _get_measurement_recommendations_prompt(self) -> str:
+        return SAM_MEASUREMENT_RECOMMENDATIONS_INSTRUCTIONS

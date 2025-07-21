@@ -4,6 +4,7 @@ import logging
 import json
 from io import StringIO
 from typing import Dict, Any, List, Union
+import textwrap
 from pathlib import Path
 
 from .analyzers import MicroscopyAnalyzer, SpectroscopyAnalyzer, BaseExperimentAnalyzer
@@ -89,11 +90,12 @@ class ExperimentNoveltyAssessment:
                  data_type: str,
                  google_api_key: str = None,
                  futurehouse_api_key: str = None,
-                 analysis_model: str = "gemini-2.5-flash-preview-05-20",
+                 analysis_model: str = "gemini-2.5-pro-preview-06-05",
                  local_model: str = None,
                  output_dir: str = "experiment_novelty_output",
-                 max_wait_time: int = 500,
+                 max_wait_time: int = 600,
                  dft_recommendations: bool = False,
+                 measurement_recommendations: bool = False,
                  enable_human_feedback: bool = True,
                  display_agent_logs: bool = True,
                  **analyzer_kwargs):
@@ -152,6 +154,7 @@ class ExperimentNoveltyAssessment:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.dft_recommendations = dft_recommendations
+        self.measurement_recommendations = measurement_recommendations 
         
         # Initialize data-specific analyzer
         analyzer_class = self.ANALYZER_REGISTRY[data_type]
@@ -298,6 +301,27 @@ class ExperimentNoveltyAssessment:
                 print(f"📄 Recommendations saved: {os.path.basename(dft_result['dft_file'])}")
             else:
                 print(f"⚠️  DFT recommendations failed: {dft_result.get('message', 'Unknown error')}")
+        
+        # === Step 5: Measurement Recommendations (Optional) ===
+        if self.measurement_recommendations:
+            step_number = "5" if (self.dft_recommendations and self.data_type == 'microscopy') else "4"
+            print(f"\n📋 WORKFLOW STEP {step_number}: Measurement Recommendations")
+            print(f"{'─'*50}")
+            
+            measurement_result = self._generate_measurement_recommendations(
+                workflow_result["claims_generation"],
+                workflow_result.get("novelty_assessment", {}),
+                system_info
+            )
+            workflow_result["measurement_recommendations"] = measurement_result
+            
+            if measurement_result["status"] == "success":
+                workflow_result["steps_completed"].append("measurement_recommendations")
+                rec_count = measurement_result.get('total_recommendations', 0)
+                print(f"✅ Measurement recommendations generated: {rec_count} suggestions")
+                print(f"📄 Recommendations saved: {os.path.basename(measurement_result['recommendations_file'])}")
+            else:
+                print(f"⚠️  Measurement recommendations failed: {measurement_result.get('message', 'Unknown error')}")
         
         workflow_result["final_status"] = "success"
         
@@ -588,6 +612,13 @@ class ExperimentNoveltyAssessment:
                 rec_count = dft_result.get('total_recommendations', 0)
                 print(f"⚛️  DFT: {rec_count} structure recommendation{'s' if rec_count > 1 else ''}")
         
+        # Measurement recommendations info (NEW)
+        if "measurement_recommendations" in workflow_result:
+            measurement_result = workflow_result["measurement_recommendations"]
+            if measurement_result["status"] == "success":
+                rec_count = measurement_result.get('total_recommendations', 0)
+                print(f"📋 Measurements: {rec_count} recommendation{'s' if rec_count > 1 else ''}")
+        
         print(f"{'='*60}")
     
     def _save_workflow_log(self, data_type_name: str):
@@ -766,3 +797,155 @@ class ExperimentNoveltyAssessment:
                 "status": "error",
                 "message": f"DFT recommendations failed: {str(e)}"
             }
+        
+    def _generate_measurement_recommendations(self, 
+                                            claims_result: Dict[str, Any],
+                                            novelty_assessment: Dict[str, Any],
+                                            system_info: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate measurement recommendations using the stored analysis agent."""
+        
+        print(f"🤖 Generating measurement recommendations...")
+        
+        try:
+            # Create novelty context
+            novelty_context = self._create_novelty_context(novelty_assessment)
+            
+            # Use the stored agent that already did the analysis
+            if not hasattr(self.analyzer, 'analysis_agent') or self.analyzer.analysis_agent is None:
+                return {
+                    "status": "error", 
+                    "message": "No analysis agent available - analysis may have failed"
+                }
+            
+            agent = self.analyzer.analysis_agent
+            
+            # The agent already has all stored analysis images and proper context
+            recommendations_result = agent.generate_measurement_recommendations(
+                analysis_result=claims_result,
+                system_info=system_info,
+                novelty_context=novelty_context
+            )
+            
+            if "error" in recommendations_result:
+                return {"status": "error", "message": recommendations_result["error"]}
+            
+            # Display recommendations summary
+            self._display_measurement_recommendations_summary(recommendations_result)
+            
+            # Save recommendations
+            rec_file = self.output_dir / f"{self.data_type}_measurement_recommendations.json"
+            with open(rec_file, 'w') as f:
+                json.dump(recommendations_result, f, indent=2)
+            
+            return {
+                "status": "success",
+                "total_recommendations": recommendations_result.get("total_recommendations", 0),
+                "recommendations_file": str(rec_file)
+            }
+            
+        except Exception as e:
+            self.logger.exception("Failed to generate measurement recommendations")
+            return {"status": "error", "message": str(e)}
+    
+    def _create_novelty_context(self, novelty_assessment: Dict[str, Any]) -> str:
+        """Create novelty context for measurement recommendations."""
+        
+        categories = novelty_assessment.get("novelty_categories", {})
+        avg_score = novelty_assessment.get("average_novelty_score", 0)
+        
+        high_novel = categories.get("highly_novel", [])
+        moderate_novel = categories.get("moderately_novel", [])
+        
+        if not high_novel and not moderate_novel:
+            return "No high-novelty findings identified. Focus on standard follow-up measurements."
+        
+        context = f"Literature review indicates significant novelty (average score: {avg_score:.2f}/5.0). "
+        context += "Prioritize measurements that can investigate these novel aspects:\n\n"
+        
+        if high_novel:
+            context += "HIGH NOVELTY FINDINGS:\n"
+            for i, claim in enumerate(high_novel, 1):
+                context += f"{i}. {claim}\n"
+            context += "\n"
+        
+        if moderate_novel:
+            context += "MODERATE NOVELTY FINDINGS:\n"
+            for i, claim in enumerate(moderate_novel, 1):
+                context += f"{i}. {claim}\n"
+            context += "\n"
+        
+        context += "Focus measurements on validating, expanding, or providing complementary evidence."
+        return context
+    
+    def _display_measurement_recommendations_summary(self, recommendations_result: Dict[str, Any]):
+        """Display detailed top recommendations and summary for workflow with improved formatting."""
+        
+        recommendations = recommendations_result.get("measurement_recommendations", [])
+        if not recommendations:
+            print("   ⚠️  No recommendations generated")
+            return
+            
+        print(f"   🎯 Generated {len(recommendations)} measurement recommendations.")
+        
+        num_to_show_detail = min(len(recommendations), 3)
+
+        print(f"\n   📋 TOP {num_to_show_detail} RECOMMENDATION{'S' if num_to_show_detail > 1 else ''}")
+
+        # --- Display each of the top recommendations in detail ---
+        for i, rec in enumerate(recommendations[:num_to_show_detail], 1):
+            # Header for each recommendation
+            print(f"\n   {'─' * 70}")
+            print(f"   [ {i} ] Recommendation (Priority: {rec.get('priority', 'N/A')})")
+            print(f"   {'─' * 70}")
+
+            detail_keys = {
+                "category": "Category",
+                "description": "Description",
+                "target_regions": "Target Regions",
+                "scientific_justification": "Justification",
+                "expected_outcomes": "Expected Outcomes"
+            }
+            
+            base_indent = "     "
+            # Set width based on the longest label to align colons
+            label_column_width = max(len(label) for label in detail_keys.values())
+            
+            keys_to_print = [key for key in detail_keys if rec.get(key)]
+
+            for idx, key in enumerate(keys_to_print):
+                label = detail_keys[key]
+                value = rec[key]
+
+                # Pad the label, then add the colon and a guaranteed space
+                formatted_label = f"{label}:".ljust(label_column_width + 2)
+                
+                # The prefix for the first line of text
+                prefix = base_indent + formatted_label
+                
+                # The indent for subsequent wrapped lines
+                subsequent_indent = ' ' * len(prefix)
+                
+                wrapped_text = textwrap.fill(
+                    str(value),
+                    width=80,
+                    initial_indent=prefix,
+                    subsequent_indent=subsequent_indent
+                )
+                print(wrapped_text)
+                
+                # Add a blank line if this is not the last item being printed
+                if idx < len(keys_to_print) - 1:
+                    print()
+
+        # --- Show a compact summary for any remaining recommendations ---
+        if len(recommendations) > num_to_show_detail:
+            remaining_count = len(recommendations) - num_to_show_detail
+            print(f"\n   {'─' * 70}")
+            print(f"   📝 Additional {remaining_count} recommendation{'s' if remaining_count > 1 else ''}:")
+            
+            for i, rec in enumerate(recommendations[num_to_show_detail:], num_to_show_detail + 1):
+                category = rec.get("category", "Unknown")
+                priority = rec.get("priority", "N/A")
+                print(f"     [{i}] {category} (Priority {priority})")
+            
+        print(f"\n   📄 See saved JSON file for complete details of all recommendations.")

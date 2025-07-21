@@ -33,6 +33,7 @@ class MicroscopyAnalyzer(BaseExperimentAnalyzer):
         self.local_model = local_model
         self.output_dir = output_dir
         self.enable_human_feedback = enable_human_feedback
+        self.analysis_agent = None
     
     def analyze_for_claims(self, data_path: str, system_info: Dict[str, Any] = None, **kwargs) -> Dict[str, Any]:
         """Analyze microscopy image and generate scientific claims."""
@@ -71,8 +72,9 @@ class MicroscopyAnalyzer(BaseExperimentAnalyzer):
                 'output_dir': self.output_dir
             }
         
-        analysis_agent = AnalysisAgentClass(**agent_kwargs)
-        return analysis_agent.analyze_microscopy_image_for_claims(data_path, system_info=system_info)
+        self.analysis_agent = AnalysisAgentClass(**agent_kwargs)
+        
+        return self.analysis_agent.analyze_microscopy_image_for_claims(data_path, system_info=system_info)
     
     def get_data_type_name(self) -> str:
         return "microscopy"

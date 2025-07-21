@@ -16,6 +16,7 @@ from .instruct import (
     MICROSCOPY_ANALYSIS_INSTRUCTIONS,
     MICROSCOPY_CLAIMS_INSTRUCTIONS,
     FFT_NMF_PARAMETER_ESTIMATION_INSTRUCTIONS,
+    MICROSCOPY_MEASUREMENT_RECOMMENDATIONS_INSTRUCTIONS
 )
 from .utils import load_image, preprocess_image, convert_numpy_to_jpeg_bytes, normalize_and_convert_to_image_bytes
 
@@ -442,3 +443,6 @@ class MicroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     
     def _get_claims_instruction_prompt(self) -> str:
         return MICROSCOPY_CLAIMS_INSTRUCTIONS
+    
+    def _get_measurement_recommendations_prompt(self) -> str:
+        return MICROSCOPY_MEASUREMENT_RECOMMENDATIONS_INSTRUCTIONS
