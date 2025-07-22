@@ -170,10 +170,10 @@ Your task is to generate appropriate INCAR and KPOINTS files based on:
   - Hybrid functionals: HSE06 parameters if needed
   - **van der Waals**: include DFT‑D3 corrections (`IVDW = 11`) **only if** the POSCAR geometry indicates a slab, surface, or molecular cluster; otherwise omit.
   - If you include DFT‑D3 (`IVDW = 11`), also specify one of:
-      • `GGA = PE`    # PBE  
-      • `GGA = PS`    # PBEsol  
-      • `GGA = RP`    # RPBE  
-    Otherwise omit both `IVDW` and `GGA`
+      - `GGA = PE`    # PBE  
+      - `GGA = PS`    # PBEsol  
+      - `GGA = RP`    # RPBE  
+  - Otherwise omit both `IVDW` and `GGA`.
 
 ## KPOINTS File Guidelines:
 - **Grid density**: Balance accuracy vs computational cost
