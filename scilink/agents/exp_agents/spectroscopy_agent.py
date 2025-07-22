@@ -1039,9 +1039,9 @@ class SpectroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Top section: Component spectra
         ax_spectra = plt.subplot(2, 1, 1)
         for i in range(final_n_components):
-            plt.plot(components[i], label=f'Component {i+1}', linewidth=2)
+            plt.plot(energy_axis, components[i], label=f'Component {i+1}', linewidth=2)
         plt.title(f'Final Spectral Components (n={final_n_components})')
-        plt.xlabel('Channel')
+        plt.xlabel(xlabel)
         plt.ylabel('Intensity')
         plt.legend()
         plt.grid(True, alpha=0.3)
