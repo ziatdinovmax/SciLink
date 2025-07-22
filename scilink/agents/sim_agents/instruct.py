@@ -173,8 +173,7 @@ Your task is to generate appropriate INCAR and KPOINTS files based on:
       • `GGA = PE`    # PBE  
       • `GGA = PS`    # PBEsol  
       • `GGA = RP`    # RPBE  
-    Otherwise omit both `IVDW` and `GGA`.
-"""
+    Otherwise omit both `IVDW` and `GGA`
 
 ## KPOINTS File Guidelines:
 - **Grid density**: Balance accuracy vs computational cost
