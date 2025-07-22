@@ -168,12 +168,13 @@ Your task is to generate appropriate INCAR and KPOINTS files based on:
   - Surface/slab: LDIPOL, DIPOL for dipole corrections
   - Magnetic systems: ISPIN=2, MAGMOM
   - Hybrid functionals: HSE06 parameters if needed
-  - van der Waals: DFT-D3 corrections if appropriate
-  - **NOTE (DFT‑D3)**: If you set `IVDW = 11`, you **must** also specify a compatible GGA.
-    Valid choices are:
-      • `GGA = PE`   # PBE  
-      • `GGA = PS`   # PBEsol  
-      • `GGA = RP`   # RPBE
+  - **van der Waals**: include DFT‑D3 corrections (`IVDW = 11`) **only if** the POSCAR geometry indicates a slab, surface, or molecular cluster; otherwise omit.
+  - If you include DFT‑D3 (`IVDW = 11`), also specify one of:
+      • `GGA = PE`    # PBE  
+      • `GGA = PS`    # PBEsol  
+      • `GGA = RP`    # RPBE  
+    Otherwise omit both `IVDW` and `GGA`.
+"""
 
 ## KPOINTS File Guidelines:
 - **Grid density**: Balance accuracy vs computational cost
