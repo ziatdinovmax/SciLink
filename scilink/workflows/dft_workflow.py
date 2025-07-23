@@ -401,9 +401,13 @@ class DFTWorkflow:
             )
             if vasp_res.get("status") != "success":
                 return vasp_res
-            saved = self.vasp_agent.save_inputs(vasp_res, self.output_dir)
-            # include the already‑generated POSCAR
-            return {"status": "success", "saved_files": [structure_path] + saved}
+#            saved = self.vasp_agent.save_inputs(vasp_res, self.output_dir)
+#            # include the already‑generated POSCAR
+#            return {"status": "success", "saved_files": [structure_path] + saved}
+             saved_info = self.vasp_agent.save_inputs(vasp_res, self.output_dir)
+             # save_inputs returns {"saved_files": [...]}
+             saved_list = saved_info.get("saved_files", []) if isinstance(saved_info, dict) else saved_info
+             return {"status":"success", "saved_files":[structure_path] + saved_list}
     
     def _validate_and_improve_incar(self, vasp_result: Dict[str, Any], 
                                    structure_path: str, user_request: str) -> Dict[str, Any]:
