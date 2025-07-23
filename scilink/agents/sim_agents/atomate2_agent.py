@@ -42,8 +42,13 @@ class Atomate2InputAgent:
                     "pymatgen Structure or ASE Atoms"
                 ) from e
 
-        # 3) Build POSCAR/INCAR/KPOINTS via Atomate2, but skip POTCAR
-        vis = self.gen.get_input_set(structure)
+        # 3) Build POSCAR/INCAR/KPOINTS via Atomate2, forcing no POTCAR
+        # pass potcar_spec=[] so Atomate2 doesn’t look for any POTCAR files
+        try:
+            vis = self.gen.get_input_set(structure, potcar_spec=[])
+        except TypeError:
+            # fallback if older Atomate2 signature without potcar_spec
+            vis = self.gen.get_input_set(structure)
         os.makedirs(output_dir, exist_ok=True)
 
         # POSCAR
