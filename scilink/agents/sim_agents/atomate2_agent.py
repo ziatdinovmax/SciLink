@@ -42,22 +42,26 @@ class Atomate2InputAgent:
                     "pymatgen Structure or ASE Atoms"
                 ) from e
 
-        # 3) Build POSCAR/INCAR/KPOINTS via Atomate2, forcing no POTCAR lookup
-        #    by passing an empty potcar_spec list
+        # 3) Try Atomate2 for full deck, but catch missing-POTCAR errors
+        from pymatgen.io.vasp.inputs import PmgVaspPspDirError, Poscar
         try:
-            vis = self.gen.get_input_set(structure, potcar_spec=[])
-        except TypeError:
-            # older Atomate2 versions may not accept potcar_spec
+            # passing potcar_spec=[] alone won’t prevent the default POTCAR lookup
+            # so we catch the error instead of letting it bubble up
             vis = self.gen.get_input_set(structure)
+        except PmgVaspPspDirError:
+            # Fallback: no POTCAR available, so we still want
+            # Atomate2’s INCAR/KPOINTS logic via MPRelaxSet
+            from pymatgen.io.vasp.sets import MPRelaxSet
+            vasp_set = MPRelaxSet(structure)
 
-        os.makedirs(output_dir, exist_ok=True)
+            # Write POSCAR/INCAR/KPOINTS manually
+            Poscar(structure).write_file(os.path.join(output_dir, "POSCAR"))
+            vasp_set.get_incar().write_file(os.path.join(output_dir, "INCAR"))
+            vasp_set.get_kpoints().write_file(os.path.join(output_dir, "KPOINTS"))
+            return output_dir
 
-        # POSCAR
-        from pymatgen.io.vasp.inputs import Poscar
+        # If we got here, Atomate2 didn’t error on POTCAR -> write POSCAR/INCAR/KPOINTS
         Poscar(structure).write_file(os.path.join(output_dir, "POSCAR"))
-
-        # INCAR & KPOINTS from Atomate2
         vis.incar.write_file(os.path.join(output_dir, "INCAR"))
         vis.kpoints.write_file(os.path.join(output_dir, "KPOINTS"))
-
         return output_dir
