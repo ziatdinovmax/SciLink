@@ -6,6 +6,10 @@ from typing import Dict, Any, List, Optional
 # Updated imports for new package structure
 from ..auth import get_api_key, APIKeyNotFoundError
 from ..agents.exp_agents.microscopy_agent import MicroscopyAnalysisAgent
+# — Atomate2 integration —
+from pymatgen.core import Structure
+from pymatgen.io.ase import AseAtomsAdaptor
+from ..agents.sim_agents.atomate2_agent import Atomate2InputAgent
 
 
 class DFTRecommendationsWorkflow:
@@ -16,7 +20,11 @@ class DFTRecommendationsWorkflow:
     def __init__(self, 
                  google_api_key: str = None,
                  analysis_model: str = "gemini-2.5-pro-preview-06-05",
-                 output_dir: str = "dft_output"):
+                 output_dir: str = "dft_output",
+                 incar_settings: Optional[dict] = None,
+                 kpoints_settings: Optional[dict] = None,
+                 potcar_settings: Optional[dict] = None):
+                
         
         # Auto-discover API key
         if google_api_key is None:
@@ -28,6 +36,13 @@ class DFTRecommendationsWorkflow:
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
         
+        # — Initialize Atomate2 agent for VASP input generation —
+        self.atomate2_agent = Atomate2InputAgent(
+            incar_settings=incar_settings,
+            kpoints_settings=kpoints_settings,
+            potcar_settings=potcar_settings
+        )
+
         # Initialize agent for text-only DFT recommendations
         # No FFT/NMF settings needed for text-only analysis
         self.agent = MicroscopyAnalysisAgent(
@@ -69,7 +84,7 @@ class DFTRecommendationsWorkflow:
             system_info=system_info,  # Pass as parameter instead of config
             additional_prompt_context=context,
             cached_detailed_analysis=analysis_text
-        )
+        )                       
         
         if "error" in result:
             return {"status": "error", "message": result.get("error")}
