@@ -1,3 +1,12 @@
+import importlib, subprocess, sys
+
+# ── Ensure Atomate2 is installed ───────────────────────────────────────────
+try:
+    import atomate2
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "atomate2>=0.4.0"])
+    atomate2 = importlib.import_module("atomate2")
+# ────────────────────────────────────────────────────────────────────────────
 from .auth import set_api_key, show_api_status
 
 def configure(service: str, api_key: str):
