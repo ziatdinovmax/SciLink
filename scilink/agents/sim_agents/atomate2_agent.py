@@ -42,8 +42,17 @@ class Atomate2InputAgent:
                     "pymatgen Structure or ASE Atoms"
                 ) from e
 
-        # 3) Use Atomate2 to build and write the input set
+        # 3) Build POSCAR/INCAR/KPOINTS via Atomate2, but skip POTCAR
         vis = self.gen.get_input_set(structure)
-        vis.write_input(output_dir)
+        os.makedirs(output_dir, exist_ok=True)
+
+        # POSCAR
+        from pymatgen.io.vasp.inputs import Poscar
+        Poscar(structure).write_file(os.path.join(output_dir, "POSCAR"))
+
+        # INCAR and KPOINTS
+        vis.incar.write_file(os.path.join(output_dir, "INCAR"))
+        vis.kpoints.write_file(os.path.join(output_dir, "KPOINTS"))
 
         return output_dir
+    
