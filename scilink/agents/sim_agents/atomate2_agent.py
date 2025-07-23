@@ -43,7 +43,7 @@ class Atomate2InputAgent:
                 ) from e
 
         # 3) Use Atomate2 to build and write the input set
-        vis = self.gen.get_input_set(atoms=structure)
+        vis = self.gen.get_input_set(structure)
         vis.write_input(output_dir)
 
         return output_dir
