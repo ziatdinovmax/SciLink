@@ -373,21 +373,29 @@ class DFTWorkflow:
 #        
 #        return vasp_result
 
-        print("📝 Generating POSCAR, INCAR, KPOINTS, and POTCAR via Atomate2…")
-
-        # Load existing POSCAR into a pymatgen Structure
+        # Attempt Atomate2 (POSCAR, INCAR, KPOINTS)
+        print("📝 Generating POSCAR, INCAR, KPOINTS via Atomate2…")
         poscar = Poscar.from_file(structure_path)
         structure = poscar.structure
-
-        # Atomate2 writes all four files into self.output_dir
-        self.atomate2_agent.generate(structure, self.output_dir)
-
-        # Collect generated file paths
-        saved_files = [
-            str(Path(self.output_dir) / fname)
-            for fname in ("POSCAR", "INCAR", "KPOINTS", "POTCAR")
-        ]
-        return {"status": "success", "saved_files": saved_files}
+        try:
+            out = self.atomate2_agent.generate(structure, self.output_dir)
+            saved = [
+                str(Path(self.output_dir) / f)
+                for f in ("POSCAR", "INCAR", "KPOINTS")
+            ]
+            return {"status": "success", "saved_files": saved}
+        except Exception as e:
+            # Atomate2 failed (e.g. missing POTCAR), fall back to LLM
+            print(f"⚠️ Atomate2 failed ({e}); falling back to LLM for INCAR/KPOINTS…")
+            vasp_res = self.vasp_agent.generate_vasp_inputs(
+                poscar_path=structure_path,
+                original_request=user_request
+            )
+            if vasp_res.get("status") != "success":
+                return vasp_res
+            saved = self.vasp_agent.save_inputs(vasp_res, self.output_dir)
+            # include the POSCAR you already have
+            return {"status": "success", "saved_files": [structure_path] + saved}
     
     def _validate_and_improve_incar(self, vasp_result: Dict[str, Any], 
                                    structure_path: str, user_request: str) -> Dict[str, Any]:
