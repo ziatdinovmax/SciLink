@@ -135,9 +135,20 @@ class DFTWorkflow:
             workflow_result["final_status"] = "failed_structure_generation"
             return workflow_result
         
+#        workflow_result["steps_completed"].append("structure_generation")
+#        structure_path = structure_result["final_structure_path"]
+#        
+#        print(f"✅ Structure generated: {os.path.basename(structure_path)}")
         workflow_result["steps_completed"].append("structure_generation")
         structure_path = structure_result["final_structure_path"]
-        
+
+        # ─── Rename the ASE‑script POSCAR so Atomate2’s POSCAR won't overwrite it ───
+        if os.path.basename(structure_path) == "POSCAR":
+            preserved = os.path.join(self.output_dir, "POSCAR_structure")
+            os.replace(structure_path, preserved)
+            structure_path = preserved
+            print("ℹ️  Renamed initial POSCAR → POSCAR_structure")
+
         print(f"✅ Structure generated: {os.path.basename(structure_path)}")
         if structure_result.get("warning"):
             print(f"⚠️  {structure_result['warning']}")
