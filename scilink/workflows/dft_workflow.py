@@ -375,26 +375,10 @@ class DFTWorkflow:
 
         # Try Atomate2 for POSCAR/INCAR/KPOINTS (no POTCAR)
         print("📝 Generating POSCAR, INCAR, KPOINTS via Atomate2…")
-        poscar = Poscar.from_file(structure_path)
-        structure = poscar.structure
-        try:
-            self.atomate2_agent.generate(structure, self.output_dir)
-            saved = [
-                str(Path(self.output_dir) / f)
-                for f in ("POSCAR", "INCAR", "KPOINTS")
-            ]
-            return {"status": "success", "saved_files": saved}
-        except Exception as e:
-            # fallback to LLM-based generator
-            print(f"⚠️ Atomate2 failed ({e}); falling back to LLM…")
-            vasp_res = self.vasp_agent.generate_vasp_inputs(
-                poscar_path=structure_path,
-                original_request=user_request
-            )
-            if vasp_res.get("status") != "success":
-                return vasp_res
-            saved = self.vasp_agent.save_inputs(vasp_res, self.output_dir)
-            return {"status": "success", "saved_files": [structure_path] + saved}
+        structure = Poscar.from_file(structure_path).structure
+        self.atomate2_agent.generate(structure, self.output_dir)
+        saved = [str(Path(self.output_dir) / f) for f in ("POSCAR", "INCAR", "KPOINTS")]
+        return {"status": "success", "saved_files": saved}
     
     def _validate_and_improve_incar(self, vasp_result: Dict[str, Any], 
                                    structure_path: str, user_request: str) -> Dict[str, Any]:
