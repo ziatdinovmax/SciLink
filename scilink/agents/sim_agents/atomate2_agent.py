@@ -29,7 +29,7 @@ class Atomate2InputAgent:
         Returns:
             str: Path to the output directory containing the input files.
         """
-        # 1) Ensure the directory exists
+        # 1) Ensure output directory exists
         os.makedirs(output_dir, exist_ok=True)
 
         # 2) Convert ASE Atoms → pymatgen Structure if needed
@@ -42,26 +42,22 @@ class Atomate2InputAgent:
                     "pymatgen Structure or ASE Atoms"
                 ) from e
 
-        # 3) Try Atomate2 for full deck, but catch missing-POTCAR errors
-        from pymatgen.io.vasp.inputs import PmgVaspPspDirError, Poscar
+        # 3) Try Atomate2’s generator (which will error if no POTCAR), else fallback
+        from pymatgen.io.vasp.inputs import Poscar, PmgVaspPspDirError
+        from pymatgen.io.vasp.sets import MPRelaxSet
+
         try:
-            # passing potcar_spec=[] alone won’t prevent the default POTCAR lookup
-            # so we catch the error instead of letting it bubble up
+            # This may raise PmgVaspPspDirError if no pseudopotentials
             vis = self.gen.get_input_set(structure)
-        except PmgVaspPspDirError:
-            # Fallback: no POTCAR available, so we still want
-            # Atomate2’s INCAR/KPOINTS logic via MPRelaxSet
-            from pymatgen.io.vasp.sets import MPRelaxSet
-            vasp_set = MPRelaxSet(structure)
-
-            # Write POSCAR/INCAR/KPOINTS manually
+            # Write POSCAR, INCAR, KPOINTS
             Poscar(structure).write_file(os.path.join(output_dir, "POSCAR"))
-            vasp_set.get_incar().write_file(os.path.join(output_dir, "INCAR"))
-            vasp_set.get_kpoints().write_file(os.path.join(output_dir, "KPOINTS"))
-            return output_dir
+            vis.incar.write_file(os.path.join(output_dir, "INCAR"))
+            vis.kpoints.write_file(os.path.join(output_dir, "KPOINTS"))
+        except PmgVaspPspDirError:
+            # Fallback: use MPRelaxSet (works without POTCAR)
+            relax = MPRelaxSet(structure)
+            relax.poscar.write_file(os.path.join(output_dir, "POSCAR"))
+            relax.incar.write_file(os.path.join(output_dir, "INCAR"))
+            relax.kpoints.write_file(os.path.join(output_dir, "KPOINTS"))
 
-        # If we got here, Atomate2 didn’t error on POTCAR -> write POSCAR/INCAR/KPOINTS
-        Poscar(structure).write_file(os.path.join(output_dir, "POSCAR"))
-        vis.incar.write_file(os.path.join(output_dir, "INCAR"))
-        vis.kpoints.write_file(os.path.join(output_dir, "KPOINTS"))
         return output_dir
