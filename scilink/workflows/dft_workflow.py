@@ -11,6 +11,8 @@ from ..agents.sim_agents.structure_agent import StructureGenerator
 from ..agents.sim_agents.val_agent import StructureValidatorAgent, IncarValidatorAgent
 from ..agents.sim_agents.vasp_agent import VaspInputAgent
 from ..agents.sim_agents.vasp_error_updater_agent import VaspErrorUpdaterAgent
+from ..agents.sim_agents.atomate2_agent import Atomate2InputAgent
+from pymatgen.io.vasp.inputs import Poscar
 
 
 class DFTWorkflow:
@@ -83,6 +85,13 @@ class DFTWorkflow:
         self.vasp_error_updater = VaspErrorUpdaterAgent(
             api_key=google_api_key,
             model_name=generator_model
+        )
+                     
+        # Atomate2 agent for full VASP input deck
+        self.atomate2_agent = Atomate2InputAgent(
+            incar_settings=None,
+            kpoints_settings=None,
+            potcar_settings=None
         )
         
         if futurehouse_api_key:
@@ -345,22 +354,38 @@ class DFTWorkflow:
     def _generate_vasp_inputs(self, structure_path: str, user_request: str) -> Dict[str, Any]:
         """Generate VASP INCAR and KPOINTS files."""
         
-        print(f"📝 Generating VASP input files...")
-        
-        # Generate initial VASP inputs
-        vasp_result = self.vasp_agent.generate_vasp_inputs(
-            poscar_path=structure_path,
-            original_request=user_request
-        )
-        
-        if vasp_result["status"] != "success":
-            return vasp_result
-        
-        # Save initial VASP files
-        saved_files = self.vasp_agent.save_inputs(vasp_result, self.output_dir)
-        vasp_result["saved_files"] = saved_files
-        
-        return vasp_result
+#        print(f"📝 Generating VASP input files...")
+#        
+#        # Generate initial VASP inputs
+#        vasp_result = self.vasp_agent.generate_vasp_inputs(
+#            poscar_path=structure_path,
+#            original_request=user_request
+#        )
+#        
+#        if vasp_result["status"] != "success":
+#            return vasp_result
+#        
+#        # Save initial VASP files
+#        saved_files = self.vasp_agent.save_inputs(vasp_result, self.output_dir)
+#        vasp_result["saved_files"] = saved_files
+#        
+#        return vasp_result
+
+        print("📝 Generating POSCAR, INCAR, KPOINTS, and POTCAR via Atomate2…")
+
+        # Load existing POSCAR into a pymatgen Structure
+        poscar = Poscar.from_file(structure_path)
+        structure = poscar.structure
+
+        # Atomate2 writes all four files into self.output_dir
+        self.atomate2_agent.generate(structure, self.output_dir)
+
+        # Collect generated file paths
+        saved_files = [
+            str(Path(self.output_dir) / fname)
+            for fname in ("POSCAR", "INCAR", "KPOINTS", "POTCAR")
+        ]
+        return {"status": "success", "saved_files": saved_files}
     
     def _validate_and_improve_incar(self, vasp_result: Dict[str, Any], 
                                    structure_path: str, user_request: str) -> Dict[str, Any]:
