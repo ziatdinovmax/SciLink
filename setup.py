@@ -56,7 +56,7 @@ setup(
         "ase>=0.8.5",
         "aimsgb>=1.1.1",
         "gdown>=5.2.0",
-        "atomate2>=0.4.0",
+        "atomate2 @ git+https://github.com/hackingmaterials/atomate2.git@main#egg=atomate2",
     ],
     # Add CLI entry points
     entry_points={
