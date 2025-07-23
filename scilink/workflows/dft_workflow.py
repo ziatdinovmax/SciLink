@@ -156,7 +156,7 @@ class DFTWorkflow:
             
         workflow_result["steps_completed"].append("vasp_generation")
 #        print(f"✅ VASP inputs generated: INCAR, KPOINTS")
-        print("✅ VASP inputs generated via Atomate2: POSCAR, INCAR, KPOINTS, POTCAR")
+        print("✅ VASP inputs generated via Atomate2: POSCAR, INCAR, KPOINTS")
         print(f"📋 Calculation type: {vasp_result.get('summary', 'N/A')}")
 
         # ─── Step 3: Error‑based INCAR/KPOINTS refinement (if you passed a log) ───
