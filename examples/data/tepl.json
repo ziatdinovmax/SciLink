@@ -1,0 +1,18 @@
+
+
+{
+    "material_type": "ultrathin PTCDI films",
+    "experiment_type": "tip-enhanced photoluminescence spectroscopy",
+    "experiment_details": "532 nm continuous wave laser source",
+    "spatial_info":{
+        "field_of_view_x": 250,
+        "field_of_view_y": 250,
+        "field_of_view_units": "nm"
+    },
+    "energy_range": {
+        "start": 500,
+        "end": 1000,
+        "units": "nm"
+    }
+}
+
