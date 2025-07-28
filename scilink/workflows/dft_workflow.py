@@ -206,9 +206,7 @@ class DFTWorkflow:
             vasp_log=log_text,
             original_request=original_request
         )
-        #print("Plan:", plan)
-        #Show the LLM’s human‑readable explanation
-        print(f"🔍 Refinement rationale: {plan.get('message', 'No explanation provided')}")
+        print("Plan:", plan)
 
         if plan.get("status") == "success":
             # INCAR backup & overwrite
