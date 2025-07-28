@@ -235,7 +235,7 @@ def generate_structure_views(structure_path: str, output_dir: str = None) -> Dic
     try:
         atoms = ase_read(structure_path)
         
-        # ADD: Center the structure for better visualization
+        # Center the structure for better visualization
         atoms = _center_structure_for_visualization(atoms)
         
     except Exception as e:

@@ -55,7 +55,6 @@ class StructureGenerator:
         selected_tool = self._select_tool(description)
         tool_name = next(iter(selected_tool.tool.function_declarations)).name
         
-        # ADD MP integration to documentation
         enhanced_docs = selected_tool.docs_content
         if enhanced_docs and self.mp_helper.enabled:
             enhanced_docs += self.mp_helper.get_common_materials_info()
