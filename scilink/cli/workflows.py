@@ -215,7 +215,7 @@ Directory Structure (for novelty/experiment2dft commands):
     # Positional arguments
     parser.add_argument(
         'command',
-        choices=['novelty', 'experiment2dft', 'dft'],
+        choices=['novelty', 'experiment2dft', 'dft', 'full_pipeline'],
         help='Workflow to run'
     )
     parser.add_argument(
@@ -277,6 +277,12 @@ Directory Structure (for novelty/experiment2dft commands):
         '--dft-recommendations',
         action='store_true',
         help='Generate DFT structure recommendations (for novelty command)'
+    )
+
+    parser.add_argument(
+        '--measurement-recommendations',
+        action='store_true',
+        help='Generate next experiment recommendations (for novelty command)'
     )
     
     # Structure generation options (for experiment2dft)
@@ -371,7 +377,8 @@ def run_novelty_workflow(args, data_file: str, metadata_file: str, structure_fil
         'analysis_model': args.model,
         'output_dir': args.output_dir,
         'max_wait_time': args.wait_time,
-        'dft_recommendations': args.dft_recommendations
+        'dft_recommendations': args.dft_recommendations,
+        'measurement_recommendations': args.measurement_recommendations 
     }
     
     # Add data-type specific parameters
@@ -689,7 +696,7 @@ def main():
         # Route to appropriate workflow
         if args.command == 'novelty':
             result = run_novelty_workflow(args, data_file, metadata_file, structure_file, structure_info_file, data_type)
-        elif args.command == 'experiment2dft':
+        elif args.command in ['experiment2dft', 'full-pipeline']:
             result = run_experiment2dft_workflow(args, data_file, metadata_file, structure_file, structure_info_file, data_type)
         else:
             print_error(f"Unknown command: {args.command}")
