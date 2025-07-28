@@ -228,7 +228,12 @@ class DFTWorkflow:
             vasp_log=log_text,
             original_request=original_request
         )
-        print("Plan:", plan)
+#        print("Plan:", plan)
+        # Dump the entire plan so you can see which key holds the rationale
+        print("🔍 Full refinement plan:", json.dumps(plan, indent=2))
+        # Extract whichever field actually contains the LLM’s reasoning
+        rationale = plan.get("message") or plan.get("rationale") or plan.get("explanation", "")
+        print(f"🔍 Refinement rationale: {rationale or 'No explanation provided'}")
 
         if plan.get("status") == "success":
             # INCAR backup & overwrite
