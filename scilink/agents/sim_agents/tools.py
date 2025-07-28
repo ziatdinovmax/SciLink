@@ -84,7 +84,7 @@ TOOL_CONFIGS = {
 TOOL_FUNCTION_MAP = {
     "define_ase_tool": define_ase_tool,
     "define_gb_tool": define_gb_tool,
-    # Add new tool functions here as they're created
+    # New tool functions will be added here
 }
 
 class ToolWithDocs:

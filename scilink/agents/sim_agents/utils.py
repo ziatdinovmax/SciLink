@@ -236,7 +236,7 @@ def generate_structure_views(structure_path: str, output_dir: str = None) -> Dic
         atoms = ase_read(structure_path)
         
         # ADD: Center the structure for better visualization
-        atoms = _center_structure_for_visualization(atoms)  # <- ADD UNDERSCORE HERE
+        atoms = _center_structure_for_visualization(atoms)
         
     except Exception as e:
         logger.error(f"Failed to read structure file {structure_path} with ASE: {e}")

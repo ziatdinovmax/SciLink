@@ -1,9 +1,3 @@
-# ==============================================================================
-# Option 1: Direct Integration into StructureExecutor (Recommended)
-# ==============================================================================
-
-# File: scilink/agents/sim_agents/executors.py
-
 import os
 import sys
 import subprocess
@@ -16,7 +10,6 @@ from ...auth import get_api_key
 
 DEFAULT_TIMEOUT = 120
 
-# Add your security functions directly to this file
 def is_in_colab():
     """Check for Google Colab environment."""
     if 'COLAB_GPU' in os.environ or 'GCE_METADATA_TIMEOUT' in os.environ:
@@ -119,7 +112,6 @@ You MUST restart SciLink inside a container or virtual machine.
         raise RuntimeError("Security sandbox requirement not met. Halting execution for safety.")
 
 
-# Modified StructureExecutor class
 class StructureExecutor:
     def __init__(self, timeout: int = DEFAULT_TIMEOUT, mp_api_key: str = None, 
                  enforce_sandbox: bool = True, allow_unsafe_override: bool = False):
@@ -151,7 +143,6 @@ class StructureExecutor:
         logging.info("Attempting to execute generated ASE script...")
         logging.warning("⚠️  EXECUTING AI-GENERATED CODE - Security sandbox verified")
         
-        # Rest of the existing execute_script method remains the same...
         temp_script_file = None
         try:
             with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as tf:
