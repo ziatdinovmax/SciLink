@@ -74,10 +74,28 @@ class VaspErrorUpdaterAgent:
             '  "explanation": rationale for each change.\n'
         )
 
-        vasp_res = self.vasp_agent.generate_vasp_inputs(
-            poscar_path=poscar_path,
-            original_request=prompt
+#        vasp_res = self.vasp_agent.generate_vasp_inputs(
+#            poscar_path=poscar_path,
+#            original_request=prompt
+#        )
+        
+        # directly call the LLM so we can parse out the “explanation” key
+        raw = self.vasp_agent.llm_client.generate(
+            prompt=prompt,
+            model=self.vasp_agent.model_name,
+            temperature=0
         )
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            raise RuntimeError(f"Failed to parse JSON from VASP‐agent response:\n{raw}")
+        vasp_res = {
+            "status": "success",
+            "incar": parsed.get("suggested_incar", ""),
+            "kpoints": parsed.get("suggested_kpoints", ""),
+            "explanation": parsed.get("explanation", "")
+        }
+        
         if vasp_res.get("status") != "success":
             return {"status": "error", "message": vasp_res.get("message", "")}
 
