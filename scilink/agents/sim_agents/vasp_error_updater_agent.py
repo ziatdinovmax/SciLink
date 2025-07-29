@@ -88,3 +88,19 @@ class VaspErrorUpdaterAgent:
             "suggested_kpoints": vasp_res["kpoints"],
             "explanation":       vasp_res.get("explanation", "")
         }
+        # now ask the LLM itself to explain those changes
+        # import the same client your other agents use:
+        from scilink.agents.sim_agents.val_agent import LLMClient
+        llm = LLMClient(api_key=self.vasp_agent.api_key, model=self.vasp_agent.model_name)
+
+        rationale_prompt = (
+            f"I just proposed the following INCAR/KPOINTS updates for “{original_request}”:\n\n"
+            f"--- INCAR ---\n{plan['suggested_incar']}\n\n"
+            f"--- KPOINTS ---\n{plan['suggested_kpoints']}\n\n"
+            "Please give me, in plain text, the reason for each change."
+        )
+        explanation = llm.generate(prompt=rationale_prompt, model=self.vasp_agent.model_name)
+        plan["explanation"] = explanation.strip()
+
+        return plan
+        
