@@ -95,7 +95,7 @@ class VaspErrorUpdaterAgent:
         llm = LLMClient(self.api_key, self.model_name)
         resp_raw = llm.generate_with_tools(prompt=prompt, tools=[])
         cand     = resp_raw.candidates[0]
-        raw      = getattr(cand, "content", None) or getattr(cand, "text", None) or str(cand)
+        raw      = cand.message.content
 
         # split off the JSON block and the free‑text explanation
         _, _, explanation = raw.partition("\n\n")
