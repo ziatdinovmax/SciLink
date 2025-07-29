@@ -105,22 +105,11 @@ class VaspErrorUpdaterAgent:
             f"--- KPOINTS ---\n{plan['suggested_kpoints']}\n\n"
             "Please explain, in plain text, the reason for each change."
         )
+
+        plan["explanation"] = llm.generate(
+            prompt=rationale_prompt,
+            model=self.model_name
+        ).strip()
         
-        # get a response from the LLMClient
-        resp = llm.generate_with_tools(prompt=rationale_prompt, tools=[])
-
-        # unwrap the text from the GenerateContentResponse
-        if hasattr(resp, "candidates") and resp.candidates:
-            explanation_text = resp.candidates[0].output
-        elif hasattr(resp, "text"):
-            explanation_text = resp.text
-        elif hasattr(resp, "content"):
-            explanation_text = resp.content
-        else:
-            explanation_text = str(resp)
-
-        # strip and store
-        plan["explanation"] = explanation_text.strip()
-
-        return plan
+        return plan        
         
