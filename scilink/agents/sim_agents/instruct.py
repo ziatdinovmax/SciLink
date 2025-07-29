@@ -222,7 +222,8 @@ You MUST provide a JSON response with exactly these keys:
 {{
   "incar": "complete INCAR file content",
   "kpoints": "complete KPOINTS file content", 
-  "summary": "brief calculation description"
+  "summary": "brief calculation description",
+  "explanation": "plain‑English rationale for each change"
 }}
 
 Analyze the provided POSCAR structure and user request, then generate appropriate VASP input files following the guidelines above."""
