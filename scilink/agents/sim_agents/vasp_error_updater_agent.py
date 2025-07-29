@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Dict, Any
 
 from .vasp_agent import VaspInputAgent
+from scilink.agents.sim_agents.val_agent import LLMClient
 
 class VaspErrorUpdaterAgent:
     """
@@ -89,8 +90,6 @@ class VaspErrorUpdaterAgent:
             "explanation":       vasp_res.get("explanation", "")
         }
         # now ask the LLM itself to explain those changes
-        # import the same client your other agents use:
-        from scilink.agents.sim_agents.val_agent import LLMClient
         llm = LLMClient(api_key=self.vasp_agent.api_key, model=self.vasp_agent.model_name)
 
         rationale_prompt = (
