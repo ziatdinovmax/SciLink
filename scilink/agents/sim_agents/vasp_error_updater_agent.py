@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Dict, Any
 
 from .vasp_agent import VaspInputAgent
-from .llm_client import LLMClient   
+from ...llm_client import LLMClient 
 
 class VaspErrorUpdaterAgent:
     """
@@ -106,7 +106,7 @@ class VaspErrorUpdaterAgent:
             "Please explain, in plain text, the reason for each change."
         )
 #        explanation = llm.generate(prompt=rationale_prompt, model=self.vasp_agent.model_name)
-        explanation = llm.generate(prompt=rationale_prompt)
+        explanation = llm.generate_with_tools(prompt=rationale_prompt, tools=[])
         plan["explanation"] = explanation.strip()
 
         return plan
