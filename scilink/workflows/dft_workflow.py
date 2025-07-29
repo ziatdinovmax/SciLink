@@ -255,6 +255,10 @@ class DFTWorkflow:
                 kpoints_f.rename(kpoints_f.with_suffix(f"{kpoints_f.suffix}.v{ver}"))
                 kpoints_f.write_text(new_kp)
                 print(f"   • KPOINTS updated → backed up as KPOINTS{kpoints_f.suffix}.v{ver}")
+                # Print the LLM’s rationale for these changes
+                explanation = plan.get("explanation", "").strip()
+                if explanation:
+                    print(f"💡 Explanation of changes: {explanation}")
         else:
             print("⚠️  Refinement failed:", plan.get("message"))
 
