@@ -1,10 +1,8 @@
 import re
-import json
 from pathlib import Path
 from typing import Dict, Any
 
 from .vasp_agent import VaspInputAgent
-from .llm_client import LLMClient 
 
 class VaspErrorUpdaterAgent:
     """
@@ -13,8 +11,6 @@ class VaspErrorUpdaterAgent:
     """
     def __init__(self, api_key: str, model_name: str = "gemini-2.5-pro-preview-06-05"):
         self.vasp_agent = VaspInputAgent(api_key, model_name)
-        self.api_key      = api_key
-        self.model_name   = model_name
 
     def _extract_errors(self, log: str) -> str:
         patterns = [r"Fatal error.*", r"ERROR.*", r"KPAR.*", r"too many k-points.*"]
@@ -85,19 +81,9 @@ class VaspErrorUpdaterAgent:
         if vasp_res.get("status") != "success":
             return {"status": "error", "message": vasp_res.get("message", "")}
 
-        # ─── BUILD PLAN ────────────────────────
-        plan = {
+        return {
             "status":            "success",
             "suggested_incar":   vasp_res["incar"],
             "suggested_kpoints": vasp_res["kpoints"],
+            "explanation":       vasp_res.get("explanation", "")
         }
-
-        llm = LLMClient(self.api_key, self.model_name)
-        resp_raw = llm.generate_with_tools(prompt=prompt, tools=[])
-        cand     = resp_raw.candidates[0]
-        raw      = cand.message.content
-
-        # split off the JSON block and the free‑text explanation
-        _, _, explanation = raw.partition("\n\n")
-        plan["explanation"] = explanation.strip()
-        return plan
