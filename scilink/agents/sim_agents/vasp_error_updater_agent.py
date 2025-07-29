@@ -105,7 +105,8 @@ class VaspErrorUpdaterAgent:
             f"--- KPOINTS ---\n{plan['suggested_kpoints']}\n\n"
             "Please explain, in plain text, the reason for each change."
         )
-        explanation = llm.generate(prompt=rationale_prompt, model=self.vasp_agent.model_name)
+#        explanation = llm.generate(prompt=rationale_prompt, model=self.vasp_agent.model_name)
+        explanation = llm.generate(prompt=rationale_prompt)
         plan["explanation"] = explanation.strip()
 
         return plan
