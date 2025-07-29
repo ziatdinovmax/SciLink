@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Dict, Any
 
 from .vasp_agent import VaspInputAgent
-from ...llm_client import LLMClient 
+from .llm_client import LLMClient 
 
 class VaspErrorUpdaterAgent:
     """
