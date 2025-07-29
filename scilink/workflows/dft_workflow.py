@@ -246,7 +246,8 @@ class DFTWorkflow:
             "final_incar":   str(incar_f),
             "final_kpoints": str(kpoints_f),
             "status":        plan.get("status"),
-            "message":       plan.get("message", "")
+            "message":       plan.get("message", ""),
+            "explanation":    plan.get("explanation", {})
         }
     
     def _generate_and_validate_structure(self, user_request: str) -> Dict[str, Any]:
