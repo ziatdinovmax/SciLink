@@ -3,7 +3,6 @@ from pathlib import Path
 from typing import Dict, Any
 
 from .vasp_agent import VaspInputAgent
-from .llm_client import LLMClient 
 
 class VaspErrorUpdaterAgent:
     """
@@ -12,9 +11,6 @@ class VaspErrorUpdaterAgent:
     """
     def __init__(self, api_key: str, model_name: str = "gemini-2.5-pro-preview-06-05"):
         self.vasp_agent = VaspInputAgent(api_key, model_name)
-        # stash these so we can call LLMClient directly
-        self.api_key = api_key
-        self.model_name = model_name
 
     def _extract_errors(self, log: str) -> str:
         patterns = [r"Fatal error.*", r"ERROR.*", r"KPAR.*", r"too many k-points.*"]
@@ -78,7 +74,6 @@ class VaspErrorUpdaterAgent:
             '  "explanation": rationale for each change.\n'
         )
 
-        # ask the VaspInputAgent for the JSON plan
         vasp_res = self.vasp_agent.generate_vasp_inputs(
             poscar_path=poscar_path,
             original_request=prompt
@@ -86,30 +81,9 @@ class VaspErrorUpdaterAgent:
         if vasp_res.get("status") != "success":
             return {"status": "error", "message": vasp_res.get("message", "")}
 
-        # assemble the plan dict
-        plan: Dict[str, Any] = {
+        return {
             "status":            "success",
             "suggested_incar":   vasp_res["incar"],
             "suggested_kpoints": vasp_res["kpoints"],
+            "explanation":       vasp_res.get("explanation", "")
         }
-
-        # now ask the LLM itself for the rationale behind those changes
-#        llm = LLMClient(api_key=self.vasp_agent.api_key, model=self.vasp_agent.model_name)
-        # now ask the LLMClient for plain-text reasons
-        # note: LLMClient takes (api_key, model_name) as positional args
-        llm = LLMClient(self.api_key, self.model_name)
-
-        rationale_prompt = (
-            f"I just proposed these INCAR/KPOINTS updates for “{original_request}”:\n\n"
-            f"--- INCAR ---\n{plan['suggested_incar']}\n\n"
-            f"--- KPOINTS ---\n{plan['suggested_kpoints']}\n\n"
-            "Please explain, in plain text, the reason for each change."
-        )
-
-        plan["explanation"] = llm.generate(
-            prompt=rationale_prompt,
-            model=self.model_name
-        ).strip()
-        
-        return plan        
-        
