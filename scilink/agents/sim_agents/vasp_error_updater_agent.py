@@ -92,26 +92,12 @@ class VaspErrorUpdaterAgent:
             "suggested_kpoints": vasp_res["kpoints"],
         }
 
-        # ─── NOW RE‑RUN RAW PROMPT TO GET THE HUMAN‑READABLE RATIONALE ─
         llm = LLMClient(self.api_key, self.model_name)
-        # use the exact same prompt you built above:
-        rationale_prompt = prompt
-
-        # get the full raw text (JSON + explanation)
-        raw = llm.generate_content(
-            prompt=rationale_prompt,
-            generation_config=None
-        ).text
+        resp_raw = llm.generate_with_tools(prompt=prompt, tools=[])
+        cand     = resp_raw.candidates[0]
+        raw      = getattr(cand, "content", None) or getattr(cand, "text", None) or str(cand)
 
         # split off the JSON block and the free‑text explanation
-        json_part, _, explanation = raw.partition("\n\n")
-        try:
-            parsed = json.loads(json_part)
-        except json.JSONDecodeError:
-            # if parsing fails, assume entire raw is explanation
-            explanation = raw
-
-        # strip and store the explanation
+        _, _, explanation = raw.partition("\n\n")
         plan["explanation"] = explanation.strip()
-
         return plan
