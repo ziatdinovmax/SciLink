@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Dict, Any
 
 from .vasp_agent import VaspInputAgent
-from scilink.llm_client import LLMClient  
+from .llm_client import LLMClient   
 
 class VaspErrorUpdaterAgent:
     """
@@ -97,7 +97,7 @@ class VaspErrorUpdaterAgent:
 #        llm = LLMClient(api_key=self.vasp_agent.api_key, model=self.vasp_agent.model_name)
         # now ask the LLMClient for plain-text reasons
         # note: LLMClient takes (api_key, model_name) as positional args
-        llm = LLMClient(self.api_key, self.model_name)
+        llm = LLMClient(api_key=self.api_key, model_name=self.model_name)
 
         rationale_prompt = (
             f"I just proposed these INCAR/KPOINTS updates for “{original_request}”:\n\n"
