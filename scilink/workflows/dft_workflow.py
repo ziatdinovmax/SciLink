@@ -135,20 +135,9 @@ class DFTWorkflow:
             workflow_result["final_status"] = "failed_structure_generation"
             return workflow_result
         
-#        workflow_result["steps_completed"].append("structure_generation")
-#        structure_path = structure_result["final_structure_path"]
-#        
-#        print(f"✅ Structure generated: {os.path.basename(structure_path)}")
         workflow_result["steps_completed"].append("structure_generation")
         structure_path = structure_result["final_structure_path"]
-
-        # ─── Rename the ASE‑script POSCAR so Atomate2’s POSCAR won't overwrite it ───
-        if os.path.basename(structure_path) == "POSCAR":
-            preserved = os.path.join(self.output_dir, "POSCAR_structure")
-            os.replace(structure_path, preserved)
-            structure_path = preserved
-            print("ℹ️  Renamed initial POSCAR → POSCAR_structure")
-
+        
         print(f"✅ Structure generated: {os.path.basename(structure_path)}")
         if structure_result.get("warning"):
             print(f"⚠️  {structure_result['warning']}")
@@ -228,12 +217,7 @@ class DFTWorkflow:
             vasp_log=log_text,
             original_request=original_request
         )
-#        print("Plan:", plan)
-        # Dump the entire plan so you can see which key holds the rationale
-        print("🔍 Full refinement plan:", json.dumps(plan, indent=2))
-        # Extract whichever field actually contains the LLM’s reasoning
-        rationale = plan.get("message") or plan.get("rationale") or plan.get("explanation", "")
-        print(f"🔍 Refinement rationale: {rationale or 'No explanation provided'}")
+        print("Plan:", plan)
 
         if plan.get("status") == "success":
             # INCAR backup & overwrite
@@ -255,10 +239,6 @@ class DFTWorkflow:
                 kpoints_f.rename(kpoints_f.with_suffix(f"{kpoints_f.suffix}.v{ver}"))
                 kpoints_f.write_text(new_kp)
                 print(f"   • KPOINTS updated → backed up as KPOINTS{kpoints_f.suffix}.v{ver}")
-                # Print the LLM’s rationale for these changes
-                explanation = plan.get("explanation", "").strip()
-                if explanation:
-                    print(f"💡 Explanation of changes: {explanation}")
         else:
             print("⚠️  Refinement failed:", plan.get("message"))
 
@@ -266,7 +246,7 @@ class DFTWorkflow:
             "final_incar":   str(incar_f),
             "final_kpoints": str(kpoints_f),
             "status":        plan.get("status"),
-            "message":       plan.get("explanation", "")
+            "message":       plan.get("message", "")
         }
     
     def _generate_and_validate_structure(self, user_request: str) -> Dict[str, Any]:
@@ -393,30 +373,29 @@ class DFTWorkflow:
 #        
 #        return vasp_result
 
-        # Try Atomate2 for POSCAR/INCAR/KPOINTS (no POTCAR)
+        # Attempt Atomate2 (POSCAR, INCAR, KPOINTS)
         print("📝 Generating POSCAR, INCAR, KPOINTS via Atomate2…")
-        structure = Poscar.from_file(structure_path).structure
+        poscar = Poscar.from_file(structure_path)
+        structure = poscar.structure
         try:
-            # Try Atomate2 first
-            self.atomate2_agent.generate(structure, self.output_dir)
-            saved = [str(Path(self.output_dir) / f) for f in ("POSCAR", "INCAR", "KPOINTS")]
+            out = self.atomate2_agent.generate(structure, self.output_dir)
+            saved = [
+                str(Path(self.output_dir) / f)
+                for f in ("POSCAR", "INCAR", "KPOINTS")
+            ]
             return {"status": "success", "saved_files": saved}
         except Exception as e:
-            # Any error in Atomate2 → fall back to LLM
-            print(f"⚠️ Atomate2 failed ({e}); falling back to LLM…")
+            # Atomate2 failed (e.g. missing POTCAR), fall back to LLM
+            print(f"⚠️ Atomate2 failed ({e}); falling back to LLM for INCAR/KPOINTS…")
             vasp_res = self.vasp_agent.generate_vasp_inputs(
                 poscar_path=structure_path,
                 original_request=user_request
             )
             if vasp_res.get("status") != "success":
                 return vasp_res
-#            saved = self.vasp_agent.save_inputs(vasp_res, self.output_dir)
-#            # include the already‑generated POSCAR
-#            return {"status": "success", "saved_files": [structure_path] + saved}
-            saved_info = self.vasp_agent.save_inputs(vasp_res, self.output_dir)
-            # save_inputs returns {"saved_files": [...]}
-            saved_list = saved_info.get("saved_files", []) if isinstance(saved_info, dict) else saved_info
-            return {"status":"success", "saved_files":[structure_path] + saved_list}
+            saved = self.vasp_agent.save_inputs(vasp_res, self.output_dir)
+            # include the POSCAR you already have
+            return {"status": "success", "saved_files": [structure_path] + saved}
     
     def _validate_and_improve_incar(self, vasp_result: Dict[str, Any], 
                                    structure_path: str, user_request: str) -> Dict[str, Any]:
