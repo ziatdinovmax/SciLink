@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Dict, Any
 
 from .vasp_agent import VaspInputAgent
-from scilink.agents.sim_agents.val_agent import LLMClient
+from .val_agent import LLMClient
 
 class VaspErrorUpdaterAgent:
     """
@@ -75,28 +75,29 @@ class VaspErrorUpdaterAgent:
             '  "explanation": rationale for each change.\n'
         )
 
+        # ask the VaspInputAgent for the JSON plan
         vasp_res = self.vasp_agent.generate_vasp_inputs(
             poscar_path=poscar_path,
             original_request=prompt
         )
-        
         if vasp_res.get("status") != "success":
             return {"status": "error", "message": vasp_res.get("message", "")}
 
-        return {
+        # assemble the plan dict
+        plan: Dict[str, Any] = {
             "status":            "success",
             "suggested_incar":   vasp_res["incar"],
             "suggested_kpoints": vasp_res["kpoints"],
-            "explanation":       vasp_res.get("explanation", "")
         }
-        # now ask the LLM itself to explain those changes
+
+        # now ask the LLM itself for the rationale behind those changes
         llm = LLMClient(api_key=self.vasp_agent.api_key, model=self.vasp_agent.model_name)
 
         rationale_prompt = (
-            f"I just proposed the following INCAR/KPOINTS updates for “{original_request}”:\n\n"
+            f"I just proposed these INCAR/KPOINTS updates for “{original_request}”:\n\n"
             f"--- INCAR ---\n{plan['suggested_incar']}\n\n"
             f"--- KPOINTS ---\n{plan['suggested_kpoints']}\n\n"
-            "Please give me, in plain text, the reason for each change."
+            "Please explain, in plain text, the reason for each change."
         )
         explanation = llm.generate(prompt=rationale_prompt, model=self.vasp_agent.model_name)
         plan["explanation"] = explanation.strip()
