@@ -209,3 +209,57 @@ class IncarLiteratureAgent:
             response = '\n'.join(lines[answer_start:])
         
         return response.strip()
+    
+
+class FittingModelLiteratureAgent:
+    """
+    Agent for querying scientific literature for physical models and
+    analysis methods using the CROW.
+    """
+
+    def __init__(self, api_key: str | None = None, max_wait_time: int = 300):
+        if api_key is None:
+            api_key = os.environ.get("FUTUREHOUSE_API_KEY")
+        if not api_key:
+            raise ValueError("API key not provided and FUTUREHOUSE_API_KEY env variable is not set.")
+        
+        self.client = FutureHouseClient(api_key=api_key)
+        self.max_wait_time = max_wait_time
+        logging.info("FittingModelLiteratureAgent initialized to use CROW.")
+
+    def query_for_models(self, search_query: str) -> dict:
+        """
+        Query the literature for analysis models and methods using CROW.
+        
+        Args:
+            search_query: A specific question about finding models or methods.
+            
+        Returns:
+            Dictionary with the search results.
+        """
+        try:
+            logging.info(f"Submitting model search query to CROW: {search_query}")
+            
+            # Use JobNames.CROW instead of JobNames.OWL
+            task_data = {"name": JobNames.CROW, "query": search_query}
+            
+            task_id = self.client.create_task(task_data)
+            
+            # Wait for the task to complete
+            final_status = self.client.wait_for_task(task_id, timeout=self.max_wait_time)
+
+            if final_status.status == "success":
+                logging.info("CROW model search query completed.")
+                return {
+                    "status": "success",
+                    "formatted_answer": final_status.formatted_answer,
+                }
+            else:
+                error_msg = f"CROW model search failed with status: {final_status.status}"
+                logging.error(error_msg)
+                return {"status": "error", "message": error_msg}
+
+        except Exception as e:
+            error_msg = f"An unexpected error occurred during CROW model search: {str(e)}"
+            logging.exception(error_msg)
+            return {"status": "error", "message": error_msg}

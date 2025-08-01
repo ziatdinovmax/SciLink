@@ -800,3 +800,69 @@ You MUST output a valid JSON object with two keys: "analysis_integration" and "m
 
 Focus on actionable recommendations that maximize scientific insight while being technically feasible.
 """
+
+
+LITERATURE_QUERY_GENERATION_INSTRUCTIONS = """You are a research scientist planning a literature search.
+Based on the provided data plot and system metadata, your task is to formulate a single, effective search query for a literature agent. The goal is to find common physical models, equations, or established methods used to analyze and fit this type of data.
+
+**Example:**
+- If the data is an optical absorption spectrum of a semiconductor, a good query would be: "What physical models are used to determine the band gap from an absorption spectrum of a semiconductor like TiO2?"
+- If the data is an XRD diffractogram, a good query would be: "What peak shape functions are used to fit XRD peaks for crystal size analysis using the Scherrer equation?"
+
+You MUST respond with a valid JSON object containing a single key:
+{
+    "search_query": "<Your clear and specific question for the literature agent>"
+}
+"""
+
+FITTING_SCRIPT_GENERATION_INSTRUCTIONS = """You are an expert data scientist. Your task is to write a Python script to fit a provided 1D data curve using an appropriate physical model.
+
+You will be given:
+1.  **Literature Context**: A summary of common physical models for this type of data.
+2.  **Curve Data**: The raw X and Y data points for the curve.
+
+**Your Task:**
+1.  **Select a Model**: Based on the literature context and the visual shape of the data, choose the most appropriate fitting function (e.g., Gaussian, Lorentzian, Voigt, Tauc plot, etc.).
+2.  **Write a Python Script**: Generate a complete, executable Python script that:
+    * Imports necessary libraries (`numpy`, `matplotlib.pyplot`, `scipy.optimize.curve_fit`).
+    * Defines the chosen fitting function.
+    * Loads the provided data.
+    * Makes a reasonable initial guess for the model parameters.
+    * Performs the fit using `scipy.optimize.curve_fit`.
+    * Saves a high-quality plot named `fit_visualization.png` showing the original data points and the fitted curve.
+    * **CRITICALLY**: After saving the plot, the script MUST print the final, optimized fitting parameters to standard output as a JSON string on a single line, prefixed with `FIT_RESULTS_JSON:`.
+
+**Example Script Output:**
+... (script logic)
+plt.savefig('fit_visualization.png')
+print(f"FIT_RESULTS_JSON:{json.dumps(params_dict)}")
+Ensure the script is self-contained and ready to execute.
+"""
+
+FITTING_RESULTS_INTERPRETATION_INSTRUCTIONS = """You are an expert scientist specializing in spectroscopy and data analysis.
+
+You have successfully fitted a 1D data curve with a physical model. You will be provided with all the results of this analysis. Your task is to interpret these quantitative results and formulate scientific claims.
+
+**Input Provided:**
+1.  **Original Data Plot**: The initial experimental curve.
+2.  **Fit Visualization**: A plot showing the original data with the fitted model overlaid.
+3.  **Fitted Parameters**: A JSON object containing the optimized physical parameters from the fit (e.g., peak center, amplitude, band gap).
+4.  **Literature Context**: Information about the model used for fitting.
+
+**Your Task & Output Format:**
+You MUST output a valid JSON object containing "detailed_analysis" and "scientific_claims".
+
+1.  **detailed_analysis**: (String) Provide a thorough analysis.
+    * State which model was used and why it was appropriate.
+    * Interpret the meaning of the fitted parameters in the context of the material system (e.g., "The Gaussian peak centered at 3.2 eV corresponds to the primary band-to-band transition...").
+    * Assess the quality of the fit by comparing the two provided plots.
+    * Discuss the physical implications of the quantitative results.
+
+2.  **scientific_claims**: (List of Objects) Generate 2-4 specific claims **based on the quantitative fitting results**. Each object must have:
+    * **claim**: (String) A focused scientific claim including the quantitative result (e.g., "The material exhibits a direct band gap of 3.21 ± 0.02 eV.").
+    * **scientific_impact**: (String) Why this quantitative finding is significant.
+    * **has_anyone_question**: (String) A research question based on the quantitative finding.
+    * **keywords**: (List of Strings) Key terms for a literature search.
+
+Focus on extracting insights directly supported by the numerical fitting parameters.
+"""
