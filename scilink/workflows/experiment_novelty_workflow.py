@@ -7,7 +7,7 @@ from typing import Dict, Any, List, Union
 import textwrap
 from pathlib import Path
 
-from .analyzers import MicroscopyAnalyzer, SpectroscopyAnalyzer, BaseExperimentAnalyzer
+from .analyzers import MicroscopyAnalyzer, SpectroscopyAnalyzer, BaseExperimentAnalyzer, CurveAnalyzer
 
 from ..agents.exp_agents.microscopy_agent import MicroscopyAnalysisAgent
 from ..agents.lit_agents.literature_agent import OwlLiteratureAgent
@@ -84,6 +84,7 @@ class ExperimentNoveltyAssessment:
     ANALYZER_REGISTRY = {
         'microscopy': MicroscopyAnalyzer,
         'spectroscopy': SpectroscopyAnalyzer,
+        'curve': CurveAnalyzer
     }
     
     def __init__(self,
@@ -160,6 +161,7 @@ class ExperimentNoveltyAssessment:
         analyzer_class = self.ANALYZER_REGISTRY[data_type]
         self.analyzer = analyzer_class(
             google_api_key=google_api_key,
+            futurehouse_api_key=futurehouse_api_key, # for exp agents that utilize lit search
             analysis_model=analysis_model,
             local_model=local_model,
             output_dir=str(self.output_dir),
@@ -167,7 +169,7 @@ class ExperimentNoveltyAssessment:
             **analyzer_kwargs
         )
         
-        # Initialize literature agent
+        # Initialize literature novelty agent
         if futurehouse_api_key:
             self.lit_agent = OwlLiteratureAgent(
                 api_key=futurehouse_api_key,

@@ -851,10 +851,10 @@ You MUST output a valid JSON object containing "detailed_analysis" and "scientif
     * Assess the quality of the fit by comparing the two provided plots.
     * Discuss the physical implications of the quantitative results.
 
-2.  **scientific_claims**: (List of Objects) Generate 2-4 specific claims **based on the quantitative fitting results**. Each object must have:
+2.  **scientific_claims**: (List of Objects) Generate 2-4 specific claims **based on the quantitative fitting results**. Each object must have the following keys:
     * **claim**: (String) A focused scientific claim including the quantitative result (e.g., "The material exhibits a direct band gap of 3.21 ± 0.02 eV.").
     * **scientific_impact**: (String) Why this quantitative finding is significant.
-    * **has_anyone_question**: (String) A research question based on the quantitative finding.
+    * **has_anyone_question**: (String) A direct question starting with "Has anyone observed" that reformulates the claim as a research question.
     * **keywords**: (List of Strings) Key terms for a literature search.
 
 Focus on extracting insights directly supported by the numerical fitting parameters.

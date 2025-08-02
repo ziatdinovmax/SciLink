@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 
 from ..agents.exp_agents.orchestrator_agent import OrchestratorAgent, AGENT_MAP
 from ..agents.exp_agents.spectroscopy_agent import SpectroscopyAnalysisAgent
+from ..agents.exp_agents.curve_analysis_agent import CurveAnalysisAgent 
 
 
 class BaseExperimentAnalyzer(ABC):
@@ -26,7 +27,8 @@ class MicroscopyAnalyzer(BaseExperimentAnalyzer):
     def __init__(self, agent_id: Optional[int] = None, google_api_key: str = None, 
                  analysis_model: str = "gemini-2.5-pro-preview-06-05", output_dir: str = "",
                  local_model: str = None,
-                 enable_human_feedback: bool = False):
+                 enable_human_feedback: bool = False,
+                 **kwargs):
         self.agent_id = agent_id
         self.google_api_key = google_api_key
         self.analysis_model = analysis_model
@@ -34,6 +36,8 @@ class MicroscopyAnalyzer(BaseExperimentAnalyzer):
         self.output_dir = output_dir
         self.enable_human_feedback = enable_human_feedback
         self.analysis_agent = None
+        if kwargs:
+            logging.warning(f"Unused arguments passed to MicroscopyAnalyzer: {kwargs}")
     
     def analyze_for_claims(self, data_path: str, system_info: Dict[str, Any] = None, **kwargs) -> Dict[str, Any]:
         """Analyze microscopy image and generate scientific claims."""
@@ -86,7 +90,8 @@ class SpectroscopyAnalyzer(BaseExperimentAnalyzer):
     def __init__(self, google_api_key: str = None, analysis_model: str = "gemini-2.5-pro-preview-06-05", 
                  local_model: str = None,
                  output_dir: str = "", spectral_unmixing_enabled: bool = True,
-                 enable_human_feedback: bool = False):
+                 enable_human_feedback: bool = False,
+                 **kwargs):
         self.google_api_key = google_api_key
         self.analysis_model = analysis_model
         self.local_model = local_model,
@@ -110,6 +115,9 @@ class SpectroscopyAnalyzer(BaseExperimentAnalyzer):
             output_dir=output_dir,
             enable_human_feedback=enable_human_feedback
         )
+
+        if kwargs:
+            logging.warning(f"Unused arguments passed to SpectroscopyAnalyzer: {kwargs}")
     
     def analyze_for_claims(self, data_path: str, system_info: Dict[str, Any] = None, **kwargs) -> Dict[str, Any]:
         """Analyze spectroscopy data and generate scientific claims."""
@@ -125,3 +133,31 @@ class SpectroscopyAnalyzer(BaseExperimentAnalyzer):
     
     def get_data_type_name(self) -> str:
         return "spectroscopy"
+    
+
+class CurveAnalyzer(BaseExperimentAnalyzer):
+    """Analyzer for 1D curve data."""
+    
+    def __init__(self, google_api_key: str = None, futurehouse_api_key: str = None, 
+                 analysis_model: str = "gemini-2.5-pro-preview-06-05", 
+                 output_dir: str = "",
+                 **kwargs):
+        self.analysis_agent = CurveAnalysisAgent(
+            google_api_key=google_api_key,
+            futurehouse_api_key=futurehouse_api_key,
+            model_name=analysis_model,
+            output_dir=output_dir,
+            **kwargs
+        )
+    
+    def analyze_for_claims(self, data_path: str, system_info: Dict[str, Any] = None, **kwargs) -> Dict[str, Any]:
+        """Analyze 1D curve data and generate scientific claims."""
+        return self.analysis_agent.analyze_for_claims(
+            data_path,
+            system_info=system_info,
+            output_dir=self.analysis_agent.output_dir,
+            **kwargs
+        )
+
+    def get_data_type_name(self) -> str:
+        return "1D Curve"

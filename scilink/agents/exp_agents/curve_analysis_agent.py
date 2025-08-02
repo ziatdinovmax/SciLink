@@ -17,8 +17,6 @@ from .instruct import (
     FITTING_RESULTS_INTERPRETATION_INSTRUCTIONS
 )
 
-from ...auth import get_api_key
-
 class CurveAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
     Agent for analyzing 1D curves via automated, literature-informed fitting.
@@ -26,12 +24,14 @@ class CurveAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
     def __init__(self, google_api_key: str = None, futurehouse_api_key: str = None, 
                  model_name: str = "gemini-2.5-pro-preview-06-05", local_model: str = None, 
-                 enable_human_feedback: bool = True, executor_timeout: int = 60):
+                 enable_human_feedback: bool = True, executor_timeout: int = 60, 
+                 output_dir: str = "curve_analysis_output", max_wait_time: int = 600, **kwargs):
         super().__init__(google_api_key, model_name, local_model, enable_human_feedback=enable_human_feedback)
         self.executor = StructureExecutor(timeout=executor_timeout, enforce_sandbox=False)
-        
-        futurehouse_api_key = get_api_key('futurehouse')
-        self.literature_agent = FittingModelLiteratureAgent(api_key=futurehouse_api_key, max_wait_time=500)
+        self.literature_agent = FittingModelLiteratureAgent(api_key=futurehouse_api_key, max_wait_time=max_wait_time)
+        self.output_dir = output_dir
+        if kwargs:
+            self.logger.warning(f"Unused arguments passed to CurveAnalysisAgent: {kwargs}")
 
     def _load_curve_data(self, data_path: str) -> np.ndarray:
         if data_path.endswith(('.csv', '.txt')):
@@ -98,11 +98,11 @@ class CurveAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             raise ValueError("LLM generated an empty fitting script.")
         return script_content
 
-    def _save_literature_step_results(self, query: str, report: str, output_dir: str) -> dict:
+    def _save_literature_step_results(self, query: str, report: str) -> dict:
         """Saves the literature search query and the resulting report to files."""
         saved_files = {}
         try:
-            lit_dir = os.path.join(output_dir, "literature_step")
+            lit_dir = os.path.join(self.output_dir, "literature_step")
             os.makedirs(lit_dir, exist_ok=True)
 
             # Save the query
@@ -124,7 +124,7 @@ class CurveAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         
         return saved_files
 
-    def analyze_for_claims(self, data_path: str, system_info: dict = None, output_dir: str = ".") -> dict:
+    def analyze_for_claims(self, data_path: str, system_info: dict = None, **kwargs) -> dict:
         self.logger.info(f"Starting advanced curve analysis with fitting for: {data_path}")
         try:
             # Step 1: Load Data and Visualize
@@ -140,13 +140,13 @@ class CurveAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             literature_context = lit_result["formatted_answer"]
             
             # **NEW**: Save literature query and report
-            saved_lit_files = self._save_literature_step_results(lit_query, literature_context, output_dir)
+            saved_lit_files = self._save_literature_step_results(lit_query, literature_context)
 
             # Step 3: Generate Fitting Script
             fitting_script = self._generate_fitting_script(curve_data, literature_context, data_path)
             
             # Step 4: Execute Fitting Script
-            exec_result = self.executor.execute_script(fitting_script, working_dir=output_dir)
+            exec_result = self.executor.execute_script(fitting_script, working_dir=self.output_dir)
             if exec_result.get("status") != "success":
                 raise RuntimeError(f"Fitting script execution failed: {exec_result.get('message')}")
 
@@ -160,7 +160,7 @@ class CurveAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             if not fit_params:
                 raise ValueError("Could not parse fitting parameters from script output.")
             
-            fit_plot_path = os.path.join(output_dir, "fit_visualization.png")
+            fit_plot_path = os.path.join(self.output_dir, "fit_visualization.png")
             with open(fit_plot_path, "rb") as f:
                 fit_plot_bytes = f.read()
 
