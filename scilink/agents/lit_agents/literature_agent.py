@@ -124,7 +124,7 @@ class OwlLiteratureAgent:
 
 
 class IncarLiteratureAgent:
-    """Agent for validating VASP INCAR parameters against literature using CROW."""
+    """Agent for validating VASP INCAR parameters against literature using the FutureHouse CROW system."""
 
     def __init__(self, api_key: str = None, max_wait_time: int = 300):
         if not api_key:
@@ -214,7 +214,7 @@ class IncarLiteratureAgent:
 class FittingModelLiteratureAgent:
     """
     Agent for querying scientific literature for physical models and
-    analysis methods using the CROW.
+    analysis methods using the FutureHouse CROW system.
     """
 
     def __init__(self, api_key: str | None = None, max_wait_time: int = 300):
@@ -225,6 +225,7 @@ class FittingModelLiteratureAgent:
         
         self.client = FutureHouseClient(api_key=api_key)
         self.max_wait_time = max_wait_time
+        self.logger = logging.getLogger(__name__)
         logging.info("FittingModelLiteratureAgent initialized to use CROW.")
 
     def query_for_models(self, search_query: str) -> dict:
@@ -237,29 +238,37 @@ class FittingModelLiteratureAgent:
         Returns:
             Dictionary with the search results.
         """
+        self.logger.info(f"Submitting model search query to CROW: {search_query}")
+        
         try:
-            logging.info(f"Submitting model search query to CROW: {search_query}")
-            
-            # Use JobNames.CROW instead of JobNames.OWL
+            # Submit to CROW
             task_data = {"name": JobNames.CROW, "query": search_query}
-            
             task_id = self.client.create_task(task_data)
             
-            # Wait for the task to complete
-            final_status = self.client.wait_for_task(task_id, timeout=self.max_wait_time)
-
-            if final_status.status == "success":
-                logging.info("CROW model search query completed.")
-                return {
-                    "status": "success",
-                    "formatted_answer": final_status.formatted_answer,
-                }
-            else:
-                error_msg = f"CROW model search failed with status: {final_status.status}"
-                logging.error(error_msg)
-                return {"status": "error", "message": error_msg}
-
+            # Wait for completion using the correct polling pattern
+            import time
+            start_time = time.time()
+            
+            while time.time() - start_time < self.max_wait_time:
+                task_status = self.client.get_task(task_id)
+                
+                if task_status.status == "success":
+                    self.logger.info("CROW model search query completed.")
+                    return {
+                        "status": "success",
+                        "formatted_answer": task_status.formatted_answer,
+                        "task_id": task_id
+                    }
+                elif task_status.status in ["FAILED", "ERROR", "error"]:
+                    error_msg = f"CROW model search failed with status: {task_status.status}"
+                    self.logger.error(error_msg)
+                    return {"status": "error", "message": error_msg}
+                
+                sleep(10) # Wait before polling again
+            
+            return {"status": "timeout", "message": f"Timed out after {self.max_wait_time}s"}
+            
         except Exception as e:
             error_msg = f"An unexpected error occurred during CROW model search: {str(e)}"
-            logging.exception(error_msg)
+            self.logger.exception(error_msg)
             return {"status": "error", "message": error_msg}
