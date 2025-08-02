@@ -16,6 +16,8 @@ from .instruct import (
     FITTING_RESULTS_INTERPRETATION_INSTRUCTIONS
 )
 
+from ...auth import get_api_key
+
 class CurveAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
     Agent for analyzing 1D curves via automated, literature-informed fitting.
@@ -24,7 +26,9 @@ class CurveAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                  model_name: str = "gemini-2.5-pro-preview-06-05", local_model: str = None, 
                  enable_human_feedback: bool = True, executor_timeout: int = 60):
         super().__init__(google_api_key, model_name, local_model, enable_human_feedback=enable_human_feedback)
-        self.executor = StructureExecutor(timeout=executor_timeout, enforce_sandbox=True)
+        self.executor = StructureExecutor(timeout=executor_timeout, enforce_sandbox=False)
+        
+        futurehouse_api_key = get_api_key('futurehouse')
         self.literature_agent = FittingModelLiteratureAgent(api_key=futurehouse_api_key)
 
     def _load_curve_data(self, data_path: str) -> np.ndarray:
@@ -73,9 +77,11 @@ class CurveAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             f"{FITTING_SCRIPT_GENERATION_INSTRUCTIONS}\n"
             f"## Literature Context\n{literature_context}\n"
             f"## Curve Data Preview\n{data_preview}\n"
-            f"## Instructions\nWrite a script that loads data from the file '{os.path.abspath(data_path)}' and performs the fit."
+            f"## Data File Path\nThe script should load data from this absolute path: '{os.path.abspath(data_path)}'"
         )
+        
         response = self.model.generate_content(prompt)
+        
         script_content = response.text.strip()
         if script_content.startswith("```python"):
             script_content = script_content[9:]
