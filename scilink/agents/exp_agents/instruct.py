@@ -818,18 +818,18 @@ You MUST respond with a valid JSON object containing a single key:
 FITTING_SCRIPT_GENERATION_INSTRUCTIONS = """You are an expert data scientist. Your task is to write a Python script to fit a 1D data curve using an appropriate physical model based on the provided literature context.
 
 First, think step-by-step:
-1.  Review the literature context to understand the appropriate physical models (e.g., Gaussian, Tauc plot).
-2.  Select the most suitable model for the data.
-3.  Plan the script: define the model function, make initial parameter guesses, and call the fitting routine.
+1.  **Analyze the Data Shape**: Visually inspect the curve provided in the prompt. Does it have one peak? Multiple peaks? An absorption edge? A combination of features (e.g., peaks on a baseline)?
+2.  **Select a Composite Model**: Based on your analysis and the literature context, choose an appropriate model. If there are multiple features, the model MUST be a *sum of multiple functions* (e.g., `gaussian1 + gaussian2 + linear_baseline`).
+3.  **Plan the Script**: Plan the full script, including defining the composite model function, making reasonable initial guesses (`p0`) for **all** parameters, and calling the fitting routine. Good initial guesses are critical for complex fits to converge.
 
 Then, generate a *complete* and *executable* Python script that follows these rules:
 1.  The script MUST include all necessary imports (`numpy`, `json`, `matplotlib.pyplot`, `scipy.optimize.curve_fit`).
 2.  The script MUST load the data from the specified file path.
-3.  The script MUST define the chosen fitting function (e.g., `gaussian(x, a, x0, sigma)`).
+3.  The script MUST define the chosen fitting function(s). For multiple features, this should be a composite function (e.g., `def double_gaussian(x, a1, c1, s1, a2, c2, s2): return gaussian(x, a1, c1, s1) + gaussian(x, a2, c2, s2)`).
 4.  The script MUST perform the fit using `scipy.optimize.curve_fit`.
-5.  The script MUST save a plot of the data and the fit to a file named `fit_visualization.png`.
-6.  **CRITICALLY**: After saving the plot, the script MUST print the final, optimized fitting parameters to standard output as a JSON string on a single line, prefixed with `FIT_RESULTS_JSON:`. For example: `print(f"FIT_RESULTS_JSON: {json.dumps(results)}")`.
-7.  Your entire response must be ONLY the Python code. Do NOT add any conversational text, explanations, or mathematical formulas outside of the code itself.
+5.  The script MUST save a plot of the data and the complete fit (including all components) to a file named `fit_visualization.png`.
+6.  **CRITICALLY**: After saving the plot, the script MUST print the final, optimized parameters for **all components** to standard output as a JSON string on a single line, prefixed with `FIT_RESULTS_JSON:`.
+7.  Your entire response must be ONLY the Python code. Do NOT add any conversational text or explanations outside of the code itself.
 """
 
 FITTING_RESULTS_INTERPRETATION_INSTRUCTIONS = """You are an expert scientist specializing in spectroscopy and data analysis.

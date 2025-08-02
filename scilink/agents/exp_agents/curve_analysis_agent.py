@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 from io import BytesIO
 import json
 import os
+import re
 
 from .base_agent import BaseAnalysisAgent
 from .human_feedback import SimpleFeedbackMixin
@@ -22,6 +23,7 @@ class CurveAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
     Agent for analyzing 1D curves via automated, literature-informed fitting.
     """
+
     def __init__(self, google_api_key: str = None, futurehouse_api_key: str = None, 
                  model_name: str = "gemini-2.5-pro-preview-06-05", local_model: str = None, 
                  enable_human_feedback: bool = True, executor_timeout: int = 60):
@@ -29,7 +31,7 @@ class CurveAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         self.executor = StructureExecutor(timeout=executor_timeout, enforce_sandbox=False)
         
         futurehouse_api_key = get_api_key('futurehouse')
-        self.literature_agent = FittingModelLiteratureAgent(api_key=futurehouse_api_key)
+        self.literature_agent = FittingModelLiteratureAgent(api_key=futurehouse_api_key, max_wait_time=500)
 
     def _load_curve_data(self, data_path: str) -> np.ndarray:
         if data_path.endswith(('.csv', '.txt')):
@@ -59,6 +61,7 @@ class CurveAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
     def _generate_lit_search_query(self, plot_bytes: bytes, system_info: dict) -> str:
         """Uses an LLM to formulate a query for the literature agent."""
+        self.logger.info("Generating literature search query for fitting models...")
         prompt = [
             LITERATURE_QUERY_GENERATION_INSTRUCTIONS,
             "## Data Plot", {"mime_type": "image/jpeg", "data": plot_bytes},
@@ -72,6 +75,7 @@ class CurveAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
     def _generate_fitting_script(self, curve_data: np.ndarray, literature_context: str, data_path: str) -> str:
         """Uses an LLM to generate a Python fitting script."""
+        self.logger.info("Generating Python script for data fitting...")
         data_preview = np.array2string(curve_data[:10], precision=4, separator=', ')
         prompt = (
             f"{FITTING_SCRIPT_GENERATION_INSTRUCTIONS}\n"
@@ -79,19 +83,49 @@ class CurveAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             f"## Curve Data Preview\n{data_preview}\n"
             f"## Data File Path\nThe script should load data from this absolute path: '{os.path.abspath(data_path)}'"
         )
-        
         response = self.model.generate_content(prompt)
-        
-        script_content = response.text.strip()
-        if script_content.startswith("```python"):
-            script_content = script_content[9:]
-        if script_content.endswith("```"):
-            script_content = script_content[:-3]
+        script_content = response.text
+        match = re.search(r"```python\n(.*?)\n```", script_content, re.DOTALL)
+        if match:
+            script_content = match.group(1).strip()
+        else:
+            if script_content.strip().startswith("import"):
+                 script_content = script_content.strip()
+            else:
+                self.logger.error(f"LLM response did not contain a valid python code block. Response: {script_content[:500]}")
+                raise ValueError("LLM failed to generate a valid Python script in a markdown block.")
         if not script_content:
-            raise ValueError("LLM failed to generate a fitting script.")
+            raise ValueError("LLM generated an empty fitting script.")
         return script_content
 
+    def _save_literature_step_results(self, query: str, report: str, output_dir: str) -> dict:
+        """Saves the literature search query and the resulting report to files."""
+        saved_files = {}
+        try:
+            lit_dir = os.path.join(output_dir, "literature_step")
+            os.makedirs(lit_dir, exist_ok=True)
+
+            # Save the query
+            query_path = os.path.join(lit_dir, "search_query.txt")
+            with open(query_path, 'w') as f:
+                f.write(query)
+            saved_files["query_file"] = query_path
+            self.logger.info(f"Saved literature query to: {query_path}")
+
+            # Save the report
+            report_path = os.path.join(lit_dir, "literature_report.md")
+            with open(report_path, 'w') as f:
+                f.write(report)
+            saved_files["report_file"] = report_path
+            self.logger.info(f"Saved literature report to: {report_path}")
+
+        except Exception as e:
+            self.logger.error(f"Failed to save literature step results: {e}")
+        
+        return saved_files
+
     def analyze_for_claims(self, data_path: str, system_info: dict = None, output_dir: str = ".") -> dict:
+        self.logger.info(f"Starting advanced curve analysis with fitting for: {data_path}")
         try:
             # Step 1: Load Data and Visualize
             curve_data = self._load_curve_data(data_path)
@@ -104,6 +138,9 @@ class CurveAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             if lit_result["status"] != "success":
                 raise RuntimeError(f"Literature search for models failed: {lit_result['message']}")
             literature_context = lit_result["formatted_answer"]
+            
+            # **NEW**: Save literature query and report
+            saved_lit_files = self._save_literature_step_results(lit_query, literature_context, output_dir)
 
             # Step 3: Generate Fitting Script
             fitting_script = self._generate_fitting_script(curve_data, literature_context, data_path)
@@ -115,6 +152,7 @@ class CurveAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
             # Step 5: Parse Results
             fit_params = {}
+            # The key for stdout is 'stdout', not 'output'
             for line in exec_result.get("stdout", "").splitlines():
                 if line.startswith("FIT_RESULTS_JSON:"):
                     fit_params = json.loads(line.replace("FIT_RESULTS_JSON:", ""))
@@ -145,9 +183,12 @@ class CurveAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "status": "success",
                 "detailed_analysis": result_json.get("detailed_analysis"),
                 "scientific_claims": self._validate_scientific_claims(result_json.get("scientific_claims", [])),
-                "fitting_parameters": fit_params
+                "fitting_parameters": fit_params,
+                "literature_files": saved_lit_files
             }
+
         except Exception as e:
+            self.logger.exception(f"Curve analysis failed: {e}")
             return {"status": "error", "message": str(e)}
 
     def _get_claims_instruction_prompt(self) -> str:
