@@ -189,22 +189,43 @@ class CurveAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     def analyze_for_claims(self, data_path: str, system_info: dict = None, **kwargs) -> dict:
         self.logger.info(f"Starting advanced curve analysis with fitting for: {data_path}")
         try:
-            # Step 1: Load Data and Visualize
+            # Step 0: Load Data and Visualize
             curve_data = self._load_curve_data(data_path)
             system_info = self._handle_system_info(system_info)
             original_plot_bytes = self._plot_curve(curve_data, system_info, " (Original Data)")
 
-            # Step 2: Search Literature for Fitting Models
+            # Step 1: Search Literature for Fitting Models
+            print(f"\n🤖 -------------------- ANALYSIS AGENT STEP: LITERATURE SEARCH FOR FITTING MODELS -------------------- 🤖")
             lit_query = self._generate_lit_search_query(original_plot_bytes, system_info)
+            
+            # Initialize variables
+            literature_context = None
+            saved_lit_files = {}
+
+            # Attempt literature search
             lit_result = self.literature_agent.query_for_models(lit_query)
-            if lit_result["status"] != "success":
-                raise RuntimeError(f"Literature search for models failed: {lit_result['message']}")
-            literature_context = lit_result["formatted_answer"]
+            
+            if lit_result["status"] == "success":
+                self.logger.info("Literature search successful.")
+                print("✅ Literature search successful.")
+                literature_context = lit_result["formatted_answer"]
+                saved_lit_files = self._save_literature_step_results(lit_query, literature_context)
+            else:
+                # This is the new fallback logic
+                warning_message = f"Literature search failed ({lit_result['message']}). Falling back to the LLM's internal knowledge."
+                self.logger.warning(warning_message)
+                print(f"⚠️  {warning_message}")
+                
+                literature_context = (
+                    "The external literature search failed. Fall back to your internal knowledge. "
+                    "Analyze the plot's shape and the system metadata to propose and implement a suitable physical fitting model."
+                )
             
             # Save literature query and report
             saved_lit_files = self._save_literature_step_results(lit_query, literature_context)
 
-            # Step 3 & 4: Generate and Execute Fitting Script with Retry Logic
+            # Step 2 & 3: Generate and Execute Fitting Script with Retry Logic
+            print(f"\n🤖 -------------------- ANALYSIS AGENT STEP: SCRIPT GENERATION & EXECUTION -------------------- 🤖")
             script_execution_bundle = self._generate_and_execute_fitting_script_with_retry(
                 curve_data, literature_context, data_path
             )
@@ -215,7 +236,7 @@ class CurveAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             
             exec_result = script_execution_bundle["exec_result"]
 
-            # Step 5: Parse Results
+            # Step 4: Parse Results
             fit_params = {}
             # The key for stdout is 'stdout', not 'output'
             for line in exec_result.get("stdout", "").splitlines():
@@ -229,7 +250,8 @@ class CurveAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             with open(fit_plot_path, "rb") as f:
                 fit_plot_bytes = f.read()
 
-            # Step 6: Final Interpretation and Claim Generation
+            # Step 5: Final Interpretation and Claim Generation
+            print(f"\n🤖 -------------------- ANALYSIS AGENT STEP: INTERPRETING FIT RESULTS & GENERATING CLAIMS -------------------- 🤖")
             final_prompt = [
                 FITTING_RESULTS_INTERPRETATION_INSTRUCTIONS,
                 "\n## Original Data Plot", {"mime_type": "image/jpeg", "data": original_plot_bytes},
