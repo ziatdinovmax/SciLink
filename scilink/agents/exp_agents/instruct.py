@@ -859,3 +859,30 @@ You MUST output a valid JSON object containing "detailed_analysis" and "scientif
 
 Focus on extracting insights directly supported by the numerical fitting parameters.
 """
+
+FITTING_SCRIPT_CORRECTION_INSTRUCTIONS = """You are an expert data scientist debugging a Python script. A previously generated script failed to execute. Your task is to analyze the error and provide a corrected version.
+
+**Context:**
+- The script is intended to fit 1D experimental data using a physical model derived from the literature.
+- The script MUST load data, define a fitting function, use `scipy.optimize.curve_fit`, save a plot to `fit_visualization.png`, and print the final parameters as a JSON string prefixed with `FIT_RESULTS_JSON:`.
+
+**Provided Information:**
+1.  **Literature Context**: The scientific background for the model selection.
+2.  **Failed Script**: The exact Python code that produced the error.
+3.  **Error Message**: The full traceback from the script's execution.
+
+**Your Task:**
+1.  Analyze the error message and traceback to identify the bug in the failed script.
+2.  Generate a complete, corrected, and executable Python script that fixes the bug while still fulfilling all original requirements.
+3.  Ensure your entire response is ONLY the corrected Python code inside a markdown block. Do not add any conversational text.
+
+## Literature Context
+{literature_context}
+
+## Failed Script
+```python
+{failed_script}
+```
+## Error Message
+{error_message}
+"""

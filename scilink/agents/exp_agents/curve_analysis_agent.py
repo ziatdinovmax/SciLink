@@ -14,13 +14,16 @@ from ..lit_agents.literature_agent import FittingModelLiteratureAgent
 from .instruct import (
     LITERATURE_QUERY_GENERATION_INSTRUCTIONS,
     FITTING_SCRIPT_GENERATION_INSTRUCTIONS,
-    FITTING_RESULTS_INTERPRETATION_INSTRUCTIONS
+    FITTING_RESULTS_INTERPRETATION_INSTRUCTIONS,
+    FITTING_SCRIPT_CORRECTION_INSTRUCTIONS
 )
 
 class CurveAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
     Agent for analyzing 1D curves via automated, literature-informed fitting.
     """
+
+    MAX_SCRIPT_ATTEMPTS = 3
 
     def __init__(self, google_api_key: str = None, futurehouse_api_key: str = None, 
                  model_name: str = "gemini-2.5-pro-preview-06-05", local_model: str = None, 
@@ -123,6 +126,65 @@ class CurveAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             self.logger.error(f"Failed to save literature step results: {e}")
         
         return saved_files
+    
+    def _generate_and_execute_fitting_script_with_retry(
+        self, curve_data: np.ndarray, literature_context: str, data_path: str
+    ) -> dict:
+        """
+        Generates and executes the fitting script, with a retry loop for self-correction.
+        """
+        last_error = "No script generated yet."
+        fitting_script = None
+
+        for attempt in range(1, self.MAX_SCRIPT_ATTEMPTS + 1):
+            try:
+                if attempt == 1:
+                    # First attempt: generate the initial script
+                    print(f"⚙️  Attempt {attempt}/{self.MAX_SCRIPT_ATTEMPTS}: Generating initial fitting script...")
+                    fitting_script = self._generate_fitting_script(curve_data, literature_context, data_path)
+                else:
+                    # Subsequent attempts: generate a corrected script
+                    print(f"⚠️  Attempt {attempt}/{self.MAX_SCRIPT_ATTEMPTS}: Script failed. Requesting correction from LLM...")
+                    correction_prompt = FITTING_SCRIPT_CORRECTION_INSTRUCTIONS.format(
+                        literature_context=literature_context,
+                        failed_script=fitting_script,
+                        error_message=last_error
+                    )
+                    response = self.model.generate_content(correction_prompt)
+                    script_content = response.text
+                    match = re.search(r"```python\n(.*?)\n```", script_content, re.DOTALL)
+                    if match:
+                        fitting_script = match.group(1).strip()
+                    else: # Fallback if markdown block is missing
+                        fitting_script = script_content.strip()
+
+                # Execute the current version of the script
+                print(f"   Executing script...")
+                exec_result = self.executor.execute_script(fitting_script, working_dir=self.output_dir)
+
+                if exec_result.get("status") == "success":
+                    print("   ✅ Script executed successfully.")
+                    return {
+                        "status": "success",
+                        "exec_result": exec_result,
+                        "final_script": fitting_script,
+                        "attempts": attempt
+                    }
+                else:
+                    last_error = exec_result.get("message", "Unknown execution error.")
+                    self.logger.warning(f"Script execution attempt {attempt} failed. Error: {last_error}")
+
+            except Exception as e:
+                last_error = f"An error occurred during script generation: {str(e)}"
+                self.logger.error(last_error, exc_info=True)
+
+        # If loop finishes without success
+        print(f"❌ Script generation failed after {self.MAX_SCRIPT_ATTEMPTS} attempts.")
+        return {
+            "status": "error",
+            "message": f"Failed to generate a working script after {self.MAX_SCRIPT_ATTEMPTS} attempts. Last error: {last_error}",
+            "last_script": fitting_script
+        }
 
     def analyze_for_claims(self, data_path: str, system_info: dict = None, **kwargs) -> dict:
         self.logger.info(f"Starting advanced curve analysis with fitting for: {data_path}")
@@ -139,16 +201,19 @@ class CurveAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 raise RuntimeError(f"Literature search for models failed: {lit_result['message']}")
             literature_context = lit_result["formatted_answer"]
             
-            # **NEW**: Save literature query and report
+            # Save literature query and report
             saved_lit_files = self._save_literature_step_results(lit_query, literature_context)
 
-            # Step 3: Generate Fitting Script
-            fitting_script = self._generate_fitting_script(curve_data, literature_context, data_path)
+            # Step 3 & 4: Generate and Execute Fitting Script with Retry Logic
+            script_execution_bundle = self._generate_and_execute_fitting_script_with_retry(
+                curve_data, literature_context, data_path
+            )
+
+            if script_execution_bundle["status"] != "success":
+                # Propagate the failure from the retry loop
+                raise RuntimeError(script_execution_bundle["message"])
             
-            # Step 4: Execute Fitting Script
-            exec_result = self.executor.execute_script(fitting_script, working_dir=self.output_dir)
-            if exec_result.get("status") != "success":
-                raise RuntimeError(f"Fitting script execution failed: {exec_result.get('message')}")
+            exec_result = script_execution_bundle["exec_result"]
 
             # Step 5: Parse Results
             fit_params = {}
