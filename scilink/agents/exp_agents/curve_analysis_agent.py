@@ -30,7 +30,7 @@ class CurveAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                  enable_human_feedback: bool = True, executor_timeout: int = 60, 
                  output_dir: str = "curve_analysis_output", max_wait_time: int = 600, **kwargs):
         super().__init__(google_api_key, model_name, local_model, enable_human_feedback=enable_human_feedback)
-        self.executor = StructureExecutor(timeout=executor_timeout, enforce_sandbox=False)
+        self.executor = StructureExecutor(timeout=executor_timeout, enforce_sandbox=True)
         self.literature_agent = FittingModelLiteratureAgent(api_key=futurehouse_api_key, max_wait_time=max_wait_time)
         self.output_dir = output_dir
         if kwargs:
