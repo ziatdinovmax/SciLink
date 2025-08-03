@@ -18,7 +18,7 @@ from .instruct import (
     FITTING_SCRIPT_CORRECTION_INSTRUCTIONS
 )
 
-class CurveAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
+class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
     Agent for analyzing 1D curves via automated, literature-informed fitting.
     """
@@ -34,7 +34,7 @@ class CurveAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         self.literature_agent = FittingModelLiteratureAgent(api_key=futurehouse_api_key, max_wait_time=max_wait_time)
         self.output_dir = output_dir
         if kwargs:
-            self.logger.warning(f"Unused arguments passed to CurveAnalysisAgent: {kwargs}")
+            self.logger.warning(f"Unused arguments passed to CurveFittingAgent: {kwargs}")
 
     def _load_curve_data(self, data_path: str) -> np.ndarray:
         if data_path.endswith(('.csv', '.txt')):

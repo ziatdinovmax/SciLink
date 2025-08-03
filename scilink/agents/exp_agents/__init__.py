@@ -3,3 +3,4 @@ from .spectroscopy_agent import SpectroscopyAnalysisAgent
 from .sam_microscopy_agent import SAMMicroscopyAnalysisAgent
 from .orchestrator_agent import OrchestratorAgent, AGENT_MAP
 from .atomistic_microscopy_agent import AtomisticMicroscopyAnalysisAgent
+from .curve_fitting_agent import CurveFittingAgent
