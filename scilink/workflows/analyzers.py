@@ -3,7 +3,7 @@ from typing import Dict, Any, Optional
 from abc import ABC, abstractmethod
 
 from ..agents.exp_agents.orchestrator_agent import OrchestratorAgent, AGENT_MAP
-from ..agents.exp_agents.spectroscopy_agent import SpectroscopyAnalysisAgent
+from ..agents.exp_agents.hyperspectral_analysis_agent import HyperspectralAnalysisAgent
 from ..agents.exp_agents.curve_fitting_agent import CurveFittingAgent 
 
 
@@ -107,7 +107,7 @@ class SpectroscopyAnalyzer(BaseExperimentAnalyzer):
             'max_iter': 500
         }
         
-        self.analysis_agent = SpectroscopyAnalysisAgent(
+        self.analysis_agent = HyperspectralAnalysisAgent(
             api_key=google_api_key,
             model_name=analysis_model,
             local_model=local_model,

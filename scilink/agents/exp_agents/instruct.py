@@ -596,7 +596,7 @@ Your decision MUST be based on the visual evidence in the image and accompanying
 - **ID 0: `MicroscopyAnalysisAgent`**: Use for standard microstructure analysis (grains, phases, etc.) where atoms are not resolved. **Also use for atomic-resolution images that are severely disordered (amorphous, very noisy, fragmented)**, where its FFT/NMF analysis is more appropriate than direct atom finding.
 - **ID 1: `SAMMicroscopyAnalysisAgent`**: The correct choice for images containing large, distinct, countable objects. Use this for tasks like measuring the size distribution, shape, and spatial arrangement of features like nanoparticles, cells, pores, or other discrete entities.
 - **ID 2: `AtomisticMicroscopyAnalysisAgent`**: **The primary choice for any high-quality image where individual atoms are clearly visible.** This is the correct agent for analyzing crystalline structures, defects, and interfaces at the atomic scale.
-- **ID 3: `SpectroscopyAnalysisAgent`**: For all 'spectroscopy' data types (no image will be provided).
+- **ID 3: `HyperspectralAnalysisAgent`**: For all 'spectroscopy' data types (no image will be provided).
 
 **Decision Guide for Atomically-Resolved Images:**
 

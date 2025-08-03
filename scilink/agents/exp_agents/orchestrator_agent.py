@@ -6,7 +6,7 @@ from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockT
 from .microscopy_agent import MicroscopyAnalysisAgent
 from .sam_microscopy_agent import SAMMicroscopyAnalysisAgent
 from .atomistic_microscopy_agent import AtomisticMicroscopyAnalysisAgent
-from .spectroscopy_agent import SpectroscopyAnalysisAgent
+from .hyperspectral_analysis_agent import HyperspectralAnalysisAgent
 from .instruct import ORCHESTRATOR_INSTRUCTIONS
 from ...auth import get_api_key, APIKeyNotFoundError
 
@@ -15,7 +15,7 @@ AGENT_MAP = {
     0: MicroscopyAnalysisAgent,
     1: SAMMicroscopyAnalysisAgent,
     2: AtomisticMicroscopyAnalysisAgent,
-    3: SpectroscopyAnalysisAgent,
+    3: HyperspectralAnalysisAgent,
 }
 
 class OrchestratorAgent:
