@@ -22,6 +22,8 @@ SciLink employs a system of intelligent agents to automate the research cycle, f
 
 - 🛡️ **Secure by Design**: AI-generated code for creating atomic structures is executed in a security sandbox (Docker, Colab, or VM) to protect your system. The tool will halt if a safe environment is not detected.
 
+- 💻 Local Model Support: Choose between powerful cloud APIs or run experimental analysis agents entirely offline with local models, such as Gemma-3 series. This keeps your data on your machine, offering flexibility for privacy, cost, or offline work.
+
 ## Statement of Need
 
 Have you ever run an experiment where you thought you had discovered something new, only to find out weeks or months later that it had already been reported five years ago? Or perhaps you've stared at a fascinating structure in your experimental images, wishing you could get a theorist's insight, but the thought of initiating a collaboration that might take months to even get going feels exhausting.
