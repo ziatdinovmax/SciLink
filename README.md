@@ -170,7 +170,7 @@ if result['final_status'] == 'success':
 
 While the high-level workflows are the recommended entry point, you can use individual agents for more granular control over specific tasks.
 
-#### 1. Example: Curve Fitting and Analysis
+#### Example: Curve Fitting and Analysis
 
 For 1D data like spectra, the `CurveFittingAgent` can find appropriate physical models from the literature, generate a Python script to fit your data, execute it, and interpret the results.
 
@@ -201,7 +201,7 @@ for i, claim in enumerate(result['scientific_claims'], 1):
 ```
 
 
-#### 2. Microscopy Image Analysis
+#### Example: Microscopy Image Analysis
 
 Analyze a microscopy image to extract features and generate scientific claims using the `MicroscopyAnalysisAgent`.
 
