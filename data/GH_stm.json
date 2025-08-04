@@ -1,9 +1,0 @@
-{
-    "material_type": "Graphene",
-    "synthesis_details": "Our first step was to create single atomic vacancies in the topmost graphene layer of the graphite samples by irradiating them with Ar+ ions (ion energy 100 eV, time of exposure = 3–4 s) in the UHV chamber and further annealing 600 °C to remove interstitials. Next, we exposed the irradiated graphite surface to atomic hydrogen produced by cracking of H2 molecules on a hot arc- shaped tungsten filament (filament temperature ~2200 °C) under UHV conditionsThe total hydrogen pressure in the UHV chamber was adjusted to 10^(−2) Pa using a leak-valve technique, and the temperature of the sample surface during hydrogenation remained at 900 °C ± 100 °C. After hydrogenation, the samples were annealed again at 600 °C under UHV conditions. We emphasize that the samples were not exposed to the ambient environment during the entire preparation process.",
-    "microscopy_type": "The STM experiments were performed under UHV conditions at room temperature in a constant-current mode using the Japan Electron Optics Laboratory (JEOL) JSPM-4500S system with a base pressure of 6 × 10^(−9) Pa. The STM tips were prepared by electrochemical etching of tungsten wire and were further cleaned by Ar+ ion sputtering (ion energy = 1.0–3.5 keV).",
-    "experimental_details": {
-        "sample bias voltage": "0.1 V",
-        "tunneling current setpoint": "0.9 nA"
-    }
-}

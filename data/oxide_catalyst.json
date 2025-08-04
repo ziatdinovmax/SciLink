@@ -1,8 +1,0 @@
-{
-    "material_type": "Mo–V–Te–Ta oxide",
-    "synthesis_details": "The nominal compositions (molar ratio) of the Mo–V–Te–Ta oxide catalyst are Mo/V/Te/Ta = 1:0.3:0.17:0.12. To make specimen for electron microscopy, the catalyst sample was embedded in a resin, and sectioned by microtome as approximately 50 nm slices. These specimens were introduced into a holey carbon coated Cu grid.",
-    "microscopy_type": "HAADF-STEM",
-    "experimental_details": {
-        "voltage": "100 kV"
-    }
-}

@@ -1,9 +1,0 @@
-{
-    "material_type": "Nanoparticles on substrate",
-    "microscopy_type": "TEM",
-    "spatial_info": {
-        "field_of_view_x": 811,
-        "field_of_view_y": 811,
-        "field_of_view_units": "nm"
-    }
-}
