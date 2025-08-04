@@ -163,6 +163,75 @@ if result['final_status'] == 'success':
 - Allows for interactive or automated selection of structures to build.
 - Executes the DFTWorkflow for each selected structure.
 
+
+## Using Individual Agents
+
+While the high-level workflows are the recommended entry point, you can use individual agents for more granular control over specific tasks.
+
+#### 1. Example: Curve Fitting and Analysis
+
+For 1D data like spectra, the `CurveFittingAgent` can find appropriate physical models from the literature, generate a Python script to fit your data, execute it, and interpret the results.
+
+```python
+# 1. Instantiate the CurveFittingAgent
+curve_agent = CurveFittingAgent()
+
+# 2. Define the path to your 1D curve data
+data_path = "data/GaN_PL.npy"
+system_info_path = "data/GaN_PL.json"
+
+# 3. Run the literature-informed fitting and analysis
+result = curve_agent.analyze_for_claims(
+    data_path=data_path,
+    system_info=system_info_path
+)
+
+# 4. Print the results
+print("--- Fitting & Analysis Summary ---")
+print(result['detailed_analysis'])
+
+print("\n--- Fitted Parameters ---")
+print(json.dumps(result.get('fitting_parameters', {}), indent=2))
+
+print(f"\n--- Generated Claims ({len(result['scientific_claims'])}) ---")
+for i, claim in enumerate(result['scientific_claims'], 1):
+    print(f"[{i}] {claim['claim']}")
+```
+
+
+#### 2. Microscopy Image Analysis
+
+Analyze a microscopy image to extract features and generate scientific claims using the `MicroscopyAnalysisAgent`.
+
+```python
+# 1. Instantiate the MicroscopyAnalysisAgent with specific settings
+# Here, we enable automated FFT-NMF analysis for deeper feature analysis.
+agent_settings = {
+    'fft_nmf_settings': {
+        'FFT_NMF_ENABLED': True,
+        'FFT_NMF_AUTO_PARAMS': True  # Let the LLM choose the best parameters
+    }
+}
+microscopy_agent = MicroscopyAnalysisAgent(**agent_settings)
+
+# 2. Define the path to your data
+image_path = "data/graphene_stm.npy"
+system_info_path = "data/graphene_stm.json"
+
+# 3. Run the analysis to generate a detailed summary and scientific claims
+result = microscopy_agent.analyze_microscopy_image_for_claims(
+    image_path=image_path,
+    system_info=system_info_path
+)
+
+# 4. Print the results
+print("--- Analysis Summary ---")
+print(result['detailed_analysis'])
+print(f"\n--- Generated Claims ({len(result['scientific_claims'])}) ---")
+for i, claim in enumerate(result['scientific_claims'], 1):
+    print(f"[{i}] {claim['claim']}")
+```
+
 ## Command-Line Interface
 
 SciLink can also be run from the terminal.
