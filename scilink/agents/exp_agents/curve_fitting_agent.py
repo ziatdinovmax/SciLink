@@ -30,7 +30,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                  enable_human_feedback: bool = True, executor_timeout: int = 60, 
                  output_dir: str = "curve_analysis_output", max_wait_time: int = 600, **kwargs):
         super().__init__(google_api_key, model_name, local_model, enable_human_feedback=enable_human_feedback)
-        self.executor = StructureExecutor(timeout=executor_timeout, enforce_sandbox=True)
+        self.executor = StructureExecutor(timeout=executor_timeout, enforce_sandbox=False)
         self.literature_agent = FittingModelLiteratureAgent(api_key=futurehouse_api_key, max_wait_time=max_wait_time)
         self.output_dir = output_dir
         if kwargs:
@@ -266,13 +266,31 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             if error_dict:
                 raise RuntimeError(f"Failed to interpret fitting results: {error_dict}")
 
-            return {
-                "status": "success",
+            # Store the generated plots for the feedback loop
+            analysis_images = [
+                {'label': 'Original Data Plot', 'data': original_plot_bytes},
+                {'label': 'Fit Visualization', 'data': fit_plot_bytes}
+            ]
+            self._store_analysis_images(analysis_images)
+
+            # Prepare the initial result for the feedback function
+            initial_result = {
                 "detailed_analysis": result_json.get("detailed_analysis"),
-                "scientific_claims": self._validate_scientific_claims(result_json.get("scientific_claims", [])),
-                "fitting_parameters": fit_params,
-                "literature_files": saved_lit_files
+                "scientific_claims": self._validate_scientific_claims(result_json.get("scientific_claims", []))
             }
+
+            # Call the feedback function, which will display the results and ask for input
+            final_result = self._apply_feedback_if_enabled(
+                initial_result,
+                system_info=system_info
+            )
+
+            # 4. Add the unique outputs from this agent back into the final result
+            final_result["status"] = "success"
+            final_result["fitting_parameters"] = fit_params
+            final_result["literature_files"] = saved_lit_files
+
+            return final_result
 
         except Exception as e:
             self.logger.exception(f"Curve analysis failed: {e}")
