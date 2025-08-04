@@ -1,8 +1,8 @@
 import logging
 from typing import Optional, Tuple
+import os
 
 from .llm_client import LLMClient
-from .executors import StructureExecutor, DEFAULT_TIMEOUT
 from .tools import get_available_tools
 from .instruct import (
     INITIAL_PROMPT_TEMPLATE, 
@@ -12,6 +12,8 @@ from .instruct import (
     DOCS_ENHANCED_CORRECTION_PROMPT_TEMPLATE
 )
 from .utils import save_generated_script, MaterialsProjectHelper
+from ...executors import ScriptExecutor, DEFAULT_TIMEOUT
+
 
 MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS = 5 
 
@@ -22,7 +24,7 @@ class StructureGenerator:
                 mp_api_key: str = None):
         """Initialize StructureGenerator with improved logging."""
         self.llm_client = LLMClient(api_key=api_key, model_name=model_name)
-        self.ase_executor = StructureExecutor(timeout=executor_timeout, mp_api_key=mp_api_key)
+        self.ase_executor = ScriptExecutor(timeout=executor_timeout, mp_api_key=mp_api_key)
         self.generated_script_dir = generated_script_dir
         self.logger = logging.getLogger(__name__)
         
@@ -221,16 +223,24 @@ class StructureGenerator:
                     exec_result = self.ase_executor.execute_script(current_script_being_processed, working_dir=self.generated_script_dir)
 
                     if exec_result["status"] == "success":
-                        print(f"      ✅ Script executed successfully")
-                        return {
-                            "status": "success",
-                            "message": f"Script generated and executed successfully on attempt {internal_exec_attempt}",
-                            "output_file": exec_result.get("output_file"),
-                            "final_script_path": final_script_path_this_attempt,
-                            "final_script_content": current_script_being_processed,
-                            "tool_used": selected_tool.name,
-                            "execution_attempts": internal_exec_attempt
-                        }
+                        output_file = None
+                        for line in exec_result.get("stdout", "").splitlines():
+                            if line.startswith("STRUCTURE_SAVED:"):
+                                output_file = line.split(":", 1)[1].strip()
+                                break
+
+                        if output_file and os.path.exists(os.path.join(self.generated_script_dir, output_file)):
+                            print(f"     ✅ Script executed successfully")
+                            full_output_path = os.path.abspath(os.path.join(self.generated_script_dir, output_file))
+                            return {
+                                "status": "success",
+                                "message": f"Script generated and executed successfully on attempt {internal_exec_attempt}",
+                                "output_file": full_output_path,
+                                "final_script_path": final_script_path_this_attempt,
+                                "final_script_content": current_script_being_processed,
+                                "tool_used": selected_tool.name,
+                                "execution_attempts": internal_exec_attempt
+                            }
                     else:
                         last_error_message_internal = exec_result.get("message", f"Unknown script execution error (attempt {internal_exec_attempt})")
                         

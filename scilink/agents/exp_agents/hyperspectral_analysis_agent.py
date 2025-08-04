@@ -1,4 +1,3 @@
-# exp_agents/spectroscopy_agent.py
 import json
 import os
 import logging
@@ -26,7 +25,7 @@ from .human_feedback import SimpleFeedbackMixin
 from atomai.stat import SpectralUnmixer
 
 
-class SpectroscopyAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
+class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     """
     Agent for analyzing hyperspectral/spectroscopy data using generative AI models.
     Refactored to inherit from BaseAnalysisAgent and includes LLM-guided spectral unmixing.
