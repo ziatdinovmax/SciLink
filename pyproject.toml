@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scilink"
+version = "0.0.1"
+authors = [
+  { name="SciLink Team", email="maxim.ziatdinov@gmail.com" },
+]
+description = "A framework for bridging experimental observations with literature analysis and computational materials modeling via large language models"
+readme = "README.md"
+requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+]
+keywords = [
+    "materials science", "computational modeling", "machine learning",
+    "large language models", "generative AI", "microscopy", "spectroscopy",
+    "density functional theory", "atomic simulation", "experimental analysis",
+    "literature mining"
+]
+dependencies = [
+    "google-generativeai>=0.8.5",
+    "atomai>=0.8.1",
+    "futurehouse-client>=0.3.19",
+    "ase>=0.8.5",
+    "aimsgb>=1.1.1",
+    "gdown>=5.2.0",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/scilinkllm/scilink"
+"Bug Tracker" = "https://github.com/scilink/scilink/issues"
+
+[project.scripts]
+scilink = "scilink.cli.workflows:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.setuptools.package-data]
+"scilink" = ["agents/sim_agents/docs/*.txt", "agents/sim_agents/docs/*.md"]
