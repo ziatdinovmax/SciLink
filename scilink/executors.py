@@ -6,11 +6,10 @@ import uuid
 import tempfile
 import logging
 
-from ...auth import get_api_key
+from .auth import get_api_key
 
 DEFAULT_TIMEOUT = 120
 
-# Add your security functions directly to this file
 def is_in_colab():
     """Check for Google Colab environment."""
     if 'COLAB_GPU' in os.environ or 'GCE_METADATA_TIMEOUT' in os.environ:
@@ -110,7 +109,7 @@ You MUST restart SciLink inside a container or virtual machine.
         logging.error(error_msg)
         raise RuntimeError("Security sandbox requirement not met. Halting execution for safety.")
 
-class StructureExecutor:
+class ScriptExecutor:
     def __init__(self, timeout: int = DEFAULT_TIMEOUT, mp_api_key: str = None,
                  enforce_sandbox: bool = True, allow_unsafe_override: bool = False):
         self.timeout = timeout
@@ -121,7 +120,7 @@ class StructureExecutor:
         if self.enforce_sandbox:
             enforce_security_sandbox(allow_override=self.allow_unsafe_override)
         
-        logging.info(f"StructureExecutor initialized with timeout: {self.timeout}s")
+        logging.info(f"ScriptExecutor initialized with timeout: {self.timeout}s")
 
     def execute_script(self, script_content: str, working_dir: str = None) -> dict:
         if self.enforce_sandbox:
