@@ -2,9 +2,9 @@ import scilink
 from scilink.workflows.dft_workflow import DFTWorkflow
 
 # Configure APIs
-scilink.configure('google', 'AIzaSyAFcTLu1Eme-B0LvGXr3MhVmIcFMF9HW30')
-scilink.configure('futurehouse', '+MZqvbTtjHVywIJ1GWJ8Zw.platformv01.eyJqdGkiOiI1MDZiZjI2OS0wNThmLTRjNDUtYmM1OC1iMDE2NjYyYTBjMGUiLCJzdWIiOiJuaUt3MDBwVk1nUmV4MDhocUg3RTBTRFVXQ3UyIiwiaWF0IjoxNzQ0NzM4OTA5fQ.9xtT+1ZfVaKWHQurUAV69viXqaTh7YSH9nmDZ0DjnQU')
-scilink.configure('materials_project', 'M6DAhhJ4OkKldg9RzGWPtowFR1BkZH9C')
+scilink.configure('google', '')
+scilink.configure('futurehouse', '')
+scilink.configure('materials_project', '')
 
 
 #request = "A heterostructure consisting of a 3 layers of MoS2 (2H phase) on top of a 3 layers of WS2 (2H phase), with a 3x3 lateral cell."
