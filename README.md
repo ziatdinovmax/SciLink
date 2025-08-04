@@ -2,7 +2,7 @@
 
 A Python framework for connecting experimental materials science with computational modeling and automated literature analysis using Large Language Models.
 
-![SciLink Logo](misc/scilink_logo_v2.svg)
+![SciLink Logo](https://raw.githubusercontent.com/scilinkllm/scilink/main/misc/scilink_logo_v2.svg)
 
 ## Overview
 
@@ -37,7 +37,7 @@ SciLink is designed to address those bottlenecks and close the gap between "I th
 - Reducing the time-to-insight from weeks and months to minutes and hours, enabling you to rapidly iterate on new ideas while your experiment is still running!
 
 
-![Workflows](misc/scilink_workflows.jpg)
+![Workflows](https://raw.githubusercontent.com/scilinkllm/scilink/main/misc/scilink_workflows.jpg)
 
 
 ## Installation
