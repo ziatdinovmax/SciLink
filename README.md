@@ -24,6 +24,15 @@ SciLink employs a system of intelligent agents to automate the research cycle, f
 
 - 💻 **Local Model Support**: Choose between powerful cloud APIs or run experimental analysis agents entirely offline with local models, such as Gemma-3 series. This keeps your data on your machine, offering flexibility for privacy, cost, or offline work.
 
+---
+<br>
+
+![Agents](misc/scilink-agents.jpg)
+
+
+![Workflows](misc/scilink-workflows.jpg)
+<br>
+
 ## Statement of Need
 
 Have you ever run an experiment where you thought you had discovered something new, only to find out weeks or months later that it had already been reported five years ago? Or perhaps you've stared at a fascinating structure in your experimental images, wishing you could get a theorist's insight, but the thought of initiating a collaboration that might take months to even get going feels exhausting.
@@ -37,12 +46,6 @@ SciLink is designed to address those bottlenecks and close the gap between "I th
 - Bridging the experiment-theory gap, automatically translating your experimental data into simulation-ready computational models.
 
 - Reducing the time-to-insight from weeks and months to minutes and hours, enabling you to rapidly iterate on new ideas while your experiment is still running!
-
-![Agents](misc/scilink-agents.jpg)
-
-
-![Workflows](misc/scilink-workflows.jpg)
-
 
 ## Installation
 
