@@ -38,8 +38,10 @@ SciLink is designed to address those bottlenecks and close the gap between "I th
 
 - Reducing the time-to-insight from weeks and months to minutes and hours, enabling you to rapidly iterate on new ideas while your experiment is still running!
 
+![Agents](misc/scilink-agents.jpg)
 
-![Workflows](misc/scilink_workflows.jpg)
+
+![Workflows](misc/scilink-workflows.jpg)
 
 
 ## Installation
