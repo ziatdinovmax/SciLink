@@ -142,7 +142,7 @@ class DFTWorkflow:
         script_pos = os.path.join(self.output_dir, "POSCAR")
         backup_pos = os.path.join(self.output_dir, "POSCAR_ASE")
         if os.path.exists(script_pos):
-            os.rename(script_pos, backup_pos
+            os.rename(script_pos, backup_pos)
         
         print(f"✅ Structure generated: {os.path.basename(structure_path)}")
         if structure_result.get("warning"):
