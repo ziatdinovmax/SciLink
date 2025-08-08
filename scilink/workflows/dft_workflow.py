@@ -380,9 +380,16 @@ class DFTWorkflow:
         structure = poscar.structure
         try:
             out = self.atomate2_agent.generate(structure, self.output_dir)
+
+            # ─── rename the Atomate2 POSCAR to avoid clobbering any script‐generated POSCAR ───
+            atomate_pos = os.path.join(self.output_dir, "POSCAR")
+            atomate2_pos = os.path.join(self.output_dir, "POSCAR_from_atomate2")
+            if os.path.exists(atomate_pos):
+                os.rename(atomate_pos, atomate2_pos)
+
             saved = [
                 str(Path(self.output_dir) / f)
-                for f in ("POSCAR", "INCAR", "KPOINTS")
+                for f in ("POSCAR_atomate2", "INCAR", "KPOINTS")
             ]
             return {"status": "success", "saved_files": saved}
         except Exception as e:
