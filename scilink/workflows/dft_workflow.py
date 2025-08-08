@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import logging
+import shutil
 from pathlib import Path
 from io import StringIO
 from typing import Optional, Dict, Any
@@ -142,7 +143,7 @@ class DFTWorkflow:
         script_pos = os.path.join(self.output_dir, "POSCAR")
         backup_pos = os.path.join(self.output_dir, "POSCAR_ASE")
         if os.path.exists(script_pos):
-            os.rename(script_pos, backup_pos)
+            shutil.copy(script_pos, backup_pos)
         
         print(f"✅ Structure generated: {os.path.basename(structure_path)}")
         if structure_result.get("warning"):
@@ -396,10 +397,11 @@ class DFTWorkflow:
             atomate2_pos = os.path.join(self.output_dir, "POSCAR_from_atomate2")
             if os.path.exists(atomate_pos):
                 os.rename(atomate_pos, atomate2_pos)
-
+            poscar.write_file(os.path.join(self.output_dir, "POSCAR"))
+            
             saved = [
                 str(Path(self.output_dir) / f)
-                for f in ("POSCAR_atomate2", "INCAR", "KPOINTS")
+                for f in ("POSCAR", "POSCAR_from_atomate2", "INCAR", "KPOINTS")
             ]
             return {"status": "success", "saved_files": saved}
         except Exception as e:
