@@ -138,12 +138,6 @@ class DFTWorkflow:
         
         workflow_result["steps_completed"].append("structure_generation")
         structure_path = structure_result["final_structure_path"]
-
-        # ─── 1) preserve the ASE script’s POSCAR ───────────────────
-        script_pos = os.path.join(self.output_dir, "POSCAR")
-        backup_pos = os.path.join(self.output_dir, "POSCAR_ASE")
-        if os.path.exists(script_pos):
-            shutil.copy(script_pos, backup_pos)
         
         print(f"✅ Structure generated: {os.path.basename(structure_path)}")
         if structure_result.get("warning"):
@@ -194,10 +188,6 @@ class DFTWorkflow:
         # Create final files manifest
         final_manifest = self._create_final_files_manifest(workflow_result)
         workflow_result["final_manifest"] = final_manifest
-
-        # ─── 3) restore the script POSCAR as “POSCAR” ─────────────
-        if os.path.exists(backup_pos):
-            os.rename(backup_pos, script_pos)
         
         # Save complete log
         self._save_workflow_log()
@@ -386,6 +376,9 @@ class DFTWorkflow:
 #        return vasp_result
 
         # Attempt Atomate2 (POSCAR, INCAR, KPOINTS)
+        # ─── backup the script‐generated POSCAR → POSCAR_ASE
+        backup_poscar = os.path.join(self.output_dir, "POSCAR_ASE")
+        shutil.copy(os.path.join(self.output_dir, "POSCAR"), backup_poscar)
         print("📝 Generating POSCAR, INCAR, KPOINTS via Atomate2…")
         poscar = Poscar.from_file(structure_path)
         structure = poscar.structure
@@ -393,15 +386,17 @@ class DFTWorkflow:
             out = self.atomate2_agent.generate(structure, self.output_dir)
 
             # ─── rename the Atomate2 POSCAR to avoid clobbering any script‐generated POSCAR ───
-            atomate_pos = os.path.join(self.output_dir, "POSCAR")
-            atomate2_pos = os.path.join(self.output_dir, "POSCAR_from_atomate2")
-            if os.path.exists(atomate_pos):
-                os.rename(atomate_pos, atomate2_pos)
-            poscar.write_file(os.path.join(self.output_dir, "POSCAR"))
+            atomate_pos = Path(self.output_dir) / "POSCAR"
+            atomate2_pos = Path(self.output_dir) / "POSCAR_from_atomate2"
+            if atomate_pos.exists():
+                atomate_pos.rename(atomate2_pos)
+
+            # ─── restore our original POSCAR_ASE → POSCAR
+            shutil.copy(backup_poscar, Path(self.output_dir) / "POSCAR")
             
             saved = [
                 str(Path(self.output_dir) / f)
-                for f in ("POSCAR", "POSCAR_from_atomate2", "INCAR", "KPOINTS")
+                for f in ("POSCAR", "POSCAR_ASE", "POSCAR_from_atomate2", "INCAR", "KPOINTS")
             ]
             return {"status": "success", "saved_files": saved}
         except Exception as e:
