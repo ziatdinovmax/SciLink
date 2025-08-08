@@ -137,6 +137,12 @@ class DFTWorkflow:
         
         workflow_result["steps_completed"].append("structure_generation")
         structure_path = structure_result["final_structure_path"]
+
+        # ─── 1) preserve the ASE script’s POSCAR ───────────────────
+        script_pos = os.path.join(self.output_dir, "POSCAR")
+        backup_pos = os.path.join(self.output_dir, "POSCAR_ASE")
+        if os.path.exists(script_pos):
+            os.rename(script_pos, backup_pos
         
         print(f"✅ Structure generated: {os.path.basename(structure_path)}")
         if structure_result.get("warning"):
@@ -187,6 +193,10 @@ class DFTWorkflow:
         # Create final files manifest
         final_manifest = self._create_final_files_manifest(workflow_result)
         workflow_result["final_manifest"] = final_manifest
+
+        # ─── 3) restore the script POSCAR as “POSCAR” ─────────────
+        if os.path.exists(backup_pos):
+            os.rename(backup_pos, script_pos)
         
         # Save complete log
         self._save_workflow_log()
