@@ -1,10 +1,18 @@
 from typing import Dict, Any, Optional
+import sys
 
-def display_plan_summary(result: Dict[str, Any]) -> None:
+def display_plan_summary(result: Dict[str, Any], quiet_mode: bool = False) -> None:
     """
     Parses the agent's results and prints a structured, pretty-printed 
     summary to the console for human review.
+    
+    Args:
+        result: The agent's result dictionary
+        quiet_mode: If True, suppresses output (useful for MCP mode)
     """
+    if quiet_mode:
+        return
+        
     # 1. Error Handling
     if result.get("error"):
         print(f"\n❌ Agent finished with an error: {result['error']}\n")
@@ -14,8 +22,6 @@ def display_plan_summary(result: Dict[str, Any]) -> None:
     experiments = result.get("proposed_experiments")
     if not experiments or not isinstance(experiments, list):
         print("\n⚠️  The agent returned a result, but no experiments were found.")
-        # Optional: Print raw if debugging needed
-        # print(json.dumps(result, indent=2))
         return
 
     # 3. Header
@@ -44,7 +50,6 @@ def display_plan_summary(result: Dict[str, Any]) -> None:
         print("\n--- 🛠️  Required Equipment ---")
         equipment = exp.get('required_equipment', [])
         if equipment:
-            # Print as a clean comma-separated list if short, or bullets if long
             if len(equipment) > 5:
                 for item in equipment: print(f"  * {item}")
             else:
@@ -52,7 +57,7 @@ def display_plan_summary(result: Dict[str, Any]) -> None:
         else:
             print("  (No equipment specified)")
 
-        # --- Outcome & Justification (Critical for Review) ---
+        # --- Outcome & Justification ---
         print("\n--- 📈 Expected Outcome ---")
         print(f"  {exp.get('expected_outcome', 'N/A')}")
 
@@ -68,7 +73,7 @@ def display_plan_summary(result: Dict[str, Any]) -> None:
         else:
             print("  (No sources listed)")
 
-        # --- Code Indicator (If generated) ---
+        # --- Code Indicator ---
         if "implementation_code" in exp:
             print("\n--- 💻 Implementation Code ---")
             print("  ✅ Python script generated (saved to file).")
@@ -76,22 +81,41 @@ def display_plan_summary(result: Dict[str, Any]) -> None:
     print("\n" + "="*80)
 
 
-def get_user_feedback() -> Optional[str]:
+def get_user_feedback(enable_interactive: bool = True) -> Optional[str]:
     """
     Pauses execution to get user input via the CLI. 
-    Returns None if the user just presses ENTER (indicating approval).
-    """
-    print("\n" + "-"*60)
+    Returns None if the user just presses ENTER (indicating approval)
+    or if running in non-interactive mode.
     
+    Args:
+        enable_interactive: If False, returns None immediately (auto-approve).
+                          This is used for MCP mode where no TTY is available.
+    
+    Returns:
+        None if approved or non-interactive, otherwise the feedback string.
+    """
+    # MCP/Non-Interactive Mode: Auto-approve
+    if not enable_interactive:
+        return None
+    
+    # Check if we actually have a TTY (terminal)
+    if not sys.stdin.isatty():
+        return None
+    
+    # Interactive Mode: Prompt user
+    print("\n" + "-"*60)
     print("👤 HUMAN FEEDBACK STEP")
     print("-" * 60)
     print("Review the plan above.")
     print("• To APPROVE: Press [ENTER] directly.")
     print("• To REQUEST CHANGES: Type your feedback/instructions and press [ENTER].")
     
-    feedback = input("\n> Instruction: ").strip()
+    try:
+        feedback = input("\n> Instruction: ").strip()
+    except (EOFError, OSError):
+        return None
     
     if not feedback:
-        return None # User accepted the plan
+        return None
         
     return feedback
