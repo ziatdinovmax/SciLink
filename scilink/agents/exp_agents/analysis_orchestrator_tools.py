@@ -761,7 +761,8 @@ class AnalysisOrchestratorTools:
             hints: str = None,
             auxiliary_data: str = None,
             auxiliary_label: str = None,
-            skill: str = None
+            skill: str = None,
+            series_metadata: str = None
         ) -> str:
             """
             Execute analysis with the selected or specified agent.
@@ -912,6 +913,75 @@ class AnalysisOrchestratorTools:
                         if len(actual_data_input) > 3:
                             print(f"      ... and {len(actual_data_input) - 3} more")
                 
+                # === Handle series metadata ===
+                is_series = isinstance(actual_data_input, list) and len(actual_data_input) > 1
+                has_series_meta = (
+                    isinstance(self.orch.current_metadata, dict)
+                    and "series" in self.orch.current_metadata
+                )
+
+                if series_metadata is not None:
+                    # Parse and inject series metadata from the tool call
+                    try:
+                        parsed_series = json.loads(series_metadata) if isinstance(series_metadata, str) else series_metadata
+                        self.orch.current_metadata["series"] = parsed_series
+                        has_series_meta = True
+                    except (json.JSONDecodeError, TypeError) as e:
+                        self.logger.warning(f"Failed to parse series_metadata: {e}")
+
+                if is_series and not has_series_meta:
+                    num_files = len(actual_data_input)
+                    return json.dumps({
+                        "status": "needs_series_metadata",
+                        "message": (
+                            f"Detected {num_files} spectra (series mode) but no series metadata found. "
+                            "Series metadata describes the experimental variable that changes across spectra "
+                            "(e.g. temperature, concentration, voltage). "
+                            "Ask the user what variable changes across the spectra, the range or "
+                            "values, and the units. The user can describe this naturally — e.g. "
+                            "'temperature from 300 to 500 K in 50 K steps' or 'concentration: "
+                            "0.1, 0.2, 0.5 mM'. Use the filenames and the user's response to "
+                            "build the values dict mapping each filename to its value, then "
+                            "re-call run_analysis with the series_metadata parameter. "
+                            "Files will be sorted by value automatically for correct trend analysis."
+                        ),
+                        "num_spectra": num_files,
+                        "expected_format": {
+                            "series_type": "<variable name, e.g. temperature>",
+                            "values": {"<filename>": "<value>", "...": "..."},
+                            "unit": "<unit string, e.g. K, mM, V>"
+                        },
+                        "files": [Path(f).name for f in actual_data_input],
+                    })
+
+                # Sort files by series values for correct physical ordering
+                if is_series and has_series_meta:
+                    series_info = self.orch.current_metadata.get("series", {})
+                    values = series_info.get("values")
+                    if isinstance(values, dict):
+                        # Map filenames to full paths
+                        name_to_path = {Path(f).name: f for f in actual_data_input}
+                        # Build sorted (path, value) pairs by value
+                        paired = []
+                        for fname, val in values.items():
+                            full_path = name_to_path.get(fname)
+                            if full_path is not None:
+                                try:
+                                    paired.append((full_path, float(val)))
+                                except (TypeError, ValueError):
+                                    paired.append((full_path, val))
+                        # Sort by value (numeric sort when possible)
+                        try:
+                            paired.sort(key=lambda x: x[1])
+                        except TypeError:
+                            pass  # mixed types, keep original order
+                        if paired:
+                            actual_data_input = [p[0] for p in paired]
+                            sorted_values = [p[1] for p in paired]
+                            # Replace dict with sorted list for agent consumption
+                            series_info["values"] = sorted_values
+                            self.orch.current_metadata["series"] = series_info
+
                 # === Run analysis ===
                 analyze_kwargs = {
                     "data": actual_data_input,
@@ -1039,6 +1109,17 @@ class AnalysisOrchestratorTools:
                         "Supported by CurveFitting and Hyperspectral agents. "
                         f"Built-in curve_fitting skills: {list_skills('curve_fitting')}. "
                         f"Built-in hyperspectral skills: {list_skills('hyperspectral')}."
+                    )
+                },
+                "series_metadata": {
+                    "type": "string",
+                    "description": (
+                        "JSON string describing the experimental variable that changes across "
+                        "spectra in a series. Required for series analysis (multiple spectra). "
+                        "Values is a dict mapping each filename to its value — files are "
+                        "automatically sorted by value for correct trend analysis. "
+                        "Format: {\"series_type\": \"<variable>\", \"values\": {\"<filename>\": <value>, ...}, \"unit\": \"<units>\"}. "
+                        "Example: {\"series_type\": \"temperature\", \"values\": {\"spec_5K.csv\": 5, \"spec_10K.csv\": 10, \"spec_20K.csv\": 20}, \"unit\": \"K\"}"
                     )
                 }
             },

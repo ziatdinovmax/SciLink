@@ -299,9 +299,22 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
                     {
                         "series_type": "temperature",   # or "time", "concentration", …
-                        "values": [300, 350, 400],      # one value per spectrum
+                        "values": [300, 350, 400],      # one value per spectrum, in file order
                         "unit": "K"                      # unit for values
                     }
+
+                When calling through the orchestrator, ``values`` can be a dict
+                mapping filenames to values instead of a list. The orchestrator
+                sorts files by value for correct physical ordering and converts
+                the dict to a list before passing to the agent::
+
+                    {
+                        "series_type": "temperature",
+                        "values": {"spec_5K.csv": 5, "spec_20K.csv": 20, "spec_10K.csv": 10},
+                        "unit": "K"
+                    }
+                    # → files sorted to [spec_5K, spec_10K, spec_20K]
+                    # → values converted to [5, 10, 20]
             auxiliary_data: Optional path to an auxiliary dataset (1D curve file
                 or 2D image) from the same sample/experiment. Not fitted or
                 analyzed in detail, but provided to the LLM as context for
