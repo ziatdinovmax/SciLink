@@ -2,11 +2,11 @@
 VAEAgent — LLM-powered Variational Autoencoder training and analysis agent.
 
 Follows all five principles from scilink_dev_manifesto.md:
-  1. Stateful Memory    – every atomic action is logged and persisted to JSON.
-  2. Atomic Tooling     – capabilities are discrete, composable methods.
-  3. Standardised I/O   – typed input/output dicts with explicit units/context.
-  4. Human-in-the-Loop  – dry-run and enable_human_feedback hooks.
-  5. Decoupled          – imports only from scilink.tools; no exp-agent domain logic.
+  1. Stateful Memory    - every atomic action is logged and persisted to JSON.
+  2. Atomic Tooling     - capabilities are discrete, composable methods.
+  3. Standardised I/O   - typed input/output dicts with explicit units/context.
+  4. Human-in-the-Loop  - dry-run and enable_human_feedback hooks.
+  5. Decoupled          - imports only from scilink.tools; no exp-agent domain logic.
 """
 
 import json
@@ -83,15 +83,15 @@ class VAEAgent(BaseUtilityAgent):
     VAE/AE models from the SciLink VAE model registry.
 
     Atomic tools (Principle 2):
-        select_model()           – LLM chooses model type from data shape + task
-        configure_hyperparameters() – LLM proposes training config
-        train_vae()              – builds DataLoader, trains model, returns history
-        analyze_latent_space()   – computes per-dim latent statistics
-        detect_training_failure() – rule-based failure diagnosis
-        adjust_hyperparameters() – LLM proposes improved config after failure
+        select_model()           - LLM chooses model type from data shape + task
+        configure_hyperparameters() - LLM proposes training config
+        train_vae()              - builds DataLoader, trains model, returns history
+        analyze_latent_space()   - computes per-dim latent statistics
+        detect_training_failure() - rule-based failure diagnosis
+        adjust_hyperparameters() - LLM proposes improved config after failure
 
     Main entry point:
-        analyze()  – orchestrates the above tools with up to max_retries attempts
+        analyze()  - orchestrates the above tools with up to max_retries attempts
     """
 
     def __init__(
@@ -262,7 +262,7 @@ Propose training hyperparameters for the following configuration.
 - Prefer latent_dims in [4, 8, 16, 32] (start small).
 - Prefer batch_size in [16, 32, 64] unless n_samples < 50 (then use 8).
 - Start with lr=1e-3; use gradient_clip_val=1.0 for stability.
-- max_epochs should be enough for convergence: 50–200 for small data, 20–50 for large.
+- max_epochs should be enough for convergence: 50-200 for small data, 20-50 for large.
 - kld_weight (variational only): start at 1.0; lower to 0.1 if collapse is likely.
 
 Respond in JSON only (no markdown):
@@ -490,11 +490,11 @@ Respond in JSON: {{"interpretation": "<2-3 sentence interpretation>"}}"""
         Tool 5 — Rule-based failure diagnosis.
 
         Checks:
-            numerical_instability  – NaN/Inf in any loss entry
-            latent_collapse        – mean KLD across all dims < 0.001
-            posterior_collapse     – >50% of dims have kld_per_dim[i] < 0.01
-            divergence             – final loss > 90% of initial loss (not converging)
-            stagnation             – <0.1% improvement in the last 20% of epochs
+            numerical_instability  - NaN/Inf in any loss entry
+            latent_collapse        - mean KLD across all dims < 0.001
+            posterior_collapse     - >50% of dims have kld_per_dim[i] < 0.01
+            divergence             - final loss > 90% of initial loss (not converging)
+            stagnation             - <0.1% improvement in the last 20% of epochs
 
         Returns:
             {"failure_type": str | None, "severity": "ok|warning|critical",

@@ -59,10 +59,10 @@ def _extract_particle_patches(
 
     Each mask is a binary array with the same spatial dimensions as
     ``image_array``.  The bounding box of each mask determines the crop
-    centre; crops are padded / clipped to exactly ``patch_size × patch_size``.
+    centre; crops are padded / clipped to exactly ``patch_size x patch_size``.
 
     Args:
-        image_array:  2-D grayscale image (H × W), values in [0, 1].
+        image_array:  2-D grayscale image (H x W), values in [0, 1].
         masks:        Binary masks returned by ``run_sam_analysis``, one per particle.
         patch_size:   Edge length (pixels) for each square crop.
         max_patches:  Cap on the number of patches extracted.
@@ -227,7 +227,7 @@ class SAMVAEWorkflow:
         Run the full SAM → patch extraction → VAE pipeline.
 
         Args:
-            image_data:       File path (str) or numpy array (H×W or H×W×C).
+            image_data:       File path (str) or numpy array (HxW or HxWxC).
             system_info:      Metadata dict (material, technique, scale, etc.).
             task_description: Optional scientific goal description for the VAE agent.
             sam_params:       Optional SAM parameter overrides (min_area, etc.).
@@ -306,7 +306,7 @@ class SAMVAEWorkflow:
             patches    = _extract_particle_patches(image_array, masks, patch_size)
 
         n_patches = len(patches)
-        logger.info(f"  Extracted {n_patches} patches of size {patch_size}×{patch_size}.")
+        logger.info(f"  Extracted {n_patches} patches of size {patch_size}x{patch_size}.")
 
         if n_patches == 0:
             return {"status": "error",
