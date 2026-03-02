@@ -175,3 +175,6 @@ cython_debug/
 
 # vscode configureation
 .vscode
+
+# claude configure and memory
+.claude

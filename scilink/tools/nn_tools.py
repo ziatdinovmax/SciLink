@@ -438,204 +438,6 @@ class ConvVariationalDecoder(ConvDecoder):
         return reconstruction
     
 #=================================
-# Variational Autoencoder definitions
-#=================================
-class BaseVAE(nn.Module):
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-
-    def encode(self, input: Tensor) -> List[Tensor]:
-        raise NotImplementedError
-
-    def decode(self, input: Tensor) -> Any:
-        raise NotImplementedError
-
-    def sample(self, batch_size: int, current_device: int, **kwargs) -> Tensor:
-        raise NotImplementedError
-
-    def reconstruct(self, x: Tensor, **kwargs) -> Tensor:
-        raise NotImplementedError
-
-    @abstractmethod
-    def forward(self, *inputs: Tensor) -> Tensor:
-        pass
-
-    @abstractmethod
-    def loss_function(self, *inputs: Any, **kwargs) -> Tensor:
-        pass
-
-class VAE(BaseVAE):
-    default_encoder = {
-        'linear': [
-            {
-                'n_layers': 1,
-                'out_features': 64,
-                'batch_norm': False,
-                'dropout_prob': 0.0,
-                'pooling_type': None,
-                'activation_fn': 'lrelu',
-                'leaky_negative_slope': 0.001
-            }
-        ],
-        'conv': [
-            {
-                'n_layers': 1,
-                'in_channels': 1,
-                'out_channels': 16,
-                'kernel_size': 3,
-                'stride': 1,
-                'padding': 1,
-                'batch_norm': False,
-                'dropout_prob': 0.0,
-                'pooling_type': 'avg',
-                'activation_fn': 'lrelu',
-                'leaky_negative_slope': 0.001
-            }
-        ]
-    }
-
-    default_decoder = {
-        'linear': [
-            {
-                'n_layers': 1,
-                'in_features': 64,
-                'batch_norm': False,
-                'dropout_prob': 0.0,
-                'pooling_type': None,
-                'activation_fn': 'lrelu',
-                'leaky_negative_slope': 0.001
-            }
-        ],
-        'conv': [
-            {
-                'n_layers': 1,
-                'in_channels': 16,
-                'out_channels': 1,
-                'kernel_size': 3,
-                'stride': 1,
-                'padding': 1,
-                'batch_norm': False,
-                'dropout_prob': 0.0,
-                'activation_fn': 'lrelu',
-                'leaky_negative_slope': 0.001
-            }
-        ]
-    }
-
-
-    def __init__(self,
-                in_dims: Tuple[int],
-                latent_dims: int = 2,
-                encoder_type: str = 'conv',
-                decoder_type: str = 'conv',
-                encoder_configs: List[dict] = None,
-                decoder_configs: List[dict] = None,
-                *args, **kwargs: Union[int, bool]) -> None:
-        super().__init__(*args, **kwargs)
-        self.latent_dims = latent_dims
-        self.in_dims = in_dims
-        
-        # Build Variational Encoder
-        if encoder_configs is None:
-            encoder_configs = VAE.default_encoder[encoder_type]
-        
-        if encoder_type == 'conv':
-            encoder = ConvVariationalEncoder
-        else:
-            encoder_configs[0]['in_features'] = in_dims[0]
-            encoder = LinearVariationalEncoder
-
-        self.encoder = encoder(in_dims = in_dims, n_latent=latent_dims, block_configs=encoder_configs)
-        
-        # Build Decoder
-        if decoder_configs is None:
-            decoder_configs = VAE.default_decoder[decoder_type]
-
-        if decoder_type == 'conv':
-            decoder = ConvVariationalDecoder
-        else:
-            decoder_configs[-1]['out_features'] = in_dims[0]
-            decoder = LinearVariationalDecoder
-
-        self.decoder = decoder(out_dims = in_dims, n_latent=latent_dims, block_configs=decoder_configs)
-
-    def encode(self, x: Tensor) -> List[Tensor]:
-        """
-        Encodes the input by passing through the encoder network
-        and returns the latent codes.
-        :param input: (Tensor) Input tensor to encoder [N x C x H x W]
-        :return: (Tensor) List of latent codes
-        """
-        z_mean, z_log_var = self.encoder(x)
-        return z_mean, z_log_var
-
-    def reparameterize(self, mu: Tensor, logvar: Tensor) -> Tensor:
-        """
-        Reparameterization trick to sample from N(mu, var) from N(0,1).
-        :param mu: (Tensor) Mean of the latent Gaussian [B x D]
-        :param logvar: (Tensor) Standard deviation of the latent Gaussian [B x D]
-        :return: (Tensor) [B x D]
-        """
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        return eps * std + mu
-    
-    def decode(self, z: Tensor) -> Tensor:
-        """
-        Maps the given latent codes onto the image space.
-        :param z: (Tensor) [B x D]
-        :return: (Tensor) [B x C x H x W]
-        """
-        decoded = self.decoder(z)
-        return decoded
-
-    def forward(self, x: Tensor) -> List[Tensor]:
-        """
-        Forward pass through the VAE.
-        """
-        mu, log_var = self.encode(x)
-        z = self.reparameterize(mu, log_var)
-        reconstruciton = self.decode(z)
-        return  reconstruciton, x, mu, log_var
-
-    def sample(self,
-               num_samples:int,
-               current_device: int) -> Tensor:
-        """
-        Samples from the latent space and return the corresponding
-        image space map.
-        :param num_samples: (Int) Number of samples
-        :param current_device: (Int) Device to run the model
-        :return: (Tensor)
-        """
-        z = torch.randn(num_samples, self.latent_dims)
-        z = z.to(current_device)
-        samples = self.decode(z)
-        return samples
-
-    def reconstruct(self, x: Tensor) -> Tensor:
-        """
-        Given an input image x, returns the reconstructed image
-        :param x: (Tensor) [B x C x H x W]
-        :return: (Tensor) [B x C x H x W]
-        """
-        return self.forward(x)[0]
-    
-    def loss_function(self, recons, input, mu, log_var) -> dict:
-        """
-        Computes the VAE loss function.
-        KL(N(\mu, \sigma), N(0, 1)) = \log \frac{1}{\sigma} + \frac{\sigma^2 + \mu^2}{2} - \frac{1}{2}
-        :param args:
-        :param kwargs:
-        :return:
-        """
-        kld_weight = 0.5 # kwargs['M_N'] # Account for the minibatch samples from the dataset
-        recons_loss = F.mse_loss(recons, input)
-        kld_loss = torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim = 1), dim = 0)
-        loss = recons_loss + kld_weight * kld_loss
-        return {'loss': loss, 'Reconstruction_Loss': recons_loss.detach(), 'KLD': kld_loss.detach()}
-
-#=================================
 # Trainer definitions
 #=================================
 @dataclass
@@ -832,22 +634,27 @@ class Trainer:
 
         return val_metrics
 
-    def fit(self, model: nn.Module, train_loader: DataLoader, val_loader: Optional[DataLoader] = None):
+    def fit(self, model: nn.Module, train_loader: DataLoader, val_loader: Optional[DataLoader] = None) -> List[Dict]:
         model = model.to(self.device)
-        optim_config = model.configure_optimizers()
         scheduler = None
         epoch_metrics, val_metrics = {}, {}
+        train_history: List[Dict] = []
 
-        # Support multiple return types (optimizer, (optimizer, scheduler), list)
-        if isinstance(optim_config, (list, tuple)):
-            if len(optim_config) == 2 and not isinstance(optim_config[0], (list, tuple)):
-                optimizer, scheduler = optim_config
-            else:
-                optimizer = optim_config[0]
-                if len(optim_config) > 1:
-                    scheduler = optim_config[1]
-        else:
-            optimizer = optim_config
+        # If the model defines configure_optimizers(), use its optimizer for training
+        # and extract an optional scheduler. Falls back to the optimizer passed to __init__.
+        if hasattr(model, "configure_optimizers"):
+            optim_config = model.configure_optimizers()
+            # Support multiple return types: optimizer, (optimizer, scheduler), list
+            if isinstance(optim_config, (list, tuple)):
+                if len(optim_config) == 2 and not isinstance(optim_config[0], (list, tuple)):
+                    self.optimizer, scheduler = optim_config
+                else:
+                    self.optimizer = optim_config[0]
+                    if len(optim_config) > 1:
+                        scheduler = optim_config[1]
+            elif optim_config is not None:
+                self.optimizer = optim_config
+        optimizer = self.optimizer  # local alias for checkpoint saving
 
         # Optional anomaly detection
         torch.autograd.set_detect_anomaly(self.cfg.detect_anomaly)
@@ -882,9 +689,11 @@ class Trainer:
                     self._log(f"[Scheduler] step failed: {e}")
 
             self.loss_history = {**epoch_metrics, **val_metrics}
+            train_history.append({"epoch": epoch, **epoch_metrics, **val_metrics})
 
         if self.best_ckpt_path:
             self._log(f"Best checkpoint: {self.best_ckpt_path} (metric: {self.best_metric})")
-        
+
         self.save_model(self.filename)
         self._log("Training complete.")
+        return train_history
