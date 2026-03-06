@@ -31,7 +31,7 @@ class ForceFieldAgent:
     def __init__(self, 
                  working_dir: str, 
                  api_key: Optional[str] = None,
-                 model_name: str = "gemini-2.5-pro-preview-05-06",
+                 model_name: str = "gemini-3-pro-preview",
                  base_url: Optional[str] = None,
                  # Legacy parameters
                  local_model: Optional[str] = None,
@@ -124,6 +124,61 @@ class ForceFieldAgent:
                 "strengths": ["Highest accuracy", "Novel molecules"]
             }
         }
+
+        self._mass_to_element = self._build_mass_lookup()
+    
+    
+    def _build_mass_lookup(self) -> Dict[str, float]:
+        """Build a dictionary mapping element symbols to their atomic masses."""
+        from ase.data import atomic_masses, chemical_symbols
+        import math
+    
+        lookup = {}
+        for i, symbol in enumerate(chemical_symbols):
+            if i == 0:  # Skip dummy
+                continue
+            mass = atomic_masses[i]
+            if mass is not None and mass > 0:
+                try:
+                    if not math.isnan(mass):
+                        lookup[symbol] = mass
+                except (TypeError, ValueError):
+                    pass
+    
+        return lookup
+    
+    
+    def _guess_element_from_mass(self, mass: float, tolerance: float = 0.5) -> str:
+        """
+        Guess element from atomic mass using ASE's periodic table data.
+    
+        Args:
+            mass: Atomic mass to identify
+            tolerance: Maximum allowed difference from reference mass
+    
+        Returns:
+            Element symbol or 'X' if unknown
+        """
+        best_match = "X"
+        best_diff = float('inf')
+    
+        for symbol, ref_mass in self._mass_to_element.items():
+            diff = abs(mass - ref_mass)
+    
+            if diff < tolerance:
+                return symbol
+    
+            if diff < best_diff:
+                best_diff = diff
+                best_match = symbol
+    
+        if best_diff > tolerance:
+            self.logger.warning(
+                f"Could not identify element for mass {mass:.4f}. "
+                f"Closest: {best_match} (diff: {best_diff:.4f})"
+            )
+    
+        return best_match
 
     def _generate_json(self, prompt: str) -> dict:
         """Generate JSON response from LLM."""
@@ -239,7 +294,9 @@ class ForceFieldAgent:
             
         return result
     
-    def acquire_parameters(self, selection_info: Dict[str, Any], data_file: Optional[str] = None) -> Dict[str, Any]:
+    def acquire_parameters(self, 
+                           selection_info: Dict[str, Any], 
+                           data_file: Optional[str] = None) -> Dict[str, Any]:
         """
         Acquire force field parameters using the selected method.
         
@@ -251,60 +308,97 @@ class ForceFieldAgent:
             Dictionary with parameter files and information
         """
         method = selection_info["parameter_method"]["method"]
-        force_field = selection_info["force_field"]["force_field"]
+        force_field_info = selection_info["force_field"]
+        force_field = force_field_info.get("force_field", "OPLS-AA")
         system_info = selection_info["system_info"]
         
         self.logger.info(f"Acquiring parameters via {method} method for {force_field}")
         
-        # Execute the appropriate parameter acquisition method
-        if method == "database":
-            params = self._acquire_parameters_from_database(
+        # For now, override quantum/analogy to database
+        # These methods require external tools and manual intervention
+        if method in ["quantum", "analogy"]:
+            self.logger.warning(
+                f"Method '{method}' requires external tools. "
+                f"Falling back to 'database' method for automated pipeline."
+            )
+            method = "database"
+        
+        # Initialize parameters structure
+        params = {
+            "source": method,
+            "force_field": force_field,
+            "force_field_info": force_field_info,
+            "system_info": system_info,
+            "atom_types": {},
+            "parameter_files": {},
+            "lammps_settings": {
+                "pair_style": force_field_info.get("lammps_pair_style", "lj/cut/coul/long 10.0"),
+                "bond_style": force_field_info.get("lammps_bond_style", "harmonic"),
+                "angle_style": force_field_info.get("lammps_angle_style", "harmonic"),
+                "dihedral_style": force_field_info.get("lammps_dihedral_style", "opls"),
+                "kspace_style": "pppm 1.0e-4",
+                "special_bonds": "lj/coul 0.0 0.0 0.5",
+            }
+        }
+        
+        # If data_file is provided, extract atom types from it
+        if data_file and os.path.exists(data_file):
+            self.logger.info(f"Extracting atom types from data file: {data_file}")
+            try:
+                atom_types = self._extract_atom_types_from_data(data_file)
+                params["atom_types"] = atom_types
+                self.logger.info(f"Found {len(atom_types)} atom types in data file")
+            except Exception as e:
+                self.logger.warning(f"Could not extract atom types from data file: {e}")
+        
+        # Generate LJ parameters for atom types
+        self.logger.info("Generating force field parameters...")
+        try:
+            generated_params = self._generate_parameters_with_llm(
                 force_field=force_field,
                 system_info=system_info,
                 data_file=data_file
             )
-        elif method == "analogy":
-            params = self._acquire_parameters_by_analogy(
-                force_field=force_field,
-                system_info=system_info,
-                data_file=data_file
-            )
-        elif method == "quantum":
-            params = self._acquire_parameters_from_quantum(
-                force_field=force_field,
-                system_info=system_info,
-                data_file=data_file
-            )
-        else:
-            # Fallback to database method
-            self.logger.warning(f"Unknown parameter method {method}, falling back to database")
-            params = self._acquire_parameters_from_database(
-                force_field=force_field,
-                system_info=system_info,
-                data_file=data_file
-            )
-            
-        # Validate parameters for scientific rigor
+            params.update(generated_params)
+        except Exception as e:
+            self.logger.error(f"Parameter generation failed: {e}")
+            params["generation_error"] = str(e)
+        
+        # Validate parameters
+        self.logger.info("Validating parameters...")
         validation = self._validate_parameters(params, system_info)
         params["validation"] = validation
         
-        # Generate parameter summary
+        if validation.get("errors"):
+            self.logger.warning(f"Parameter validation errors: {validation['errors']}")
+        if validation.get("warnings"):
+            self.logger.info(f"Parameter validation warnings: {validation['warnings']}")
+        
+        # Generate summary
         params["summary"] = self._generate_parameter_summary(params, selection_info)
         
-        # Save parameter info to file
+        # Save parameter info
         param_file = os.path.join(self.working_dir, "parameter_info.json")
-        with open(param_file, 'w') as f:
-            # Filter out large data that can't be serialized
-            serializable_params = {k: v for k, v in params.items() if k not in ["raw_data", "quantum_results"]}
-            json.dump(serializable_params, f, indent=2)
-            
+        try:
+            with open(param_file, 'w') as f:
+                serializable_params = {
+                    k: v for k, v in params.items() 
+                    if k not in ["raw_data", "quantum_results"]
+                }
+                json.dump(serializable_params, f, indent=2)
+            self.logger.info(f"Saved parameter info to {param_file}")
+        except Exception as e:
+            self.logger.warning(f"Could not save parameter info: {e}")
+        
         return params
-    
+
     def generate_lammps_parameters(self, 
                                parameter_info: Dict[str, Any], 
                                data_file: str) -> Dict[str, str]:
         """
         Generate LAMMPS parameter files based on the acquired parameters.
+        
+        Uses the actual data file to ensure type consistency.
         
         Args:
             parameter_info: Parameter info from acquire_parameters()
@@ -315,13 +409,10 @@ class ForceFieldAgent:
         """
         self.logger.info(f"Generating LAMMPS parameter files for {data_file}")
         
-        # Parse the existing data file to understand what parameters are needed
-        data_file_info = self._parse_data_file(data_file)
-        
-        # Generate LAMMPS parameter file content
-        param_content = self._generate_lammps_parameters(
-            data_file_info=data_file_info,
-            parameter_info=parameter_info
+        # Use the data-file-aware method to ensure type consistency
+        param_content = self._generate_lammps_parameters_from_data(
+            data_file=data_file,
+            force_field_info={"force_field": parameter_info.get("force_field", {})}
         )
         
         # Write parameter files
@@ -336,14 +427,15 @@ class ForceFieldAgent:
         # Additional files if needed
         if "additional" in param_content:
             for name, content in param_content["additional"].items():
-                add_file = os.path.join(self.working_dir, f"{name}.lammps")
-                with open(add_file, 'w') as f:
-                    f.write(content)
-                files[name] = add_file
+                if content:  # Only write non-empty content
+                    add_file = os.path.join(self.working_dir, f"{name}.lammps")
+                    with open(add_file, 'w') as f:
+                        f.write(content)
+                    files[name] = add_file
                 
         self.logger.info(f"Generated {len(files)} parameter files")
         return files
-    
+
     # ================================
     # PRIVATE METHODS
     # ================================
@@ -634,107 +726,54 @@ class ForceFieldAgent:
             
         return f"{description} ({system_info['n_atoms']} atoms)"
     
-    def _select_optimal_force_field(self, 
-                                 system_info: Dict[str, Any], 
-                                 research_goal: str,
-                                 system_description: str) -> Dict[str, Any]:
-        """
-        Use LLM to select the optimal force field for the system and research goal.
+    def _select_optimal_force_field(self,
+                                    system_info: Dict[str, Any],
+                                    research_goal: str,
+                                    system_description: str) -> Dict[str, Any]:
+        """Select optimal force field using LLM."""
         
-        Args:
-            system_info: System information from _analyze_system_composition
-            research_goal: Research objective in natural language
-            system_description: Human-readable system description
-            
-        Returns:
-            Dictionary with force field selection and justification
-        """
-        self.logger.info("Selecting optimal force field using LLM")
-        
-        # Convert system_info to a format suitable for the prompt
-        composition = system_info["composition"]
-        comp_str = "\n".join([f"- {k}: {'Yes' if v else 'No'}" for k, v in composition.items()])
-        
-        elements_str = ", ".join([f"{e}: {c}" for e, c in system_info.get("elements", {}).items()])
-        
-        # Create a dictionary of force field options to include in prompt
-        ff_options = {}
-        for category, force_fields in self.ff_databases.items():
-            if composition.get(category.replace("_", " "), False):
-                ff_options[category] = force_fields
-                
-        # Always include water force fields if water is present
-        if composition["water"] and "water" not in ff_options:
-            ff_options["water"] = self.ff_databases["water"]
-            
-        # Format force field options for the prompt
-        ff_options_str = ""
-        for category, force_fields in ff_options.items():
-            ff_options_str += f"- {category.capitalize()}: {', '.join(force_fields)}\n"
-            
-        # Create the prompt for the LLM
         prompt = f"""
-        As an expert in molecular dynamics force field selection, analyze this system and research goal to recommend the optimal force field.
-        
-        SYSTEM DESCRIPTION: {system_description}
-        
-        SYSTEM COMPOSITION:
-        {comp_str}
-        
-        ELEMENTS PRESENT: {elements_str}
-        
-        RESEARCH GOAL: "{research_goal}"
-        
-        AVAILABLE FORCE FIELDS BY CATEGORY:
-        {ff_options_str}
-        
-        Based on this information, please select the most appropriate force field for this system and research goal.
-        Consider these factors in your selection:
-        1. Accuracy requirements implied by the research goal
-        2. Compatibility between force fields if multiple molecular types are present
-        3. Specific strengths of each force field for the properties being studied
-        4. Computational efficiency vs. accuracy tradeoffs
-        5. Recent advancements in force field development
-        
-        Provide your response as JSON with this structure:
-        {{
-            "force_field": "Name of recommended force field",
-            "compatible_water_model": "Recommended water model",
-            "justification": "Detailed scientific explanation for this choice",
-            "alternatives": ["Alternative force field 1", "Alternative force field 2"],
-            "cautions": "Any limitations or issues to be aware of",
-            "parameter_availability": "Ease of obtaining parameters (high/medium/low)"
-        }}
-        Include only the JSON response with no additional text.
-        """
-        
-        try:
-            ff_selection = self._generate_json(prompt)
-            
-            # Ensure all expected fields are present
-            ff_selection.setdefault("force_field", "AMBER ff14SB")
-            ff_selection.setdefault("compatible_water_model", "TIP3P")
-            ff_selection.setdefault("alternatives", [])
-            ff_selection.setdefault("parameter_availability", "high")
-            
-            return ff_selection
-            
-        except Exception as e:
-            self.logger.error(f"Error selecting force field: {e}")
-            # Fallback to reasonable defaults
-            comp = system_info["composition"]
-            
-            default_selection = {
-                "force_field": "AMBER ff14SB" if comp["proteins"] else "GAFF" if comp["small_molecules"] else "TIP3P" if comp["water"] else "OPLS-AA",
-                "compatible_water_model": "TIP3P",
-                "justification": "Default selection based on system composition.",
-                "alternatives": ["CHARMM36", "OPLS-AA"],
-                "cautions": "This is a default selection due to LLM analysis failure.",
-                "parameter_availability": "high"
-            }
-            
-            return default_selection
+    You are an expert in molecular dynamics force field selection for LAMMPS simulations.
     
+    SYSTEM INFORMATION:
+    - Total atoms: {system_info.get('n_atoms', 'Unknown')}
+    - Elements present: {system_info.get('elements', {})}
+    - Composition: {system_info.get('composition', {})}
+    - System description: {system_description}
+    
+    RESEARCH GOAL:
+    {research_goal}
+    
+    TARGET MD SOFTWARE: LAMMPS
+    
+    Select the optimal force field for this LAMMPS simulation. Consider:
+    1. Scientific accuracy for the research goals
+    2. **LAMMPS compatibility** - the force field must be implementable with standard LAMMPS pair_styles
+    3. Parameter availability for all species
+    4. Computational efficiency
+    
+    IMPORTANT LAMMPS CONSTRAINTS:
+    - Standard pair_styles: lj/cut/coul/long, lj/charmm/coul/long, buck/coul/long
+    - For metal ions, consider: simple point charge models (Joung-Cheatham, Aqvist) 
+      which work with standard LJ, rather than 12-6-4 models requiring special implementation
+    - Water models: TIP3P, TIP4P, SPC/E are well-supported
+    - For organic molecules: OPLS-AA, GAFF, CHARMM are well-supported
+    
+    Return a JSON object with:
+    {{
+        "force_field": "<primary force field name>",
+        "compatible_water_model": "<water model>",
+        "ion_parameters": "<ion parameter set>",
+        "justification": "<scientific reasoning>",
+        "lammps_pair_style": "<recommended LAMMPS pair_style>",
+        "alternatives": ["<alternative 1>", "<alternative 2>"],
+        "cautions": "<important considerations>",
+        "parameter_availability": "high|medium|low"
+    }}
+    """
+        
+        return self._generate_json(prompt)
+
     def _determine_parameter_method(self, 
                                 system_info: Dict[str, Any],
                                 force_field: str,
@@ -1063,43 +1102,7 @@ class ForceFieldAgent:
             self.logger.error(f"Error extracting atom types from data file: {e}")
             
         return atom_types
-    
-    def _guess_element_from_mass(self, mass: float) -> str:
-        """Guess element from atomic mass."""
-        # Define mass ranges for common elements
-        mass_ranges = {
-            "H": (0.9, 1.1),
-            "C": (11.5, 12.5),
-            "N": (13.5, 14.5),
-            "O": (15.5, 16.5),
-            "Na": (22.5, 23.5),
-            "Mg": (23.5, 24.5),
-            "P": (30.5, 31.5),
-            "S": (31.5, 32.5),
-            "Cl": (35.0, 36.0),
-            "K": (38.5, 39.5),
-            "Ca": (39.5, 40.5),
-            "Fe": (55.0, 56.0),
-            "Zn": (64.5, 65.5)
-        }
         
-        for element, (min_mass, max_mass) in mass_ranges.items():
-            if min_mass <= mass <= max_mass:
-                return element
-                
-        # Default to closest match if not in range
-        closest_element = "C"
-        closest_diff = float('inf')
-        
-        for element, (min_mass, max_mass) in mass_ranges.items():
-            avg_mass = (min_mass + max_mass) / 2
-            diff = abs(mass - avg_mass)
-            if diff < closest_diff:
-                closest_diff = diff
-                closest_element = element
-                
-        return closest_element
-    
     def _extract_unique_molecules(self, system_info: Dict[str, Any]) -> List[str]:
         """
         Extract unique molecules from system information.
@@ -1537,7 +1540,316 @@ class ForceFieldAgent:
             self.logger.error(f"Error parsing data file: {e}")
             
         return info
+
+    def _generate_lammps_parameters_from_data(self,
+                                               data_file: str,
+                                               force_field_info: Dict[str, Any]) -> Dict[str, str]:
+        """
+        Generate LAMMPS parameter file content that EXACTLY matches the data file.
+        
+        This reads the actual atom types from the data file and generates
+        parameters only for those types, ensuring consistency.
+        
+        Args:
+            data_file: Path to LAMMPS data file
+            force_field_info: Force field selection info
+            
+        Returns:
+            Dictionary with parameter file content
+        """
+        self.logger.info(f"Generating parameters matched to data file: {data_file}")
+        
+        # Step 1: Parse the data file to get EXACT atom types
+        data_info = self._parse_data_file_for_charges(data_file)
+        
+        n_atom_types = len(data_info["masses"])
+        n_bond_types = 0
+        n_angle_types = 0
+        n_dihedral_types = 0
+        n_improper_types = 0
+        
+        # Count bond/angle/dihedral/improper types from data file header
+        with open(data_file, 'r') as f:
+            for line in f:
+                line_lower = line.lower()
+                if "bond types" in line_lower:
+                    n_bond_types = int(line.split()[0])
+                elif "angle types" in line_lower:
+                    n_angle_types = int(line.split()[0])
+                elif "dihedral types" in line_lower:
+                    n_dihedral_types = int(line.split()[0])
+                elif "improper types" in line_lower:
+                    n_improper_types = int(line.split()[0])
+        
+        # Build type info string for LLM
+        type_info = []
+        for type_id in sorted(data_info["masses"].keys()):
+            mass = data_info["masses"][type_id]
+            element = data_info["type_elements"].get(type_id, "X")
+            name = data_info["type_names"].get(type_id, element)
+            count = data_info["type_counts"].get(type_id, 0)
+            type_info.append(f"  Type {type_id}: element={element}, mass={mass:.4f}, count={count}")
+        
+        type_info_str = "\n".join(type_info)
+        
+        # Get force field name
+        force_field = force_field_info.get("force_field", {})
+        if isinstance(force_field, dict):
+            ff_name = force_field.get("force_field", "OPLS-AA")
+            water_model = force_field.get("compatible_water_model", "TIP3P")
+        else:
+            ff_name = str(force_field) if force_field else "OPLS-AA"
+            water_model = "TIP3P"
+        
+        self.logger.info(f"Data file has {n_atom_types} atom types, {n_bond_types} bond types, "
+                         f"{n_angle_types} angle types, {n_dihedral_types} dihedral types")
+        
+        prompt = f"""
+    Generate a LAMMPS force field parameter file for this molecular system.
     
+    CRITICAL CONSTRAINTS - READ CAREFULLY:
+    1. The data file has EXACTLY {n_atom_types} atom types (numbered 1 to {n_atom_types})
+    2. DO NOT define parameters for atom types outside the range 1-{n_atom_types}
+    3. DO NOT include 'mass' commands - masses are already defined in the data file
+    4. DO NOT include 'units' or 'atom_style' commands - these are set elsewhere
+    
+    ATOM TYPES IN THE DATA FILE:
+    {type_info_str}
+    
+    TOPOLOGY FROM DATA FILE:
+    - Atom types: {n_atom_types}
+    - Bond types: {n_bond_types}
+    - Angle types: {n_angle_types}
+    - Dihedral types: {n_dihedral_types}
+    - Improper types: {n_improper_types}
+    
+    FORCE FIELD: {ff_name}
+    WATER MODEL (if applicable): {water_model}
+    
+    GENERATE PARAMETERS IN THIS EXACT ORDER:
+    
+    1. Pair style and settings:
+       pair_style lj/cut/coul/long 10.0
+       pair_modify mix geometric
+       kspace_style pppm 1.0e-4
+       special_bonds lj/coul 0.0 0.0 0.5
+    
+    2. Bond/angle/dihedral styles (ONLY if corresponding types > 0):
+       bond_style harmonic          # only if {n_bond_types} > 0
+       angle_style harmonic         # only if {n_angle_types} > 0
+       dihedral_style opls          # only if {n_dihedral_types} > 0
+       improper_style harmonic      # only if {n_improper_types} > 0
+    
+    3. Pair coefficients for EACH atom type (self-interactions):
+       Format: pair_coeff I I epsilon sigma
+       - Use appropriate Lennard-Jones parameters for each element
+       - epsilon in kcal/mol, sigma in Angstroms
+       - Base parameters on the {ff_name} force field
+    
+    4. Bond coefficients (if {n_bond_types} > 0):
+       Format: bond_coeff N K r0
+       - K in kcal/mol/Å², r0 in Angstroms
+    
+    5. Angle coefficients (if {n_angle_types} > 0):
+       Format: angle_coeff N K theta0
+       - K in kcal/mol/rad², theta0 in degrees
+    
+    6. Dihedral coefficients (if {n_dihedral_types} > 0):
+       Format for OPLS: dihedral_coeff N K1 K2 K3 K4
+       - K values in kcal/mol
+    
+    IMPORTANT REMINDERS:
+    - Generate pair_coeff for types 1 through {n_atom_types} ONLY
+    - Generate bond_coeff for types 1 through {n_bond_types} ONLY
+    - Generate angle_coeff for types 1 through {n_angle_types} ONLY
+    - Generate dihedral_coeff for types 1 through {n_dihedral_types} ONLY
+    - Do NOT generate any *_coeff commands if that type count is 0
+    
+    Output ONLY valid LAMMPS commands. No markdown formatting, no explanations, no code blocks.
+    """
+        
+        response = self._generate_text(prompt)
+        
+        # Clean up response - remove any markdown formatting
+        param_content = response.strip()
+        if param_content.startswith("```"):
+            lines = param_content.split("\n")
+            param_content = "\n".join(
+                line for line in lines 
+                if not line.strip().startswith("```")
+            )
+        
+        # Validate and fix any out-of-range type references
+        param_content = self._validate_and_fix_param_types(
+            param_content, 
+            n_atom_types, 
+            n_bond_types, 
+            n_angle_types, 
+            n_dihedral_types,
+            n_improper_types
+        )
+        
+        # Add header comment
+        header = f"""# Force field parameters
+    # Generated by ForceFieldAgent
+    # Force field: {ff_name}
+    # Water model: {water_model}
+    #
+    # Data file type counts:
+    #   Atom types: {n_atom_types}
+    #   Bond types: {n_bond_types}
+    #   Angle types: {n_angle_types}
+    #   Dihedral types: {n_dihedral_types}
+    #   Improper types: {n_improper_types}
+    
+    """
+        
+        return {
+            "main": header + param_content,
+            "additional": {}
+        }            
+    
+    def _validate_and_fix_param_types(self,
+                                       param_content: str,
+                                       n_atom_types: int,
+                                       n_bond_types: int,
+                                       n_angle_types: int,
+                                       n_dihedral_types: int,
+                                       n_improper_types: int = 0) -> str:
+        """
+        Validate parameter file and remove any out-of-range type references.
+        Also removes mass commands since masses are in the data file.
+        
+        Args:
+            param_content: Raw parameter file content
+            n_atom_types: Number of atom types in data file
+            n_bond_types: Number of bond types in data file
+            n_angle_types: Number of angle types in data file
+            n_dihedral_types: Number of dihedral types in data file
+            n_improper_types: Number of improper types in data file
+            
+        Returns:
+            Cleaned parameter file content
+        """
+        lines = param_content.split('\n')
+        valid_lines = []
+        
+        for line in lines:
+            stripped = line.strip()
+            
+            # Skip empty lines and comments
+            if not stripped or stripped.startswith('#'):
+                valid_lines.append(line)
+                continue
+            
+            # Remove mass commands - masses are in data file
+            if stripped.startswith('mass ') or stripped.startswith('mass\t'):
+                self.logger.warning(f"Removing mass command (already in data file): {stripped}")
+                continue
+            
+            # Remove units command - set elsewhere
+            if stripped.startswith('units '):
+                self.logger.warning(f"Removing units command (set in main script): {stripped}")
+                continue
+            
+            # Remove atom_style command - set elsewhere
+            if stripped.startswith('atom_style '):
+                self.logger.warning(f"Removing atom_style command (set in main script): {stripped}")
+                continue
+            
+            # Check pair_coeff lines
+            if stripped.startswith('pair_coeff'):
+                match = re.match(r'pair_coeff\s+(\d+)\s+(\d+)', stripped)
+                if match:
+                    type1, type2 = int(match.group(1)), int(match.group(2))
+                    if type1 > n_atom_types or type2 > n_atom_types:
+                        self.logger.warning(f"Removing invalid pair_coeff (types {type1},{type2} > {n_atom_types}): {stripped}")
+                        continue
+                # Handle wildcard pair_coeff
+                elif re.match(r'pair_coeff\s+\*\s+\*', stripped):
+                    valid_lines.append(line)
+                    continue
+                valid_lines.append(line)
+                continue
+            
+            # Check bond_coeff lines
+            if stripped.startswith('bond_coeff'):
+                if n_bond_types == 0:
+                    self.logger.warning(f"Removing bond_coeff (no bond types in data): {stripped}")
+                    continue
+                match = re.match(r'bond_coeff\s+(\d+)', stripped)
+                if match:
+                    type_id = int(match.group(1))
+                    if type_id > n_bond_types:
+                        self.logger.warning(f"Removing invalid bond_coeff (type {type_id} > {n_bond_types}): {stripped}")
+                        continue
+                valid_lines.append(line)
+                continue
+            
+            # Check angle_coeff lines
+            if stripped.startswith('angle_coeff'):
+                if n_angle_types == 0:
+                    self.logger.warning(f"Removing angle_coeff (no angle types in data): {stripped}")
+                    continue
+                match = re.match(r'angle_coeff\s+(\d+)', stripped)
+                if match:
+                    type_id = int(match.group(1))
+                    if type_id > n_angle_types:
+                        self.logger.warning(f"Removing invalid angle_coeff (type {type_id} > {n_angle_types}): {stripped}")
+                        continue
+                valid_lines.append(line)
+                continue
+            
+            # Check dihedral_coeff lines
+            if stripped.startswith('dihedral_coeff'):
+                if n_dihedral_types == 0:
+                    self.logger.warning(f"Removing dihedral_coeff (no dihedral types in data): {stripped}")
+                    continue
+                match = re.match(r'dihedral_coeff\s+(\d+)', stripped)
+                if match:
+                    type_id = int(match.group(1))
+                    if type_id > n_dihedral_types:
+                        self.logger.warning(f"Removing invalid dihedral_coeff (type {type_id} > {n_dihedral_types}): {stripped}")
+                        continue
+                valid_lines.append(line)
+                continue
+            
+            # Check improper_coeff lines
+            if stripped.startswith('improper_coeff'):
+                if n_improper_types == 0:
+                    self.logger.warning(f"Removing improper_coeff (no improper types in data): {stripped}")
+                    continue
+                match = re.match(r'improper_coeff\s+(\d+)', stripped)
+                if match:
+                    type_id = int(match.group(1))
+                    if type_id > n_improper_types:
+                        self.logger.warning(f"Removing invalid improper_coeff (type {type_id} > {n_improper_types}): {stripped}")
+                        continue
+                valid_lines.append(line)
+                continue
+            
+            # Remove style commands if no corresponding types
+            if stripped.startswith('bond_style') and n_bond_types == 0:
+                self.logger.warning(f"Removing bond_style (no bond types in data): {stripped}")
+                continue
+            
+            if stripped.startswith('angle_style') and n_angle_types == 0:
+                self.logger.warning(f"Removing angle_style (no angle types in data): {stripped}")
+                continue
+            
+            if stripped.startswith('dihedral_style') and n_dihedral_types == 0:
+                self.logger.warning(f"Removing dihedral_style (no dihedral types in data): {stripped}")
+                continue
+            
+            if stripped.startswith('improper_style') and n_improper_types == 0:
+                self.logger.warning(f"Removing improper_style (no improper types in data): {stripped}")
+                continue
+            
+            # Keep all other valid lines
+            valid_lines.append(line)
+        
+        return '\n'.join(valid_lines)
+
     def _generate_lammps_parameters(self, 
                                 data_file_info: Dict[str, Any],
                                 parameter_info: Dict[str, Any]) -> Dict[str, str]:
@@ -1833,3 +2145,2426 @@ class ForceFieldAgent:
             fixed_lines.append(line)
             
         return '\n'.join(fixed_lines)
+
+    def assign_charges_to_data_file(self,
+                                     data_file: str,
+                                     parameter_info: Optional[Dict[str, Any]] = None,
+                                     pdb_file: Optional[str] = None,
+                                     research_goal: Optional[str] = None,
+                                     output_file: Optional[str] = None) -> str:
+        """
+        Assign partial charges to a LAMMPS data file based on force field parameters.
+        
+        This method analyzes the data file structure, determines appropriate charges
+        using the LLM based on atom types and force field, and writes the charges
+        back to the data file.
+        
+        Args:
+            data_file: Path to LAMMPS data file (with 0.0 charges)
+            parameter_info: Optional pre-computed parameter info from acquire_parameters()
+            pdb_file: Optional PDB file for additional context
+            research_goal: Optional research goal for context
+            output_file: Output path (if None, creates _charged.data version)
+            
+        Returns:
+            Path to the data file with charges assigned
+        """
+        self.logger.info(f"Assigning charges to {data_file}")
+        
+        if output_file is None:
+            base, ext = os.path.splitext(data_file)
+            output_file = f"{base}_charged{ext}"
+        
+        # Step 1: Parse the data file to understand its structure
+        data_info = self._parse_data_file_for_charges(data_file)
+        
+        # Generate charge assignments
+        if parameter_info and parameter_info.get("atom_types"):
+            # Use FF parameter mapping approach
+            charge_assignments = self._generate_charge_assignments(
+                data_info=data_info,
+                parameter_info=parameter_info,  # Pass this!
+                pdb_file=pdb_file,
+                research_goal=research_goal
+            )
+        else:
+            # Fallback to direct LLM generation
+            charge_assignments = self._generate_charges_with_llm(
+                data_info=data_info,
+                pdb_file=pdb_file,
+                research_goal=research_goal
+            )
+
+        # Step 3: Validate charge assignments
+        validation = self._validate_charge_assignments(charge_assignments, data_info)
+        if not validation["valid"]:
+            self.logger.warning(f"Charge validation warnings: {validation['warnings']}")
+        
+        # Step 4: Write the data file with charges
+        self._write_data_file_with_charges(
+            input_file=data_file,
+            output_file=output_file,
+            charge_assignments=charge_assignments,
+            data_info=data_info
+        )
+        
+        # Step 5: Save charge assignment info
+        charge_info_file = os.path.join(self.working_dir, "charge_assignments.json")
+        with open(charge_info_file, 'w') as f:
+            json.dump({
+                "charge_assignments": charge_assignments,
+                "validation": validation,
+                "input_file": data_file,
+                "output_file": output_file
+            }, f, indent=2)
+        
+        self.logger.info(f"Charges assigned successfully: {output_file}")
+        return output_file
+    
+    
+    def _parse_data_file_for_charges(self, data_file: str) -> Dict[str, Any]:
+        """
+        Parse a LAMMPS data file to extract detailed information needed for charge assignment.
+        
+        Args:
+            data_file: Path to LAMMPS data file
+            
+        Returns:
+            Dictionary with detailed data file information
+        """
+        info = {
+            "n_atoms": 0,
+            "n_atom_types": 0,
+            "masses": {},           # type_id -> mass
+            "type_names": {},       # type_id -> guessed name from comment or mass
+            "type_elements": {},    # type_id -> element symbol
+            "type_counts": {},      # type_id -> count of atoms
+            "molecules": {},        # mol_id -> list of (atom_id, type_id)
+            "atom_style": "full",   # Detected atom style
+            "box": None,
+            "header_lines": [],
+            "atoms_section_start": 0,
+            "atoms_section_end": 0,
+        }
+        
+        with open(data_file, 'r') as f:
+            lines = f.readlines()
+        
+        # First pass: parse header to get counts
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            
+            # Parse atom/type counts from header
+            parts = stripped.split()
+            if len(parts) >= 2:
+                if parts[1] == "atoms":
+                    info["n_atoms"] = int(parts[0])
+                elif parts[1] == "atom" and len(parts) >= 3 and parts[2] == "types":
+                    info["n_atom_types"] = int(parts[0])
+                elif "atom types" in stripped:
+                    info["n_atom_types"] = int(parts[0])
+            
+            # Parse box dimensions
+            if "xlo xhi" in stripped:
+                info["box"] = {"xlo": float(parts[0]), "xhi": float(parts[1])}
+        
+        self.logger.info(f"Data file header: {info['n_atoms']} atoms, {info['n_atom_types']} atom types")
+        
+        # Second pass: find section locations
+        section_lines = {}
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped in ["Masses", "Atoms", "Velocities", "Bonds", "Angles", 
+                           "Dihedrals", "Impropers", "Pair Coeffs", "Bond Coeffs",
+                           "Angle Coeffs", "Dihedral Coeffs", "Improper Coeffs"]:
+                section_lines[stripped] = i
+            # Handle "Atoms # full" format
+            elif stripped.startswith("Atoms"):
+                section_lines["Atoms"] = i
+                if "#" in stripped:
+                    style = stripped.split("#")[1].strip()
+                    info["atom_style"] = style
+        
+        # Parse Masses section
+        if "Masses" in section_lines:
+            start = section_lines["Masses"] + 1
+            for i in range(start, len(lines)):
+                line = lines[i].strip()
+                
+                # Stop at empty line or next section
+                if not line:
+                    continue
+                if line in section_lines or line.startswith("Atoms") or line.startswith("Pair") or line.startswith("Bond"):
+                    break
+                if line.startswith("#"):
+                    continue
+                
+                parts = line.split()
+                if len(parts) >= 2:
+                    try:
+                        type_id = int(parts[0])
+                        mass = float(parts[1])
+                        
+                        # Sanity check: type_id should be <= n_atom_types
+                        if type_id > info["n_atom_types"]:
+                            self.logger.warning(f"Skipping invalid type_id {type_id} > {info['n_atom_types']}")
+                            continue
+                        
+                        info["masses"][type_id] = mass
+                        
+                        # Extract element name from comment if present
+                        if "#" in line:
+                            comment = line.split("#")[1].strip()
+                            type_name = comment.split()[0] if comment.split() else None
+                            if type_name:
+                                info["type_names"][type_id] = type_name
+                                info["type_elements"][type_id] = type_name  # In this case, comment IS the element
+                        else:
+                            # Guess element from mass
+                            element = self._guess_element_from_mass(mass)
+                            info["type_elements"][type_id] = element
+                            info["type_names"][type_id] = element
+                        
+                    except (ValueError, IndexError) as e:
+                        self.logger.debug(f"Could not parse mass line: {line} - {e}")
+                        continue
+        
+        self.logger.info(f"Parsed {len(info['masses'])} masses: {info['masses']}")
+        self.logger.info(f"Element mapping: {info['type_elements']}")
+        
+        # Parse Atoms section
+        if "Atoms" in section_lines:
+            start = section_lines["Atoms"] + 1
+            
+            # Skip blank/comment lines after "Atoms" header
+            while start < len(lines) and (not lines[start].strip() or lines[start].strip().startswith("#")):
+                start += 1
+            
+            info["atoms_section_start"] = start
+            
+            # Initialize type counts
+            for type_id in info["masses"].keys():
+                info["type_counts"][type_id] = 0
+            
+            for i in range(start, len(lines)):
+                line = lines[i].strip()
+                
+                # Stop at empty line (end of section) or next section header
+                if not line:
+                    # Could be end of section or just blank line - check next few lines
+                    blank_count = 0
+                    for j in range(i, min(i + 3, len(lines))):
+                        if not lines[j].strip():
+                            blank_count += 1
+                        elif lines[j].strip() in section_lines or lines[j].strip().startswith(("Velocities", "Bonds", "Angles")):
+                            info["atoms_section_end"] = i
+                            break
+                    if blank_count >= 2:
+                        info["atoms_section_end"] = i
+                        break
+                    continue
+                
+                if line.startswith("#"):
+                    continue
+                
+                # Check if we've hit another section
+                if line in section_lines or line.startswith(("Velocities", "Bonds", "Angles", "Dihedrals", "Impropers")):
+                    info["atoms_section_end"] = i
+                    break
+                
+                # Parse atom line: atom_id mol_id atom_type charge x y z [flags]
+                parts = line.split()
+                if len(parts) >= 7:
+                    try:
+                        atom_id = int(parts[0])
+                        mol_id = int(parts[1])
+                        atom_type = int(parts[2])
+                        # parts[3] is charge
+                        # parts[4:7] are x, y, z
+                        
+                        # CRITICAL VALIDATION: atom_type must be in valid range!
+                        if atom_type < 1 or atom_type > info["n_atom_types"]:
+                            self.logger.warning(f"Invalid atom type {atom_type} for atom {atom_id} "
+                                              f"(valid range: 1-{info['n_atom_types']})")
+                            continue
+                        
+                        # Count this atom type
+                        info["type_counts"][atom_type] = info["type_counts"].get(atom_type, 0) + 1
+                        
+                        # Track molecules
+                        if mol_id not in info["molecules"]:
+                            info["molecules"][mol_id] = []
+                        info["molecules"][mol_id].append((atom_id, atom_type))
+                        
+                    except (ValueError, IndexError) as e:
+                        self.logger.debug(f"Could not parse atom line {i}: {line} - {e}")
+                        continue
+            else:
+                info["atoms_section_end"] = len(lines)
+        
+        # Final validation
+        total_counted = sum(info["type_counts"].values())
+        if total_counted != info["n_atoms"]:
+            self.logger.warning(f"Atom count mismatch: header says {info['n_atoms']}, counted {total_counted}")
+        
+        self.logger.info(f"Atom type counts: {info['type_counts']}")
+        self.logger.info(f"Number of molecules: {len(info['molecules'])}")
+        
+        return info
+    
+    
+    def _get_default_charge_for_element(self, element: str) -> float:
+        """
+        Get a reasonable default charge for an element when LLM fails.
+        
+        Uses common oxidation states and typical force field values.
+        For truly unknown elements, returns 0.0.
+        """
+        from ase.data import atomic_numbers
+        
+        # Check if it's a known element
+        if element not in atomic_numbers:
+            self.logger.warning(f"Unknown element symbol: {element}")
+            return 0.0
+        
+        # Alkali metals: +1
+        alkali = ["Li", "Na", "K", "Rb", "Cs"]
+        if element in alkali:
+            return 1.0
+        
+        # Alkaline earth metals: +2
+        alkaline_earth = ["Be", "Mg", "Ca", "Sr", "Ba"]
+        if element in alkaline_earth:
+            return 2.0
+        
+        # Common transition metals (default oxidation states)
+        transition_metals = {
+            "Zn": 2.0, "Cu": 2.0, "Fe": 2.0, "Co": 2.0, "Ni": 2.0,
+            "Mn": 2.0, "Cr": 3.0, "Ti": 4.0, "Ag": 1.0, "Au": 1.0,
+            "Pt": 2.0, "Pd": 2.0, "Cd": 2.0, "Hg": 2.0
+        }
+        if element in transition_metals:
+            return transition_metals[element]
+        
+        # Halogens: -1 (as anions) or small negative (in molecules)
+        halogens = ["F", "Cl", "Br", "I"]
+        if element in halogens:
+            return -0.2  # Small negative, conservative for molecular context
+        
+        # Oxygen: typically negative
+        if element == "O":
+            return -0.4  # Conservative default
+        
+        # Hydrogen: typically positive in most contexts
+        if element == "H":
+            return 0.3  # Conservative default
+        
+        # Nitrogen: context dependent, default to small negative
+        if element == "N":
+            return -0.3
+        
+        # Sulfur: context dependent
+        if element == "S":
+            return 0.0
+        
+        # Carbon and other main group elements: neutral default
+        return 0.0
+    
+    
+    def _get_default_charges(self, data_info: Dict[str, Any]) -> Dict[int, float]:
+        """
+        Get default charges for all atom types when LLM fails completely.
+        """
+        charges = {}
+        for type_id, element in data_info["type_elements"].items():
+            charges[type_id] = self._get_default_charge_for_element(element)
+        
+        self.logger.warning(f"Using fallback default charges: {charges}")
+        return charges
+
+    def _analyze_molecular_compositions(self, data_info: Dict[str, Any]) -> Dict[str, Dict]:
+        """
+        Analyze molecules in the system to identify distinct molecule types.
+        
+        Args:
+            data_info: Parsed data file information
+            
+        Returns:
+            Dictionary of molecule types with their compositions and counts
+        """
+        # Group molecules by their atom type composition
+        mol_signatures = {}
+        
+        for mol_id, atoms in data_info["molecules"].items():
+            # Create a signature based on sorted atom types
+            type_counts = {}
+            for atom_id, atom_type in atoms:
+                type_counts[atom_type] = type_counts.get(atom_type, 0) + 1
+            
+            # Convert to tuple for hashing
+            signature = tuple(sorted(type_counts.items()))
+            
+            if signature not in mol_signatures:
+                mol_signatures[signature] = {
+                    "count": 0,
+                    "type_counts": type_counts,
+                    "example_mol_id": mol_id
+                }
+            mol_signatures[signature]["count"] += 1
+        
+        # Convert to more readable format
+        mol_types = {}
+        for i, (signature, data) in enumerate(mol_signatures.items()):
+            # Try to identify molecule type
+            mol_name = self._identify_molecule_type(data["type_counts"], data_info)
+            
+            composition_str = ", ".join([
+                f"{data_info['type_elements'].get(t, '?')}{c}" 
+                for t, c in sorted(data["type_counts"].items())
+            ])
+            
+            mol_types[mol_name] = {
+                "count": data["count"],
+                "composition": composition_str,
+                "type_counts": data["type_counts"]
+            }
+        
+        return mol_types
+    
+    
+    def _identify_molecule_type(self, type_counts: Dict[int, int], data_info: Dict[str, Any]) -> str:
+        """
+        Try to identify what type of molecule based on its composition.
+        
+        Uses common molecular patterns as heuristics, falls back to formula-based naming.
+        This is for identification/labeling only - does NOT determine charges.
+        
+        Args:
+            type_counts: Dictionary of atom_type -> count
+            data_info: Parsed data file information
+            
+        Returns:
+            Molecule type name (string identifier)
+        """
+        # Get element composition
+        element_counts = {}
+        for type_id, count in type_counts.items():
+            element = data_info["type_elements"].get(type_id, "X")
+            element_counts[element] = element_counts.get(element, 0) + count
+        
+        n_atoms = sum(element_counts.values())
+        
+        # === Common molecule patterns (heuristics for naming, not charges) ===
+        
+        # Monatomic species (ions)
+        if n_atoms == 1:
+            element = list(element_counts.keys())[0]
+            return f"{element.lower()}_ion"
+        
+        # Water: H2O (3 atoms, 2H + 1O)
+        if (n_atoms == 3 and 
+            element_counts.get("H", 0) == 2 and 
+            element_counts.get("O", 0) == 1):
+            return "water"
+        
+        # Hydroxide: OH (2 atoms)
+        if (n_atoms == 2 and 
+            element_counts.get("H", 0) == 1 and 
+            element_counts.get("O", 0) == 1):
+            return "hydroxide"
+        
+        # Hydronium: H3O (4 atoms)
+        if (n_atoms == 4 and 
+            element_counts.get("H", 0) == 3 and 
+            element_counts.get("O", 0) == 1):
+            return "hydronium"
+        
+        # Ammonia: NH3
+        if (n_atoms == 4 and 
+            element_counts.get("N", 0) == 1 and 
+            element_counts.get("H", 0) == 3):
+            return "ammonia"
+        
+        # Ammonium: NH4
+        if (n_atoms == 5 and 
+            element_counts.get("N", 0) == 1 and 
+            element_counts.get("H", 0) == 4):
+            return "ammonium"
+        
+        # Methane: CH4
+        if (n_atoms == 5 and 
+            element_counts.get("C", 0) == 1 and 
+            element_counts.get("H", 0) == 4):
+            return "methane"
+        
+        # Methanol: CH4O (CH3OH)
+        if (n_atoms == 6 and 
+            element_counts.get("C", 0) == 1 and 
+            element_counts.get("H", 0) == 4 and
+            element_counts.get("O", 0) == 1):
+            return "methanol"
+        
+        # Ethanol: C2H6O
+        if (n_atoms == 9 and 
+            element_counts.get("C", 0) == 2 and 
+            element_counts.get("H", 0) == 6 and
+            element_counts.get("O", 0) == 1):
+            return "ethanol"
+        
+        # Carbon dioxide: CO2
+        if (n_atoms == 3 and 
+            element_counts.get("C", 0) == 1 and 
+            element_counts.get("O", 0) == 2):
+            return "carbon_dioxide"
+        
+        # Carbonate: CO3
+        if (n_atoms == 4 and 
+            element_counts.get("C", 0) == 1 and 
+            element_counts.get("O", 0) == 3):
+            return "carbonate"
+        
+        # Bicarbonate: HCO3
+        if (n_atoms == 5 and 
+            element_counts.get("H", 0) == 1 and
+            element_counts.get("C", 0) == 1 and 
+            element_counts.get("O", 0) == 3):
+            return "bicarbonate"
+        
+        # Nitrate: NO3
+        if (n_atoms == 4 and 
+            element_counts.get("N", 0) == 1 and 
+            element_counts.get("O", 0) == 3):
+            return "nitrate"
+        
+        # Sulfate: SO4
+        if (n_atoms == 5 and 
+            element_counts.get("S", 0) == 1 and 
+            element_counts.get("O", 0) == 4 and
+            element_counts.get("C", 0) == 0):
+            return "sulfate"
+        
+        # Bisulfate: HSO4
+        if (n_atoms == 6 and 
+            element_counts.get("H", 0) == 1 and
+            element_counts.get("S", 0) == 1 and 
+            element_counts.get("O", 0) == 4):
+            return "bisulfate"
+        
+        # Phosphate: PO4
+        if (n_atoms == 5 and 
+            element_counts.get("P", 0) == 1 and 
+            element_counts.get("O", 0) == 4):
+            return "phosphate"
+        
+        # Perchlorate: ClO4
+        if (n_atoms == 5 and 
+            element_counts.get("Cl", 0) == 1 and 
+            element_counts.get("O", 0) == 4):
+            return "perchlorate"
+        
+        # === Pattern-based identification for larger molecules ===
+        
+        # Fluorosulfonate-type (contains C, F, S, O) - e.g., triflate, mesylate variants
+        if (element_counts.get("S", 0) >= 1 and 
+            element_counts.get("O", 0) >= 3 and
+            element_counts.get("F", 0) >= 1):
+            return "fluorosulfonate"
+        
+        # Sulfonate-type (contains S and O, possibly C, no F)
+        if (element_counts.get("S", 0) >= 1 and 
+            element_counts.get("O", 0) >= 3 and
+            element_counts.get("F", 0) == 0 and
+            element_counts.get("C", 0) >= 1):
+            return "sulfonate"
+        
+        # Carboxylate-type (COO group)
+        if (element_counts.get("C", 0) >= 1 and 
+            element_counts.get("O", 0) >= 2 and
+            element_counts.get("S", 0) == 0 and
+            element_counts.get("N", 0) == 0 and
+            element_counts.get("P", 0) == 0):
+            # Check if it's likely a carboxylic acid/carboxylate
+            c_count = element_counts.get("C", 0)
+            o_count = element_counts.get("O", 0)
+            if o_count == 2 or (o_count >= 2 and o_count <= c_count + 1):
+                return "carboxylate"
+        
+        # Amine-type (contains N and H, possibly C)
+        if (element_counts.get("N", 0) >= 1 and 
+            element_counts.get("H", 0) >= 1 and
+            element_counts.get("O", 0) == 0):
+            return "amine"
+        
+        # Imidazolium-type (ring with N)
+        if (element_counts.get("N", 0) >= 2 and 
+            element_counts.get("C", 0) >= 3 and
+            element_counts.get("H", 0) >= 4):
+            return "imidazolium"
+        
+        # === Generic fallback: formula-based name ===
+        
+        # Build formula string with standard ordering: C, H, then alphabetical
+        formula_parts = []
+        
+        # Carbon first (if present)
+        if "C" in element_counts:
+            cnt = element_counts["C"]
+            formula_parts.append(f"C{cnt}" if cnt > 1 else "C")
+        
+        # Hydrogen second (if present)
+        if "H" in element_counts:
+            cnt = element_counts["H"]
+            formula_parts.append(f"H{cnt}" if cnt > 1 else "H")
+        
+        # Remaining elements alphabetically
+        for el in sorted(element_counts.keys()):
+            if el not in ["C", "H"]:
+                cnt = element_counts[el]
+                formula_parts.append(f"{el}{cnt}" if cnt > 1 else el)
+        
+        formula = "".join(formula_parts)
+        return f"molecule_{formula}"    
+
+    def _map_data_types_to_ff_types(self,
+                                     data_info: Dict[str, Any],
+                                     parameter_info: Dict[str, Any],
+                                     research_goal: Optional[str] = None) -> Dict[int, str]:
+        """
+        Use LLM to map data file atom type IDs to force field atom type names.
+        """
+        self.logger.info("Mapping data file types to force field atom types via LLM")
+        
+        type_to_element = data_info["type_elements"]
+        type_to_name = data_info.get("type_names", {})
+        
+        # Get molecular context for each type
+        mol_compositions = self._analyze_molecular_compositions(data_info)
+        type_to_context = self._build_type_to_context_map(mol_compositions)
+        
+        # Build data file type descriptions
+        data_type_lines = []
+        for type_id in sorted(data_info["masses"].keys()):
+            element = type_to_element.get(type_id, "?")
+            mass = data_info["masses"][type_id]
+            count = data_info["type_counts"].get(type_id, 0)
+            contexts = type_to_context.get(type_id, ["unknown"])
+            name = type_to_name.get(type_id, element)
+            
+            data_type_lines.append(
+                f"  DATA_TYPE_{type_id}: element={element}, mass={mass:.3f}, "
+                f"count={count}, appears_in={contexts}, label='{name}'"
+            )
+        data_types_str = "\n".join(data_type_lines)
+        
+        # Build force field atom type descriptions with clear names
+        ff_atom_types = parameter_info.get("atom_types", {})
+        ff_type_lines = []
+        ff_type_names = list(ff_atom_types.keys())  # Get actual type names
+        
+        for ff_name in ff_type_names:
+            params = ff_atom_types[ff_name]
+            mass = params.get("mass", 0)
+            charge = params.get("charge", 0)
+            desc = params.get("description", "")
+            ff_type_lines.append(
+                f"  FF_TYPE '{ff_name}': mass={mass:.3f}, charge={charge:+.4f}, description='{desc}'"
+            )
+        ff_types_str = "\n".join(ff_type_lines)
+        
+        # Build molecule descriptions
+        mol_desc_lines = []
+        for mol_name, mol_data in mol_compositions.items():
+            element_counts = {}
+            for type_id, count in mol_data["type_counts"].items():
+                element = type_to_element.get(type_id, "X")
+                element_counts[element] = element_counts.get(element, 0) + count
+            
+            formula = self._build_molecular_formula(element_counts)
+            type_list = [f"DATA_TYPE_{t}" for t in sorted(mol_data["type_counts"].keys())]
+            
+            mol_desc_lines.append(
+                f"  {mol_name}: {mol_data['count']} molecules, formula={formula}, "
+                f"uses: [{', '.join(type_list)}]"
+            )
+        mol_desc_str = "\n".join(mol_desc_lines)
+        
+        type_ids = sorted(data_info["masses"].keys())
+        
+        # Make the list of available FF type names very clear
+        ff_names_list = ", ".join([f"'{name}'" for name in ff_type_names])
+        
+        prompt = f"""
+    You are mapping atom types from a LAMMPS data file to force field parameter names.
+    
+    DATA FILE ATOM TYPES (these need to be mapped):
+    {data_types_str}
+    
+    AVAILABLE FORCE FIELD TYPES (use these EXACT names in your response):
+    {ff_types_str}
+    
+    MOLECULAR CONTEXT:
+    {mol_desc_str}
+    
+    YOUR TASK:
+    For each DATA_TYPE, select the best matching FF_TYPE based on:
+    1. Element must match
+    2. Molecular context (water O ≠ sulfonate O)
+    3. Description should match the chemical environment
+    
+    AVAILABLE FF_TYPE NAMES: {ff_names_list}
+    
+    IMPORTANT: 
+    - Return the FF_TYPE NAME (like 'OW', 'HW', 'CT', etc.), NOT a number
+    - Each data type maps to exactly one FF type name
+    
+    Return a JSON object mapping data file type ID to FF type NAME:
+    {{
+        "1": "<ff_type_name>",
+        "2": "<ff_type_name>",
+        ...
+    }}
+    
+    Example response format:
+    {{
+        "1": "CT",
+        "2": "F",
+        "3": "HW",
+        "4": "OW",
+        "5": "S",
+        "6": "Zn2+",
+        "7": "OS"
+    }}
+    
+    Data file type IDs to map: {', '.join(str(t) for t in type_ids)}
+    """
+    
+        try:
+            response = self._generate_json(prompt)
+            self.logger.info(f"LLM type mapping response: {response}")
+            
+            # Validate and build mapping
+            type_mapping = {}
+            valid_ff_types = set(ff_atom_types.keys())
+            
+            for key, ff_type in response.items():
+                try:
+                    type_id = int(key)
+                    
+                    if type_id not in data_info["masses"]:
+                        self.logger.warning(f"Ignoring mapping for non-existent type {type_id}")
+                        continue
+                    
+                    # Handle case where LLM returned a number instead of name
+                    if ff_type.isdigit() or (isinstance(ff_type, str) and ff_type.lstrip('-').isdigit()):
+                        self.logger.warning(
+                            f"LLM returned number '{ff_type}' instead of FF type name for type {type_id}"
+                        )
+                        # Try to use as index into ff_type_names
+                        try:
+                            idx = int(ff_type) - 1  # Assuming 1-based
+                            if 0 <= idx < len(ff_type_names):
+                                ff_type = ff_type_names[idx]
+                                self.logger.info(f"  Converted to: {ff_type}")
+                            else:
+                                element = type_to_element.get(type_id, "?")
+                                ff_type = self._find_closest_ff_type(element, ff_atom_types)
+                        except (ValueError, IndexError):
+                            element = type_to_element.get(type_id, "?")
+                            ff_type = self._find_closest_ff_type(element, ff_atom_types)
+                    
+                    # Validate FF type exists
+                    if ff_type not in valid_ff_types:
+                        self.logger.warning(
+                            f"FF type '{ff_type}' not in parameters for type {type_id}, "
+                            f"finding closest match"
+                        )
+                        element = type_to_element.get(type_id, "?")
+                        ff_type = self._find_closest_ff_type(element, ff_atom_types)
+                    
+                    type_mapping[type_id] = ff_type
+                    self.logger.info(
+                        f"Mapped: Type {type_id} ({type_to_element.get(type_id, '?')}) → '{ff_type}'"
+                    )
+                    
+                except (ValueError, TypeError) as e:
+                    self.logger.warning(f"Could not parse mapping for {key}: {e}")
+            
+            # Fill in any missing mappings
+            missing = set(data_info["masses"].keys()) - set(type_mapping.keys())
+            if missing:
+                self.logger.warning(f"Missing mappings for types: {missing}")
+                for type_id in missing:
+                    element = type_to_element.get(type_id, "?")
+                    ff_type = self._find_closest_ff_type(element, ff_atom_types)
+                    type_mapping[type_id] = ff_type
+                    self.logger.info(f"Fallback mapping: Type {type_id} ({element}) → '{ff_type}'")
+            
+            return type_mapping
+            
+        except Exception as e:
+            self.logger.error(f"Error in LLM type mapping: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            
+            return self._fallback_type_mapping(data_info, parameter_info)
+
+    def _find_closest_ff_type(self, 
+                              element: str, 
+                              ff_atom_types: Dict[str, Any],
+                              context: Optional[str] = None) -> str:
+        """
+        Find closest matching FF type for an element, optionally considering context.
+        
+        Args:
+            element: Element symbol (e.g., 'O', 'H', 'C')
+            ff_atom_types: Dictionary of FF atom type parameters
+            context: Optional molecular context (e.g., 'water', 'fluorosulfonate')
+            
+        Returns:
+            FF type name
+        """
+        candidates = []
+        
+        for ff_name, params in ff_atom_types.items():
+            desc = params.get("description", "").lower()
+            mass = params.get("mass", 0)
+            
+            # Check if element matches (by mass or name)
+            element_lower = element.lower()
+            ff_name_lower = ff_name.lower()
+            
+            # Element in name check
+            element_match = (
+                element_lower in ff_name_lower or 
+                element_lower in desc or
+                ff_name_lower.startswith(element_lower)
+            )
+            
+            # Mass check
+            try:
+                from ase.data import atomic_masses, atomic_numbers
+                target_mass = atomic_masses[atomic_numbers[element]]
+                mass_match = abs(mass - target_mass) < 1.0
+            except:
+                mass_match = False
+            
+            if element_match or mass_match:
+                # Score by context match
+                score = 0
+                if context:
+                    context_lower = context.lower()
+                    if "water" in context_lower:
+                        if "water" in desc or ff_name_lower in ["ow", "hw", "o_w", "h_w", "oh2"]:
+                            score += 10
+                    elif "sulfon" in context_lower or "triflate" in context_lower:
+                        if "sulfon" in desc or "sulfate" in desc or ff_name_lower in ["os", "ot", "st", "s"]:
+                            score += 10
+                        if "water" in desc:
+                            score -= 5  # Penalize water types for sulfonate context
+                
+                candidates.append((ff_name, score))
+        
+        if candidates:
+            # Sort by score (highest first), then by name
+            candidates.sort(key=lambda x: (-x[1], x[0]))
+            return candidates[0][0]
+        
+        # Last resort: return first available type
+        if ff_atom_types:
+            return list(ff_atom_types.keys())[0]
+        return element   
+    
+    def _fallback_type_mapping(self,
+                               data_info: Dict[str, Any],
+                               parameter_info: Dict[str, Any]) -> Dict[int, str]:
+        """Simple fallback type mapping based on element and mass."""
+        self.logger.warning("Using fallback type mapping (element-based)")
+    
+        type_to_element = data_info["type_elements"]
+        ff_atom_types = parameter_info.get("atom_types", {})
+    
+        # Group FF types by element (inferred from mass or name)
+        from ase.data import atomic_masses, atomic_numbers, chemical_symbols
+    
+        ff_by_element = {}
+        for ff_name, params in ff_atom_types.items():
+            mass = params.get("mass", 0)
+            # Guess element from mass
+            element = None
+            for i, sym in enumerate(chemical_symbols[1:], 1):
+                if abs(atomic_masses[i] - mass) < 0.5:
+                    element = sym
+                    break
+            if element:
+                if element not in ff_by_element:
+                    ff_by_element[element] = []
+                ff_by_element[element].append(ff_name)
+    
+        # Map each data type to first matching FF type
+        type_mapping = {}
+        for type_id, element in type_to_element.items():
+            if element in ff_by_element and ff_by_element[element]:
+                type_mapping[type_id] = ff_by_element[element][0]
+            else:
+                type_mapping[type_id] = element  # Use element name as fallback
+    
+        return type_mapping
+
+    def _generate_charges_with_llm(self,
+                                      data_info: Dict[str, Any],
+                                      parameter_info: Optional[Dict[str, Any]] = None,
+                                      pdb_file: Optional[str] = None,
+                                      research_goal: Optional[str] = None) -> Dict[int, float]:
+        """
+        Generate charge assignments by mapping data file types to force field types.
+        
+        If parameter_info is provided with atom_types, uses LLM to map data file
+        types to FF types and extracts charges from the FF parameters.
+        
+        Otherwise, falls back to direct LLM charge generation.
+        """
+        self.logger.info("Generating charge assignments")
+        
+        # If we have force field parameters, use type mapping approach
+        ff_atom_types = parameter_info.get("atom_types", {}) if parameter_info else {}
+        
+        if ff_atom_types:
+            self.logger.info("Using force field parameter mapping approach")
+            
+            # Step 1: Map data file types to FF types
+            type_mapping = self._map_data_types_to_ff_types(
+                data_info=data_info,
+                parameter_info=parameter_info,
+                research_goal=research_goal
+            )
+            
+            self.logger.info(f"Type mapping: {type_mapping}")
+            
+            # Step 2: Extract charges from FF parameters using the mapping
+            charge_assignments = {}
+            type_to_element = data_info["type_elements"]
+            
+            for type_id, ff_type in type_mapping.items():
+                if ff_type in ff_atom_types:
+                    charge = ff_atom_types[ff_type].get("charge", 0.0)
+                    charge_assignments[type_id] = charge
+                    self.logger.info(
+                        f"Type {type_id} ({type_to_element.get(type_id, '?')}) → "
+                        f"{ff_type} → charge {charge:+.4f}"
+                    )
+                else:
+                    self.logger.warning(
+                        f"FF type '{ff_type}' not found in parameters for type {type_id}"
+                    )
+                    charge_assignments[type_id] = 0.0
+            
+            # Step 3: Validate molecule charges
+            mol_compositions = self._analyze_molecular_compositions(data_info)
+            self._log_molecular_charge_validation(
+                charge_assignments, mol_compositions, type_to_element
+            )
+            
+            # Step 4: Check if any molecules have incorrect total charges
+            # If so, the FF parameters themselves may be inconsistent
+            validation_issues = self._check_molecule_charge_totals(
+                charge_assignments, mol_compositions, type_to_element
+            )
+            
+            if validation_issues:
+                self.logger.warning(
+                    f"Molecule charge validation issues detected: {validation_issues}"
+                )
+                # Optionally: fall back to LLM-based charge generation
+                # Or: try to fix by adjusting charges
+            
+            return charge_assignments
+        
+        else:
+            # Fall back to direct LLM charge generation (original approach)
+            self.logger.info("No FF parameters available, using direct LLM charge generation")
+            return self._generate_charges_with_llm(
+                data_info=data_info,
+                pdb_file=pdb_file,
+                research_goal=research_goal
+            )
+
+    def _build_type_to_context_map(self, mol_compositions: Dict[str, Any]) -> Dict[int, List[str]]:
+        """Build mapping of type_id -> list of molecule names it appears in."""
+        type_to_context = {}
+        for mol_name, mol_data in mol_compositions.items():
+            for type_id in mol_data["type_counts"].keys():
+                if type_id not in type_to_context:
+                    type_to_context[type_id] = []
+                if mol_name not in type_to_context[type_id]:
+                    type_to_context[type_id].append(mol_name)
+        return type_to_context
+    
+    
+    def _build_molecular_formula(self, element_counts: Dict[str, int]) -> str:
+        """Build molecular formula string from element counts."""
+        formula_parts = []
+        for el in ["C", "H"]:
+            if el in element_counts:
+                cnt = element_counts[el]
+                formula_parts.append(f"{el}{cnt}" if cnt > 1 else el)
+        for el in sorted(element_counts.keys()):
+            if el not in ["C", "H"]:
+                cnt = element_counts[el]
+                formula_parts.append(f"{el}{cnt}" if cnt > 1 else el)
+        return "".join(formula_parts)
+    
+    
+    def _validate_and_fix_molecule_charges(self,
+                                            charge_assignments: Dict[int, float],
+                                            mol_compositions: Dict[str, Any],
+                                            expected_mol_charges: Dict[str, float],
+                                            type_to_element: Dict[int, str],
+                                            type_to_context: Dict[int, List[str]]) -> Dict[int, float]:
+        """Validate and fix molecule charges if they don't sum correctly."""
+        self.logger.info("Validating and fixing molecule charges...")
+        
+        for mol_name, mol_data in mol_compositions.items():
+            expected = expected_mol_charges.get(mol_name, 0.0)
+            
+            current = sum(
+                charge_assignments.get(t, 0.0) * c
+                for t, c in mol_data["type_counts"].items()
+            )
+            
+            error = current - expected
+            
+            if abs(error) < 0.01:
+                self.logger.info(f"  {mol_name}: {current:.4f} ✓")
+                continue
+            
+            self.logger.warning(f"  {mol_name}: {current:.4f} (expected {expected}), error={error:.4f}")
+            
+            # Find types exclusive to this molecule for adjustment
+            exclusive_types = [
+                t for t in mol_data["type_counts"]
+                if len(type_to_context.get(t, [])) == 1 and type_to_context.get(t, [None])[0] == mol_name
+            ]
+            
+            if not exclusive_types:
+                # Use most abundant type in molecule
+                exclusive_types = [max(mol_data["type_counts"].items(), key=lambda x: x[1])[0]]
+            
+            total_atoms = sum(mol_data["type_counts"].get(t, 0) for t in exclusive_types)
+            
+            if total_atoms > 0:
+                correction = -error / total_atoms
+                for type_id in exclusive_types:
+                    old = charge_assignments.get(type_id, 0.0)
+                    charge_assignments[type_id] = old + correction
+                    self.logger.info(f"    Adjusted type {type_id}: {old:.4f} → {old + correction:.4f}")
+        
+        return charge_assignments
+
+    def _generate_charge_assignments(self,
+                                      data_info: Dict[str, Any],
+                                      parameter_info: Optional[Dict[str, Any]] = None,
+                                      pdb_file: Optional[str] = None,
+                                      research_goal: Optional[str] = None) -> Dict[int, float]:
+        """Generate charge assignments."""
+        self.logger.info("Generating charge assignments")
+        
+        ff_atom_types = {}
+        if parameter_info:
+            ff_atom_types = parameter_info.get("atom_types", {})
+        
+        if ff_atom_types:
+            self.logger.info("Using force field parameter mapping approach")
+            
+            # Check if atom_types is keyed by name or by number
+            # If by number, build a name-based lookup
+            first_key = next(iter(ff_atom_types.keys()), "")
+            if first_key.isdigit():
+                # Parameter file uses numeric keys with 'name' field
+                # Build name -> params lookup
+                ff_by_name = {}
+                for key, params in ff_atom_types.items():
+                    name = params.get("name", key)
+                    ff_by_name[name] = params
+                self.logger.info(f"FF types by name: {list(ff_by_name.keys())}")
+            else:
+                # Parameter file already uses names as keys
+                ff_by_name = ff_atom_types
+            
+            # Map data types to FF type names
+            type_mapping = self._map_data_types_to_ff_types(
+                data_info=data_info,
+                parameter_info={"atom_types": ff_by_name},  # Pass name-keyed version
+                research_goal=research_goal
+            )
+            
+            self.logger.info(f"Type mapping: {type_mapping}")
+            
+            # Extract charges
+            charge_assignments = {}
+            type_to_element = data_info["type_elements"]
+            
+            for type_id, ff_type in type_mapping.items():
+                if ff_type in ff_by_name:
+                    charge = ff_by_name[ff_type].get("charge", 0.0)
+                    charge_assignments[type_id] = charge
+                    self.logger.info(
+                        f"Type {type_id} ({type_to_element.get(type_id, '?')}) → "
+                        f"'{ff_type}' → charge {charge:+.4f}"
+                    )
+                else:
+                    self.logger.warning(f"FF type '{ff_type}' not found for type {type_id}")
+                    charge_assignments[type_id] = 0.0
+            
+            # Validate and fix
+            mol_compositions = self._analyze_molecular_compositions(data_info)
+            validation_issues = self._check_molecule_charge_totals(
+                charge_assignments, mol_compositions, type_to_element
+            )
+            
+            if validation_issues:
+                self.logger.warning(f"Molecule charge issues: {validation_issues}")
+                expected_mol_charges = self._determine_expected_molecule_charges(
+                    mol_compositions, data_info
+                )
+                type_to_context = self._build_type_to_context_map(mol_compositions)
+                
+                charge_assignments = self._validate_and_fix_molecule_charges(
+                    charge_assignments=charge_assignments,
+                    mol_compositions=mol_compositions,
+                    expected_mol_charges=expected_mol_charges,
+                    type_to_element=type_to_element,
+                    type_to_context=type_to_context
+                )
+            
+            self._log_molecular_charge_validation(
+                charge_assignments, mol_compositions, type_to_element
+            )
+            
+            return charge_assignments
+    
+        else:
+            self.logger.info("No FF parameters, using direct LLM generation")
+            return self._generate_charges_direct_llm(
+                data_info=data_info,
+                pdb_file=pdb_file,
+                research_goal=research_goal
+            )
+
+    def _check_molecule_charge_totals(self,
+                                       charge_assignments: Dict[int, float],
+                                       mol_compositions: Dict[str, Any],
+                                       type_to_element: Dict[int, str]) -> List[str]:
+        """Check if molecule charges sum to reasonable values."""
+        issues = []
+        
+        expected_charges = self._determine_expected_molecule_charges(
+            mol_compositions, {"type_elements": type_to_element}
+        )
+        
+        for mol_name, mol_data in mol_compositions.items():
+            total_charge = sum(
+                charge_assignments.get(type_id, 0.0) * count
+                for type_id, count in mol_data["type_counts"].items()
+            )
+            
+            expected = expected_charges.get(mol_name, 0.0)
+            
+            if abs(total_charge - expected) > 0.05:
+                issues.append(
+                    f"{mol_name}: got {total_charge:.3f}, expected {expected:.1f}"
+                )
+        
+        return issues
+    
+    
+    def _determine_expected_molecule_charges(self,
+                                              mol_compositions: Dict[str, Any],
+                                              data_info: Dict[str, Any]) -> Dict[str, float]:
+        """
+        Determine expected formal charges for each molecule type.
+        Uses chemical heuristics based on molecular formula.
+        """
+        expected_charges = {}
+        type_to_element = data_info.get("type_elements", {})
+        
+        for mol_name, mol_data in mol_compositions.items():
+            element_counts = {}
+            for type_id, count in mol_data["type_counts"].items():
+                element = type_to_element.get(type_id, "X")
+                element_counts[element] = element_counts.get(element, 0) + count
+            
+            charge = self._infer_formal_charge_from_composition(mol_name, element_counts)
+            expected_charges[mol_name] = charge
+        
+        return expected_charges
+    
+    
+    def _infer_formal_charge_from_composition(self,
+                                               mol_name: str,
+                                               element_counts: Dict[str, int]) -> float:
+        """
+        Infer formal charge from molecular composition using chemical heuristics.
+        """
+        # Water: H2O → 0
+        if element_counts == {"H": 2, "O": 1}:
+            return 0.0
+        
+        # Monatomic ions
+        if len(element_counts) == 1 and list(element_counts.values())[0] == 1:
+            element = list(element_counts.keys())[0]
+            monatomic = {
+                "Li": 1, "Na": 1, "K": 1, "Rb": 1, "Cs": 1,
+                "Mg": 2, "Ca": 2, "Sr": 2, "Ba": 2, "Zn": 2,
+                "Fe": 2, "Cu": 2, "Ni": 2, "Co": 2,
+                "Al": 3, "Fe3": 3,
+                "F": -1, "Cl": -1, "Br": -1, "I": -1,
+            }
+            return float(monatomic.get(element, 0))
+        
+        # Sulfonate (RSO3): charge -1
+        if "S" in element_counts and element_counts.get("O", 0) == 3:
+            return -1.0
+        
+        # Sulfate (SO4): charge -2
+        if element_counts.get("S", 0) == 1 and element_counts.get("O", 0) == 4:
+            if "C" not in element_counts:
+                return -2.0
+        
+        # Nitrate (NO3): charge -1
+        if element_counts == {"N": 1, "O": 3}:
+            return -1.0
+        
+        # Phosphate (PO4): charge -3
+        if element_counts == {"P": 1, "O": 4}:
+            return -3.0
+        
+        # Hydroxide (OH): charge -1
+        if element_counts == {"O": 1, "H": 1}:
+            return -1.0
+        
+        # Ammonium (NH4): charge +1
+        if element_counts == {"N": 1, "H": 4}:
+            return 1.0
+        
+        # Default: neutral
+        return 0.0    
+    
+    def _generate_missing_charges(self,
+                                   missing_types: set,
+                                   data_info: Dict[str, Any],
+                                   type_to_context: Dict[int, List[str]],
+                                   existing_charges: Dict[int, float]) -> Dict[int, float]:
+        """
+        Generate charges for types that were missing from the initial LLM response.
+        """
+        self.logger.info(f"Generating charges for missing types: {missing_types}")
+        
+        type_to_element = data_info["type_elements"]
+        
+        # Build info about missing types
+        missing_info = []
+        for type_id in sorted(missing_types):
+            element = type_to_element.get(type_id, "X")
+            mass = data_info["masses"].get(type_id, 0)
+            contexts = type_to_context.get(type_id, ["unknown"])
+            missing_info.append(
+                f"  Type {type_id}: element={element}, mass={mass:.3f}, appears_in=[{', '.join(contexts)}]"
+            )
+        
+        missing_info_str = "\n".join(missing_info)
+        missing_ids_str = ", ".join(str(t) for t in sorted(missing_types))
+        
+        # Show existing charges for context
+        existing_str = ", ".join(f"{t}:{c:.4f}" for t, c in sorted(existing_charges.items()))
+        
+        prompt = f"""
+    You are assigning partial charges to atom types in a molecular simulation.
+    
+    The following types still need charges:
+    {missing_info_str}
+    
+    Already assigned charges (for context): {existing_str}
+    
+    Assign appropriate partial charges based on:
+    1. The element type
+    2. The molecular context (appears_in field)
+    3. Consistency with already assigned charges for similar elements
+    
+    Return ONLY a JSON object:
+    {{
+        {', '.join(f'"{t}": <charge>' for t in sorted(missing_types))}
+    }}
+    """
+    
+        try:
+            response = self._generate_json(prompt)
+            
+            charges = {}
+            for key, value in response.items():
+                try:
+                    type_id = int(key)
+                    if type_id in missing_types:
+                        charge = float(value) if not isinstance(value, dict) else float(value.get("charge", 0.0))
+                        charges[type_id] = charge
+                except (ValueError, TypeError):
+                    continue
+            
+            # Fill any still-missing with defaults
+            still_missing = missing_types - set(charges.keys())
+            for type_id in still_missing:
+                element = type_to_element.get(type_id, "X")
+                charges[type_id] = self._get_default_charge_for_element(element)
+                self.logger.warning(f"Using default charge for type {type_id} ({element})")
+            
+            return charges
+            
+        except Exception as e:
+            self.logger.error(f"Error generating missing charges: {e}")
+            # Return defaults for all missing
+            charges = {}
+            for type_id in missing_types:
+                element = type_to_element.get(type_id, "X")
+                charges[type_id] = self._get_default_charge_for_element(element)
+            return charges
+    
+    
+    def _generate_charges_fallback(self,
+                                    data_info: Dict[str, Any],
+                                    type_to_context: Dict[int, List[str]]) -> Dict[int, float]:
+        """
+        Fallback charge generation with a simpler, more direct prompt.
+        """
+        self.logger.info("Using fallback charge generation")
+        
+        type_to_element = data_info["type_elements"]
+        mol_compositions = self._analyze_molecular_compositions(data_info)
+        
+        # Build a simple type list
+        type_lines = []
+        for type_id in sorted(data_info["masses"].keys()):
+            element = type_to_element.get(type_id, "X")
+            contexts = type_to_context.get(type_id, ["unknown"])
+            type_lines.append(f"Type {type_id}: {element} in {contexts}")
+        
+        type_list_str = "\n".join(type_lines)
+        type_ids = sorted(data_info["masses"].keys())
+        
+        prompt = f"""
+    Assign partial charges for these atom types in a molecular dynamics simulation:
+    
+    {type_list_str}
+    
+    Rules:
+    - Use standard force field values (TIP3P for water, OPLS-AA or similar for organics)
+    - Neutral molecules should sum to charge 0
+    - Ions should sum to their formal charge
+    - Different types of the same element in different contexts need different charges
+    
+    Return JSON mapping type ID to charge:
+    {{
+        {', '.join(f'"{t}": <charge>' for t in type_ids)}
+    }}
+    """
+    
+        try:
+            response = self._generate_json(prompt)
+            
+            charges = {}
+            for key, value in response.items():
+                try:
+                    type_id = int(key)
+                    if type_id in data_info["masses"]:
+                        charge = float(value) if not isinstance(value, dict) else float(value.get("charge", 0.0))
+                        charges[type_id] = charge
+                except (ValueError, TypeError):
+                    continue
+            
+            # Fill missing with defaults
+            for type_id in data_info["masses"].keys():
+                if type_id not in charges:
+                    element = type_to_element.get(type_id, "X")
+                    charges[type_id] = self._get_default_charge_for_element(element)
+            
+            return charges
+            
+        except Exception as e:
+            self.logger.error(f"Fallback charge generation failed: {e}")
+            # Ultimate fallback: use element-based defaults
+            return self._get_default_charges(data_info)
+    
+    
+    def _log_molecular_charge_validation(self,
+                                          charges: Dict[int, float],
+                                          mol_compositions: Dict[str, Dict],
+                                          type_to_element: Dict[int, str]) -> None:
+        """
+        Log validation of molecular charges (for debugging, not enforcing).
+        """
+        self.logger.info("Validating molecular charges:")
+        
+        for mol_name, mol_data in mol_compositions.items():
+            mol_charge = 0.0
+            charge_breakdown = []
+            
+            for type_id, count in mol_data["type_counts"].items():
+                charge = charges.get(type_id, 0.0)
+                contribution = charge * count
+                mol_charge += contribution
+                element = type_to_element.get(type_id, "?")
+                charge_breakdown.append(f"{element}(type{type_id}):{charge:.3f}×{count}={contribution:.3f}")
+            
+            self.logger.info(
+                f"  {mol_name}: total_charge={mol_charge:.4f} "
+                f"[{', '.join(charge_breakdown)}]"
+            )
+    
+    
+    def _extract_charges_from_parameters(self,
+                                          parameter_info: Dict[str, Any],
+                                          data_info: Dict[str, Any]) -> Dict[int, float]:
+        """
+        Extract charge assignments from existing parameter info.
+        
+        If the data file has more types than parameter_info (due to type splitting),
+        fall back to LLM generation for all charges to ensure context-awareness.
+        """
+        self.logger.info("Attempting to extract charges from parameter_info")
+        
+        # Check if types were split (data file has more types than parameter_info)
+        n_param_types = len(parameter_info.get("atom_types", {}))
+        n_data_types = len(data_info["masses"])
+        
+        if n_data_types > n_param_types:
+            self.logger.warning(
+                f"Data file has {n_data_types} types but parameter_info has {n_param_types}. "
+                f"Types were likely split by molecular context. Using LLM for context-aware charges."
+            )
+            return self._generate_charge_assignments(data_info)
+        
+        if n_param_types == 0:
+            self.logger.warning("parameter_info has no atom_types, using LLM")
+            return self._generate_charge_assignments(data_info)
+        
+        # Build element -> charge lookup from parameter_info
+        element_charges = {}
+        atom_types = parameter_info.get("atom_types", {})
+        
+        self.logger.info(f"parameter_info has {n_param_types} atom types")
+        
+        for type_id_str, type_info in atom_types.items():
+            if not isinstance(type_info, dict):
+                continue
+            
+            element = type_info.get("name") or type_info.get("element")
+            charge = type_info.get("charge")
+            
+            if element is not None and charge is not None:
+                try:
+                    charge = float(charge)
+                    element_normalized = self._normalize_element_name(element)
+                    
+                    if element_normalized not in element_charges:
+                        element_charges[element_normalized] = charge
+                        self.logger.info(f"  {element} -> {element_normalized}: charge={charge}")
+                except (ValueError, TypeError) as e:
+                    self.logger.warning(f"Could not parse charge for {element}: {e}")
+        
+        if not element_charges:
+            self.logger.warning("No valid charges found in parameter_info, using LLM")
+            return self._generate_charge_assignments(data_info)
+        
+        self.logger.info(f"Element charges from parameter_info: {element_charges}")
+        
+        # Map element charges to data file type IDs
+        charges = {}
+        data_type_to_element = data_info["type_elements"]
+        
+        for type_id, element in data_type_to_element.items():
+            element_normalized = self._normalize_element_name(element)
+            
+            if element_normalized in element_charges:
+                charges[type_id] = element_charges[element_normalized]
+                self.logger.info(f"Type {type_id} ({element}): charge={charges[type_id]}")
+            else:
+                self.logger.warning(f"No charge for element {element_normalized} (type {type_id})")
+        
+        # Fill in missing types
+        missing_types = set(data_info["masses"].keys()) - set(charges.keys())
+        
+        if missing_types:
+            self.logger.warning(f"Missing charges for {len(missing_types)} types, using LLM")
+            llm_charges = self._generate_charge_assignments(data_info)
+            
+            for type_id in missing_types:
+                charges[type_id] = llm_charges.get(
+                    type_id, 
+                    self._get_default_charge_for_element(data_type_to_element.get(type_id, "X"))
+                )
+        
+        self.logger.info(f"Final charge assignments: {charges}")
+        return charges
+
+    def _normalize_element_name(self, element: str) -> str:
+        """
+        Normalize element names to handle variations.
+        """
+        if not element:
+            return "X"
+        
+        # Strip whitespace and convert to string
+        element = str(element).strip()
+        
+        # If it's already a standard 1-2 char symbol, just capitalize
+        if len(element) <= 2 and element.isalpha():
+            return element.capitalize()
+        
+        # Handle description-style names like "Water oxygen" or "CF3 carbon"
+        # Extract just the element part
+        element_lower = element.lower()
+        
+        # Check if any standard element name is in the string
+        element_names = {
+            "hydrogen": "H", "carbon": "C", "nitrogen": "N", "oxygen": "O",
+            "fluorine": "F", "sulfur": "S", "chlorine": "Cl", "sodium": "Na",
+            "potassium": "K", "calcium": "Ca", "magnesium": "Mg", "zinc": "Zn",
+            "iron": "Fe", "copper": "Cu", "phosphorus": "P", "bromine": "Br",
+        }
+        
+        for name, symbol in element_names.items():
+            if name in element_lower:
+                return symbol
+        
+        # Common variations mapping
+        variations = {
+            # Water oxygens
+            "ow": "O", "oh": "O", "o_w": "O", "o_water": "O", "owater": "O",
+            "ot": "O", "os": "O", "o": "O",
+            # Water hydrogens  
+            "hw": "H", "ho": "H", "h_w": "H", "h_water": "H", "hwater": "H",
+            "ht": "H", "hs": "H", "h": "H",
+            # Carbon types
+            "ct": "C", "ca": "C", "c3": "C", "c2": "C", "cx": "C", "c": "C",
+            # Sulfur
+            "s": "S", "sh": "S", "ss": "S",
+            # Fluorine
+            "f": "F", "f1": "F",
+            # Zinc
+            "zn": "Zn", "zn2+": "Zn", "zn+2": "Zn",
+            # Other common variations
+            "na": "Na", "na+": "Na", "cl": "Cl", "cl-": "Cl",
+            "fe": "Fe", "ca_ion": "Ca", "mg_ion": "Mg", "zn_ion": "Zn",
+        }
+        
+        # Check variations
+        if element_lower in variations:
+            return variations[element_lower]
+        
+        # Check if first word is a variation
+        first_word = element_lower.split()[0] if element_lower.split() else element_lower
+        if first_word in variations:
+            return variations[first_word]
+        
+        # Last resort: return first 1-2 characters
+        if len(element) >= 2 and element[1].islower():
+            return element[:2].capitalize()
+        else:
+            return element[0].upper()
+
+    def _validate_charge_assignments(self,
+                                      charge_assignments: Dict[int, float],
+                                      data_info: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Validate that charge assignments are physically reasonable.
+        
+        Uses general chemistry principles, not system-specific expectations.
+        
+        Args:
+            charge_assignments: Dictionary of type_id -> charge
+            data_info: Parsed data file information
+            
+        Returns:
+            Validation result dictionary
+        """
+        validation = {
+            "valid": True,
+            "warnings": [],
+            "errors": [],
+            "total_charge": 0.0,
+            "molecule_charges": {}
+        }
+        
+        # Check that all atom types have charges
+        for type_id in data_info["masses"].keys():
+            if type_id not in charge_assignments:
+                validation["errors"].append(f"Missing charge for atom type {type_id}")
+                validation["valid"] = False
+        
+        # Calculate total system charge
+        total_charge = 0.0
+        for type_id, count in data_info["type_counts"].items():
+            charge = charge_assignments.get(type_id, 0.0)
+            total_charge += charge * count
+        
+        validation["total_charge"] = total_charge
+        
+        # Check if total charge is reasonable (should be near integer)
+        rounded_total = round(total_charge)
+        if abs(total_charge - rounded_total) > 0.1:
+            validation["warnings"].append(
+                f"Total system charge ({total_charge:.4f}) is not close to integer {rounded_total}"
+            )
+        
+        # Calculate charge per molecule type
+        mol_compositions = self._analyze_molecular_compositions(data_info)
+        for mol_name, mol_data in mol_compositions.items():
+            mol_charge = sum(
+                charge_assignments.get(type_id, 0.0) * count
+                for type_id, count in mol_data["type_counts"].items()
+            )
+            validation["molecule_charges"][mol_name] = mol_charge
+            
+            # Check if molecule charge is close to an integer
+            # Most molecules should have integer formal charges (0, ±1, ±2, etc.)
+            rounded_mol_charge = round(mol_charge)
+            if abs(mol_charge - rounded_mol_charge) > 0.15:
+                validation["warnings"].append(
+                    f"{mol_name} charge ({mol_charge:.4f}) deviates significantly from integer {rounded_mol_charge}"
+                )
+        
+        # Element-specific sanity checks based on general chemistry
+        # These are soft warnings, not hard failures
+        for type_id, charge in charge_assignments.items():
+            element = data_info["type_elements"].get(type_id, "?")
+            
+            # Very large charges are suspicious for any element
+            if abs(charge) > 4.0:
+                validation["warnings"].append(
+                    f"Unusually large charge magnitude for type {type_id} ({element}): {charge:.4f}"
+                )
+            
+            # Hydrogen is almost always positive or near-zero in molecular systems
+            if element == "H" and charge < -0.5:
+                validation["warnings"].append(
+                    f"Unusually negative hydrogen (type {type_id}): {charge:.4f}"
+                )
+            
+            # Oxygen is typically negative in most contexts
+            if element == "O" and charge > 1.0:
+                validation["warnings"].append(
+                    f"Unusually positive oxygen (type {type_id}): {charge:.4f}"
+                )
+            
+            # Fluorine is the most electronegative element - rarely positive
+            if element == "F" and charge > 0.3:
+                validation["warnings"].append(
+                    f"Positive charge on fluorine (type {type_id}): {charge:.4f}"
+                )
+            
+            # Halogens (Cl, Br, I) are typically negative as ions or slightly negative in molecules
+            if element in ["Cl", "Br", "I"] and charge > 0.5:
+                validation["warnings"].append(
+                    f"Unusually positive halogen {element} (type {type_id}): {charge:.4f}"
+                )
+            
+            # Alkali metals should be positive
+            if element in ["Li", "Na", "K", "Rb", "Cs"] and charge < 0.5:
+                validation["warnings"].append(
+                    f"Alkali metal {element} (type {type_id}) has low charge: {charge:.4f}"
+                )
+            
+            # Alkaline earth and transition metals typically positive
+            if element in ["Mg", "Ca", "Zn", "Fe", "Cu", "Ni", "Co", "Mn"] and charge < 0:
+                validation["warnings"].append(
+                    f"Negative charge on metal {element} (type {type_id}): {charge:.4f}"
+                )
+        
+        return validation
+
+    def _write_data_file_with_charges(self,
+                                       input_file: str,
+                                       output_file: str,
+                                       charge_assignments: Dict[int, float],
+                                       data_info: Dict[str, Any]) -> None:
+        """
+        Write a new data file with charges assigned.
+        
+        Args:
+            input_file: Path to input data file
+            output_file: Path to output data file
+            charge_assignments: Dictionary of type_id -> charge
+            data_info: Parsed data file information
+        """
+        with open(input_file, 'r') as f:
+            lines = f.readlines()
+        
+        new_lines = []
+        in_atoms_section = False
+        charges_written = 0
+        
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            
+            # Detect Atoms section
+            if stripped.startswith("Atoms"):
+                in_atoms_section = True
+                new_lines.append(line)
+                continue
+            
+            # Detect end of Atoms section (next section header or significant gap)
+            if in_atoms_section:
+                if stripped in ["Velocities", "Bonds", "Angles", "Dihedrals", 
+                              "Impropers", "Pair Coeffs", "Bond Coeffs",
+                              "Angle Coeffs", "Dihedral Coeffs", "Improper Coeffs"]:
+                    in_atoms_section = False
+                    new_lines.append(line)
+                    continue
+                
+                # Skip empty lines and comments in atoms section
+                if not stripped or stripped.startswith("#"):
+                    new_lines.append(line)
+                    continue
+                
+                # Parse and modify atom line
+                parts = line.split()
+                if len(parts) >= 7:
+                    try:
+                        atom_id = parts[0]
+                        mol_id = parts[1]
+                        atom_type = int(parts[2])
+                        x, y, z = parts[4], parts[5], parts[6]
+                        
+                        # Get new charge
+                        new_charge = charge_assignments.get(atom_type, 0.0)
+                        
+                        # Preserve comment if present
+                        comment = ""
+                        if "#" in line:
+                            comment = " #" + line.split("#", 1)[1].rstrip("\n")
+                        
+                        # Reconstruct line
+                        new_line = (
+                            f"{atom_id:>8} {mol_id:>8} {atom_type:>4} {new_charge:>12.6f} "
+                            f"{x:>14} {y:>14} {z:>14}{comment}\n"
+                        )
+                        new_lines.append(new_line)
+                        charges_written += 1
+                        continue
+                        
+                    except (ValueError, IndexError) as e:
+                        self.logger.warning(f"Could not parse atom line {i}: {e}")
+                        new_lines.append(line)
+                        continue
+            
+            # Keep all other lines unchanged
+            new_lines.append(line)
+        
+        # Write output file
+        with open(output_file, 'w') as f:
+            f.writelines(new_lines)
+        
+        self.logger.info(f"Wrote data file with charges: {output_file} ({charges_written} atoms)")
+        
+        if charges_written == 0:
+            self.logger.error("WARNING: No charges were written! Check Atoms section detection.")
+
+    def complete_parameterization(self,
+                                   pdb_file: str,
+                                   data_file: str,
+                                   research_goal: str,
+                                   system_description: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Complete parameterization workflow: select force field, acquire parameters,
+        assign charges to data file, and generate LAMMPS parameter files.
+        
+        Args:
+            pdb_file: Path to PDB file (for analysis)
+            data_file: Path to LAMMPS data file (to add charges to)
+            research_goal: Research objective
+            system_description: Optional system description
+            
+        Returns:
+            Dictionary with all parameterization results and file paths
+        """
+        self.logger.info("="*60)
+        self.logger.info("COMPLETE PARAMETERIZATION WORKFLOW")
+        self.logger.info("="*60)
+        
+        results = {
+            "status": "success",
+            "input_files": {
+                "pdb_file": pdb_file,
+                "data_file": data_file
+            },
+            "output_files": {},
+            "force_field": None,
+            "errors": [],
+            "warnings": []
+        }
+        
+        try:
+            # Step 1: Select force field
+            self.logger.info("\n[Step 1/4] Selecting force field...")
+            selection_info = self.select_force_field(
+                pdb_file=pdb_file,
+                research_goal=research_goal,
+                system_description=system_description
+            )
+            results["force_field"] = selection_info["force_field"]
+            results["output_files"]["selection_info"] = os.path.join(
+                self.working_dir, "force_field_selection.json"
+            )
+            
+            # Step 2: Acquire parameters
+            self.logger.info("\n[Step 2/4] Acquiring force field parameters...")
+            parameter_info = self.acquire_parameters(
+                selection_info=selection_info,
+                data_file=data_file
+            )
+            results["output_files"]["parameter_info"] = os.path.join(
+                self.working_dir, "parameter_info.json"
+            )
+            
+            # Step 2.5: Split atom types if same element appears in different molecules
+            self.logger.info("\n[Step 2.5/4] Checking for atom types needing context-based splitting...")
+            data_file = self.split_atom_types_by_molecule_context(data_file)
+            
+            # Step 3: Assign charges to data file
+            self.logger.info("\n[Step 3/4] Assigning charges to data file...")
+            charged_data_file = self.assign_charges_to_data_file(
+                data_file=data_file,
+                parameter_info=parameter_info,
+                pdb_file=pdb_file,
+                research_goal=research_goal
+            )
+            results["output_files"]["charged_data_file"] = charged_data_file
+            results["output_files"]["charge_assignments"] = os.path.join(
+                self.working_dir, "charge_assignments.json"
+            )
+            
+            # Step 4: Generate LAMMPS parameter files
+            self.logger.info("\n[Step 4/4] Generating LAMMPS parameter files...")
+            param_files = self.generate_lammps_parameters(
+                parameter_info=parameter_info,
+                data_file=charged_data_file
+            )
+            results["output_files"]["parameter_files"] = param_files
+            
+            # Collect any warnings from validation
+            charge_info_file = os.path.join(self.working_dir, "charge_assignments.json")
+            if os.path.exists(charge_info_file):
+                with open(charge_info_file, 'r') as f:
+                    charge_info = json.load(f)
+                    validation = charge_info.get("validation", {})
+                    results["warnings"].extend(validation.get("warnings", []))
+            
+            self.logger.info("\n" + "="*60)
+            self.logger.info("PARAMETERIZATION COMPLETE")
+            self.logger.info("="*60)
+            self.logger.info(f"Force field: {results['force_field'].get('force_field', 'Unknown')}")
+            self.logger.info(f"Charged data file: {charged_data_file}")
+            self.logger.info(f"Parameter files: {list(param_files.keys())}")
+            
+        except Exception as e:
+            self.logger.error(f"Parameterization failed: {e}")
+            results["status"] = "failed"
+            results["errors"].append(str(e))
+            import traceback
+            results["traceback"] = traceback.format_exc()
+        
+        return results
+
+    def split_atom_types_by_molecule_context(self,
+                                              data_file: str,
+                                              output_file: Optional[str] = None) -> str:
+        """
+        Split atom types that appear in different molecular contexts.
+        """
+        self.logger.info(f"Analyzing atom types for context-based splitting: {data_file}")
+        
+        if output_file is None:
+            output_file = data_file
+        
+        # Parse the data file
+        data_info = self._parse_data_file_for_charges(data_file)
+        mol_compositions = self._analyze_molecular_compositions(data_info)
+        
+        # Find elements that appear in multiple molecule types
+        element_to_molecules = {}
+        for mol_name, mol_data in mol_compositions.items():
+            for type_id in mol_data["type_counts"].keys():
+                element = data_info["type_elements"].get(type_id, "X")
+                if element not in element_to_molecules:
+                    element_to_molecules[element] = set()
+                element_to_molecules[element].add(mol_name)
+        
+        # Identify elements needing splitting
+        elements_to_split = {
+            el: mols for el, mols in element_to_molecules.items()
+            if len(mols) > 1
+        }
+        
+        if not elements_to_split:
+            self.logger.info("No atom types need splitting")
+            return data_file
+        
+        self.logger.info(f"Elements in multiple contexts: {elements_to_split}")
+        
+        # Read original file
+        with open(data_file, 'r') as f:
+            lines = f.readlines()
+        
+        # Determine which types need splitting and build mapping
+        old_n_types = data_info["n_atom_types"]
+        new_type_counter = old_n_types
+        
+        type_split_map = {}  # old_type -> {mol_name: new_type}
+        new_type_info = {}   # new_type -> {"mass": ..., "element": ..., "context": ...}
+        
+        for element, mol_names in elements_to_split.items():
+            # Find original type for this element
+            original_type = None
+            for type_id, el in data_info["type_elements"].items():
+                if el == element and type_id <= old_n_types:
+                    original_type = type_id
+                    break
+            
+            if original_type is None:
+                continue
+            
+            # Keep original type for the most common molecule
+            mol_list = sorted(mol_names, key=lambda m: -mol_compositions[m]["count"])
+            
+            type_split_map[original_type] = {}
+            
+            for i, mol_name in enumerate(mol_list):
+                if i == 0:
+                    type_split_map[original_type][mol_name] = original_type
+                else:
+                    new_type_counter += 1
+                    type_split_map[original_type][mol_name] = new_type_counter
+                    new_type_info[new_type_counter] = {
+                        "mass": data_info["masses"][original_type],
+                        "element": element,
+                        "context": mol_name
+                    }
+                    self.logger.info(
+                        f"New type {new_type_counter} for {element} in {mol_name}"
+                    )
+        
+        if not new_type_info:
+            self.logger.info("No new types needed after analysis")
+            return data_file
+        
+        # Build mol_id -> mol_name mapping
+        mol_id_to_name = {}
+        for mol_name, mol_data in mol_compositions.items():
+            for mol_id, atoms in data_info["molecules"].items():
+                type_counts = {}
+                for atom_id, atom_type in atoms:
+                    type_counts[atom_type] = type_counts.get(atom_type, 0) + 1
+                if type_counts == mol_data["type_counts"]:
+                    mol_id_to_name[mol_id] = mol_name
+        
+        # Rewrite the file
+        new_lines = []
+        in_masses = False
+        in_atoms = False
+        masses_collected = []  # Collect all mass lines
+        header_updated = False
+        
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+            
+            # Update atom types count in header
+            if not header_updated and "atom types" in stripped.lower():
+                parts = stripped.split()
+                try:
+                    old_count = int(parts[0])
+                    new_count = new_type_counter
+                    new_lines.append(f" {new_count} atom types\n")
+                    header_updated = True
+                    i += 1
+                    continue
+                except (ValueError, IndexError):
+                    pass
+            
+            # Detect Masses section
+            if stripped == "Masses":
+                in_masses = True
+                new_lines.append(line)
+                i += 1
+                continue
+            
+            # Collect mass lines
+            if in_masses:
+                # Check if we've hit the next section or Atoms
+                if stripped.startswith("Atoms") or stripped.startswith("Pair"):
+                    # We've reached the end of masses section
+                    # Write all original masses in order, then new ones
+                    
+                    # Sort collected masses by type ID
+                    masses_collected.sort(key=lambda x: x[0])
+                    
+                    # Write blank line after "Masses" header
+                    new_lines.append("\n")
+                    
+                    # Write original masses
+                    for type_id, mass_line in masses_collected:
+                        new_lines.append(mass_line)
+                    
+                    # Write new masses
+                    for new_type in sorted(new_type_info.keys()):
+                        info = new_type_info[new_type]
+                        new_lines.append(
+                            f" {new_type} {info['mass']:.6f} # {info['element']} ({info['context']})\n"
+                        )
+                    
+                    # Write blank line before next section
+                    new_lines.append("\n")
+                    
+                    # Done with masses
+                    in_masses = False
+                    
+                    # Now write the current line (Atoms or Pair header)
+                    new_lines.append(line)
+                    i += 1
+                    continue
+                
+                # Skip blank lines in masses section
+                if not stripped:
+                    i += 1
+                    continue
+                
+                # Skip comment lines
+                if stripped.startswith("#"):
+                    i += 1
+                    continue
+                
+                # Parse and collect mass line
+                parts = stripped.split()
+                if len(parts) >= 2:
+                    try:
+                        type_id = int(parts[0])
+                        # Keep the original line formatting
+                        masses_collected.append((type_id, line))
+                    except ValueError:
+                        new_lines.append(line)
+                
+                i += 1
+                continue
+            
+            # Detect Atoms section
+            if stripped.startswith("Atoms"):
+                in_atoms = True
+                new_lines.append(line)
+                i += 1
+                continue
+            
+            # Detect end of Atoms section
+            if in_atoms and stripped in ["Velocities", "Bonds", "Angles", "Dihedrals", "Impropers"]:
+                in_atoms = False
+                new_lines.append(line)
+                i += 1
+                continue
+            
+            # Modify atom lines to use new types where needed
+            if in_atoms and stripped and not stripped.startswith("#"):
+                parts = line.split()
+                if len(parts) >= 7:
+                    try:
+                        atom_id = int(parts[0])
+                        mol_id = int(parts[1])
+                        old_type = int(parts[2])
+                        charge = parts[3]
+                        x, y, z = parts[4], parts[5], parts[6]
+                        
+                        # Preserve comment
+                        comment = ""
+                        if "#" in line:
+                            comment = " #" + line.split("#", 1)[1].rstrip("\n")
+                        
+                        # Check if this type needs remapping
+                        new_type = old_type
+                        if old_type in type_split_map:
+                            mol_name = mol_id_to_name.get(mol_id)
+                            if mol_name and mol_name in type_split_map[old_type]:
+                                new_type = type_split_map[old_type][mol_name]
+                        
+                        new_line = (
+                            f"{atom_id:>8} {mol_id:>8} {new_type:>4} {charge:>12} "
+                            f"{x:>14} {y:>14} {z:>14}{comment}\n"
+                        )
+                        new_lines.append(new_line)
+                        i += 1
+                        continue
+                        
+                    except (ValueError, IndexError):
+                        pass
+            
+            # Keep all other lines unchanged
+            new_lines.append(line)
+            i += 1
+        
+        # Write output
+        with open(output_file, 'w') as f:
+            f.writelines(new_lines)
+        
+        self.logger.info(f"Split {len(new_type_info)} atom types, total now: {new_type_counter}")
+        self.logger.info(f"Wrote: {output_file}")
+        
+        return output_file
+
+
+    def diagnose_and_fix_force_field(self,
+                                      quality_result: Dict[str, Any],
+                                      research_goal: str,
+                                      data_file: str,
+                                      ff_params_path: str,
+                                      stage: str) -> Dict[str, Any]:
+        """
+        Diagnose and fix force field parameters based on quality analysis.
+        
+        Args:
+            quality_result: Quality check output from LAMMPSAnalysisAgent
+            research_goal: Research objective
+            data_file: Path to current LAMMPS data file
+            ff_params_path: Path to ff_params.lammps
+            stage: Current simulation stage name
+            
+        Returns:
+            Dictionary with:
+                - ff_modified: bool
+                - charges_modified: bool
+                - diagnosis: str
+                - ff_backup: path to backup (if modified)
+                - charge_backup: path to backup (if modified)
+                - details: dict with full analysis
+        """
+        self.logger.info(f"Diagnosing quality issues for stage: {stage}")
+        
+        result = {
+            "ff_modified": False,
+            "charges_modified": False,
+            "diagnosis": "",
+            "details": {}
+        }
+        
+        issues = quality_result.get("issues", [])
+        recommendations = quality_result.get("recommendations", [])
+        metrics = quality_result.get("quality_metrics", {})
+        
+        # Classify what needs fixing
+        issue_text = " ".join([
+            i.get("description", "").lower() for i in issues
+        ])
+        rec_text = " ".join([
+            (r.get("description", "") if isinstance(r, dict) else str(r)).lower()
+            for r in recommendations
+        ])
+        all_text = issue_text + " " + rec_text
+        
+        needs_ff = any(kw in all_text for kw in [
+            "density", "volume", "coordination", "rdf", "radial",
+            "solvation", "energy", "lj", "lennard", "sigma", "epsilon",
+            "mixing rule", "pair_modify"
+        ])
+        
+        needs_charges = any(kw in all_text for kw in [
+            "charge", "electrostatic", "coulomb", "neutral", "dipole",
+            "density", "structure"
+        ])
+        
+        # Fix force field parameters
+        if needs_ff and os.path.exists(ff_params_path):
+            self.logger.info("Attempting force field parameter correction...")
+            ff_fixed, ff_info = self._diagnose_ff_params(
+                quality_result=quality_result,
+                research_goal=research_goal,
+                data_file=data_file,
+                ff_params_path=ff_params_path,
+                stage=stage
+            )
+            result["ff_modified"] = ff_fixed
+            result["details"]["force_field"] = ff_info
+            if ff_fixed:
+                result["ff_backup"] = ff_info.get("backup")
+        
+        # Fix charges
+        if needs_charges:
+            self.logger.info("Attempting charge correction...")
+            charge_fixed, charge_info = self._diagnose_charges(
+                quality_result=quality_result,
+                research_goal=research_goal,
+                data_file=data_file,
+                stage=stage
+            )
+            result["charges_modified"] = charge_fixed
+            result["details"]["charges"] = charge_info
+            if charge_fixed:
+                result["charge_backup"] = charge_info.get("backup")
+        
+        # Build diagnosis summary
+        diagnosis_parts = []
+        if result["ff_modified"]:
+            diagnosis_parts.append(f"FF parameters adjusted: {result['details']['force_field'].get('summary', '')}")
+        if result["charges_modified"]:
+            diagnosis_parts.append(f"Charges adjusted: {result['details']['charges'].get('summary', '')}")
+        if not diagnosis_parts:
+            diagnosis_parts.append("No parameter changes needed - issue may be in simulation settings")
+        
+        result["diagnosis"] = "; ".join(diagnosis_parts)
+        
+        return result
+    
+    
+    def _diagnose_ff_params(self,
+                             quality_result: Dict[str, Any],
+                             research_goal: str,
+                             data_file: str,
+                             ff_params_path: str,
+                             stage: str) -> Tuple[bool, Dict[str, Any]]:
+        """Diagnose and fix force field parameters based on quality metrics."""
+        
+        with open(ff_params_path, 'r') as f:
+            current_ff = f.read()
+        
+        data_info = self._parse_data_file_for_charges(data_file)
+        
+        type_info = []
+        for type_id in sorted(data_info["masses"].keys()):
+            element = data_info["type_elements"].get(type_id, "?")
+            mass = data_info["masses"][type_id]
+            name = data_info.get("type_names", {}).get(type_id, element)
+            count = data_info["type_counts"].get(type_id, 0)
+            type_info.append(f"  Type {type_id}: {name} ({element}), mass={mass:.3f}, count={count}")
+        type_info_str = "\n".join(type_info)
+        
+        # Get thermo data from log
+        log_file = os.path.join(self.working_dir, "log.lammps")
+        thermo_excerpt = ""
+        if os.path.exists(log_file):
+            with open(log_file, 'r') as f:
+                log_lines = f.readlines()
+            thermo_lines = [l for l in log_lines if l.strip() and
+                           l.strip()[0].isdigit() and len(l.split()) >= 5]
+            if thermo_lines:
+                thermo_excerpt = "".join(thermo_lines[-20:])
+        
+        issues_str = "\n".join([
+            f"- [{i.get('severity', '?')}] {i.get('description', '')}"
+            for i in quality_result.get("issues", [])
+        ])
+        
+        metrics_str = json.dumps(quality_result.get("quality_metrics", {}), indent=2, default=str)
+        
+        prompt = f"""
+    You are an expert molecular dynamics force field specialist. A LAMMPS simulation 
+    completed but quality analysis found physics problems.
+    
+    RESEARCH GOAL: {research_goal}
+    STAGE: {stage}
+    
+    QUALITY ISSUES:
+    {issues_str}
+    
+    QUALITY METRICS:
+    {metrics_str}
+    
+    ATOM TYPES IN DATA FILE:
+    {type_info_str}
+    
+    CURRENT FORCE FIELD (ff_params.lammps):
+    {current_ff}
+    
+    RECENT THERMO OUTPUT:
+    {thermo_excerpt[-1500:]}
+    
+    Analyze the quality issues and determine if force field parameters need adjustment.
+    
+    Common fixes:
+    - Low density: pair_modify mix should be geometric for OPLS-AA, check sigma values
+    - Wrong coordination: adjust epsilon/sigma for relevant pairs
+    - High energy: check for missing or incorrect coefficients
+    - Wrong mixing rule is a very common error
+    
+    Return JSON:
+    {{
+        "diagnosis": "What is wrong and why",
+        "changes_needed": true/false,
+        "changes": [
+            {{
+                "what": "Description",
+                "why": "Physical justification",
+                "original_line": "original line",
+                "corrected_line": "corrected line"
+            }}
+        ],
+        "corrected_ff_params": "Complete corrected ff_params.lammps content or null"
+    }}
+    """
+        
+        try:
+            result = self._generate_json(prompt)
+            
+            diagnosis = result.get("diagnosis", "No diagnosis")
+            self.logger.info(f"FF diagnosis: {diagnosis[:200]}")
+            
+            if not result.get("changes_needed", False):
+                return False, {"diagnosis": diagnosis, "changes_needed": False}
+            
+            corrected_ff = result.get("corrected_ff_params")
+            if corrected_ff and corrected_ff.strip() != current_ff.strip():
+                import shutil
+                backup_path = ff_params_path + f".before_quality_{stage}"
+                shutil.copy2(ff_params_path, backup_path)
+                
+                with open(ff_params_path, 'w') as f:
+                    f.write(corrected_ff)
+                
+                changes = result.get("changes", [])
+                return True, {
+                    "summary": f"{len(changes)} parameter changes: {diagnosis[:80]}",
+                    "diagnosis": diagnosis,
+                    "changes": changes,
+                    "backup": backup_path
+                }
+            
+            return False, {"diagnosis": diagnosis, "no_actual_changes": True}
+            
+        except Exception as e:
+            self.logger.error(f"FF diagnosis failed: {e}")
+            return False, {"error": str(e)}    
+    
+    def _diagnose_charges(self,
+                           quality_result: Dict[str, Any],
+                           research_goal: str,
+                           data_file: str,
+                           stage: str) -> Tuple[bool, Dict[str, Any]]:
+        """Diagnose and fix charge assignments based on quality metrics."""
+        
+        data_info = self._parse_data_file_for_charges(data_file)
+        mol_compositions = self._analyze_molecular_compositions(data_info)
+        
+        # Read charge_assignments.json if it exists
+        charge_file = os.path.join(self.working_dir, "charge_assignments.json")
+        current_charges = {}
+        validation = {}
+        if os.path.exists(charge_file):
+            with open(charge_file, 'r') as f:
+                charge_data = json.load(f)
+                current_charges = charge_data.get("charge_assignments", {})
+                validation = charge_data.get("validation", {})
+        
+        if not current_charges:
+            return False, {"error": "No charge assignments found"}
+        
+        # Build info strings OUTSIDE f-string
+        type_info = []
+        for type_id in sorted(data_info["masses"].keys()):
+            element = data_info["type_elements"].get(type_id, "?")
+            name = data_info.get("type_names", {}).get(type_id, element)
+            charge = current_charges.get(str(type_id), "?")
+            count = data_info["type_counts"].get(type_id, 0)
+            type_info.append(f"  Type {type_id}: {name} ({element}), charge={charge}, count={count}")
+        type_info_str = "\n".join(type_info)
+        
+        mol_info = []
+        for mol_name, mol_data in mol_compositions.items():
+            mol_charge = sum(
+                float(current_charges.get(str(tid), 0)) * cnt
+                for tid, cnt in mol_data["type_counts"].items()
+            )
+            mol_info.append(f"  {mol_name}: {mol_data['count']} molecules, charge={mol_charge:.4f}")
+        mol_info_str = "\n".join(mol_info)
+        
+        issues_str = "\n".join([
+            f"- [{i.get('severity', '?')}] {i.get('description', '')}"
+            for i in quality_result.get("issues", [])
+        ])
+        
+        prompt = f"""
+    You are an expert in molecular dynamics charge parameterization. A simulation has
+    quality issues that may be related to partial charges.
+    
+    RESEARCH GOAL: {research_goal}
+    
+    QUALITY ISSUES:
+    {issues_str}
+    
+    ATOM TYPES AND CURRENT CHARGES:
+    {type_info_str}
+    
+    MOLECULAR CHARGES:
+    {mol_info_str}
+    
+    Determine if charges need adjustment. Key rules:
+    - Water molecules must sum to exactly 0.0
+    - Monatomic ions have their formal charge
+    - Polyatomic anions sum to their formal charge
+    - Total system should be neutral
+    
+    Return JSON:
+    {{
+        "diagnosis": "Analysis of charge issues",
+        "changes_needed": true/false,
+        "corrected_charges": {{
+            "type_id_string": new_charge_float
+        }}
+    }}
+    """
+        
+        try:
+            result = self._generate_json(prompt)
+            
+            diagnosis = result.get("diagnosis", "No diagnosis")
+            self.logger.info(f"Charge diagnosis: {diagnosis[:200]}")
+            
+            if not result.get("changes_needed", False):
+                return False, {"diagnosis": diagnosis}
+            
+            corrected_charges = result.get("corrected_charges")
+            if not corrected_charges:
+                return False, {"diagnosis": diagnosis, "no_corrections": True}
+            
+            # Convert string keys to the format _write_data_file_with_charges expects
+            int_charges = {}
+            for k, v in corrected_charges.items():
+                try:
+                    int_charges[int(k)] = float(v)
+                except (ValueError, TypeError):
+                    continue
+            
+            # Backup original
+            import shutil
+            backup_path = data_file + f".before_charge_fix_{stage}"
+            shutil.copy2(data_file, backup_path)
+            
+            # Use the existing method that writes charges
+            self._write_data_file_with_charges(
+                input_file=data_file,
+                output_file=data_file,  # Overwrite in place
+                charge_assignments=int_charges,
+                data_info=data_info
+            )
+            
+            # Update charge_assignments.json
+            new_validation = self._validate_charge_assignments(int_charges, data_info)
+            with open(charge_file, 'w') as f:
+                json.dump({
+                    "charge_assignments": {str(k): v for k, v in int_charges.items()},
+                    "validation": new_validation,
+                    "quality_fix_stage": stage,
+                    "previous_charges": current_charges
+                }, f, indent=2)
+            
+            return True, {
+                "summary": f"Updated {len(int_charges)} types, total_charge={new_validation.get('total_charge', 0):.4f}",
+                "diagnosis": diagnosis,
+                "backup": backup_path
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Charge diagnosis failed: {e}")
+            return False, {"error": str(e)}

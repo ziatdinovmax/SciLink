@@ -1,4 +1,5 @@
 import os
+import re
 from typing import List, Dict, Any
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional, Union
@@ -54,7 +55,9 @@ def generate_repo_map(root_dir: str) -> str:
 
     tree_lines = [f"{root.name}/"]
     
-    for path in sorted(root.rglob('*')):
+    def _nat_key(p):
+        return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', str(p))]
+    for path in sorted(root.rglob('*'), key=_nat_key):
         # Skip hidden files/dirs
         if any(part.startswith('.') or part in ('__pycache__', 'venv', 'env') for part in path.parts):
             continue

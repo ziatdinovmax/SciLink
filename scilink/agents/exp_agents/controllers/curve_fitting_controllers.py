@@ -106,7 +106,14 @@ def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
     if not content:
         return
 
-    prompt.append(f"\n## Domain Skill: {skill_name} ({stage})")
+    prompt.append(f"\n## MANDATORY Domain Skill Rules: {skill_name} ({stage})")
+    prompt.append(
+        "The following rules are MANDATORY. Your analysis plan and implementation "
+        "MUST conform to these domain-specific requirements. These rules encode "
+        "validated domain expertise and take precedence over general-purpose defaults. "
+        "Do NOT substitute your own preferences where these rules specify a method, "
+        "treatment, or constraint."
+    )
     prompt.append(content)
 
     # Include validation rules during planning and interpretation
@@ -114,7 +121,7 @@ def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
     if stage in ("planning", "interpretation"):
         validation = sections.get("validation", "")
         if validation:
-            prompt.append(f"\n## Domain Validation Rules ({skill_name})")
+            prompt.append(f"\n## MANDATORY Domain Validation Rules ({skill_name})")
             prompt.append(validation)
 
 
@@ -213,6 +220,193 @@ class AnalyzeDataController:
         except Exception as e:
             self.logger.error(f"❌ Data analysis failed: {e}", exc_info=True)
             state["error_dict"] = {"error": "Data analysis failed", "details": str(e)}
+
+        return state
+
+
+class SeriesScoutController:
+    """Scout representative spectra across a series before planning.
+
+    For series with n > 1, loads and plots representative spectra
+    (evenly spaced, capped at 7) so the LLM can see how data evolves
+    across the series and plan fitting regimes proactively.
+
+    For n == 1: no-op (state passes through unchanged).
+    """
+
+    def __init__(
+        self,
+        logger: logging.Logger,
+        plot_fn: Callable,
+    ):
+        self.logger = logger
+        self.plot_fn = plot_fn
+
+    @staticmethod
+    def _select_scout_indices(num_spectra: int) -> list:
+        """Select evenly spaced representative indices, capped at 7."""
+        if num_spectra <= 3:
+            return list(range(num_spectra))
+        if num_spectra <= 6:
+            mid = num_spectra // 2
+            return sorted({0, mid, num_spectra - 1})
+        if num_spectra <= 15:
+            indices = {0, num_spectra // 4, num_spectra // 2,
+                       3 * num_spectra // 4, num_spectra - 1}
+            return sorted(indices)
+        # Large series: 7 evenly spaced
+        step = (num_spectra - 1) / 6
+        indices = {round(i * step) for i in range(7)}
+        return sorted(indices)
+
+    @staticmethod
+    def _compute_statistics(curve_data: np.ndarray) -> dict:
+        if curve_data.ndim == 1:
+            x = np.arange(len(curve_data))
+            y = curve_data
+        elif curve_data.shape[0] == 2:
+            x, y = curve_data[0], curve_data[1]
+        elif curve_data.shape[1] == 2:
+            x, y = curve_data[:, 0], curve_data[:, 1]
+        else:
+            raise ValueError(f"Unexpected data shape: {curve_data.shape}")
+        return {
+            "n_points": len(x),
+            "x_range": [float(np.nanmin(x)), float(np.nanmax(x))],
+            "y_range": [float(np.nanmin(y)), float(np.nanmax(y))],
+            "y_mean": float(np.nanmean(y)),
+            "y_std": float(np.nanstd(y)),
+            "has_nans": bool(np.any(np.isnan(curve_data))),
+        }
+
+    @staticmethod
+    def _extract_xy(curve_data: np.ndarray):
+        """Extract x, y arrays from various data shapes."""
+        if curve_data.ndim == 1:
+            return np.arange(len(curve_data)), curve_data
+        elif curve_data.shape[0] == 2:
+            return curve_data[0], curve_data[1]
+        elif curve_data.shape[1] == 2:
+            return curve_data[:, 0], curve_data[:, 1]
+        raise ValueError(f"Unexpected data shape: {curve_data.shape}")
+
+    @staticmethod
+    def _create_overlay_plot(
+        scout_curves: list,
+        system_info: dict,
+    ) -> bytes:
+        """Create a single overlay figure with all scout spectra.
+
+        Args:
+            scout_curves: list of {"label": str, "curve_data": np.ndarray}
+            system_info: metadata dict for axis labels
+        Returns:
+            PNG image bytes.
+        """
+        import matplotlib.pyplot as plt
+        import io
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        cmap = plt.cm.viridis
+        n = len(scout_curves)
+        for i, entry in enumerate(scout_curves):
+            x, y = SeriesScoutController._extract_xy(entry["curve_data"])
+            color = cmap(i / max(n - 1, 1))
+            ax.plot(x, y, color=color, linewidth=1.2, label=entry["label"])
+
+        ax.set_xlabel(system_info.get("xlabel", "X"))
+        ax.set_ylabel(system_info.get("ylabel", "Y"))
+        ax.set_title(
+            system_info.get("title", "Data")
+            + " — Scout Overlay"
+        )
+        ax.legend(fontsize=8, loc="best")
+        fig.tight_layout()
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=120)
+        plt.close(fig)
+        buf.seek(0)
+        return base64.b64encode(buf.read()).decode("utf-8")
+
+    def _load_spectrum(self, idx: int, state: dict) -> np.ndarray:
+        spectrum_stack = state.get("spectrum_stack")
+        if spectrum_stack is not None:
+            return spectrum_stack[idx]
+        data_path = state.get("spectrum_paths", [])[idx]
+        try:
+            from ....tools.curve_fitting_tools import load_curve_data
+            return load_curve_data(data_path)
+        except ImportError:
+            if data_path.endswith('.npy'):
+                return np.load(data_path)
+            return np.loadtxt(data_path, delimiter=',')
+
+    def execute(self, state: dict) -> dict:
+        if state.get("error_dict") or state.get("is_single_spectrum", True):
+            return state
+
+        num_spectra = state.get("num_spectra", 1)
+        if num_spectra <= 1:
+            return state
+
+        self.logger.info("\n🔭 --- Scouting Series ---\n")
+
+        scout_indices = self._select_scout_indices(num_spectra)
+        series_metadata = state.get("series_metadata", {})
+        values = series_metadata.get("values", [])
+        variable = series_metadata.get("variable", "index")
+        unit = series_metadata.get("unit", "")
+
+        scout_data = []
+        scout_curves = []  # for overlay plot
+        for idx in scout_indices:
+            try:
+                curve_data = self._load_spectrum(idx, state)
+
+                stats = self._compute_statistics(curve_data)
+
+                if idx < len(values):
+                    label = f"{variable}={values[idx]} {unit}".strip()
+                else:
+                    label = f"index {idx}"
+
+                plot_bytes = self.plot_fn(
+                    curve_data, state.get("system_info", {}),
+                    title_suffix=f" [{label}]",
+                )
+
+                scout_data.append({
+                    "index": idx,
+                    "label": label,
+                    "statistics": stats,
+                    "plot_bytes": plot_bytes,
+                })
+                scout_curves.append({
+                    "label": label,
+                    "curve_data": curve_data,
+                })
+                self.logger.info(f"  Scouted spectrum {idx}: {label}")
+            except Exception as e:
+                self.logger.warning(f"  Failed to scout spectrum {idx}: {e}")
+
+        # Generate overlay comparison plot
+        if len(scout_curves) >= 2:
+            try:
+                overlay_bytes = self._create_overlay_plot(
+                    scout_curves, state.get("system_info", {})
+                )
+                state["scout_overlay_plot"] = overlay_bytes
+                self.logger.info("  Generated overlay comparison plot")
+            except Exception as e:
+                self.logger.warning(f"  Failed to create overlay plot: {e}")
+                state["scout_overlay_plot"] = None
+        else:
+            state["scout_overlay_plot"] = None
+
+        state["scout_data"] = scout_data
+        self.logger.info(f"  Scouted {len(scout_data)} of {num_spectra} spectra")
 
         return state
 
@@ -580,9 +774,42 @@ class HumanFeedbackRefinementController:
         if state.get("literature_query"):
             print(f"\n📚 Literature Query:\n   {state['literature_query']}")
         
-        if not is_single:
+        # Display regime plan if present
+        series_plan = state.get("series_analysis_plan")
+        if series_plan and series_plan.get("regimes") and not is_single:
+            regimes = series_plan["regimes"]
+            print(f"\n{'=' * 60}")
+            print(f"📦 SERIES FITTING REGIMES ({len(regimes)} regimes)")
+            print(f"{'=' * 60}")
+            if series_plan.get("rationale"):
+                print(f"\nRationale: {series_plan['rationale']}")
+
+            series_metadata = state.get("series_metadata", {})
+            values = series_metadata.get("values", [])
+            unit = series_metadata.get("unit", "")
+
+            for i, regime in enumerate(regimes, 1):
+                indices = regime.get("spectrum_indices", [])
+                if values and indices:
+                    valid_vals = [values[idx] for idx in indices if idx < len(values)]
+                    range_str = f" ({min(valid_vals)}-{max(valid_vals)} {unit})" if valid_vals else ""
+                else:
+                    range_str = ""
+                print(f"\n  Regime {i}: {regime.get('name', 'Unnamed')}")
+                print(f"    Spectra: indices {indices}{range_str}")
+                print(f"    Model: {regime.get('physical_model', 'N/A')}")
+                print(f"    Strategy: {regime.get('fitting_strategy', 'N/A')}")
+                print(f"    Parameters: {', '.join(regime.get('parameters_to_extract', []))}")
+
+            transitions = series_plan.get("transition_points", [])
+            if transitions:
+                print(f"\n  Transition Points:")
+                for t in transitions:
+                    print(f"    Between indices {t.get('between_indices', '?')}: "
+                          f"{t.get('description', 'N/A')}")
+        elif not is_single:
             print(f"\n📦 **Note:** This fitting model will be LOCKED and applied to all {num_spectra} spectra.")
-        
+
         print("\n" + "=" * 60)
 
     def _get_human_feedback(self, state: dict) -> dict:
@@ -615,9 +842,16 @@ class HumanFeedbackRefinementController:
         _append_skill_context(prompt, state, "planning")
         _append_prior_knowledge_context(prompt, state)
 
-        if not state.get("is_single_spectrum", True):
-            prompt.append(f"\n## Series Context\nThis is the first spectrum in a series of {state.get('num_spectra', 1)}. "
-                         "The fitting model you choose will be applied to ALL spectra in the series.")
+        # Series context: use scout data if available, otherwise basic notice
+        num_spectra = state.get("num_spectra", 1)
+        scout_data = state.get("scout_data", [])
+        if scout_data and not state.get("is_single_spectrum", True):
+            self._append_scout_context(prompt, state, scout_data)
+        elif not state.get("is_single_spectrum", True):
+            prompt.append(
+                f"\n## Series Context\nThis is the first spectrum in a series of {num_spectra}. "
+                "The fitting model you choose will be applied to ALL spectra in the series."
+            )
 
         response = self.model.generate_content(prompt, generation_config=self.generation_config)
         result, error = self._parse(response)
@@ -632,7 +866,108 @@ class HumanFeedbackRefinementController:
         state["fitting_strategy"] = result.get("fitting_strategy", "Standard fitting")
         state["literature_query"] = result.get("literature_query")
 
+        # Extract series analysis plan if present
+        self._extract_series_plan(state, result)
+
         return state
+
+    def _append_scout_context(self, prompt: list, state: dict, scout_data: list) -> None:
+        """Append scout spectrum plots and series regime planning instructions."""
+        from ..instruct import SERIES_REGIME_PLANNING_SUPPLEMENT
+
+        num_spectra = state.get("num_spectra", 1)
+        series_metadata = state.get("series_metadata", {})
+
+        prompt.append(f"\n## Series Overview ({num_spectra} spectra)")
+        prompt.append(
+            "Below are representative spectra from across the series. "
+            "Examine how the data changes. If the spectral character changes "
+            "significantly (e.g., peak splitting, new features, major shape "
+            "changes), plan multiple fitting regimes. Otherwise, a single "
+            "model is fine."
+        )
+
+        if series_metadata.get("variable"):
+            values = series_metadata.get("values", [])
+            unit = series_metadata.get("unit", "")
+            prompt.append(
+                f"\nSeries variable: {series_metadata['variable']} ({unit})"
+            )
+            if values:
+                prompt.append(f"Range: {values[0]} to {values[-1]} {unit}")
+
+        # Overlay comparison plot (all scouts on one figure)
+        overlay = state.get("scout_overlay_plot")
+        if overlay:
+            prompt.append(
+                "\n### Overlay Comparison\n"
+                "All scout spectra plotted together for direct visual comparison. "
+                "Look for shifts, shape changes, peak splitting, or new features "
+                "emerging across the series."
+            )
+            prompt.append({
+                "mime_type": "image/png",
+                "data": overlay,
+            })
+
+        prompt.append("\n### Individual Scout Spectra")
+        for scout in scout_data:
+            prompt.append(
+                f"\n### Spectrum at {scout['label']} (index {scout['index']})"
+            )
+            prompt.append(f"Statistics: {json.dumps(scout['statistics'], indent=2)}")
+            prompt.append({
+                "mime_type": "image/png",
+                "data": scout["plot_bytes"],
+            })
+
+        prompt.append(SERIES_REGIME_PLANNING_SUPPLEMENT.format(
+            num_spectra=num_spectra,
+            num_spectra_minus_1=num_spectra - 1,
+        ))
+
+    def _extract_series_plan(self, state: dict, result: dict) -> None:
+        """Extract and validate series_analysis_plan from LLM response."""
+        series_plan = result.get("series_analysis_plan")
+        if not series_plan or state.get("is_single_spectrum", True):
+            state["series_analysis_plan"] = None
+            return
+
+        num_spectra = state.get("num_spectra", 1)
+        regimes = series_plan.get("regimes", [])
+
+        if not regimes:
+            state["series_analysis_plan"] = None
+            return
+
+        # Validate index coverage
+        all_indices = set()
+        for regime in regimes:
+            indices = regime.get("spectrum_indices", [])
+            # Filter to valid range
+            regime["spectrum_indices"] = [i for i in indices if 0 <= i < num_spectra]
+            all_indices.update(regime["spectrum_indices"])
+
+        missing = set(range(num_spectra)) - all_indices
+        if missing:
+            self.logger.warning(
+                f"  Series plan missing indices {sorted(missing)}, "
+                f"assigning to first regime"
+            )
+            regimes[0]["spectrum_indices"] = sorted(
+                set(regimes[0]["spectrum_indices"]) | missing
+            )
+
+        state["series_analysis_plan"] = series_plan
+        self.logger.info(
+            f"  Series analysis plan: {len(regimes)} regime(s)"
+        )
+        for regime in regimes:
+            self.logger.info(
+                f"    {regime.get('name', 'unnamed')}: "
+                f"indices {regime.get('spectrum_indices', [])}, "
+                f"model: {regime.get('physical_model', 'N/A')}"
+            )
 
     def _refine_plan(self, state: dict, feedback: str) -> dict:
         current_plan = (
@@ -662,6 +997,22 @@ class HumanFeedbackRefinementController:
         _append_skill_context(prompt, state, "planning")
         _append_prior_knowledge_context(prompt, state)
 
+        # Include current series plan and scout data in refinement context
+        if state.get("series_analysis_plan"):
+            prompt.append(
+                f"\n## Current Series Analysis Plan\n"
+                f"{json.dumps(state['series_analysis_plan'], indent=2)}"
+            )
+            prompt.append(
+                "\nThe user may want to adjust regime boundaries, merge regimes, "
+                "change models for specific regimes, or switch to a single model. "
+                "Adjust the series_analysis_plan accordingly, or remove it entirely "
+                "if the user wants a single model."
+            )
+        scout_data = state.get("scout_data", [])
+        if scout_data and not state.get("is_single_spectrum", True):
+            self._append_scout_context(prompt, state, scout_data)
+
         response = self.model.generate_content(prompt, generation_config=self.generation_config)
         result, error = self._parse(response)
 
@@ -675,6 +1026,9 @@ class HumanFeedbackRefinementController:
         state["parameters_to_extract"] = result.get("parameters_to_extract", state.get("parameters_to_extract", []))
         state["fitting_strategy"] = result.get("fitting_strategy", state.get("fitting_strategy"))
         state["literature_query"] = result.get("literature_query", state.get("literature_query"))
+
+        # Re-extract series plan (may have been updated or removed)
+        self._extract_series_plan(state, result)
 
         return state
 
@@ -714,8 +1068,37 @@ class HumanFeedbackRefinementController:
                 "parameters_to_extract": state.get("parameters_to_extract", []),
                 "fitting_strategy": state.get("fitting_strategy"),
             }
-            
-            self.logger.info("  ✅ Fitting configuration locked for series processing.")
+
+            # Build per-regime configs if series plan has multiple regimes
+            series_plan = state.get("series_analysis_plan")
+            if series_plan and series_plan.get("regimes"):
+                regime_configs = {}
+                for regime in series_plan["regimes"]:
+                    regime_config = {
+                        "analysis_approach": state.get("analysis_approach"),
+                        "physical_model": regime.get(
+                            "physical_model", state.get("physical_model")
+                        ),
+                        "parameters_to_extract": regime.get(
+                            "parameters_to_extract",
+                            state.get("parameters_to_extract", []),
+                        ),
+                        "fitting_strategy": regime.get(
+                            "fitting_strategy", state.get("fitting_strategy")
+                        ),
+                    }
+                    for idx in regime.get("spectrum_indices", []):
+                        regime_configs[idx] = regime_config
+                state["regime_configs"] = regime_configs
+                self.logger.info(
+                    f"  ✅ Locked {len(series_plan['regimes'])} regime "
+                    f"configuration(s) for series processing."
+                )
+            else:
+                state["regime_configs"] = None
+                self.logger.info(
+                    "  ✅ Fitting configuration locked for series processing."
+                )
 
         except Exception as e:
             self.logger.warning(f"⚠️ Planning failed: {e}, using fallback")
@@ -726,6 +1109,8 @@ class HumanFeedbackRefinementController:
             state["fitting_strategy"] = "Standard curve fitting"
             state["literature_query"] = None
             state["locked_fitting_config"] = None
+            state["series_analysis_plan"] = None
+            state["regime_configs"] = None
 
         return state
 
@@ -798,10 +1183,16 @@ select it even if it's not perfect. Only return acceptable=false if ALL fits are
 3. Incorrect baseline behavior
 4. Wrong peak shape (too sharp, too broad, wrong tail behavior)
 
-Based on your visual inspection and the numerical results, suggest an alternative fitting model. Consider:
-1. Different functional forms (e.g., if using single Gaussian, try double Gaussian, Voigt, or Lorentzian)
-2. Additional components (e.g., baseline correction, additional peaks, shoulders)
-3. Different physical models appropriate for this type of spectroscopy
+Based on your visual inspection and the numerical results, suggest an alternative fitting model.
+
+**Physics-first rule:** Before adding more components, first try improving the existing model:
+1. Different peak shapes (e.g., Voigt instead of Gaussian, asymmetric profiles)
+2. Better baseline treatment (higher-order polynomial, different correction method)
+3. Physically motivated constraints (known peak ratios, position bounds from literature)
+
+Only add new components if you can identify a specific physical feature in the data that the
+current model is missing (a visible shoulder, a second peak, etc.). Do NOT add components
+just to absorb residual structure — that is overfitting, not physics.
 
 Return JSON with:
 {{
@@ -846,6 +1237,7 @@ Your guidance: '''
         outlier_sigma: float = None,
         max_verification_iterations: int = None,
         preprocessor: Any = None,
+        conformance_instructions: str = "",
     ):
         self.model = model
         self.logger = logger
@@ -864,6 +1256,7 @@ Your guidance: '''
         self.outlier_sigma = outlier_sigma if outlier_sigma is not None else self.DEFAULT_OUTLIER_SIGMA
         self.max_verification_iterations = max_verification_iterations if max_verification_iterations is not None else self.DEFAULT_MAX_VERIFICATION_ITERATIONS
         self.preprocessor = preprocessor
+        self.conformance_instructions = conformance_instructions
 
     def _generate_fitting_script(self, state: dict, data_path: str, stats: dict) -> str:
         config = state.get("locked_fitting_config", {})
@@ -873,7 +1266,9 @@ Your guidance: '''
         skill_sections = state.get("skill_sections")
         if skill_sections and skill_sections.get("fitting"):
             context_parts.append(
-                f"## Domain Skill Guidance ({state.get('skill_name', 'skill')})\n"
+                f"## MANDATORY Domain Skill Rules ({state.get('skill_name', 'skill')})\n"
+                "The following domain rules are MANDATORY and must be implemented exactly "
+                "as specified. They take precedence over general-purpose fitting defaults.\n\n"
                 + skill_sections["fitting"]
             )
 
@@ -910,7 +1305,9 @@ Your guidance: '''
         skill_sections = state.get("skill_sections")
         if skill_sections and skill_sections.get("fitting"):
             prompt += (
-                f"\n\n## Domain Fitting Guidance ({state.get('skill_name', 'skill')})\n"
+                f"\n\n## MANDATORY Domain Skill Rules ({state.get('skill_name', 'skill')})\n"
+                "While fixing the error, you MUST continue to follow these domain rules. "
+                "Do not change the fitting model or workflow to deviate from these rules.\n\n"
                 + skill_sections["fitting"]
             )
 
@@ -924,6 +1321,60 @@ Your guidance: '''
             self.logger.info(f"    Diagnosis: {result['diagnosis']}")
 
         return result["script"]
+
+    def _check_plan_conformance(self, state: dict, script: str) -> dict | None:
+        """Use the LLM to verify a generated script implements the locked plan.
+
+        Returns a dict with ``conformant``, ``justified_deviations``,
+        ``unjustified_deviations``, and ``summary`` keys, or ``None`` if the
+        check cannot be performed (missing config, LLM error, etc.).
+        """
+        config = state.get("locked_fitting_config", {})
+        if not config or not config.get("physical_model"):
+            return None
+        if not self.conformance_instructions:
+            return None
+
+        # Build skill rules text for conformance checking
+        skill_rules_text = ""
+        skill_sections = state.get("skill_sections")
+        if skill_sections:
+            skill_name = state.get("skill_name", "domain skill")
+            rules_parts = []
+            for stage in ("planning", "fitting", "validation"):
+                content = skill_sections.get(stage, "")
+                if content:
+                    rules_parts.append(f"### {stage.title()} rules\n{content}")
+            if rules_parts:
+                skill_rules_text = (
+                    f"\n**MANDATORY Domain Skill Rules ({skill_name}):**\n"
+                    + "\n".join(rules_parts)
+                    + "\n"
+                )
+
+        prompt = self.conformance_instructions.format(
+            analysis_approach=config.get("analysis_approach", ""),
+            physical_model=config.get("physical_model", ""),
+            parameters_to_extract=", ".join(
+                config.get("parameters_to_extract", [])
+            ),
+            fitting_strategy=config.get("fitting_strategy", ""),
+            skill_rules=skill_rules_text,
+            script=script,
+        )
+
+        try:
+            response = self.model.generate_content(contents=[prompt])
+            result, error = self._parse(response)
+            if error or not result:
+                self.logger.debug(
+                    "Plan conformance check parse failed: %s", error
+                )
+                return None
+            return result
+        except Exception as exc:
+            self.logger.debug("Plan conformance check failed: %s", exc)
+            return None
 
     def _adapt_script_for_spectrum(self, base_script: str, data_path: str, output_prefix: str) -> str:
         adapted = base_script
@@ -1047,6 +1498,30 @@ Your guidance: '''
                     script = self._adapt_script_for_spectrum(base_script, str(temp_data_path), output_prefix)
                 elif attempt == 1:
                     script = self._generate_fitting_script(state, str(temp_data_path), stats)
+                    # Check conformance with locked plan on fresh generation
+                    conformance = self._check_plan_conformance(state, script)
+                    if conformance and not conformance.get("conformant", True):
+                        issues = "; ".join(
+                            conformance.get("unjustified_deviations", [])
+                        )
+                        self.logger.warning(
+                            "    \u26a0\ufe0f Plan conformance issue: %s", issues
+                        )
+                        last_error = (
+                            "PLAN CONFORMANCE: Script deviates from the "
+                            "locked plan without justification. Issues: "
+                            f"{issues}. Plan model: "
+                            f"{state.get('locked_fitting_config', {}).get('physical_model', '')}. "
+                            "Either fix the script to match the plan, or if "
+                            "the plan cannot work, implement the closest "
+                            "viable alternative and explain why in the summary."
+                        )
+                        continue
+                    if conformance and conformance.get("justified_deviations"):
+                        self.logger.info(
+                            "    \u2139\ufe0f Justified plan deviations: %s",
+                            "; ".join(conformance["justified_deviations"]),
+                        )
                 else:
                     script = self._correct_script(state, script, last_error)
 
@@ -1546,13 +2021,13 @@ Return JSON with:
             self.logger.error(f"Failed to refine model from feedback: {e}")
             return config
 
-    def _fit_with_quality_control(self, state: dict, curve_data: np.ndarray, data_path: str, spectrum_name: str, spectrum_idx: int) -> dict:
+    def _fit_with_quality_control(self, state: dict, curve_data: np.ndarray, data_path: str, spectrum_name: str, spectrum_idx: int, is_regime_anchor: bool = False) -> dict:
         """
         Fit a single spectrum with quality control, verification, and optional judge selection.
-        
+
         Flow:
         1. Initial fit attempt
-        2. For first spectrum: LLM verification loop (up to max_verification_iterations)
+        2. For anchor spectrum (first in series or first in regime): LLM verification loop
         - Each iteration: verify current fit -> if issues, refit
         - After loop: verify final refit
         - If still not approved: call judge to select best
@@ -1562,29 +2037,32 @@ Return JSON with:
         all_attempts = []
         best_result = None
         best_r2 = -1.0
-        
+
+        # Anchor = first spectrum overall OR first in a regime; gets full QC
+        _is_anchor = spectrum_idx == 0 or is_regime_anchor
+
         # --- Initial fit ---
         initial_model = state.get('locked_fitting_config', {}).get('physical_model', 'Initial model')
         self.logger.info(f"   Attempt 1: {initial_model[:80]}...")
-        
+
         result = self._fit_single_spectrum(
             state=state, curve_data=curve_data, data_path=data_path,
             spectrum_name=spectrum_name, spectrum_idx=spectrum_idx, base_script=None
         )
-        
+
         if result["success"]:
             r2 = result.get("fit_quality", {}).get("r_squared", 0)
             all_attempts.append({"model": initial_model, "r2": r2, "result": result})
-            
+
             if r2 > best_r2:
                 best_r2 = r2
                 best_result = result
-            
-            # Track if user explicitly accepted (only relevant for first spectrum)
+
+            # Track if user explicitly accepted
             user_accepted_fit = False
 
-            # --- Verification loop (only for first spectrum) ---
-            if spectrum_idx == 0:
+            # --- Verification loop (for anchor spectra: first overall or first in regime) ---
+            if _is_anchor:
                 if not best_result or not best_result.get("success") or best_r2 < 0.1:
                     self.logger.warning(f"   Initial fit failed or R² too low ({best_r2:.4f}), skipping verification")
                 else:
@@ -1803,9 +2281,9 @@ Return JSON with:
                 
                 if alt_r2 >= self.r2_threshold:
                     self.logger.info(f"✅ R² = {alt_r2:.4f} (meets threshold with alternative model)")
-                    if spectrum_idx == 0:
+                    if _is_anchor:
                         state["locked_fitting_config"] = temp_config
-                        
+
                         # Offer human review for alternative model before locking
                         if self.enable_human_feedback and alt_result.get("visualization_bytes"):
                             user_feedback = self._get_user_feedback_on_fit(state, alt_result, alt_r2)
@@ -1826,47 +2304,47 @@ Return JSON with:
                 })
         
         # --- Human feedback for poor fit (if enabled) ---
-        if self.enable_human_feedback and spectrum_idx == 0:
+        if self.enable_human_feedback and _is_anchor:
             feedback_result = self._get_human_feedback_for_poor_fit(state, best_result, all_attempts)
-            
+
             if feedback_result:
                 if feedback_result.get("action") == "adjust_threshold":
                     self.r2_threshold = feedback_result["new_threshold"]
                     if best_r2 >= self.r2_threshold:
                         self.logger.info(f"✅ Best fit now meets adjusted threshold")
                         return best_result
-                
+
                 elif feedback_result.get("action") == "retry":
                     refined_config = self._refine_model_from_feedback(state, feedback_result["feedback"])
                     original_config = state.get("locked_fitting_config")
                     state["locked_fitting_config"] = refined_config
-                    
+
                     human_guided_result = self._fit_single_spectrum(
                         state=state, curve_data=curve_data, data_path=data_path,
                         spectrum_name=spectrum_name, spectrum_idx=spectrum_idx, base_script=None
                     )
-                    
+
                     if human_guided_result["success"]:
                         human_r2 = human_guided_result.get("fit_quality", {}).get("r_squared", 0)
                         self.logger.info(f"   Human-guided fit: R² = {human_r2:.4f}")
-                        
+
                         if human_r2 > best_r2:
                             best_r2 = human_r2
                             best_result = human_guided_result
-                            if spectrum_idx == 0:
+                            if _is_anchor:
                                 state["locked_fitting_config"] = refined_config
                         else:
                             state["locked_fitting_config"] = original_config
                     else:
                         state["locked_fitting_config"] = original_config
-        
+
         # --- Return best available result ---
         if best_result:
             best_result["quality_warning"] = f"R² = {best_r2:.4f} below threshold {self.r2_threshold}"
             best_result["attempted_models"] = [a["model"] for a in all_attempts]
             self.logger.warning(f"⚠️ Proceeding with best available fit (R² = {best_r2:.4f})")
-            
-            if spectrum_idx == 0 and best_result.get("_winning_config"):
+
+            if _is_anchor and best_result.get("_winning_config"):
                 state["locked_fitting_config"] = best_result["_winning_config"]
             
             return best_result
@@ -2091,6 +2569,27 @@ Return JSON with:
         lines.append("=" * 60)
         return "\n".join(lines)
 
+    def _get_config_for_spectrum(self, state: dict, idx: int) -> dict:
+        """Return the fitting config for a given spectrum index.
+
+        If regime_configs is present, return the regime-specific config.
+        Otherwise, return the single locked_fitting_config (backward compatible).
+        """
+        regime_configs = state.get("regime_configs")
+        if regime_configs and idx in regime_configs:
+            return regime_configs[idx]
+        return state.get("locked_fitting_config", {})
+
+    def _get_regime_for_spectrum(self, state: dict, idx: int) -> Optional[str]:
+        """Return the regime name for a given spectrum index, or None."""
+        series_plan = state.get("series_analysis_plan")
+        if not series_plan:
+            return None
+        for regime in series_plan.get("regimes", []):
+            if idx in regime.get("spectrum_indices", []):
+                return regime.get("name", "unnamed")
+        return None
+
     def execute(self, state: dict) -> dict:
         if state.get("error_dict"):
             return state
@@ -2108,11 +2607,31 @@ Return JSON with:
         
         spectrum_paths = state.get("spectrum_paths", [])
         spectrum_stack = state.get("spectrum_stack")
-        
+
+        # Determine regime structure for per-regime execution
+        series_plan = state.get("series_analysis_plan")
+        regime_configs = state.get("regime_configs")
+
+        if series_plan and regime_configs:
+            first_in_regime: set = set()
+            for regime in series_plan.get("regimes", []):
+                indices = sorted(regime.get("spectrum_indices", []))
+                if indices:
+                    first_in_regime.add(indices[0])
+            self.logger.info(f"   Regimes: {len(series_plan.get('regimes', []))}")
+            self.logger.info(
+                f"   First-in-regime spectra (full QC): {sorted(first_in_regime)}"
+            )
+        else:
+            first_in_regime = {0}  # Only spectrum 0 needs full QC
+
         series_results = []
-        base_script = None
-        locked_preprocessing_strategy = None  # Track locked preprocessing strategy
-        
+        base_scripts: Dict[str, str] = {}  # keyed by regime name
+        locked_preprocessing_strategy = None
+        original_locked_config = state.get("locked_fitting_config", {})
+        if original_locked_config:
+            original_locked_config = original_locked_config.copy()
+
         for idx in range(num_spectra):
             if spectrum_stack is not None:
                 curve_data = spectrum_stack[idx]
@@ -2126,12 +2645,25 @@ Return JSON with:
             # Apply preprocessing with locking support for series consistency
             if self.preprocessor is not None:
                 try:
-                    if idx == 0:
-                        # First spectrum: let preprocessor decide strategy, then lock it
+                    if idx == 0 and state.get("first_spectrum_preprocessed"):
+                        # Reuse preprocessing from analyze() — avoid redundant LLM call
+                        curve_data = state.get("curve_data", curve_data)
+                        preprocess_quality = state.get(
+                            "first_spectrum_preprocess_quality", {}
+                        ) or {}
+                        locked_preprocessing_strategy = preprocess_quality.get("strategy")
+                        if locked_preprocessing_strategy:
+                            state["locked_preprocessing_strategy"] = locked_preprocessing_strategy
+                            self.logger.info(
+                                "📝 Preprocessing strategy locked (from planning stage): "
+                                f"{locked_preprocessing_strategy.get('reasoning', 'N/A')[:60]}"
+                            )
+                        else:
+                            self.logger.info("Preprocessed (reused from planning stage)")
+                    elif idx == 0:
                         curve_data, preprocess_quality = self.preprocessor.run_preprocessing(
                             curve_data, state.get("system_info", {})
                         )
-                        # Lock the strategy for subsequent spectra
                         locked_preprocessing_strategy = preprocess_quality.get("strategy")
                         if locked_preprocessing_strategy:
                             state["locked_preprocessing_strategy"] = locked_preprocessing_strategy
@@ -2139,45 +2671,107 @@ Return JSON with:
                         else:
                             self.logger.info(f"Preprocessed (no lockable strategy returned)")
                     else:
-                        # Subsequent spectra: use locked strategy for consistency
                         curve_data, _ = self.preprocessor.run_preprocessing(
-                            curve_data, 
+                            curve_data,
                             state.get("system_info", {}),
                             locked_strategy=locked_preprocessing_strategy
                         )
                     self.logger.info(f"Preprocessed: {spectrum_name}")
                 except Exception as e:
                     self.logger.warning(f"Preprocessing failed for {spectrum_name}: {e}, using raw data")
-            
+
+            # Determine regime and set appropriate config
+            regime_name = self._get_regime_for_spectrum(state, idx) or "default"
+            spectrum_config = self._get_config_for_spectrum(state, idx)
+
+            # Temporarily set the config for this spectrum
+            state["locked_fitting_config"] = spectrum_config
+
             if is_single:
                 self.logger.info(f"Fitting: {spectrum_name}")
+            elif regime_configs:
+                self.logger.info(
+                    f"[{idx + 1}/{num_spectra}] Fitting: {spectrum_name} "
+                    f"(regime: {regime_name})"
+                )
             else:
                 self.logger.info(f"[{idx + 1}/{num_spectra}] Fitting: {spectrum_name}")
-            
-            if idx == 0:
+
+            if idx in first_in_regime:
+                if regime_configs and idx != 0:
+                    self.logger.info(
+                        f"  First in regime '{regime_name}' — full quality control"
+                    )
+
+                # For regime anchors that aren't spectrum 0, temporarily swap
+                # original_plot_bytes and data_statistics so the verification
+                # and script generation steps reference the correct spectrum.
+                _saved_original_plot = None
+                _saved_data_statistics = None
+                if idx != 0 and idx in first_in_regime:
+                    _saved_original_plot = state.get("original_plot_bytes")
+                    _saved_data_statistics = state.get("data_statistics")
+                    try:
+                        anchor_plot = self.plot_fn(
+                            curve_data, state.get("system_info", {})
+                        )
+                        state["original_plot_bytes"] = anchor_plot
+                    except Exception:
+                        pass
+                    state["data_statistics"] = self._compute_statistics(curve_data)
+
                 result = self._fit_with_quality_control(
                     state=state, curve_data=curve_data, data_path=data_path,
                     spectrum_name=spectrum_name, spectrum_idx=idx,
+                    is_regime_anchor=(idx != 0 and idx in first_in_regime),
                 )
-                
+
+                # Restore original state
+                if _saved_original_plot is not None:
+                    state["original_plot_bytes"] = _saved_original_plot
+                if _saved_data_statistics is not None:
+                    state["data_statistics"] = _saved_data_statistics
+
                 if result["success"] and result.get("script"):
-                    base_script = result["script"]
-                    state["base_fitting_script"] = base_script
-                    self.logger.info("📝 Base fitting script locked for series.")
+                    base_scripts[regime_name] = result["script"]
+                    if idx == 0:
+                        state["base_fitting_script"] = result["script"]
+                    self.logger.info(
+                        f"📝 Base fitting script locked for regime '{regime_name}'."
+                    )
+
+                    # If QC changed the config, propagate to all spectra in this regime
+                    updated_config = state.get("locked_fitting_config", spectrum_config)
+                    if regime_configs and updated_config != spectrum_config:
+                        for r_regime in (series_plan or {}).get("regimes", []):
+                            if idx in r_regime.get("spectrum_indices", []):
+                                for other_idx in r_regime["spectrum_indices"]:
+                                    regime_configs[other_idx] = updated_config
+                                break
             else:
+                base_script = base_scripts.get(regime_name)
                 result = self._fit_single_spectrum(
                     state=state, curve_data=curve_data, data_path=data_path,
-                    spectrum_name=spectrum_name, spectrum_idx=idx, base_script=base_script
+                    spectrum_name=spectrum_name, spectrum_idx=idx,
+                    base_script=base_script,
                 )
-            
+
+            # Tag result with regime info
+            if regime_configs:
+                result["regime"] = regime_name
+
             series_results.append(result)
-            
+
             if result["success"]:
                 r2 = result.get("fit_quality", {}).get("r_squared")
                 r2_str = f"R²: {r2:.4f}" if r2 else "R²: N/A"
                 self.logger.info(f"✅ {result.get('model_type', 'Fit')} - {r2_str}")
             else:
                 self.logger.error(f"❌ Failed: {result.get('error', 'Unknown')[:50]}")
+
+        # Restore original locked config
+        if original_locked_config:
+            state["locked_fitting_config"] = original_locked_config
         
         flagged_spectra = []
         if num_spectra > 1:
@@ -2257,6 +2851,7 @@ Return JSON with:
                     "outlier_sigma": self.outlier_sigma,
                 },
                 "locked_config": state.get("locked_fitting_config"),
+                "series_analysis_plan": state.get("series_analysis_plan"),
                 "locked_preprocessing_strategy": state.get("locked_preprocessing_strategy"),
                 "results": serializable_results
             }, f, indent=2, default=str)
@@ -2429,6 +3024,7 @@ class AdaptiveRefitController:
         max_verification_iterations: int = 3,
         preprocessor: Any = None,
         enable_human_feedback: bool = False,
+        conformance_instructions: str = "",
     ):
         self.logger = logger
         self.output_dir = Path(output_dir)
@@ -2454,6 +3050,7 @@ class AdaptiveRefitController:
             enable_human_feedback=False,
             max_verification_iterations=max_verification_iterations,
             preprocessor=preprocessor,
+            conformance_instructions=conformance_instructions,
         )
 
     def _load_spectrum(self, idx, spectrum_paths, spectrum_stack):
@@ -2542,6 +3139,19 @@ class AdaptiveRefitController:
             f"The locked model was: {locked_config.get('physical_model', 'Unknown')}\n"
             f"The locked strategy was: {locked_config.get('fitting_strategy', 'Unknown')}\n\n"
         )
+
+        # Add regime context if available
+        series_plan = state.get("series_analysis_plan")
+        if series_plan:
+            for regime in series_plan.get("regimes", []):
+                if idx in regime.get("spectrum_indices", []):
+                    refit_context += (
+                        f"**Regime context:** This spectrum was assigned to regime "
+                        f"'{regime.get('name', 'unnamed')}' with expected model: "
+                        f"{regime.get('physical_model', 'Unknown')}.\n\n"
+                    )
+                    break
+
         if exp_context:
             refit_context += f"**Experimental context:**\n{exp_context}\n\n"
         if series_context:

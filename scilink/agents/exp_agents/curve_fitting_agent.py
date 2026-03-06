@@ -156,7 +156,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     def __init__(
         self,
         api_key: str | None = None,
-        model_name: str = "gemini-3-pro-preview",
+        model_name: str = "gemini-3.1-pro-preview",
         base_url: str | None = None,
         output_dir: str = "curve_analysis_output",
         # Deprecated parameters
@@ -167,7 +167,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         use_literature: bool = False,
         run_preprocessing: bool = True,
         enable_human_feedback: bool = True,
-        executor_timeout: int = 60,
+        executor_timeout: int = 300,
         max_wait_time: int = 1000,
         # Quality control settings
         r2_threshold: float = 0.95,
@@ -477,10 +477,13 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         
         # Optional preprocessing of first spectrum
         processed_first_spectrum = first_spectrum
+        first_spectrum_preprocess_quality = None
         if self.preprocessor is not None:
             try:
-                processed_first_spectrum, _ = self.preprocessor.run_preprocessing(
-                    first_spectrum, self._handle_system_info(system_info)
+                processed_first_spectrum, first_spectrum_preprocess_quality = (
+                    self.preprocessor.run_preprocessing(
+                        first_spectrum, self._handle_system_info(system_info)
+                    )
                 )
             except Exception as e:
                 self.logger.warning(f"Preprocessing failed: {e}, using raw data")
@@ -509,9 +512,14 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Load skill if provided
         skill_state = {"skill_name": None, "skill_sections": None}
         if skill:
-            parsed = load_skill(skill, domain="curve_fitting")
-            skill_state = {"skill_name": parsed["name"], "skill_sections": parsed}
-            self.logger.info(f"   Skill loaded: {parsed['name']}")
+            try:
+                parsed = load_skill(skill, domain="curve_fitting")
+                skill_state = {"skill_name": parsed["name"], "skill_sections": parsed}
+                self.logger.info(f"   Skill loaded: {parsed['name']}")
+            except FileNotFoundError:
+                self.logger.warning(
+                    f"   Skill '{skill}' not found — proceeding without domain skill"
+                )
 
         # Extract series metadata from system_info if not provided explicitly
         handled_system_info = self._handle_system_info(system_info)
@@ -548,6 +556,8 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "curve_data": processed_first_spectrum,
             "original_plot_bytes": original_plot_bytes,
             "data_statistics": data_statistics,
+            "first_spectrum_preprocessed": first_spectrum_preprocess_quality is not None,
+            "first_spectrum_preprocess_quality": first_spectrum_preprocess_quality,
 
             # Pipeline state
             "analysis_images": [{"label": "First Spectrum", "data": original_plot_bytes}],

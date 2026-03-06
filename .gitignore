@@ -175,4 +175,7 @@ cython_debug/
 .pypirc
 
 # vscode configureation
-.vscode
+.vscode*.tar
+*.tar.gz
+*.err
+*.out

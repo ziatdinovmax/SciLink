@@ -71,8 +71,8 @@ Metadata Options:
     parser.add_argument(
         '--model',
         type=str,
-        default='gemini-3-pro-preview',
-        help='Model name (default: gemini-3-pro-preview)'
+        default='gemini-3.1-pro-preview',
+        help='Model name (default: gemini-3.1-pro-preview)'
     )
     
     parser.add_argument(
@@ -308,7 +308,7 @@ class AnalysisPlayground:
         )
         
         # Read from config
-        model_name = self.config.get('model_name', 'gemini-3-pro-preview')
+        model_name = self.config.get('model_name', 'gemini-3.1-pro-preview')
         base_url = self.config.get('base_url')
         api_key = self.config.get('api_key')
         analysis_mode_str = self.config.get('analysis_mode', 'co-pilot')

@@ -166,7 +166,7 @@ class BOAgent(BaseAgent):
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model_name: str = "gemini-3-pro-preview",
+        model_name: str = "gemini-3.1-pro-preview",
         base_url: Optional[str] = None,
         output_dir: str = ".",
         # Deprecated
@@ -783,6 +783,13 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         is_moo = len(target_cols) > 1
         history = self._load_history()
 
+        is_retry = history and history[-1].get("data_points") == len(df)
+        if is_retry:
+            print(f"  - 🔄 Re-run detected (same {len(df)} data points). Replacing previous step.")
+            history.pop()
+            with open(self.history_file, 'w') as f:
+                json.dump(history, f, indent=2)
+
         # Compute budget context
         budget_ctx = _compute_budget_context(experimental_budget, history)
         self.state["experimental_budget"] = experimental_budget
@@ -830,9 +837,22 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         
         valid_config = self._validate_config(raw_config)
         valid_config["batch_size"] = int(batch_size)
-        
+
         # Store current config in state
         self.state["current_config"] = valid_config
+
+        # Log strategy selection details
+        model_cfg = valid_config.get("model_config", {})
+        acq_cfg = valid_config.get("acquisition_strategy", {})
+        rationale = valid_config.get("rationale", "No rationale provided")
+        print(f"    📋 Strategy config:")
+        print(f"       Kernel: {model_cfg.get('kernel', 'N/A')}")
+        print(f"       Noise: {model_cfg.get('noise', 'N/A')}")
+        print(f"       Acquisition: {acq_cfg.get('type', 'N/A')}")
+        acq_params = acq_cfg.get("params", {})
+        if acq_params:
+            print(f"       Acq params: {acq_params}")
+        print(f"       Rationale: {rationale}")
 
         # 3. Fit Model
         optimizer = get_optimizer(is_moo=is_moo)
@@ -923,11 +943,12 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
 
         # 5. Diagnostics
         step_num = len(history) + 1
+        n_initial = history[0]["data_points"] if history and "data_points" in history[0] else len(df)
         plot_path = f"{output_dir}/step_{step_num}.png"
         if is_moo:
             optimizer.generate_diagnostics(save_path=plot_path)
         else:
-            optimizer.generate_diagnostics(next_x_batch, df[target_cols[0]].values.tolist(), save_path=plot_path)
+            optimizer.generate_diagnostics(next_x_batch, df[target_cols[0]].values.tolist(), save_path=plot_path, n_initial=n_initial)
 
         # 5b. Acquisition Function Plot & Data (SOO only)
         acq_plot_path = None
@@ -972,9 +993,10 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
 
         # 7. Save History
         log_entry = {
-            "step": step_num, 
-            "config": valid_config, 
-            "recommendation_batch": recommendations, 
+            "step": step_num,
+            "data_points": len(df),
+            "config": valid_config,
+            "recommendation_batch": recommendations,
             "inspection": inspection,
             "budget": budget_ctx,
         }
@@ -1004,6 +1026,7 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             "next_parameters": recommendations[0] if batch_size == 1 else recommendations,
             "strategy": valid_config,
             "plot_path": plot_path,
+            "inspection": inspection,
             "budget": budget_ctx,
         }
         if acq_plot_path:

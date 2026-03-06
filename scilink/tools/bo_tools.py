@@ -56,6 +56,28 @@ def build_likelihood(noise_key: str) -> GaussianLikelihood:
     return likelihood
 
 
+def _acq_contour_levels(acq_map: np.ndarray, n_levels: int = 30) -> np.ndarray:
+    """Compute contour levels that focus on the acquisition peaks.
+
+    Near observed points the acquisition value can be extremely low (e.g.,
+    log_ei = -27000), creating dark bands that dominate the colormap.
+    We clip the lower bound aggressively so the colormap highlights where
+    the optimizer actually wants to sample (the bright regions).
+    """
+    vmax = np.percentile(acq_map, 99)
+    # Use the median as the lower bound — this ensures at least half the
+    # landscape gets color variation, regardless of extreme lows
+    vmin = np.median(acq_map)
+    # If median == max (very flat landscape), fall back to wider range
+    if vmin >= vmax:
+        vmin = np.percentile(acq_map, 10)
+    if vmin >= vmax:
+        vmin = acq_map.min()
+    if vmin == vmax:
+        vmax = vmin + 1
+    return np.linspace(vmin, vmax, n_levels)
+
+
 class SingleObjectiveOptimizer:
     def __init__(self, device: str = "cpu"):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
@@ -356,11 +378,11 @@ class SingleObjectiveOptimizer:
                    marker='|', color='black', s=100, zorder=5, label='Observations')
 
         ax.set_xlabel(self.feature_names[0])
-        ax.set_ylabel('Acquisition Value')
+        ax.set_ylabel('Log(EI)' if self.acq_strategy_name == 'log_ei' else 'Acquisition Value')
         ax.set_title(f'Acquisition Function: {self.acq_strategy_name}')
         ax.legend(); ax.grid(True, alpha=0.3)
 
-        plt.tight_layout(); plt.savefig(save_path, dpi=150); plt.close()
+        fig.tight_layout(); fig.savefig(save_path, dpi=150); plt.close(fig)
         return save_path
 
     def _plot_acq_2d(self, anchor: np.ndarray, candidate_x: np.ndarray,
@@ -369,8 +391,9 @@ class SingleObjectiveOptimizer:
         g1, g2, acq_map = self._evaluate_acq_on_grid(d1, d2, anchor, resolution)
 
         fig, ax = plt.subplots(figsize=(10, 8))
-        contour = ax.contourf(g1, g2, acq_map, levels=50, cmap='viridis')
-        fig.colorbar(contour, ax=ax, label='Acquisition Value')
+        levels = _acq_contour_levels(acq_map, 50)
+        contour = ax.contourf(g1, g2, acq_map, levels=levels, cmap='viridis', extend='both')
+        fig.colorbar(contour, ax=ax, label='Log(EI)' if self.acq_strategy_name == 'log_ei' else 'Acquisition Value')
 
         X_np = self.X_train.cpu().numpy()
         ax.scatter(X_np[:, d1], X_np[:, d2], c='white', edgecolors='black',
@@ -385,7 +408,7 @@ class SingleObjectiveOptimizer:
         ax.set_title(f'Acquisition Function: {self.acq_strategy_name}')
         ax.legend(loc='upper right')
 
-        plt.tight_layout(); plt.savefig(save_path, dpi=150); plt.close()
+        fig.tight_layout(); fig.savefig(save_path, dpi=150); plt.close(fig)
         return save_path
 
     def _plot_acq_nd(self, anchor: np.ndarray, candidate_x: np.ndarray,
@@ -418,8 +441,9 @@ class SingleObjectiveOptimizer:
         d1, d2 = top_dims
         g1, g2, acq_map = self._evaluate_acq_on_grid(d1, d2, anchor, resolution)
 
-        contour = ax_2d.contourf(g1, g2, acq_map, levels=50, cmap='viridis')
-        fig.colorbar(contour, ax=ax_2d, label='Acquisition Value', fraction=0.02)
+        levels = _acq_contour_levels(acq_map, 50)
+        contour = ax_2d.contourf(g1, g2, acq_map, levels=levels, cmap='viridis', extend='both')
+        fig.colorbar(contour, ax=ax_2d, label='Log(EI)' if self.acq_strategy_name == 'log_ei' else 'Acquisition Value', fraction=0.02)
 
         X_np = self.X_train.cpu().numpy()
         ax_2d.scatter(X_np[:, d1], X_np[:, d2], c='white', edgecolors='black',
@@ -450,7 +474,7 @@ class SingleObjectiveOptimizer:
             ax.set_title(f'Slice: {self.feature_names[i]}', fontsize=10)
             ax.grid(True, alpha=0.2)
 
-        plt.savefig(save_path, dpi=150, bbox_inches='tight'); plt.close()
+        fig.savefig(save_path, dpi=150, bbox_inches='tight'); plt.close(fig)
         return save_path
 
     def save_acquisition_data(self, candidate_x: np.ndarray, save_path: str,
@@ -527,8 +551,7 @@ class SingleObjectiveOptimizer:
         """Helper: Calculates First-Order Sobol Indices for diagnostics."""
         if self.input_dim == 1: return [self.feature_names[0]], [1.0]
 
-        bounds = torch.stack([torch.zeros(self.input_dim), torch.ones(self.input_dim)]).to(self.device)
-        X_sobol = draw_sobol_samples(bounds=bounds, n=n_samples * 2, q=1).squeeze(1)
+        X_sobol = draw_sobol_samples(bounds=self.bounds, n=n_samples * 2, q=1).squeeze(1)
         A, B = X_sobol[:n_samples], X_sobol[n_samples:]
 
         def predict(X):
@@ -544,36 +567,116 @@ class SingleObjectiveOptimizer:
             indices.append(max(0.0, (numerator / var_Y).item()))
         return self.feature_names, indices
 
-    def generate_diagnostics(self, candidate_x: np.ndarray, history_y: List[float], save_path: str):
-        """Generates 4-Panel Dashboard: Calibration, Trend, Acquisition Slice, Sensitivity."""
+    def generate_diagnostics(self, candidate_x: np.ndarray, history_y: List[float], save_path: str, n_initial: int = 0):
+        """Generates 4-Panel Dashboard: LOO-CV Residuals, Trend, Acquisition Slice, Sensitivity."""
         x_plot = candidate_x[0:1]
 
         y_np = self.y_train.cpu().numpy().flatten()
         fig, axes = plt.subplots(2, 2, figsize=(16, 10))
 
-        # --- 1. Calibration (Top Left) ---
-        ax_cal = axes[0, 0]
-        self.model.eval()
-        with torch.no_grad():
-            posterior = self.model.posterior(self.X_train)
-            pred_mean = posterior.mean.cpu().numpy().flatten()
-            pred_std = posterior.variance.sqrt().cpu().numpy().flatten()
-        ax_cal.errorbar(y_np, pred_mean, yerr=pred_std, fmt='o', alpha=0.5, label='Predictions')
-        min_v, max_v = y_np.min(), y_np.max()
-        buff = (max_v - min_v) * 0.1 if max_v != min_v else 0.1
-        ax_cal.plot([min_v-buff, max_v+buff], [min_v-buff, max_v+buff], 'r--', label='Ideal')
-        ax_cal.set_title("1. Model Accuracy"); ax_cal.set_xlabel("Observed"); ax_cal.set_ylabel("Predicted"); ax_cal.legend()
+        # --- 1. LOO-CV Residuals (Top Left) ---
+        ax_res = axes[0, 0]
+        n_pts = len(y_np)
+        LOO_MAX = 50  # Only run LOO-CV for small datasets
 
-        # --- 2. Trend (Top Right) ---
+        if n_pts <= LOO_MAX:
+            # Leave-one-out cross-validation
+            loo_residuals = np.zeros(n_pts)
+            loo_std = np.zeros(n_pts)
+            X_all = self.X_train.clone()
+            y_all = self.y_train.clone()
+
+            for i in range(n_pts):
+                # Remove point i
+                mask = torch.ones(n_pts, dtype=torch.bool)
+                mask[i] = False
+                X_loo = X_all[mask]
+                y_loo = y_all[mask]
+
+                # Fit a temporary GP on N-1 points
+                try:
+                    from botorch.models import SingleTaskGP
+                    from botorch.fit import fit_gpytorch_mll
+                    from gpytorch.mlls import ExactMarginalLogLikelihood
+
+                    loo_model = SingleTaskGP(X_loo, y_loo)
+                    mll = ExactMarginalLogLikelihood(loo_model.likelihood, loo_model)
+                    fit_gpytorch_mll(mll)
+
+                    loo_model.eval()
+                    with torch.no_grad():
+                        pred = loo_model.posterior(X_all[i:i+1], observation_noise=False)
+                        loo_residuals[i] = y_np[i] - pred.mean.cpu().numpy().flatten()[0]
+                        loo_std[i] = pred.variance.sqrt().cpu().numpy().flatten()[0]
+                except Exception:
+                    loo_residuals[i] = 0
+                    loo_std[i] = 0
+
+            max_resid = np.abs(loo_residuals).max()
+            bar_width = 0.8
+            ax_res.bar(np.arange(n_pts), loo_residuals, width=bar_width,
+                       color='steelblue', alpha=0.7, edgecolor='white')
+            ax_res.axhline(0, color='red', linestyle='--', linewidth=1)
+            # Show prediction uncertainty from LOO — extend band to cover full bar width
+            if loo_std.max() > 0:
+                # Create step-wise band that covers each bar fully
+                x_band = []
+                y_lo = []
+                y_hi = []
+                for i in range(n_pts):
+                    x_band.extend([i - bar_width / 2, i + bar_width / 2])
+                    y_lo.extend([-loo_std[i], -loo_std[i]])
+                    y_hi.extend([loo_std[i], loo_std[i]])
+                ax_res.fill_between(x_band, y_lo, y_hi,
+                                    color='red', alpha=0.1, label='LOO prediction uncertainty (1\u03c3)')
+            y_extent = max(max_resid, loo_std.max()) * 1.3
+            if y_extent == 0:
+                y_extent = 0.1
+            ax_res.set_ylim(-y_extent, y_extent)
+            ax_res.set_title('1. LOO-CV Residuals')
+        else:
+            # Too many points for LOO — show training residuals instead
+            self.model.eval()
+            with torch.no_grad():
+                posterior = self.model.posterior(self.X_train, observation_noise=False)
+                pred_mean = posterior.mean.cpu().numpy().flatten()
+            residuals = y_np - pred_mean
+            max_resid = np.abs(residuals).max() if len(residuals) > 0 else 0
+            ax_res.bar(np.arange(n_pts), residuals, color='steelblue', alpha=0.7, edgecolor='white')
+            ax_res.axhline(0, color='red', linestyle='--', linewidth=1)
+            y_extent = max_resid * 1.5 if max_resid > 0 else 0.1
+            ax_res.set_ylim(-y_extent, y_extent)
+            ax_res.set_title(f'1. Training Residuals (n={n_pts}, LOO skipped)')
+
+        ax_res.set_xlabel('Data point index')
+        ax_res.set_ylabel('Residual (Observed \u2212 Predicted)')
+        if ax_res.get_legend_handles_labels()[1]:
+            ax_res.legend(fontsize=8)
+
+        # --- 2. Data Overview / Optimization Trend (Top Right) ---
         ax_trend = axes[0, 1]
         steps = np.arange(1, len(history_y) + 1)
-        ax_trend.plot(steps, history_y, 'ko-', alpha=0.3)
-        ax_trend.plot(steps, np.maximum.accumulate(history_y), 'g-', linewidth=2, label='Best Found')
-        ax_trend.set_title("2. Optimization Trend")
+        if n_initial > 0 and n_initial >= len(history_y):
+            # No BO-guided points yet — show initial data only
+            ax_trend.plot(steps, history_y, 's', color='gray', alpha=0.5, label='Initial data')
+            ax_trend.set_title("2. Initial Data Overview")
+        elif n_initial > 0 and n_initial < len(history_y):
+            # Mix of initial + BO-guided
+            ax_trend.plot(steps[:n_initial], history_y[:n_initial], 's', color='gray', alpha=0.4, label='Initial data')
+            ax_trend.plot(steps[n_initial:], history_y[n_initial:], 'ko-', alpha=0.5, label='BO-guided')
+            ax_trend.axvline(n_initial + 0.5, color='gray', linestyle=':', linewidth=1, alpha=0.6)
+            ax_trend.plot(steps, np.maximum.accumulate(history_y), 'g-', linewidth=2, label='Best Found')
+            ax_trend.set_title("2. Optimization Trend")
+        else:
+            ax_trend.plot(steps, history_y, 'ko-', alpha=0.3)
+            ax_trend.plot(steps, np.maximum.accumulate(history_y), 'g-', linewidth=2, label='Best Found')
+            ax_trend.set_title("2. Optimization Trend")
+        ax_trend.legend(fontsize=8)
 
         # --- 3. Sensitivity (Bottom Right) ---
         ax_sens = axes[1, 1]
         top_dim_idx = 0
+        sorted_idx = np.arange(self.input_dim)  # default: original order
         try:
             names, scores = self._compute_sensitivity()
             sorted_idx = np.argsort(scores)[::-1]
@@ -620,9 +723,11 @@ class SingleObjectiveOptimizer:
                 g1, g2, acq_map = self._evaluate_acq_on_grid(
                     0, 1, anchor, resolution=50
                 )
-                contour = ax_acq.contourf(g1, g2, acq_map, levels=30,
-                                           cmap='viridis')
-                fig.colorbar(contour, ax=ax_acq, fraction=0.046, pad=0.04)
+                _levels = _acq_contour_levels(acq_map, 30)
+                contour = ax_acq.contourf(g1, g2, acq_map, levels=_levels,
+                                           cmap='viridis', extend='both')
+                _acq_label = 'Log(EI)' if self.acq_strategy_name == 'log_ei' else 'Acq. Value'
+                fig.colorbar(contour, ax=ax_acq, fraction=0.046, pad=0.04, label=_acq_label)
                 ax_acq.scatter(X_np[:, 0], X_np[:, 1], c='white',
                                edgecolors='black', s=30, zorder=5,
                                label='Observations')
@@ -641,9 +746,11 @@ class SingleObjectiveOptimizer:
                 g1, g2, acq_map = self._evaluate_acq_on_grid(
                     top_dim_idx, second_dim_idx, anchor, resolution=50
                 )
-                contour = ax_acq.contourf(g1, g2, acq_map, levels=30,
-                                           cmap='viridis')
-                fig.colorbar(contour, ax=ax_acq, fraction=0.046, pad=0.04)
+                _levels = _acq_contour_levels(acq_map, 30)
+                contour = ax_acq.contourf(g1, g2, acq_map, levels=_levels,
+                                           cmap='viridis', extend='both')
+                _acq_label = 'Log(EI)' if self.acq_strategy_name == 'log_ei' else 'Acq. Value'
+                fig.colorbar(contour, ax=ax_acq, fraction=0.046, pad=0.04, label=_acq_label)
                 ax_acq.scatter(X_np[:, top_dim_idx], X_np[:, second_dim_idx],
                                c='white', edgecolors='black', s=30, zorder=5,
                                label='Observations')
@@ -684,7 +791,7 @@ class SingleObjectiveOptimizer:
         ax_acq.legend()
         ax_acq.grid(True, alpha=0.3)
 
-        plt.tight_layout(); plt.savefig(save_path); plt.close()
+        fig.tight_layout(); fig.savefig(save_path); plt.close(fig)
 
 
 class MultiObjectiveOptimizer:
@@ -878,8 +985,8 @@ class MultiObjectiveOptimizer:
         for i in range(n_plots, len(axes_list)):
             axes_list[i].axis('off')
 
-        plt.suptitle(f"Multi-Objective Diagnostics ({self.output_dim} Objectives)", fontsize=16)
-        plt.tight_layout(); plt.savefig(save_path); plt.close()
+        fig.suptitle(f"Multi-Objective Diagnostics ({self.output_dim} Objectives)", fontsize=16)
+        fig.tight_layout(); fig.savefig(save_path); plt.close(fig)
 
 
 def get_optimizer(is_moo: bool, device: str = "cpu"):

@@ -1,5 +1,6 @@
 import json
 import logging
+import textwrap
 from typing import Dict, Any, Optional
 from datetime import datetime
 
@@ -222,11 +223,19 @@ class IterationFeedbackMixin:
         
         print(f"\n🧠 LLM Decision: Refinement Needed = {is_needed}")
         print(f"Reasoning: {decision.get('reasoning', 'N/A')}")
-        print(f"Targeted Actions ({len(targets)} found):")
+        print()
+        print("-" * 80)
+        print(f"\U0001f3af Targeted Actions ({len(targets)} found)")
+        print("-" * 80)
         for i, t in enumerate(targets, 1):
+            t_type = t.get('type', 'N/A')
             value_str = str(t.get('value', 'N/A'))
-            print(f"  {i}. Type: {t.get('type'):<8} | Value: {value_str:<15} | Description: {t.get('description', 'N/A')}")
-        
+            t_desc = t.get('description', 'N/A')
+
+            print(f"\n  [{i}] {t_type}  (value: {value_str})")
+            for line in textwrap.wrap(t_desc, width=70):
+                print(f"      {line}")
+
         print("-" * 80)
         
         # Prompt for feedback

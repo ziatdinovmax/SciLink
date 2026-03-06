@@ -18,7 +18,7 @@ from ._deprecation import normalize_params
 
 class StructureValidatorAgent:
     def __init__(self, api_key: str = None, 
-                 model_name: str = "gemini-3-pro-preview", 
+                 model_name: str = "gemini-3.1-pro-preview", 
                  base_url: Optional[str] = None,
                  # Legacy params
                  local_model: str = None,
@@ -270,7 +270,7 @@ class IncarValidatorAgent:
     """Agent that validates and suggests improvements to VASP INCAR files using literature."""
 
     def __init__(self, api_key: str = None, 
-                 model_name: str = "gemini-3-pro-preview", 
+                 model_name: str = "gemini-3.1-pro-preview", 
                  base_url: Optional[str] = None,
                  futurehouse_api_key: str = None, 
                  max_wait_time: int = 500,

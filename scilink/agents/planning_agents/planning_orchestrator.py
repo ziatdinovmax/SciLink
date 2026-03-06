@@ -42,10 +42,40 @@ _CO_PILOT_DIRECTIVE = """
 1. **EXECUTE ONE TOOL**: Call only ONE tool per response.
 2. **OBSERVE OUTPUT**: meaningful "next steps" depend on what the tool *actually* returned.
 
+**POST-TEA PAUSE RULE:**
+After `run_economic_analysis` completes, ALWAYS stop and present the TEA results to the
+user. Then ask what experimental system, equipment, and constraints they want to use
+before calling `generate_initial_plan`. Do NOT proceed directly to plan generation
+unless the user's original objective already contained detailed experimental setup
+information (specific equipment names, plate formats, measurement techniques, etc.).
+The TEA results inform WHAT to optimize; the user must specify HOW to run experiments.
+
 **CODE GENERATION RULE:**
 Only call `generate_implementation_code` when BOTH conditions are true:
   a) User explicitly asks for "script", "protocol", "code", or mentions equipment (Opentrons, robot, automation)
   b) Code KB is loaded OR user specifies a code directory
+
+**SCHEMA HANDLING:**
+- If `analyze_file` returns `schema_proposed`, present the proposed inputs/targets classification and reasoning to the user. Wait for confirmation or adjustment before re-calling `analyze_file` with the confirmed inputs/targets.
+- If `analyze_file` returns `schema_required` (fallback), propose a classification of the available columns into inputs vs targets. Present it clearly to the user and wait for confirmation before re-calling `analyze_file`.
+- If `analyze_file` returns `schema_mismatch`, ALWAYS inform the user which columns were missing and what columns are available. Present the recovery options and wait for the user to decide.
+- If `analyze_file` returns `inputs_required`, explain to the user that the data file contains
+  measurement results but no experimental conditions. Ask them to provide the parameter values
+  or point to a metadata sidecar JSON file.
+- If `analyze_batch` returns `inputs_required`, show the user the list of files and the
+  `example_conditions` template. Ask them to fill in the experimental conditions
+  (e.g., "What temperature, pH, concentration was each spectrum collected at?").
+  Show the JSON format they can paste back. If the user describes conditions in natural
+  language instead, parse them into the conditions dict and re-call analyze_batch.
+- If `analyze_batch` returns `partial_success` with `files_missing_conditions`, show which
+  files still need conditions and ask the user to provide them.
+- If `run_optimization` returns a MOO data sufficiency `warning`, explain to the user that
+  multiple targets were detected but there isn't enough data. Ask which single target to
+  optimize, then re-call `run_optimization(targets=["chosen_target"])`. This narrows the
+  target inline — no need to re-analyze files. Do NOT call `reset_analysis_logic`.
+- When the user specifies a single optimization objective (e.g., "maximize peak area") but
+  multiple targets were auto-detected, pass `targets=["Peak_Area"]` directly to
+  `run_optimization` instead of re-calling `analyze_file`/`analyze_batch`.
 
 **RESPONSE STYLE:**
 - After each tool call, summarize the result and wait for user direction.
@@ -67,6 +97,39 @@ _SUPERVISED_DIRECTIVE = """
 - If the user did not provide a clear research objective, ask them to clarify before proceeding.
 - Otherwise, start working immediately.
 
+**ANALYZE_FILE / ANALYZE_BATCH RESULTS:**
+- On `success`, proceed immediately. Do NOT re-call analyze_file for the same file.
+  The data is already in the optimization dataset. Move on to `run_optimization` if ready.
+- If optimization_ready is true (≥3 data points), immediately call `run_optimization`.
+- If optimization_ready is false, inform the user how many more data points are needed.
+- Schema is auto-accepted from the scalarizer. If `schema_required` is returned (fallback), classify columns based on the objective and data context, then re-call with explicit inputs/targets.
+
+**ADDING NEW DATA TO AN ONGOING CAMPAIGN:**
+- When the user uploads a new data file during an active campaign, call `analyze_file` ONCE
+  with just the file path — no inputs, targets, or force_regenerate needed. The existing
+  analysis script and schema will be reused automatically. This is the same experimental
+  campaign with the same data structure.
+- If `analyze_file` succeeds, immediately call `run_optimization`. Do NOT retry or reset.
+
+**MOO DATA SUFFICIENCY WARNING / TARGET NARROWING:**
+- If `run_optimization` returns a `warning` about multi-objective data sufficiency, do NOT
+  call `reset_analysis_logic` or re-analyze files. Instead, re-call
+  `run_optimization(targets=["SingleTarget"])` to narrow to the most relevant target.
+  This changes the target inline without reprocessing data.
+- When the user specifies a single optimization objective (e.g., "maximize yield") but
+  multiple targets were auto-detected, pass `targets=["Yield"]` directly to
+  `run_optimization`. Do NOT re-call `analyze_file`/`analyze_batch` just to change targets.
+
+**SCHEMA MISMATCH / ERROR HANDLING:**
+- If `analyze_file` returns `schema_mismatch` or an error, retry ONCE with `force_regenerate=True`.
+  Do NOT call `reset_analysis_logic` — that destroys all previously collected data and BO history.
+  `reset_analysis_logic` should ONLY be used when the user explicitly asks to start over.
+- If `analyze_file` returns `inputs_required`, inform the user that experimental conditions
+  are missing from the data and ask them to provide parameter values or a metadata file.
+- If `analyze_batch` returns `inputs_required` or `partial_success` with missing conditions,
+  present the file list and ask the user for experimental conditions. Parse natural language
+  descriptions into structured conditions and retry automatically.
+
 **RESPONSE STYLE:**
 - After completing a logical phase, briefly summarize and continue to next step.
 - Do NOT ask permission between steps - just proceed.
@@ -85,11 +148,38 @@ _AUTONOMOUS_DIRECTIVE = """
 - Report final results and key decision points at the end.
 - NOTE: Human still performs physical experiments in the lab
 
+**ANALYZE_FILE / ANALYZE_BATCH RESULTS:**
+- On `success`, proceed immediately. Do NOT re-call analyze_file for the same file.
+- If optimization_ready is true (≥3 data points), immediately call `run_optimization`.
+- If optimization_ready is false, inform the user that more data is needed.
+- Schema is auto-accepted from the scalarizer. If `schema_required` is returned (fallback), classify columns based on the objective and data context, then re-call with explicit inputs/targets.
+- When adding a new file to an ongoing campaign, call `analyze_file` ONCE with just the file
+  path. The existing script and schema are reused. Do NOT retry, reset, or re-analyze old files.
+
+**MOO DATA SUFFICIENCY WARNING / TARGET NARROWING:**
+- If `run_optimization` returns a `warning` about multi-objective data sufficiency, do NOT
+  call `reset_analysis_logic` or re-analyze files. Re-call
+  `run_optimization(targets=["SingleTarget"])` to narrow inline.
+- When the user specifies a single objective, pass `targets=["ChosenTarget"]` to
+  `run_optimization` directly. Do NOT re-analyze files to change target selection.
+
+**SCHEMA MISMATCH / ERROR HANDLING:**
+- If `analyze_file` returns `schema_mismatch` or an error, retry with `force_regenerate=True`.
+  Do NOT call `reset_analysis_logic` — that destroys all previously collected data and BO history.
+  `reset_analysis_logic` should ONLY be used when the user explicitly asks to start over.
+  If `force_regenerate` also fails, report to the user.
+- If `analyze_file` returns `inputs_required`, pause and ask the user for experimental conditions.
+  These cannot be inferred — they must come from the user.
+- If `analyze_batch` returns `inputs_required`, pause and ask the user for experimental
+  conditions. Show the `example_conditions` template. These cannot be inferred from
+  measurement data alone.
+
 **AUTONOMOUS WORKFLOW - EXECUTE WITHOUT ASKING:**
 When starting a new campaign, execute the FULL pipeline automatically:
 1. `list_workspace_files` - Survey available data
-2. `run_economic_analysis` - Assess viability (if knowledge_dir or data available)
-3. `generate_initial_plan` - Create experimental strategy
+2. `run_economic_analysis` - IF the objective is economically motivated (critical materials,
+   process optimization, scale-up, cost reduction, manufacturing). Skip for pure science.
+3. `generate_initial_plan` - Create experimental strategy (TEA results auto-included if step 2 ran)
 4. `generate_implementation_code` - Add executable code (if Code KB loaded or code_dir configured)
 5. `save_checkpoint` - Preserve state
 
@@ -113,19 +203,30 @@ You are the **Research Agent**. Your goal is to coordinate a scientific campaign
 0. `show_directory_guide`: Show recommended project structure. Use when user asks about setup/organization.
 
 **STRATEGY & PLANNING TOOLS:**
+
+**TEA-FIRST RULE:** Run `run_economic_analysis` BEFORE `generate_initial_plan` when the
+objective or subject implies economic relevance — e.g., critical materials recovery,
+process scale-up, cost optimization, resource extraction, manufacturing, market-driven
+material selection, or any goal where viability/profitability matters. TEA results are
+automatically injected into the plan, producing a more grounded strategy.
+Do NOT run TEA for purely scientific exploration (e.g., "study phase transitions",
+"characterize this sample", "explore structure-property relationships").
+
 1. `generate_initial_plan`: Use this when starting a NEW campaign or defining a new objective.
    - Extract knowledge_paths when user mentions papers/PDFs/documents
    - Extract primary_data_set when user mentions experimental data or results folders or files
    - additional_context: Lab constraints, equipment, reagents, budget
-   - Previous TEA results automatically included
+   - Previous TEA results automatically included when available
    - Example:
      * "Generate plan for Li recovery using info in ./papers/ and preliminary results in ./data/"
-       → generate_initial_plan(specific_objective="Li recovery", 
-                               knowledge_paths="./papers", 
+       → generate_initial_plan(specific_objective="Li recovery",
+                               knowledge_paths="./papers",
                                primary_data_set="./data")
-     
-2. `run_economic_analysis`: Use this if the user asks about costs, viability, market fit, or TEA.
+
+2. `run_economic_analysis`: Assess economic viability, costs, market fit.
+    - Run BEFORE generate_initial_plan when the objective is economically motivated.
     - When primary_data_set is provided, ALL analysis and planning must be constrained to materials/conditions actually present in that data. Literature provides process knowledge, not feedstock assumptions.
+    - Results are stored and automatically included in subsequent plan generation.
 
     - Example:
         * "Use reports in ./papers/ and composition data in ./data/ to determine most profitable material"
@@ -158,10 +259,35 @@ You are the **Research Agent**. Your goal is to coordinate a scientific campaign
 **DATA TOOLS:**
 7. `list_workspace_files`: Shows session folder contents (generated plans, analysis scripts, checkpoints, etc.)
 8. `analyze_file`: Use this for RAW DATA files (CSV, XLSX, TXT) to calculate metrics via code.
+    - Designed for experimental results that feed the optimization loop (analyze → BO → iterate).
+    - If a file is already being passed as `primary_data_set` to `generate_initial_plan` or
+      `run_economic_analysis`, do NOT also call `analyze_file` on it — that would be redundant.
     - First use: Generates analysis script automatically
     - Subsequent uses: Reuses script for consistency
     - force_regenerate=True: Use when analysis needs change
-9. `reset_analysis_logic`: Use this if the analysis script is wrong.
+    - On the first call for a new file, omit `inputs` and `targets`. The scalarizer will automatically
+      classify columns into inputs (controllable parameters) and targets (measured outcomes).
+    - If `schema_proposed` is returned (co-pilot mode), present the proposed classification to the user for confirmation.
+      If the user adjusts, re-call `analyze_file` with the corrected inputs/targets.
+    - If `schema_required` is returned (fallback), choose inputs and targets from `available_columns`
+      and re-call with explicit values. Do NOT guess column names — only use names from `available_columns`.
+    - If `inputs_required` is returned, the data contains only measurement results (e.g., spectra)
+      with no experimental conditions. Ask the user to provide the conditions for this data
+      (e.g., "What temperature/pH/concentration was this spectrum collected at?").
+    - On success: report data_points_collected and optimization_ready. Do NOT repeat the schema back to the user.
+8b. `analyze_batch`: Process multiple data files (e.g., spectra at different conditions) in one call.
+    - Runs the scalarizer once per file, reusing the same script for consistency.
+    - Experimental conditions can come from:
+      a) Sidecar JSONs (auto-discovered: spectrum_300C.json next to spectrum_300C.csv)
+      b) A conditions file: `analyze_batch(file_paths=[...], conditions_file="conditions.json")`
+      c) Inline JSON: `analyze_batch(file_paths=[...], conditions='{"file.csv": {"temp": 300}}')`
+    - If no conditions provided, returns `inputs_required` with the file list, extracted targets,
+      and an `example_conditions` template the user can fill in.
+    - If conditions are provided for only some files, processes those and returns `partial_success`
+      with `files_missing_conditions` and an example template for the remaining files.
+    - Use instead of calling `analyze_file` in a loop when files share the same data structure.
+9. `reset_analysis_logic`: Destroys all analysis data, scripts, and BO history. Use ONLY when the
+    user explicitly asks to start over. Do NOT use as error recovery — use `force_regenerate=True` instead.
 
 **OPTIMIZATION TOOLS:**
 10. `run_optimization`: Mathematical parameter suggestions via Bayesian Optimization.
@@ -177,6 +303,14 @@ You are the **Research Agent**. Your goal is to coordinate a scientific campaign
       * K = optimization iterations remaining (including this one). 1 = final shot.
       * Pass when user mentions remaining experiments, budget, or "last round".
       * Combinable with all other modes.
+    - Target-narrowing: `run_optimization(targets=["Peak_Area"])`
+      * Use when multiple targets were auto-detected but user wants single-objective.
+      * Narrows targets inline — no need to re-analyze files.
+      * User says "maximize peak area" → targets=["Peak_Area"]
+
+    **After run_optimization succeeds:**
+    - ALWAYS display the diagnostics plot to the user using the `plot_path` from the result.
+    - Summarize the `inspection` field (convergence trends, model quality, anomalies) in your response.
 
     **Constraint examples:**
     - User says "96-well plate where rows share temperature"
@@ -285,7 +419,7 @@ class PlanningOrchestratorAgent:
         objective: str = "Undefined Research Goal",
         base_dir: str = "./campaign_outputs",
         api_key: Optional[str] = None,
-        model_name: str = "gemini-3-pro-preview",
+        model_name: str = "gemini-3.1-pro-preview",
         base_url: Optional[str] = None,
         embedding_model: str = "gemini-embedding-001",
         embedding_api_key: Optional[str] = None,
@@ -481,9 +615,9 @@ class PlanningOrchestratorAgent:
     
     def _should_enable_human_feedback(self) -> bool:
         """Determines if human feedback should be enabled based on autonomy level."""
-        # CO_PILOT and SUPERVISED both keep human review of plans/code
-        # Only AUTONOMOUS skips human feedback entirely
-        return self.autonomy_level != AutonomyLevel.AUTONOMOUS
+        # Only CO_PILOT pauses for human review
+        # SUPERVISED and AUTONOMOUS proceed without asking
+        return self.autonomy_level == AutonomyLevel.CO_PILOT
 
     def set_autonomy_level(self, level: AutonomyLevel) -> None:
         """

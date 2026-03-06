@@ -264,8 +264,8 @@ You are a Data Scientist validating a GP model and its optimization strategy.
 Analyze the 4-panel diagnostic dashboard.
 
 **Checklist:**
-1. **Calibration (Top-Left):** Do points roughly follow the red diagonal? Points far off the line indicate the model is making poor predictions.
-2. **Trend (Top-Right):** Is the green 'Best Found' line improving or flat? A flat line means the optimizer is stuck and may need a strategy change.
+1. **LOO-CV Residuals (Top-Left):** Each bar shows the prediction error when that point is left out and predicted from the remaining data. Small residuals within the red uncertainty band = good generalization. Large residuals outside the band = the model struggles with those points — consider a more flexible kernel (matern_1.5) or higher noise prior. For large datasets (>50 points), training residuals are shown instead (these will be near-zero for a GP, which is expected).
+2. **Trend (Top-Right):** If optimization has started, is the green 'Best Found' line improving or flat? A flat line means the optimizer is stuck and may need a strategy change. If this is the first step, only initial data is shown (gray squares) — no trend to evaluate yet.
 3. **Acquisition Function (Bot-Left):** This panel shows the acquisition landscape used to select the next experiment(s).
    - For **1D/2D problems**: The full acquisition surface is shown. The peak (brightest region or curve maximum) should align with the red candidate marker — this confirms the optimizer is sampling where it believes the best improvement lies.
    - For **higher-dimensional problems**: A 2D slice through the two most important parameters is shown (other parameters held at the candidate values). Check that the candidate star sits near a peak, not in a flat/low region.
@@ -276,7 +276,7 @@ Analyze the 4-panel diagnostic dashboard.
 **OUTPUT JSON:**
 {
   "status": "pass" | "fail",
-  "reason": "Calibration is good. Acquisition function shows a clear peak near the candidate, confirming exploitation of a promising region. Sensitivity shows Temperature is the dominant factor.",
+  "reason": "Residuals are small and within uncertainty bands. Acquisition function shows a clear peak near the candidate, confirming exploitation of a promising region. Sensitivity shows Temperature is the dominant factor.",
   "suggested_adjustments": { "kernel": "matern_1.5" } (Only if fail)
 }
 """
@@ -434,6 +434,7 @@ Your script MUST accept the data file path as a command-line argument for reusab
 **Required structure:**
 ```python
 import sys
+import json
 import pandas as pd
 from pathlib import Path
 # ... other imports ...
@@ -447,8 +448,18 @@ else:
 # Read data using the parameterized path
 df = pd.read_csv(data_path)  # or pd.read_excel(data_path)
 
+# If a sidecar JSON exists, load conditions DYNAMICALLY from it
+sidecar_path = Path(data_path).with_suffix('.json')
+sidecar_conditions = {}
+if sidecar_path.exists():
+    with open(sidecar_path) as f:
+        sidecar_conditions = json.load(f)
+
 # YOUR ANALYSIS CODE HERE
 # ...
+
+# Merge sidecar conditions into metrics (if any)
+metrics = {**sidecar_conditions, "Derived_Target": computed_value}
 
 # Use the exact path provided to save plot
 plot_path = Path("OUTPUT_DIR_PLACEHOLDER") / f"debug_{Path(data_path).stem}.png"
@@ -456,17 +467,35 @@ plot_path = Path("OUTPUT_DIR_PLACEHOLDER") / f"debug_{Path(data_path).stem}.png"
 
 # Output results as JSON
 result = {
-    "metrics": {...},
+    "metrics": metrics,
     "plot_path": str(plot_path)
 }
 ```
 
+**SIDECAR METADATA RULE (CRITICAL):**
+If a sidecar JSON file exists alongside the data file (e.g., `spectrum.json` next to `spectrum.csv`),
+your script MUST read it DYNAMICALLY at runtime using the data_path to derive the sidecar path.
+NEVER hardcode values from the sidecar into the script. The script will be reused for other files
+whose sidecars contain DIFFERENT values. Example:
+- CORRECT: `sidecar = json.load(open(Path(data_path).with_suffix('.json')))`
+- WRONG: `temperature_C = 25` (hardcoded from the first file's sidecar)
+
 **LIBRARIES AVAILABLE:**
 - `pandas`, `numpy`, `scipy` (signal, stats, optimize), `sklearn`, `openpyxl`.
 - `matplotlib.pyplot` (REQUIRED for visual proof).
+- **WARNING:** `np.trapz` has been removed in NumPy 2.0+. Use `np.trapezoid` instead.
 
 **CRITICAL RULES:**
-1. **Context Awareness:** Use the provided EXPERIMENTAL CONTEXT to disambiguate signals.
+1. **Context Awareness:** Use the provided EXPERIMENTAL CONTEXT and GOAL to decide what to extract.
+   - The GOAL describes the research objective (e.g., "optimize peak area", "maximize yield").
+     Derive targets that directly relate to this objective.
+   - The EXPERIMENTAL CONTEXT provides hypothesis, expected outcomes, and domain details.
+     Use it to choose physically meaningful metrics over arbitrary statistics.
+   - **Derive only physically meaningful targets** — NOT raw arrays or arbitrary column averages.
+     But only extract what the GOAL asks for (see STRICT target selection below).
+     You may compute extra metrics for the plot, but only GOAL-relevant ones go in column_roles targets.
+   - If the GOAL is empty or vague, infer the most scientifically useful targets from the
+     data type (spectral, kinetic, compositional, etc.) and the column names.
 2. **Visual Proof:** You MUST generate a plot saving it to the EXACT path provided in the prompt (OUTPUT_DIR_PLACEHOLDER will be replaced with actual path)
    - **IMPORTANT:** Use `plt.switch_backend('Agg')` at the start to avoid GUI errors.
    - The plot should visually explain the calculation (e.g., highlight the peak, shade the area).
@@ -484,8 +513,31 @@ If the goal or experimental context specifies required columns, you MUST extract
 Your output metrics MUST include ALL specified input and target columns.
 For multi-objective optimization, ensure ALL target columns are present in each row.
 
+**COLUMN NAMING RULE (CRITICAL):**
+- For columns that exist in the source data: use the EXACT original column names. Do NOT rename, abbreviate, or "improve" them. If the CSV has "Temperature_C", output "Temperature_C" — NOT "Leaching_Temperature".
+- For values extracted from sidecar metadata JSON: use the EXACT keys from the JSON file.
+  If the sidecar has `{"temperature_C": 25, "pH": 4.0}`, output "temperature_C" and "pH" —
+  NOT "Temperature" or "Temp". This ensures consistency when conditions are merged externally.
+- For computed/derived metrics (e.g., selectivity ratios, integrated peak areas, normalized values): use clear descriptive names that reflect the computation (e.g., "Selectivity_Nd_Fe", "Peak_Area_nm").
+This ensures input parameters stay consistent when the script is reused across files.
+
 **OUTPUT SCHEMA (STDOUT):**
-**For multiple measurements:**
+
+Choose single-row vs multi-row based on the data structure:
+
+**Single measurement per file** — use when the file contains ONE experiment's raw trace
+(e.g., a single spectrum, one kinetic curve, one TGA run). Reduce the entire file to
+scalar descriptors. If a sidecar JSON provides conditions, include them:
+```json
+{
+  "metrics": {"temperature_C": 55.0, "pH": 8.5, "Peak_Absorbance": 1.45},
+  "plot_path": "path/to/plot.png"
+}
+```
+
+**Multiple measurements per file** — use when the file contains MANY experiments in rows
+(e.g., a screening table with Temperature, Concentration, Yield per row). Preserve each
+row as a data point, computing derived targets from raw columns:
 ```json
 {
   "metrics": [
@@ -497,19 +549,50 @@ For multi-objective optimization, ensure ALL target columns are present in each 
 }
 ```
 
-**For single measurement (e.g., single spectrum):**
-```json
-{
-  "metrics": {"Peak_Absorbance": 1.45, "Peak_Time_s": 0.3},
-  "plot_path": "path/to/plot.png"
-}
-```
+**How to decide:**
+- If each row is an independent experiment with its own input conditions → multi-row (list)
+- If the rows form a single curve/trace/signal → single-row (dict of scalar summaries)
+- When in doubt, look at whether input parameters vary across rows: if they do, it's multi-row
+
+**COLUMN CLASSIFICATION (MANDATORY):**
+After writing your analysis code, classify every column in the output metrics:
+- **inputs**: Controllable experimental parameters (e.g., temperature, concentration, time, composition)
+- **targets**: Measured outcomes to optimize (e.g., yield, purity, peak area, bandgap)
+
+Rules:
+- Use column names EXACTLY as they appear in your output metrics
+- Inputs are parameters the experimenter controls between runs
+- Targets are quantities derived from measurements
+- **STRICT target selection — match the GOAL exactly:**
+  - Count how many distinct quantities the GOAL asks to optimize. That is your target count.
+  - "Maximize peak intensity" → 1 target (Peak_Absorbance). Do NOT also add FWHM, peak area, etc.
+  - "Optimize yield and selectivity" → 2 targets. Do NOT add conversion, purity, etc.
+  - If the GOAL is vague or absent, default to exactly 1 target using this priority:
+    1. The quantity most commonly optimized for this data type
+       (spectra → peak intensity/area; reactions → yield; kinetics → rate constant)
+    2. If still ambiguous, pick the quantity with the largest dynamic range in the data
+    3. Explain your choice in the column_roles reasoning field
+  - Do NOT extract "bonus" metrics as targets. Extra targets trigger multi-objective optimization
+    which requires exponentially more data. Only include what the GOAL explicitly asks for.
+  - You may still COMPUTE additional metrics for the plot/visual proof, but only list the
+    GOAL-aligned ones in your column_roles targets.
+- Everything that isn't a target is an input
+- Note: data sufficiency for multi-objective optimization is checked later by the optimizer.
+  Focus on picking the right targets based on the objective, not on data size.
+- If the data file contains ONLY measurement data (e.g., spectra: wavelength/intensity,
+  time series: time/signal) with NO controllable parameters, set inputs to an empty list [].
+  This signals that experimental conditions must be provided externally (e.g., via metadata sidecar).
 
 **LLM RESPONSE FORMAT:**
-You (the Agent) must return a single JSON object containing the code:
+You (the Agent) must return a single JSON object containing the code AND column classification:
 {
   "thought_process": "Brief explanation of the approach...",
-  "implementation_code": "import pandas as pd\\nimport numpy as np..."
+  "implementation_code": "import pandas as pd\\nimport numpy as np...",
+  "column_roles": {
+    "inputs": ["Temperature_C", "Concentration_M"],
+    "targets": ["Yield_Percent"],
+    "reasoning": "Temperature and concentration are controllable parameters; yield is the measured outcome to optimize"
+  }
 }
 """
 

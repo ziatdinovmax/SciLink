@@ -13,7 +13,7 @@ def synthesize_knowledge(
     focus: str,
     *,
     model: Any = None,
-    model_name: str = "gemini-3-pro-preview",
+    model_name: str = "gemini-3.1-pro-preview",
     api_key: Optional[str] = None,
     knowledge_id: Optional[str] = None,
 ) -> Dict[str, Any]:

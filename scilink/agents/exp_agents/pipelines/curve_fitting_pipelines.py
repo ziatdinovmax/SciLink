@@ -21,6 +21,7 @@ from typing import Callable, List, Any
 from ..controllers.curve_fitting_controllers import (
     # Original controllers
     AnalyzeDataController,
+    SeriesScoutController,
     LiteratureSearchController,
     GenerateCurveFittingReportController,
     # Unified controllers for series support
@@ -40,6 +41,7 @@ from ..instruct import (
     FITTING_SCRIPT_CORRECTION_INSTRUCTIONS,
     FIT_QUALITY_ASSESSMENT_INSTRUCTIONS,
     FITTING_INTERPRETATION_INSTRUCTIONS,
+    PLAN_CONFORMANCE_CHECK_INSTRUCTIONS,
 )
 
 
@@ -133,6 +135,14 @@ def create_unified_curve_fitting_pipeline(
     # Step 1: Analyze first spectrum data (compute stats, initial plot)
     pipeline.append(AnalyzeDataController(logger, plot_fn))
 
+    # Step 1.5: Scout representative spectra for series planning
+    pipeline.append(
+        SeriesScoutController(
+            logger=logger,
+            plot_fn=plot_fn,
+        )
+    )
+
     # Step 2: Human feedback refinement on fitting approach
     pipeline.append(
         HumanFeedbackRefinementController(
@@ -176,7 +186,8 @@ def create_unified_curve_fitting_pipeline(
             enable_human_feedback=enable_human_feedback,
             outlier_sigma=outlier_sigma,
             max_verification_iterations=max_verification_iterations,
-            preprocessor=preprocessor
+            preprocessor=preprocessor,
+            conformance_instructions=PLAN_CONFORMANCE_CHECK_INSTRUCTIONS,
         )
     )
 
@@ -199,6 +210,7 @@ def create_unified_curve_fitting_pipeline(
             max_verification_iterations=max_verification_iterations,
             preprocessor=preprocessor,
             enable_human_feedback=enable_human_feedback,
+            conformance_instructions=PLAN_CONFORMANCE_CHECK_INSTRUCTIONS,
         )
     )
 

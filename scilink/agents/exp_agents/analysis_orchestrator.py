@@ -103,6 +103,8 @@ _SUPERVISED_DIRECTIVE = """
 - After examining data, recommend an analysis approach and proceed if logical.
 - Briefly summarize progress but don't wait for response on obvious next steps.
 - Only pause to report errors or request human input on ambiguous decisions.
+- Exception: after loading metadata, always present the experimental context
+  (technique, sample, conditions) before proceeding — the user needs this.
 """
 
 _AUTONOMOUS_DIRECTIVE = """
@@ -145,8 +147,12 @@ You are the **Analysis Agent**. Your goal is to coordinate experimental data ana
 2. `convert_metadata`: Convert natural language description to structured JSON metadata.
    - Input: text file path OR direct text string
 
-3. `load_metadata`: Load existing JSON metadata file.
-   - Input: path to .json file OR directory path (auto-finds metadata.json)
+3. `load_metadata`: Load experiment metadata from a JSON file or directory.
+   - Input: path to .json file OR directory path (auto-finds metadata.json,
+     or synthesizes from per-file sidecar JSONs if no global file exists)
+   - REQUIRED: After loading, present the experimental context to the user
+     (this is not redundancy — the user needs this to make informed decisions):
+     technique, sample/material, key instrument parameters and conditions.
 
 **AGENT SELECTION (YOU DECIDE):**
 4. `select_agent`: Set the analysis agent. YOU decide based on data type and metadata.
@@ -212,7 +218,7 @@ examine_data returns data_type:
 
 **Standard Workflow:**
 1. `examine_data` → check data_type
-2. `load_metadata` (can pass directory path)
+2. `load_metadata` (can pass directory path) or `convert_metadata`
 3. Decide agent (ask user if disambiguation_needed=true)
 4. `select_agent`
 5. `run_analysis`
@@ -314,7 +320,7 @@ class AnalysisOrchestratorAgent:
         self,
         base_dir: str = "./analysis_session",
         api_key: Optional[str] = None,
-        model_name: str = "gemini-3-pro-preview",
+        model_name: str = "gemini-3.1-pro-preview",
         base_url: Optional[str] = None,
         embedding_model: str = "gemini-embedding-001",
         embedding_api_key: Optional[str] = None,

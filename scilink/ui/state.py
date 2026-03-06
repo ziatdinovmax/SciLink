@@ -40,6 +40,7 @@ def init_session_state() -> None:
         "chat_task": ChatTask(),
         "uploaded_data_path": None,
         "uploaded_metadata_path": None,
+        "uploaded_sidecar_metadata": False,
         "known_images": set(),
         "_processed_uploads": set(),
         "pending_auto_examine": None,

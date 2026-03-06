@@ -86,7 +86,7 @@ class PlanningAgent(BaseAgent):
         local_model: DEPRECATED. Use 'base_url' instead.
     """
     def __init__(self, api_key: str = None,
-                 model_name: str = "gemini-3-pro-preview",
+                 model_name: str = "gemini-3.1-pro-preview",
                  base_url: Optional[str] = None,
                  embedding_model: str = "gemini-embedding-001",
                  embedding_api_key: Optional[str] = None,

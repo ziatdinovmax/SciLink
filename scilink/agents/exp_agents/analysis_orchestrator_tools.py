@@ -189,10 +189,19 @@ def _llm_pick_series_variable(
         "Your task is to decide whether any of these fields is the "
         "**independent control variable** — the physical or experimental "
         "quantity the experimenter intentionally varied across measurements "
-        "(e.g. temperature, concentration, voltage, pressure, dose). "
+        "(e.g. temperature, concentration, voltage, pressure, dose, time). "
+        "For in-situ, time-resolved, or kinetic experiments, elapsed time "
+        "or total time IS the control variable — do not dismiss it as mere "
+        "acquisition metadata. "
         "Instrument and acquisition parameters that happen to differ "
         "(e.g. laser_power, integration_time, slit_width, probe_current) "
-        "are NOT control variables.\n\n"
+        "are NOT control variables. Note: 'integration_time' (detector "
+        "exposure per scan) is an acquisition setting, but 'total time' or "
+        "'elapsed time' (cumulative experiment duration) is typically a "
+        "real control variable.\n\n"
+        "If multiple candidates exist, prefer the one that represents the "
+        "primary experimental axis (e.g. 'Total time (s)' over redundant "
+        "derivatives like 'measurement_duration').\n\n"
         "It is also possible that NONE of the listed fields is a true "
         "control variable — for example the real control variable was set "
         "manually and not recorded in the sidecar metadata.\n\n"
@@ -233,6 +242,56 @@ def _llm_pick_series_variable(
     except Exception as exc:
         logger.warning("LLM series-variable selection failed: %s", exc)
         return None
+
+
+# Keys produced by the LLM metadata normalization schema.
+_CANONICAL_SCHEMA_KEYS = frozenset({
+    "experiment_type", "experiment", "sample", "spatial_info",
+    "energy_range", "title", "data_columns", "xlabel", "ylabel",
+    "custom_processing_instruction",
+})
+
+# Keys managed by the sidecar / series extraction pipeline.
+_INTERNAL_KEYS = frozenset({"per_file_metadata", "series"})
+
+
+def _structure_metadata_for_save(metadata: dict) -> dict:
+    """Restructure flat current_metadata into grouped sections for saving.
+
+    The runtime ``current_metadata`` dict is kept flat so that agents can
+    access keys directly (``system_info.get("title")``).  For the saved
+    ``metadata_used.json`` we reorganise into three clear groups:
+
+    * **global** — normalised experiment-level fields from the canonical
+      schema (experiment, sample, title, xlabel, …).
+    * **per_file_metadata** / **series** — kept at top level as-is.
+    * **raw_instrument** — remaining passthrough fields from sidecar
+      synthesis that were not consumed by the LLM normalisation.
+    """
+    if not isinstance(metadata, dict):
+        return metadata
+
+    global_section: dict = {}
+    raw_section: dict = {}
+    internal_section: dict = {}
+
+    for key, value in metadata.items():
+        if key in _INTERNAL_KEYS:
+            internal_section[key] = value
+        elif key in _CANONICAL_SCHEMA_KEYS:
+            global_section[key] = value
+        else:
+            raw_section[key] = value
+
+    # Build result with global first for readability
+    result: dict = {}
+    if global_section:
+        result["global"] = global_section
+    result.update(internal_section)
+    if raw_section:
+        result["raw_instrument"] = raw_section
+
+    return result
 
 
 def _extract_series_from_sidecars(
@@ -885,6 +944,101 @@ class AnalysisOrchestratorTools:
                     metadata_path = non_sidecar_jsons[0]
                 
                 if metadata_path is None:
+                    # ---------------------------------------------------------
+                    # Synthesize global metadata from sidecar JSONs
+                    # ---------------------------------------------------------
+                    # When there is no dedicated metadata file but per-file
+                    # sidecars exist, extract fields that are identical across
+                    # ALL sidecars as shared (global) metadata.  This lets
+                    # users skip writing a separate metadata.json when the
+                    # sidecars already contain experiment/sample information.
+                    sidecar_paths = [
+                        jf for jf in json_files if jf.stem in _data_stems
+                    ]
+                    if sidecar_paths:
+                        try:
+                            all_sidecar_dicts = []
+                            for sp in sidecar_paths:
+                                with open(sp, "r") as _f:
+                                    all_sidecar_dicts.append(json.load(_f))
+
+                            if all_sidecar_dicts:
+                                # Collect keys shared by every sidecar
+                                shared_keys = set(all_sidecar_dicts[0].keys())
+                                for sd in all_sidecar_dicts[1:]:
+                                    shared_keys &= sd.keys()
+
+                                # Keep only fields whose value is the same in
+                                # every sidecar (these describe the experiment,
+                                # not the varying control variable).
+                                synthesized: dict = {}
+                                for key in shared_keys:
+                                    values = [sd[key] for sd in all_sidecar_dicts]
+                                    ref = values[0]
+                                    if all(v == ref for v in values):
+                                        synthesized[key] = ref
+
+                                if synthesized:
+                                    # Normalize to canonical schema
+                                    is_conformant, _ = check_schema_conformance(synthesized)
+                                    if not is_conformant:
+                                        normed, _ = normalize_metadata_dict(synthesized)
+                                        re_ok, _ = check_schema_conformance(normed)
+                                        if not re_ok:
+                                            try:
+                                                llm_result = normalize_metadata_dict_with_llm(
+                                                    synthesized, self.orch.model, self.logger
+                                                )
+                                                if llm_result:
+                                                    for k, v in synthesized.items():
+                                                        if k not in llm_result:
+                                                            llm_result[k] = v
+                                                    synthesized = llm_result
+                                            except Exception:
+                                                synthesized = normed
+                                        else:
+                                            synthesized = normed
+
+                                    self.orch.current_metadata = synthesized
+                                    output_path = self.orch.base_dir / "metadata.json"
+                                    with open(output_path, 'w') as f:
+                                        json.dump(synthesized, f, indent=2)
+                                    print(
+                                        f"    Synthesized global metadata from "
+                                        f"{len(sidecar_paths)} sidecar JSON(s)"
+                                    )
+
+                                    required_fields = ["experiment_type", "experiment", "sample"]
+                                    missing = [f for f in required_fields if f not in synthesized]
+                                    status = "warning" if missing else "success"
+                                    result_payload = {
+                                        "status": status,
+                                        "source": "synthesized_from_sidecars",
+                                        "num_sidecars": len(sidecar_paths),
+                                        "metadata": synthesized,
+                                        "experiment_type": synthesized.get("experiment_type"),
+                                        "technique": (
+                                            synthesized.get("experiment", {}).get("technique")
+                                            if isinstance(synthesized.get("experiment"), dict)
+                                            else synthesized.get("technique")
+                                        ),
+                                        "material": (
+                                            synthesized.get("sample", {}).get("material")
+                                            if isinstance(synthesized.get("sample"), dict)
+                                            else synthesized.get("material")
+                                        ),
+                                    }
+                                    if missing:
+                                        result_payload["message"] = (
+                                            f"Metadata synthesized from sidecar JSONs "
+                                            f"but missing recommended fields: {missing}"
+                                        )
+                                    return json.dumps(result_payload)
+                        except Exception as e:
+                            self.logger.warning(
+                                f"Failed to synthesize metadata from sidecars: {e}"
+                            )
+
                     # Look for .txt description files
                     txt_candidates = [
                         path / "metadata.txt",
@@ -898,7 +1052,7 @@ class AnalysisOrchestratorTools:
                                 "message": f"Found text description file: {candidate.name}. Use convert_metadata to convert it to JSON.",
                                 "text_file": str(candidate)
                             })
-                    
+
                     return json.dumps({
                         "status": "error",
                         "message": f"No metadata file found in directory: {json_path}"
@@ -977,12 +1131,15 @@ class AnalysisOrchestratorTools:
             func=load_metadata,
             name="load_metadata",
             description=(
-                "Load existing JSON metadata file. "
-                "Can accept a direct path to a .json file OR a directory path "
-                "(will automatically find metadata.json, meta.json, info.json, etc. in the directory). "
-                "Per-file sidecar JSONs (stem-matched to data files, e.g. spec_5K.json) are "
-                "excluded from the search so they are not mistakenly loaded as global metadata. "
-                "Use this when analyzing a directory of spectra that contains a metadata file."
+                "Load experiment metadata. "
+                "Can accept a direct path to a .json file OR a directory path. "
+                "When given a directory it will: (1) look for a dedicated metadata file "
+                "(metadata.json, meta.json, info.json, etc.), or (2) if none exists, "
+                "automatically synthesize global metadata from per-file sidecar JSONs "
+                "by extracting fields that are shared across all sidecars and "
+                "normalizing them into the canonical schema. "
+                "Use this for any directory containing metadata — whether as a "
+                "single file or as per-file sidecars."
             ),
             parameters={
                 "json_path": {
@@ -1240,70 +1397,25 @@ class AnalysisOrchestratorTools:
                 })
             
             if self.orch.current_metadata is None:
-                return json.dumps({
-                    "status": "error",
-                    "message": "No metadata available. Use load_metadata or convert_metadata first."
-                })
+                # When a data directory contains sidecar JSONs, allow
+                # run_analysis to proceed so the sidecar extraction code
+                # below can populate metadata automatically.
+                data_p = Path(data_path)
+                has_sidecars = False
+                if data_p.is_dir():
+                    _all = [f for f in data_p.iterdir() if f.is_file() and not f.name.startswith('.')]
+                    _data = [f for f in _all if f.suffix.lower() != ".json"]
+                    _smap, _ = _detect_sidecar_jsons(_data, _all)
+                    has_sidecars = bool(_smap)
+                if has_sidecars:
+                    self.orch.current_metadata = {}
+                else:
+                    return json.dumps({
+                        "status": "error",
+                        "message": "No metadata available. Use load_metadata or convert_metadata first."
+                    })
             
             try:
-                # === Generate unique analysis output directory ===
-                analysis_id = self.orch.generate_analysis_id(data_path, agent_id)
-                analysis_output_dir = self.orch.results_dir / f"analysis_{analysis_id}"
-                analysis_output_dir.mkdir(parents=True, exist_ok=True)
-                
-                print(f"    Analysis ID: {analysis_id}")
-                print(f"    Output directory: {analysis_output_dir}")
-                
-                # === Save metadata copy for traceability ===
-                metadata_copy_path = analysis_output_dir / "metadata_used.json"
-                with open(metadata_copy_path, 'w') as f:
-                    json.dump({
-                        "analysis_id": analysis_id,
-                        "data_path": data_path,
-                        "agent_id": agent_id,
-                        "agent_name": self.AGENT_NAMES.get(agent_id),
-                        "analysis_goal": analysis_goal,
-                        "timestamp": datetime.now().isoformat(),
-                        "metadata": self.orch.current_metadata
-                    }, f, indent=2)
-                
-                # === Create agent with unique output directory ===
-                # NOTE: For code-executing agents (2, 3), this may prompt the user
-                # for sandbox approval and raise RuntimeError if declined.
-                try:
-                    agent = self.orch.create_agent_for_analysis(agent_id, str(analysis_output_dir))
-                except RuntimeError as e:
-                    # Handle sandbox rejection or other init failures
-                    error_msg = str(e)
-                    
-                    if "sandbox" in error_msg.lower() or "declined" in error_msg.lower():
-                        # Clean up the output directory we created
-                        import shutil
-                        if analysis_output_dir.exists():
-                            shutil.rmtree(analysis_output_dir)
-                        
-                        return json.dumps({
-                            "status": "aborted",
-                            "reason": "sandbox_declined",
-                            "message": "Analysis aborted: User declined to proceed without sandbox protection.",
-                            "agent_id": agent_id,
-                            "agent_name": self.AGENT_NAMES.get(agent_id),
-                            "recommendation": (
-                                "This agent executes AI-generated Python code and requires a secure environment.\n\n"
-                                "Please run SciLink in one of the following:\n"
-                                "  1. Docker container (recommended)\n"
-                                "  2. Virtual machine (VMware, VirtualBox, cloud VM)\n"
-                                "  3. Google Colab\n\n"
-                                "See the documentation for setup instructions."
-                            )
-                        })
-                    else:
-                        # Some other initialization error
-                        raise
-                
-                print(f"    Using agent: {type(agent).__name__}")
-                print(f"    Data: {data_path}")
-                
                 # === Handle directory input - filter out metadata files ===
                 path = Path(data_path)
                 actual_data_input = data_path  # Default: pass as-is
@@ -1392,6 +1504,60 @@ class AnalysisOrchestratorTools:
                             self.orch.current_metadata[
                                 "per_file_metadata"
                             ] = per_file_meta
+
+                            # Synthesize normalized global metadata from
+                            # shared invariant fields across all sidecars,
+                            # unless current_metadata already contains
+                            # normalized top-level sections.
+                            _has_global = any(
+                                k in self.orch.current_metadata
+                                for k in ("experiment", "sample", "instrument")
+                            )
+                            if not _has_global:
+                                _all_dicts = list(per_file_meta.values())
+                                _shared = set(_all_dicts[0].keys())
+                                for _sd in _all_dicts[1:]:
+                                    _shared &= _sd.keys()
+                                _synth: dict = {}
+                                for _k in _shared:
+                                    _vals = [_sd[_k] for _sd in _all_dicts]
+                                    if all(v == _vals[0] for v in _vals):
+                                        _synth[_k] = _vals[0]
+                                if _synth:
+                                    try:
+                                        _ok, _ = check_schema_conformance(_synth)
+                                        if not _ok:
+                                            _normed, _ = normalize_metadata_dict(_synth)
+                                            _re_ok, _ = check_schema_conformance(_normed)
+                                            if not _re_ok:
+                                                _llm = normalize_metadata_dict_with_llm(
+                                                    _synth, self.orch.model, self.logger
+                                                )
+                                                if _llm:
+                                                    for _k2, _v2 in _synth.items():
+                                                        if _k2 not in _llm:
+                                                            _llm[_k2] = _v2
+                                                    _synth = _llm
+                                                else:
+                                                    _synth = _normed
+                                            else:
+                                                _synth = _normed
+                                        # Merge normalized global fields into
+                                        # current_metadata without overwriting
+                                        # per_file_metadata or series.
+                                        for _k3, _v3 in _synth.items():
+                                            if _k3 not in self.orch.current_metadata:
+                                                self.orch.current_metadata[_k3] = _v3
+                                        print(
+                                            f"    Synthesized global metadata from "
+                                            f"{len(per_file_meta)} sidecar(s)"
+                                        )
+                                    except Exception as _e:
+                                        self.logger.warning(
+                                            "Failed to synthesize global metadata "
+                                            "in run_analysis: %s", _e
+                                        )
+
                         # Auto-populate series metadata if extraction succeeded
                         if extracted_series is not None:
                             self.orch.current_metadata["series"] = extracted_series
@@ -1400,6 +1566,54 @@ class AnalysisOrchestratorTools:
                                 f"    Auto-extracted series variable "
                                 f"'{extracted_series['variable']}' from sidecar JSONs"
                             )
+                            # In co-pilot / supervised modes, let the user
+                            # know which control variable was extracted and
+                            # give them a chance to confirm or correct it
+                            # before proceeding with the analysis.
+                            mode = self.orch.analysis_mode.value
+                            if mode in ("co-pilot", "supervised"):
+                                values = extracted_series.get("values", {})
+                                unit = extracted_series.get("unit", "")
+                                # Build a readable summary of the mapping
+                                sample_items = list(values.items())[:5]
+                                mapping_lines = [
+                                    f"  {fname}: {val}"
+                                    for fname, val in sample_items
+                                ]
+                                if len(values) > 5:
+                                    mapping_lines.append(
+                                        f"  ... and {len(values) - 5} more"
+                                    )
+                                mapping_str = "\n".join(mapping_lines)
+                                return json.dumps({
+                                    "status": "series_variable_extracted",
+                                    "message": (
+                                        f"Auto-extracted series control variable "
+                                        f"'{extracted_series['variable']}'"
+                                        f"{(' (' + unit + ')') if unit else ''} "
+                                        f"from per-file sidecar JSON metadata. "
+                                        f"File-to-value mapping:\n{mapping_str}\n\n"
+                                        f"Present this to the user and ask them "
+                                        f"to confirm it is correct before "
+                                        f"proceeding.\n"
+                                        f"- If the user CONFIRMS: re-call "
+                                        f"run_analysis with the same parameters "
+                                        f"(no series_metadata needed — it is "
+                                        f"already stored).\n"
+                                        f"- If the user DISAGREES or wants a "
+                                        f"different variable: ask them for the "
+                                        f"correct variable name, values, and "
+                                        f"unit, then re-call run_analysis with "
+                                        f"an explicit series_metadata parameter "
+                                        f"containing the corrected mapping. "
+                                        f"The explicit parameter will override "
+                                        f"the auto-extracted one."
+                                    ),
+                                    "variable": extracted_series["variable"],
+                                    "unit": unit,
+                                    "values": values,
+                                    "num_files": len(values),
+                                })
 
                 if is_series and not has_series_meta:
                     num_files = len(actual_data_input)
@@ -1487,6 +1701,69 @@ class AnalysisOrchestratorTools:
                             # Replace dict with sorted list for agent consumption
                             series_info["values"] = sorted_values
                             self.orch.current_metadata["series"] = series_info
+
+                # === Generate unique analysis output directory ===
+                # Deferred until after early-return checks (series variable
+                # confirmation, missing series metadata) to avoid creating
+                # orphan directories that never receive analysis results.
+                analysis_id = self.orch.generate_analysis_id(data_path, agent_id)
+                analysis_output_dir = self.orch.results_dir / f"analysis_{analysis_id}"
+                analysis_output_dir.mkdir(parents=True, exist_ok=True)
+
+                print(f"    Analysis ID: {analysis_id}")
+                print(f"    Output directory: {analysis_output_dir}")
+
+                # === Save metadata copy for traceability ===
+                metadata_copy_path = analysis_output_dir / "metadata_used.json"
+                with open(metadata_copy_path, 'w') as f:
+                    json.dump({
+                        "analysis_id": analysis_id,
+                        "data_path": data_path,
+                        "agent_id": agent_id,
+                        "agent_name": self.AGENT_NAMES.get(agent_id),
+                        "analysis_goal": analysis_goal,
+                        "timestamp": datetime.now().isoformat(),
+                        "metadata": _structure_metadata_for_save(
+                            self.orch.current_metadata
+                        ),
+                    }, f, indent=2)
+
+                # === Create agent with unique output directory ===
+                # NOTE: For code-executing agents (2, 3), this may prompt the user
+                # for sandbox approval and raise RuntimeError if declined.
+                try:
+                    agent = self.orch.create_agent_for_analysis(agent_id, str(analysis_output_dir))
+                except RuntimeError as e:
+                    # Handle sandbox rejection or other init failures
+                    error_msg = str(e)
+
+                    if "sandbox" in error_msg.lower() or "declined" in error_msg.lower():
+                        # Clean up the output directory we created
+                        import shutil
+                        if analysis_output_dir.exists():
+                            shutil.rmtree(analysis_output_dir)
+
+                        return json.dumps({
+                            "status": "aborted",
+                            "reason": "sandbox_declined",
+                            "message": "Analysis aborted: User declined to proceed without sandbox protection.",
+                            "agent_id": agent_id,
+                            "agent_name": self.AGENT_NAMES.get(agent_id),
+                            "recommendation": (
+                                "This agent executes AI-generated Python code and requires a secure environment.\n\n"
+                                "Please run SciLink in one of the following:\n"
+                                "  1. Docker container (recommended)\n"
+                                "  2. Virtual machine (VMware, VirtualBox, cloud VM)\n"
+                                "  3. Google Colab\n\n"
+                                "See the documentation for setup instructions."
+                            )
+                        })
+                    else:
+                        # Some other initialization error
+                        raise
+
+                print(f"    Using agent: {type(agent).__name__}")
+                print(f"    Data: {data_path}")
 
                 # === Run analysis ===
                 analyze_kwargs = {

@@ -1,4 +1,5 @@
 import logging
+import textwrap
 from typing import Callable
 import json
 
@@ -130,19 +131,23 @@ class IterativeFeedbackController:
         
         print(f"🧠 LLM's Proposed Plan: Refinement Needed = **{decision.get('refinement_needed', False)}**")
         print(f"Reasoning: {decision.get('reasoning', 'N/A')}")
-        print(f"\nTargeted Actions ({len(targets)} found):")
-        
+        print()
+        print("-" * 80)
+        print(f"\U0001f3af Targeted Actions ({len(targets)} found)")
+        print("-" * 80)
+
         if not targets:
             print("  (No specific targets were generated.)")
-        
+
         for i, t in enumerate(targets, 1):
             t_type = t.get('type', 'N/A')
             t_value = t.get('value', 'N/A')
             t_desc = t.get('description', 'No description provided.')
-            
-            print(f"  {i}. Type: {t_type:<15} | Value: {str(t_value):<15}")            
-            print(f"      Description: {t_desc}")
-        
+
+            print(f"\n  [{i}] {t_type}  (value: {t_value})")
+            for line in textwrap.wrap(t_desc, width=70):
+                print(f"      {line}")
+
         print("-" * 80)
         
         try:

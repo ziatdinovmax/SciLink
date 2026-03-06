@@ -15,7 +15,7 @@ class VaspInputAgent:
     """Agent for generating VASP INCAR and KPOINTS files."""
 
     def __init__(self, api_key: str = None, 
-                 model_name: str = "gemini-3-pro-preview", 
+                 model_name: str = "gemini-3.1-pro-preview", 
                  base_url: Optional[str] = None,
                  # Legacy params
                  local_model: str = None,

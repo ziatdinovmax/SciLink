@@ -11,7 +11,7 @@ from ..config import (
     SUPPORTED_METADATA_EXTENSIONS,
     SUPPORTED_PLANNING_DATA_EXTENSIONS,
 )
-from .sidebar import save_upload, save_upload_batch
+from .sidebar import save_metadata_to_series, save_upload, save_upload_batch
 
 
 def render_pre_chat_uploads(start_task_fn) -> None:
@@ -57,20 +57,32 @@ def _render_analyze_uploads(start_task_fn) -> None:
             "Metadata (optional)",
             type=[e.lstrip(".") for e in SUPPORTED_METADATA_EXTENSIONS],
             key="main_uploader_meta",
+            accept_multiple_files=True,
         )
-        if main_meta is not None:
-            save_upload(main_meta, "metadata", auto_dispatch=False)
+        if main_meta:
+            if len(main_meta) == 1:
+                save_upload(main_meta[0], "metadata", auto_dispatch=False)
+            else:
+                save_metadata_to_series(main_meta, auto_dispatch=False)
 
     # Show "Analyze" button once data is uploaded
     if st.session_state.uploaded_data_path:
         if st.button("Analyze", type="primary", use_container_width=True):
             data_path = st.session_state.uploaded_data_path
             meta_path = st.session_state.uploaded_metadata_path
+            has_sidecars = st.session_state.get("uploaded_sidecar_metadata", False)
             if data_path and meta_path:
                 prompt = (
                     f"I uploaded a data file at `{data_path}` "
                     f"and a metadata file at `{meta_path}`. "
                     f"Please examine the data and load the metadata."
+                )
+            elif data_path and has_sidecars:
+                prompt = (
+                    f"I uploaded data files at `{data_path}` along with "
+                    f"per-file JSON sidecar metadata in the same directory. "
+                    f"Please examine the data and load the metadata "
+                    f"(pass the directory path `{data_path}` to load_metadata)."
                 )
             else:
                 prompt = (
@@ -186,10 +198,63 @@ def _render_planning_uploads(start_task_fn) -> None:
         if _folders.get("code"):
             parts.append(f"Code folder: `{_folders['code']}`")
         if st.session_state.uploaded_planning_data_paths:
-            paths = ", ".join(f"`{p}`" for p in st.session_state.uploaded_planning_data_paths)
-            parts.append(f"Data files: {paths}")
+            data_paths = [p for p in st.session_state.uploaded_planning_data_paths if not p.endswith(".json")]
+            json_paths = [p for p in st.session_state.uploaded_planning_data_paths if p.endswith(".json")]
+            if data_paths:
+                paths_str = ", ".join(f"`{p}`" for p in data_paths)
+                if len(data_paths) > 1 and json_paths:
+                    # Multiple data files + JSON metadata → suggest analyze_batch
+                    json_str = ", ".join(f"`{p}`" for p in json_paths)
+                    parts.append(f"Data files: {paths_str}")
+                    parts.append(f"Conditions/metadata JSON: {json_str}")
+                    parts.append(
+                        "Use `analyze_batch` to process these files together, "
+                        "using the JSON as the conditions source."
+                    )
+                elif len(data_paths) > 1:
+                    parts.append(f"Data files: {paths_str}")
+                    parts.append(
+                        "Use `analyze_batch` to process these files together. "
+                        "If these are measurement-only files (e.g., spectra), "
+                        "you will need experimental conditions for each file."
+                    )
+                else:
+                    parts.append(f"Data files: {paths_str}")
+            if json_paths and not data_paths:
+                paths_str = ", ".join(f"`{p}`" for p in json_paths)
+                parts.append(f"Data/metadata files: {paths_str}")
         if _folders.get("data"):
-            parts.append(f"Data folder: `{_folders['data']}`")
+            data_dir = Path(_folders["data"])
+            data_exts = {".csv", ".xlsx", ".tsv", ".txt"}
+            dir_data_files = sorted(
+                [f for f in data_dir.iterdir() if f.suffix.lower() in data_exts],
+                key=lambda f: [int(c) if c.isdigit() else c.lower()
+                               for c in __import__("re").split(r"(\d+)", f.name)]
+            )
+            dir_json_files = sorted(
+                [f for f in data_dir.iterdir() if f.suffix.lower() == ".json"],
+                key=lambda f: f.name
+            )
+            if len(dir_data_files) > 1:
+                paths_str = ", ".join(f"`{f}`" for f in dir_data_files)
+                parts.append(f"Data files: {paths_str}")
+                if dir_json_files:
+                    json_str = ", ".join(f"`{f}`" for f in dir_json_files)
+                    parts.append(f"Conditions/metadata JSON: {json_str}")
+                    parts.append(
+                        "Use `analyze_batch` to process these files together, "
+                        "using the JSON as the conditions source."
+                    )
+                else:
+                    parts.append(
+                        "Use `analyze_batch` to process these files together. "
+                        "If these are measurement-only files (e.g., spectra), "
+                        "you will need experimental conditions for each file."
+                    )
+            elif len(dir_data_files) == 1:
+                parts.append(f"Data file: `{dir_data_files[0]}`")
+            else:
+                parts.append(f"Data folder: `{_folders['data']}`")
         prompt = "\n\n".join(parts) if parts else "Please help me plan my experiment."
 
         # Point the agent's dirs to the original folder paths so that

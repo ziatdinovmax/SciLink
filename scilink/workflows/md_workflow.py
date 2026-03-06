@@ -1,5 +1,6 @@
 # scilink/workflows/lammps_workflow.py
 import os
+import re
 import sys
 import logging
 import shutil
@@ -25,28 +26,35 @@ class LAMMPSWorkflow:
     """
     
     def __init__(self,
-                 google_api_key: str = None,
+                 api_key: str = None,
+                 model_name: str = "gemini-3-pro-preview",
+                 base_url: Optional[str] = None,
                  vmd_path: str = None,
                  output_dir: str = "lammps_workflow_output",
-                 model_name: str = "gemini-2.5-pro-preview-05-06",
-                 max_refinement_cycles: int = 3):
+                 max_refinement_cycles: int = 10,
+                 # Legacy parameters
+                 local_model: Optional[str] = None,
+                 google_api_key: Optional[str] = None):
         """
         Initializes the LAMMPS workflow and its constituent agents.
         
         Args:
-            google_api_key (str, optional): Google API key for Gemini models.
+            api_key (str, optional): API key for the LLM provider
                 Defaults to auto-discovery from environment variables.
+            model_name (str, optional): Model name to use
+            base_url: Optional base URL for internal proxy
             vmd_path (str, optional): Path to VMD executable. Required for 
                 PDB to LAMMPS data conversion.
             output_dir (str, optional): Directory to save all generated files.
-            model_name (str, optional): Name of the Gemini model for generating scripts.
             max_refinement_cycles (int, optional): Maximum number of refinement
                 attempts for error correction.
+            local_model: Deprecated, use base_url instead
+            google_api_key: Deprecated, use api_key instead
         """
         # Auto-discover API keys
-        if google_api_key is None:
-            google_api_key = get_api_key('google')
-            if not google_api_key:
+        if api_key is None:
+            api_key = get_api_key('google')
+            if not api_key:
                 raise APIKeyNotFoundError('google')
                 
         # Setup logging
@@ -61,9 +69,42 @@ class LAMMPSWorkflow:
             ]
         )
         self.logger = logging.getLogger(__name__)
-        
+
+        # Normalize deprecated parameters
+        api_key, base_url = normalize_params(
+            api_key=api_key,
+            google_api_key=google_api_key,
+            base_url=base_url,
+            local_model=local_model,
+            source="LAMMPSSimulationAgent"
+        )
+        # Initialize model using wrapper structure
+        if base_url:
+            # Internal Proxy
+            if api_key is None:
+                api_key = get_internal_proxy_key()
+
+            if not api_key:
+                raise ValueError("API key required for internal proxy")
+
+            self.logger.info(f"Using internal proxy: {base_url}")
+            self.model = OpenAIAsGenerativeModel(
+                model=model_name,
+                api_key=api_key,
+                base_url=base_url
+            )
+        else:
+            # Public / LiteLLM
+            self.logger.info(f"Using LiteLLM: {model_name}")
+            self.model = LiteLLMGenerativeModel(
+                model=model_name,
+                api_key=api_key
+            )
+
+        self.generation_config = None
+
         # Store configuration
-        self.google_api_key = google_api_key
+        self.api_key = api_key
         self.vmd_path = vmd_path
         self.output_dir = output_dir
         self.model_name = model_name
@@ -83,17 +124,18 @@ class LAMMPSWorkflow:
         ) if vmd_path else None
         
         self.ff_agent = ForceFieldAgent(
-            api_key=google_api_key,
+            api_key=api_key,
             working_dir=self.ff_dir,
         )
         
         self.lammps_agent = LAMMPSSimulationAgent(
-            api_key=google_api_key,
-            working_dir=self.sim_dir
+            api_key=api_key,
+            working_dir=self.sim_dir,
+            model_name=model_name
         )
         
         self.lammps_updater = LAMMPSUpdater(
-            api_key=google_api_key,
+            api_key=api_key,
             model_name=model_name
         )
     
@@ -384,7 +426,17 @@ class LAMMPSWorkflow:
                         with open(log_path, "w") as f:
                             f.write("=== SYSTEM ERRORS ===\n")
                             f.write(process.stderr)
-                
+
+                # Check for misc errors in stdout
+                misc_errors = []
+                if "ERROR" in process.stdout:
+                    misc_errors = [line.strip() for line in process.stdout.splitlines() if "ERROR" in line]
+                    # If there are misc errors and no LAMMPS log was created, create one
+                    if misc_errors and not os.path.exists(log_path):
+                        with open(log_path, "w") as f:
+                            f.write("=== OTHER ERRORS ===\n")
+                            f.write(process.stdout)
+
                 # Log errors to console
                 if lammps_errors:
                     print(f"⚠️ LAMMPS reported errors:")

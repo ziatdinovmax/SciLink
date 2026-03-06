@@ -41,7 +41,7 @@ class DFTWorkflow:
                  local_model: str = None,
                  output_dir: str = "dft_workflow_output",
                  max_refinement_cycles: int = 4,
-                 script_timeout: int = 180,
+                 script_timeout: int = 300,
                  vasp_generator_method: str = "llm"):
         """
         Initializes the DFT workflow and its constituent agents.

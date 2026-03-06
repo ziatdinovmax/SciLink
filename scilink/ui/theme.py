@@ -672,7 +672,8 @@ div:has(> [data-testid="stMarkdown"] .theme-toggle-anchor) + div button:hover {
     color: #212121 !important;
     box-shadow: none !important;
 }
-[data-testid="stExpander"] .stButton > button {
+[data-testid="stExpander"] .stButton > button,
+[data-testid="stExpander"] .stButton button {
     background-color: #EEEEEE;
     color: #212121;
     border: 1px solid #E0E0E0;
@@ -682,13 +683,15 @@ div:has(> [data-testid="stMarkdown"] .theme-toggle-anchor) + div button:hover {
     font-size: 0.85em;
     padding: 0.25rem 0.5rem;
 }
-[data-testid="stExpander"] .stButton > button:hover {
+[data-testid="stExpander"] .stButton > button:hover,
+[data-testid="stExpander"] .stButton button:hover {
     background-color: #E3F2FD;
     border-color: #5B8DEF;
     color: #212121;
     box-shadow: none;
 }
-[data-testid="stExpander"] .stButton > button[kind="primary"] {
+[data-testid="stExpander"] .stButton > button[kind="primary"],
+[data-testid="stExpander"] .stButton button[kind="primary"] {
     background-color: #E3F2FD;
     border-color: #5B8DEF;
     color: #1565C0;
@@ -925,6 +928,25 @@ section[data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stExpa
 [data-testid="stCode"]:hover * {
     color: #E0E0E0 !important;
     background-color: #1E1E1E !important;
+}
+
+/* ── JSON viewer ───────────────────────────────────── */
+[data-testid="stJson"],
+[data-testid="stJson"] > div {
+    background-color: #FFFFFF !important;
+    color: #212121 !important;
+    border: 1px solid #E0E0E0;
+    border-radius: 4px;
+}
+
+/* ── Dataframe / table ─────────────────────────────── */
+[data-testid="stDataFrame"],
+[data-testid="stDataFrame"] > div,
+[data-testid="stTable"],
+[data-testid="stTable"] > div {
+    background-color: #FFFFFF !important;
+    color: #212121 !important;
+    border-radius: 4px;
 }
 
 /* ── Scrollbar (webkit) ─────────────────────────────── */

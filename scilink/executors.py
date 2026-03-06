@@ -10,7 +10,7 @@ import threading
 
 from .auth import get_api_key
 
-DEFAULT_TIMEOUT = 120
+DEFAULT_TIMEOUT = 300
 
 # Global registry of active subprocesses, keyed by thread ID.
 # Accessible from any thread so the UI stop handler can kill them.
@@ -349,7 +349,7 @@ class ExecutionTimeout:
        ``TimeoutError`` into the target thread after *seconds* elapse.
     """
 
-    def __init__(self, seconds: int = 120):
+    def __init__(self, seconds: int = 300):
         self.seconds = seconds
         self._old_handler = None
         self._watchdog: threading.Timer | None = None

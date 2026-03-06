@@ -74,12 +74,12 @@ class BOAgent:
     **ARGUMENTS:**
     --------------
     google_api_key (str): Google Gemini API Key.
-    model_name (str): LLM model name (default: "gemini-3-pro-preview").
+    model_name (str): LLM model name (default: "gemini-3.1-pro-preview").
     local_model (str): Optional URL for local/OpenAI-compatible endpoints.
     """
     def __init__(self, 
                  google_api_key: str = None, 
-                 model_name: str = "gemini-3-pro-preview", 
+                 model_name: str = "gemini-3.1-pro-preview", 
                  local_model: str = None):
         
         if google_api_key is None:

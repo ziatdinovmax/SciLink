@@ -40,13 +40,13 @@ def plot_curve_to_bytes(curve_data: np.ndarray, system_info: dict, title_suffix:
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.plot(curve_data[:, 0], curve_data[:, 1], 'b.', markersize=4)
     
-    plot_title = system_info.get("title", "Data")
+    plot_title = system_info.get("title") or "Data"
     ax.set_title(plot_title + title_suffix)
-    
-    xlabel_text = system_info.get("xlabel", "X-axis")
+
+    xlabel_text = system_info.get("xlabel") or "X-axis"
     ax.set_xlabel(xlabel_text)
-    
-    ylabel_text = system_info.get("ylabel", "Y-axis")
+
+    ylabel_text = system_info.get("ylabel") or "Y-axis"
     ax.set_ylabel(ylabel_text)
     
     ax.grid(True, linestyle='--')

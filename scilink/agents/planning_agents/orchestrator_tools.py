@@ -6,10 +6,16 @@ Supports both Google Gemini (function objects) and OpenAI (JSON schemas).
 from datetime import datetime
 import json
 import logging
+import re
 import pandas as pd
 from pathlib import Path
 from typing import Dict, Any, Callable
 import hashlib
+
+
+def _natural_sort_key(s):
+    """Sort key that handles embedded numbers naturally (e.g., run_2 before run_10)."""
+    return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', str(s))]
 
 from .parser_utils import write_experiments_to_disk
 
@@ -120,6 +126,33 @@ class OrchestratorTools:
             return [str(self.orch.knowledge_dir)]
         return None
 
+    @staticmethod
+    def _build_objective_guidance(n_data: int, numeric_cols: list) -> dict:
+        """Return data-aware guidance on how many targets the data can support."""
+        # Estimate max feasible inputs (assume at least 2)
+        n_numeric = len(numeric_cols)
+        est_inputs = max(2, n_numeric // 2)
+
+        supported = {}
+        for n_t in range(1, min(n_numeric, 5)):
+            needed = 5 * est_inputs * n_t
+            supported[n_t] = {"min_recommended": needed, "feasible": n_data >= needed}
+
+        max_feasible = max((k for k, v in supported.items() if v["feasible"]), default=1)
+
+        return {
+            "data_points": n_data,
+            "numeric_columns": n_numeric,
+            "supported_targets": supported,
+            "max_feasible_targets": max_feasible,
+            "recommendation": (
+                f"With {n_data} data points, up to {max_feasible} target(s) can be "
+                f"optimized reliably. Pick the {max_feasible} most important target(s) "
+                f"aligned with the stated objective. Additional targets can be added "
+                f"later when more data is collected."
+            ),
+        }
+
     def _resolve_data_path(self, path_input: str) -> tuple[str, str]:
         """
         Resolves user input to actual file path with fuzzy matching for typos.
@@ -144,8 +177,15 @@ class OrchestratorTools:
                     print(f"    🔍 Resolved: {path.name} → {candidate.name}")
                     return str(candidate), None
         
-        # Case 3: Try in common data folders
-        search_folders = ['./experimental_results', './data', './results', './']
+        # Case 3: Try in common data folders (session dirs first, then cwd-relative)
+        session = self.orch.base_dir
+        search_folders = [
+            str(session / "uploads"),
+            str(session / "uploads" / "series"),
+            str(session / "data"),
+            str(session),
+            './experimental_results', './data', './results', './',
+        ]
         all_candidates = []  # Track all files we find for fuzzy matching
         
         if not path.is_absolute():
@@ -312,7 +352,7 @@ class OrchestratorTools:
                         
                     else:
                         # Multiple files - require user to specify
-                        file_list = sorted([f.name for f in all_files])
+                        file_list = sorted([f.name for f in all_files], key=_natural_sort_key)
                         return json.dumps({
                             "status": "error",
                             "message": f"Multiple data files found in '{primary_data_set}'",
@@ -606,7 +646,7 @@ class OrchestratorTools:
                         
                     else:
                         # Multiple files - require user to specify
-                        file_list = sorted([f.name for f in all_files])
+                        file_list = sorted([f.name for f in all_files], key=_natural_sort_key)
                         return json.dumps({
                             "status": "error",
                             "message": f"Multiple data files found in '{primary_data_set}'",
@@ -854,16 +894,24 @@ class OrchestratorTools:
                 targets: List of column names to treat as OPTIMIZATION TARGETS
             """
             print(f"  ⚡ Tool: Analyzing {file_path}...")
-            
-            if not Path(file_path).exists(): 
-                return json.dumps({"status": "error", "message": f"File {file_path} not found"})
-            
+
+            resolved_path, error = self._resolve_data_path(file_path)
+            if error:
+                return error
+            file_path = resolved_path
+
             # Resolve absolute path for tracking
             file_path_abs = str(Path(file_path).resolve())
             
             #  Build schema-aware extraction goal
             enhanced_objective = extraction_goal or ""
-            
+            # Always include the campaign objective so the scalarizer knows
+            # what physically meaningful targets to derive
+            if self.orch.objective and self.orch.objective != "Undefined Research Goal":
+                enhanced_objective = (
+                    f"Research objective: {self.orch.objective}\n\n{enhanced_objective}"
+                ).strip()
+
             if inputs and targets:
                 # User explicitly specified schema - incorporate into the objective query
                 schema_instruction = f"""
@@ -880,17 +928,26 @@ class OrchestratorTools:
                 print(f"       Targets: {targets}")
             
             # Determine script to use
-            if force_regenerate:
+            schema_changed = (
+                inputs and targets and (
+                    set(inputs) != set(self.orch.expected_input_columns or [])
+                    or set(targets) != set(self.orch.expected_target_columns or [])
+                )
+            )
+            if force_regenerate or schema_changed:
                 script_to_use = None
-                print(f"    🔄 Force regenerate: Creating new analysis script")
+                if schema_changed:
+                    print(f"    🔄 Schema changed — regenerating analysis script")
+                else:
+                    print(f"    🔄 Force regenerate: Creating new analysis script")
             else:
                 script_to_use = self.orch.active_scalarizer_script if (
                     self.orch.active_scalarizer_script and Path(self.orch.active_scalarizer_script).exists()
                 ) else None
-                
-                if script_to_use: 
+
+                if script_to_use:
                     print(f"    (Consistency Mode: Using cached script)")
-                else: 
+                else:
                     print(f"    (Discovery Mode: Generating new script)")
             
             # Pass schema to experiment context
@@ -907,12 +964,18 @@ class OrchestratorTools:
                 }
             
             try:
+                # Pass user-specified schema as hints so scalarizer can classify
+                role_hints = None
+                if inputs and targets:
+                    role_hints = {"inputs": inputs, "targets": targets}
+
                 res = self.orch.scalarizer.scalarize(
-                    data_path=file_path, 
-                    objective_query=enhanced_objective,  
+                    data_path=file_path,
+                    objective_query=enhanced_objective,
                     reuse_script_path=script_to_use,
-                    experiment_context=exp_context, 
-                    enable_human_review=self._get_human_feedback_enabled()
+                    experiment_context=exp_context,
+                    enable_human_review=self._get_human_feedback_enabled(),
+                    column_role_hints=role_hints
                 )
                 
                 if res["status"] != "success":
@@ -921,11 +984,79 @@ class OrchestratorTools:
                         "message": res.get('error', 'Analysis failed'),
                         "hint": "Try force_regenerate=True if requirements changed"
                     })
-                
+
+                # Validate sidecar conditions match script output
+                # If the script hardcoded values from a different file's sidecar,
+                # the output will have wrong condition values. Detect and auto-regenerate.
+                if script_to_use and not force_regenerate:
+                    sidecar_path = Path(file_path).with_suffix('.json')
+                    if sidecar_path.exists():
+                        try:
+                            with open(sidecar_path) as _sc:
+                                sidecar_data = json.load(_sc)
+                            metrics_to_check = res["metrics"]
+                            if isinstance(metrics_to_check, list):
+                                metrics_to_check = metrics_to_check[0] if metrics_to_check else {}
+                            mismatched = []
+                            for key, expected_val in sidecar_data.items():
+                                if key in metrics_to_check:
+                                    actual_val = metrics_to_check[key]
+                                    if isinstance(expected_val, (int, float)) and isinstance(actual_val, (int, float)):
+                                        if abs(actual_val - expected_val) > 1e-6:
+                                            mismatched.append(f"{key}: expected {expected_val}, got {actual_val}")
+                            if mismatched:
+                                print(f"    ⚠️  Sidecar mismatch detected (script has hardcoded values):")
+                                for m in mismatched:
+                                    print(f"       {m}")
+                                print(f"    🔄 Auto-regenerating script...")
+                                res = self.orch.scalarizer.scalarize(
+                                    data_path=file_path,
+                                    objective_query=enhanced_objective,
+                                    reuse_script_path=None,
+                                    experiment_context=exp_context,
+                                    enable_human_review=self._get_human_feedback_enabled(),
+                                    column_role_hints=role_hints
+                                )
+                                if res["status"] != "success":
+                                    return json.dumps({
+                                        "status": "error",
+                                        "message": res.get('error', 'Regeneration failed'),
+                                    })
+                                force_regenerate = True  # ensure script lock updates below
+                        except Exception:
+                            pass  # If sidecar can't be read, skip validation
+
                 if not self.orch.active_scalarizer_script or force_regenerate:
                     self.orch.active_scalarizer_script = res["source_script"]
                     print(f"    ✅ Analysis Logic Locked: {Path(self.orch.active_scalarizer_script).name}")
-                
+
+                # Merge sidecar conditions into scalarizer output.
+                # analyze_batch merges conditions externally (line ~1584),
+                # but analyze_file did not — so a batch-generated script
+                # that only outputs target metrics (e.g. Peak_Absorbance)
+                # would miss input parameters (e.g. temperature, pH) that
+                # live in the sidecar JSON, causing a column mismatch on
+                # CSV append.
+                sidecar_merge_path = Path(file_path).with_suffix('.json')
+                if sidecar_merge_path.exists():
+                    try:
+                        with open(sidecar_merge_path, 'r') as _sc:
+                            sidecar_conds = json.load(_sc)
+                        if isinstance(sidecar_conds, dict):
+                            scalar_conds = {
+                                k: v for k, v in sidecar_conds.items()
+                                if isinstance(v, (int, float, str))
+                            }
+                            if scalar_conds:
+                                raw = res["metrics"]
+                                if isinstance(raw, list):
+                                    res["metrics"] = [{**row, **scalar_conds} for row in raw]
+                                elif isinstance(raw, dict):
+                                    res["metrics"] = {**raw, **scalar_conds}
+                                print(f"    📎 Merged sidecar conditions: {list(scalar_conds.keys())}")
+                    except Exception as e:
+                        logging.warning(f"Could not merge sidecar conditions: {e}")
+
                 # Handle both single-row and multi-row results
                 metrics = res["metrics"]
                 
@@ -1012,17 +1143,34 @@ class OrchestratorTools:
 
                 elif current_row_count == prev_row_count:
                     # prev_hash == current_hash (guaranteed by earlier elif)
-                    # TRULY UNCHANGED
-                    print(f"    ℹ️  File unchanged (same content hash)")
-                    df_final = pd.read_csv(self.orch.bo_data_path) if self.orch.bo_data_path.exists() else pd.DataFrame()
-                    
-                    return json.dumps({
-                        "status": "success",
-                        "message": "File already analyzed - no changes detected",
-                        "data_points_collected": len(df_final),
-                        "rows_added": 0,
-                        "optimization_ready": len(df_final) >= 3
-                    })
+                    schema_changed = (
+                        inputs and targets and (
+                            set(inputs) != set(self.orch.expected_input_columns or [])
+                            or set(targets) != set(self.orch.expected_target_columns or [])
+                        )
+                    )
+                    if schema_changed:
+                        # Same data, new schema — reprocess with updated columns
+                        print(f"    🔄 Schema changed — reprocessing with new inputs/targets")
+                        df_to_append = df_new
+                        num_new = len(df_new)
+                        # Clear existing optimization data (schema mismatch)
+                        if self.orch.bo_data_path.exists():
+                            backup = self.orch.bo_data_path.with_suffix('.csv.backup')
+                            self.orch.bo_data_path.rename(backup)
+                            print(f"    ⚠️  Old optimization data backed up (schema change)")
+                    else:
+                        # TRULY UNCHANGED
+                        print(f"    ℹ️  File unchanged (same content hash)")
+                        df_final = pd.read_csv(self.orch.bo_data_path) if self.orch.bo_data_path.exists() else pd.DataFrame()
+
+                        return json.dumps({
+                            "status": "success",
+                            "message": "File already analyzed - no changes detected",
+                            "data_points_collected": len(df_final),
+                            "rows_added": 0,
+                            "optimization_ready": len(df_final) >= 3
+                        })
 
                 else:
                     # FEWER ROWS - file was truncated/replaced
@@ -1064,13 +1212,22 @@ class OrchestratorTools:
                                 suggestions[missing] = matches
                         
                         return json.dumps({
-                            "status": "error",
-                            "message": "Requested columns not found in extracted metrics",
+                            "status": "schema_mismatch",
+                            "message": (
+                                f"The analysis script could not produce the requested columns. "
+                                f"Missing inputs: {missing_inputs or 'none'}. "
+                                f"Missing targets: {missing_targets or 'none'}. "
+                                f"Available columns from extraction: {all_cols}."
+                            ),
                             "missing_inputs": missing_inputs,
                             "missing_targets": missing_targets,
                             "available_columns": all_cols,
                             "suggestions": suggestions if suggestions else None,
-                            "hint": "Column names may differ slightly. Check available_columns and retry with correct names, or use force_regenerate=True with updated extraction_goal."
+                            "recovery_options": [
+                                "Retry with corrected column names from available_columns",
+                                "Use force_regenerate=True with an updated extraction_goal",
+                                "Choose different inputs/targets from the available columns"
+                            ]
                         })
                     
                     self.orch.expected_input_columns = inputs
@@ -1085,21 +1242,128 @@ class OrchestratorTools:
                     print(f"       Inputs: {self.orch.expected_input_columns}")
                     print(f"       Targets: {self.orch.expected_target_columns}")
                 
-                # Case 3: Fallback - Auto-detect (Single-Objective default)
+                # Case 3: No user schema — use scalarizer's column_roles classification
                 else:
-                    # Heuristic: numeric columns that look like targets go to targets
-                    # This is a last resort - prefer explicit schema
-                    self.orch.expected_target_columns = [all_cols[-1]]
-                    self.orch.expected_input_columns = [c for c in all_cols if c != all_cols[-1]] 
-                    print(f"    📊 Schema Auto-Detected (Default Single-Objective):")
-                    print(f"       Inputs: {self.orch.expected_input_columns}")
-                    print(f"       Targets: {self.orch.expected_target_columns}")
-                    print(f"    ⚠️  Warning: Using auto-detected schema. For multi-objective optimization, specify inputs and targets explicitly.")
+                    column_roles = res.get("column_roles", {})
+                    proposed_inputs = column_roles.get("inputs", [])
+                    proposed_targets = column_roles.get("targets", [])
+
+                    if proposed_inputs and proposed_targets:
+                        # Validate proposed columns exist in extracted data
+                        missing = [c for c in proposed_inputs + proposed_targets if c not in all_cols]
+                        if missing:
+                            print(f"    ⚠️  Scalarizer classification references missing columns: {missing}")
+                            # Fall through to schema_required below
+                            proposed_inputs, proposed_targets = [], []
+                        else:
+                            reasoning = column_roles.get("reasoning", "")
+                            print(f"    🔬 Scalarizer classified columns:")
+                            print(f"       Inputs: {proposed_inputs}")
+                            print(f"       Targets: {proposed_targets}")
+                            if reasoning:
+                                print(f"       Reasoning: {reasoning}")
+
+                            if self.orch.autonomy_level == "CO_PILOT":
+                                # Return proposal for user confirmation
+                                n_data = len(df_to_append)
+                                return json.dumps({
+                                    "status": "schema_proposed",
+                                    "inputs": proposed_inputs,
+                                    "targets": proposed_targets,
+                                    "reasoning": reasoning,
+                                    "data_points": n_data,
+                                    "message": "Scalarizer proposes this classification. Confirm or adjust.",
+                                    "available_columns": all_cols
+                                })
+                            else:
+                                # SUPERVISED/AUTONOMOUS: accept directly
+                                self.orch.expected_input_columns = proposed_inputs
+                                self.orch.expected_target_columns = proposed_targets
+                                print(f"    ✅ Schema auto-accepted: inputs={proposed_inputs}, targets={proposed_targets}")
+
+                    # Targets found but no inputs — measurement-only data (e.g., spectra)
+                    if proposed_targets and not proposed_inputs:
+                        n_data = len(df_to_append)
+                        return json.dumps({
+                            "status": "inputs_required",
+                            "message": (
+                                "The data file contains measurement data but no experimental conditions. "
+                                "Input parameters (e.g., temperature, pH, concentration) are needed for optimization."
+                            ),
+                            "targets_found": proposed_targets,
+                            "reasoning": column_roles.get("reasoning", ""),
+                            "data_points": n_data,
+                            "options": [
+                                "Provide a metadata JSON sidecar file with experimental conditions",
+                                "Manually specify input parameter values for this data file",
+                                "Re-call analyze_file with inputs=[...] listing the parameter names to add"
+                            ]
+                        })
+
+                    # Fallback: scalarizer didn't classify or classification was invalid
+                    if not proposed_inputs or not proposed_targets:
+                        print(f"    ⚠️  No schema specified. Extracted columns: {all_cols}")
+                        data_preview = df_to_append.head(3).to_dict(orient='records')
+                        col_stats = {}
+                        for col in all_cols:
+                            if pd.api.types.is_numeric_dtype(df_to_append[col]):
+                                col_stats[col] = {
+                                    "type": "numeric",
+                                    "unique": int(df_to_append[col].nunique()),
+                                    "min": float(df_to_append[col].min()),
+                                    "max": float(df_to_append[col].max()),
+                                }
+                            else:
+                                col_stats[col] = {"type": "non-numeric", "unique": int(df_to_append[col].nunique())}
+                        n_data = len(df_to_append)
+                        numeric_cols = [c for c in all_cols if pd.api.types.is_numeric_dtype(df_to_append[c])]
+                        return json.dumps({
+                            "status": "schema_required",
+                            "message": "Could not auto-classify columns. Re-call analyze_file with explicit inputs and targets.",
+                            "available_columns": all_cols,
+                            "column_stats": col_stats,
+                            "data_preview": data_preview,
+                            "data_points": n_data,
+                            "objective": self.orch.objective or "Not set",
+                            "hint": (
+                                "Use the objective, column names, and data preview to decide: "
+                                "which columns are controllable INPUT parameters (experimentally set) "
+                                "and which are measured TARGET metrics (outcomes to optimize). "
+                                "Non-numeric columns (e.g., Sample_ID, Notes) should be excluded. "
+                                "Then call: analyze_file(file_path=..., inputs=[...], targets=[...])"
+                            ),
+                            "objective_count_guidance": self._build_objective_guidance(n_data, numeric_cols)
+                        })
                 
-                # SCHEMA ENFORCEMENT ON SAVE
+                # FILTER TO MATCH CSV SCHEMA
+                # The scalarizer may output extra metrics beyond what the
+                # optimization CSV tracks.  Use the existing CSV columns as
+                # ground truth (they may be wider than expected_target_columns
+                # if targets were narrowed via run_optimization).  For new
+                # CSVs, fall back to the expected schema.
                 if self.orch.bo_data_path.exists():
                     df_existing = pd.read_csv(self.orch.bo_data_path)
-                    
+                    ref_cols = list(df_existing.columns)
+                else:
+                    df_existing = None
+                    if self.orch.expected_input_columns and self.orch.expected_target_columns:
+                        ref_cols = self.orch.expected_input_columns + self.orch.expected_target_columns
+                    else:
+                        ref_cols = None
+
+                if ref_cols:
+                    available = [c for c in ref_cols if c in df_to_append.columns]
+                    extra = [c for c in df_to_append.columns if c not in ref_cols]
+                    missing = [c for c in ref_cols if c not in df_to_append.columns]
+                    if extra:
+                        print(f"    📎 Dropping extra columns: {extra}")
+                    if missing:
+                        print(f"    ⚠️  Missing expected columns: {missing}")
+                    if available:
+                        df_to_append = df_to_append[available]
+
+                # SCHEMA ENFORCEMENT ON SAVE
+                if df_existing is not None:
                     if set(df_to_append.columns) != set(df_existing.columns):
                         return json.dumps({
                             "status": "error",
@@ -1108,7 +1372,7 @@ class OrchestratorTools:
                             "received_columns": list(df_to_append.columns),
                             "hint": "All data must have same structure. Use reset_analysis_logic to start fresh."
                         })
-                    
+
                     df_to_append = df_to_append[df_existing.columns]
                     df_to_append.to_csv(self.orch.bo_data_path, mode='a', header=False, index=False)
                 else:
@@ -1128,14 +1392,11 @@ class OrchestratorTools:
                 
                 return json.dumps({
                     "status": "success",
-                    "metrics": metrics if isinstance(metrics, dict) else f"{len(metrics)} data points",
                     "data_points_collected": data_count,
                     "rows_added": num_new,
                     "optimization_ready": data_count >= 3,
-                    "schema": {
-                        "inputs": self.orch.expected_input_columns,
-                        "targets": self.orch.expected_target_columns
-                    }
+                    "inputs": self.orch.expected_input_columns,
+                    "targets": self.orch.expected_target_columns
                 })
                 
             except Exception as e:
@@ -1184,6 +1445,430 @@ class OrchestratorTools:
             required=["file_path"]
         )
         
+        # 6b. ANALYZE BATCH
+        def analyze_batch(
+                file_paths: list[str],
+                extraction_goal: str = None,
+                conditions: str = None,
+                conditions_file: str = None,
+                inputs: list[str] = None,
+                targets: list[str] = None,
+                force_regenerate: bool = False):
+            """
+            Analyzes multiple raw data files in a single call.
+            Runs the scalarizer on each file, merges with experimental conditions,
+            and appends all results to the optimization dataset.
+            """
+            print(f"  ⚡ Tool: Analyzing batch of {len(file_paths)} files...")
+
+            # --- 1. Resolve all file paths first ---
+            resolved_paths = []
+            resolve_errors = []
+            for fp in file_paths:
+                resolved, err = self._resolve_data_path(fp)
+                if err:
+                    resolve_errors.append({"file": fp, "error": "File not found"})
+                else:
+                    resolved_paths.append(resolved)
+
+            if not resolved_paths:
+                return json.dumps({
+                    "status": "error",
+                    "message": "None of the provided file paths could be resolved.",
+                    "errors": resolve_errors
+                })
+
+            # --- 2. Parse conditions ---
+            file_conditions = {}  # resolved_path -> {param: value}
+
+            raw_conditions = None
+            if conditions:
+                try:
+                    raw_conditions = json.loads(conditions)
+                except json.JSONDecodeError as e:
+                    return json.dumps({
+                        "status": "error",
+                        "message": f"Could not parse conditions JSON: {e}",
+                        "expected_formats": [
+                            '{"filename.csv": {"temperature": 300, "pH": 7.0}, ...}',
+                            '[{"temperature": 300}, {"temperature": 350}]'
+                        ]
+                    })
+            elif conditions_file:
+                cf_resolved, cf_err = self._resolve_data_path(conditions_file)
+                if cf_err:
+                    return json.dumps({
+                        "status": "error",
+                        "message": f"Conditions file not found: {conditions_file}"
+                    })
+                try:
+                    with open(cf_resolved, 'r') as f:
+                        raw_conditions = json.load(f)
+                except Exception as e:
+                    return json.dumps({
+                        "status": "error",
+                        "message": f"Could not read conditions file: {e}"
+                    })
+
+            if raw_conditions is not None:
+                if isinstance(raw_conditions, list):
+                    # Positional matching
+                    if len(raw_conditions) != len(resolved_paths):
+                        return json.dumps({
+                            "status": "error",
+                            "message": (
+                                f"Conditions list has {len(raw_conditions)} entries "
+                                f"but {len(resolved_paths)} files were resolved. Counts must match."
+                            )
+                        })
+                    for rpath, cond in zip(resolved_paths, raw_conditions):
+                        if isinstance(cond, dict):
+                            file_conditions[rpath] = cond
+                elif isinstance(raw_conditions, dict):
+                    # Key matching by filename or stem
+                    unmatched_keys = []
+                    for key, cond in raw_conditions.items():
+                        matched = False
+                        for rpath in resolved_paths:
+                            fname = Path(rpath).name
+                            stem = Path(rpath).stem
+                            if key in (fname, stem):
+                                file_conditions[rpath] = cond
+                                matched = True
+                                break
+                        if not matched:
+                            unmatched_keys.append(key)
+                    if unmatched_keys and not file_conditions:
+                        return json.dumps({
+                            "status": "error",
+                            "message": (
+                                f"None of the condition keys matched any file. "
+                                f"Unmatched keys: {unmatched_keys}. "
+                                f"Resolved filenames: {[Path(p).name for p in resolved_paths]}"
+                            )
+                        })
+                    if unmatched_keys:
+                        print(f"    ⚠️  Unmatched condition keys (ignored): {unmatched_keys}")
+
+            # --- 3. Process each file through scalarizer ---
+            enhanced_objective = extraction_goal or ""
+            if self.orch.objective and self.orch.objective != "Undefined Research Goal":
+                enhanced_objective = (
+                    f"Research objective: {self.orch.objective}\n\n{enhanced_objective}"
+                ).strip()
+            if inputs and targets:
+                schema_instruction = (
+                    f"\nREQUIRED OUTPUT SCHEMA:\n"
+                    f"- INPUT PARAMETERS: {inputs}\n"
+                    f"- TARGET METRICS: {targets}\n"
+                    f"Extract EXACTLY these columns from the data."
+                )
+                enhanced_objective = f"{enhanced_objective}\n{schema_instruction}".strip()
+
+            current_plan = self.orch.planner.state.get("current_plan", {})
+            exp_context = current_plan.get("proposed_experiments", [{}])[0] if current_plan else {}
+
+            if inputs and targets:
+                exp_context = exp_context.copy() if exp_context else {}
+                exp_context["_schema_requirements"] = {
+                    "input_columns": inputs,
+                    "target_columns": targets,
+                    "optimization_type": "multi-objective" if len(targets) > 1 else "single-objective"
+                }
+
+            role_hints = {"inputs": inputs, "targets": targets} if inputs and targets else None
+
+            script_to_use = None
+            if not force_regenerate:
+                script_to_use = self.orch.active_scalarizer_script if (
+                    self.orch.active_scalarizer_script and Path(self.orch.active_scalarizer_script).exists()
+                ) else None
+
+            results = []
+            errors = list(resolve_errors)
+            first_column_roles = None
+
+            for rpath in resolved_paths:
+                fname = Path(rpath).name
+                try:
+                    res = self.orch.scalarizer.scalarize(
+                        data_path=rpath,
+                        objective_query=enhanced_objective,
+                        reuse_script_path=script_to_use,
+                        experiment_context=exp_context,
+                        enable_human_review=False,
+                        column_role_hints=role_hints
+                    )
+
+                    if res.get("status") != "success":
+                        errors.append({"file": fname, "error": res.get("error", "Scalarizer failed")})
+                        continue
+
+                    # Lock script after first success
+                    if not script_to_use and res.get("source_script"):
+                        script_to_use = res["source_script"]
+                        self.orch.active_scalarizer_script = script_to_use
+                        print(f"    🔒 Script locked: {Path(script_to_use).name}")
+
+                    if first_column_roles is None:
+                        first_column_roles = res.get("column_roles", {})
+
+                    # Extract metrics row
+                    metrics = res.get("metrics", {})
+                    if isinstance(metrics, list):
+                        if len(metrics) == 1:
+                            row = metrics[0]
+                        else:
+                            # Multi-row from a single spectrum file — take all rows
+                            # but this is unusual; log a warning
+                            print(f"    ⚠️  {fname}: scalarizer returned {len(metrics)} rows (expected 1)")
+                            row = metrics[0]
+                    elif isinstance(metrics, dict):
+                        row = metrics
+                    else:
+                        errors.append({"file": fname, "error": f"Unexpected metrics type: {type(metrics)}"})
+                        continue
+
+                    # Merge conditions with scalarizer output.
+                    # External conditions take priority — they overwrite any
+                    # values the script may have hardcoded from the first sidecar.
+                    cond = file_conditions.get(rpath, {})
+                    merged = {**row, **cond}
+                    results.append({"file": fname, "row": merged, "path": rpath})
+
+                    print(f"    ✅ {fname}: {len(merged)} columns extracted")
+
+                except Exception as e:
+                    logging.error(f"Error processing {fname}: {e}", exc_info=True)
+                    errors.append({"file": fname, "error": str(e)})
+
+            if not results:
+                return json.dumps({
+                    "status": "error",
+                    "message": "All files failed during processing.",
+                    "errors": errors
+                })
+
+            # --- 4. Determine schema ---
+            all_keys = list(results[0]["row"].keys())
+            condition_keys = set()
+            if file_conditions:
+                for cond in file_conditions.values():
+                    condition_keys.update(cond.keys())
+                condition_keys = sorted(condition_keys)
+
+            if inputs and targets:
+                # User-specified schema
+                self.orch.expected_input_columns = inputs
+                self.orch.expected_target_columns = targets
+            elif condition_keys:
+                # Derive: inputs = condition keys, targets = remaining keys
+                proposed_targets = first_column_roles.get("targets", []) if first_column_roles else []
+                scalarizer_keys = [k for k in all_keys if k not in condition_keys]
+                if not proposed_targets:
+                    proposed_targets = scalarizer_keys
+                self.orch.expected_input_columns = list(condition_keys)
+                self.orch.expected_target_columns = proposed_targets
+            else:
+                # No conditions at all — check if scalarizer found inputs
+                proposed_inputs = first_column_roles.get("inputs", []) if first_column_roles else []
+                proposed_targets = first_column_roles.get("targets", []) if first_column_roles else []
+                if proposed_inputs and proposed_targets:
+                    self.orch.expected_input_columns = proposed_inputs
+                    self.orch.expected_target_columns = proposed_targets
+                else:
+                    # Return inputs_required with example template
+                    file_names = [r["file"] for r in results]
+                    targets_found = proposed_targets or all_keys
+                    example = {fn: {"parameter_1": "value", "parameter_2": "value"} for fn in file_names}
+                    return json.dumps({
+                        "status": "inputs_required",
+                        "message": (
+                            f"Extracted targets from {len(results)} files but no experimental "
+                            f"conditions were found. Input parameters are needed for optimization."
+                        ),
+                        "files": file_names,
+                        "targets_found": targets_found,
+                        "example_conditions": example,
+                        "options": [
+                            "Re-call analyze_batch with conditions='{...}' mapping filenames to parameter values",
+                            "Re-call analyze_batch with conditions_file='path/to/conditions.json'",
+                            "Place sidecar JSON files next to each data file (e.g., spectrum_300C.json)"
+                        ]
+                    })
+
+            print(f"    📊 Batch schema: inputs={self.orch.expected_input_columns}, targets={self.orch.expected_target_columns}")
+
+            # --- 5. Validate condition key consistency across files ---
+            files_missing_conditions = []
+            if condition_keys:
+                for r in results[:]:  # iterate over copy
+                    missing_cond_keys = [k for k in condition_keys if k not in r["row"] or r["row"][k] is None]
+                    if missing_cond_keys:
+                        files_missing_conditions.append(r["file"])
+                        results.remove(r)
+
+            if not results and files_missing_conditions:
+                example = {fn: {k: "value" for k in condition_keys} for fn in files_missing_conditions}
+                return json.dumps({
+                    "status": "inputs_required",
+                    "message": "All files are missing experimental conditions.",
+                    "files_missing_conditions": files_missing_conditions,
+                    "example_conditions": example,
+                    "options": [
+                        "Re-call analyze_batch with conditions='{...}' providing values for all files",
+                        "Re-call analyze_batch with conditions_file='path/to/conditions.json'"
+                    ]
+                })
+
+            # --- 6. Build DataFrame and append to optimization_data.csv ---
+            expected_cols = self.orch.expected_input_columns + self.orch.expected_target_columns
+
+            # Filter rows to expected columns only
+            clean_rows = []
+            for r in results:
+                row_data = {}
+                for col in expected_cols:
+                    row_data[col] = r["row"].get(col)
+                clean_rows.append(row_data)
+
+            df_batch = pd.DataFrame(clean_rows)
+
+            if self.orch.bo_data_path.exists():
+                df_existing = pd.read_csv(self.orch.bo_data_path)
+                if set(df_batch.columns) != set(df_existing.columns):
+                    if inputs or targets:
+                        # Schema intentionally changed by user — replace old data
+                        print(f"    🔄 Schema changed (user-specified targets). Replacing old optimization data.")
+                        backup = self.orch.bo_data_path.with_suffix('.csv.backup')
+                        self.orch.bo_data_path.rename(backup)
+                        # Clear file tracking so all files are re-counted
+                        self.orch.analyzed_files = {}
+                        df_batch.to_csv(self.orch.bo_data_path, mode='w', header=True, index=False)
+
+                        for r in results:
+                            file_path_abs = str(Path(r["path"]).resolve())
+                            current_hash = self._compute_file_hash(r["path"])
+                            self.orch.analyzed_files[file_path_abs] = {
+                                'row_count': 1, 'hash': current_hash,
+                                'timestamp': datetime.now().isoformat()
+                            }
+                        with open(self.orch.analyzed_files_path, 'w') as f:
+                            json.dump(self.orch.analyzed_files, f, indent=2)
+
+                        df_final = pd.read_csv(self.orch.bo_data_path)
+                        return json.dumps({
+                            "status": "success",
+                            "files_processed": len(results),
+                            "rows_added": len(results),
+                            "data_points_collected": len(df_final),
+                            "optimization_ready": len(df_final) >= 3,
+                            "inputs": self.orch.expected_input_columns,
+                            "targets": self.orch.expected_target_columns,
+                            "note": "Schema changed — old data replaced with new target selection"
+                        })
+                    return json.dumps({
+                        "status": "error",
+                        "message": "Schema mismatch with existing optimization data.",
+                        "expected_columns": list(df_existing.columns),
+                        "received_columns": list(df_batch.columns),
+                        "hint": "Use reset_analysis_logic to start fresh."
+                    })
+                df_batch = df_batch[df_existing.columns]
+                df_batch.to_csv(self.orch.bo_data_path, mode='a', header=False, index=False)
+            else:
+                df_batch.to_csv(self.orch.bo_data_path, mode='w', header=True, index=False)
+
+            # Track each file
+            for r in results:
+                file_path_abs = str(Path(r["path"]).resolve())
+                current_hash = self._compute_file_hash(r["path"])
+                self.orch.analyzed_files[file_path_abs] = {
+                    'row_count': 1,
+                    'hash': current_hash,
+                    'timestamp': datetime.now().isoformat()
+                }
+            with open(self.orch.analyzed_files_path, 'w') as f:
+                json.dump(self.orch.analyzed_files, f, indent=2)
+
+            df_final = pd.read_csv(self.orch.bo_data_path)
+            data_count = len(df_final)
+            num_added = len(results)
+
+            response = {
+                "status": "success" if not errors and not files_missing_conditions else "partial_success",
+                "files_processed": len(results),
+                "rows_added": num_added,
+                "data_points_collected": data_count,
+                "optimization_ready": data_count >= 3,
+                "inputs": self.orch.expected_input_columns,
+                "targets": self.orch.expected_target_columns,
+            }
+            if errors:
+                response["errors"] = errors
+            if files_missing_conditions:
+                example = {fn: {k: "value" for k in condition_keys} for fn in files_missing_conditions}
+                response["files_missing_conditions"] = files_missing_conditions
+                response["example_conditions"] = example
+
+            return json.dumps(response)
+
+        self._register_tool(
+            func=analyze_batch,
+            name="analyze_batch",
+            description=(
+                "Analyzes multiple data files (e.g., spectra, time series) in a single call. "
+                "Runs the scalarizer on each file to extract target metrics, then merges with "
+                "experimental conditions. All results are appended to the optimization dataset. "
+                "Use instead of calling analyze_file repeatedly when files share the same structure."
+            ),
+            parameters={
+                "file_paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "List of data file paths to analyze "
+                        "(e.g., ['data/spectrum_300C.csv', 'data/spectrum_350C.csv'])"
+                    )
+                },
+                "extraction_goal": {
+                    "type": "string",
+                    "description": "What to extract from each file (e.g., 'Calculate peak area and FWHM')"
+                },
+                "conditions": {
+                    "type": "string",
+                    "description": (
+                        "JSON string mapping filenames to experimental conditions. "
+                        "Dict format: {\"spectrum_300C.csv\": {\"temperature\": 300}, ...}. "
+                        "List format: [{\"temperature\": 300}, {\"temperature\": 350}] (positional). "
+                        "Omit if sidecar JSONs exist next to each data file."
+                    )
+                },
+                "conditions_file": {
+                    "type": "string",
+                    "description": (
+                        "Path to a JSON file containing the conditions mapping "
+                        "(same format as the conditions parameter)"
+                    )
+                },
+                "inputs": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of column names to treat as INPUT parameters (overrides auto-detection)"
+                },
+                "targets": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of column names to treat as OPTIMIZATION TARGETS (overrides auto-detection)"
+                },
+                "force_regenerate": {
+                    "type": "boolean",
+                    "description": "If true, regenerates analysis script even if one exists. Default: false"
+                }
+            },
+            required=["file_paths"]
+        )
+
         # 7. RESET ANALYSIS LOGIC
         def reset_analysis_logic():
             """Resets the analysis script, optimization data, AND file tracking."""
@@ -1204,7 +1889,13 @@ class OrchestratorTools:
                 backup_path = self.orch.bo_data_path.with_suffix('.csv.backup')
                 self.orch.bo_data_path.rename(backup_path)
                 print(f"    ⚠️  Old data backed up to: {backup_path.name}")
-            
+
+            bo_history = self.orch.bo.history_file
+            if bo_history.exists():
+                backup = bo_history.with_suffix('.json.backup')
+                bo_history.rename(backup)
+                print(f"    ⚠️  BO history backed up to: {backup.name}")
+
             return json.dumps({
                 "status": "success",
                 "message": "Analysis logic reset. All files will be reprocessed fresh on next analyze_file call.",
@@ -1225,10 +1916,11 @@ class OrchestratorTools:
         
         # 8. RUN OPTIMIZATION
         def run_optimization(
-            parallel_capable: bool = False, 
+            parallel_capable: bool = False,
             batch_size: int = None,
             physical_constraints: str = None,
-            experimental_budget: int = None
+            experimental_budget: int = None,
+            targets: list[str] = None
         ):
             """
             Runs Bayesian Optimization to suggest next parameters.
@@ -1272,12 +1964,26 @@ class OrchestratorTools:
             
             if not self.orch.expected_target_columns or not self.orch.expected_input_columns:
                 return json.dumps({
-                    "status": "error", 
+                    "status": "error",
                     "message": "Schema not established",
                     "hint": "This shouldn't happen. Try reset_analysis_logic."
                 })
-            
-            # SCHEMA VALIDATION 
+
+            # TARGET NARROWING — allows switching from MOO to SOO
+            # without re-running analyze_batch on every file.
+            if targets:
+                missing = [t for t in targets if t not in df.columns]
+                if missing:
+                    return json.dumps({
+                        "status": "error",
+                        "message": f"Requested targets not in data: {missing}",
+                        "available_columns": list(df.columns)
+                    })
+                old_targets = self.orch.expected_target_columns
+                self.orch.expected_target_columns = targets
+                print(f"    🎯 Targets narrowed: {old_targets} → {targets}")
+
+            # SCHEMA VALIDATION
             missing_targets = [t for t in self.orch.expected_target_columns if t not in df.columns]
             if missing_targets:
                 return json.dumps({
@@ -1406,6 +2112,35 @@ class OrchestratorTools:
             if physical_constraints:
                 print(f"       Constraints: {physical_constraints[:100]}...")
             
+            # ============================================
+            # DATA SUFFICIENCY CHECK FOR MOO
+            # ============================================
+            n_targets = len(self.orch.expected_target_columns)
+            n_inputs = len(self.orch.expected_input_columns)
+            n_data = len(df)
+            if n_targets > 1:
+                min_recommended = 5 * n_inputs * n_targets
+                if n_data < min_recommended:
+                    print(f"    ⚠️  MOO data sufficiency: {n_data} points for "
+                          f"{n_inputs} inputs × {n_targets} targets (recommend ≥{min_recommended})")
+                    return json.dumps({
+                        "status": "warning",
+                        "message": (
+                            f"Multi-objective optimization with {n_targets} targets and "
+                            f"{n_inputs} inputs ideally needs ≥{min_recommended} data points, "
+                            f"but only {n_data} are available. The Pareto recommendations "
+                            f"will be unreliable."
+                        ),
+                        "suggestion": (
+                            f"Re-call run_optimization with targets=[\"chosen_target\"] to "
+                            f"narrow to single-objective. No need to re-analyze files. "
+                            f"You can switch to MOO once more data is collected."
+                        ),
+                        "current_targets": self.orch.expected_target_columns,
+                        "data_points": n_data,
+                        "recommended_minimum": min_recommended,
+                    })
+
             try:
                 # ============================================
                 # CALL BO
@@ -1456,6 +2191,10 @@ class OrchestratorTools:
                 if res.get("acq_data_path"):
                     response["acq_data_path"] = res["acq_data_path"]
                 
+                # Include visual inspection results
+                if res.get("inspection"):
+                    response["inspection"] = res["inspection"]
+
                 # Include constrained planning metadata
                 if res.get("constrained_planning"):
                     cp = res["constrained_planning"]
@@ -1532,6 +2271,17 @@ class OrchestratorTools:
                         "Pass when user mentions remaining experiments, budget, 'last round', "
                         "or 'N more tries'. This counts iterations (calls to run_optimization), "
                         "not individual experiments within a batch."
+                    )
+                },
+                "targets": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Subset of target columns to optimize. Use to narrow from "
+                        "multi-objective to single-objective without re-analyzing files. "
+                        "Example: targets=['Peak_Area'] to optimize only peak area when "
+                        "the scalarizer extracted multiple metrics. The specified targets "
+                        "must exist in the optimization data."
                     )
                 }
             },

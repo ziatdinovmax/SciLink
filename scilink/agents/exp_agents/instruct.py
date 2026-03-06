@@ -2069,6 +2069,28 @@ Examine the data and determine the appropriate fitting/analysis approach. Consid
 - Are there overlapping features requiring deconvolution?
 - Is baseline correction needed?
 
+**Physics-First Modeling (CRITICAL):**
+Every component in your model MUST correspond to a physically identifiable feature — a known
+vibrational mode, electronic transition, relaxation process, diffraction peak, etc. Do NOT
+add components solely to improve R² or reduce residuals. A simpler model with clear physical
+meaning is always preferred over a complex model with marginally better fit statistics.
+- Start with the minimum number of components that the physics demands.
+- Only add a component if you can name the physical origin (e.g., "shoulder at ~3200 cm⁻¹
+  from strongly H-bonded OH stretch") AND it is clearly visible in the data.
+- Treat R² as a sanity check, not an optimization target. An R² of 0.96 with 3 physically
+  meaningful components is far superior to R² of 0.99 with 6 components where half are
+  fitting noise or compensating for an incorrect baseline.
+- If residuals show systematic structure, first reconsider the baseline or peak shape
+  (e.g., Voigt vs Gaussian) before adding more peaks.
+
+**Domain Skill Rules (when provided):** If a "MANDATORY Domain Skill Rules" section appears \
+below, its rules are MANDATORY constraints on your analysis plan. These rules encode validated \
+domain expertise and override general-purpose defaults. For example, if the skill specifies a \
+particular baseline treatment (e.g., "Shirley background"), you MUST use that treatment — do \
+not substitute your own preference. If the skill specifies line shapes, component constraints, \
+or fitting workflow steps, follow them exactly. Violations of skill rules are treated as errors, \
+not style preferences.
+
 **Common Analysis Approaches** (for reference):
 - Peak fitting (Gaussian, Lorentzian, Voigt, Pseudo-Voigt, Pearson VII, asymmetric profiles)
 - Peak deconvolution (overlapping features with constraints)
@@ -2078,17 +2100,81 @@ Examine the data and determine the appropriate fitting/analysis approach. Consid
 - Derivative spectroscopy
 - Peak detection and integration
 
+**Commit to specific choices — do NOT hedge:**
+- State ONE model type, not alternatives (write "Voigt profiles" not "Gaussian or Voigt")
+- State the exact number of components, not a range (write "3 peaks" not "3-4 peaks")
+- Specify the exact baseline/background treatment (write "linear baseline" not "polynomial or linear")
+- If you are unsure between options, pick the one best supported by the data and physics —
+  the user can refine before the plan is locked
+- This plan will be translated directly into code; any ambiguity forces the code generator to guess
+
 **Output Format:**
 ```json
 {
     "observations": "What you see in the data",
     "analysis_approach": "What you will do",
-    "physical_model": "Mathematical form",
+    "physical_model": "Mathematical form — be specific: state the exact profile/function type, exact number of components, and baseline treatment",
     "parameters_to_extract": ["param1", "param2"],
     "fitting_strategy": "How you will fit (initial guesses, constraints, method)",
     "literature_query": "Question for literature search to help with fitting, or null if not needed"
 }
 ```
+"""
+
+
+SERIES_REGIME_PLANNING_SUPPLEMENT = """
+## Series Analysis Planning
+
+You are analyzing a series of {num_spectra} spectra. Representative spectra from across
+the series are shown above so you can see how the data evolves.
+
+**If the data appears UNIFORM** across the series (same peak structure, similar shapes):
+Return the standard response format with a single model for all spectra.
+
+**If the data changes SIGNIFICANTLY** across the series (new peaks appearing, peak
+splitting, major shape changes, or features indicating different physical regimes):
+Add a `"series_analysis_plan"` field to your JSON response:
+
+```json
+{{
+    "observations": "...",
+    "analysis_approach": "...",
+    "physical_model": "primary model (for the first/majority regime)",
+    "parameters_to_extract": ["param1", "param2"],
+    "fitting_strategy": "...",
+    "literature_query": "...",
+    "series_analysis_plan": {{
+        "rationale": "Why multiple fitting regimes are needed",
+        "regimes": [
+            {{
+                "name": "descriptive regime name",
+                "spectrum_indices": [0, 1, 2, 3],
+                "physical_model": "model for this regime",
+                "fitting_strategy": "strategy for this regime",
+                "parameters_to_extract": ["param1", "param2"]
+            }}
+        ],
+        "transition_points": [
+            {{
+                "between_indices": [3, 4],
+                "variable_value": null,
+                "description": "Description of what changes at this transition"
+            }}
+        ]
+    }}
+}}
+```
+
+**Rules:**
+- Every spectrum index (0 through {num_spectra_minus_1}) must appear in exactly ONE regime.
+- Each regime must have at least one spectrum.
+- Only use multiple regimes when you can clearly see different spectral character.
+- When in doubt, use a single model — the adaptive refit step can recover individual failures later.
+- Consider the experimental metadata and user objective when deciding regime boundaries.
+- If you detect a gradual transition, place the boundary where the dominant spectral feature changes.
+- Do NOT inflate the model to accommodate every spectrum perfectly. A physically grounded
+  model that fits most spectra well is better than an overparameterized model that fits all
+  spectra but loses interpretability. Let the adaptive refit handle outliers.
 """
 
 
@@ -2099,6 +2185,21 @@ FITTING_SCRIPT_INSTRUCTIONS = """Write a curve fitting script for spectroscopic 
 - Model: {physical_model}
 - Parameters: {parameters_to_extract}
 - Strategy: {fitting_strategy}
+
+**CONFORMANCE REQUIREMENT:** Your script MUST implement exactly what the plan specifies:
+- Use the exact mathematical model described (e.g., if the plan says "Voigt profiles", implement Voigt — not Gaussian, not Lorentzian)
+- Match the exact number of components (e.g., "3 peaks" means 3, not 2 or 4)
+- Match the baseline/background treatment described
+- If the plan specifies exponential decay, implement exponential decay — not a polynomial fit
+- If the Context section below contains "MANDATORY Domain Skill Rules", those rules are \
+binding constraints that MUST be followed in your implementation. Skill rules specify required \
+methods (e.g., Shirley background, Voigt line shapes, spin-orbit constraints) that cannot be \
+substituted with alternatives.
+Deviations are acceptable ONLY when they are obvious from the data dimensions provided \
+(e.g., more parameters than data points). In such cases, implement the closest viable model \
+and document the deviation and reasoning in the results "summary" field. \
+Do NOT preemptively deviate because you think the plan might not converge — implement the \
+plan as specified and let the retry pipeline handle actual runtime failures.
 
 **Context:** {context}
 
@@ -2149,6 +2250,50 @@ FITTING_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed script.
 **CRITICAL:** Fix only the execution error. Do NOT change the fitting model, its parameters, or the overall analysis approach. The model is locked for series consistency.
 
 **Response:** Return only `{{"diagnosis": "...", "script": "..."}}`
+"""
+
+
+PLAN_CONFORMANCE_CHECK_INSTRUCTIONS = """You are verifying that a Python script correctly implements a scientific analysis plan.
+
+**ANALYSIS PLAN (authoritative specification):**
+- Approach: {analysis_approach}
+- Model: {physical_model}
+- Parameters to extract: {parameters_to_extract}
+- Strategy: {fitting_strategy}
+{skill_rules}
+**GENERATED SCRIPT:**
+```python
+{script}
+```
+
+Compare the script against the plan and determine if the script faithfully implements \
+what the plan describes.
+
+Check:
+1. **Mathematical model**: Does the script implement the same type of model? \
+(e.g., if the plan says "Voigt profiles", does the script use Voigt — not Gaussian? \
+If "bi-exponential decay", does it use two exponentials — not a stretched exponential?)
+2. **Number of components**: Does the script create the number of model components \
+the plan specifies?
+3. **Background/baseline treatment**: Does the script handle the baseline as the plan \
+describes?
+4. **Parameters**: Does the script compute and report the parameters the plan lists?
+5. **Domain skill compliance**: If MANDATORY Domain Skill Rules are listed above, does \
+the script follow ALL of them? (e.g., if the skill requires Shirley background, does \
+the script implement Shirley — not linear or polynomial? If the skill specifies Voigt \
+line shapes, does the script use Voigt — not Gaussian?)
+
+Allow reasonable implementation-level variation (variable naming, optimization algorithm, \
+library choice). A deviation is **justified** only if it is obvious from the data dimensions \
+that the plan cannot work (e.g., more components than data points). In that case the script's \
+"summary" field should explain the deviation. Justified deviations should be marked conformant.
+
+Mark as non-conformant when the script implements a different model or structure than the plan \
+describes without clear justification (e.g., plan says "3 Voigt peaks" but script uses \
+2 Gaussians with no explanation), OR when the script violates mandatory domain skill rules.
+
+Return JSON:
+{{"conformant": true/false, "justified_deviations": ["deviations with stated reasoning, if any"], "unjustified_deviations": ["deviations with no explanation"], "summary": "one sentence"}}
 """
 
 

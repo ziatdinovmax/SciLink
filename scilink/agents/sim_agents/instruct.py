@@ -379,6 +379,20 @@ SYSTEM COMPOSITION:
   - Bond types: {bond_types}
   - Angle types: {angle_types}
 
+EXACT TYPE INFORMATION FROM DATA FILE:
+{data_type_info}
+
+CRITICAL: You MUST use the EXACT type numbers listed above for ALL commands including:
+  - group definitions (e.g., if Zn is type 6, use "group zinc type 6")
+  - fix shake (use the correct bond type number for water O-H bonds and angle type for H-O-H)
+  - compute rdf (use correct atom type pairs from the list above)
+  - compute coord/atom (use correct atom type numbers)
+  - DO NOT guess or assume type numbers. Use ONLY what is listed above.
+  - DO NOT include pair_coeff, bond_coeff, angle_coeff, or dihedral_coeff commands.
+    Instead use: include ff_params.lammps
+  - DO NOT include pair_style, bond_style, angle_style, dihedral_style, kspace_style,
+    or special_bonds commands. These are defined in ff_params.lammps.
+
 DETECTED COMPONENTS:
   - Water: {has_water}
   - Ions: {has_ions}

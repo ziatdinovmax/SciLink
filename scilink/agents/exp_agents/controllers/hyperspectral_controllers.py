@@ -45,7 +45,14 @@ def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
     if not content:
         return
 
-    prompt.append(f"\n## Domain Skill: {skill_name} ({stage})")
+    prompt.append(f"\n## MANDATORY Domain Skill Rules: {skill_name} ({stage})")
+    prompt.append(
+        "The following rules are MANDATORY. Your analysis plan and implementation "
+        "MUST conform to these domain-specific requirements. These rules encode "
+        "validated domain expertise and take precedence over general-purpose defaults. "
+        "Do NOT substitute your own preferences where these rules specify a method, "
+        "treatment, or constraint."
+    )
     prompt.append(content)
 
     # Include validation rules during planning and interpretation
@@ -53,7 +60,7 @@ def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
     if stage in ("planning", "interpretation"):
         validation = sections.get("validation", "")
         if validation:
-            prompt.append(f"\n## Domain Validation Rules ({skill_name})")
+            prompt.append(f"\n## MANDATORY Domain Validation Rules ({skill_name})")
             prompt.append(validation)
 
 
