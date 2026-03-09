@@ -146,6 +146,22 @@ Metadata Options:
         )
     )
 
+    # MCP server arguments
+    parser.add_argument(
+        '--mcp',
+        type=str,
+        nargs='+',
+        dest='mcp_servers',
+        metavar='MCP_CONFIG',
+        help=(
+            'MCP server configurations. Each entry can be:\n'
+            '  - A JSON config file ({"name":"...", "command":["..."], "env":{}})\n'
+            '  - stdio shorthand:  stdio:name:command,arg1,arg2\n'
+            '  - SSE shorthand:    sse:name:http://host:port/sse\n'
+            'Example: scilink analyze --mcp stdio:fs:npx,-y,@modelcontextprotocol/server-filesystem,/tmp'
+        )
+    )
+
     # Session arguments
     parser.add_argument(
         '--session-dir',
@@ -322,6 +338,7 @@ class AnalysisPlayground:
         self._initial_metadata_path = metadata_path
         self._agent_files = self.config.get('agent_files', [])
         self._tool_files = self.config.get('tool_files', [])
+        self._mcp_servers = self.config.get('mcp_servers', [])
         
         # Convert mode string to enum
         mode_map = {
@@ -431,7 +448,11 @@ Supported data types:
         # === LOAD CUSTOM TOOL FILES ===
         if self._tool_files:
             self._load_custom_tools(self._tool_files)
-        
+
+        # === CONNECT MCP SERVERS ===
+        if self._mcp_servers:
+            self._connect_mcp_servers(self._mcp_servers)
+
         # === SHOW SESSION INFO ===
         print("\n" + "="*60)
         print("SESSION INFO")
@@ -463,6 +484,7 @@ Supported data types:
         """Load BaseAnalysisAgent subclasses from user-supplied .py files and register them."""
         import importlib.util
         import inspect
+        import sys
         from scilink.agents.exp_agents.base_agent import BaseAnalysisAgent
 
         for file_path in agent_files:
@@ -471,7 +493,12 @@ Supported data types:
             try:
                 spec = importlib.util.spec_from_file_location(path.stem, path)
                 module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
+                _prev = sys.dont_write_bytecode
+                sys.dont_write_bytecode = True
+                try:
+                    spec.loader.exec_module(module)
+                finally:
+                    sys.dont_write_bytecode = _prev
             except Exception as e:
                 print(f"   ❌ Failed to load {path.name}: {e}")
                 continue
@@ -510,6 +537,7 @@ Supported data types:
         """
         import importlib.util
         import inspect
+        import sys
 
         for file_path in tool_files:
             path = Path(file_path).resolve()
@@ -517,7 +545,12 @@ Supported data types:
             try:
                 spec = importlib.util.spec_from_file_location(path.stem, path)
                 module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
+                _prev = sys.dont_write_bytecode
+                sys.dont_write_bytecode = True
+                try:
+                    spec.loader.exec_module(module)
+                finally:
+                    sys.dont_write_bytecode = _prev
             except Exception as e:
                 print(f"   ❌ Failed to load {path.name}: {e}")
                 continue
@@ -571,6 +604,50 @@ Supported data types:
             self.agent.register_tools(schemas, factory)
             count = sum(1 for s in schemas if s.get('type') == 'function')
             print(f"   ✅ Registered {count} tool(s) from {path.name}")
+
+    def _connect_mcp_servers(self, mcp_configs: list) -> None:
+        """Parse MCP server configs and connect to each."""
+        import json as _json
+
+        for entry in mcp_configs:
+            try:
+                if entry.startswith("stdio:"):
+                    # stdio:name:cmd,arg1,arg2
+                    parts = entry[len("stdio:"):].split(":", 1)
+                    name = parts[0]
+                    command = parts[1].split(",") if len(parts) > 1 else []
+                    print(f"\n🔌 Connecting to MCP server '{name}' (stdio)...")
+                    count = self.agent.connect_mcp_server(
+                        name, command=command
+                    )
+                    print(f"   ✅ Registered {count} tool(s) from '{name}'")
+
+                elif entry.startswith("sse:"):
+                    # sse:name:http://host:port/path
+                    parts = entry[len("sse:"):].split(":", 1)
+                    name = parts[0]
+                    url = parts[1] if len(parts) > 1 else ""
+                    print(f"\n🔌 Connecting to MCP server '{name}' (SSE)...")
+                    count = self.agent.connect_mcp_server(name, url=url)
+                    print(f"   ✅ Registered {count} tool(s) from '{name}'")
+
+                else:
+                    # JSON config file
+                    path = Path(entry).resolve()
+                    with open(path) as f:
+                        cfg = _json.load(f)
+                    name = cfg.get("name", path.stem)
+                    print(f"\n🔌 Connecting to MCP server '{name}'...")
+                    count = self.agent.connect_mcp_server(
+                        name,
+                        command=cfg.get("command"),
+                        url=cfg.get("url"),
+                        env=cfg.get("env"),
+                    )
+                    print(f"   ✅ Registered {count} tool(s) from '{name}'")
+
+            except Exception as e:
+                print(f"   ❌ Failed to connect MCP server '{entry}': {e}")
 
     def print_help(self):
         """Print available commands."""

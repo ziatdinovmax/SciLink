@@ -399,16 +399,31 @@ class OrchestratorTools:
                 output_path = self.orch.base_dir / "plan.json"
                 with open(output_path, 'w') as f:
                     json.dump(plan, f, indent=2)
-                
+
+                # Save literature and molecule design results as separate files
+                saved_extras = []
+                if plan.get("literature_search"):
+                    lit_path = self.orch.base_dir / "literature_search.md"
+                    with open(lit_path, 'w') as f:
+                        f.write("# Literature Search Results\n\n")
+                        f.write(plan["literature_search"])
+                    saved_extras.append(str(lit_path))
+                if plan.get("molecule_design"):
+                    mol_path = self.orch.base_dir / "molecule_design.md"
+                    with open(mol_path, 'w') as f:
+                        f.write("# Molecular Design & Synthesis Planning Results\n\n")
+                        f.write(plan["molecule_design"])
+                    saved_extras.append(str(mol_path))
+
                 # Generate HTML
                 from .html_generator import HTMLReportGenerator
                 html_path = self.orch.base_dir / "plan.html"
                 generator = HTMLReportGenerator(self.orch.planner.state)
                 generator.generate(str(html_path))
-                
+
                 num_experiments = len(plan.get('proposed_experiments', []))
-                
-                return json.dumps({
+
+                result = {
                     "status": "success",
                     "iteration": plan.get('iteration'),
                     "num_experiments": num_experiments,
@@ -418,7 +433,10 @@ class OrchestratorTools:
                     "primary_data_used": primary_dataset is not None,
                     "tea_context_included": self.orch.latest_tea_results is not None,
                     "hint": "Use generate_implementation_code() to add executable code"
-                })
+                }
+                if saved_extras:
+                    result["external_results_files"] = saved_extras
+                return json.dumps(result)
                 
             except Exception as e:
                 logging.error(f"Plan generation error: {e}", exc_info=True)
@@ -2289,7 +2307,76 @@ class OrchestratorTools:
         )
 
 
-        # 9. SAVE CHECKPOINT
+        # 9. SAVE FILE
+        def save_file(filename: str, content: str, subfolder: str = ""):
+            """
+            Save text content (code, protocols, notes) to a file in the session
+            directory.
+            """
+            print(f"  ⚡ Tool: Saving file '{filename}'...")
+
+            # Sanitise: strip path separators from filename to prevent traversal.
+            safe_name = Path(filename).name
+            if not safe_name:
+                return json.dumps({
+                    "status": "error",
+                    "message": "Invalid filename.",
+                })
+
+            target_dir = self.orch.base_dir
+            if subfolder:
+                safe_sub = Path(subfolder).name
+                target_dir = target_dir / safe_sub
+            target_dir.mkdir(parents=True, exist_ok=True)
+            dest = target_dir / safe_name
+
+            try:
+                dest.write_text(content, encoding="utf-8")
+                print(f"    💾 Saved: {dest}")
+                return json.dumps({
+                    "status": "success",
+                    "path": str(dest),
+                    "size_bytes": dest.stat().st_size,
+                })
+            except Exception as e:
+                logging.error(f"save_file failed: {e}")
+                return json.dumps({
+                    "status": "error",
+                    "message": str(e),
+                })
+
+        self._register_tool(
+            func=save_file,
+            name="save_file",
+            description=(
+                "Save text content (code, protocols, scripts, notes) to a file "
+                "in the session directory. Use this to persist generated code, "
+                "instrument protocols, or any text artifact."
+            ),
+            parameters={
+                "filename": {
+                    "type": "string",
+                    "description": (
+                        "Name of the file to create, e.g. 'extraction_protocol.py' "
+                        "or 'notes.txt'."
+                    ),
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The text content to write to the file.",
+                },
+                "subfolder": {
+                    "type": "string",
+                    "description": (
+                        "Optional subfolder within the session directory, "
+                        "e.g. 'protocols' or 'scripts'. Created if it doesn't exist."
+                    ),
+                },
+            },
+            required=["filename", "content"],
+        )
+
+        # 10. SAVE CHECKPOINT
         def save_checkpoint():
             """
             Saves complete orchestrator state including conversation and agent state.

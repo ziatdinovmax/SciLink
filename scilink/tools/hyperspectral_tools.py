@@ -226,24 +226,25 @@ def create_nmf_summary_plot(
             im = axes[1, i].imshow(abundance_maps[..., i], cmap='seismic', aspect='auto')
             axes[1, i].set_title(f'Abundance Map {i+1}', fontsize=10)
             axes[1, i].axis('off')
-            plt.colorbar(im, ax=axes[1, i], fraction=0.046, pad=0.04)
+            fig.colorbar(im, ax=axes[1, i], fraction=0.046, pad=0.04)
 
         title = f'{method_name} Analysis: {n_comp} Components'
         if has_energy_info:
             title += " (Energy Calibrated)"
-        plt.suptitle(title, fontsize=14, y=0.95)
-        plt.tight_layout()
-        
+        fig.suptitle(title, fontsize=14, y=0.95)
+        fig.tight_layout()
+
         buf = BytesIO()
-        plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
+        fig.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
         buf.seek(0)
         image_bytes = buf.getvalue()
-        plt.close()
-        
+        plt.close(fig)
+
         return resize_image_bytes(image_bytes)
-        
+
     except Exception as e:
         logger.error(f"  (Tool Error: Failed to create summary plot for {n_comp} components: {e})")
+        plt.close('all')
         return None
 
 
@@ -266,10 +267,10 @@ def create_elbow_plot(component_range: list[int], errors: list[float], logger: l
         ax.set_title(f'{method_name} Reconstruction Error vs. Number of Components (Elbow Plot)')
         ax.grid(True, linestyle='--', alpha=0.6)
         ax.set_xticks(component_range)
-        plt.tight_layout()
+        fig.tight_layout()
 
         buf = BytesIO()
-        plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
+        fig.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
         buf.seek(0)
         image_bytes = buf.getvalue()
         plt.close(fig)
@@ -277,6 +278,7 @@ def create_elbow_plot(component_range: list[int], errors: list[float], logger: l
         return resize_image_bytes(image_bytes)
     except Exception as e:
         logger.error(f"  (Tool Error: Failed to create elbow plot: {e})", exc_info=True)
+        plt.close('all')
         return None
 
 
@@ -319,25 +321,26 @@ def create_component_abundance_pairs(
             im = ax_abundance.imshow(abundance_maps[..., i], cmap='viridis', aspect='equal')
             ax_abundance.set_title(f'Component {i+1} Abundance Map')
             ax_abundance.axis('off')
-            plt.colorbar(im, ax=ax_abundance, fraction=0.046, pad=0.04, label='Abundance')
-            
+            fig.colorbar(im, ax=ax_abundance, fraction=0.046, pad=0.04, label='Abundance')
+
             fig.suptitle(f'Component {i+1} Analysis', fontsize=12, y=0.98)
-            plt.tight_layout()
-            
+            fig.tight_layout()
+
             buf = BytesIO()
-            plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
+            fig.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
             buf.seek(0)
             image_bytes = resize_image_bytes(buf.getvalue())
             pair_images_list.append({
                 "label": f"Component {i+1} Pair (Spectrum + Abundance Map)",
                 "bytes": image_bytes
             })
-            plt.close()
-            
+            plt.close(fig)
+
         return pair_images_list
-        
+
     except Exception as e:
         logger.error(f"  (Tool Error: Failed to create component-abundance pairs: {e})")
+        plt.close('all')
         return []
 
 
@@ -407,13 +410,14 @@ def compare_component_with_weighted_raw(
         ax.grid(True, alpha=0.3)
         
         buf = BytesIO()
-        plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
-        plt.close()
+        fig.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
+        plt.close(fig)
         buf.seek(0)
         return resize_image_bytes(buf.getvalue())
 
     except Exception as e:
         logger.error(f"Failed to create weighted comparison plot: {e}")
+        plt.close('all')
         return None
     
 
@@ -459,52 +463,47 @@ def create_validated_component_pair(
         im = ax_map.imshow(abundance_map, cmap='viridis')
         ax_map.set_title(f"Component {component_idx+1} Distribution", fontsize=12, fontweight='bold')
         ax_map.axis('off')
-        plt.colorbar(im, ax=ax_map, fraction=0.046, pad=0.04)
+        fig.colorbar(im, ax=ax_map, fraction=0.046, pad=0.04)
 
         # 2. Main Spectrum (Top Right)
         ax_spec = fig.add_subplot(gs[0, 1])
-        
+
         # Plot Variance Band (Background)
-        ax_spec.fill_between(energy_axis, 
-                             weighted_raw_spectrum - std_dev, 
-                             weighted_raw_spectrum + std_dev, 
+        ax_spec.fill_between(energy_axis,
+                             weighted_raw_spectrum - std_dev,
+                             weighted_raw_spectrum + std_dev,
                              color='blue', alpha=0.15, label='Raw Variance (±1σ)')
-        
+
         # Plot Mean and Model
         ax_spec.plot(energy_axis, weighted_raw_spectrum, color='black', linewidth=2, label='Weighted Mean')
         ax_spec.plot(energy_axis, scaled_nmf, color='red', linestyle='--', linewidth=1.5, label='NMF Model')
-        
+
         ax_spec.set_title("Validation: Spectrum & Model Fit", fontsize=12, fontweight='bold')
         ax_spec.legend(loc='best', fontsize=9)
         ax_spec.grid(True, alpha=0.3)
         ax_spec.set_ylabel("Intensity")
-        # Hide x-labels on top plot to avoid clutter
         plt.setp(ax_spec.get_xticklabels(), visible=False)
 
         # 3. Residual Plot (Bottom Right)
         ax_res = fig.add_subplot(gs[1, 1], sharex=ax_spec)
-        
-        # Plot Zero line
         ax_res.axhline(0, color='black', linewidth=1, alpha=0.5)
-        
-        # Plot Residual
         ax_res.plot(energy_axis, residual, color='gray', linewidth=1)
         ax_res.fill_between(energy_axis, residual, 0, color='gray', alpha=0.3)
-        
         ax_res.set_ylabel("Residual")
         ax_res.set_xlabel(xlabel)
         ax_res.grid(True, alpha=0.3)
 
-        plt.tight_layout()
-        
+        fig.tight_layout()
+
         buf = BytesIO()
-        plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
-        plt.close()
+        fig.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
+        plt.close(fig)
         buf.seek(0)
         return resize_image_bytes(buf.getvalue())
 
     except Exception as e:
         logger.error(f"Failed to create validated pair: {e}")
+        plt.close('all')
         return None
     
 
@@ -716,26 +715,26 @@ def create_validated_component_pair_reconstruction(
         
         # Overlay high-purity contour
         ax_map.contour(
-            high_purity_mask_2d, 
-            levels=[0.5], 
-            colors='red', 
-            linewidths=2.5, 
+            high_purity_mask_2d,
+            levels=[0.5],
+            colors='red',
+            linewidths=2.5,
             linestyles='--'
         )
-        
-        plt.colorbar(im, ax=ax_map, fraction=0.046, pad=0.04, label='Abundance')
-        
+
         # Pixel count annotation
         ax_map.text(
-            0.02, 0.02, 
+            0.02, 0.02,
             f"{n_pixels_selected} pixels\n({purity_pixel_percent:.1f}% of data)",
             transform=ax_map.transAxes,
-            fontsize=9, 
-            color='red', 
+            fontsize=9,
+            color='red',
             weight='bold',
             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8)
         )
-        
+
+        fig.colorbar(im, ax=ax_map, fraction=0.046, pad=0.04, label='Abundance')
+
         # -----------------------------------------------------------------
         # PANEL 2: MAIN SPECTRUM PLOT
         # -----------------------------------------------------------------
@@ -823,15 +822,15 @@ def create_validated_component_pair_reconstruction(
         ax_res.set_ylabel("Residual\n(Measured - Reconstructed)", fontsize=10)
         ax_res.set_xlabel(xlabel, fontsize=10)
         ax_res.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        
+
+        fig.tight_layout()
+
         # =================================================================
         # SAVE & RETURN
         # =================================================================
         buf = BytesIO()
-        plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
-        plt.close()
+        fig.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
+        plt.close(fig)
         buf.seek(0)
         
         logger.info(
@@ -849,6 +848,7 @@ def create_validated_component_pair_reconstruction(
             f"component {component_idx+1}: {e}",
             exc_info=True
         )
+        plt.close('all')
         return None
 
 
@@ -868,25 +868,25 @@ def create_annotated_heatmap(data_map: np.ndarray, title: str, units: str) -> by
     im = ax.imshow(data_map, cmap='plasma', vmin=vmin, vmax=vmax, origin='upper')
     
     # Clean Colorbar
-    cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cbar.set_label(f"{units}", rotation=270, labelpad=15, fontsize=12)
     cbar.ax.tick_params(labelsize=10)
-    
+
     # Title only (Large and bold)
     clean_title = title.replace("_", " ")
     ax.set_title(f"{clean_title}", fontsize=14, fontweight='bold', pad=12)
-    
+
     # Remove axes ticks for a cleaner look
     ax.set_xticks([])
     ax.set_yticks([])
-    
+
     # Remove the border spine for a modern look
     for spine in ax.spines.values():
         spine.set_visible(False)
 
     buf = BytesIO()
-    plt.savefig(buf, format='jpeg', bbox_inches='tight', dpi=150)
-    plt.close()
+    fig.savefig(buf, format='jpeg', bbox_inches='tight', dpi=150)
+    plt.close(fig)
     return resize_image_bytes(buf.getvalue())
 
 
@@ -918,7 +918,7 @@ def create_feature_dashboard(data_map: np.ndarray, feature_name: str, units: str
     ax_map.axis('off') # Clean look
     
     # Colorbar attached to map
-    cbar = plt.colorbar(im, ax=ax_map, fraction=0.046, pad=0.04)
+    cbar = fig.colorbar(im, ax=ax_map, fraction=0.046, pad=0.04)
     cbar.set_label(units, rotation=270, labelpad=15)
 
     # --- RIGHT PANEL: Histogram ---
@@ -943,12 +943,12 @@ def create_feature_dashboard(data_map: np.ndarray, feature_name: str, units: str
     ax_hist.spines['top'].set_visible(False)
     ax_hist.spines['right'].set_visible(False)
 
-    plt.tight_layout()
-    
+    fig.tight_layout()
+
     # 3. Save
     buf = BytesIO()
-    plt.savefig(buf, format='jpeg', bbox_inches='tight', dpi=150)
-    plt.close()
+    fig.savefig(buf, format='jpeg', bbox_inches='tight', dpi=150)
+    plt.close(fig)
     return resize_image_bytes(buf.getvalue())
 
 

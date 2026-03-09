@@ -405,7 +405,7 @@ if not st.session_state.agent_initialized:
 # ══════════════════════════════════════════════════════════════════
 # Active session — Chat + File Explorer tabs
 # ══════════════════════════════════════════════════════════════════
-chat_tab, files_tab, tools_tab = st.tabs(["Chat", "File Explorer", "Tools & Agents"])
+chat_tab, files_tab, tools_tab = st.tabs(["Chat", "File Explorer", "Tools"])
 
 # ── Chat tab ─────────────────────────────────────────────────────
 with chat_tab:
@@ -906,6 +906,6 @@ with files_tab:
             else:
                 st.caption("Select a file to preview.")
 
-# ── Tools & Agents tab ───────────────────────────────────────────
+# ── Tools tab ────────────────────────────────────────────────────
 with tools_tab:
     render_tools_agents_tab()

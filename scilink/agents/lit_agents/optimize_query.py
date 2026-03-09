@@ -24,16 +24,17 @@ def optimize_search_query(objective: str,
     """
     prompt = f"""
     You are a Research Librarian.
-    
+
     **USER INPUT:** "{objective}"
-    
-    **TASK:** Convert this input (which may refer to specific local files, results, or objectives) into a **General Scientific Search Query** suitable for a database like Google Scholar.
-    
+
+    **TASK:** Convert this input (which may refer to specific local files, results, or objectives) into a **clear, natural-language scientific query** suitable for an AI-powered literature search system.
+
     **RULES:**
     1. REMOVE LOCAL CONTEXT: Strip out references to specific files, provided datasets, or user actions (e.g., "analyze this spreadsheet", "my results", "provided data", "the attached file").
     2. PRESERVE SCIENTIFIC NOUNS: Preserve specific chemical names, material sources (e.g., "Produced Water", "Lithium-Ion Batteries"), and key analytes.
-    3. STANDALONE: The output must make sense to a search engine that knows nothing about the user's computer.
-    4. Return ONLY the query string.
+    3. STANDALONE: The output must make sense without knowing anything about the user's computer.
+    4. NATURAL LANGUAGE: Write a proper sentence or question, NOT a list of keywords. For example: "What experimental methods exist for reversible CO2 capture using secondary amines as thermochemical cooling fluids?" — not a keyword dump.
+    5. Return ONLY the query string.
     """
     
     try:
@@ -55,6 +56,55 @@ def optimize_search_query(objective: str,
     except Exception as e:
         print(f"  - ⚠️ Query optimization failed: {e}. Using raw input.")
         return objective
+
+
+def is_molecule_design_objective(objective: str, model: Any) -> bool:
+    """
+    Uses the LLM to classify whether an objective requires molecular
+    design, synthesis planning, or de novo molecule generation.
+
+    Returns True only for objectives that need cheminformatics capabilities,
+    NOT for objectives that merely mention molecules in passing.
+
+    Args:
+        objective: Raw user objective.
+        model: LLM model instance.
+
+    Returns:
+        True if the objective involves molecule design/synthesis.
+    """
+    prompt = f"""
+    You are a scientific research classifier.
+
+    **USER OBJECTIVE:** "{objective}"
+
+    **TASK:** Determine if this objective requires **molecular design, synthesis planning, or de novo molecule generation**.
+
+    Answer YES if the objective involves:
+    - Designing or discovering new molecules or chemical compounds
+    - Planning synthesis routes for target molecules
+    - Optimizing molecular properties or structures
+    - Drug design or lead compound optimization
+
+    Answer NO if the objective merely:
+    - Mentions molecules in passing (e.g., "molecular dynamics simulation")
+    - Involves characterizing or analyzing existing molecular samples
+    - Uses "molecular" as an adjective for a technique (e.g., "molecular beam epitaxy")
+    - Is about data analysis, spectroscopy, or materials characterization
+
+    Respond with ONLY "YES" or "NO".
+    """
+
+    try:
+        response = model.generate_content([prompt])
+        answer = _extract_response_text(response).strip().upper()
+        result = answer.startswith("YES")
+        if result:
+            print(f"  - 🧪 Objective classified as molecule design task.")
+        return result
+    except Exception as e:
+        print(f"  - ⚠️ Molecule classification failed: {e}. Skipping MOLECULES agent.")
+        return False
 
 
 def _extract_response_text(response) -> str:

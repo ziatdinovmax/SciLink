@@ -443,8 +443,8 @@ def create_abundance_overlay(structure_image: np.ndarray,
     
     # Convert to bytes
     buf = BytesIO()
-    plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
-    plt.close()
+    fig.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
+    plt.close(fig)
     buf.seek(0)
     return buf.getvalue()
 
@@ -548,12 +548,12 @@ def create_multi_abundance_overlays(structure_image: np.ndarray,
     for i in range(total_plots, len(axes)):
         axes[i].axis('off')
     
-    plt.tight_layout()
-    
+    fig.tight_layout()
+
     # Convert to bytes
     buf = BytesIO()
-    plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
-    plt.close()
+    fig.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
+    plt.close(fig)
     buf.seek(0)
     return buf.getvalue()
 
@@ -609,12 +609,12 @@ def create_intensity_histogram_plot(intensities: np.ndarray, n_bins: int = 50) -
                 label=f'Median: {np.median(intensities):.2f}')
     ax.legend()
     
-    plt.tight_layout()
-    
+    fig.tight_layout()
+
     buf = BytesIO()
-    plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
+    fig.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
     buf.seek(0)
     image_bytes = buf.getvalue()
-    plt.close()
-    
+    plt.close(fig)
+
     return image_bytes

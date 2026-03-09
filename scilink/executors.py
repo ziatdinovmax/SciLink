@@ -325,7 +325,7 @@ class ScriptExecutor:
 
             if proc.returncode == 0:
                 return {"status": "success", "stdout": stdout, "stderr": stderr}
-            elif proc.returncode == -signal.SIGTERM or proc.returncode == -signal.SIGKILL:
+            elif proc.returncode == -getattr(signal, 'SIGTERM', 15) or proc.returncode == -getattr(signal, 'SIGKILL', 9):
                 return {"status": "error", "message": "Script execution was stopped by the user."}
             else:
                 error_msg = f"Script execution failed with return code {proc.returncode}.\nSTDERR:\n{stderr}"

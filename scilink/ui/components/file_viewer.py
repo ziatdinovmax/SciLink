@@ -69,6 +69,25 @@ def render_file_preview(file_path: Path) -> None:
             st.error(f"Could not load .npy file: {exc}")
         return
 
+    # Source code
+    _code_langs = {
+        ".py": "python",
+        ".js": "javascript",
+        ".ts": "typescript",
+        ".sh": "bash",
+        ".yaml": "yaml",
+        ".yml": "yaml",
+        ".toml": "toml",
+        ".xml": "xml",
+        ".html": "html",
+        ".css": "css",
+        ".r": "r",
+        ".jl": "julia",
+    }
+    if suffix in _code_langs:
+        st.code(file_path.read_text()[:10000], language=_code_langs[suffix])
+        return
+
     # Plain text fallback
     if suffix in (".txt", ".md", ".log"):
         st.code(file_path.read_text()[:10000], language="text")

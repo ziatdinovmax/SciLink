@@ -413,6 +413,9 @@ class AnalysisOrchestratorAgent:
         # the system prompt current so the LLM knows they exist.
         # Each entry: {"name": str, "description": str}
         self._external_tools: List[Dict[str, str]] = []
+
+        # MCP server connections (keyed by server name)
+        self._mcp_connections: Dict[str, Any] = {}
         
         self.message_count = 0
         self.last_checkpoint_message_count = 0
@@ -684,6 +687,135 @@ class AnalysisOrchestratorAgent:
         )
         if self.messages and self.messages[0]["role"] == "system":
             self.messages[0]["content"] = self._system_prompt
+
+    # ── MCP server integration ─────────────────────────────────────────
+
+    def connect_mcp_server(
+        self,
+        server_name: str,
+        *,
+        command: list = None,
+        url: str = None,
+        env: dict = None,
+    ) -> int:
+        """Connect to an MCP server and register its tools.
+
+        Args:
+            server_name: Human-readable label for this server.
+            command: Command + args for stdio transport,
+                e.g. ``["npx", "-y", "@mcp/server-filesystem", "/tmp"]``.
+            url: URL for SSE transport.
+            env: Optional environment variables for the subprocess.
+
+        Returns:
+            Number of tools registered from this server.
+        """
+        from ...mcp_client import MCPConnection
+
+        if server_name in self._mcp_connections:
+            logging.warning(
+                f"MCP server '{server_name}' already connected — "
+                "disconnect first to reconnect."
+            )
+            return 0
+
+        conn = MCPConnection(server_name, command=command, url=url, env=env)
+        schemas = conn.connect()
+
+        existing_names = {t["name"] for t in self._external_tools}
+        registered = 0
+        for schema in schemas:
+            fn_info = schema.get("function", {})
+            tool_name = fn_info.get("name", "")
+            if not tool_name:
+                continue
+
+            # Prefix with server name if there's a collision.
+            display_name = tool_name
+            if tool_name in self.tools.functions_map or tool_name in existing_names:
+                tool_name = f"{server_name}_{tool_name}"
+                logging.info(
+                    f"MCP tool renamed to '{tool_name}' to avoid collision"
+                )
+
+            description = fn_info.get("description", "")
+            params_spec = fn_info.get("parameters", {})
+            properties = params_spec.get("properties", {})
+            required = params_spec.get("required", [])
+
+            def _make_mcp_wrapper(_conn, _name):
+                def wrapper(**kwargs):
+                    return _conn.call_tool(_name, kwargs)
+                return wrapper
+
+            self.tools._register_tool(
+                func=_make_mcp_wrapper(conn, display_name),
+                name=tool_name,
+                description=f"[MCP:{server_name}] {description}",
+                parameters=properties,
+                required=required,
+            )
+            self._external_tools.append({
+                "name": tool_name,
+                "description": f"[MCP:{server_name}] {description}",
+            })
+            registered += 1
+
+        self._mcp_connections[server_name] = conn
+
+        # Rebuild system prompt so the LLM sees the new tools.
+        self._system_prompt = get_system_prompt(
+            self.analysis_mode, self._agent_registry, self._external_tools
+        )
+        if self.messages and self.messages[0]["role"] == "system":
+            self.messages[0]["content"] = self._system_prompt
+
+        logging.info(
+            f"✅ MCP '{server_name}': registered {registered} tool(s)"
+        )
+        return registered
+
+    def disconnect_mcp_server(self, server_name: str) -> None:
+        """Disconnect from an MCP server and unregister its tools."""
+        conn = self._mcp_connections.pop(server_name, None)
+        if conn is None:
+            logging.warning(f"MCP server '{server_name}' not found.")
+            return
+
+        conn.disconnect()
+
+        # Remove tools that came from this server.
+        prefix = f"[MCP:{server_name}]"
+        # Collect names to remove before filtering.
+        names_to_remove = {
+            s.get("function", {}).get("name")
+            for s in self.tools.openai_schemas
+            if s.get("function", {}).get("description", "").startswith(prefix)
+        }
+        self._external_tools = [
+            t for t in self._external_tools
+            if not t["description"].startswith(prefix)
+        ]
+        self.tools.openai_schemas = [
+            s for s in self.tools.openai_schemas
+            if s.get("function", {}).get("name") not in names_to_remove
+        ]
+        for name in names_to_remove:
+            self.tools.functions_map.pop(name, None)
+
+        # Rebuild system prompt.
+        self._system_prompt = get_system_prompt(
+            self.analysis_mode, self._agent_registry, self._external_tools
+        )
+        if self.messages and self.messages[0]["role"] == "system":
+            self.messages[0]["content"] = self._system_prompt
+
+        logging.info(f"🔌 MCP '{server_name}' disconnected.")
+
+    def disconnect_all_mcp_servers(self) -> None:
+        """Disconnect from all MCP servers."""
+        for name in list(self._mcp_connections):
+            self.disconnect_mcp_server(name)
 
     def _load_data_as_array(self, data_path: str):
         """Load a data file for use by external tool factories.

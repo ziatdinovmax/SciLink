@@ -124,6 +124,41 @@ Supported Models:
         help='Path to code/API documentation directory (optional)'
     )
     
+    # Custom tool arguments
+    parser.add_argument(
+        '--tools',
+        type=str,
+        nargs='+',
+        dest='tool_files',
+        metavar='TOOL_FILE',
+        help=(
+            'Path(s) to Python files containing domain-specific tool functions to '
+            'expose directly to the orchestrator\'s LLM loop. '
+            'Each file must define: (1) a list of OpenAI-format tool schemas named '
+            '\'tool_schemas\', \'openai_schemas\', or any top-level list of '
+            'OpenAI function dicts; (2) a factory function named '
+            '\'create_tool_functions\' (or any function ending in \'_tool_functions\') '
+            'that accepts data and returns a dict mapping tool names to callables. '
+            'Example: scilink plan --tools ./custom_stats_tools.py'
+        )
+    )
+
+    # MCP server arguments
+    parser.add_argument(
+        '--mcp',
+        type=str,
+        nargs='+',
+        dest='mcp_servers',
+        metavar='MCP_CONFIG',
+        help=(
+            'MCP server configurations. Each entry can be:\n'
+            '  - A JSON config file ({"name":"...", "command":["..."], "env":{}})\n'
+            '  - stdio shorthand:  stdio:name:command,arg1,arg2\n'
+            '  - SSE shorthand:    sse:name:http://host:port/sse\n'
+            'Example: scilink plan --mcp stdio:fs:npx,-y,@modelcontextprotocol/server-filesystem,/tmp'
+        )
+    )
+
     # Deprecated arguments (hidden but functional)
     parser.add_argument(
         '--local-model',
@@ -192,6 +227,8 @@ Supported Models:
         'data_dir': args.data_dir,
         'knowledge_dir': args.knowledge_dir,
         'code_dir': args.code_dir,
+        'tool_files': args.tool_files,
+        'mcp_servers': args.mcp_servers,
     }
     
     # Run the interactive orchestrator
@@ -225,6 +262,8 @@ class OrchestratorPlayground:
         self.data_dir = None
         self.knowledge_dir = None
         self.code_dir = None
+        self._tool_files = self.config.get('tool_files')
+        self._mcp_servers = self.config.get('mcp_servers')
         
     def _infer_provider(self, model_name: str) -> tuple:
         """
@@ -397,7 +436,7 @@ class OrchestratorPlayground:
                 code_dir=self.code_dir,
             )
             print("✅ Agent ready!")
-            
+
         except Exception as e:
             print(f"❌ Failed to initialize agent: {e}")
             import traceback
@@ -408,7 +447,15 @@ class OrchestratorPlayground:
             print("   3. Check your API key is valid")
             print("   4. For supervised/autonomous: ensure directories exist")
             sys.exit(1)
-        
+
+        # === LOAD CUSTOM TOOL FILES ===
+        if self._tool_files:
+            self._load_custom_tools(self._tool_files)
+
+        # === CONNECT MCP SERVERS ===
+        if self._mcp_servers:
+            self._connect_mcp_servers(self._mcp_servers)
+
         # === SHOW SESSION INFO ===
         print("\n" + "="*60)
         print("SESSION INFO")
@@ -444,6 +491,117 @@ class OrchestratorPlayground:
         else:
             print(f"  {', '.join(tool_names)}")
         
+    def _load_custom_tools(self, tool_files: list) -> None:
+        """Load external tool functions from user-supplied .py files."""
+        import importlib.util
+        import inspect
+
+        for file_path in tool_files:
+            path = Path(file_path).resolve()
+            print(f"\n🔧 Loading custom tools from: {path}")
+            try:
+                spec = importlib.util.spec_from_file_location(path.stem, path)
+                module = importlib.util.module_from_spec(spec)
+                _prev = sys.dont_write_bytecode
+                sys.dont_write_bytecode = True
+                try:
+                    spec.loader.exec_module(module)
+                finally:
+                    sys.dont_write_bytecode = _prev
+            except Exception as e:
+                print(f"   ❌ Failed to load {path.name}: {e}")
+                continue
+
+            # Discover schemas
+            schemas = (
+                getattr(module, 'tool_schemas', None)
+                or getattr(module, 'openai_schemas', None)
+            )
+            if schemas is None:
+                for attr_name in dir(module):
+                    obj = getattr(module, attr_name, None)
+                    if (
+                        isinstance(obj, list)
+                        and obj
+                        and isinstance(obj[0], dict)
+                        and obj[0].get('type') == 'function'
+                    ):
+                        schemas = obj
+                        print(f"   📋 Auto-detected schemas in '{attr_name}'")
+                        break
+
+            if not schemas:
+                print(
+                    f"   ⚠️  No tool schemas found in {path.name}.\n"
+                    "       Define 'tool_schemas' as a list of OpenAI-format tool dicts."
+                )
+                continue
+
+            # Discover factory
+            factory = getattr(module, 'create_tool_functions', None)
+            if factory is None:
+                for name, fn in inspect.getmembers(module, inspect.isfunction):
+                    if (
+                        name.endswith('_tool_functions')
+                        and fn.__module__ == module.__name__
+                    ):
+                        factory = fn
+                        print(f"   🏭 Auto-detected factory '{name}'")
+                        break
+
+            if factory is None:
+                print(
+                    f"   ⚠️  No factory function found in {path.name}.\n"
+                    "       Define 'create_tool_functions(data)' returning "
+                    "a dict mapping tool names to callables."
+                )
+                continue
+
+            self.agent.register_tools(schemas, factory)
+            count = sum(1 for s in schemas if s.get('type') == 'function')
+            print(f"   ✅ Registered {count} tool(s) from {path.name}")
+
+    def _connect_mcp_servers(self, mcp_configs: list) -> None:
+        """Parse MCP server configs and connect to each."""
+        import json as _json
+
+        for entry in mcp_configs:
+            try:
+                if entry.startswith("stdio:"):
+                    parts = entry[len("stdio:"):].split(":", 1)
+                    name = parts[0]
+                    command = parts[1].split(",") if len(parts) > 1 else []
+                    print(f"\n🔌 Connecting to MCP server '{name}' (stdio)...")
+                    count = self.agent.connect_mcp_server(
+                        name, command=command
+                    )
+                    print(f"   ✅ Registered {count} tool(s) from '{name}'")
+
+                elif entry.startswith("sse:"):
+                    parts = entry[len("sse:"):].split(":", 1)
+                    name = parts[0]
+                    url = parts[1] if len(parts) > 1 else ""
+                    print(f"\n🔌 Connecting to MCP server '{name}' (SSE)...")
+                    count = self.agent.connect_mcp_server(name, url=url)
+                    print(f"   ✅ Registered {count} tool(s) from '{name}'")
+
+                else:
+                    path = Path(entry).resolve()
+                    with open(path) as f:
+                        cfg = _json.load(f)
+                    name = cfg.get("name", path.stem)
+                    print(f"\n🔌 Connecting to MCP server '{name}'...")
+                    count = self.agent.connect_mcp_server(
+                        name,
+                        command=cfg.get("command"),
+                        url=cfg.get("url"),
+                        env=cfg.get("env"),
+                    )
+                    print(f"   ✅ Registered {count} tool(s) from '{name}'")
+
+            except Exception as e:
+                print(f"   ❌ Failed to connect MCP server '{entry}': {e}")
+
     def print_help(self):
         """Print available commands."""
         print("\n" + "="*60)

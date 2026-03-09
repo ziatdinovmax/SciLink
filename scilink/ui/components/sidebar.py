@@ -674,6 +674,15 @@ def _reset_session() -> None:
         task.feedback_request.response = ""
         task.feedback_request.event.set()
 
+    # Disconnect MCP servers to avoid orphaned subprocesses
+    agent = st.session_state.get("agent")
+    if agent is not None:
+        for name in list(getattr(agent, "_mcp_connections", {})):
+            try:
+                agent.disconnect_mcp_server(name)
+            except Exception:
+                pass
+
     # Preserve mode and configuration across reset
     _keep = {
         "app_mode": st.session_state.get("app_mode"),

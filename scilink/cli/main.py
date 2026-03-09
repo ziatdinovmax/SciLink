@@ -113,9 +113,15 @@ def print_gradient_logo():
 def main():
     """Main CLI entry point with subcommands"""
     
+    # Skip logo for MCP server mode (stdout is the transport)
+    if len(sys.argv) >= 2 and sys.argv[1] == 'serve':
+        from scilink.cli.serve import main as serve_main
+        sys.argv = [sys.argv[0] + ' serve'] + sys.argv[2:]
+        return serve_main()
+
     # Always show logo first
     print_gradient_logo()
-    
+
     if len(sys.argv) < 2:
         print()  # Spacing after logo
         print_usage()
@@ -143,6 +149,11 @@ def main():
         from scilink.cli.ui import main as ui_main
         sys.argv = [sys.argv[0] + ' ui'] + sys.argv[2:]
         return ui_main()
+
+    elif command == 'serve':
+        from scilink.cli.serve import main as serve_main
+        sys.argv = [sys.argv[0] + ' serve'] + sys.argv[2:]
+        return serve_main()
 
     elif command in ['-h', '--help', 'help']:
         print()  # Spacing after logo
@@ -179,6 +190,10 @@ Available Commands:
 
   ui            Launch the Streamlit web interface for interactive
                 analysis (requires: pip install scilink[ui])
+
+  serve         Start SciLink as an MCP tool server so external clients
+                (Claude Desktop, Cursor) can use SciLink's tools
+                (requires: pip install scilink[mcp])
 
 Examples:
   scilink plan                              # Start planning orchestrator

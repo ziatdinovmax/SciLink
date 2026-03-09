@@ -31,7 +31,8 @@ from .base_agent import BaseAgent
 from .knowledge_base import KnowledgeBase
 
 from ..lit_agents.literature_agent import LiteratureSearchAgent
-from ..lit_agents.optimize_query import optimize_search_query
+from ..lit_agents.molecules_agent import MoleculesAgent
+from ..lit_agents.optimize_query import optimize_search_query, is_molecule_design_objective
 
 from .rag_engine import (
     perform_science_rag, 
@@ -71,7 +72,7 @@ class PlanningAgent(BaseAgent):
     Args:
         api_key: API key for the LLM provider.
         model_name: Model name. For public deployments, use LiteLLM format
-            (e.g., "gemini/gemini-2.0-flash", "gpt-4o", "claude-sonnet-4-20250514").
+            (e.g., "gemini-3.1-pro-preview", "claude-opus-4-6").
         base_url: Base URL for internal proxy endpoint.
             When provided, uses OpenAI-compatible client.
             When None, uses LiteLLM for multi-provider support.
@@ -156,14 +157,20 @@ class PlanningAgent(BaseAgent):
         self.generation_config = None
 
         self.lit_agent = None
+        self.mol_agent = None
         if futurehouse_api_key or os.getenv("FUTUREHOUSE_API_KEY"):
             try:
-                self.lit_agent = LiteratureSearchAgent(futurehouse_api_key, max_wait_time=1000)
+                self.lit_agent = LiteratureSearchAgent(futurehouse_api_key, max_wait_time=3000)
                 logging.info("✅ Literature Search Agent initialized.")
             except Exception as e:
                 logging.warning(f"⚠️ Failed to initialize Literature Agent: {e}")
+            try:
+                self.mol_agent = MoleculesAgent(futurehouse_api_key, max_wait_time=3000)
+                logging.info("✅ Molecules Agent initialized.")
+            except Exception as e:
+                logging.warning(f"⚠️ Failed to initialize Molecules Agent: {e}")
         else:
-            logging.info("ℹ️ No FutureHouse API key provided. Literature search will be skipped.")
+            logging.info("ℹ️ No FutureHouse API key provided. Literature search and molecule design will be skipped.")
                     
         # --- Dual KnowledgeBase Initialization ---
         base_path = Path(kb_base_path)
@@ -359,18 +366,41 @@ class PlanningAgent(BaseAgent):
                     reset_state: bool = False) -> Dict[str, Any]:
         """
         Generate experimental plan (science only, no implementation code/protocol).
-        
+
         This method performs:
         1. Knowledge base initialization (docs only)
         2. Literature search (optional)
         3. RAG-based hypothesis generation
         4. Self-correction loop
         5. Human feedback on strategy
-        
+
         Does NOT generate implementation code. Use generate_implementation_code() for that.
-        
+
+        Args:
+            objective: High-level research goal guiding hypothesis generation.
+            knowledge_paths: Paths to scientific documents/data for the Docs KB.
+                Supports PDFs, .txt, .md, .xlsx, .csv, and directories.
+            primary_data_set: Main dataset to analyze. Can be a file path string
+                or a dict with "file_path" (and optional "metadata_path") keys.
+            additional_context: Extra text context injected into the prompt.
+                Keys become section headers, values become content.
+            image_paths: Paths to images (.png, .jpg, .tiff, .bmp) for
+                multimodal analysis. Images in knowledge_paths are auto-discovered.
+            image_descriptions: Text descriptions for each image, in the same
+                order as image_paths.
+            enable_human_feedback: If True, pauses for user review after
+                hypothesis generation. Defaults to True.
+            reset_state: If True, clears existing state and starts fresh.
+                If False, appends to the current research session.
+
         Returns:
-            Dict with proposed_experiments
+            Dict containing the experimental plan with keys:
+                - proposed_experiments: List of experiment dicts with hypotheses,
+                  steps, justifications, and expected outcomes
+                - literature_search: Literature context (if lit_agent available)
+                - iteration: Current iteration number
+                - stage: Pipeline stage that produced this plan
+                - error/message: Present only if generation failed
         """
         
         # Resolve data and images
@@ -428,7 +458,30 @@ class PlanningAgent(BaseAgent):
             )
             if lit_res['status'] == 'success':
                 lit_context = lit_res['content']
-        
+                print(f"  - ✅ Literature search completed.")
+            else:
+                print(f"  - ⚠️ Literature search {lit_res['status']}: {lit_res.get('message', '')}")
+
+        # Molecule design (only if objective involves molecular design/synthesis)
+        mol_context = ""
+        if self.mol_agent and is_molecule_design_objective(objective, self.model):
+            print(f"  - 🧪 Querying MOLECULES agent for synthesis/design...")
+            mol_res = self.mol_agent.query(objective)
+            if mol_res['status'] == 'success':
+                mol_context = mol_res['content']
+                print(f"  - ✅ MOLECULES query completed.")
+            else:
+                print(f"  - ⚠️ MOLECULES query {mol_res['status']}: {mol_res.get('message', '')}")
+
+        # Combine external contexts
+        external_context = ""
+        if lit_context:
+            external_context += lit_context
+        if mol_context:
+            if external_context:
+                external_context += "\n\n"
+            external_context += "## Molecular Design & Synthesis Planning\n" + mol_context
+
         # RAG for science plan
         print(f"\n--- Generating Experimental Strategy ---")
         res = perform_science_rag(
@@ -442,11 +495,13 @@ class PlanningAgent(BaseAgent):
             image_paths=all_image_paths,
             image_descriptions=image_descriptions,
             additional_context=ctx_string,
-            external_context=lit_context
+            external_context=external_context
         )
-        
+
         if lit_context:
             res["literature_search"] = lit_context
+        if mol_context:
+            res["molecule_design"] = mol_context
 
         self._log_action(
             action="perform_science_rag",
@@ -454,7 +509,8 @@ class PlanningAgent(BaseAgent):
                 "objective": objective,
                 "knowledge_paths": knowledge_paths,
                 "has_primary_data": primary_data_set is not None,
-                "has_literature": bool(lit_context)
+                "has_literature": bool(lit_context),
+                "has_molecule_design": bool(mol_context)
             },
             result=res,
             rationale=res.get("proposed_experiments", [{}])[0].get("justification") if res.get("proposed_experiments") else None
@@ -773,7 +829,13 @@ class PlanningAgent(BaseAgent):
                 - session_id: Unique identifier for this session
                 - objective: The research objective
                 - iteration_index: Current iteration number (1 for initial plan)
-                - current_plan: The active experimental plan, structure
+                - current_plan: The active experimental plan dict with
+                  proposed_experiments (and implementation_code if code_paths given)
+                - plan_history: List of all plan snapshots across stages
+                - experimental_results: List of result entries from iterations
+                - human_feedback_history: List of feedback entries by phase
+                - status: Current status ("planned", "failed", etc.)
+                - action_history: Audit log of all agent actions
         """
         # Phase 1: Generate experimental plan (science only)
         plan = self.generate_plan(
@@ -1380,10 +1442,10 @@ Select the most appropriate strategy:
                                         image_descriptions: Optional[List[str]] = None,
                                         output_json_path: Optional[str] = None) -> Dict[str, Any]:
         """
-        Performs TEA using Dual-KB retrieval. 
+        Performs technoeconomic analysis (TEA) using Dual-KB retrieval.
 
         **Workflow:**
-        
+
         1. Knowledge Base Construction (if needed)
         2. External Literature Search (optional, via FutureHouse)
         3. RAG-based Economic Analysis
@@ -1391,85 +1453,73 @@ Select the most appropriate strategy:
         5. Report Generation (JSON + HTML)
 
         **Integration with Planning:**
-    
+
         TEA results are stored in the agent's state and can inform subsequent
         experimental planning:
-            >>> # Perform TEA first
             >>> tea_results = agent.perform_technoeconomic_analysis(
             ...     objective="Recover lithium from brine",
             ...     knowledge_paths=["./market_data/", "./reports/"],
             ... )
-            >>> 
-            >>> # Use TEA insights in experimental planning
             >>> plan = agent.propose_experiments(
-            ...             objective="Develop lithium extraction process",
-            ...             knowledge_paths=["./extraction_methods/"],
-            ...             additional_context=tea_results,
-            ...             primary_data_set={
-            ...                "file_path": "./brine_composition.xlsx",
-            ...                "metadata_path": ./metadata.json}
+            ...     objective="Develop lithium extraction process",
+            ...     knowledge_paths=["./extraction_methods/"],
+            ...     additional_context=tea_results,
+            ...     primary_data_set={"file_path": "./brine_composition.xlsx"},
             ... )
+
         Args:
-        objective (str): Research objective to evaluate economically.
-            Should describe the material, process, or technology to assess.
-            Examples:
-                - "Recover rare earth elements from coal ash"
-                - "Evaluate magnesium extraction from produced water"
-                - "Assess economic viability of direct air capture"
-        
-        knowledge_paths (Optional[List[str]]): Paths to documents for TEA context.
-            Should include market data, pricing reports, criticality assessments,
-            existing TEA studies, and process descriptions. Supports both PDF/TXT and Excel/CSV.
-            Examples: ["./market_reports/", "./critical_materials_report.pdf", "./public_data.xlsx", "./public_data.json"]
-        
-        primary_data_set (Optional[Dict[str, str]]): Main dataset for analysis.
-            Can contain composition, concentration, or yield data.
-            Example: {"file_path": "./feedstock_composition.xlsx"}
-        
-        image_paths (Optional[List[str]]): Images to support TEA analysis.
-            Examples: criticality matrices, supply chain diagrams, cost breakdowns.
-        
-        image_descriptions (Optional[List[str]]): Descriptions for each image.
-            Example: ["Criticality matrix showing supply risk vs. importance"]
-        
-        output_json_path (Optional[str]): Path to save TEA results.
-            Saves to {output_json_path} (results only)
-            Saves to {output_json_path}.state.json (full state)
-            Generates {output_json_path}.html (formatted report)
-    
-    Returns:
-        Dict[str, Any]: Technoeconomic analysis results  
+            objective: Research objective to evaluate economically.
+                Should describe the material, process, or technology to assess.
+                Examples:
+                    - "Recover rare earth elements from coal ash"
+                    - "Evaluate magnesium extraction from produced water"
+                    - "Assess economic viability of direct air capture"
 
-    Example - Basic Usage:
-        >>> agent = PlanningAgent()
-        >>> state = agent.propose_experiments(
-        ...     objective="Optimize enzyme kinetics",
-        ...     knowledge_paths=["./enzyme_papers/"],
-        ...     code_paths=["./plate_reader_api/"],
-        ...     output_json_path="./plan.json"
-        ... )
-        >>> # User reviews in console, provides feedback or approves
-        >>> # Final scripts saved to ./output_scripts/
+            knowledge_paths: Paths to documents for TEA context.
+                Should include market data, pricing reports, criticality assessments,
+                existing TEA studies, and process descriptions. Supports PDF/TXT
+                and Excel/CSV.
+                Example: ["./market_reports/", "./critical_materials_report.pdf"]
 
-    Example - Advanced with Data:
-        >>> state = agent.propose_experiments(
-        ...     objective="Identify optimal precipitation conditions",
-        ...     knowledge_paths=["./papers/", "./protocols.pdf"],
-        ...     code_paths=["https://github.com/opentrons/opentrons"],
-        ...     primary_data_set={
-        ...         "file_path": "./icpms_results.xlsx",
-        ...         "metadata_path": "./icpms_metadata.json"
-        ...     },
-        ...     image_paths=["./criticality_matrix.jpg"],
-        ...     image_descriptions=["Material criticality assessment"],
-        ...     additional_context={
-        ...         "Constraints": "Use only commodity chemicals",
-        ...         "Equipment": "Opentrons OT-2, 96-well plates, ICP-MS"
-        ...     },
-        ...     output_json_path="./precipitation_plan.json",
-        ...     enable_human_feedback=True
-        ... )
-    """
+            primary_data_set: Main dataset for analysis.
+                Can contain composition, concentration, or yield data.
+                Example: {"file_path": "./feedstock_composition.xlsx"}
+
+            image_paths: Images to support TEA analysis.
+                Examples: criticality matrices, supply chain diagrams, cost breakdowns.
+
+            image_descriptions: Descriptions for each image.
+                Example: ["Criticality matrix showing supply risk vs. importance"]
+
+            output_json_path: Path to save TEA results.
+                Saves results to {output_json_path}, state to
+                {output_json_path}.state.json, and HTML report to
+                {output_json_path}.html.
+
+        Returns:
+            Dict[str, Any]: Technoeconomic analysis results containing
+                cost breakdowns, market analysis, and economic feasibility
+                assessment. Structure mirrors the plan dict with
+                proposed_experiments replaced by economic analysis sections.
+
+        Example - Basic TEA:
+            >>> agent = PlanningAgent()
+            >>> tea = agent.perform_technoeconomic_analysis(
+            ...     objective="Recover rare earth elements from coal ash",
+            ...     knowledge_paths=["./market_reports/", "./process_data/"],
+            ...     output_json_path="./tea_results.json"
+            ... )
+
+        Example - TEA with Data and Images:
+            >>> tea = agent.perform_technoeconomic_analysis(
+            ...     objective="Evaluate magnesium extraction from produced water",
+            ...     knowledge_paths=["./reports/", "./pricing.xlsx"],
+            ...     primary_data_set={"file_path": "./brine_composition.xlsx"},
+            ...     image_paths=["./criticality_matrix.png"],
+            ...     image_descriptions=["Material criticality assessment"],
+            ...     output_json_path="./mg_tea.json"
+            ... )
+        """
         
         # 0a. Resolve Primary Data
         primary_data_set = resolve_primary_data_path(primary_data_set)

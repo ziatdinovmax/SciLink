@@ -377,14 +377,31 @@ Assume user runs agent from project directory. For example, when user says "file
 """
 
 
-def get_system_prompt(autonomy_level: AutonomyLevel) -> str:
-    """Returns the appropriate system prompt for the given autonomy level."""
+def get_system_prompt(
+    autonomy_level: AutonomyLevel,
+    external_tools: Optional[List[Dict[str, str]]] = None,
+) -> str:
+    """Returns the appropriate system prompt for the given autonomy level.
+
+    Args:
+        autonomy_level: Current autonomy level.
+        external_tools: Optional list of ``{"name": ..., "description": ...}``
+            dicts describing custom/MCP tools registered at runtime.
+    """
     directives = {
         AutonomyLevel.CO_PILOT: _CO_PILOT_DIRECTIVE,
         AutonomyLevel.SUPERVISED: _SUPERVISED_DIRECTIVE,
         AutonomyLevel.AUTONOMOUS: _AUTONOMOUS_DIRECTIVE,
     }
-    return directives[autonomy_level] + _SYSTEM_PROMPT_BODY
+    prompt = directives[autonomy_level] + _SYSTEM_PROMPT_BODY
+
+    if external_tools:
+        lines = ["\n\n**ADDITIONAL TOOLS (user-registered):**"]
+        for t in external_tools:
+            lines.append(f"- **{t['name']}**: {t.get('description', '')}")
+        prompt += "\n".join(lines)
+
+    return prompt
 
 
 
@@ -509,7 +526,12 @@ class PlanningOrchestratorAgent:
         self.expected_input_columns = None
         self.expected_target_columns = []
         self.latest_tea_results = None
-        
+
+        # Custom tools / MCP state
+        self._tool_data_cache: Dict[tuple, Any] = {}
+        self._external_tools: List[Dict[str, str]] = []
+        self._mcp_connections: Dict[str, Any] = {}
+
         self.message_count = 0
         self.last_checkpoint_message_count = 0
         
@@ -518,15 +540,18 @@ class PlanningOrchestratorAgent:
         
         # --- Init Sub-Agents ---
         print("🤖 Agent: Hiring sub-agents...")
-        self.planner = PlanningAgent(
+        planner_kwargs = dict(
             api_key=api_key,
             model_name=model_name,
             base_url=base_url,
             embedding_model=embedding_model,
             embedding_api_key=embedding_api_key,
             futurehouse_api_key=futurehouse_api_key,
-            output_dir=str(self.base_dir)
+            output_dir=str(self.base_dir),
         )
+        if self.knowledge_dir:
+            planner_kwargs["kb_base_path"] = str(self.knowledge_dir / "default_kb")
+        self.planner = PlanningAgent(**planner_kwargs)
         self.scalarizer = ScalarizerAgent(
             api_key=api_key,
             model_name=model_name,
@@ -544,7 +569,9 @@ class PlanningOrchestratorAgent:
         self.tools = OrchestratorTools(self)
         
         # --- Get appropriate system prompt based on autonomy level ---
-        system_prompt = get_system_prompt(self.autonomy_level)
+        system_prompt = get_system_prompt(
+            self.autonomy_level, self._external_tools or None
+        )
         system_prompt += self._build_workspace_context()
         
         # --- LLM Initialization ---
@@ -631,9 +658,11 @@ class PlanningOrchestratorAgent:
         self._enable_human_feedback = self._should_enable_human_feedback()
         
         # Update system prompt
-        new_system_prompt = get_system_prompt(level)
+        new_system_prompt = get_system_prompt(
+            level, self._external_tools or None
+        )
         self._system_prompt = new_system_prompt
-        
+
         # Update system message in messages list (works for both OpenAI and LiteLLM now)
         if self.messages and self.messages[0]["role"] == "system":
             self.messages[0]["content"] = new_system_prompt
@@ -644,6 +673,250 @@ class PlanningOrchestratorAgent:
     def get_human_feedback_setting(self) -> bool:
         """Returns current human feedback setting for sub-agents."""
         return self._enable_human_feedback
+
+    # ── Custom tools ──────────────────────────────────────────────────
+
+    def _rebuild_system_prompt(self) -> None:
+        """Rebuild the system prompt and update the message history."""
+        self._system_prompt = get_system_prompt(
+            self.autonomy_level, self._external_tools or None
+        )
+        self._system_prompt += self._build_workspace_context()
+        if self.messages and self.messages[0]["role"] == "system":
+            self.messages[0]["content"] = self._system_prompt
+
+    def _load_data_for_factory(self, data_path: str):
+        """Load a data file for use by external tool factories.
+
+        Returns a pandas DataFrame for tabular files, a NumPy array for .npy,
+        or the path string itself as a fallback.
+        """
+        path = Path(data_path)
+        ext = path.suffix.lower()
+        if ext in {'.csv', '.txt', '.tsv', '.xlsx', '.xls'}:
+            try:
+                if ext in {'.xlsx', '.xls'}:
+                    return pd.read_excel(str(path))
+                return pd.read_csv(str(path))
+            except Exception:
+                return data_path
+        elif ext == '.npy':
+            import numpy as np
+            return np.load(str(path))
+        else:
+            logging.warning(
+                f"_load_data_for_factory: unknown extension '{ext}' — "
+                "passing path string to factory."
+            )
+            return data_path
+
+    def register_tools(self, schemas: list, factory: callable) -> None:
+        """Register external tool functions into the orchestrator's LLM loop.
+
+        The ``factory`` callable is invoked lazily at tool-call time.  The
+        orchestrator inspects the *name* of the factory's first positional
+        parameter to decide what to pass:
+
+        * ``data_path`` / ``path`` / ``file`` / ``filepath`` / ``filename``
+          → the current optimization CSV path (or data directory) as a string.
+        * Any other name (e.g. ``data``, ``df``, ``dataframe``)
+          → the optimization CSV is loaded as a pandas DataFrame and passed.
+
+        If the factory declares an ``output_dir`` parameter the orchestrator
+        passes ``<base_dir>/custom_tools/``.
+
+        Args:
+            schemas: List of OpenAI-format tool schemas.
+            factory: Callable that accepts data and returns a dict mapping tool
+                names to callables.
+        """
+        import inspect
+
+        sig = inspect.signature(factory)
+        params = list(sig.parameters.keys())
+        first_param = params[0] if params else None
+        _path_param_names = {
+            'data_path', 'path', 'file', 'filepath', 'file_path', 'filename',
+        }
+        factory_takes_path = first_param in _path_param_names
+        factory_takes_output_dir = 'output_dir' in params
+
+        registered = 0
+        for schema in schemas:
+            if schema.get("type") != "function":
+                continue
+            fn_info = schema["function"]
+            tool_name = fn_info["name"]
+            description = fn_info.get("description", "")
+            params_spec = fn_info.get("parameters", {})
+            properties = params_spec.get("properties", {})
+            required = params_spec.get("required", [])
+
+            def _make_wrapper(name, _factory, _takes_path, _takes_output_dir):
+                def wrapper(**kwargs):
+                    # Determine what data source to pass.
+                    data_path = str(self.bo_data_path) if self.bo_data_path.exists() else None
+                    if data_path is None and self.data_dir is not None:
+                        data_path = str(self.data_dir)
+                    if data_path is None:
+                        return json.dumps({
+                            "status": "error",
+                            "message": (
+                                "No data available. Load experimental data "
+                                "or provide --data-dir first."
+                            ),
+                        })
+                    output_dir = self.base_dir / "custom_tools"
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    cache_key = (data_path, id(_factory), str(output_dir))
+                    if cache_key not in self._tool_data_cache:
+                        if _takes_path:
+                            data = data_path
+                        else:
+                            data = self._load_data_for_factory(data_path)
+                        if _takes_output_dir:
+                            self._tool_data_cache[cache_key] = _factory(
+                                data, output_dir=str(output_dir)
+                            )
+                        else:
+                            self._tool_data_cache[cache_key] = _factory(data)
+                    bound_fns = self._tool_data_cache[cache_key]
+                    fn = bound_fns.get(name)
+                    if fn is None:
+                        return json.dumps({
+                            "status": "error",
+                            "message": (
+                                f"Tool '{name}' not found in factory output. "
+                                f"Available: {list(bound_fns.keys())}"
+                            ),
+                        })
+                    print(f"  ⚡ Tool: {name}...")
+                    result = fn(**kwargs)
+                    return result if isinstance(result, str) else json.dumps(result)
+                return wrapper
+
+            self.tools._register_tool(
+                func=_make_wrapper(
+                    tool_name, factory,
+                    factory_takes_path, factory_takes_output_dir,
+                ),
+                name=tool_name,
+                description=description,
+                parameters=properties,
+                required=required,
+            )
+            self._external_tools.append({
+                "name": tool_name, "description": description,
+            })
+            registered += 1
+
+        logging.info(f"✅ Registered {registered} external tool(s)")
+        self._rebuild_system_prompt()
+
+    # ── MCP server integration ────────────────────────────────────────
+
+    def connect_mcp_server(
+        self,
+        server_name: str,
+        *,
+        command: list = None,
+        url: str = None,
+        env: dict = None,
+    ) -> int:
+        """Connect to an MCP server and register its tools.
+
+        Args:
+            server_name: Human-readable label for this server.
+            command: Command + args for stdio transport.
+            url: URL for SSE transport.
+            env: Optional environment variables for the subprocess.
+
+        Returns:
+            Number of tools registered from this server.
+        """
+        from ...mcp_client import MCPConnection
+
+        if server_name in self._mcp_connections:
+            logging.warning(
+                f"MCP server '{server_name}' already connected — "
+                "disconnect first to reconnect."
+            )
+            return 0
+
+        conn = MCPConnection(server_name, command=command, url=url, env=env)
+        schemas = conn.connect()
+
+        existing_names = {t["name"] for t in self._external_tools}
+        registered = 0
+        for schema in schemas:
+            fn_info = schema.get("function", {})
+            tool_name = fn_info.get("name", "")
+            if not tool_name:
+                continue
+
+            display_name = tool_name
+            if tool_name in self.tools.functions_map or tool_name in existing_names:
+                tool_name = f"{server_name}_{tool_name}"
+                logging.info(
+                    f"MCP tool renamed to '{tool_name}' to avoid collision"
+                )
+
+            description = fn_info.get("description", "")
+            params_spec = fn_info.get("parameters", {})
+            properties = params_spec.get("properties", {})
+            required = params_spec.get("required", [])
+
+            def _make_mcp_wrapper(_conn, _name):
+                def wrapper(**kwargs):
+                    return _conn.call_tool(_name, kwargs)
+                return wrapper
+
+            self.tools._register_tool(
+                func=_make_mcp_wrapper(conn, display_name),
+                name=tool_name,
+                description=f"[MCP:{server_name}] {description}",
+                parameters=properties,
+                required=required,
+            )
+            self._external_tools.append({
+                "name": tool_name,
+                "description": f"[MCP:{server_name}] {description}",
+            })
+            registered += 1
+
+        self._mcp_connections[server_name] = conn
+        logging.info(f"✅ MCP '{server_name}': registered {registered} tool(s)")
+        self._rebuild_system_prompt()
+        return registered
+
+    def disconnect_mcp_server(self, server_name: str) -> None:
+        """Disconnect from an MCP server and unregister its tools."""
+        conn = self._mcp_connections.pop(server_name, None)
+        if conn is None:
+            logging.warning(f"MCP server '{server_name}' not found.")
+            return
+
+        conn.disconnect()
+
+        prefix = f"[MCP:{server_name}]"
+        names_to_remove = {
+            s.get("function", {}).get("name")
+            for s in self.tools.openai_schemas
+            if s.get("function", {}).get("description", "").startswith(prefix)
+        }
+        self._external_tools = [
+            t for t in self._external_tools
+            if not t["description"].startswith(prefix)
+        ]
+        self.tools.openai_schemas = [
+            s for s in self.tools.openai_schemas
+            if s.get("function", {}).get("name") not in names_to_remove
+        ]
+        for name in names_to_remove:
+            self.tools.functions_map.pop(name, None)
+
+        logging.info(f"🔌 Disconnected MCP server '{server_name}'")
+        self._rebuild_system_prompt()
 
     def _restore_checkpoint(self):
         """Restore campaign state from checkpoint."""

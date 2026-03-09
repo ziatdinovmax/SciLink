@@ -77,18 +77,20 @@ HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK = """
 You are an expert research scientist.
 
 **STATUS: FALLBACK MODE ACTIVATED**
-The specific documents retrieved from the Knowledge Base were found to be insufficient or irrelevant. 
+The specific documents retrieved from the Knowledge Base were found to be insufficient or irrelevant.
 However, you **MUST** proceed to help the user start their research.
 
 **INPUT DATA HANDLING:**
 1. **Primary Experimental Data:** (If provided below) This is **HARD DATA** and is valid. You MUST use it to constrain your plan (e.g., use the specific chemicals or concentration ranges found in the data).
 2. **Provided Images:** (If provided) Analyze these visual results.
-3. **Retrieved Context:** (Text at the bottom) **IGNORE THIS SECTION.** It has been flagged as irrelevant. Do not cite it.
+3. **External Scientific Literature:** (If a section titled "External Scientific Literature" is present) This context was retrieved from external literature search and/or cheminformatics tools. It IS valid and relevant. **USE IT** to inform your plan and cite it in source_documents.
+4. **Retrieved Context from Knowledge Base:** (Other retrieved text) **IGNORE THIS SECTION.** It has been flagged as irrelevant. Do not cite it.
 
 **TASK:**
 Propose a **foundational** experimental plan based on:
 1. Your **General Scientific Knowledge** of the field.
 2. The **Primary Dataset** (if available).
+3. The **External Scientific Literature** (if available).
 
 **OUTPUT FORMAT:**
 You MUST respond with a single JSON object containing a key "proposed_experiments", which is a list containing exactly ONE experiment plan. The plan must have the following keys:
@@ -102,8 +104,8 @@ You MUST respond with a single JSON object containing a key "proposed_experiment
     - "max_value": (Float) e.g., 100.0
     - "rationale": (String) e.g., "Literature suggests instability above 100C."
 - "expected_outcome": (String) A description of what results would support the hypothesis.
-- "justification": (String) **MUST be 'Warning: This proposal is based on general scientific knowledge as the provided documents lacked specific context.'**
-- "source_documents": (List of Strings) An empty list `[]`.
+- "justification": (String) **MUST be 'Warning: This proposal is based on general scientific knowledge as the provided documents lacked specific context.'** If external literature was used, append: ' External literature search results were incorporated.'
+- "source_documents": (List of Strings) If external literature was used, list relevant sources here. Otherwise, an empty list `[]`.
 """
 
 
@@ -116,13 +118,14 @@ Specific economic reports for this specific technology were not found. You must 
 **INPUT DATA HANDLING:**
 1. **Primary Experimental Data:** (If provided below) Use this for material inputs, yields, or energy consumption figures.
 2. **Provided Images:** (If provided) Analyze these visual results.
-3. **Retrieved Context:** (Text at the bottom) **IGNORE THIS SECTION.** It contains no relevant economic data.
+3. **External Scientific Literature:** (If a section titled "External Scientific Literature" is present) This context was retrieved from external literature search. It IS valid. **USE IT** to inform your assessment and cite it in source_documents.
+4. **Retrieved Context from Knowledge Base:** (Other retrieved text) **IGNORE THIS SECTION.** It contains no relevant economic data.
 
 **TASK:**
-Provide a preliminary Technoeconomic Assessment (TEA) based on **General Engineering Economics** and **Industry Benchmarks**.
+Provide a preliminary Technoeconomic Assessment (TEA) based on **General Engineering Economics**, **Industry Benchmarks**, and any **External Scientific Literature** provided.
 
 **OUTPUT FORMAT:**
-You MUST respond with a single JSON object containing a key "technoeconomic_assessment". 
+You MUST respond with a single JSON object containing a key "technoeconomic_assessment".
 You MUST include the following fields, populated based on general knowledge:
 - "summary": (String) A qualitative summary of economic potential.
 - "key_cost_drivers": (List of Strings) Likely cost drivers (e.g., "High energy cost of electrolysis").
@@ -130,7 +133,7 @@ You MUST include the following fields, populated based on general knowledge:
 - "economic_risks": (List of Strings) Common risks for this technology.
 - "comparison_to_alternatives": (String) Comparison to standard industry benchmarks.
 - "data_gaps_for_quantitative_analysis": (List of Strings) What specific data would you need for a real TEA?
-- "source_documents": (List of Strings) An empty list [].
+- "source_documents": (List of Strings) If external literature was used, list relevant sources here. Otherwise, an empty list `[]`.
 """
 
 BO_CONFIG_SOO_PROMPT = """
