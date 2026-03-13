@@ -1724,7 +1724,7 @@ Return JSON:
 }}
 
 
-Remember: Rejecting a good fit (R² > 0.98) to chase marginal improvements often makes things WORSE through overfitting or convergence failures.
+Remember: Rejecting a good fit (R² > {accept_threshold:.3f}) to chase marginal improvements often makes things WORSE through overfitting or convergence failures.
 '''
 
     def _verify_fit_with_llm(self, state: dict, fit_result: dict, history: List[dict] = None) -> Optional[dict]:
