@@ -95,7 +95,7 @@ def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
     Args:
         prompt: Mutable list of prompt parts to extend.
         state: Pipeline state dict containing ``skill_sections`` and ``skill_name``.
-        stage: One of ``"planning"``, ``"fitting"``, ``"interpretation"``, ``"validation"``.
+        stage: One of ``"planning"``, ``"analysis"``, ``"interpretation"``, ``"validation"``.
     """
     sections = state.get("skill_sections")
     if not sections:
@@ -1264,12 +1264,12 @@ Your guidance: '''
         if state.get("literature_context"):
             context_parts.append(state["literature_context"])
         skill_sections = state.get("skill_sections")
-        if skill_sections and skill_sections.get("fitting"):
+        if skill_sections and skill_sections.get("analysis"):
             context_parts.append(
                 f"## MANDATORY Domain Skill Rules ({state.get('skill_name', 'skill')})\n"
                 "The following domain rules are MANDATORY and must be implemented exactly "
                 "as specified. They take precedence over general-purpose fitting defaults.\n\n"
-                + skill_sections["fitting"]
+                + skill_sections["analysis"]
             )
 
         prompt = self.script_instructions.format(
@@ -1303,12 +1303,12 @@ Your guidance: '''
             error_message=error_msg,
         )
         skill_sections = state.get("skill_sections")
-        if skill_sections and skill_sections.get("fitting"):
+        if skill_sections and skill_sections.get("analysis"):
             prompt += (
                 f"\n\n## MANDATORY Domain Skill Rules ({state.get('skill_name', 'skill')})\n"
                 "While fixing the error, you MUST continue to follow these domain rules. "
                 "Do not change the fitting model or workflow to deviate from these rules.\n\n"
-                + skill_sections["fitting"]
+                + skill_sections["analysis"]
             )
 
         response = self.model.generate_content(prompt)
@@ -1341,7 +1341,7 @@ Your guidance: '''
         if skill_sections:
             skill_name = state.get("skill_name", "domain skill")
             rules_parts = []
-            for stage in ("planning", "fitting", "validation"):
+            for stage in ("planning", "analysis", "validation"):
                 content = skill_sections.get(stage, "")
                 if content:
                     rules_parts.append(f"### {stage.title()} rules\n{content}")

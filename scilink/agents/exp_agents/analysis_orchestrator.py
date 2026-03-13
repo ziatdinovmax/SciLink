@@ -244,6 +244,7 @@ def get_system_prompt(
     analysis_mode: AnalysisMode,
     agent_registry: dict = None,
     external_tools: list = None,
+    custom_skills: dict = None,
 ) -> str:
     """Returns the appropriate system prompt for the given analysis mode.
 
@@ -256,6 +257,9 @@ def get_system_prompt(
         external_tools: List of ``{"name": str, "description": str}`` dicts
             for tools registered via register_tools(). When provided, a
             "Custom tools" section is appended so the LLM knows they exist.
+        custom_skills: ``{name: path}`` dict of custom skills registered via
+            register_skill(). When provided, a "Custom skills" section is
+            appended so the LLM knows to pass them to ``run_analysis``.
     """
     directives = {
         AnalysisMode.CO_PILOT: _CO_PILOT_DIRECTIVE,
@@ -277,6 +281,14 @@ def get_system_prompt(
         for t in external_tools:
             lines.append(f"  * `{t['name']}` - {t['description']}")
         body += "\n".join(lines) + "\n"
+    if custom_skills:
+        names = sorted(custom_skills.keys())
+        body += (
+            "\n**CUSTOM SKILLS (registered for this session):**\n"
+            f"  {names}\n"
+            "When running analysis on data that matches a custom skill's domain, "
+            "pass the skill name via the `skill` parameter in `run_analysis`.\n"
+        )
     return directives[analysis_mode] + body
 
 
@@ -414,6 +426,9 @@ class AnalysisOrchestratorAgent:
         # Each entry: {"name": str, "description": str}
         self._external_tools: List[Dict[str, str]] = []
 
+        # Custom skills registered via register_skill() (name → path)
+        self._custom_skills: Dict[str, str] = {}
+
         # MCP server connections (keyed by server name)
         self._mcp_connections: Dict[str, Any] = {}
         
@@ -432,7 +447,10 @@ class AnalysisOrchestratorAgent:
         self.tools = AnalysisOrchestratorTools(self)
 
         # Get appropriate system prompt (agent list built from registry)
-        system_prompt = get_system_prompt(self.analysis_mode, self._agent_registry)
+        system_prompt = get_system_prompt(
+            self.analysis_mode, self._agent_registry,
+            custom_skills=self._custom_skills or None,
+        )
         
         # Initialize LLM
         if base_url:
@@ -484,7 +502,8 @@ class AnalysisOrchestratorAgent:
         
         # Update system prompt (preserve external tools if any are registered)
         new_system_prompt = get_system_prompt(
-            mode, self._agent_registry, self._external_tools or None
+            mode, self._agent_registry, self._external_tools or None,
+            self._custom_skills or None,
         )
         self._system_prompt = new_system_prompt
 
@@ -576,7 +595,10 @@ class AnalysisOrchestratorAgent:
         # Keep the tools dicts and system prompt in sync.
         if hasattr(self, "tools"):
             self.tools._sync_from_registry()
-        self._system_prompt = get_system_prompt(self.analysis_mode, self._agent_registry)
+        self._system_prompt = get_system_prompt(
+            self.analysis_mode, self._agent_registry,
+            self._external_tools or None, self._custom_skills or None,
+        )
         if self.messages and self.messages[0]["role"] == "system":
             self.messages[0]["content"] = self._system_prompt
 
@@ -683,10 +705,53 @@ class AnalysisOrchestratorAgent:
 
         # Keep the system prompt current so the LLM knows the new tools exist.
         self._system_prompt = get_system_prompt(
-            self.analysis_mode, self._agent_registry, self._external_tools
+            self.analysis_mode, self._agent_registry,
+            self._external_tools, self._custom_skills or None,
         )
         if self.messages and self.messages[0]["role"] == "system":
             self.messages[0]["content"] = self._system_prompt
+
+    def register_skill(self, skill_path: str) -> str:
+        """Register a custom skill file (.md) for use in analysis.
+
+        Custom skills appear alongside built-in skills in the ``run_analysis``
+        tool description and in ``show_available_agents`` output, so the LLM
+        can select them by name.
+
+        Args:
+            skill_path: Path to a ``.md`` skill file.
+
+        Returns:
+            The skill name (file stem) used to reference it.
+
+        Raises:
+            FileNotFoundError: If *skill_path* does not exist.
+            ValueError: If the file is empty or not a ``.md`` file.
+        """
+        path = Path(skill_path).resolve()
+        if not path.exists():
+            raise FileNotFoundError(f"Skill file not found: {path}")
+        if path.suffix.lower() != ".md":
+            raise ValueError(f"Skill file must be a .md file: {path}")
+        if path.stat().st_size == 0:
+            raise ValueError(f"Skill file is empty: {path}")
+
+        name = path.stem
+        self._custom_skills[name] = str(path)
+
+        # Update the run_analysis tool description so the LLM sees the new skill.
+        self.tools._update_skill_description(self._custom_skills)
+
+        # Rebuild system prompt so the LLM knows the skill exists.
+        self._system_prompt = get_system_prompt(
+            self.analysis_mode, self._agent_registry,
+            self._external_tools, self._custom_skills,
+        )
+        if self.messages and self.messages[0]["role"] == "system":
+            self.messages[0]["content"] = self._system_prompt
+
+        logging.info(f"✅ Registered custom skill '{name}' from {path}")
+        return name
 
     # ── MCP server integration ─────────────────────────────────────────
 
@@ -765,7 +830,8 @@ class AnalysisOrchestratorAgent:
 
         # Rebuild system prompt so the LLM sees the new tools.
         self._system_prompt = get_system_prompt(
-            self.analysis_mode, self._agent_registry, self._external_tools
+            self.analysis_mode, self._agent_registry,
+            self._external_tools, self._custom_skills or None,
         )
         if self.messages and self.messages[0]["role"] == "system":
             self.messages[0]["content"] = self._system_prompt
@@ -805,7 +871,8 @@ class AnalysisOrchestratorAgent:
 
         # Rebuild system prompt.
         self._system_prompt = get_system_prompt(
-            self.analysis_mode, self._agent_registry, self._external_tools
+            self.analysis_mode, self._agent_registry,
+            self._external_tools, self._custom_skills or None,
         )
         if self.messages and self.messages[0]["role"] == "system":
             self.messages[0]["content"] = self._system_prompt

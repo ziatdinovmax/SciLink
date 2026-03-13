@@ -18,6 +18,7 @@ def _natural_sort_key(s):
     return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', str(s))]
 
 from .parser_utils import write_experiments_to_disk
+from .instruct import BO_OBJECTIVE_DISTILL_PROMPT
 
 
 class OrchestratorTools:
@@ -58,6 +59,41 @@ class OrchestratorTools:
             logging.warning(f"Could not compute hash for {file_path}: {e}")
             return ""
 
+
+    def _distill_objective_for_bo(self, target_cols: list) -> str:
+        """
+        Distill a verbose user objective into a concise BO-relevant objective.
+        Uses the orchestrator's LLM to extract only optimization targets and
+        directions. Result is cached on self.orch._distilled_objective.
+        """
+        raw = self.orch.objective
+        # Skip distillation for short/default objectives
+        if (not raw
+                or raw == "Undefined Research Goal"
+                or len(raw) <= 200):
+            return raw
+
+        cached = getattr(self.orch, '_distilled_objective', None)
+        if cached is not None:
+            return cached
+
+        try:
+            prompt = BO_OBJECTIVE_DISTILL_PROMPT.format(
+                objective=raw,
+                target_cols=", ".join(target_cols),
+            )
+            resp = self.orch.bo.model.generate_content(
+                [prompt], generation_config=self.orch.bo.generation_config
+            )
+            distilled = resp.text.strip()
+            if distilled:
+                print(f"    🎯 Distilled objective: {distilled}")
+                self.orch._distilled_objective = distilled
+                return distilled
+        except Exception as e:
+            logging.warning(f"Objective distillation failed, using original: {e}")
+
+        return raw
 
     def _parse_result_input(self, result_data: str):
         """
@@ -568,11 +604,27 @@ class OrchestratorTools:
                 generator = HTMLReportGenerator(self.orch.planner.state)
                 generator.generate(str(html_path))
                 
+                # Check if any experiments actually got code
+                experiments = updated_plan.get("proposed_experiments", [])
+                has_code = any(
+                    exp.get("implementation_code")
+                    for exp in experiments
+                )
+
+                if not has_code:
+                    return json.dumps({
+                        "status": "error",
+                        "message": "Code generation failed — no executable code was produced for any experiment.",
+                        "hint": "This may be due to an LLM API timeout or error. Try again.",
+                        "output_path": str(output_path),
+                        "html_report": str(html_path)
+                    })
+
                 # Save scripts to output folder
                 final_out = str(self.orch.base_dir / "output_scripts")
                 print(f"\n--- Saving Scripts to: {final_out} ---")
                 write_experiments_to_disk(updated_plan, final_out)
-                
+
                 return json.dumps({
                     "status": "success",
                     "message": "Implementation code added to plan",
@@ -603,7 +655,10 @@ class OrchestratorTools:
                 "code_paths": {
                     "type": "string",
                     "description": (
-                        "Comma-separated paths to code/API folders (e.g., './opentrons_api,./automation_lib'). "
+                        "Comma-separated paths to SOURCE CODE or API documentation folders "
+                        "(e.g., './opentrons_api,./automation_lib'). "
+                        "Must contain .py, .js, or other code files — NOT scientific papers, "
+                        "PDFs, or literature. Do NOT pass the knowledge directory here. "
                         "OPTIONAL if Code Knowledge Base is already loaded. "
                         "REQUIRED if no Code KB exists."
                     )
@@ -775,13 +830,13 @@ class OrchestratorTools:
                     })
                 
                 # Save
-                output_path = self.orch.base_dir / "plan_refined.json"
+                output_path = self.orch.base_dir / "plan.json"
                 with open(output_path, 'w') as f:
                     json.dump(plan, f, indent=2)
-                
+
                 # Generate HTML
                 from .html_generator import HTMLReportGenerator
-                html_path = self.orch.base_dir / "plan_refined.html"
+                html_path = self.orch.base_dir / "plan.html"
                 generator = HTMLReportGenerator(self.orch.planner.state)
                 generator.generate(str(html_path))
                 
@@ -823,6 +878,79 @@ class OrchestratorTools:
             required=["result_data"]
         )
         
+        # 4b. ADJUST PLAN FOR CONSTRAINTS (pre-execution)
+        def adjust_plan_for_constraints(constraint_description: str):
+            """
+            Adjusts the experimental plan for implementation or instrument
+            constraints discovered during protocol/code generation.
+            Does NOT increment the iteration — the experiment hasn't run yet.
+            """
+            print(f"  ⚡ Tool: Adjusting plan for implementation constraints...")
+
+            try:
+                plan = self.orch.planner.adjust_plan_for_constraints(
+                    constraint_description=constraint_description,
+                    enable_human_feedback=self._get_human_feedback_enabled()
+                )
+
+                if plan.get("error"):
+                    return json.dumps({
+                        "status": "error",
+                        "message": plan.get("error")
+                    })
+
+                # Save
+                output_path = self.orch.base_dir / "plan.json"
+                with open(output_path, 'w') as f:
+                    json.dump(plan, f, indent=2)
+
+                # Generate HTML
+                from .html_generator import HTMLReportGenerator
+                html_path = self.orch.base_dir / "plan.html"
+                generator = HTMLReportGenerator(self.orch.planner.state)
+                generator.generate(str(html_path))
+
+                return json.dumps({
+                    "status": "success",
+                    "iteration": plan.get('iteration'),
+                    "num_experiments": len(plan.get('proposed_experiments', [])),
+                    "output_path": str(output_path),
+                    "html_report": str(html_path),
+                    "hint": "Use generate_implementation_code() or refine_implementation_code() to update executable code for the adjusted plan."
+                })
+
+            except Exception as e:
+                logging.error(f"Plan adjustment error: {e}", exc_info=True)
+                return json.dumps({
+                    "status": "error",
+                    "message": str(e)
+                })
+
+        self._register_tool(
+            func=adjust_plan_for_constraints,
+            name="adjust_plan_for_constraints",
+            description=(
+                "Adjusts the experimental plan when implementation or instrument "
+                "constraints make the current plan impractical BEFORE running the experiment. "
+                "Use when protocol generation reveals incompatibilities (e.g., pipette type "
+                "vs plate layout, equipment limitations, reagent availability). "
+                "Does NOT increment iteration or log as experimental results. "
+                "Use refine_plan_with_results() instead when adjusting based on actual experimental outcomes."
+            ),
+            parameters={
+                "constraint_description": {
+                    "type": "string",
+                    "description": (
+                        "Description of the implementation constraint or instrument "
+                        "incompatibility that requires plan adjustment. Include what "
+                        "the constraint is, why it conflicts with the current plan, "
+                        "and any proposed resolution if known."
+                    )
+                }
+            },
+            required=["constraint_description"]
+        )
+
         # 5. REFINE IMPLEMENTATION CODE (based on refined plan)
         def refine_implementation_code():
             """
@@ -1250,12 +1378,25 @@ class OrchestratorTools:
                     
                     self.orch.expected_input_columns = inputs
                     self.orch.expected_target_columns = targets
+                    # Capture optimization direction from scalarizer
+                    column_roles = res.get("column_roles", {})
+                    opt_dir = column_roles.get("optimization_direction", {})
+                    if opt_dir:
+                        self.orch.target_directions = opt_dir
                     print(f"    📊 Schema Enforced (User-Specified):")
                     print(f"       Inputs: {self.orch.expected_input_columns}")
                     print(f"       Targets: {self.orch.expected_target_columns}")
-                
+                    if self.orch.target_directions:
+                        print(f"       Directions: {self.orch.target_directions}")
+
                 # Case 2: Schema already established from previous analysis
                 elif self.orch.expected_input_columns and self.orch.expected_target_columns:
+                    # Still capture direction if scalarizer provided it and we don't have one yet
+                    if not self.orch.target_directions:
+                        column_roles = res.get("column_roles", {})
+                        opt_dir = column_roles.get("optimization_direction", {})
+                        if opt_dir:
+                            self.orch.target_directions = opt_dir
                     print(f"    📊 Schema Enforced (From Previous Analysis):")
                     print(f"       Inputs: {self.orch.expected_input_columns}")
                     print(f"       Targets: {self.orch.expected_target_columns}")
@@ -1275,9 +1416,12 @@ class OrchestratorTools:
                             proposed_inputs, proposed_targets = [], []
                         else:
                             reasoning = column_roles.get("reasoning", "")
+                            opt_dir = column_roles.get("optimization_direction", {})
                             print(f"    🔬 Scalarizer classified columns:")
                             print(f"       Inputs: {proposed_inputs}")
                             print(f"       Targets: {proposed_targets}")
+                            if opt_dir:
+                                print(f"       Directions: {opt_dir}")
                             if reasoning:
                                 print(f"       Reasoning: {reasoning}")
 
@@ -1288,6 +1432,7 @@ class OrchestratorTools:
                                     "status": "schema_proposed",
                                     "inputs": proposed_inputs,
                                     "targets": proposed_targets,
+                                    "optimization_direction": opt_dir,
                                     "reasoning": reasoning,
                                     "data_points": n_data,
                                     "message": "Scalarizer proposes this classification. Confirm or adjust.",
@@ -1297,6 +1442,8 @@ class OrchestratorTools:
                                 # SUPERVISED/AUTONOMOUS: accept directly
                                 self.orch.expected_input_columns = proposed_inputs
                                 self.orch.expected_target_columns = proposed_targets
+                                if opt_dir:
+                                    self.orch.target_directions = opt_dir
                                 print(f"    ✅ Schema auto-accepted: inputs={proposed_inputs}, targets={proposed_targets}")
 
                     # Targets found but no inputs — measurement-only data (e.g., spectra)
@@ -1938,7 +2085,8 @@ class OrchestratorTools:
             batch_size: int = None,
             physical_constraints: str = None,
             experimental_budget: int = None,
-            targets: list[str] = None
+            targets: list[str] = None,
+            strategy_hint: str = None
         ):
             """
             Runs Bayesian Optimization to suggest next parameters.
@@ -2161,18 +2309,23 @@ class OrchestratorTools:
 
             try:
                 # ============================================
-                # CALL BO
+                # DISTILL OBJECTIVE & CALL BO
                 # ============================================
+                bo_objective = self._distill_objective_for_bo(
+                    self.orch.expected_target_columns
+                )
                 res = self.orch.bo.run_optimization_loop(
                     data_path=str(self.orch.bo_data_path),
-                    objective_text=self.orch.objective,
+                    objective_text=bo_objective,
                     input_cols=self.orch.expected_input_columns,
-                    input_bounds=input_bounds,                    
+                    input_bounds=input_bounds,
                     target_cols=self.orch.expected_target_columns,
+                    target_directions=self.orch.target_directions,
                     output_dir=str(self.orch.base_dir / "bo_artifacts"),
                     batch_size=int(final_batch_size),
                     physical_constraints=physical_constraints,
                     experimental_budget=experimental_budget,
+                    strategy_hint=strategy_hint,
                     plot_acq=True,
                     save_acq=True,
                 )
@@ -2300,6 +2453,16 @@ class OrchestratorTools:
                         "Example: targets=['Peak_Area'] to optimize only peak area when "
                         "the scalarizer extracted multiple metrics. The specified targets "
                         "must exist in the optimization data."
+                    )
+                },
+                "strategy_hint": {
+                    "type": "string",
+                    "description": (
+                        "Optional user preference for BO strategy. Pass when the user "
+                        "requests a specific kernel, acquisition function, or noise prior. "
+                        "Examples: 'use RBF kernel', 'try Thompson sampling', "
+                        "'switch to Matern-1.5', 'use UCB with high exploration'. "
+                        "The hint is respected unless it conflicts with budget constraints."
                     )
                 }
             },

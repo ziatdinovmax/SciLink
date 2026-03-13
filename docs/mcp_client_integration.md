@@ -19,7 +19,7 @@ The external tools are available to the LLM alongside built-in tools like `exami
 
 ```bash
 # stdio transport (spawns a subprocess)
-scilink analyze --mcp stdio:arxiv:arxiv-mcp-server,--storage-path,/tmp/papers
+scilink analyze --mcp stdio:arxiv:python,-m,arxiv_mcp_server,--storage-path,/tmp/papers
 
 # SSE transport (connects to a running server)
 scilink analyze --mcp sse:myserver:http://localhost:8000/sse
@@ -28,7 +28,7 @@ scilink analyze --mcp sse:myserver:http://localhost:8000/sse
 scilink analyze --mcp /path/to/mcp_config.json
 
 # Multiple servers
-scilink analyze --mcp stdio:arxiv:arxiv-mcp-server stdio:fs:npx,-y,@modelcontextprotocol/server-filesystem,/tmp
+scilink analyze --mcp stdio:arxiv:python,-m,arxiv_mcp_server stdio:fs:npx,-y,@modelcontextprotocol/server-filesystem,/tmp
 ```
 
 **Shorthand format:**
@@ -39,7 +39,7 @@ scilink analyze --mcp stdio:arxiv:arxiv-mcp-server stdio:fs:npx,-y,@modelcontext
 ```json
 {
   "name": "arxiv",
-  "command": ["arxiv-mcp-server", "--storage-path", "/tmp/papers"],
+  "command": ["python", "-m", "arxiv_mcp_server", "--storage-path", "/tmp/papers"],
   "env": {"SOME_API_KEY": "..."}
 }
 ```
@@ -73,7 +73,7 @@ orch = AnalysisOrchestratorAgent(...)
 # stdio transport
 count = orch.connect_mcp_server(
     "arxiv",
-    command=["arxiv-mcp-server", "--storage-path", "/tmp/papers"],
+    command=["python", "-m", "arxiv_mcp_server", "--storage-path", "/tmp/papers"],
 )
 
 # SSE transport
@@ -102,7 +102,7 @@ orch.disconnect_all_mcp_servers()
 
 ```bash
 pip install arxiv-mcp-server
-scilink analyze --mcp stdio:arxiv:arxiv-mcp-server,--storage-path,/tmp/papers
+scilink analyze --mcp stdio:arxiv:python,-m,arxiv_mcp_server,--storage-path,/tmp/papers
 ```
 
 Then in the chat:
@@ -111,6 +111,29 @@ Search arXiv for recent papers on XPS peak fitting of transition metal oxides
 ```
 
 The LLM will use the arXiv MCP tools to search and retrieve papers, then use SciLink's built-in tools to analyze your data — combining literature context with experimental analysis.
+
+## Example: OpentronsAI protocol generation
+
+Connect to the OpentronsAI MCP server (hosted on Hugging Face) to generate Opentrons protocols:
+
+```bash
+# CLI
+scilink plan --mcp stdio:OpentronsAI:npx,mcp-remote,https://opentrons-opentronsai-mcp-server.hf.space/gradio_api/mcp/
+```
+
+```python
+# Python API
+agent.connect_mcp_server(
+    "OpentronsAI",
+    command=["npx", "mcp-remote",
+             "https://opentrons-opentronsai-mcp-server.hf.space/gradio_api/mcp/"]
+)
+```
+
+In the UI, use the **Tools & Agents** tab:
+1. Transport: **stdio**
+2. Server name: **OpentronsAI**
+3. Command: `npx mcp-remote https://opentrons-opentronsai-mcp-server.hf.space/gradio_api/mcp/`
 
 ## How tools appear to the LLM
 
@@ -126,7 +149,7 @@ If an external tool name collides with a built-in tool, it's automatically prefi
 ## Requirements
 
 ```bash
-pip install scilink[mcp]
+pip install scilink
 ```
 
-The `mcp` optional dependency is needed for both connecting to external servers and running SciLink as a server.
+The `mcp` package is included in the default SciLink installation.

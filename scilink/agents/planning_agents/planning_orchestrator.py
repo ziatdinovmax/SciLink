@@ -367,6 +367,15 @@ Assume user runs agent from project directory. For example, when user says "file
 - Call `save_checkpoint` after every 3-5 experiments
 - If conversation becomes very long (>50 messages), suggest user restart with checkpoint
 
+**CODE PROVENANCE TRANSPARENCY:**
+- When presenting implementation code to the user, ALWAYS state how it was produced:
+  - Via `generate_implementation_code` / `refine_implementation_code` → grounded in the user's Code KB.
+  - Via a third-party MCP tool or external service → state the tool name.
+  - Written by you directly → state that you wrote it from general knowledge and it was NOT
+    grounded in the user's codebase.
+- If `generate_implementation_code` or `refine_implementation_code` returns status="error",
+  clearly inform the user of the failure and the reason before proceeding with any alternative.
+
 **BEHAVIOR:**
 - Extract ALL paths mentioned by user (papers, data, code, reports)
 - Extract specific_objective from user's goal/intent
@@ -525,6 +534,7 @@ class PlanningOrchestratorAgent:
         self.active_scalarizer_script = None
         self.expected_input_columns = None
         self.expected_target_columns = []
+        self.target_directions = {}  # e.g. {"Yield": "maximize", "Defect_Density": "minimize"}
         self.latest_tea_results = None
 
         # Custom tools / MCP state
@@ -934,6 +944,7 @@ class PlanningOrchestratorAgent:
             else:
                 self.expected_target_columns = []
 
+            self.target_directions = state.get("target_directions", {})
             self.latest_tea_results = state.get("latest_tea_results")
             
             # Restore autonomy level if saved
@@ -1023,6 +1034,7 @@ class PlanningOrchestratorAgent:
                 "active_scalarizer_script": self.active_scalarizer_script,
                 "expected_input_columns": self.expected_input_columns,
                 "expected_target_columns": self.expected_target_columns,
+                "target_directions": self.target_directions,
                 "data_points_collected": len(pd.read_csv(self.bo_data_path)) if self.bo_data_path.exists() else 0,
                 "planner_state": self.planner.state,
                 "message_count": self.message_count,

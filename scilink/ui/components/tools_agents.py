@@ -61,7 +61,7 @@ def _render_custom_tools(agent) -> None:
             with st.expander(t["name"], expanded=False):
                 st.markdown(t.get("description", "No description."))
     else:
-        st.caption("No custom tools registered yet.")
+        st.caption("No custom or external tools registered yet.")
 
 
 def _render_builtin_tools(agent) -> None:
@@ -161,6 +161,11 @@ def _load_tool_file(agent, uploaded_file) -> None:
 def _render_mcp_section(agent) -> None:
     """Connect/disconnect MCP servers and list their tools."""
     st.subheader("MCP Servers")
+    st.caption(
+        "Extend SciLink's capabilities by connecting to external services — "
+        "instrument APIs, databases, computational tools, or other scientific agents. "
+        "MCP is an open standard for integrating AI agents with external tools and data sources."
+    )
 
     mcp_connections = getattr(agent, "_mcp_connections", {})
 

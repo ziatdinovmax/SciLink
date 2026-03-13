@@ -32,7 +32,53 @@ from .metadata_converter import (
     normalize_metadata_dict_with_llm,
 )
 from ..lit_agents import OwlLiteratureAgent, NoveltyScorer
-from ...skills.loader import list_skills
+from ...skills.loader import list_skills, list_all_skills
+
+def _build_skill_description(agent_registry: dict = None,
+                              custom_skills: dict = None) -> str:
+    """Build the ``skill`` parameter description for ``run_analysis``.
+
+    Auto-discovers built-in skill domains and inspects the agent registry
+    to determine which agents accept a ``skill`` parameter.
+    """
+    import inspect
+
+    parts = ["Domain skill name or path to a custom .md skill file."]
+
+    # Discover which agents support skills from their analyze() signature.
+    # Registry entries use lazy class loading — resolve class_path if needed.
+    if agent_registry:
+        supported = []
+        for entry in agent_registry.values():
+            cls = entry.get("class")
+            if cls is None and "class_path" in entry:
+                try:
+                    module_path, cls_name = entry["class_path"].rsplit(".", 1)
+                    import importlib
+                    mod = importlib.import_module(module_path)
+                    cls = getattr(mod, cls_name)
+                except Exception:
+                    continue
+            if cls is None:
+                continue
+            try:
+                sig = inspect.signature(cls.analyze)
+                if "skill" in sig.parameters:
+                    supported.append(entry["name"])
+            except (ValueError, TypeError):
+                continue
+        if supported:
+            parts.append(f"Supported by: {', '.join(supported)}.")
+
+    # Auto-discover all built-in skill domains
+    for domain, names in list_all_skills().items():
+        parts.append(f"Built-in {domain} skills: {names}.")
+
+    if custom_skills:
+        parts.append(f"Custom skills: {sorted(custom_skills.keys())}.")
+
+    return " ".join(parts)
+
 
 # Names that are always treated as global (directory-level) metadata files,
 # never as per-file sidecars, even if their stem happens to match a data file.
@@ -446,6 +492,79 @@ class AnalysisOrchestratorTools:
         """Get current human feedback setting from orchestrator."""
         return getattr(self.orch, '_enable_human_feedback', True)
 
+    def _check_instruction_redundancy(self, existing: str, new: str) -> bool:
+        """Ask the LLM whether two preprocessing instructions are redundant.
+
+        Returns ``True`` if the instructions describe essentially the same
+        processing operation (even if worded differently), ``False`` if they
+        are genuinely distinct steps.  Falls back to ``False`` on any error
+        so that the caller never blocks on a failed check.
+        """
+        prompt = (
+            "You are a scientific data processing expert. Determine whether "
+            "the following two preprocessing instructions describe the SAME "
+            "operation (even if worded differently) or genuinely DIFFERENT "
+            "processing steps.\n\n"
+            f"Instruction A: {existing}\n\n"
+            f"Instruction B: {new}\n\n"
+            "If they are essentially the same operation (e.g. both describe "
+            "baseline division, both describe the same normalization, etc.), "
+            "respond with exactly: REDUNDANT\n"
+            "If they are genuinely different processing steps, respond with "
+            "exactly: DISTINCT\n\n"
+            "Respond with a SINGLE word — REDUNDANT or DISTINCT."
+        )
+        try:
+            response = self.orch.model.generate_content(contents=[prompt])
+            raw = (
+                response.text if hasattr(response, "text") else str(response)
+            ).strip().upper()
+            return "REDUNDANT" in raw
+        except Exception as e:
+            self.logger.warning(f"LLM redundancy check failed: {e}")
+            return False
+
+    def _replace_metadata(self, new_metadata: dict) -> dict | None:
+        """Replace current_metadata, preserving any custom_processing_instruction.
+
+        If the old metadata had a custom_processing_instruction that would be
+        lost (i.e. the new metadata doesn't include one), it is carried
+        forward automatically.
+
+        Returns a warning dict if both old and new metadata contain
+        *different* custom_processing_instructions (the new one wins, but
+        the caller should surface the conflict).  Returns ``None`` otherwise.
+        """
+        _CPI = "custom_processing_instruction"
+        old_instruction = None
+        if self.orch.current_metadata:
+            old_instruction = self.orch.current_metadata.get(_CPI)
+
+        self.orch.current_metadata = new_metadata
+
+        if not old_instruction:
+            return None  # Nothing to preserve
+
+        new_instruction = new_metadata.get(_CPI)
+
+        if not new_instruction:
+            # New metadata has no instruction — carry forward the old one
+            new_metadata[_CPI] = old_instruction
+            return None
+
+        # Both have instructions — keep the new one but warn
+        if old_instruction.strip() != new_instruction.strip():
+            return {
+                "preprocessing_warning": (
+                    "New metadata contains a custom_processing_instruction that "
+                    "differs from a previously set one. The new instruction is "
+                    "being used. Review to ensure correctness."
+                ),
+                "previous_instruction": old_instruction,
+                "current_instruction": new_instruction,
+            }
+        return None
+
     def _register_all_tools(self):
         """Register all tools with OpenAI format."""
         
@@ -792,29 +911,32 @@ class AnalysisOrchestratorTools:
                     )
                     
                     if metadata:
-                        self.orch.current_metadata = metadata
+                        cpi_warning = self._replace_metadata(metadata)
                         output_path = self.orch.base_dir / "metadata.json"
                         with open(output_path, 'w') as f:
                             json.dump(metadata, f, indent=2)
-                        
-                        return json.dumps({
+
+                        result = {
                             "status": "success",
                             "metadata": metadata,
                             "saved_to": str(output_path)
-                        })
+                        }
+                        if cpi_warning:
+                            result.update(cpi_warning)
+                        return json.dumps(result)
                     else:
                         return json.dumps({
                             "status": "error",
                             "message": "Failed to convert metadata"
                         })
-                        
+
                 except Exception as e:
                     self.logger.error(f"Metadata conversion error: {e}", exc_info=True)
                     return json.dumps({
                         "status": "error",
                         "message": str(e)
                     })
-            
+
             elif text_input:
                 # Create temporary file and convert
                 temp_path = self.orch.base_dir / "temp_metadata_input.txt"
@@ -833,22 +955,25 @@ class AnalysisOrchestratorTools:
                     temp_path.unlink()
                     
                     if metadata:
-                        self.orch.current_metadata = metadata
+                        cpi_warning = self._replace_metadata(metadata)
                         output_path = self.orch.base_dir / "metadata.json"
                         with open(output_path, 'w') as f:
                             json.dump(metadata, f, indent=2)
-                        
-                        return json.dumps({
+
+                        result = {
                             "status": "success",
                             "metadata": metadata,
                             "saved_to": str(output_path)
-                        })
+                        }
+                        if cpi_warning:
+                            result.update(cpi_warning)
+                        return json.dumps(result)
                     else:
                         return json.dumps({
                             "status": "error",
                             "message": "Failed to convert metadata"
                         })
-                        
+
                 except Exception as e:
                     if temp_path.exists():
                         temp_path.unlink()
@@ -856,7 +981,7 @@ class AnalysisOrchestratorTools:
                         "status": "error",
                         "message": str(e)
                     })
-            
+
             else:
                 return json.dumps({
                     "status": "error",
@@ -999,7 +1124,7 @@ class AnalysisOrchestratorTools:
                                         else:
                                             synthesized = normed
 
-                                    self.orch.current_metadata = synthesized
+                                    cpi_warning = self._replace_metadata(synthesized)
                                     output_path = self.orch.base_dir / "metadata.json"
                                     with open(output_path, 'w') as f:
                                         json.dump(synthesized, f, indent=2)
@@ -1033,6 +1158,8 @@ class AnalysisOrchestratorTools:
                                             f"Metadata synthesized from sidecar JSONs "
                                             f"but missing recommended fields: {missing}"
                                         )
+                                    if cpi_warning:
+                                        result_payload.update(cpi_warning)
                                     return json.dumps(result_payload)
                         except Exception as e:
                             self.logger.warning(
@@ -1090,14 +1217,14 @@ class AnalysisOrchestratorTools:
                         metadata = normalized
 
                 # Always store metadata (possibly normalized)
-                self.orch.current_metadata = metadata
+                cpi_warning = self._replace_metadata(metadata)
 
                 # Validate basic structure
                 required_fields = ["experiment_type", "experiment", "sample"]
                 missing = [f for f in required_fields if f not in metadata]
 
                 if missing:
-                    return json.dumps({
+                    result = {
                         "status": "warning",
                         "message": f"Metadata loaded but missing recommended fields: {missing}",
                         "metadata_file": path.name,
@@ -1105,16 +1232,22 @@ class AnalysisOrchestratorTools:
                         "experiment_type": metadata.get("experiment_type"),
                         "technique": metadata.get("experiment", {}).get("technique") if isinstance(metadata.get("experiment"), dict) else metadata.get("technique"),
                         "material": metadata.get("sample", {}).get("material") if isinstance(metadata.get("sample"), dict) else metadata.get("material")
-                    })
-                
-                return json.dumps({
+                    }
+                    if cpi_warning:
+                        result.update(cpi_warning)
+                    return json.dumps(result)
+
+                result = {
                     "status": "success",
                     "metadata_file": path.name,
                     "metadata": metadata,
                     "experiment_type": metadata.get("experiment_type"),
                     "technique": metadata.get("experiment", {}).get("technique"),
                     "material": metadata.get("sample", {}).get("material")
-                })
+                }
+                if cpi_warning:
+                    result.update(cpi_warning)
+                return json.dumps(result)
                 
             except json.JSONDecodeError as e:
                 return json.dumps({
@@ -1779,6 +1912,11 @@ class AnalysisOrchestratorTools:
                 if auxiliary_label is not None:
                     analyze_kwargs["auxiliary_label"] = auxiliary_label
                 if skill is not None:
+                    # Resolve custom skill names to their file paths so the
+                    # agent's load_skill() can locate them.
+                    custom_skills = getattr(self.orch, "_custom_skills", {})
+                    if skill in custom_skills:
+                        skill = custom_skills[skill]
                     analyze_kwargs["skill"] = skill
                 if self.orch.active_knowledge:
                     analyze_kwargs["prior_knowledge"] = self.orch.active_knowledge
@@ -1891,12 +2029,10 @@ class AnalysisOrchestratorTools:
                 },
                 "skill": {
                     "type": "string",
-                    "description": (
-                        "Domain skill name or path to a custom .md skill file. "
-                        "Supported by CurveFitting and Hyperspectral agents. "
-                        f"Built-in curve_fitting skills: {list_skills('curve_fitting')}. "
-                        f"Built-in hyperspectral skills: {list_skills('hyperspectral')}."
-                    )
+                    "description": _build_skill_description(
+                        getattr(self.orch, "_agent_registry", None),
+                        getattr(self.orch, "_custom_skills", None),
+                    ),
                 },
                 "series_metadata": {
                     "type": "string",
@@ -2068,11 +2204,10 @@ class AnalysisOrchestratorTools:
                     "description": self.AGENT_DESCRIPTIONS[agent_id]
                 })
 
-            available_skills = {}
-            for domain in ["curve_fitting", "hyperspectral"]:
-                skills = list_skills(domain)
-                if skills:
-                    available_skills[domain] = skills
+            available_skills = list_all_skills()
+            custom_skills = getattr(self.orch, "_custom_skills", {})
+            if custom_skills:
+                available_skills["custom"] = sorted(custom_skills.keys())
 
             result = {
                 "status": "success",
@@ -2444,7 +2579,8 @@ class AnalysisOrchestratorTools:
             Modes:
                 - "auto": If existing instruction found, return conflict for LLM to resolve
                 - "replace": Overwrite existing instruction
-                - "append": Append new instruction to existing one
+                - "append": Append new instruction to existing one (blocked if redundant)
+                - "force_append": Append without redundancy check
             """
             print(f"  ⚡ Tool: Setting custom preprocessing instruction...")
             
@@ -2455,10 +2591,10 @@ class AnalysisOrchestratorTools:
                 })
             
             existing = self.orch.current_metadata.get("custom_processing_instruction")
-            
+
             # Conflict detection
             if existing and mode == "auto":
-                return json.dumps({
+                result = {
                     "status": "conflict",
                     "message": "Metadata already contains a custom preprocessing instruction.",
                     "existing_instruction": existing,
@@ -2468,14 +2604,47 @@ class AnalysisOrchestratorTools:
                         "Call again with mode='append' to combine both instructions.",
                     ],
                     "hint": "Ask the user which they prefer if unclear."
-                })
-            
+                }
+                if self._check_instruction_redundancy(existing, instruction):
+                    result["redundancy_warning"] = (
+                        "These instructions appear to describe the same processing "
+                        "operation. Appending would likely cause the same processing "
+                        "to be applied twice, corrupting the data. Prefer 'replace' "
+                        "unless you are certain they describe distinct steps."
+                    )
+                return json.dumps(result)
+
             if existing and mode == "append":
+                if self._check_instruction_redundancy(existing, instruction):
+                    return json.dumps({
+                        "status": "conflict",
+                        "message": (
+                            "The new instruction appears to describe the same "
+                            "processing as the existing one. Appending would likely "
+                            "apply the same operation twice, corrupting the data."
+                        ),
+                        "existing_instruction": existing,
+                        "new_instruction": instruction,
+                        "options": [
+                            "Call again with mode='replace' to use only the new instruction.",
+                            "If you are certain these are distinct steps, call "
+                            "again with mode='force_append' to combine them."
+                        ],
+                    })
                 combined = f"{existing}\nThen: {instruction}"
                 self.orch.current_metadata["custom_processing_instruction"] = combined
                 return json.dumps({
                     "status": "success",
                     "message": "Appended new instruction to existing one.",
+                    "final_instruction": combined
+                })
+
+            if existing and mode == "force_append":
+                combined = f"{existing}\nThen: {instruction}"
+                self.orch.current_metadata["custom_processing_instruction"] = combined
+                return json.dumps({
+                    "status": "success",
+                    "message": "Force-appended new instruction to existing one.",
                     "final_instruction": combined
                 })
             
@@ -2500,8 +2669,11 @@ class AnalysisOrchestratorTools:
                 "Use when the user wants custom preprocessing (e.g., baseline division, "
                 "background subtraction, normalization) on top of existing metadata. "
                 "If metadata already has a preprocessing instruction, returns a conflict "
-                "for you to resolve with the user. Supports modes: 'auto' (detect conflict), "
-                "'replace' (overwrite), 'append' (combine both)."
+                "for you to resolve with the user. When appending, an LLM check detects "
+                "redundant instructions to prevent double-processing. "
+                "Supports modes: 'auto' (detect conflict), 'replace' (overwrite), "
+                "'append' (combine both, with redundancy check), "
+                "'force_append' (combine without redundancy check)."
             ),
             parameters={
                 "instruction": {
@@ -2517,7 +2689,8 @@ class AnalysisOrchestratorTools:
                         "How to handle existing instructions: "
                         "'auto' (default, detect conflicts), "
                         "'replace' (overwrite), "
-                        "'append' (combine both)"
+                        "'append' (combine both, blocks if redundant), "
+                        "'force_append' (combine without redundancy check)"
                     )
                 }
             },
@@ -2705,6 +2878,78 @@ class AnalysisOrchestratorTools:
             required=[]
         )
 
+        # =====================================================================
+        # 16. SAVE FILE
+        # =====================================================================
+        def save_file(filename: str, content: str, subfolder: str = "") -> str:
+            """
+            Save text content (reports, summaries, tables, scripts) to a file
+            in the session directory.
+            """
+            print(f"  ⚡ Tool: Saving file '{filename}'...")
+
+            # Sanitise: strip path separators from filename to prevent traversal.
+            safe_name = Path(filename).name
+            if not safe_name:
+                return json.dumps({
+                    "status": "error",
+                    "message": "Invalid filename.",
+                })
+
+            target_dir = self.orch.base_dir
+            if subfolder:
+                safe_sub = Path(subfolder).name
+                target_dir = target_dir / safe_sub
+            target_dir.mkdir(parents=True, exist_ok=True)
+            dest = target_dir / safe_name
+
+            try:
+                dest.write_text(content, encoding="utf-8")
+                print(f"    💾 Saved: {dest}")
+                return json.dumps({
+                    "status": "success",
+                    "path": str(dest),
+                    "size_bytes": dest.stat().st_size,
+                })
+            except Exception as e:
+                logging.error(f"save_file failed: {e}")
+                return json.dumps({
+                    "status": "error",
+                    "message": str(e),
+                })
+
+        self._register_tool(
+            func=save_file,
+            name="save_file",
+            description=(
+                "Save text content (reports, summaries, tables, scripts, notes) "
+                "to a file in the session directory. Use this to persist "
+                "synthesized knowledge summaries, analysis reports, exported "
+                "results, or any text artifact the user requests."
+            ),
+            parameters={
+                "filename": {
+                    "type": "string",
+                    "description": (
+                        "Name of the file to create, e.g. 'analysis_report.md', "
+                        "'peak_positions.csv', or 'summary.txt'."
+                    ),
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The text content to write to the file.",
+                },
+                "subfolder": {
+                    "type": "string",
+                    "description": (
+                        "Optional subfolder within the session directory, "
+                        "e.g. 'reports' or 'exports'. Created if it doesn't exist."
+                    ),
+                },
+            },
+            required=["filename", "content"]
+        )
+
     def _register_tool(
         self,
         func: Callable,
@@ -2729,6 +2974,22 @@ class AnalysisOrchestratorTools:
             }
         }
         self.openai_schemas.append(openai_schema)
+
+    def _update_skill_description(self, custom_skills: dict) -> None:
+        """Update the ``skill`` parameter description in ``run_analysis``
+        to include newly registered custom skills."""
+        for schema in self.openai_schemas:
+            fn = schema.get("function", {})
+            if fn.get("name") != "run_analysis":
+                continue
+            skill_prop = fn["parameters"]["properties"].get("skill")
+            if skill_prop is None:
+                break
+            skill_prop["description"] = _build_skill_description(
+                getattr(self.orch, "_agent_registry", None),
+                custom_skills,
+            )
+            break
 
     def execute_tool(self, tool_name: str, **kwargs) -> str:
         """Execute a tool by name with given arguments."""

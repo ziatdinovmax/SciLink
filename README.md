@@ -18,7 +18,11 @@ SciLink provides three complementary agent systems that cover the full scientifi
 | **Analysis Agents** | Multi-modal data analysis | Microscopy, spectroscopy, particle segmentation, curve fitting |
 | **Simulation Agents** | Computational modeling | DFT calculations, classical MD (LAMMPS), structure recommendations |
 
-All systems support configurable autonomy levels: from co-pilot mode where humans lead and AI assists, to fully autonomous operation where the agent chains all tools independently.
+All systems support three autonomy levels:
+
+- **Co-Pilot** (default) — Human leads, AI assists. Reviews every step.
+- **Supervised** — AI leads, human reviews major decisions.
+- **Autonomous** — Full autonomy, no human review.
 
 ---
 
@@ -26,6 +30,12 @@ All systems support configurable autonomy levels: from co-pilot mode where human
 
 ```bash
 pip install scilink
+
+# With web UI
+pip install scilink[ui]
+
+# With simulation dependencies (ASE, atomate2, etc.)
+pip install scilink[sim]
 ```
 
 ### Environment Variables
@@ -42,44 +52,50 @@ export OPENAI_API_KEY="your-key"
 # Anthropic
 export ANTHROPIC_API_KEY="your-key"
 
-# Internal proxy (if applicable)
+# OpenAI-compatible proxy (if applicable)
 export SCILINK_API_KEY="your-key"
 ```
+
+When using `SCILINK_API_KEY`, also provide a `--base-url` pointing to your OpenAI-compatible endpoint.
 
 ---
 
 ## Quick Start
 
-### Planning a New Experiment
+SciLink can be used via the **CLI**, **web UI**, **MCP server**, or **Python API**.
+
+### CLI
 
 ```bash
-# Interactive planning session
+# Planning session
 scilink plan
-
-# With specific settings
 scilink plan --autonomy supervised --data-dir ./results --knowledge-dir ./papers
-```
 
-### Analyzing Experimental Data
-
-```bash
-# Interactive analysis session
+# Analysis session
 scilink analyze
-
-# With data file
 scilink analyze --data ./sample.tif --metadata ./metadata.json
 ```
 
----
+### Web UI
 
-![SciLink Reports](misc/report_snapshots.jpg)
+```bash
+scilink ui
+```
 
----
+Requires `pip install scilink[ui]`.
+
+### MCP Server
+
+```bash
+scilink serve --model gemini-3.1-pro-preview
+```
+
+See [MCP Integration](#mcp-integration) for details.
 
 ### Python API
 
 ```python
-from scilink.agents.planning_agents import PlanningAgent, BOAgent
+from scilink.agents.planning_agents import PlanningAgent
 from scilink.agents.exp_agents import AnalysisOrchestratorAgent, AnalysisMode
 
 # Generate an experimental plan
@@ -91,10 +107,90 @@ plan = planner.propose_experiments(
 )
 
 # Analyze microscopy data
-analyzer = AnalysisOrchestratorAgent(
-    analysis_mode=AnalysisMode.SUPERVISED
-)
+analyzer = AnalysisOrchestratorAgent(analysis_mode=AnalysisMode.SUPERVISED)
 result = analyzer.chat("Analyze ./stem_image.tif and generate scientific claims")
+```
+
+---
+
+![SciLink Reports](misc/report_snapshots.jpg)
+
+---
+
+## MCP Integration
+
+SciLink supports the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) as both a **server** (exposing its tools/agents to external clients like Claude Code) and a **client** (connecting to external MCP servers for additional capabilities).
+
+### As an MCP Server
+
+Expose SciLink's analysis and planning tools to any MCP-compatible client:
+
+```bash
+# Default (stdio transport, autonomous mode)
+scilink serve --model gemini-3.1-pro-preview
+
+# Analysis only, with human approval for major actions
+scilink serve --mode analyze --autonomy co-pilot
+
+# HTTP transport (SSE)
+scilink serve --transport sse --host 127.0.0.1 --port 8000
+```
+
+The server exposes all orchestrator tools (prefixed `scilink_` for analysis, `scilink_plan_` for planning), plus job management tools for long-running operations. Autonomy modes control which tools require human approval before execution. See [docs/claude_code_integration.md](docs/claude_code_integration.md) for the full MCP server guide.
+
+### As an MCP Client
+
+Connect external MCP servers to extend SciLink with additional tools:
+
+```bash
+# Python MCP server (e.g., arXiv paper search)
+scilink analyze --mcp stdio:arxiv:python,-m,arxiv_mcp_server,--storage-path,/tmp/papers
+```
+
+Programmatically:
+
+```python
+orchestrator = AnalysisOrchestratorAgent()
+tool_count = orchestrator.connect_mcp_server(
+    server_name="arxiv",
+    command=["python", "-m", "arxiv_mcp_server", "--storage-path", "/tmp/papers"]
+)
+```
+
+In the **web UI**, go to the **Tools** tab > **MCP Servers** section, select a transport (stdio/SSE), enter the server name and command, and click **Connect**.
+
+See [docs/mcp_client_integration.md](docs/mcp_client_integration.md) for the full MCP guide.
+
+---
+
+## Extensibility
+
+SciLink supports custom tools, skills, and agents that can be added via CLI flags, the web UI, or programmatically.
+
+### Custom Tools
+
+Provide a Python file with `tool_schemas` (list of OpenAI-format tool dicts) and a `create_tool_functions(data)` factory:
+
+```bash
+scilink analyze --tools ./my_image_tools.py
+```
+
+### Custom Skills
+
+Add domain-specific analysis guidance via Markdown skill files:
+
+```bash
+scilink analyze --skills ./raman_skill.md ./ftir_skill.md
+```
+
+Built-in skills are available for curve fitting (XPS, Raman, etc.) and hyperspectral analysis (EELS, etc.).
+
+### Custom Agents
+
+Register additional `BaseAnalysisAgent` subclasses:
+
+```bash
+scilink analyze --agents ./my_xrd_agent.py
 ```
 
 ---
@@ -103,7 +199,7 @@ result = analyzer.chat("Analyze ./stem_image.tif and generate scientific claims"
 
 <img src="misc/scilink_plan.png" alt="SciLink Planning Agent" width="50%">
 
-The Planning Agents module provides an AI-powered research orchestration system that automates experimental design, data analysis, and iterative optimization workflows.
+The Planning Agents module automates experimental design, data analysis, and iterative optimization workflows.
 
 ## Architecture
 
@@ -124,25 +220,11 @@ PlanningOrchestratorAgent (main coordinator)
 | **ScalarizerAgent** | Converts raw data (CSV, Excel) into optimization-ready metrics |
 | **BOAgent** | Suggests optimal parameters via Bayesian Optimization |
 
-### Autonomy Levels
-
-- **Co-Pilot** (default): Human leads, AI assists. Reviews every step.
-- **Supervised**: AI leads, human reviews plans/code only.
-- **Autonomous**: Full autonomy, no human review.
-
 ## CLI Usage
 
 ```bash
-# Start interactive planning session
 scilink plan
-
-# Supervised mode with workspace config
-scilink plan --autonomy supervised \
-  --data-dir ./experimental_results \
-  --knowledge-dir ./papers \
-  --code-dir ./opentrons_api
-
-# Use a specific model
+scilink plan --autonomy supervised --data-dir ./results --knowledge-dir ./papers
 scilink plan --model claude-opus-4-5
 ```
 
@@ -154,58 +236,18 @@ $ scilink plan
 📋 What's your research objective?
 Your objective: Optimize lithium extraction from brine
 
-🔧 Initializing agent...
-✅ Agent ready!
-
-============================================================
-💬 CHAT SESSION STARTED
-============================================================
-
 👤 You: Generate a plan using papers in ./literature/
 
-🤖 Agent: I'll generate an experimental plan using your literature.
-
-  ⚡ Tool: Generating Initial Plan...
-    📚 Knowledge sources: ['./literature/']
-    ✅ Retrieved 8 document chunks.
-
-============================================================
-✅ PROPOSED EXPERIMENTAL PLAN
-============================================================
+🤖 Agent: ⚡ Generating Initial Plan...
+    📚 Retrieved 8 document chunks.
 
 🔬 EXPERIMENT 1: pH-Controlled Selective Precipitation
---------------------------------------------------------------------------------
-> 🎯 Hypothesis:
-> Adjusting pH to 10-11 will selectively precipitate Mg(OH)₂ while retaining Li⁺
-
---- 🧪 Experimental Steps ---
- 1. Prepare 50mL aliquots of brine sample
- 2. Add NaOH dropwise while monitoring pH
- 3. Filter precipitate through 0.45μm membrane
- 4. Analyze filtrate via ICP-OES
-
-📝 Press [ENTER] to approve or type feedback:
-
-👤 You: Add implementation code using ./opentrons_api/
-
-🤖 Agent: [calls generate_implementation_code]
-    → Builds Code KB from ./opentrons_api/
-    → Maps steps to API calls
-    → Generates Python scripts
-    ✅ Scripts saved to ./output_scripts/
+> 🎯 Hypothesis: Adjusting pH to 10-11 will selectively precipitate Mg(OH)₂ while retaining Li⁺
 
 👤 You: Analyze ./results/batch_001.csv and run optimization
 
-🤖 Agent: [calls analyze_file]
-    → Generates analysis script
-    → Returns: {"metrics": {"yield": 78.5}}
-
-  [calls run_optimization]
-    → Bayesian Optimization with 3 data points
-    → Returns: {"recommended_parameters": {"temp": 85.2, "pH": 6.8}}
-
-👤 You: /quit
-👋 Session saved at: ./campaign_session
+🤖 Agent: [calls analyze_file → {"metrics": {"yield": 78.5}}]
+  [calls run_optimization → {"recommended_parameters": {"temp": 85.2, "pH": 6.8}}]
 ```
 
 ### CLI Commands
@@ -222,71 +264,31 @@ Your objective: Optimize lithium extraction from brine
 
 ## Python API
 
-### Using the Orchestrator
-
 ```python
 from scilink.agents.planning_agents.planning_orchestrator import (
-    PlanningOrchestratorAgent, 
-    AutonomyLevel
+    PlanningOrchestratorAgent, AutonomyLevel
 )
+from scilink.agents.planning_agents import PlanningAgent, ScalarizerAgent, BOAgent
 
+# Using the orchestrator
 orchestrator = PlanningOrchestratorAgent(
     objective="Optimize reaction yield",
     autonomy_level=AutonomyLevel.SUPERVISED,
     data_dir="./experimental_results",
     knowledge_dir="./papers"
 )
-
 response = orchestrator.chat("Generate initial plan and analyze batch_001.csv")
-```
 
-### Using Individual Agents
-
-#### PlanningAgent - Experimental Design
-
-```python
-from scilink.agents.planning_agents import PlanningAgent
-
+# Direct agent usage
 agent = PlanningAgent(model_name="gemini-3.1-pro-preview")
-
 plan = agent.propose_experiments(
-    objective="Screen precipitation conditions for magnesium recovery",
-    knowledge_paths=["./literature/", "./protocols.pdf"],
-    code_paths=["./opentrons_api/"],
-    primary_data_set={"file_path": "./composition_data.xlsx"},
-    enable_human_feedback=True
+    objective="Screen precipitation conditions",
+    knowledge_paths=["./literature/"],
+    primary_data_set={"file_path": "./composition_data.xlsx"}
 )
 
-# Iterate based on results
-updated_state = agent.update_plan_with_results(
-    results=["./results/batch_001.csv", "./plots/yield_curve.png"]
-)
-```
-
-#### ScalarizerAgent - Data Analysis
-
-```python
-from scilink.agents.planning_agents import ScalarizerAgent
-
-scalarizer = ScalarizerAgent(model_name="gemini-3.1-pro-preview")
-
-result = scalarizer.scalarize(
-    data_path="./data/hplc_run_001.csv",
-    objective_query="Calculate peak area and purity percentage",
-    enable_human_review=True
-)
-
-print(f"Metrics: {result['metrics']}")
-# {'peak_area': 12504.2, 'purity_percent': 98.5}
-```
-
-#### BOAgent - Bayesian Optimization
-
-```python
-from scilink.agents.planning_agents import BOAgent
-
+# Bayesian optimization
 bo = BOAgent(model_name="gemini-3.1-pro-preview")
-
 result = bo.run_optimization_loop(
     data_path="./optimization_data.csv",
     objective_text="Maximize yield while minimizing cost",
@@ -295,18 +297,15 @@ result = bo.run_optimization_loop(
     target_cols=["Yield"],
     batch_size=1
 )
-
-print(f"Next parameters: {result['next_parameters']}")
-# {'Temperature': 65.2, 'pH': 8.3, 'Concentration': 1.2}
 ```
 
 ---
 
 # Experimental Analysis Agents
 
-<img src="misc/scilink_analyze.png" alt="SciLink Planning Agent" width="50%">
+<img src="misc/scilink_analyze.png" alt="SciLink Analysis Agent" width="50%">
 
-The Analysis Agents module provides automated scientific data analysis across multiple modalities—microscopy, spectroscopy, particle segmentation, and curve fitting.
+The Analysis Agents module provides automated scientific data analysis across multiple modalities.
 
 ## Architecture
 
@@ -320,27 +319,16 @@ AnalysisOrchestratorAgent (main coordinator)
 
 | ID | Agent | Use Case |
 |----|-------|----------|
-| 0 | **FFTMicroscopyAnalysisAgent** | Microstructure via FFT/NMF—grains, phases, atomic-resolution |
-| 1 | **SAMMicroscopyAnalysisAgent** | Particle segmentation—counting, size distributions |
-| 2 | **HyperspectralAnalysisAgent** | Spectroscopic datacubes—EELS-SI, EDS, Raman imaging |
-| 3 | **CurveFittingAgent** | 1D fitting—XRD, UV-Vis, PL, DSC, kinetics |
-
-### Autonomy Levels
-
-- **Co-Pilot** (default): Human leads, AI assists. Reviews agent selection.
-- **Supervised**: AI leads, human approves major decisions.
-- **Autonomous**: Full autonomy for complete analysis pipelines.
+| 0 | **FFTMicroscopyAnalysisAgent** | Microstructure via FFT/NMF — grains, phases, atomic-resolution |
+| 1 | **SAMMicroscopyAnalysisAgent** | Particle segmentation — counting, size distributions |
+| 2 | **HyperspectralAnalysisAgent** | Spectroscopic datacubes — EELS-SI, EDS, Raman imaging |
+| 3 | **CurveFittingAgent** | 1D fitting — XRD, UV-Vis, PL, DSC, kinetics |
 
 ## CLI Usage
 
 ```bash
-# Start interactive analysis session
 scilink analyze
-
-# With data and metadata
 scilink analyze --data ./sample.tif --metadata ./metadata.json
-
-# Autonomous mode
 scilink analyze --mode autonomous --data ./spectrum.npy
 ```
 
@@ -349,50 +337,18 @@ scilink analyze --mode autonomous --data ./spectrum.npy
 ```
 $ scilink analyze --data ./stem_image.tif
 
-============================================================
-🔬 SCILINK ANALYSIS ORCHESTRATOR
-============================================================
-
 👤 You: Examine my data and suggest an analysis approach
 
-🤖 Agent: I'll examine your data file.
-
-  ⚡ Tool: Examining data at ./stem_image.tif...
-
-  • Type: microscopy
-  • Shape: 2048 x 2048 pixels
+🤖 Agent: ⚡ Examining data at ./stem_image.tif...
+  • Type: microscopy, Shape: 2048 x 2048
   • Suggested agents: FFTMicroscopyAnalysisAgent (0) or SAMMicroscopyAnalysisAgent (1)
-
-👤 You: Preview the image and select the best agent
-
-🤖 Agent: Looking at the image, I can see atomic-resolution features with a crystalline lattice.
-
-  ⚡ Tool: Setting agent to 0...
-
-Selected **FFTMicroscopyAnalysisAgent** for microstructure analysis.
-
-👤 You: Convert this to metadata: HAADF-STEM of MoS2, 50nm FOV, 300kV
-
-🤖 Agent: ⚡ Tool: Converting metadata...
-    ✅ Metadata saved
 
 👤 You: Run the analysis
 
-🤖 Agent: ⚡ Tool: Running analysis...
-    Analysis ID: stem_image_FFT_20250202_143215_001
-
-**Detailed Analysis:**
-The HAADF-STEM image reveals MoS2 with predominantly 2H phase structure.
-FFT analysis identified four distinct spatial frequency patterns...
-
-**Scientific Claims Generated:** 3
-
-👤 You: What follow-up measurements do you recommend?
-
-🤖 Agent: 
-1. **[Priority 1] EELS Spectrum Imaging** - Target sulfur vacancy clusters
-2. **[Priority 2] 4D-STEM Strain Mapping** - Quantify grain boundary strain
-3. **[Priority 3] Time-Series Imaging** - Assess defect evolution
+🤖 Agent: ⚡ Running analysis...
+  The HAADF-STEM image reveals MoS2 with predominantly 2H phase structure.
+  FFT analysis identified four distinct spatial frequency patterns...
+  **Scientific Claims Generated:** 3
 ```
 
 ### CLI Commands
@@ -404,103 +360,32 @@ FFT analysis identified four distinct spatial frequency patterns...
 | `/agents` | List analysis agents with descriptions |
 | `/status` | Show session state |
 | `/mode [level]` | Show or change analysis mode |
-| `/checkpoint` | Save checkpoint |
 | `/schema` | Show metadata JSON schema |
 | `/quit` | Exit session |
 
 ## Python API
 
-### Using the Orchestrator
-
 ```python
-from scilink.agents.exp_agents import AnalysisOrchestratorAgent, AnalysisMode
+from scilink.agents.exp_agents import (
+    AnalysisOrchestratorAgent, AnalysisMode,
+    FFTMicroscopyAnalysisAgent, SAMMicroscopyAnalysisAgent,
+    HyperspectralAnalysisAgent, CurveFittingAgent
+)
 
+# Using the orchestrator
 orchestrator = AnalysisOrchestratorAgent(
     base_dir="./my_analysis",
     analysis_mode=AnalysisMode.SUPERVISED
 )
-
 response = orchestrator.chat("Examine ./data/sample.tif")
-response = orchestrator.chat("Select agent 0 and run analysis")
-```
 
-### Using Individual Agents
-
-#### FFTMicroscopyAnalysisAgent
-
-```python
-from scilink.agents.exp_agents import FFTMicroscopyAnalysisAgent
-
-agent = FFTMicroscopyAnalysisAgent(
-    output_dir="./fft_output",
-    enable_human_feedback=True
-)
-
-# Single image
-result = agent.analyze("sample.tif", system_info=metadata)
-
-# Batch/series
-result = agent.analyze(
-    ["frame_001.tif", "frame_002.tif"],
-    series_metadata={"variable": "time", "values": [0, 10], "unit": "s"}
-)
-
-# Get recommendations
-recommendations = agent.recommend_measurements(analysis_result=result)
-```
-
-#### SAMMicroscopyAnalysisAgent
-
-```python
-from scilink.agents.exp_agents import SAMMicroscopyAnalysisAgent
-
-agent = SAMMicroscopyAnalysisAgent(
-    output_dir="./sam_output",
-    sam_settings={"min_area": 100, "sam_parameters": "sensitive"}
-)
-
-result = agent.analyze("nanoparticles.tif")
-print(f"Particles: {result['summary']['successful']}")
-print(f"Mean area: {result['statistics']['mean_area_pixels']:.1f} px²")
-```
-
-#### HyperspectralAnalysisAgent
-
-```python
-from scilink.agents.exp_agents import HyperspectralAnalysisAgent
-
-agent = HyperspectralAnalysisAgent(
-    output_dir="./hyperspectral_output",
-    run_preprocessing=True
-)
-
-# 3D datacube: (height, width, energy_channels)
-result = agent.analyze(
-    "eels_spectrum_image.npy",
-    system_info={"experiment": {"technique": "EELS-SI"}},
-    structure_image_path="haadf_reference.tif"  # Optional correlation
-)
-```
-
-#### CurveFittingAgent
-
-```python
-from scilink.agents.exp_agents import CurveFittingAgent
-
-agent = CurveFittingAgent(
-    output_dir="./curve_output",
-    use_literature=True,  # Search for fitting models
-    r2_threshold=0.95
-)
-
+# Direct agent usage
+agent = CurveFittingAgent(output_dir="./curve_output", use_literature=True)
 result = agent.analyze(
     "pl_spectrum.csv",
     system_info={"experiment": {"technique": "Photoluminescence"}},
     hints="Focus on band-edge emission"
 )
-
-print(f"Model: {result['model_type']}")
-print(f"R²: {result['fit_quality']['r_squared']:.4f}")
 
 # Series with trend analysis
 result = agent.analyze(
@@ -514,73 +399,30 @@ result = agent.analyze(
 ```python
 from scilink.agents.exp_agents import generate_metadata_json_from_text
 
-# Convert natural language to structured metadata
+# "HAADF-STEM of MoS2 monolayer, 50nm FOV, 300kV"
+# → {"experiment_type": "Microscopy", "experiment": {"technique": "HAADF-STEM"}, ...}
 metadata = generate_metadata_json_from_text("./experiment_notes.txt")
-
-# Input: "HAADF-STEM of MoS2 monolayer, 50nm FOV, 300kV"
-# Output: {"experiment_type": "Microscopy", "experiment": {"technique": "HAADF-STEM"}, ...}
 ```
 
 ---
 
-## Novelty Assessment: From Data to Discovery
+## Novelty Assessment
 
-One of SciLink's key features is automated novelty assessment - instantly checking your experimental findings against the scientific literature to identify what's genuinely new.
-
-This is powered by integration with [FutureHouse](https://www.futurehouse.org/) AI agents, which provide deep literature search and scientific reasoning capabilities. The integration enables SciLink to search across thousands of scientific papers and assess whether your findings have been previously reported.
-
-### Interactive Example
+SciLink can automatically check experimental findings against the scientific literature to identify what's genuinely new. This is powered by integration with [FutureHouse](https://www.futurehouse.org/) AI agents.
 
 ```
-👤 You: Analyze the STEM images and generate scientific claims
-
-🤖 Agent: 
-  ⚡ Running analysis...
-     → Analysis ID: stem_MoS2_FFT_20250203_001
-
-  **Scientific Claims Generated:** 3
-  • MoS2 exhibits mixed 2H/1T phase coexistence at room temperature
-  • Sulfur vacancy density at grain boundaries is 3.2 × 10¹³ cm⁻²
-  • 1T phase domains are localized within 5nm of grain boundaries
-
 👤 You: Assess novelty of these claims
 
-🤖 Agent:
-  ⚡ Searching literature via FutureHouse...
+🤖 Agent: ⚡ Searching literature via FutureHouse...
 
-  📚 [Score 2/5] Mixed 2H/1T phase coexistence
-     → Well-documented (Li et al. 2018, Wang et al. 2020)
-
-  🤔 [Score 3/5] Sulfur vacancy density of 3.2 × 10¹³ cm⁻²
-     → Similar measurements exist at different conditions
-
-  🌟 [Score 4/5] 1T phase localized within 5nm of grain boundaries
-     → Limited prior reports; spatial correlation not established
+  📚 [Score 2/5] Mixed 2H/1T phase coexistence → Well-documented
+  🤔 [Score 3/5] Sulfur vacancy density of 3.2 × 10¹³ cm⁻² → Similar measurements exist
+  🌟 [Score 4/5] 1T phase localized within 5nm of grain boundaries → Limited prior reports
 
   Summary: 1 HIGH-NOVELTY finding identified
-
-👤 You: What experiments should I run next?
-
-🤖 Agent:
-  ⚡ Generating novelty-informed recommendations...
-
-  [Priority 1] Confirm 1T localization near grain boundaries (Score 4/5)
-     → Statistical analysis across n>20 boundaries, EELS mapping
-
-  [Priority 2] Differentiate vacancy density from prior work (Score 3/5)
-     → Document methodology differences vs. Zhou et al. 2021
-
-  💡 High-novelty findings prioritized for validation experiments
 ```
 
-### The Discovery Acceleration Loop
-
-1. **Analysis Agent** processes data → generates scientific claims with searchable keywords
-2. **Novelty Assessment** searches literature → scores each claim (1-5)
-3. **Recommendations** prioritized by novelty → validation experiments for novel findings
-
-**Without SciLink:** Days of manual analysis and literature searching  
-**With SciLink:** Know what's novel in minutes - while your experiment is still running
+The discovery loop: **Analysis** generates scientific claims → **Novelty Assessment** scores each against literature → **Recommendations** prioritize validation experiments for novel findings.
 
 ---
 
@@ -615,25 +457,14 @@ analysis_session/
 
 # Simulation Agents *(Coming Soon)*
 
-The Simulation Agents module provides AI-powered computational modeling capabilities, bridging experimental observations with atomistic simulations.
-
-## Planned Capabilities
+The Simulation Agents module will provide AI-powered computational modeling, bridging experimental observations with atomistic simulations.
 
 | Agent | Purpose |
 |-------|---------|
 | **DFTAgent** | Density Functional Theory workflow automation |
 | **MDAgent** | Classical molecular dynamics simulations via LAMMPS |
-| **SimulationRecommendationAgent** | Recommends structures and simulation objectives based on experimental analysis (within available DFT/MD methods) |
+| **SimulationRecommendationAgent** | Recommends structures and simulation objectives based on experimental analysis |
 
-### Key Features (In Development)
-
-- **Experiment-to-Simulation Pipeline**: Automatically generate simulation input structures from microscopy analysis
-- **Defect Modeling**: Create supercells with point defects, grain boundaries, and interfaces identified in images
-- **DFT Calculations**: Electronic structure, formation energies, and spectroscopic signatures
-- **Classical MD Simulations**: Large-scale dynamics, thermal properties, mechanical response via LAMMPS
-
-### Integration with Analysis Agents
-
-The Simulation Agents will integrate directly with the Analysis Agents. Experimental analysis and interpretation will be used to recommend structures and simulation objectives that provide deeper insight into observed phenomena:
+Key planned features include experiment-to-simulation pipelines, defect modeling, and direct integration with the Analysis Agents.
 
 > **Note**: This module is currently being refactored. Check back for updates.

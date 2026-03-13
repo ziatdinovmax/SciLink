@@ -202,6 +202,10 @@ div:has(> [data-testid="stMarkdown"] .theme-toggle-anchor) + div button:hover {
 /* ── Tabs ───────────────────────────────────────────── */
 .stTabs [data-baseweb="tab"] {
     color: #B0B0B0;
+    font-size: 1.05rem !important;
+}
+.stTabs [data-baseweb="tab"] * {
+    font-size: 1.05rem !important;
 }
 .stTabs [aria-selected="true"] {
     color: #82B1FF;
@@ -791,6 +795,10 @@ div:has(> [data-testid="stMarkdown"] .theme-toggle-anchor) + div button:hover {
 /* ── Tabs ───────────────────────────────────────────── */
 .stTabs [data-baseweb="tab"] {
     color: #212121;
+    font-size: 1.05rem !important;
+}
+.stTabs [data-baseweb="tab"] * {
+    font-size: 1.05rem !important;
 }
 .stTabs [aria-selected="true"] {
     color: #6200EE;

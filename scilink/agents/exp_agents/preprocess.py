@@ -409,11 +409,30 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
         self.logger.info("Loading processed data and mask from script output...")
         processed_data = np.load(processed_data_path)
         mask_2d = np.load(mask_path)
-        
+
+        # Validate shapes before allowing data to propagate downstream
+        if processed_data.shape != hspy_data.shape:
+            raise RuntimeError(
+                f"Custom script output shape {processed_data.shape} does not "
+                f"match expected input shape {hspy_data.shape}"
+            )
+        expected_mask_shape = hspy_data.shape[:2]
+        if mask_2d.shape != expected_mask_shape:
+            raise RuntimeError(
+                f"Custom script mask shape {mask_2d.shape} does not "
+                f"match expected spatial shape {expected_mask_shape}"
+            )
+        if mask_2d.dtype != bool:
+            self.logger.warning(
+                f"Custom script mask has dtype {mask_2d.dtype}, expected bool. "
+                f"Casting via > 0."
+            )
+            mask_2d = mask_2d > 0
+
         os.remove(input_data_path)
         os.remove(processed_data_path)
         os.remove(mask_path)
-        
+
         return processed_data, mask_2d, script_save_path
     
 
@@ -486,17 +505,42 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
         # Check for a custom, overriding instruction
         custom_instruction = system_info.get("custom_processing_instruction")
         
+        # Check if we have a locked custom script strategy from a previous spectrum
+        if (locked_strategy is not None
+                and locked_strategy.get("type") == "custom_script"):
+            self.logger.info("Replaying locked custom preprocessing script for series consistency.")
+            try:
+                processed_data = self._replay_custom_script_1d(
+                    curve_data, locked_strategy["script_content"]
+                )
+                data_quality["strategy"] = locked_strategy
+                data_quality["reasoning"] = "Locked custom script replayed for series consistency."
+            except Exception as e:
+                self.logger.error(f"Locked custom script replay failed: {e}. Returning original data.")
+                processed_data = curve_data
+                data_quality["reasoning"] = f"LOCKED CUSTOM SCRIPT REPLAY FAILED: {e}"
+            return processed_data, data_quality
+
         if custom_instruction:  # Custom script path
             self.logger.info(f"Detected custom 1D processing instruction. Diverting to script executor.")
             self.logger.info(f"Instruction: {custom_instruction}")
-            
+
             try:
-                processed_data, script_path = self._run_custom_script_processing_1d(
-                    curve_data, system_info, custom_instruction
+                processed_data, script_path, script_content = (
+                    self._run_custom_script_processing_1d(
+                        curve_data, system_info, custom_instruction
+                    )
                 )
                 self.logger.info("Custom 1D script processing successful.")
                 if script_path:
                     data_quality["custom_script_path"] = script_path
+                # Store the validated script so it can be locked for series
+                if script_content:
+                    data_quality["strategy"] = {
+                        "type": "custom_script",
+                        "script_content": script_content,
+                        "reasoning": f"Custom preprocessing: {custom_instruction[:100]}",
+                    }
             except Exception as e:
                 self.logger.error(f"Custom 1D script processing failed: {e}. Returning original data.")
                 processed_data = curve_data
@@ -504,10 +548,10 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
 
         else:  # Standard LLM-guided path
             self.logger.info("Running LLM-guided standard 1D processing.")
-            
+
             # 1. Calculate stats (needed for the LLM if no locked strategy)
             stats = self._calculate_statistics_1d(curve_data)
-            
+
             # 2. Use locked strategy if provided, otherwise ask LLM
             if locked_strategy is not None:
                 self.logger.info("Using locked preprocessing strategy for series consistency.")
@@ -515,10 +559,10 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
             else:
                 self.logger.info("No locked strategy - asking LLM for preprocessing strategy.")
                 strategy = self._llm_select_1d_strategy(stats, system_info)
-            
+
             # 3. Apply the strategy
             processed_data = self._apply_1d_strategy(curve_data, strategy)
-            
+
             # 4. Return strategy in data_quality so it can be locked for series
             data_quality["reasoning"] = strategy.get('reasoning', 'LLM-guided standard processing applied.')
             data_quality["strategy"] = strategy
@@ -713,10 +757,13 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
 
     def _run_custom_script_processing_1d(
         self, curve_data: np.ndarray, system_info: dict, instruction: str
-    ) -> tuple[np.ndarray, str]:
+    ) -> tuple[np.ndarray, str, str]:
         """
         Orchestrates the custom 1D script pipeline and validates the result
         using a logic-correction loop.
+
+        Returns:
+            Tuple of (processed_data, script_save_path, script_content)
         """
         stats = self._calculate_statistics_1d(curve_data)
         
@@ -754,6 +801,18 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
                 raise RuntimeError(f"1D script finished but did not create 'processed_data.npy'")
             processed_data = np.load(processed_data_path)
 
+            # Shape validation
+            if processed_data.ndim != 2 or processed_data.shape[1] != 2:
+                raise RuntimeError(
+                    f"Custom script output shape {processed_data.shape} is not "
+                    f"a valid (N, 2) curve"
+                )
+            if processed_data.shape[0] != curve_data.shape[0]:
+                raise RuntimeError(
+                    f"Custom script output has {processed_data.shape[0]} points, "
+                    f"expected {curve_data.shape[0]} to match input"
+                )
+
             # 3. Validation step (LLM quality check)
             self.logger.info("🤖 Validating custom preprocessing script output...")
             raw_plot_bytes = self._plot_curve_to_bytes(curve_data, "1. Raw Data (Before)")
@@ -787,7 +846,7 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
                 # Clean up temp files and return
                 os.remove(input_data_path)
                 os.remove(processed_data_path)
-                return processed_data, script_save_path
+                return processed_data, script_save_path, final_script
             
             elif model_attempt < self.MAX_MODEL_ATTEMPTS:
                 self.logger.warning("⚠️ Preprocessing quality is unacceptable. Attempting to correct the logic.")
@@ -809,7 +868,60 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
 
         # This part should not be reachable, but as a fallback:
         raise RuntimeError("Agent failed to preprocess data.")
-    
+
+    def _replay_custom_script_1d(
+        self, curve_data: np.ndarray, script_content: str
+    ) -> np.ndarray:
+        """
+        Re-executes a previously validated custom preprocessing script on new
+        input data. Used for series consistency — the script was already
+        generated and quality-checked on the first spectrum.
+        """
+        input_filename = f"input_data_1d_{os.getpid()}.npy"
+        input_data_path = os.path.join(self.output_dir, input_filename)
+        processed_data_path = os.path.join(self.output_dir, "processed_data.npy")
+
+        try:
+            np.save(input_data_path, curve_data)
+            self.logger.info(f"Saved input data for locked script replay to: {input_data_path}")
+
+            exec_result = self.executor.execute_script(
+                script_content, working_dir=self.output_dir
+            )
+
+            if exec_result.get("status") != "success":
+                raise RuntimeError(
+                    f"Locked script execution failed: {exec_result.get('message', 'Unknown error')}"
+                )
+
+            if not os.path.exists(processed_data_path):
+                raise RuntimeError(
+                    "Locked script finished but did not create 'processed_data.npy'"
+                )
+
+            processed_data = np.load(processed_data_path)
+
+            # Shape validation — no LLM quality check on replay path
+            if processed_data.ndim != 2 or processed_data.shape[1] != 2:
+                raise RuntimeError(
+                    f"Locked script output shape {processed_data.shape} is not "
+                    f"a valid (N, 2) curve"
+                )
+            if processed_data.shape[0] != curve_data.shape[0]:
+                raise RuntimeError(
+                    f"Locked script output has {processed_data.shape[0]} points, "
+                    f"expected {curve_data.shape[0]} to match input"
+                )
+
+            return processed_data
+
+        finally:
+            # Always clean up temp files
+            if os.path.exists(input_data_path):
+                os.remove(input_data_path)
+            if os.path.exists(processed_data_path):
+                os.remove(processed_data_path)
+
     def _plot_curve_to_bytes(self, curve_data: np.ndarray, title: str) -> bytes:
         """Helper to plot a 1D curve into in-memory bytes."""
         fig, ax = plt.subplots(figsize=(8, 5))

@@ -45,7 +45,7 @@ justify it with known chemistry of the sample.
 reference all binding energies to C 1s = 284.8 eV. Note the correction
 applied.
 
-## fitting
+## analysis
 
 **CRITICAL: XPS fitting workflow.** Always follow this exact sequence:
 1. Sort data so binding energy is in INCREASING order (low to high).

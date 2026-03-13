@@ -34,7 +34,7 @@ def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
     Args:
         prompt: Mutable list of prompt parts to extend.
         state: Pipeline state dict containing ``skill_sections`` and ``skill_name``.
-        stage: One of ``"planning"``, ``"fitting"``, ``"interpretation"``, ``"validation"``.
+        stage: One of ``"planning"``, ``"analysis"``, ``"interpretation"``, ``"validation"``.
     """
     sections = state.get("skill_sections")
     if not sections:
@@ -257,7 +257,7 @@ class RunPreprocessingController:
         if not state.get("settings", {}).get("run_preprocessing", True):
             self.logger.info("Preprocessing skipped for this refinement iteration (run_preprocessing=False).")
             self.logger.info("Calculating statistics on *current* masked data for the next step...")
-            
+
             try:
                 # We still need stats (like SNR and shape) for the *next* controller
                 stats = self.preprocessor._calculate_statistics(state["hspy_data"])
@@ -266,9 +266,12 @@ class RunPreprocessingController:
                     "snr_estimate": snr_value,
                     "reasoning": f"SNR of *current iteration* data: {snr_reasoning}"
                 }
-                state["preprocessing_mask"] = np.ones(state["hspy_data"].shape[:2], dtype=bool)
+                # Preserve the original preprocessing mask if available;
+                # only fall back to all-ones if no mask was ever computed.
+                if "preprocessing_mask" not in state:
+                    state["preprocessing_mask"] = np.ones(state["hspy_data"].shape[:2], dtype=bool)
                 self.logger.info(f"✅ Tool Complete: Statistics calculated. SNR = {snr_value:.2f}")
-                return state 
+                return state
             except Exception as e:
                 self.logger.error(f"❌ Tool Failed: Stat calculation on refinement data failed: {e}", exc_info=True)
                 state["error_dict"] = {"error": "Stat calculation on refinement data failed", "details": str(e)}
@@ -276,10 +279,10 @@ class RunPreprocessingController:
 
         try:
             processed_data, mask, data_quality = self.preprocessor.run_preprocessing(
-                state["hspy_data"], 
+                state["hspy_data"],
                 state["system_info"]
             )
-            state["hspy_data"] = processed_data 
+            state["hspy_data"] = processed_data
             state["preprocessing_mask"] = mask
             state["data_quality"] = data_quality
             self.logger.info("✅ Tool Complete: Full preprocessing finished.")

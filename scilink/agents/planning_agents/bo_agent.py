@@ -705,12 +705,15 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
     # Main Optimization Loop
     # =====================================================================
 
-    def run_optimization_loop(self, data_path: str, objective_text: str, 
-                             input_cols: List[str], input_bounds: List[List[float]], 
-                             target_cols: List[str], output_dir: str = "./bo_artifacts",
+    def run_optimization_loop(self, data_path: str, objective_text: str,
+                             input_cols: List[str], input_bounds: List[List[float]],
+                             target_cols: List[str],
+                             target_directions: Optional[Dict[str, str]] = None,
+                             output_dir: str = "./bo_artifacts",
                              batch_size: int = 1,
                              experimental_budget: Optional[int] = None,
                              physical_constraints: Optional[str] = None,
+                             strategy_hint: Optional[str] = None,
                              save_acq: bool = True,
                              plot_acq: bool = True) -> Dict[str, Any]:
         """
@@ -747,6 +750,11 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                 - "Only 5 catalyst concentrations available: 0.1, 0.5, 1.0, 2.0, 5.0 mM"
                 - "Reactor zones A,B share cooling; C,D share heating. Max 4 temps total."
                 When None, standard unconstrained BO is used (original behavior).
+            strategy_hint: Optional natural language hint from the user to guide
+                strategy selection (kernel, acquisition function, noise prior).
+                Examples: "use RBF kernel", "try UCB with high exploration",
+                "switch to Thompson sampling". Respected unless it conflicts
+                with budget constraints.
             save_acq: If True, saves acquisition function landscape data to .npz file.
                 Supported for single-objective only; ignored for multi-objective.
             plot_acq: If True, generates and saves a plot of the acquisition function.
@@ -766,17 +774,28 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         self._init_state(objective=objective_text, data_path=data_path)
         
         # 1. Load Data
+        minimize_mask = []
         try:
             df = pd.read_excel(data_path) if data_path.endswith('.xlsx') else pd.read_csv(data_path)
             for col in input_cols + target_cols:
-                if col not in df.columns: 
+                if col not in df.columns:
                     return {"error": f"Column '{col}' not found in data."}
             X = df[input_cols].values
             y = df[target_cols].values
-            
+
+            # Negate minimize targets so the optimizer always maximizes
+            if target_directions:
+                for i, col in enumerate(target_cols):
+                    if target_directions.get(col, "maximize") == "minimize":
+                        y[:, i] *= -1
+                        minimize_mask.append(i)
+                if minimize_mask:
+                    minimized_names = [target_cols[i] for i in minimize_mask]
+                    print(f"  - 🔄 Negated for minimization: {minimized_names}")
+
             # Track data points
             self.state["data_points_seen"] = len(df)
-            
+
         except Exception as e:
             return {"error": f"Data load failed: {e}"}
 
@@ -802,12 +821,38 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             )
 
         # 2. Configure Strategy (LLM)
-        trend_context = f"Last 5 strategies: {[h.get('config', {}).get('rationale', 'N/A') for h in history[-5:]]}" if history else "No history."
+        if history:
+            trend_parts = []
+            for h in history[-5:]:
+                rationale = h.get("config", {}).get("rationale", "N/A")
+                insp = h.get("inspection", {})
+                insp_status = insp.get("status", "")
+                insp_reason = insp.get("reason", "")
+                insp_adj = insp.get("suggested_adjustments", {})
+                entry = f"Strategy: {rationale}"
+                if insp_status:
+                    entry += f" | Diagnostics: {insp_status}"
+                    if insp_reason:
+                        entry += f" — {insp_reason}"
+                    if insp_adj:
+                        entry += f" | Suggested adjustments: {insp_adj}"
+                trend_parts.append(entry)
+            trend_context = "Last steps:\n" + "\n".join(
+                f"  Step {i+1}: {p}" for i, p in enumerate(trend_parts)
+            )
+        else:
+            trend_context = "No history."
         
         prompt_tmpl = BO_CONFIG_MOO_PROMPT if is_moo else BO_CONFIG_SOO_PROMPT
         prompt_parts = [
             prompt_tmpl,
             f"Objective: {objective_text}",
+            *(
+                [f"Optimization direction: {', '.join(f'{c} → {d}' for c, d in target_directions.items() if c in target_cols)}"]
+                if target_directions and any(
+                    target_directions.get(c) == "minimize" for c in target_cols
+                ) else []
+            ),
             f"Constraint: Fixed Batch Size = {batch_size}",
             f"Meta-Data Trend: {trend_context}",
             f"Data Summary:\n{df.describe().to_markdown()}"
@@ -829,6 +874,14 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                 f"Focus on selecting the best kernel, noise, and acquisition strategy."
             )
         
+        if strategy_hint:
+            prompt_parts.append(
+                f"\n**User Strategy Hint:**\n{strategy_hint}\n"
+                f"The user has requested specific strategy preferences. "
+                f"Respect this hint when selecting kernel, noise, and acquisition, "
+                f"unless it directly conflicts with budget constraints."
+            )
+
         print(f"  - 🤖 BO Agent: Configuring strategy (Batch={batch_size})...")
         resp = self.model.generate_content(prompt_parts, generation_config=self.generation_config)
         raw_config, parse_error = parse_json_from_response(resp)
@@ -892,7 +945,12 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                 is_moo=is_moo
             )
             
-            # Get current best for context
+            # Get current best for context (un-negate for display)
+            def _unnegate_target_val(col_name, val):
+                """Restore original sign for minimization targets."""
+                idx = target_cols.index(col_name) if col_name in target_cols else -1
+                return -val if idx in minimize_mask else val
+
             if is_moo:
                 current_best = {}
                 current_best_value = {}
@@ -900,7 +958,8 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                     pareto_indices = optimizer.get_pareto_indices() if hasattr(optimizer, 'get_pareto_indices') else []
                     pareto_front = [
                         {**{k: float(v) for k, v in zip(input_cols, X[i])},
-                         **{k: float(v) for k, v in zip(target_cols, y[i])}}
+                         **{tc: float(_unnegate_target_val(tc, y[i, j]))
+                            for j, tc in enumerate(target_cols)}}
                         for i in pareto_indices
                     ] if len(pareto_indices) > 0 else []
                 except Exception:
@@ -908,9 +967,16 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             else:
                 best_idx = int(np.argmax(y[:, 0]))
                 current_best = {k: float(v) for k, v in zip(input_cols, X[best_idx])}
-                current_best_value = {target_cols[0]: float(y[best_idx, 0])}
+                raw_best = float(y[best_idx, 0])
+                current_best_value = {
+                    target_cols[0]: float(_unnegate_target_val(target_cols[0], raw_best))
+                }
                 pareto_front = None
-            
+
+            # df still has original values (only y array was negated),
+            # so df.describe() shows natural units for LLM display
+            data_summary_str = df.describe().to_markdown()
+
             constrained_recs, constrained_metadata, constraint_error = self._plan_constrained_batch(
                 objective_text=objective_text,
                 input_cols=input_cols,
@@ -919,7 +985,7 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                 acq_summary=acq_summary,
                 physical_constraints=physical_constraints,
                 unconstrained_recommendations=unconstrained_recommendations,
-                data_summary_str=df.describe().to_markdown(),
+                data_summary_str=data_summary_str,
                 current_best=current_best,
                 current_best_value=current_best_value,
                 budget_ctx=budget_ctx,

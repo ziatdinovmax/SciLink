@@ -461,8 +461,8 @@ def parse_multimodal_results(results: Any) -> Tuple[str, List]:
     def process_item(item: Any, description: str = "") -> str:
         text_output = ""
         
-        # If it's a file path
-        if isinstance(item, str) and Path(item).exists():
+        # If it's a file path (skip strings that are too long or contain newlines)
+        if isinstance(item, str) and len(item) <= 1024 and "\n" not in item and Path(item).exists():
             path = Path(item)
             suffix = path.suffix.lower()
             

@@ -1049,6 +1049,113 @@ Select the most appropriate strategy:
         self.state["status"] = "refined"
         return new_plan
     
+    def adjust_plan_for_constraints(self,
+                                    constraint_description: str,
+                                    enable_human_feedback: bool = True) -> Dict[str, Any]:
+        """
+        Adjusts the experimental plan to accommodate implementation or
+        instrument constraints discovered during protocol/code generation.
+
+        Unlike refine_plan(), this does NOT increment the iteration counter
+        or log as experimental results — the experiment hasn't run yet.
+
+        Args:
+            constraint_description: Description of the constraint or
+                incompatibility that requires plan adjustment.
+            enable_human_feedback: If True, pauses for user review.
+
+        Returns:
+            Updated plan dict with the same JSON structure.
+        """
+        if not self.state or not self.state.get("current_plan"):
+            raise ValueError(
+                "No active plan to adjust. Generate a plan first."
+            )
+
+        print(f"\n--- 🔧 Adjusting Plan for Implementation Constraints ---")
+
+        objective = self.state["objective"]
+        current_plan = self.state["current_plan"]
+
+        adjustment_prompt = (
+            f"An implementation constraint was discovered BEFORE running the experiment. "
+            f"The experiment has NOT been executed yet.\n\n"
+            f"**Constraint / Incompatibility:**\n{constraint_description}\n\n"
+            f"**TASK:** Make the MINIMUM changes necessary to accommodate this constraint.\n"
+            f"- ONLY modify the specific parts of the plan affected by the constraint.\n"
+            f"- Do NOT change the scientific hypothesis, objective, or rationale.\n"
+            f"- Do NOT modify experimental parameters, conditions, or steps that are "
+            f"unrelated to the constraint.\n"
+            f"- Keep all unaffected experiments, steps, and details EXACTLY as they are.\n"
+            f"- If the constraint forces a scope reduction, explain the trade-off in the "
+            f"justification but do not redesign unaffected parts of the plan.\n"
+            f"- Do NOT treat this as experimental results — no experiment was run."
+        )
+
+        print(f"  - Reasoning over constraint...")
+        new_plan = refine_plan_with_feedback(
+            original_result=current_plan,
+            feedback=adjustment_prompt,
+            objective=objective,
+            model=self.model,
+            generation_config=self.generation_config
+        )
+
+        if new_plan.get("error"):
+            print(f"\n❌ Adjustment Failed: {new_plan.get('message')}")
+            self._log_action(
+                action="adjust_plan_for_constraints",
+                input_ctx={"constraint": constraint_description[:200]},
+                result=new_plan,
+                rationale=None
+            )
+            return new_plan
+
+        # Keep same iteration — this is an in-place adjustment, not a new cycle
+        new_plan["iteration"] = current_plan.get("iteration", 0)
+        new_plan["stage"] = "Constraint Adjusted"
+        self.state["plan_history"].append(new_plan.copy())
+        self.state["current_plan"] = new_plan
+
+        self._log_action(
+            action="adjust_plan_for_constraints",
+            input_ctx={"constraint": constraint_description[:200]},
+            result=new_plan,
+            rationale=constraint_description
+        )
+
+        # Human feedback
+        human_feedback = None
+        if enable_human_feedback and not new_plan.get("error"):
+            print("\n" + "=" * 60)
+            print("🔧 AGENT'S PROPOSED PLAN ADJUSTMENT (Constraint)")
+            print("=" * 60)
+            display_plan_summary(new_plan)
+
+            human_feedback = get_user_feedback()
+
+            if human_feedback:
+                print(f"\n📝 Feedback received. Adjusting...")
+                self.state["human_feedback_history"].append({
+                    "phase": "constraint_adjustment",
+                    "feedback": human_feedback
+                })
+                new_plan = refine_plan_with_feedback(
+                    original_result=new_plan,
+                    feedback=human_feedback,
+                    objective=objective,
+                    model=self.model,
+                    generation_config=self.generation_config
+                )
+                new_plan["iteration"] = current_plan.get("iteration", 0)
+                new_plan["stage"] = "Human Refined (Constraint)"
+                self.state["plan_history"].append(new_plan.copy())
+                self.state["current_plan"] = new_plan
+                print("✅ Constraint adjustment updated.")
+
+        self.state["status"] = "constraint_adjusted"
+        return new_plan
+
     def refine_implementation_code(self,
                                    plan: Dict[str, Any],
                                    enable_human_feedback: bool = True) -> Dict[str, Any]:

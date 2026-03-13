@@ -468,11 +468,12 @@ def _init_planning_agent(session_dir, api_key, model, base_url, mode, fh_api_key
     }
     objective = st.session_state.get("planning_objective", "").strip() or "Undefined Research Goal"
 
-    # Create subdirectories for planning uploads
-    knowledge_dir = session_dir / "knowledge"
+    # Shared knowledge directory (persists across sessions)
+    knowledge_dir = Path.cwd() / "kb_storage"
+    knowledge_dir.mkdir(exist_ok=True)
+    # Per-session directories
     code_dir = session_dir / "code"
     data_dir = session_dir / "data"
-    knowledge_dir.mkdir(exist_ok=True)
     code_dir.mkdir(exist_ok=True)
     data_dir.mkdir(exist_ok=True)
 

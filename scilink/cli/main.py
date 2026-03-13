@@ -193,7 +193,6 @@ Available Commands:
 
   serve         Start SciLink as an MCP tool server so external clients
                 (Claude Desktop, Cursor) can use SciLink's tools
-                (requires: pip install scilink[mcp])
 
 Examples:
   scilink plan                              # Start planning orchestrator

@@ -11,9 +11,7 @@ Supports three autonomy modes:
 - **co-pilot** — tools that need approval return a ``needs_input``
   response; the MCP client must call ``scilink_respond`` to continue.
 
-Requires the ``mcp`` optional dependency::
-
-    pip install scilink[mcp]
+The ``mcp`` package is installed by default with SciLink.
 """
 
 import asyncio
@@ -22,6 +20,7 @@ import contextlib
 import io
 import json
 import logging
+import sys
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -38,7 +37,7 @@ def _require_mcp():
     if not HAS_MCP:
         raise ImportError(
             "MCP server support requires the 'mcp' package. "
-            "Install with: pip install scilink[mcp]"
+            "Install with: pip install scilink"
         )
 
 
@@ -552,6 +551,9 @@ def _init_orchestrators(state: dict, config: dict) -> None:
     import os
     from datetime import datetime
     from pathlib import Path
+
+    # MCP server manages trust via client — skip interactive sandbox prompt
+    os.environ.setdefault("UNSAFE_EXECUTION_OK", "true")
 
     session_dir = config["session_dir"]
     if not session_dir:

@@ -12,7 +12,7 @@ from typing import Dict
 
 _SKILLS_DIR = Path(__file__).parent
 
-_KNOWN_SECTIONS = {"overview", "planning", "fitting", "interpretation", "validation"}
+_KNOWN_SECTIONS = {"overview", "planning", "analysis", "interpretation", "validation"}
 
 
 def list_skills(domain: str = "curve_fitting") -> list:
@@ -30,6 +30,26 @@ def list_skills(domain: str = "curve_fitting") -> list:
     return sorted(p.stem for p in skills_dir.glob("*.md"))
 
 
+def list_all_skills() -> dict:
+    """Auto-discover all built-in skill domains and their skills.
+
+    Scans subdirectories of the skills package directory for ``.md`` files.
+
+    Returns:
+        Dict mapping domain names to sorted lists of skill names,
+        e.g. ``{"curve_fitting": ["xps"], "hyperspectral": ["eels"]}``.
+        Empty domains are omitted.
+    """
+    result = {}
+    for sub in sorted(_SKILLS_DIR.iterdir()):
+        if not sub.is_dir() or sub.name.startswith(("_", ".")):
+            continue
+        names = sorted(p.stem for p in sub.glob("*.md"))
+        if names:
+            result[sub.name] = names
+    return result
+
+
 def load_skill(skill: str, domain: str = "curve_fitting") -> Dict[str, str]:
     """Load and parse a skill markdown file.
 
@@ -40,7 +60,7 @@ def load_skill(skill: str, domain: str = "curve_fitting") -> Dict[str, str]:
         domain: Skill domain subdirectory (default: "curve_fitting").
 
     Returns:
-        Dict with keys: name, overview, planning, fitting, interpretation,
+        Dict with keys: name, overview, planning, analysis, interpretation,
         validation. Missing sections default to empty string.
 
     Raises:

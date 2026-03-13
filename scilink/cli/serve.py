@@ -118,7 +118,7 @@ def main():
     except ImportError as exc:
         print(
             f"Error: {exc}\n"
-            "Install MCP support with: pip install scilink[mcp]",
+            "Install MCP support with: pip install scilink",
             file=sys.stderr,
         )
         return 1
@@ -135,15 +135,19 @@ def main():
 
     # Initialize orchestrators eagerly so tools/list responds instantly.
     # Claude Desktop times out after ~5 seconds.
+    print(f"Initializing SciLink MCP server (mode={args.mode}, autonomy={args.autonomy})...",
+          file=sys.stderr)
     server.eager_init()
 
+    transport_label = (f"SSE on http://{args.host}:{args.port}/sse"
+                       if args.transport == "sse" else "stdio")
+    print(f"SciLink MCP server ready ({transport_label}). "
+          f"Waiting for MCP client connections...",
+          file=sys.stderr, flush=True)
+
+    sys.stderr.flush()
+
     if args.transport == "sse":
-        # SSE doesn't need stdout redirection — it's HTTP, not stdio.
-        print(
-            f"Starting SciLink MCP server (SSE) on "
-            f"http://{args.host}:{args.port}/sse",
-            file=sys.stderr,
-        )
         run_sse(server, host=args.host, port=args.port)
     else:
         import asyncio

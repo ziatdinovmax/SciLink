@@ -267,7 +267,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             try:
                 parsed = load_skill(skill, domain="hyperspectral")
                 skill_state = {"skill_name": parsed["name"], "skill_sections": parsed}
-                self.logger.info(f"   Skill loaded: {parsed['name']}")
+                self.logger.info(f"   📖 Skill loaded: {parsed['name']}")
             except FileNotFoundError:
                 self.logger.warning(
                     f"   Skill '{skill}' not found — proceeding without domain skill"
@@ -684,6 +684,11 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
                 if current_task["depth"] > 0:
                     iteration_state["settings"]['run_preprocessing'] = False
+                    # Carry forward the preprocessing mask from the parent so
+                    # refinement iterations retain knowledge of masked pixels.
+                    parent_mask = current_task.get("preprocessing_mask")
+                    if parent_mask is not None:
+                        iteration_state["preprocessing_mask"] = parent_mask
 
                 # Run iteration pipeline
                 for controller in self.iteration_pipeline:
@@ -713,7 +718,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                         "system_info": t["system_info"],
                         "title": t["title"],
                         "parent_reasoning": t["parent_reasoning"],
-                        "depth": t["source_depth"]
+                        "depth": t["source_depth"],
+                        "preprocessing_mask": iteration_state.get("preprocessing_mask"),
                     })
 
             # Run synthesis

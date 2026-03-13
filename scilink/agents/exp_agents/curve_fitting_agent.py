@@ -515,7 +515,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             try:
                 parsed = load_skill(skill, domain="curve_fitting")
                 skill_state = {"skill_name": parsed["name"], "skill_sections": parsed}
-                self.logger.info(f"   Skill loaded: {parsed['name']}")
+                self.logger.info(f"   📖 Skill loaded: {parsed['name']}")
             except FileNotFoundError:
                 self.logger.warning(
                     f"   Skill '{skill}' not found — proceeding without domain skill"
@@ -612,14 +612,17 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         
         # Compile results
         final_results = self._compile_results(state)
-        
+
         # Save final results
         results_path = self.output_dir / "analysis_results.json"
         with open(results_path, 'w') as f:
             # Make serializable
             serializable = self._make_serializable(final_results)
             json.dump(serializable, f, indent=2, default=str)
-        
+
+        # Save fitting scripts for reproducibility
+        self._save_fitting_scripts(state)
+
         self.logger.info("")
         self.logger.info("✅ ANALYSIS COMPLETE")
         self.logger.info(f"   Results: {results_path}")
@@ -780,6 +783,35 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             self.logger.warning(f"Failed to load auxiliary data: {e}")
 
         return result
+
+    def _save_fitting_scripts(self, state: dict) -> None:
+        """Save LLM-generated fitting scripts to disk for reproducibility."""
+        scripts_dir = self.output_dir / "scripts"
+        saved = []
+
+        if state.get("is_single_spectrum", True):
+            script = state.get("final_script")
+            if script:
+                scripts_dir.mkdir(parents=True, exist_ok=True)
+                path = scripts_dir / "fitting_script.py"
+                path.write_text(script, encoding="utf-8")
+                saved.append(str(path))
+        else:
+            series_results = state.get("series_results", [])
+            for r in series_results:
+                script = r.get("script")
+                if script and r.get("success"):
+                    scripts_dir.mkdir(parents=True, exist_ok=True)
+                    safe_name = "".join(
+                        c if c.isalnum() or c in ("_", "-") else "_"
+                        for c in str(r.get("name", f"spectrum_{r['index']}"))
+                    )
+                    path = scripts_dir / f"{safe_name}.py"
+                    path.write_text(script, encoding="utf-8")
+                    saved.append(str(path))
+
+        if saved:
+            self.logger.info(f"   Scripts: {scripts_dir} ({len(saved)} file(s))")
 
     def _compile_results(self, state: dict) -> Dict[str, Any]:
         """Compile results into a consistent output structure."""

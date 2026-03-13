@@ -688,7 +688,7 @@ class SingleObjectiveOptimizer:
             ax_sens.set_yticklabels([names[i] for i in sorted_idx])
             ax_sens.invert_yaxis()
             ax_sens.set_xlabel('Sobol Index (Impact on Mean)')
-            ax_sens.set_title("4. Parameter Importance")
+            ax_sens.set_title("4. Model Sensitivity")
         except Exception as e:
             ax_sens.text(0.5, 0.5, f"Analysis Error: {str(e)}", ha='center')
 

@@ -127,6 +127,21 @@ Metadata Options:
         )
     )
 
+    # Custom skill arguments
+    parser.add_argument(
+        '--skills',
+        type=str,
+        nargs='+',
+        dest='skill_files',
+        metavar='SKILL_FILE',
+        help=(
+            'Path(s) to custom skill .md files providing domain-specific '
+            'guidance for analysis agents (e.g. fitting strategy, interpretation '
+            'rules). Skills are made available by name to the run_analysis tool. '
+            'Example: scilink analyze --skills ./raman_skill.md ./ftir_skill.md'
+        )
+    )
+
     # Custom tool arguments
     parser.add_argument(
         '--tools',
@@ -232,6 +247,14 @@ Metadata Options:
             if not af.endswith('.py'):
                 parser.error(f"--agents file must be a .py file: {af}")
 
+    # Validate custom skill files if provided
+    if args.skill_files:
+        for sf in args.skill_files:
+            if not Path(sf).exists():
+                parser.error(f"--skills path does not exist: {sf}")
+            if not sf.endswith('.md'):
+                parser.error(f"--skills file must be a .md file: {sf}")
+
     # Validate custom tool files if provided
     if args.tool_files:
         for tf in args.tool_files:
@@ -252,6 +275,8 @@ Metadata Options:
         'restore': args.restore,
         'agent_files': args.agent_files or [],
         'tool_files': args.tool_files or [],
+        'skill_files': args.skill_files or [],
+        'mcp_servers': args.mcp_servers or [],
     }
     
     # Run the interactive orchestrator
@@ -338,6 +363,7 @@ class AnalysisPlayground:
         self._initial_metadata_path = metadata_path
         self._agent_files = self.config.get('agent_files', [])
         self._tool_files = self.config.get('tool_files', [])
+        self._skill_files = self.config.get('skill_files', [])
         self._mcp_servers = self.config.get('mcp_servers', [])
         
         # Convert mode string to enum
@@ -448,6 +474,10 @@ Supported data types:
         # === LOAD CUSTOM TOOL FILES ===
         if self._tool_files:
             self._load_custom_tools(self._tool_files)
+
+        # === REGISTER CUSTOM SKILLS ===
+        if self._skill_files:
+            self._register_custom_skills(self._skill_files)
 
         # === CONNECT MCP SERVERS ===
         if self._mcp_servers:
@@ -604,6 +634,17 @@ Supported data types:
             self.agent.register_tools(schemas, factory)
             count = sum(1 for s in schemas if s.get('type') == 'function')
             print(f"   ✅ Registered {count} tool(s) from {path.name}")
+
+    def _register_custom_skills(self, skill_files: list) -> None:
+        """Register custom skill .md files with the orchestrator."""
+        for file_path in skill_files:
+            path = Path(file_path).resolve()
+            print(f"\n📖 Registering custom skill: {path}")
+            try:
+                name = self.agent.register_skill(str(path))
+                print(f"   ✅ Registered skill '{name}'")
+            except Exception as e:
+                print(f"   ❌ Failed to register {path.name}: {e}")
 
     def _connect_mcp_servers(self, mcp_configs: list) -> None:
         """Parse MCP server configs and connect to each."""

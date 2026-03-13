@@ -4,9 +4,7 @@ Provides a thin synchronous wrapper around the async MCP Python SDK so that
 the analysis orchestrator can discover and call tools exposed by any
 MCP-compatible server over stdio or SSE transports.
 
-Requires the ``mcp`` optional dependency::
-
-    pip install scilink[mcp]
+The ``mcp`` package is installed by default with SciLink.
 """
 
 import asyncio
@@ -33,7 +31,7 @@ def _require_mcp():
     if not HAS_MCP:
         raise ImportError(
             "MCP client support requires the 'mcp' package. "
-            "Install with: pip install scilink[mcp]"
+            "Install with: pip install scilink"
         )
 
 
@@ -198,7 +196,7 @@ class MCPConnection:
     def _run(self, coro):
         """Schedule a coroutine on the background loop and wait for the result."""
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result(timeout=60)
+        return future.result(timeout=300)
 
     def __del__(self):
         try:

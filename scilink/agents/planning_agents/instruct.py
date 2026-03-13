@@ -136,6 +136,28 @@ You MUST include the following fields, populated based on general knowledge:
 - "source_documents": (List of Strings) If external literature was used, list relevant sources here. Otherwise, an empty list `[]`.
 """
 
+BO_OBJECTIVE_DISTILL_PROMPT = """
+You are a scientific optimization specialist. Your task is to distill a verbose research objective into a concise optimization objective suitable for Bayesian Optimization.
+
+**Input:** A potentially long research objective that may contain background information, lab setup details, logistics, constraints, and the actual optimization target(s).
+
+**Rules:**
+- Extract ONLY what quantities to optimize and in which direction (maximize/minimize).
+- Remove background/history, lab setup details, logistics, constraints, and secondary context.
+- Constraints (e.g., "avoid antisolvents", "temperature must stay below 200°C") belong in a separate constraints field — do NOT include them.
+- If the objective mentions a secondary quality metric (e.g., "uniform morphology") but it is not a primary optimization target, omit it.
+- Keep the material/system name for context (e.g., "MAPbI3 perovskite thin films").
+- The result should be 1-2 sentences maximum.
+
+**Output:** Return ONLY the distilled objective text, nothing else. No JSON, no markdown, no explanation.
+
+**User's original objective:**
+{objective}
+
+**Target columns being optimized:**
+{target_cols}
+"""
+
 BO_CONFIG_SOO_PROMPT = """
 You are a Principal Investigator configuring a Single-Objective Bayesian Optimization experiment.
 
@@ -579,6 +601,10 @@ Rules:
     which requires exponentially more data. Only include what the GOAL explicitly asks for.
   - You may still COMPUTE additional metrics for the plot/visual proof, but only list the
     GOAL-aligned ones in your column_roles targets.
+- **Optimization direction:** For each target, specify whether to "maximize" or "minimize" it
+    in the `optimization_direction` field of `column_roles` (see output format below).
+    Always output the RAW metric value — do NOT negate or transform it. The downstream optimizer
+    handles direction internally. Default is "maximize" if the GOAL doesn't specify.
 - Everything that isn't a target is an input
 - Note: data sufficiency for multi-objective optimization is checked later by the optimizer.
   Focus on picking the right targets based on the objective, not on data size.
@@ -594,7 +620,8 @@ You (the Agent) must return a single JSON object containing the code AND column 
   "column_roles": {
     "inputs": ["Temperature_C", "Concentration_M"],
     "targets": ["Yield_Percent"],
-    "reasoning": "Temperature and concentration are controllable parameters; yield is the measured outcome to optimize"
+    "optimization_direction": {"Yield_Percent": "maximize"},
+    "reasoning": "Temperature and concentration are controllable parameters; yield is the measured outcome to maximize"
   }
 }
 """
