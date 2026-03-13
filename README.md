@@ -52,6 +52,9 @@ export OPENAI_API_KEY="your-key"
 # Anthropic
 export ANTHROPIC_API_KEY="your-key"
 
+# Novita (OpenAI-compatible)
+export NOVITA_API_KEY="your-key"
+
 # OpenAI-compatible proxy (if applicable)
 export SCILINK_API_KEY="your-key"
 ```

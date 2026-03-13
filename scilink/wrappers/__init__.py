@@ -4,24 +4,38 @@ API Wrappers for Multi-Backend LLM Support
 Two deployment modes:
 1. Internal (Incubator) - OpenAI-compatible proxy endpoint
    → Uses OpenAIAsGenerativeModel, OpenAIAsEmbeddingModel
-   
+
 2. Public - Direct provider access via LiteLLM
    → Uses LiteLLMGenerativeModel, LiteLLMEmbeddingModel
    → Supports: Google, OpenAI, Anthropic, Cohere, and 100+ providers
+
+3. Novita - OpenAI-compatible provider with fixed endpoint
+   → Uses NovitaGenerativeModel
+   → Supports: deepseek/deepseek-v3.2, zai-org/glm-5, minimax/minimax-m2.5
 
 Usage:
     # Internal proxy
     from wrappers import OpenAIAsGenerativeModel
     model = OpenAIAsGenerativeModel("model-name", api_key="...", base_url="https://proxy/v1")
-    
+
     # Public (multi-provider)
     from wrappers import LiteLLMGenerativeModel
     model = LiteLLMGenerativeModel("gemini/gemini-2.0-flash", api_key="...")
+
+    # Novita
+    from wrappers import NovitaGenerativeModel
+    model = NovitaGenerativeModel("deepseek/deepseek-v3.2", api_key="...")
 """
 
 # Internal/Incubator - OpenAI-compatible endpoints
 from .openai_wrapper import OpenAIAsGenerativeModel
 from .openai_wrapper_embeddings import OpenAIAsEmbeddingModel
+
+# Novita - OpenAI-compatible provider with fixed endpoint
+try:
+    from .novita_wrapper import NovitaGenerativeModel
+except ImportError:
+    NovitaGenerativeModel = None
 
 # Public - Multi-provider via LiteLLM
 try:
@@ -39,11 +53,13 @@ except ImportError:
 
 __all__ = [
     # Internal proxy
-    'OpenAIAsGenerativeModel',
-    'OpenAIAsEmbeddingModel',
+    "OpenAIAsGenerativeModel",
+    "OpenAIAsEmbeddingModel",
+    # Novita provider
+    "NovitaGenerativeModel",
     # Public multi-provider
-    'LiteLLMGenerativeModel',
-    'LiteLLMEmbeddingModel',
-    'LiteLLMChatSession',
-    'LITELLM_AVAILABLE',
+    "LiteLLMGenerativeModel",
+    "LiteLLMEmbeddingModel",
+    "LiteLLMChatSession",
+    "LITELLM_AVAILABLE",
 ]

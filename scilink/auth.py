@@ -14,6 +14,7 @@ ENV_VARS = {
     'google': ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
     'openai': ['OPENAI_API_KEY'],
     'anthropic': ['ANTHROPIC_API_KEY'],
+    'novita': ['NOVITA_API_KEY'],
     
     # Other Services
     'futurehouse': ['FUTUREHOUSE_API_KEY'],
@@ -47,6 +48,7 @@ def infer_provider(model_name: str) -> Optional[str]:
             'google': 'google',
             'openai': 'openai',
             'anthropic': 'anthropic',
+            'novita': 'novita',
         }
         if prefix in prefix_map:
             return prefix_map[prefix]
@@ -58,6 +60,9 @@ def infer_provider(model_name: str) -> Optional[str]:
         return 'anthropic'
     if 'gemini' in model_lower:
         return 'google'
+    # Novita models use / separator (e.g., deepseek/deepseek-v3.2)
+    if 'novita' in model_lower or model_lower.startswith('deepseek/') or model_lower.startswith('zai-org/') or model_lower.startswith('minimax/'):
+        return 'novita'
     
     return None
 
