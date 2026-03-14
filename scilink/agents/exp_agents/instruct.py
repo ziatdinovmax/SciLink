@@ -2210,13 +2210,15 @@ plan as specified and let the retry pipeline handle actual runtime failures.
 - Y: [{y_min:.6g}, {y_max:.6g}]
 
 **Available Libraries:** numpy, pandas, scipy, lmfit, matplotlib, json
+Note: use `np.trapezoid` (not `np.trapz`, which was removed in NumPy 2.0).
 
 **Requirements:**
-1. Load data (handle .npy, .csv, .txt)
-2. Implement your fitting approach
-3. Compute R² and RMSE
-4. Save `fit_visualization.png` (data + fit + residuals; show components if multiple peaks)
-5. Print results as JSON:
+1. Start the script with `# -*- coding: utf-8 -*-` as the very first line to avoid Unicode errors.
+2. Load data (handle .npy, .csv, .txt)
+3. Implement your fitting approach
+4. Compute R² and RMSE
+5. Save `fit_visualization.png` (data + fit + residuals; show components if multiple peaks)
+6. Print results as JSON:
 ```python
 results = {{
     "model_type": "description",
@@ -2246,8 +2248,10 @@ FITTING_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed script.
 ```
 
 **Available Libraries:** numpy, pandas, scipy, lmfit, matplotlib, json
+Note: use `np.trapezoid` (not `np.trapz`, which was removed in NumPy 2.0).
 
 **CRITICAL:** Fix only the execution error. Do NOT change the fitting model, its parameters, or the overall analysis approach. The model is locked for series consistency.
+Also ensure the script starts with `# -*- coding: utf-8 -*-` as the first line.
 
 **Response:** Return only `{{"diagnosis": "...", "script": "..."}}`
 """
