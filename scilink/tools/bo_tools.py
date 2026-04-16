@@ -548,11 +548,28 @@ class SingleObjectiveOptimizer:
     # ------------------------------------------------------------------ #
 
     def _compute_sensitivity(self, n_samples=2048) -> Tuple[List[str], List[float]]:
-        """Helper: Calculates First-Order Sobol Indices for diagnostics."""
+        """Helper: Total-order Sobol indices (Jansen 1999) for diagnostics.
+
+        ST_i = (1 / 2N) * sum_k (f(A) - f(A_B^{(i)}))^2 / Var(Y), where A_B^{(i)}
+        is A with its i-th column replaced by B's i-th column. ST_i captures all
+        variance contributions involving X_i — first-order plus every interaction —
+        so variables whose influence is purely through interactions don't get
+        hidden at zero.
+
+        Note on sampling: A and B must be independent. Splitting a single
+        Sobol sequence in half does NOT give independence — the halves share
+        the low-discrepancy lattice and column i of the two halves ends up
+        near-identical for low dimensions, which collapses ST_i to ~0. We
+        instead draw a single 2d-dimensional Sobol sample and split columns.
+        """
         if self.input_dim == 1: return [self.feature_names[0]], [1.0]
 
-        X_sobol = draw_sobol_samples(bounds=self.bounds, n=n_samples * 2, q=1).squeeze(1)
-        A, B = X_sobol[:n_samples], X_sobol[n_samples:]
+        # Double-width bounds so the first d columns and last d columns sample
+        # the same physical space but use different Sobol dimensions (i.e. are
+        # effectively independent).
+        double_bounds = torch.cat([self.bounds, self.bounds], dim=1)
+        X_sobol = draw_sobol_samples(bounds=double_bounds, n=n_samples, q=1).squeeze(1)
+        A, B = X_sobol[:, :self.input_dim], X_sobol[:, self.input_dim:]
 
         def predict(X):
             with torch.no_grad(): return self.model.posterior(X).mean.flatten()
@@ -563,7 +580,7 @@ class SingleObjectiveOptimizer:
         indices = []
         for i in range(self.input_dim):
             AB_i = A.clone(); AB_i[:, i] = B[:, i]
-            numerator = torch.mean(f_B * (predict(AB_i) - f_A))
+            numerator = 0.5 * torch.mean((f_A - predict(AB_i)) ** 2)
             indices.append(max(0.0, (numerator / var_Y).item()))
         return self.feature_names, indices
 
@@ -689,7 +706,7 @@ class SingleObjectiveOptimizer:
             ax_sens.set_yticks(y_pos)
             ax_sens.set_yticklabels([names[i] for i in sorted_idx])
             ax_sens.invert_yaxis()
-            ax_sens.set_xlabel('First-Order Sobol Index')
+            ax_sens.set_xlabel('Total-Order Sobol Index')
             ax_sens.set_title("4. Model Sensitivity")
         except Exception as e:
             ax_sens.text(0.5, 0.5, f"Analysis Error: {str(e)}", ha='center')
