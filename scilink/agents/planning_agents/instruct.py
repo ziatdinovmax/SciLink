@@ -208,7 +208,8 @@ You are a Principal Investigator configuring a Single-Objective Bayesian Optimiz
     
 **MENU 2: KERNEL (Physics)**
 * `"matern_2.5"`: **(Default)** Standard physical processes. Smooth but allows local variation.
-* `"matern_1.5"`: Use if data is **jagged**, discontinuous, or changes rapidly.
+* `"matern_1.5"`: Use if data is **jagged** or changes rapidly.
+* `"matern_0.5"`: Use for **step-like** or **discontinuous** landscapes (phase boundaries, regime changes).
 * `"rbf"`: Use ONLY if data is **extremely smooth** and theoretical.
 
 **MENU 3: NOISE PRIOR**
@@ -267,7 +268,8 @@ You are a Principal Investigator configuring a Multi-Objective Optimization expe
 
 **MENU 2: KERNEL (Physics)**
 * `"matern_2.5"`: **(Default)** Standard physical processes. Smooth but allows local variation.
-* `"matern_1.5"`: Use if data is **jagged**, discontinuous, or changes rapidly.
+* `"matern_1.5"`: Use if data is **jagged** or changes rapidly.
+* `"matern_0.5"`: Use for **step-like** or **discontinuous** landscapes (phase boundaries, regime changes).
 * `"rbf"`: Use ONLY if data is **extremely smooth** and theoretical.
 
 **MENU 3: NOISE PRIOR**
@@ -297,7 +299,7 @@ You are a Data Scientist validating a GP model and its optimization strategy.
 Analyze the 4-panel diagnostic dashboard.
 
 **Checklist:**
-1. **LOO-CV Residuals (Top-Left):** Each bar shows the prediction error when that point is left out and predicted from the remaining data. Small residuals within the red uncertainty band = good generalization. Large residuals outside the band = the model struggles with those points — consider a more flexible kernel (matern_1.5) or higher noise prior. For large datasets (>50 points), training residuals are shown instead (these will be near-zero for a GP, which is expected).
+1. **LOO-CV Residuals (Top-Left):** Each bar shows the prediction error when that point is left out. The pink band is the GP's epistemic 1σ (mean uncertainty only — observation noise not included), so some residuals extending past it is expected. Only flag the model as miscalibrated if most bars exceed the band, or if any residual exceeds it by ~3×. For large datasets (>50 points), training residuals are shown instead and will be near-zero, which is expected.
 2. **Trend (Top-Right):** If optimization has started, is the green 'Best Found' line improving or flat? A flat line means the optimizer is stuck and may need a strategy change. If this is the first step, only initial data is shown (gray squares) — no trend to evaluate yet.
 3. **Acquisition Function (Bot-Left):** This panel shows the acquisition landscape used to select the next experiment(s).
    - For **1D/2D problems**: The full acquisition surface is shown. The peak (brightest region or curve maximum) should align with the red candidate marker — this confirms the optimizer is sampling where it believes the best improvement lies.
@@ -310,7 +312,7 @@ Analyze the 4-panel diagnostic dashboard.
 {
   "status": "pass" | "fail",
   "reason": "Residuals are small and within uncertainty bands. Acquisition function shows a clear peak near the candidate. Sobol indices: [use actual values if provided].",
-  "suggested_adjustments": { "kernel": "matern_1.5" } (Only if fail)
+  "suggested_adjustments": { "kernel": "<choice>" } (Only if fail)
 }
 """
 

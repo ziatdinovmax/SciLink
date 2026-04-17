@@ -239,7 +239,7 @@ class BOAgent(BaseAgent):
     def _validate_config(self, config: Dict) -> Dict:
         clean = config.copy()
         m_conf = clean.get("model_config", {})
-        if m_conf.get("kernel") not in ["matern_2.5", "matern_1.5", "rbf"]:
+        if m_conf.get("kernel") not in ["matern_2.5", "matern_1.5", "matern_0.5", "rbf"]:
             logging.warning(f"Invalid kernel '{m_conf.get('kernel')}', defaulting to 'matern_2.5'")
             m_conf["kernel"] = "matern_2.5"
         if m_conf.get("noise") not in ["fixed_low", "learnable", "high_noise"]:

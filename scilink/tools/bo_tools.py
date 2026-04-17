@@ -24,6 +24,7 @@ from gpytorch.constraints import GreaterThan
 ALLOWED_KERNELS = {
     "matern_2.5": {"class": MaternKernel, "kwargs": {"nu": 2.5}},
     "matern_1.5": {"class": MaternKernel, "kwargs": {"nu": 1.5}},
+    "matern_0.5": {"class": MaternKernel, "kwargs": {"nu": 0.5}},
     "rbf":        {"class": RBFKernel,    "kwargs": {}},
 }
 
