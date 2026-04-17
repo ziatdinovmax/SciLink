@@ -5,6 +5,7 @@ from typing import List, Tuple, Dict, Any, Optional
 
 from botorch.models import SingleTaskGP, ModelListGP
 from botorch.models.transforms import Standardize, Normalize
+from botorch.models.transforms.input import Warp, ChainedInputTransform
 from botorch.fit import fit_gpytorch_mll
 from botorch.acquisition import LogExpectedImprovement, qLogExpectedImprovement
 from botorch.acquisition.monte_carlo import qUpperConfidenceBound
@@ -29,10 +30,22 @@ ALLOWED_KERNELS = {
 }
 
 ALLOWED_NOISE_PRIORS = {
-    "fixed_low":  {"min_noise": 1e-4}, 
-    "learnable":  {"min_noise": 1e-5}, 
-    "high_noise": {"min_noise": 1e-2}, 
+    "fixed_low":  {"min_noise": 1e-4},
+    "learnable":  {"min_noise": 1e-5},
+    "high_noise": {"min_noise": 1e-2},
 }
+
+ALLOWED_INPUT_TRANSFORMS = {"none", "warp"}
+
+
+def build_input_transform(key: str, input_dim: int) -> "ChainedInputTransform | Normalize":
+    """Construct the GP's input_transform. 'warp' chains Normalize -> Warp to give
+    per-axis non-stationary stretching; 'none' is the default Normalize-only path."""
+    normalize = Normalize(d=input_dim)
+    if key == "warp":
+        warp = Warp(d=input_dim, indices=list(range(input_dim)))
+        return ChainedInputTransform(normalize=normalize, warp=warp)
+    return normalize
 
 def build_covar_module(kernel_key: str, input_dim: int) -> ScaleKernel:
     """Factory for Kernel selection."""
@@ -105,16 +118,18 @@ class SingleObjectiveOptimizer:
 
         kernel_choice = model_config.get("kernel", "matern_2.5")
         noise_choice = model_config.get("noise", "fixed_low")
-        
+        input_transform_choice = model_config.get("input_transform", "none")
+
         covar = build_covar_module(kernel_choice, self.input_dim)
         likelihood = build_likelihood(noise_choice)
+        input_transform = build_input_transform(input_transform_choice, self.input_dim)
 
         self.model = SingleTaskGP(
-            self.X_train, 
+            self.X_train,
             self.y_train,
             covar_module=covar,
             likelihood=likelihood,
-            input_transform=Normalize(d=self.input_dim),
+            input_transform=input_transform,
             outcome_transform=Standardize(m=1)
         )
         
@@ -842,13 +857,14 @@ class MultiObjectiveOptimizer:
         for i in range(self.output_dim):
             kernel_choice = model_config.get("kernel", "matern_2.5")
             noise_choice = model_config.get("noise", "fixed_low")
-            
+            input_transform_choice = model_config.get("input_transform", "none")
+
             models.append(
                 SingleTaskGP(
                     self.X_train, self.y_train[:, i : i + 1],
                     covar_module=build_covar_module(kernel_choice, self.input_dim),
                     likelihood=build_likelihood(noise_choice),
-                    input_transform=Normalize(d=self.input_dim),
+                    input_transform=build_input_transform(input_transform_choice, self.input_dim),
                     outcome_transform=Standardize(m=1)
                 )
             )

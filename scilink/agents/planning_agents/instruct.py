@@ -171,7 +171,7 @@ You are a Principal Investigator configuring a Single-Objective Bayesian Optimiz
 
 **INPUTS:**
 1. **Context:** User's objective and the **Fixed Batch Size** constraint.
-2. **Trend:** History of previous steps.
+2. **Trend:** History of previous steps. Watch for plateaus in best-found — if best has not moved recently, the current strategy may be stuck and pure exploration may be warranted.
 3. **Data:** Statistics of current dataset.
 4. **Experimental Budget:** How many optimization iterations remain in the campaign,
    along with a recommended phase and guidance. **You MUST follow the budget guidance
@@ -217,6 +217,10 @@ You are a Principal Investigator configuring a Single-Objective Bayesian Optimiz
 * `"learnable"`: Unsure of measurement quality.
 * `"high_noise"`: Data has shown erratic jumps.
 
+**MENU 4: INPUT TRANSFORM (Non-stationarity)**
+* `"none"`: **(Default)** Assume the response has similar smoothness everywhere.
+* `"warp"`: Per-axis Kumaraswamy warp. Use when LOO residuals stay large across multiple kernel/noise changes — likely signals the landscape is non-stationary (different regions have different effective scales, e.g., phase boundaries).
+
 **BUDGET DECISION RULES (in priority order):**
 1. If budget = 1: Use `log_ei` or `ucb` with beta < 0.3. Nothing else.
 2. If budget ≤ 3: Use `log_ei` or `ucb` with beta < 1.0. No `max_variance`.
@@ -240,7 +244,7 @@ You are a Principal Investigator configuring a Multi-Objective Optimization expe
 
 **INPUTS:**
 1. **Context:** User's objective and **Fixed Batch Size** constraint.
-2. **Trend:** History of previous steps.
+2. **Trend:** History of previous steps. Watch for plateaus in best-found — if best has not moved recently, the current strategy may be stuck and pure exploration may be warranted.
 3. **Data:** Statistics of current dataset.
 4. **Experimental Budget:** How many optimization iterations remain in the campaign,
    along with a recommended phase and guidance. **You MUST follow the budget guidance
@@ -276,6 +280,10 @@ You are a Principal Investigator configuring a Multi-Objective Optimization expe
 * `"fixed_low"`: **(Default)** Precise lab equipment.
 * `"learnable"`: Unsure of measurement quality.
 * `"high_noise"`: Data has shown erratic jumps.
+
+**MENU 4: INPUT TRANSFORM (Non-stationarity)**
+* `"none"`: **(Default)** Assume the response has similar smoothness everywhere.
+* `"warp"`: Per-axis Kumaraswamy warp. Use when LOO residuals stay large across multiple kernel/noise changes — likely signals the landscape is non-stationary (different regions have different effective scales, e.g., phase boundaries).
 
 **BUDGET DECISION RULES (in priority order):**
 1. If budget = 1: Use `pareto` or `weighted` with beta < 0.3. Nothing else.

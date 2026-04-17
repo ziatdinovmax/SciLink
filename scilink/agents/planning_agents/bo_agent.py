@@ -245,6 +245,9 @@ class BOAgent(BaseAgent):
         if m_conf.get("noise") not in ["fixed_low", "learnable", "high_noise"]:
             logging.warning(f"Invalid noise '{m_conf.get('noise')}', defaulting to 'fixed_low'")
             m_conf["noise"] = "fixed_low"
+        if m_conf.get("input_transform", "none") not in ["none", "warp"]:
+            logging.warning(f"Invalid input_transform '{m_conf.get('input_transform')}', defaulting to 'none'")
+            m_conf["input_transform"] = "none"
         clean["model_config"] = m_conf
         return clean
 
