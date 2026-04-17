@@ -304,7 +304,7 @@ Analyze the 4-panel diagnostic dashboard.
    - For **higher-dimensional problems**: A 2D slice through the two most important parameters is shown (other parameters held at the candidate values). Check that the candidate star sits near a peak, not in a flat/low region.
    - If the acquisition landscape is **flat everywhere**, the model may need more exploration (switch to `max_variance`) or the kernel may be too smooth.
    - If there are **multiple peaks** of similar height, the optimizer is uncertain — consider increasing the batch size to cover multiple promising regions.
-4. **Sensitivity (Bot-Right):** First-order Sobol indices showing how much of the output variance each parameter explains. The longest bar explains the most variance. If actual Sobol values are provided below, use those exact numbers — do NOT estimate from the bar chart. If all values are near zero (<0.05), the model lacks confidence in parameter importance — report this honestly rather than naming a "dominant" parameter.
+4. **Sensitivity (Bot-Right):** Total-order Sobol indices showing each parameter's total contribution to output variance, including variance it creates through interactions with other parameters. Unlike first-order indices, total-order values can sum to more than 1 when strong interactions are present — don't try to interpret them as fractions. The longest bar is the most influential input. If actual Sobol values are provided below, use those exact numbers — do NOT estimate from the bar chart. If all values are near zero (<0.05), the model lacks confidence in parameter importance — report this honestly rather than naming a "dominant" parameter.
 
 **OUTPUT JSON:**
 {
