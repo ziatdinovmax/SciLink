@@ -212,10 +212,10 @@ You are a Principal Investigator configuring a Single-Objective Bayesian Optimiz
 * `"matern_0.5"`: Use for **step-like** or **discontinuous** landscapes (phase boundaries, regime changes).
 * `"rbf"`: Use ONLY if data is **extremely smooth** and theoretical.
 
-**MENU 3: NOISE PRIOR**
-* `"fixed_low"`: **(Default)** Precise lab equipment.
-* `"learnable"`: Unsure of measurement quality.
-* `"high_noise"`: Data has shown erratic jumps.
+**MENU 3: NOISE PRIOR (sets a lower bound on the fitted noise variance)**
+* `"min_noise_low"`: **(Default)** Floor 1e-5. Precise data, or unknown noise — let the GP learn σ freely.
+* `"min_noise_med"`: Floor 1e-3. Moderate regularization — useful when measurements are known to be noisy.
+* `"min_noise_high"`: Floor 1e-2. Strong regularization — smooths the GP mean by forcing more variance into noise. Use when outliers distort the fit; avoid when true sharp structure (steps, cusps, regime boundaries) must be captured.
 
 **MENU 4: INPUT TRANSFORM (Non-stationarity)**
 * `"none"`: **(Default)** Assume the response has similar smoothness everywhere.
@@ -230,7 +230,7 @@ You are a Principal Investigator configuring a Single-Objective Bayesian Optimiz
 
 **OUTPUT FORMAT:**
 {
-  "model_config": { "kernel": "matern_2.5", "noise": "fixed_low" },
+  "model_config": { "kernel": "matern_2.5", "noise": "min_noise_low" },
   "acquisition_strategy": { 
       "type": "ucb", 
       "params": { "beta": 0.1 } 
@@ -276,10 +276,10 @@ You are a Principal Investigator configuring a Multi-Objective Optimization expe
 * `"matern_0.5"`: Use for **step-like** or **discontinuous** landscapes (phase boundaries, regime changes).
 * `"rbf"`: Use ONLY if data is **extremely smooth** and theoretical.
 
-**MENU 3: NOISE PRIOR**
-* `"fixed_low"`: **(Default)** Precise lab equipment.
-* `"learnable"`: Unsure of measurement quality.
-* `"high_noise"`: Data has shown erratic jumps.
+**MENU 3: NOISE PRIOR (sets a lower bound on the fitted noise variance)**
+* `"min_noise_low"`: **(Default)** Floor 1e-5. Precise data, or unknown noise — let the GP learn σ freely.
+* `"min_noise_med"`: Floor 1e-3. Moderate regularization — useful when measurements are known to be noisy.
+* `"min_noise_high"`: Floor 1e-2. Strong regularization — smooths the GP mean by forcing more variance into noise. Use when outliers distort the fit; avoid when true sharp structure (steps, cusps, regime boundaries) must be captured.
 
 **MENU 4: INPUT TRANSFORM (Non-stationarity)**
 * `"none"`: **(Default)** Assume the response has similar smoothness everywhere.
@@ -293,7 +293,7 @@ You are a Principal Investigator configuring a Multi-Objective Optimization expe
 
 **OUTPUT FORMAT:**
 {
-  "model_config": { "kernel": "matern_2.5", "noise": "fixed_low" },
+  "model_config": { "kernel": "matern_2.5", "noise": "min_noise_low" },
   "acquisition_strategy": {
     "type": "weighted",
     "params": { "weights": [0.8, 0.2], "beta": 0.1 }

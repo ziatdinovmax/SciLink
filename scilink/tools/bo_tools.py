@@ -30,9 +30,9 @@ ALLOWED_KERNELS = {
 }
 
 ALLOWED_NOISE_PRIORS = {
-    "fixed_low":  {"min_noise": 1e-4},
-    "learnable":  {"min_noise": 1e-5},
-    "high_noise": {"min_noise": 1e-2},
+    "min_noise_low":  {"min_noise": 1e-5},
+    "min_noise_med":  {"min_noise": 1e-3},
+    "min_noise_high": {"min_noise": 1e-2},
 }
 
 ALLOWED_INPUT_TRANSFORMS = {"none", "warp"}
@@ -59,7 +59,7 @@ def build_covar_module(kernel_key: str, input_dim: int) -> ScaleKernel:
 def build_likelihood(noise_key: str) -> GaussianLikelihood:
     """Factory for Likelihood/Noise selection."""
     if noise_key not in ALLOWED_NOISE_PRIORS:
-        noise_key = "fixed_low"
+        noise_key = "min_noise_low"
         
     config = ALLOWED_NOISE_PRIORS[noise_key]
     noise_constraint = GreaterThan(config["min_noise"])
@@ -105,34 +105,47 @@ class SingleObjectiveOptimizer:
         self.acq_func = None
         self.acq_strategy_name = None
 
-    def fit(self, X: np.ndarray, y: np.ndarray, bounds: List[Tuple[float, float]], 
-            model_config: Dict[str, str], feature_names: List[str] = None):
-        """Fits the SingleTaskGP."""
+    def fit(self, X: np.ndarray, y: np.ndarray, bounds: List[Tuple[float, float]],
+            model_config: Dict[str, str], feature_names: List[str] = None,
+            fixed_noise_std: Optional[float] = None):
+        """Fits the SingleTaskGP.
+
+        If ``fixed_noise_std`` is provided, uses a FixedNoiseGaussianLikelihood
+        (via ``train_Yvar``) with noise variance = fixed_noise_std**2 applied
+        uniformly to all training points. In this case the ``noise`` entry in
+        ``model_config`` is ignored.
+        """
         self.X_train = torch.tensor(X, dtype=torch.double, device=self.device)
         self.y_train = torch.tensor(y, dtype=torch.double, device=self.device)
         if self.y_train.ndim == 1: self.y_train = self.y_train.unsqueeze(-1)
-        
+
         self.input_dim = self.X_train.shape[-1]
         self.bounds = torch.tensor(bounds, dtype=torch.double, device=self.device).T
         self.feature_names = feature_names or [f"x{i}" for i in range(self.input_dim)]
 
         kernel_choice = model_config.get("kernel", "matern_2.5")
-        noise_choice = model_config.get("noise", "fixed_low")
+        noise_choice = model_config.get("noise", "min_noise_low")
         input_transform_choice = model_config.get("input_transform", "none")
 
         covar = build_covar_module(kernel_choice, self.input_dim)
-        likelihood = build_likelihood(noise_choice)
         input_transform = build_input_transform(input_transform_choice, self.input_dim)
 
-        self.model = SingleTaskGP(
-            self.X_train,
-            self.y_train,
+        gp_kwargs = dict(
             covar_module=covar,
-            likelihood=likelihood,
             input_transform=input_transform,
-            outcome_transform=Standardize(m=1)
+            outcome_transform=Standardize(m=1),
         )
-        
+        if fixed_noise_std is not None:
+            # train_Yvar activates the fixed-noise path internally; do NOT pass
+            # a likelihood alongside it.
+            gp_kwargs["train_Yvar"] = torch.full_like(
+                self.y_train, float(fixed_noise_std) ** 2
+            )
+        else:
+            gp_kwargs["likelihood"] = build_likelihood(noise_choice)
+
+        self.model = SingleTaskGP(self.X_train, self.y_train, **gp_kwargs)
+
         self.mll = ExactMarginalLogLikelihood(self.model.likelihood, self.model)
         fit_gpytorch_mll(self.mll)
         
@@ -844,8 +857,9 @@ class MultiObjectiveOptimizer:
         self.acq_func = None
         self.acq_strategy_name = None
 
-    def fit(self, X: np.ndarray, y: np.ndarray, bounds: List[Tuple[float, float]], 
-            model_config: Dict[str, str], feature_names: List[str] = None):
+    def fit(self, X: np.ndarray, y: np.ndarray, bounds: List[Tuple[float, float]],
+            model_config: Dict[str, str], feature_names: List[str] = None,
+            fixed_noise_std: Optional[float] = None):
         self.X_train = torch.tensor(X, dtype=torch.double, device=self.device)
         self.y_train = torch.tensor(y, dtype=torch.double, device=self.device)
         self.input_dim = self.X_train.shape[-1]
@@ -856,18 +870,21 @@ class MultiObjectiveOptimizer:
         models = []
         for i in range(self.output_dim):
             kernel_choice = model_config.get("kernel", "matern_2.5")
-            noise_choice = model_config.get("noise", "fixed_low")
+            noise_choice = model_config.get("noise", "min_noise_low")
             input_transform_choice = model_config.get("input_transform", "none")
 
-            models.append(
-                SingleTaskGP(
-                    self.X_train, self.y_train[:, i : i + 1],
-                    covar_module=build_covar_module(kernel_choice, self.input_dim),
-                    likelihood=build_likelihood(noise_choice),
-                    input_transform=build_input_transform(input_transform_choice, self.input_dim),
-                    outcome_transform=Standardize(m=1)
-                )
+            y_i = self.y_train[:, i : i + 1]
+            gp_kwargs = dict(
+                covar_module=build_covar_module(kernel_choice, self.input_dim),
+                input_transform=build_input_transform(input_transform_choice, self.input_dim),
+                outcome_transform=Standardize(m=1),
             )
+            if fixed_noise_std is not None:
+                gp_kwargs["train_Yvar"] = torch.full_like(y_i, float(fixed_noise_std) ** 2)
+            else:
+                gp_kwargs["likelihood"] = build_likelihood(noise_choice)
+
+            models.append(SingleTaskGP(self.X_train, y_i, **gp_kwargs))
         self.model = ModelListGP(*models)
         self.mll = SumMarginalLogLikelihood(self.model.likelihood, self.model)
         fit_gpytorch_mll(self.mll)

@@ -242,9 +242,9 @@ class BOAgent(BaseAgent):
         if m_conf.get("kernel") not in ["matern_2.5", "matern_1.5", "matern_0.5", "rbf"]:
             logging.warning(f"Invalid kernel '{m_conf.get('kernel')}', defaulting to 'matern_2.5'")
             m_conf["kernel"] = "matern_2.5"
-        if m_conf.get("noise") not in ["fixed_low", "learnable", "high_noise"]:
-            logging.warning(f"Invalid noise '{m_conf.get('noise')}', defaulting to 'fixed_low'")
-            m_conf["noise"] = "fixed_low"
+        if m_conf.get("noise") not in ["min_noise_low", "min_noise_med", "min_noise_high"]:
+            logging.warning(f"Invalid noise '{m_conf.get('noise')}', defaulting to 'min_noise_low'")
+            m_conf["noise"] = "min_noise_low"
         if m_conf.get("input_transform", "none") not in ["none", "warp"]:
             logging.warning(f"Invalid input_transform '{m_conf.get('input_transform')}', defaulting to 'none'")
             m_conf["input_transform"] = "none"
@@ -718,7 +718,8 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                              physical_constraints: Optional[str] = None,
                              strategy_hint: Optional[str] = None,
                              save_acq: bool = True,
-                             plot_acq: bool = True) -> Dict[str, Any]:
+                             plot_acq: bool = True,
+                             fixed_noise_std: Optional[float] = None) -> Dict[str, Any]:
         """
         Run one iteration of the Bayesian Optimization loop.
         
@@ -913,11 +914,17 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         # 3. Fit Model
         optimizer = get_optimizer(is_moo=is_moo)
         optimizer.fit(
-            X, y, 
-            bounds=input_bounds, 
+            X, y,
+            bounds=input_bounds,
             model_config=valid_config["model_config"],
-            feature_names=input_cols
+            feature_names=input_cols,
+            fixed_noise_std=fixed_noise_std,
         )
+        if fixed_noise_std is not None:
+            # Echo the override back into the config so downstream history /
+            # trend summaries reflect the noise that was actually used, not
+            # the LLM's choice that got bypassed.
+            valid_config["model_config"]["noise"] = f"fixed_std={fixed_noise_std}"
 
         # 4. Recommend (Unconstrained)
         acq_conf = valid_config.get("acquisition_strategy", {})
