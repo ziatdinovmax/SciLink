@@ -51,7 +51,7 @@ def build_covar_module(kernel_key: str, input_dim: int) -> ScaleKernel:
     """Factory for Kernel selection."""
     if kernel_key not in ALLOWED_KERNELS:
         kernel_key = "matern_2.5"
-    
+
     config = ALLOWED_KERNELS[kernel_key]
     base_kernel = config["class"](ard_num_dims=input_dim, **config["kwargs"])
     return ScaleKernel(base_kernel)
@@ -77,18 +77,25 @@ def _acq_contour_levels(acq_map: np.ndarray, n_levels: int = 30) -> np.ndarray:
     log_ei = -27000), creating dark bands that dominate the colormap.
     We clip the lower bound aggressively so the colormap highlights where
     the optimizer actually wants to sample (the bright regions).
+
+    Robust to degenerate inputs:
+      - NaN / inf values are stripped before computing percentiles.
+      - Flat or near-flat landscapes fall back to an artificial [v, v+1] range
+        so ``np.linspace`` always returns strictly increasing levels
+        (``contourf`` requires strictly-increasing ``levels``).
     """
-    vmax = np.percentile(acq_map, 99)
-    # Use the median as the lower bound — this ensures at least half the
-    # landscape gets color variation, regardless of extreme lows
-    vmin = np.median(acq_map)
-    # If median == max (very flat landscape), fall back to wider range
+    finite = acq_map[np.isfinite(acq_map)]
+    if finite.size == 0:
+        return np.linspace(0.0, 1.0, n_levels)
+    vmax = float(np.percentile(finite, 99))
+    vmin = float(np.median(finite))
     if vmin >= vmax:
-        vmin = np.percentile(acq_map, 10)
+        vmin = float(np.percentile(finite, 10))
     if vmin >= vmax:
-        vmin = acq_map.min()
-    if vmin == vmax:
-        vmax = vmin + 1
+        vmin = float(finite.min())
+    # Enforce strictly monotone levels — guard against float-equal ties.
+    if vmax <= vmin + 1e-12:
+        vmax = vmin + max(1e-9, abs(vmin) * 1e-6 + 1.0)
     return np.linspace(vmin, vmax, n_levels)
 
 
