@@ -1,0 +1,37 @@
+{
+  "edition_title": "Image Intelligence, Conformance Annealing, and MCP Integration",
+  "features": [
+    {
+      "headline": "New Agent: Adaptive Image Analysis with Custom Script Generation",
+      "explanation": "SciLink now includes ImageAnalysisAgent, a general-purpose agent for microscopy and scientific image analysis. Rather than running fixed pipelines, the agent observes the actual image, reasons about what analysis is appropriate, and generates custom Python scripts tailored to the data. It supports a two-tier workflow: Tier 1 performs foundational analysis (segmentation, feature detection, summary statistics), while Tier 2 runs deeper, image-specific routines such as strain mapping, sublattice separation, or any custom analysis the LLM determines is warranted based on Tier 1 findings. Established tools like the Segment Anything Model and Atomap are available alongside bespoke scripts, so the agent can mix standard algorithms with novel analysis approaches. The new agent is automatically available through the CLI (`scilink analyze`) and web UI, as well as the Python API.",
+      "example_api": "from scilink.agents.exp_agents.image_analysis_agent import ImageAnalysisAgent\n\nagent = ImageAnalysisAgent(\n    model_name=\"claude-opus-4-6\",\n    analysis_depth=\"auto\",\n    enable_human_feedback=True,\n    output_dir=\"image_analysis_output\",\n)\n\nresult = agent.analyze(\n    data=\"tem_grain_boundary.tif\",\n    system_info={\"sample\": \"polycrystalline Al thin film\"},\n    objective=\"Grain size distribution and boundary analysis\",\n)\n\nprint(result[\"scientific_claims\"])\nprint(result[\"extracted_features\"])",
+      "example_cli": "scilink analyze\n# In the interactive chat, describe your image and objective.\n# Example: \"Analyze this TEM image of a polycrystalline Al thin film for grain size distribution.\"\n# The orchestrator automatically routes to ImageAnalysisAgent (agent ID 1).",
+      "example_ui": ""
+    },
+    {
+      "headline": "Use SciLink Tools from Any MCP-Compatible AI Client",
+      "explanation": "SciLink now exposes more than 40 analysis and planning tools through the Model Context Protocol (MCP), allowing MCP-compatible AI clients \u2014 such as Claude Code, Claude Desktop, Cursor, Windsurf, and others \u2014 to call SciLink capabilities directly. You can run analyses, generate experimental plans, trigger Bayesian optimization, and manage knowledge \u2014 all from within your existing AI workflow. SciLink can also consume tools from other MCP servers, enabling integration with the growing ecosystem of scientific MCP services \u2014 for example, arXiv and PubMed servers for literature search, instrument API servers for hardware control, or database servers for querying materials and chemical repositories. This two-way interoperability positions SciLink as a connectable node in broader autonomous science workflows rather than a standalone tool.",
+      "example_api": "from scilink.mcp_server import create_mcp_server\n\n# Start an MCP server exposing analysis tools\nserver = create_mcp_server(\n    mode=\"analyze\",\n    model_name=\"claude-opus-4-6\",\n    autonomy=\"autonomous\",\n)\nserver.run(transport=\"stdio\")",
+      "example_cli": "# Start the MCP server\nscilink serve --mode analyze --model claude-opus-4-6\n\n# Options:\n#   --mode analyze|plan|both\n#   --autonomy autonomous|supervised|co-pilot\n#   --transport stdio|sse",
+      "example_ui": ""
+    },
+    {
+      "headline": "Physics-Inspired Agentic Pipeline: Conformance Annealing",
+      "explanation": "SciLink's analysis agents now use a constraint annealing mechanism \u2014 borrowed from simulated annealing in physics \u2014 to balance domain expertise against what the data actually shows. When an agent locks an analysis plan, all subsequent decisions \u2014 model selection, code generation, parameter choices \u2014 must conform to it. If the fit struggles, the system progressively relaxes constraints through three temperature levels: frozen (must stay within the prescribed model), warm (small deviations allowed with justification), and hot (full freedom if the data warrants it). Domain skill rules follow the same schedule. Temperature escalates automatically when the agent gets stuck or improvement is too slow to converge. The approach mirrors Bayesian reasoning: the locked plan acts as an informative prior that dominates early on, and only yields to the data as accumulating evidence shifts the posterior.",
+      "example_api": "# Conformance annealing runs automatically for analysis agents.\n# No configuration required.",
+      "example_cli": "# Conformance annealing is enabled by default for analysis agents.\n# No additional flags needed.",
+      "example_ui": ""
+    }
+  ],
+  "use_cases": [
+    {
+      "title": "Agentic workflow enables the recovery of critical materials from complex feedstocks via selective precipitation",
+      "summary": "Ritchhart, Allec, Butreddy, Kulesa, Wang, Nguyen, Ziatdinov, Nakouzi (2025)",
+      "link": "https://arxiv.org/abs/2603.15491",
+      "link_text": "arXiv:2603.15491",
+      "figure": "newsletters/march_figs/Results.jpg",
+      "description": "CICERO, built on SciLink's planning subsystem, autonomously plans, evaluates, and optimizes selective precipitation campaigns for recovering critical materials from produced water and magnet leachates. The workflow chains SciLink's Planning Agent for literature-grounded hypothesis generation and economic viability screening, the Scalarizer Agent for automated data conversion, and the Bayesian Optimization Agent for closed-loop parameter optimization \u2014 achieving feedstock-specific separation protocols in days rather than months."
+    }
+  ],
+  "upcoming_events": "\ud83d\ude80 Stay tuned for an upcoming hackathon in May!"
+}
