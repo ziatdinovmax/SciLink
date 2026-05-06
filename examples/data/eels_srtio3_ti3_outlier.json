@@ -1,0 +1,24 @@
+{
+  "experiment_type": "Spectroscopy",
+  "experiment": {
+    "technique": "EELS core-loss spectroscopy",
+    "instrument": "Synthetic data generator (test fixture)",
+    "details": "Single-spectrum core-loss EELS at T=400 K; energy axis 350–862 eV across 2048 channels; integration time 20 s; dark subtracted."
+  },
+  "sample": {
+    "material": "SrTiO3",
+    "description": "Synthetic strontium titanate EELS test data. Expected core-loss edges in this energy window: Ti L2,3 (~456 eV) and O K (~530 eV). Sr edges are out of range (Sr L2,3 at ~1940 eV; Sr M4,5 at ~133 eV) — useful to know in identification mode, since the spectrum cannot directly distinguish SrTiO3 from TiO2 polymorphs from these edges alone. This particular spectrum deliberately contains an extra Ti3+ contamination shoulder at ~453.5 eV that a clean Ti4+-only model will not capture."
+  },
+  "energy_range": {
+    "start": 350.0,
+    "end": 861.75,
+    "units": "eV"
+  },
+  "data_columns": [
+    {"name": "Energy loss", "units": "eV"},
+    {"name": "Intensity", "units": "counts"}
+  ],
+  "xlabel": "Energy loss (eV)",
+  "ylabel": "Intensity (counts)",
+  "title": "Synthetic SrTiO3 EELS spectrum with Ti3+ contamination (T=400 K)"
+}
