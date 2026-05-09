@@ -44,16 +44,25 @@ is a complete pipeline by itself. Otherwise pick atom-resolved
 detection.
 
 **For atom-resolved detection — choose the detector:**
+
+Default to `detect_atoms_dcnn` when the material is in its training set
+**and** `fov_nm` is available from metadata; otherwise use the
+classical `detect_atoms`.
+
 - `detect_atoms_dcnn` (AtomNet3 DCNN ensemble): best for transition-
   metal oxides (perovskites, layered perovskites, cuprate
-  superconductors) and graphene; needs `fov_nm` from metadata. Pass
-  the raw image without preprocessing — the model handles intensity
-  gradients internally.
+  superconductors) and graphene; needs `fov_nm` from metadata.
+  **Pass the raw image without preprocessing** — no CLAHE, no contrast
+  normalization, no background subtraction, no bandpass filtering. The
+  model is trained on raw images and handles intensity gradients
+  internally; added preprocessing degrades detection. If weak columns
+  are missed, lower the `threshold` parameter; do not preprocess.
 - `detect_atoms` (classical peak detection): more general-purpose
   baseline; use when material is outside the DCNN's training set, when
-  `fov_nm` is unknown, or when DCNN results look poor. Background
-  subtraction or bandpass filtering before detection helps with
-  non-uniform illumination.
+  `fov_nm` is unknown, or when DCNN results look poor. **Preprocessing
+  applies here, not to the DCNN path** — background subtraction or
+  bandpass filtering before detection helps with non-uniform
+  illumination.
 
 Refine detected positions with 2D Gaussian fitting (built into
 `detect_atoms`, available via `refine_positions` after
@@ -102,12 +111,18 @@ goal you picked above:
   not built in), and a focused interpretation is the complete pipeline.
   Do not add FFT, zone-axis analysis, or sublattice clustering to the
   same step.
-- *If goal is sublattice separation:* intensity-based clustering alone
-  is insufficient for complex structures — combine intensity with
-  position within the unit cell, or use local-environment GMM (see the
-  `analysis` section). Verify stoichiometric ratios. Detected positions
-  from a prior detection step should come from `prior_analysis_paths`,
-  not be re-detected here.
+- *If goal is sublattice separation:* three approaches, choose based
+  on the data — see the `analysis` section for code:
+  (a) **iterative detect-subtract-detect** when sublattices have
+  noticeably different intensities (the classical Z-contrast case);
+  (b) **local-environment GMM** when intensity alone is ambiguous and
+  the neighborhood arrangement disambiguates the species;
+  (c) **intensity + positional clustering** when both intensity and
+  fractional position within the unit cell carry signal.
+  Intensity-based clustering alone is insufficient for complex
+  structures. Verify stoichiometric ratios in all cases. Detected
+  positions from a prior detection step should come from
+  `prior_analysis_paths`, not be re-detected here.
 - *If goal is lattice parameter / zone axis:* use FFT for periodicity
   (NN distance is not the lattice parameter for multi-sublattice
   structures — true unit cell may be 2× or more of the shortest column
@@ -126,9 +141,21 @@ goal you picked above:
 ## analysis
 
 ### foundational
-Column detection typically involves: normalization, background
-subtraction or bandpass filtering, blob/peak detection, and 2D
-Gaussian refinement. Measure basic statistics: column count, intensity
+**Workflow shape depends on the detector chosen in planning** (see
+`## planning` for the decision):
+
+- **DCNN path** (`detect_atoms_dcnn`): pass the raw image as-is →
+  built-in detection → `refine_positions` for sub-pixel coordinates and
+  Gaussian parameters → measure basic statistics. **No preprocessing
+  step.** The model handles intensity gradients internally; CLAHE,
+  contrast normalization, background subtraction, and bandpass
+  filtering on the input degrade detection.
+- **Classical path** (`detect_atoms`): normalization → optional
+  background subtraction or bandpass filtering for non-uniform
+  illumination → built-in peak detection → 2D Gaussian refinement
+  (built into `detect_atoms` via `refine=True`).
+
+Both paths end with the same statistics: column count, intensity
 distribution, nearest-neighbor distances, and lattice parameters from
 FFT.
 
@@ -290,12 +317,12 @@ failure. Hard checks should be self-consistency: ratio of measured
 spacings (b/a) matching the expected ratio, or FFT peaks forming a
 consistent reciprocal lattice.
 
-**Do not recommend preprocessing on the input to `detect_atoms_dcnn`**
-(CLAHE, contrast normalization, background subtraction, etc.). The
-AtomNet3 model is trained on raw images and handles intensity
-gradients internally; added preprocessing can degrade detection. If
-weak columns are missed, recommend adjusting the tool's `threshold`
-parameter instead.
+**DCNN preprocessing check:** if the step uses `detect_atoms_dcnn`,
+flag any pipeline step that preprocesses the image before the DCNN
+call (CLAHE, contrast normalization, background subtraction, bandpass
+filtering, etc.) — these belong only on the classical
+`detect_atoms` path. See the planning-section detector selection for
+the rationale.
 
 ### advanced
 The following only apply when the step explicitly targets the named
