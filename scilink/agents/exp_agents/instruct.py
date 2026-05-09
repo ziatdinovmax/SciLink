@@ -2716,24 +2716,28 @@ KNOWLEDGE_TO_SKILL_INSTRUCTIONS = """You are an expert scientific data analyst. 
 {analysis_details}
 
 **Instructions:**
-Organize the knowledge into exactly five sections. Each section should contain actionable, specific guidance. Use markdown formatting.
+Begin the document with a YAML frontmatter block containing a single one-line `description:` field — a self-contained sentence that lets a downstream agent decide whether this skill is relevant. Do not end the description with a period. Then organize the knowledge into exactly five sections, each containing actionable, specific guidance. Use markdown formatting.
 
-# overview
+---
+description: <one-line, self-contained, no trailing period>
+---
+
+## overview
 Describe what domain/technique this skill covers, what types of data it applies to, and when to use it.
 
-# planning
+## planning
 List strategy constraints, recommended parameter ranges, and setup considerations. Include any user-specified corrections or preferences.
 
-# analysis
+## analysis
 Describe code patterns, workflows, or processing steps that have proven effective. Include specific parameter values that worked.
 
-# interpretation
+## interpretation
 Provide reference values, peak assignments, expected ranges, and how to interpret results. Include quantitative benchmarks from the key findings.
 
-# validation
+## validation
 Define quality criteria, acceptable tolerance ranges, failure indicators, and sanity checks. Include any corrections from user feedback.
 
-Output ONLY the skill document content in markdown, starting with `# overview`. Do not wrap in code blocks.
+Output ONLY the skill document content in markdown, starting with the `---` frontmatter block followed by `## overview`. Do not wrap in code blocks. Use level-2 headings (`##`) for the sections — level-1 (`#`) is not parsed by the loader.
 """
 
 SKILL_UPDATE_INSTRUCTIONS = """You are an expert scientific data analyst. You need to update an existing skill document with new knowledge while preserving what is already correct.
@@ -2751,10 +2755,11 @@ SKILL_UPDATE_INSTRUCTIONS = """You are an expert scientific data analyst. You ne
 2. Integrate the new findings into the appropriate sections.
 3. Do NOT remove existing content unless the new knowledge explicitly contradicts it.
 4. When there is a conflict, prefer the newer knowledge but note the discrepancy.
-5. Maintain the five-section structure (overview, planning, analysis, interpretation, validation).
+5. Maintain the five-section structure (overview, planning, analysis, interpretation, validation), each at level-2 (`##`) heading depth.
 6. Add new quantitative details, parameter ranges, or heuristics from the new knowledge.
+7. Preserve the YAML frontmatter at the top (the `---`-delimited block). If the new knowledge materially changes the skill's purpose, update the `description:` field; otherwise leave it intact. If the existing skill has no frontmatter, add one with a one-line `description:` synthesized from the overview.
 
-Output ONLY the updated skill document content in markdown, starting with `# overview`. Do not wrap in code blocks.
+Output ONLY the updated skill document content in markdown, starting with the `---` frontmatter block followed by `## overview`. Do not wrap in code blocks.
 """
 
 # Backwards compatibility
