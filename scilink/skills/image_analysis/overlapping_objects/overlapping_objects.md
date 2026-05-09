@@ -49,24 +49,27 @@ Only reach for SAM when objects genuinely touch or overlap AND no
 visible boundary feature delineates them — the case where classical
 approaches would merge adjacent objects into single blobs.
 
-Connected component labeling on a binary mask merges all touching pixels
-into one object. If the image shows touching or overlapping objects, the
-pipeline must include a splitting step between mask creation and
-measurement. The main approaches, in order of preference:
+### genuinely-overlapping case (no visible boundary)
 
-1. **SAM instance segmentation** (preferred): Use `run_sam_analysis`
-   from `scilink.skills._shared.sam`. SAM detects individual object instances
-   directly, even when they overlap, without requiring thresholding
-   or binary masks. Works for any object shape. Tune via
-   `sam_parameters` preset and `min_area`/`pruning_iou_threshold`.
-   Avoid Gaussian blur before SAM unless noise is very high.
+When the foundational checks above rule out classical methods —
+i.e. objects genuinely touch with no boundary feature you can extract —
+connected component labeling on a binary mask will merge all touching
+pixels into one object, so the pipeline must include a dedicated
+splitting step. Within this case, in order of preference:
+
+1. **SAM instance segmentation**: Use `run_sam_analysis` from
+   `scilink.skills._shared.sam`. SAM detects individual object instances
+   directly, even when they overlap, without requiring thresholding or
+   binary masks. Works for any object shape. Tune via `sam_parameters`
+   preset and `min_area` / `pruning_iou_threshold`. Avoid Gaussian blur
+   before SAM unless noise is very high.
 
 2. **Watershed splitting**: Create binary mask (any method) → distance
    transform → find markers (local maxima of distance transform) →
-   watershed on inverted distance transform. Best for roughly convex
-   objects when SAM is unavailable or produces poor results. Key
-   parameter: `min_distance` in `peak_local_max` should approximate
-   the object radius.
+   watershed on inverted distance transform. Use when objects are
+   roughly convex and SAM produces poor results (over-merged or
+   over-split for the size scale). Key parameter: `min_distance` in
+   `peak_local_max` should approximate the object radius.
 
 3. **Instance detection**: Detect individual objects directly from
    the image without relying on a binary mask. For elliptical objects:
@@ -90,13 +93,64 @@ boundaries follow real inter-object edges.
 
 ## analysis
 
-### foundational
-**SAM implementation (preferred):**
+Implementations match the cases laid out in `## planning`. Pick the
+case first via the foundational decision tree there, then use the
+matching implementation below.
+
+### classical: visible boundary feature (etched grains, stained walls, …)
+
+Extract the boundary, invert, and label the interiors. Default to
+global Otsu unless illumination varies noticeably across the field of
+view.
+
+```
+import numpy as np
+from skimage.filters import threshold_otsu
+from skimage.morphology import binary_closing, disk
+from scipy.ndimage import label
+
+# 1. Boundary mask. Dark boundaries → True where image < threshold.
+thr = threshold_otsu(image_array)
+boundary = image_array < thr          # flip the comparison if boundaries are bright
+
+# 2. Close small gaps in the boundary so it fully encloses interiors.
+boundary = binary_closing(boundary, disk(1))
+
+# 3. binary_mask = inverse of the boundary; True where the objects are.
+binary_mask = ~boundary
+labels, n = label(binary_mask)
+props = skimage.measure.regionprops(labels, intensity_image=image_array)
+```
+
+Use adaptive thresholding (`cv2.adaptiveThreshold` /
+`skimage.filters.threshold_local`) only as a substitute for the Otsu
+line above when illumination drifts across the image. Block size and
+offset add tuning surface area that doesn't pay rent on uniformly lit
+images.
+
+### classical: well-separated or clean foreground/background
+
+```
+import numpy as np
+from skimage.filters import threshold_otsu
+from skimage.morphology import binary_opening, disk
+from scipy.ndimage import label
+
+thr = threshold_otsu(image_array)
+binary_mask = image_array > thr       # flip if foreground is dark
+binary_mask = binary_opening(binary_mask, disk(1))   # cleanup small specks
+labels, n = label(binary_mask)
+props = skimage.measure.regionprops(labels, intensity_image=image_array)
+```
+
+### genuinely-overlapping: SAM
+
 Pass a 2D grayscale array or an HxWx3 RGB uint8 array. For multi-channel
 images that are not RGB (e.g., 2-channel or 4-channel), pass a single
-channel (e.g., `image[:,:,0]`).
-**Tune all numeric parameters to the image** — the values below are
-syntax examples only, not recommended defaults.
+channel (e.g., `image[:,:,0]`). **Tune all numeric parameters to the
+image** — the values below are syntax examples only, not recommended
+defaults.
+
 ```
 from scilink.skills._shared.sam import run_sam_analysis
 result = run_sam_analysis(image_array, params={
@@ -112,16 +166,20 @@ for i, p in enumerate(result["particles"]):
 props = skimage.measure.regionprops(labeled, intensity_image=image_array)
 ```
 
-**Watershed implementation (fallback):**
+Avoid Gaussian blur before SAM unless noise is very high.
+
+### genuinely-overlapping: watershed
+
 ```
-binary_mask = threshold(image)
+# binary_mask comes from one of the classical thresholding blocks above
 distance = scipy.ndimage.distance_transform_edt(binary_mask)
 markers = skimage.feature.peak_local_max(distance, min_distance=estimated_radius)
 labeled_markers = scipy.ndimage.label(markers)[0]
 labels = skimage.segmentation.watershed(-distance, labeled_markers, mask=binary_mask)
 ```
 
-**Ellipse detection implementation:**
+### genuinely-overlapping: ellipse detection (specific shapes only)
+
 ```
 contours, _ = cv2.findContours(binary_mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
 for contour in contours:
