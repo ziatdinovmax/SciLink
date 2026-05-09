@@ -24,15 +24,24 @@ reaching for a heavy model like SAM:
   boundaries in etched metal, stained cell walls, bright domain
   edges) → use the boundary itself to separate the objects. Extract
   the boundary first — the method depends on how the boundary looks
-  in the pixel data (thresholding for clean dark/bright lines, edge
-  detection such as Canny/Sobel for gradient edges, gradient magnitude
-  or texture filters for softer boundaries; add morphological closing
-  if the boundary is broken). Once you have the boundary map, the two
-  classical ways to turn it into labeled objects are (a) invert and
-  run connected components on the interiors, or (b) use the boundary
-  map as a watershed landscape. Usually sharper and faster than SAM
-  for these images — SAM does not know to treat a thin boundary
-  feature as an object separator.
+  in the pixel data:
+    - **Default: global Otsu thresholding** (`skimage.filters.threshold_otsu`)
+      for clean dark/bright lines on a uniformly illuminated image.
+      Simpler and usually sharper than adaptive variants; tune nothing.
+    - **Adaptive thresholding** (`cv2.adaptiveThreshold` or
+      `skimage.filters.threshold_local`) only when illumination varies
+      noticeably across the field of view — block size and offset add
+      tuning surface area that doesn't pay rent on evenly lit images.
+    - **Edge detection** (Canny/Sobel) for gradient edges where there's
+      no clean intensity step.
+    - **Gradient magnitude or texture filters** for softer / textured
+      boundaries.
+    - Add **morphological closing** afterward if the boundary is broken.
+  Once you have the boundary map, the two classical ways to turn it
+  into labeled objects are (a) invert and run connected components on
+  the interiors, or (b) use the boundary map as a watershed landscape.
+  Usually sharper and faster than SAM for these images — SAM does not
+  know to treat a thin boundary feature as an object separator.
 - **Clean foreground-background intensity separation** → Otsu +
   connected components + morphological cleanup.
 
