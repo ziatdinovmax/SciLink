@@ -170,6 +170,63 @@ the one-shot pipeline tool because that's the right shape for "I'm done
 analyzing, prepare a calc". Simulate mode adds *granular* alternatives
 for iterative work. Don't replace `run_dft_workflow`; add alongside.
 
+## Skill subsystem
+
+Skills are domain-specific LLM context shared across the experimental and
+simulation agents.
+
+- **Skill bundles** at `scilink/skills/<domain>/<name>/` — one folder per
+  skill containing `<name>.md` plus optional sibling `.py` helpers
+  (Anthropic-Skill shape).
+- **Cross-skill helpers** at `scilink/skills/_shared/` — modules referenced
+  by multiple bundles, plus the `_registry.py` / `_spec.py` discovery
+  infrastructure.
+- **Non-skill utilities** at `scilink/utils/`. The legacy `scilink/tools/`
+  no longer exists.
+
+Skill markdown begins with an optional `---`-delimited YAML frontmatter
+block. The only field consumed today is `description` (rendered into the
+orchestrator's `run_analysis` tool parameter blurb). Add fields only when
+there's a consumer; don't accumulate metadata speculatively.
+
+Section vocabulary is **fixed**: `overview`, `planning`, `analysis`,
+`interpretation`, `validation`, `implementation`. Off-vocabulary `## headings`
+are preserved under `extras` and a warning is logged so authors get
+feedback instead of silent loss. The fixed set is load-bearing — controllers
+inject specific sections at decision points
+(`_get_skill_context(section="planning")`), which is how prompts stay tight.
+
+Multi-skill is end-to-end. `analyze(skill=...)` and the `run_analysis` tool
+both accept `str | list[str]`. `TOOL_SPEC` declarations inside a skill
+bundle are visible to the LLM only when that skill is active; `_shared/`
+specs are always-on (filtered by their `agents=` tag).
+
+Code blocks inside skill markdown are **LLM-facing reference**, not
+executable surfaces — the loader does not extract or run them. Runnable
+code lives in sibling `.py` files and is registered via `TOOL_SPEC`.
+Domain scientists who write markdown only can ship a skill as a single
+`<name>.md` and never touch Python; the engineer-maintained helpers
+co-locate as siblings.
+
+### Comparison with Anthropic Skills
+
+|  | Anthropic | SciLink |
+|---|---|---|
+| Folder bundle layout | ✓ (`SKILL.md` + siblings) | ✓ (`<name>.md` + siblings) |
+| Description-based selection by the model | ✓ (system prompt, every turn) | ✓ (`run_analysis` tool param, when routing) |
+| Section vocabulary | Free-form | Fixed six-section; off-vocab content captured under `extras` |
+| Injection granularity | Whole `SKILL.md` once activated | Per-decision via `_get_skill_context(section=…)` |
+| Bundled scripts | Model can read and run | Reference-only in markdown; runnable code as sibling `.py` registered via `TOOL_SPEC` |
+| Multi-skill loading | Implicit (model loads whichever descriptions match) | Explicit (`skill: str \| list[str]`); active set gates tool visibility |
+| Shared library across skills | Not a concept (skills are independent units) | `scilink/skills/_shared/` — always-on infrastructure |
+
+Conceptually: Anthropic skills are *independently distributable units the
+model picks at conversation time*; SciLink skills are *in-package knowledge
+bundles selected by orchestrator tool routing*, with skill-gated tool
+visibility doing what skill activation does upstream. The `_shared/`
+carve-out is a deliberate adaptation for in-package code reuse — Anthropic
+users would either duplicate the helper or split it into a standalone skill.
+
 ## Conventions for prompt patches
 
 When live traces surface bad LLM behavior:
