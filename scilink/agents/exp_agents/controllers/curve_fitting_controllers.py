@@ -1712,6 +1712,47 @@ Your guidance: '''
             except ValueError:
                 return np.loadtxt(data_path, skiprows=1)
 
+    # Adaptive-timeout policy for per-spectrum subprocess execution.
+    # A subprocess that times out is rarely "broken code" — usually the
+    # fit just needs longer. Re-running the SAME script with 2× the
+    # timeout, up to a hard cap, avoids burning LLM tokens on
+    # _correct_script "fixing" code that wasn't actually wrong.
+    _TIMEOUT_ESCALATIONS = 2
+    _TIMEOUT_GROWTH = 2.0
+    _TIMEOUT_HARD_CAP_S = 1800
+
+    def _execute_with_adaptive_timeout(self, script: str) -> dict:
+        """Run a script via the executor; on timeout, retry the same script
+        with a longer timeout until it succeeds, the hard cap is hit, or the
+        escalation budget is exhausted. Non-timeout failures are returned
+        as-is so the caller's script-correction loop can handle them.
+        """
+        base = self.executor.timeout
+        current = base
+        result = None
+        for esc in range(self._TIMEOUT_ESCALATIONS + 1):
+            result = self.executor.execute_script(
+                script, working_dir=str(self.output_dir), timeout=current
+            )
+            if result.get("status") == "success":
+                return result
+            msg = (result.get("message") or "").lower()
+            if "timed out" not in msg:
+                return result  # genuine script error — escalate via _correct_script
+            next_timeout = min(int(current * self._TIMEOUT_GROWTH), self._TIMEOUT_HARD_CAP_S)
+            if next_timeout <= current or esc >= self._TIMEOUT_ESCALATIONS:
+                self.logger.warning(
+                    f"    ⏱  Timed out at {current}s; hit escalation cap "
+                    f"({self._TIMEOUT_HARD_CAP_S}s / {self._TIMEOUT_ESCALATIONS} retries) — giving up."
+                )
+                return result
+            self.logger.warning(
+                f"    ⏱  Script timed out at {current}s — retrying same script with {next_timeout}s "
+                f"(escalation {esc + 1}/{self._TIMEOUT_ESCALATIONS})"
+            )
+            current = next_timeout
+        return result
+
     def _fit_single_spectrum(
         self,
         state: dict,
@@ -1784,7 +1825,7 @@ Your guidance: '''
                     script, diagnosis = self._correct_script(state, script, last_error)
                     script_errors.append({"error": last_error, "diagnosis": diagnosis})
 
-                exec_result = self.executor.execute_script(script, working_dir=str(self.output_dir))
+                exec_result = self._execute_with_adaptive_timeout(script)
 
                 if exec_result.get("status") == "success":
                     # Check if the script actually produced the expected outputs
