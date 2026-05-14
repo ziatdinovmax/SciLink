@@ -277,6 +277,10 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         r2_threshold: Optional[float] = None,
         max_model_retries: Optional[int] = None,
         outlier_sigma: Optional[float] = None,
+        # Per-call override of non-anchor parallel fan-out. None → falls back
+        # to the agent's construction-time `self.parallel_workers` (which in
+        # turn falls back to the SCILINK_CURVE_FIT_WORKERS env var or 1).
+        parallel_workers: Optional[int] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -609,7 +613,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             max_model_retries=effective_max_retries,
             outlier_sigma=effective_outlier_sigma,
             max_verification_iterations=self.max_verification_iterations,
-            parallel_workers=self.parallel_workers,
+            parallel_workers=(
+                parallel_workers if parallel_workers is not None else self.parallel_workers
+            ),
         )
         
         # Execute pipeline

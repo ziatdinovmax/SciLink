@@ -1930,6 +1930,7 @@ class AnalysisOrchestratorTools:
             series_metadata: str = None,
             task_mode: str = None,
             prior_analysis_paths: List[str] = None,
+            parallel_workers: int = None,
         ) -> str:
             """
             Execute analysis with the selected or specified agent.
@@ -2401,6 +2402,11 @@ class AnalysisOrchestratorTools:
                     # accept **kwargs and silently ignore unknown parameters,
                     # matching the existing pattern for `hints`.
                     analyze_kwargs["task_mode"] = task_mode
+                if parallel_workers is not None:
+                    # Per-call override of non-anchor parallel fan-out for
+                    # series fitting. Consumed by CurveFittingAgent; other
+                    # agents accept **kwargs and silently ignore.
+                    analyze_kwargs["parallel_workers"] = parallel_workers
                 if self.orch.active_knowledge:
                     analyze_kwargs["prior_knowledge"] = self.orch.active_knowledge
                 if prior_analysis_paths:
@@ -2597,6 +2603,31 @@ class AnalysisOrchestratorTools:
                         "receives a state summary (pipeline, quality score, "
                         "extracted features, scientific claims, saved-arrays "
                         "catalog). Image-analysis agent only."
+                    )
+                },
+                "parallel_workers": {
+                    "type": "integer",
+                    "description": (
+                        "CurveFitting agent only. Worker count for the "
+                        "non-anchor parallel fan-out in series fitting. Each "
+                        "regime anchor is fit serially with full quality "
+                        "control; the remaining spectra in that regime are "
+                        "then fit concurrently using this many workers. "
+                        "Speedup scales roughly linearly up to min(N-1, "
+                        "cores) where N is series length. "
+                        "**Policy:** treat this as a user preference, not a "
+                        "scientific decision. Do NOT set this parameter "
+                        "without first asking the user — the LLM lacks "
+                        "context about their hardware (core count), latency "
+                        "tolerance, and CI/interactive setting. For series "
+                        "with ≥10 spectra, ask the user something like "
+                        "'This is a 30-spectrum series. Would you like to "
+                        "run non-anchor fits in parallel? A typical value "
+                        "is 4-8 workers.' For single spectra or short series "
+                        "(<5), omit this parameter — the parallel section is "
+                        "negligible. Leave unset to use the session default "
+                        "(operator-set at orchestrator construction or via "
+                        "SCILINK_CURVE_FIT_WORKERS env var)."
                     )
                 }
             },
