@@ -73,7 +73,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Agent specific params
         spectral_unmixing_settings: dict | None = None,
         run_preprocessing: bool = True,
-        enable_human_feedback: bool = True
+        enable_human_feedback: bool = True,
+        **kwargs,
     ):
         
         if not require_sandbox_approval(
