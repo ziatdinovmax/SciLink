@@ -9,6 +9,7 @@ Coordinates multi-modal experimental analysis using specialized sub-agents:
 Follows the same design patterns as PlanningOrchestratorAgent for consistent UX.
 """
 
+import inspect
 import json
 import logging
 import os
@@ -391,6 +392,7 @@ class AnalysisOrchestratorAgent:
         analysis_mode: AnalysisMode = AnalysisMode.CO_PILOT,
         futurehouse_api_key: Optional[str] = None,
         image_analysis_depth: str = "basic",
+        curve_fit_parallel_workers: Optional[int] = None,
         # Deprecated
         google_api_key: Optional[str] = None,
         local_model: Optional[str] = None,
@@ -445,6 +447,12 @@ class AnalysisOrchestratorAgent:
         # in-agent escalation, so the image agent defaults to Tier-1-only.
         # Users can override via the constructor kwarg.
         self.image_analysis_depth = image_analysis_depth
+
+        # Non-anchor parallel fan-out for series curve fitting. None →
+        # the agent's own resolver picks up SCILINK_CURVE_FIT_WORKERS or
+        # falls back to 1 (serial). Forwarded only to agents whose
+        # __init__ declares the parameter — see create_agent_for_analysis.
+        self.curve_fit_parallel_workers = curve_fit_parallel_workers
 
         self.futurehouse_api_key = futurehouse_api_key
         if not self.futurehouse_api_key:
@@ -1018,6 +1026,18 @@ class AnalysisOrchestratorAgent:
             module = importlib.import_module(module_path)
             cls = getattr(module, class_name)
             entry["class"] = cls  # cache for subsequent calls
+
+        # Forward orchestrator-level optional kwargs only to agents whose
+        # __init__ declares them (or accepts **kwargs). Keeps backward
+        # compatibility with agents that haven't been updated.
+        sig_params = inspect.signature(cls.__init__).parameters
+        accepts_var_kw = any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in sig_params.values()
+        )
+        if self.curve_fit_parallel_workers is not None and (
+            "parallel_workers" in sig_params or accepts_var_kw
+        ):
+            common_kwargs["parallel_workers"] = self.curve_fit_parallel_workers
 
         agent = cls(**common_kwargs)
         logging.info(f"   Created agent {agent_id}: {type(agent).__name__}")
