@@ -59,6 +59,8 @@ dependencies = [
     # Markdown -> PDF export (with pymupdf above). Arrives transitively via
     # streamlit -> rich, but this is a direct import, so pin it directly.
     "markdown-it-py>=2.2.0",
+    "langgraph",
+    "langchain"
 ]
 
 [project.optional-dependencies]
