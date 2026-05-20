@@ -13,6 +13,12 @@ only for now; LAMMPS support and HPC submission tools are follow-up work
 The duplication with AnalysisOrchestratorAgent is intentional and acceptable
 at this development stage — see CLAUDE.md "Why no BaseChatOrchestrator
 refactor".
+
+LangGraph backbone
+------------------
+The chat loop is driven by a LangGraph ``StateGraph`` (ReAct topology).
+``chat()`` delegates to ``_invoke_graph()`` which calls ``graph.invoke()``.
+``run_task()`` uses the same graph with ``autonomy_mode="autonomous"``.
 """
 
 import json
@@ -28,6 +34,8 @@ from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .simulation_orchestrator_tools import SimulationOrchestratorTools
 from ._deprecation import normalize_params
+
+from langchain_core.messages import HumanMessage, AIMessage
 
 
 class SimulationMode(Enum):
@@ -349,6 +357,16 @@ class SimulationOrchestratorAgent:
             recent_history = self._trim_history(history, max_messages=self.MAX_HISTORY_MESSAGES)
             self.messages.extend(recent_history)
 
+        # ── LangGraph backbone ─────────────────────────────────────────────
+        from ...graphs.simulation import build_simulation_graph
+        self._graph_thread_id = f"simulation-{self.base_dir.name}"
+        self._graph = build_simulation_graph(self)
+        self._graph_config = {"configurable": {"thread_id": self._graph_thread_id}}
+
+        if history:
+            self._seed_graph_history(history)
+        # ──────────────────────────────────────────────────────────────────
+
         logging.info(f"✅ SimulationOrchestratorAgent initialized. Session: {self.base_dir}")
 
     # ------------------------------------------------------------------
@@ -357,14 +375,96 @@ class SimulationOrchestratorAgent:
 
     def chat(self, user_input: str) -> str:
         """Interactive chat — used by the CLI and UI."""
-        if self.use_openai:
-            response = self._handle_openai_chat(user_input)
-        else:
-            response = self._handle_litellm_chat(user_input)
+        response = self._invoke_graph(user_input)
         self.message_count += 1
         self._auto_checkpoint()
         self._save_history()
         return response
+
+    def _invoke_graph(self, user_input: str) -> str:
+        """
+        Run one user turn through the LangGraph ReAct loop.
+
+        Used by both ``chat()`` (interactive) and ``run_task()``
+        (non-interactive autonomous mode).
+        """
+        # Keep self.messages in sync for JSON persistence
+        self.messages.append({"role": "user", "content": user_input})
+
+        if len(self.messages) > 120:
+            print("  ⚠️  Context window getting full - trimming history...")
+            system_msg = self.messages[0]
+            recent_msgs = self._trim_history(
+                self.messages[1:], max_messages=self.MAX_HISTORY_MESSAGES
+            )
+            self.messages = [system_msg] + recent_msgs
+
+        result = self._graph.invoke(
+            {
+                "messages": [HumanMessage(content=user_input)],
+                "step_count": 0,
+                "autonomy_mode": self.simulation_mode.value,
+                "active_skill": None,
+                "session_dir": str(self.base_dir),
+                "checkpoint_data": {},
+                "mcp_connections": list(self._mcp_connections.keys()),
+                "generated_structures": self.generated_structures,
+                "default_calc_params": self.default_calc_params,
+                "message_count": self.message_count,
+            },
+            config=self._graph_config,
+        )
+
+        final_text = ""
+        for msg in reversed(result.get("messages", [])):
+            if isinstance(msg, AIMessage) and msg.content:
+                final_text = msg.content
+                break
+
+        if not final_text:
+            final_text = "⚠️ Maximum tool iterations reached. Please simplify your request."
+
+        self.messages.append({"role": "assistant", "content": final_text})
+        return final_text
+
+    def _seed_graph_history(self, history: List[Dict]) -> None:
+        """Replay persisted history into the graph's MemorySaver at init."""
+        from langchain_core.messages import HumanMessage as HM, ToolMessage as TM
+
+        lc_messages = []
+        for m in history:
+            role = m.get("role", "")
+            content = m.get("content") or ""
+            if role == "user":
+                lc_messages.append(HM(content=content))
+            elif role == "assistant":
+                tool_calls_raw = m.get("tool_calls", [])
+                lc_tc = [
+                    {
+                        "id": tc.get("id", ""),
+                        "name": tc.get("function", {}).get("name", ""),
+                        "args": json.loads(tc.get("function", {}).get("arguments", "{}"))
+                        if isinstance(tc.get("function", {}).get("arguments", "{}"), str)
+                        else tc.get("function", {}).get("arguments", {}),
+                        "type": "tool_call",
+                    }
+                    for tc in tool_calls_raw
+                ]
+                lc_messages.append(AIMessage(content=content, tool_calls=lc_tc))
+            elif role == "tool":
+                lc_messages.append(TM(content=content, tool_call_id=m.get("tool_call_id", "")))
+
+        if not lc_messages:
+            return
+
+        try:
+            self._graph.update_state(self._graph_config, {"messages": lc_messages})
+            self.logger.info(
+                "  🧠 Graph history seeded: %d messages loaded into MemorySaver",
+                len(lc_messages),
+            )
+        except Exception as e:
+            self.logger.warning("Failed to seed graph history: %s", e)
 
     def run_task(self, task: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Non-interactive entry point — used by the future meta agent.
@@ -649,176 +749,6 @@ class SimulationOrchestratorAgent:
     # ------------------------------------------------------------------
     # Chat handlers — manual tool-call loops, mirrors analyze mode
     # ------------------------------------------------------------------
-
-    def _handle_openai_chat(self, user_input: str) -> str:
-        """Chat with OpenAI-compatible models with manual function calling loop."""
-        from openai import OpenAI
-
-        client = OpenAI(
-            api_key=self.model.api_key,
-            base_url=self.model.base_url,
-            timeout=120.0,
-        )
-
-        self.messages.append({"role": "user", "content": user_input})
-
-        if len(self.messages) > 120:
-            print("  ⚠️  Context window getting full - trimming history...")
-            system_msg = self.messages[0]
-            recent_msgs = self._trim_history(self.messages[1:], max_messages=self.MAX_HISTORY_MESSAGES)
-            self.messages = [system_msg] + recent_msgs
-
-        iteration = 0
-        while iteration < self.MAX_TOOL_ITERATIONS:
-            iteration += 1
-            print(f"  ⏳ Waiting for orchestrator response ...")
-
-            try:
-                response = client.chat.completions.create(
-                    model=self.model.model,
-                    messages=self.messages,
-                    tools=self.tools_for_model,
-                    tool_choice="auto",
-                )
-            except Exception as e:
-                if "timeout" in str(e).lower() or "timed out" in str(e).lower():
-                    print(f"  ⚠️ API timeout on iteration {iteration}. Retrying...")
-                    if iteration < 3:
-                        continue
-                raise
-
-            message = response.choices[0].message
-
-            if not message.tool_calls:
-                text = message.content
-                if not text and iteration > 0:
-                    self.messages.append({
-                        "role": "user",
-                        "content": "Please briefly summarize what you just did and suggest next steps.",
-                    })
-                    followup = client.chat.completions.create(
-                        model=self.model.model,
-                        messages=self.messages,
-                        tools=self.tools_for_model,
-                        tool_choice="none",
-                    )
-                    text = followup.choices[0].message.content or ""
-                self.messages.append({"role": "assistant", "content": text})
-                return text
-
-            self.messages.append({
-                "role": "assistant",
-                "content": message.content,
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    } for tc in message.tool_calls
-                ],
-            })
-
-            for tool_call in message.tool_calls:
-                func_name = tool_call.function.name
-                args = json.loads(tool_call.function.arguments)
-                print(f"  🔧 Calling tool: {func_name}")
-                result = self.tools.execute_tool(func_name, **args)
-                self.messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result,
-                })
-
-        return "⚠️ Maximum tool iterations reached. Please simplify your request."
-
-    def _handle_litellm_chat(self, user_input: str) -> str:
-        """Chat with LiteLLM models with manual function calling loop."""
-        import litellm
-
-        self.messages.append({"role": "user", "content": user_input})
-
-        if len(self.messages) > 120:
-            print("  ⚠️  Context window getting full - trimming history...")
-            system_msg = self.messages[0]
-            recent_msgs = self._trim_history(self.messages[1:], max_messages=self.MAX_HISTORY_MESSAGES)
-            self.messages = [system_msg] + recent_msgs
-
-        iteration = 0
-        while iteration < self.MAX_TOOL_ITERATIONS:
-            iteration += 1
-            print(f"  ⏳ Waiting for orchestrator response ...")
-
-            try:
-                response = litellm.completion(
-                    model=self.model.model,
-                    messages=self.messages,
-                    tools=self.tools_for_model,
-                    tool_choice="auto",
-                    api_key=self.model.api_key,
-                    api_base=self.model.base_url,
-                    timeout=120,
-                    request_timeout=120,
-                )
-            except Exception as e:
-                if "timeout" in str(e).lower() or "timed out" in str(e).lower():
-                    print(f"  ⚠️ API timeout on iteration {iteration}. Retrying...")
-                    if iteration < 3:
-                        continue
-                raise
-
-            message = response.choices[0].message
-            tool_calls = getattr(message, "tool_calls", None)
-            content = getattr(message, "content", None)
-
-            if not tool_calls:
-                if not content and iteration > 0:
-                    self.messages.append({
-                        "role": "user",
-                        "content": "Please briefly summarize what you just did and suggest next steps.",
-                    })
-                    followup = litellm.completion(
-                        model=self.model.model,
-                        messages=self.messages,
-                        tools=self.tools_for_model,
-                        tool_choice="none",
-                    )
-                    content = getattr(followup.choices[0].message, "content", None) or ""
-                self.messages.append({"role": "assistant", "content": content or ""})
-                return content or ""
-
-            self.messages.append({
-                "role": "assistant",
-                "content": content,
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    } for tc in tool_calls
-                ],
-            })
-
-            for tool_call in tool_calls:
-                func_name = tool_call.function.name
-                try:
-                    args = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError:
-                    args = {}
-                print(f"  🔧 Calling tool: {func_name}")
-                result = self.tools.execute_tool(func_name, **args)
-                self.messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result,
-                })
-
-        return "⚠️ Maximum tool iterations reached. Please simplify your request."
 
     # ------------------------------------------------------------------
     # Restoration

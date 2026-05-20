@@ -47,6 +47,8 @@ dependencies = [
     "h5py>=3.10",
     "nexusformat>=2.0",
     "pyyaml>=6.0",
+    "langgraph",
+    "langchain"
 ]
 
 [project.optional-dependencies]

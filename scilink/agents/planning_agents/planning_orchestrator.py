@@ -7,6 +7,8 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 from enum import Enum
 
+from langchain_core.messages import HumanMessage, AIMessage
+
 from ...auth import get_internal_proxy_key
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
@@ -751,6 +753,16 @@ class PlanningOrchestratorAgent:
                 recent_history = self._trim_history(history, max_messages=100)
                 self.messages.extend(recent_history)
 
+        # ── LangGraph backbone ─────────────────────────────────────────────
+        from ...graphs.planning import build_planning_graph
+        self._graph_thread_id = f"planning-{self.base_dir.name}"
+        self._graph = build_planning_graph(self)
+        self._graph_config = {"configurable": {"thread_id": self._graph_thread_id}}
+
+        if history:
+            self._seed_graph_history(history)
+        # ──────────────────────────────────────────────────────────────────
+
     def _convert_tools_to_litellm_format(self) -> List[Dict]:
         """
         Convert OpenAI tool schemas to LiteLLM format.
@@ -1153,38 +1165,124 @@ class PlanningOrchestratorAgent:
         return trimmed
 
     def chat(self, user_input: str) -> str:
-        """Main chat interface with robust function calling support."""
+        """Main chat interface — delegates to the LangGraph ReAct loop."""
         self.message_count += 1
-        
+
         # AUTO-CHECKPOINT: Every 10 messages
         if self.message_count - self.last_checkpoint_message_count >= 10:
             print("  💾 Auto-checkpoint triggered (every 10 messages)...")
             self._auto_checkpoint()
             self.last_checkpoint_message_count = self.message_count
-        
+
         try:
-            if self.use_openai:
-                response_text = self._handle_openai_chat(user_input)
-            else:
-                # Use the same manual tool handling approach for LiteLLM
-                response_text = self._handle_litellm_chat(user_input)
-            
+            response_text = self._invoke_graph(user_input)
+
             print(f"🤖 Agent: {response_text}")
             self._save_history()
-            
+
             if self.message_count > 80:
                 warning = "\n\n⚠️ Note: Conversation is getting long. Consider calling save_checkpoint and restarting."
                 response_text += warning
-            
+
             return response_text
-            
+
         except Exception as e:
             logging.error(f"Chat Error: {e}", exc_info=True)
-            
+
             print("  💾 Error detected - saving emergency checkpoint...")
             self._auto_checkpoint()
-            
+
             return f"❌ Error: {e}\n\n(Emergency checkpoint saved to {self.checkpoint_path})"
+
+    def _invoke_graph(self, user_input: str) -> str:
+        """
+        Run one user turn through the LangGraph ReAct loop.
+
+        Delegates to the compiled planning graph.  The MemorySaver checkpointer
+        retains the full thread history across calls.
+        """
+        # Keep self.messages in sync for JSON persistence
+        self.messages.append({"role": "user", "content": user_input})
+
+        if len(self.messages) > 120:
+            print("  ⚠️  Context window getting full - trimming history...")
+            system_msg = self.messages[0]
+            recent_msgs = self._trim_history(self.messages[1:], max_messages=100)
+            self.messages = [system_msg] + recent_msgs
+
+        result = self._graph.invoke(
+            {
+                "messages": [HumanMessage(content=user_input)],
+                "step_count": 0,
+                "autonomy_mode": self.autonomy_level.value,
+                "active_skill": None,
+                "session_dir": str(self.base_dir),
+                "checkpoint_data": {},
+                "mcp_connections": list(self._mcp_connections.keys()),
+                "objective": self.objective,
+                "active_scalarizer_script": self.active_scalarizer_script,
+                "expected_input_columns": self.expected_input_columns,
+                "expected_target_columns": self.expected_target_columns,
+                "target_directions": self.target_directions,
+                "expected_input_types": self.expected_input_types,
+                "expected_input_levels": self.expected_input_levels,
+                "latest_tea_results": self.latest_tea_results,
+                "active_knowledge": self.active_knowledge,
+                "message_count": self.message_count,
+            },
+            config=self._graph_config,
+        )
+
+        final_text = ""
+        for msg in reversed(result.get("messages", [])):
+            if isinstance(msg, AIMessage) and msg.content:
+                final_text = msg.content
+                break
+
+        if not final_text:
+            final_text = "⚠️ Maximum tool iterations reached. Please simplify your request."
+
+        self.messages.append({"role": "assistant", "content": final_text})
+        return final_text
+
+    def _seed_graph_history(self, history: List[Dict]) -> None:
+        """Replay persisted history into the graph's MemorySaver at init."""
+        from langchain_core.messages import HumanMessage as HM, ToolMessage as TM
+
+        lc_messages = []
+        for m in history:
+            role = m.get("role", "")
+            content = m.get("content") or ""
+            if role == "user":
+                lc_messages.append(HM(content=content))
+            elif role == "assistant":
+                tool_calls_raw = m.get("tool_calls", [])
+                lc_tc = [
+                    {
+                        "id": tc.get("id", ""),
+                        "name": tc.get("function", {}).get("name", ""),
+                        "args": json.loads(tc.get("function", {}).get("arguments", "{}"))
+                        if isinstance(tc.get("function", {}).get("arguments", "{}"), str)
+                        else tc.get("function", {}).get("arguments", {}),
+                        "type": "tool_call",
+                    }
+                    for tc in tool_calls_raw
+                ]
+                lc_messages.append(AIMessage(content=content, tool_calls=lc_tc))
+            elif role == "tool":
+                lc_messages.append(TM(content=content, tool_call_id=m.get("tool_call_id", "")))
+
+        if not lc_messages:
+            return
+
+        try:
+            self._graph.update_state(self._graph_config, {"messages": lc_messages})
+            logging.info(
+                "  🧠 Graph history seeded: %d messages loaded into MemorySaver",
+                len(lc_messages),
+            )
+        except Exception as e:
+            logging.warning("Failed to seed graph history: %s", e)
 
     def _compress_large_tool_results(self):
         """Compress large tool results in chat history to prevent context overflow.
@@ -1244,180 +1342,6 @@ class PlanningOrchestratorAgent:
             
         except Exception as e:
             logging.warning(f"Auto-checkpoint failed: {e}")
-
-    def _handle_openai_chat(self, user_input: str) -> str:
-        """Handle chat with OpenAI-compatible models with manual function calling loop."""
-        from openai import OpenAI
-        
-        client = OpenAI(
-            api_key=self.model.api_key,
-            base_url=self.model.base_url
-        )
-        
-        self.messages.append({"role": "user", "content": user_input})
-        
-        if len(self.messages) > 120:
-            print("  ⚠️  Context window getting full - trimming history...")
-            system_msg = self.messages[0]
-            recent_msgs = self._trim_history(self.messages[1:], max_messages=100)
-            self.messages = [system_msg] + recent_msgs
-
-        self._compress_large_tool_results()
-
-        max_iterations = 20
-        iteration = 0
-
-        while iteration < max_iterations:
-            iteration += 1
-
-            # Also compress within the loop — tool calls can grow history mid-conversation
-            if iteration > 1:
-                self._compress_large_tool_results()
-
-            print(f"  ⏳ Waiting for orchestrator response ...")
-
-            response = client.chat.completions.create(
-                model=self.model.model,
-                messages=self.messages,
-                tools=self.tools_for_model,
-                tool_choice="auto"
-            )
-            
-            message = response.choices[0].message
-            
-            if not message.tool_calls:
-                self.messages.append({
-                    "role": "assistant",
-                    "content": message.content
-                })
-                return message.content
-            
-            self.messages.append({
-                "role": "assistant",
-                "content": message.content,
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments
-                        }
-                    } for tc in message.tool_calls
-                ]
-            })
-            
-            for tool_call in message.tool_calls:
-                func_name = tool_call.function.name
-                args = json.loads(tool_call.function.arguments)
-                
-                print(f"  🔧 Calling tool: {func_name}")
-                
-                result = self.tools.execute_tool(func_name, **args)
-                
-                self.messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result
-                })
-        
-        return "⚠️ Maximum tool iterations reached. Please simplify your request."
-
-    def _handle_litellm_chat(self, user_input: str) -> str:
-        """Handle chat with LiteLLM models with manual function calling loop."""
-        import litellm
-        
-        self.messages.append({"role": "user", "content": user_input})
-        
-        if len(self.messages) > 120:
-            print("  ⚠️  Context window getting full - trimming history...")
-            system_msg = self.messages[0]
-            recent_msgs = self._trim_history(self.messages[1:], max_messages=100)
-            self.messages = [system_msg] + recent_msgs
-
-        self._compress_large_tool_results()
-
-        max_iterations = 20
-        iteration = 0
-
-        while iteration < max_iterations:
-            iteration += 1
-
-            # Also compress within the loop — tool calls can grow history mid-conversation
-            if iteration > 1:
-                self._compress_large_tool_results()
-
-            print(f"  ⏳ Waiting for orchestrator response ...")
-
-            response = litellm.completion(
-                model=self.model.model,
-                messages=self.messages,
-                tools=self.tools_for_model,
-                tool_choice="auto",
-                api_key=self.model.api_key,
-                api_base=self.model.base_url
-            )
-            
-            message = response.choices[0].message
-            tool_calls = getattr(message, "tool_calls", None)
-            content = getattr(message, "content", None)
-            
-            if not tool_calls:
-                # No tool calls - return the text response
-                self.messages.append({
-                    "role": "assistant",
-                    "content": content or ""
-                })
-                return content or ""
-            
-            # Has tool calls - add assistant message with tool calls
-            assistant_msg = {
-                "role": "assistant",
-                "content": content,
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments
-                        }
-                    } for tc in tool_calls
-                ]
-            }
-            self.messages.append(assistant_msg)
-            
-            # Execute each tool call
-            for tool_call in tool_calls:
-                func_name = tool_call.function.name
-                try:
-                    args = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError:
-                    args = {}
-                
-                print(f"  🔧 Calling tool: {func_name}")
-                
-                result = self.tools.execute_tool(func_name, **args)
-                
-                self.messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result
-                })
-        
-        return "⚠️ Maximum tool iterations reached. Please simplify your request."
-
-    def _extract_response_text(self, response) -> str:
-        """Robustly extract text from different response formats."""
-        if hasattr(response, 'text'):
-            return response.text
-        elif hasattr(response, 'parts') and response.parts:
-            text_parts = [p.text for p in response.parts if hasattr(p, 'text')]
-            return ' '.join(text_parts)
-        elif isinstance(response, str):
-            return response
-        else:
-            return str(response)
 
     def _load_history(self) -> List[Dict]:
         """Load conversation history from disk."""
