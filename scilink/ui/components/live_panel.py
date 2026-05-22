@@ -429,6 +429,7 @@ def _spin_up_live_session(
     from scilink.agents.exp_agents.live_session import LiveSession
     from scilink.agents.exp_agents.live_triggers import (
         ConfidenceReversalTrigger,
+        DEFAULT_QUALITATIVE_GUIDANCE,
         HeartbeatTrigger,
         ManualTrigger,
         NewFeatureTrigger,
@@ -500,7 +501,8 @@ def _spin_up_live_session(
     #   2. Per-session additions: optional ThresholdCrossTrigger,
     #      framework-injected QualitativeProgressTrigger + ManualTrigger.
     from scilink.skills.loader import resolve_triggers_from_skill
-    trigger_list = list(resolve_triggers_from_skill(skill.get("meta", {})))
+    skill_triggers = list(resolve_triggers_from_skill(skill.get("meta", {})))
+    trigger_list = list(skill_triggers)
     if triggers["threshold"] is not None:
         trigger_list.append(
             ThresholdCrossTrigger(threshold=triggers["threshold"], direction="above")
@@ -509,9 +511,25 @@ def _spin_up_live_session(
     # Qualitative-progress (Stage 1 LLM, cheap/fast) — added when the
     # operator supplied a light model AND the skill declares guidance.
     qcheck = skill.get("meta", {}).get("live_reading", {}).get("qualitative_check") or {}
-    if light_model and qcheck.get("enabled", True) and qcheck.get("guidance"):
+    guidance = qcheck.get("guidance")
+    qcheck_enabled = qcheck.get("enabled", True)
+    # Framework fallback: if the skill declares no deterministic triggers
+    # AND no qualitative guidance, give it generic LLM-only monitoring so
+    # a minimum-viable skill (just reading_fn) is useful out of the box.
+    if (light_model and api_key and not skill_triggers
+            and (not guidance or not qcheck_enabled)):
+        guidance = DEFAULT_QUALITATIVE_GUIDANCE
+        qcheck_enabled = True
+        import logging
+        logging.getLogger(__name__).info(
+            "Skill declares no live_reading.triggers and no "
+            "qualitative_check.guidance — using framework's default "
+            "qualitative-check guidance. For tailored monitoring, "
+            "add a qualitative_check.guidance block to the skill's frontmatter."
+        )
+    if light_model and qcheck_enabled and guidance:
         trigger_list.append(QualitativeProgressTrigger(
-            guidance=str(qcheck["guidance"]),
+            guidance=str(guidance),
             model=light_model,
             api_key=api_key,
             interval_sec=float(qcheck.get("interval_sec", 45.0)),

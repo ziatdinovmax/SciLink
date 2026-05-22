@@ -447,6 +447,15 @@ class QualitativeProgressTrigger:
 # ---------------------------------------------------------------------------
 
 
+DEFAULT_QUALITATIVE_GUIDANCE = (
+    "Watch for any qualitative changes in the reading trend that warrant a "
+    "closer look — value drift, noise creep, slowed progress, unexpected "
+    "jumps or dips, or anomalies in the metric / feature stream. "
+    "Bias toward NOT firing unless the trend clearly merits human "
+    "attention; the skill ships no specific guidance, so be conservative."
+)
+
+
 _QUAL_SYSTEM_PROMPT = """You are a fast, cheap quality monitor for a live scientific measurement.
 
 You see the last few readings from an in-progress experiment plus the
