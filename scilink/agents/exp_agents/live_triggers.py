@@ -347,6 +347,209 @@ class ManualTrigger:
         self._last_request_ts = None
 
 
+class QualitativeProgressTrigger:
+    """Periodically asks a cheap/fast LLM whether the recent reading
+    history shows qualitatively interesting patterns the deterministic
+    triggers miss.
+
+    The "two-stage LLM" architecture:
+      Stage 1 — small/fast model (this trigger): looks at last N readings
+                + skill-provided guidance, returns yes/no.
+      Stage 2 — full model (the slow loop): on yes, produces the
+                user-facing interpretation as usual.
+
+    Cost discipline:
+      - Runs at most every ``interval_sec`` (default 45 s), not every
+        reading. ~80 calls/hour at the default cadence.
+      - Each call sees only the last ``history_n`` readings summarized
+        as compact JSON — keeps tokens low.
+      - Default model is the cheapest in each provider's family
+        (Haiku / GPT-mini / Gemini Flash); skill author / operator can
+        override.
+
+    Skill side: the frontmatter's ``live_reading.qualitative_check``
+    block carries the guidance string + interval. See
+    ``scilink/skills/diagnostics/live_passthrough/live_passthrough.md``
+    for the reference shape.
+    """
+
+    name = "qualitative_progress"
+
+    def __init__(
+        self,
+        *,
+        guidance: str,
+        model: str,
+        api_key: str,
+        interval_sec: float = 45.0,
+        history_n: int = 10,
+    ) -> None:
+        self.guidance = guidance.strip() or "Watch for any qualitative changes in the reading trend."
+        self.model = model
+        self.api_key = api_key
+        self.interval_sec = float(interval_sec)
+        self.history_n = int(history_n)
+        self._last_checked_at: Optional[float] = None
+        # Suppress repeated firings for the same situation: dedupe by
+        # (reason, severity) within a single session unless the metric
+        # has clearly moved on. Keep it simple: store the last fired
+        # reason; if the next decision repeats verbatim, skip it.
+        self._last_fired_reason: Optional[str] = None
+
+    def evaluate(self, history: list[LiveReadingResult]) -> Optional[TriggerEvent]:
+        if not history:
+            return None
+        latest = history[-1]
+        if self._last_checked_at is None:
+            # First evaluation — set the clock but don't fire immediately
+            # (lets the deterministic triggers go first on session start).
+            self._last_checked_at = latest.timestamp
+            return None
+        if (latest.timestamp - self._last_checked_at) < self.interval_sec:
+            return None
+        self._last_checked_at = latest.timestamp
+
+        # Build the compact prompt
+        recent = history[-self.history_n :]
+        summary = _summarize_history_for_llm(recent)
+        decision = _call_qualitative_check(
+            model=self.model, api_key=self.api_key,
+            guidance=self.guidance, history_summary=summary,
+        )
+        if decision is None:
+            return None  # LLM call failed; logged, no fire
+        if not decision.get("fire"):
+            return None
+        reason = (decision.get("reason") or "").strip()
+        if reason and reason == self._last_fired_reason:
+            # Same reason as last fire — skip to avoid spamming the feed
+            return None
+        self._last_fired_reason = reason
+        return TriggerEvent(
+            timestamp=latest.timestamp,
+            name=self.name,
+            details={
+                "reason": reason,
+                "severity": decision.get("severity", "medium"),
+                "model": self.model,
+                "interval_sec": self.interval_sec,
+            },
+            triggering_reading=latest,
+        )
+
+    def reset(self) -> None:
+        self._last_checked_at = None
+        self._last_fired_reason = None
+
+
+# ---------------------------------------------------------------------------
+# Qualitative LLM helper (used by QualitativeProgressTrigger)
+# ---------------------------------------------------------------------------
+
+
+_QUAL_SYSTEM_PROMPT = """You are a fast, cheap quality monitor for a live scientific measurement.
+
+You see the last few readings from an in-progress experiment plus the
+skill's guidance about what to watch for. Decide whether the recent
+trend warrants a full interpretation by the main model.
+
+Bias toward "fire" only when something is genuinely interesting — not
+just because data is arriving. The deterministic triggers
+(verdict-change, new-feature, confidence-reversal) already handle clean
+transitions; your job is to catch QUALITATIVE patterns those miss:
+intensity-ratio drift, noise-floor creep, slowed peak emergence,
+sample drift, detector saturation, unexpected feature, etc.
+
+Return ONE JSON object — no prose, no markdown fences:
+
+{
+  "fire": true | false,
+  "reason": "one-sentence description of what's interesting (or empty when fire=false)",
+  "severity": "low" | "medium" | "high"
+}
+
+Default: fire=false. Only flip to true when the recent history clearly
+shows one of the patterns the guidance asks you to watch for.
+
+SKILL GUIDANCE:
+{guidance}
+"""
+
+
+def _summarize_history_for_llm(readings: list[LiveReadingResult]) -> str:
+    """Compact text summary of recent readings; minimizes prompt tokens."""
+    if not readings:
+        return "(no readings yet)"
+    lines = []
+    base_ts = readings[0].timestamp
+    for r in readings:
+        rel_t = r.timestamp - base_ts
+        feats = len(r.detected_features)
+        lines.append(
+            f"  t={rel_t:+6.1f}s  {r.metric_name}={r.primary_metric:.3f}  "
+            f"verdict={r.verdict:<8s}  features={feats}  notes={r.notes[:60]}"
+        )
+    return "\n".join(lines)
+
+
+def _call_qualitative_check(
+    *, model: str, api_key: str, guidance: str, history_summary: str,
+) -> Optional[dict]:
+    """Make the small-model call and parse the JSON response.
+
+    Returns None on any failure (import, network, JSON parse, missing
+    keys). Failures are logged and the caller treats them as "don't fire."
+    """
+    try:
+        import litellm
+    except ImportError:
+        return None
+    try:
+        from ...wrappers.litellm_wrapper import _normalize_model_name
+    except ImportError:
+        _normalize_model_name = lambda m: m  # noqa: E731
+
+    system = _QUAL_SYSTEM_PROMPT.replace("{guidance}", guidance)
+    user_msg = f"Recent readings:\n{history_summary}\n\nReturn the JSON decision."
+    try:
+        resp = litellm.completion(
+            model=_normalize_model_name(model),
+            api_key=api_key,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_msg},
+            ],
+            max_tokens=200,
+            temperature=0.0,
+        )
+        text = resp.choices[0].message.content or ""
+    except Exception:
+        return None
+
+    # Extract JSON tolerantly (LLMs sometimes wrap in fences or prose)
+    import json
+    import re
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    candidate = fenced.group(1) if fenced else None
+    if candidate is None:
+        first = text.find("{")
+        last = text.rfind("}")
+        if first == -1 or last <= first:
+            return None
+        candidate = text[first : last + 1]
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict) or "fire" not in parsed:
+        return None
+    return parsed
+
+    def reset(self) -> None:
+        self.pending = False
+        self._last_request_ts = None
+
+
 # ---------------------------------------------------------------------------
 # Policy
 # ---------------------------------------------------------------------------

@@ -4,8 +4,17 @@ live_reading:
   enabled: true
   reading_fn: scilink.skills.diagnostics.live_passthrough.live_reading:passthrough_reading
   data_type: spectrum_1d
-  trigger_overrides:
-    heartbeat_sec: 30
+  qualitative_check:
+    enabled: true
+    interval_sec: 45
+    guidance: |
+      Watch for: noise-floor creep across consecutive readings (Imax
+      slowly rising when no new peaks have appeared), the rate of new
+      peak emergence slowing or stopping mid-scan, an unexpected dip
+      in peak count after it had been growing (possible detector
+      saturation or sample shift), or any reading where the peak
+      count drops to zero after non-zero readings (catastrophic data
+      loss).
 ---
 # Diagnostics — Live Passthrough Skill
 

@@ -152,6 +152,18 @@ runs any pending LLM call to completion).
         help="LLM model to use for the slow loop. Default: claude-opus-4-6.",
     )
     parser.add_argument(
+        "--qualitative-model", default=None,
+        help="Cheap/fast LLM that periodically (~45s by default) "
+             "checks whether the recent readings show patterns the "
+             "deterministic triggers miss. Defaults to a small "
+             "companion of --model (e.g. claude-haiku-4-5 for claude-opus). "
+             "Pass 'none' to disable.",
+    )
+    parser.add_argument(
+        "--qualitative-interval", type=float, default=45.0,
+        help="Seconds between qualitative-check LLM calls. Default: 45.",
+    )
+    parser.add_argument(
         "--api-key", default=None,
         help="LLM API key. Falls back to ANTHROPIC_API_KEY / "
              "CLAUDE_API_KEY / GEMINI_API_KEY / OPENAI_API_KEY.",
@@ -218,11 +230,23 @@ def _parse_chemistry_hint(raw: Optional[str]):
     return [e.strip() for e in raw.split(",") if e.strip()]
 
 
-def _build_policy(args):
+def _infer_light_model(main_model: str) -> str:
+    m = (main_model or "").lower()
+    if "claude" in m:
+        return "claude-haiku-4-5-20251001"
+    if m.startswith(("gpt-", "openai/")):
+        return "gpt-5-mini" if "5" in m else "gpt-4o-mini"
+    if "gemini" in m:
+        return "gemini/gemini-2.0-flash"
+    return ""
+
+
+def _build_policy(args, *, skill_meta: dict | None = None,
+                   resolved_api_key: str | None = None):
     from scilink.agents.exp_agents.live_triggers import (
         ConfidenceReversalTrigger, HeartbeatTrigger, ManualTrigger,
-        NewFeatureTrigger, ThresholdCrossTrigger, TriggerPolicy,
-        VerdictChangeTrigger,
+        NewFeatureTrigger, QualitativeProgressTrigger,
+        ThresholdCrossTrigger, TriggerPolicy, VerdictChangeTrigger,
     )
     triggers = []
     if not args.no_verdict_trigger:
@@ -237,7 +261,31 @@ def _build_policy(args):
         ))
     if args.heartbeat_sec and args.heartbeat_sec > 0:
         triggers.append(HeartbeatTrigger(interval_sec=args.heartbeat_sec))
-    triggers.append(ManualTrigger())  # always available; we don't expose "interpret now" in CLI v1
+
+    # Qualitative-progress (Stage 1 cheap-LLM trigger). Enabled when:
+    #   1. The user didn't disable it explicitly via --qualitative-model none
+    #   2. The skill declares a qualitative_check.guidance block
+    #   3. We have an API key to call the cheap model with
+    light_arg = (args.qualitative_model or "").strip().lower()
+    if light_arg == "none":
+        light_model = None
+    elif light_arg:
+        light_model = args.qualitative_model
+    else:
+        light_model = _infer_light_model(args.model)
+
+    qcheck = ((skill_meta or {}).get("live_reading") or {}).get("qualitative_check") or {}
+    if (light_model and qcheck.get("enabled", True) and qcheck.get("guidance")
+            and resolved_api_key):
+        triggers.append(QualitativeProgressTrigger(
+            guidance=str(qcheck["guidance"]),
+            model=light_model,
+            api_key=resolved_api_key,
+            interval_sec=float(args.qualitative_interval or qcheck.get("interval_sec", 45.0)),
+            history_n=int(qcheck.get("history_n", 10)),
+        ))
+
+    triggers.append(ManualTrigger())  # always available
     return TriggerPolicy(triggers=triggers)
 
 
@@ -334,7 +382,8 @@ def _run_live(args, log) -> int:
         log.error("Failed to initialize agent: %s", e)
         return 4
 
-    policy = _build_policy(args)
+    policy = _build_policy(args, skill_meta=skill.get("meta", {}),
+                            resolved_api_key=api_key)
 
     def on_reading(result):
         log.info("[TICK] %s", _format_tick(result))

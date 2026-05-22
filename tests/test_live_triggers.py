@@ -11,6 +11,7 @@ from scilink.agents.exp_agents.live_triggers import (
     HeartbeatTrigger,
     ManualTrigger,
     NewFeatureTrigger,
+    QualitativeProgressTrigger,
     ThresholdCrossTrigger,
     Trigger,
     TriggerPolicy,
@@ -314,3 +315,152 @@ def test_from_overrides_applies_skill_settings():
 def test_from_overrides_ignores_unknown_keys():
     p = from_overrides({"some_future_field": 42})
     assert len(p.triggers) >= 3  # default set still present
+
+
+# --- QualitativeProgressTrigger -----------------------------------------------
+
+class _FakeLLMCall:
+    """Helper for patching the cheap-LLM helper deterministically."""
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls: list[dict] = []
+
+    def __call__(self, *, model, api_key, guidance, history_summary):
+        self.calls.append({
+            "model": model, "guidance": guidance,
+            "history_summary": history_summary,
+        })
+        if not self.responses:
+            return None
+        return self.responses.pop(0)
+
+
+def test_qualitative_first_eval_sets_clock_no_fire():
+    """First call ever just records the timestamp; never fires immediately."""
+    t = QualitativeProgressTrigger(
+        guidance="watch noise floor", model="m", api_key="k",
+        interval_sec=10.0,
+    )
+    h = [_tick(metric=0.5)]
+    assert t.evaluate(h) is None
+
+
+def test_qualitative_interval_gate_skips_calls(monkeypatch):
+    """Within the interval, .evaluate() returns None without calling the LLM."""
+    fake = _FakeLLMCall([{"fire": True, "reason": "noise", "severity": "low"}])
+    monkeypatch.setattr(
+        "scilink.agents.exp_agents.live_triggers._call_qualitative_check",
+        fake,
+    )
+    t = QualitativeProgressTrigger(
+        guidance="g", model="m", api_key="k", interval_sec=10.0,
+    )
+    base = time.time()
+    h = [_tick(ts=base)]
+    t.evaluate(h)  # first call sets the clock
+    # Second call only 1s later — should not call the LLM
+    h.append(_tick(ts=base + 1.0))
+    assert t.evaluate(h) is None
+    assert fake.calls == []
+
+
+def test_qualitative_fires_when_interval_elapsed_and_decision_fire(monkeypatch):
+    fake = _FakeLLMCall([{"fire": True, "reason": "noise creep", "severity": "medium"}])
+    monkeypatch.setattr(
+        "scilink.agents.exp_agents.live_triggers._call_qualitative_check",
+        fake,
+    )
+    t = QualitativeProgressTrigger(
+        guidance="watch noise", model="claude-haiku", api_key="k", interval_sec=10.0,
+    )
+    base = time.time()
+    h = [_tick(ts=base)]
+    t.evaluate(h)  # first call sets the clock
+    h.append(_tick(ts=base + 11.0))  # interval elapsed
+    ev = t.evaluate(h)
+    assert ev is not None
+    assert ev.name == "qualitative_progress"
+    assert ev.details["reason"] == "noise creep"
+    assert ev.details["severity"] == "medium"
+    # Smoke check the LLM was called with the right inputs
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["model"] == "claude-haiku"
+    assert "watch noise" in fake.calls[0]["guidance"]
+
+
+def test_qualitative_does_not_fire_when_decision_is_wait(monkeypatch):
+    fake = _FakeLLMCall([{"fire": False, "reason": "", "severity": "low"}])
+    monkeypatch.setattr(
+        "scilink.agents.exp_agents.live_triggers._call_qualitative_check",
+        fake,
+    )
+    t = QualitativeProgressTrigger(
+        guidance="g", model="m", api_key="k", interval_sec=10.0,
+    )
+    base = time.time()
+    h = [_tick(ts=base)]
+    t.evaluate(h)
+    h.append(_tick(ts=base + 11.0))
+    assert t.evaluate(h) is None
+
+
+def test_qualitative_dedupes_repeated_reason(monkeypatch):
+    """Same fire-reason twice in a row → only first one fires (avoid spam)."""
+    fake = _FakeLLMCall([
+        {"fire": True, "reason": "noise creep", "severity": "low"},
+        {"fire": True, "reason": "noise creep", "severity": "low"},  # same
+        {"fire": True, "reason": "intensity drift", "severity": "medium"},  # different
+    ])
+    monkeypatch.setattr(
+        "scilink.agents.exp_agents.live_triggers._call_qualitative_check",
+        fake,
+    )
+    t = QualitativeProgressTrigger(
+        guidance="g", model="m", api_key="k", interval_sec=10.0,
+    )
+    base = time.time()
+    h = [_tick(ts=base)]
+    t.evaluate(h)  # clock-set
+    h.append(_tick(ts=base + 11.0))
+    assert t.evaluate(h) is not None  # first fire
+    h.append(_tick(ts=base + 22.0))
+    assert t.evaluate(h) is None     # same reason — dedupe
+    h.append(_tick(ts=base + 33.0))
+    assert t.evaluate(h) is not None  # different reason — fire
+
+
+def test_qualitative_llm_failure_does_not_fire(monkeypatch):
+    """If the cheap-LLM call fails (returns None), the trigger does not fire."""
+    fake = _FakeLLMCall([None, None])
+    monkeypatch.setattr(
+        "scilink.agents.exp_agents.live_triggers._call_qualitative_check",
+        fake,
+    )
+    t = QualitativeProgressTrigger(
+        guidance="g", model="m", api_key="k", interval_sec=10.0,
+    )
+    base = time.time()
+    h = [_tick(ts=base)]
+    t.evaluate(h)
+    h.append(_tick(ts=base + 11.0))
+    assert t.evaluate(h) is None
+
+
+def test_qualitative_reset_re_arms():
+    t = QualitativeProgressTrigger(
+        guidance="g", model="m", api_key="k", interval_sec=10.0,
+    )
+    h = [_tick()]
+    t.evaluate(h)
+    assert t._last_checked_at is not None
+    t.reset()
+    assert t._last_checked_at is None
+    assert t._last_fired_reason is None
+
+
+def test_qualitative_satisfies_trigger_protocol():
+    t = QualitativeProgressTrigger(
+        guidance="g", model="m", api_key="k", interval_sec=10.0,
+    )
+    assert isinstance(t, Trigger)
+    assert t.name == "qualitative_progress"

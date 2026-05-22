@@ -58,6 +58,20 @@ def render_live_panel() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _infer_light_model(main_model: str) -> str:
+    """Pick a sensible cheap/fast companion for the qualitative-check
+    trigger based on the sidebar's main model. Returns "" if no good
+    default is known (user can fill it in)."""
+    m = (main_model or "").lower()
+    if "claude" in m:
+        return "claude-haiku-4-5-20251001"
+    if m.startswith(("gpt-", "openai/")):
+        return "gpt-5-mini" if "5" in m else "gpt-4o-mini"
+    if "gemini" in m:
+        return "gemini/gemini-2.0-flash"
+    return ""
+
+
 def _resolve_sidebar_config() -> tuple[str, str, bool]:
     """Read model / API key / consent from the standard sidebar fields.
 
@@ -268,13 +282,31 @@ def _render_setup() -> None:
             "scan_XXXX.csv files into a folder, one per measurement. Alert me "
             "when the verdict changes or when a new peak appears.\n\n"
             "• Single CSV file gets rewritten as the scan progresses. "
-            "Check every 3 seconds. Heartbeat every 30s. No threshold trigger."
+            "Check every 3 seconds."
         ),
         help=(
             "Plain language. The LLM extracts the source kind, reading "
             "interval, triggers, and any chemistry hint, then starts the "
             "session. The dashboard header shows the parsed config so you "
             "can spot a mis-parse and Stop + re-describe if needed."
+        ),
+    )
+
+    # Light-model picker for the qualitative-progress trigger (Stage 1 LLM —
+    # cheap, fast, periodically checks for patterns the deterministic
+    # triggers miss). The main model from the sidebar still does the
+    # full-quality interpretations when any trigger fires.
+    light_default = _infer_light_model(model)
+    light_model = st.text_input(
+        "Qualitative-check model (optional)",
+        value=st.session_state.get("live_light_model", light_default),
+        key="live_light_model",
+        help=(
+            "Cheap/fast model that periodically (~45 s) checks whether "
+            "the recent reading history shows qualitative patterns the "
+            "deterministic triggers (verdict change / new feature / "
+            "reversal) miss. Defaults to a small model matching the "
+            "sidebar's provider. Leave blank or type 'none' to disable."
         ),
     )
 
@@ -305,14 +337,20 @@ def _render_setup() -> None:
             )
         if parsed is None:
             return  # _parse_description already surfaced the error
+        # Normalize light model: blank or 'none' → disabled
+        lm = (light_model or "").strip()
+        if lm.lower() in ("", "none"):
+            lm = None
         _start_from_parsed(
             parsed=parsed, data_path=data_path,
             model=model, api_key=resolved_key, skill_options=skill_options,
+            light_model=lm,
         )
 
 
 def _start_from_parsed(*, parsed: dict, data_path: str, model: str,
-                        api_key: str, skill_options: list[dict]) -> None:
+                        api_key: str, skill_options: list[dict],
+                        light_model: Optional[str] = None) -> None:
     # Resolve skill label → (domain, name)
     skill_label = parsed.get("skill_label", "")
     selected = next((s for s in skill_options if s["label"] == skill_label), None)
@@ -377,6 +415,7 @@ def _start_from_parsed(*, parsed: dict, data_path: str, model: str,
         skill_domain=selected["domain"],
         reading_interval_sec=float(parsed.get("reading_interval_sec", 2.0)),
         triggers=triggers,
+        light_model=light_model,
     )
 
 
@@ -421,6 +460,7 @@ def _spin_up_live_session(
     skill_domain: str,
     reading_interval_sec: float,
     triggers: dict,
+    light_model: Optional[str] = None,
 ) -> None:
     from scilink.agents.exp_agents.analysis_orchestrator import (
         AnalysisMode,
@@ -437,6 +477,7 @@ def _spin_up_live_session(
         HeartbeatTrigger,
         ManualTrigger,
         NewFeatureTrigger,
+        QualitativeProgressTrigger,
         ThresholdCrossTrigger,
         TriggerPolicy,
         VerdictChangeTrigger,
@@ -512,6 +553,17 @@ def _spin_up_live_session(
         )
     if triggers["heartbeat"]:
         trigger_list.append(HeartbeatTrigger(interval_sec=triggers["heartbeat_sec"]))
+    # Qualitative-progress (Stage 1 LLM, cheap/fast) — added when the
+    # operator supplied a light model AND the skill declares guidance.
+    qcheck = skill.get("meta", {}).get("live_reading", {}).get("qualitative_check") or {}
+    if light_model and qcheck.get("enabled", True) and qcheck.get("guidance"):
+        trigger_list.append(QualitativeProgressTrigger(
+            guidance=str(qcheck["guidance"]),
+            model=light_model,
+            api_key=api_key,
+            interval_sec=float(qcheck.get("interval_sec", 45.0)),
+            history_n=int(qcheck.get("history_n", 10)),
+        ))
     trigger_list.append(ManualTrigger())  # always-on so "Interpret Now" works
     policy = TriggerPolicy(triggers=trigger_list)
 
