@@ -99,6 +99,7 @@ No new dependencies — the live infrastructure uses only the existing Streamlit
 
 - [ ] Offline tests pass: `python -m pytest tests/test_live_data_sources.py tests/test_live_triggers.py tests/test_live_session.py tests/test_live_replay.py tests/test_resolve_tick_fn.py -v` — 89 tests, 0 skipped.
 - [ ] UI smoke (no LLM key needed for the setup view): `streamlit run scilink/ui/app.py`, click **Live**. The setup form should render; the skill picker is empty until a skill declares `live_tick` (expected — no skill does yet on this branch).
+- [ ] CLI smoke (no LLM key needed for `--help` or `--replay`): `scilink live --help` shows the options table; `scilink live --replay <jsonl>` runs an offline replay against a recorded session.
 - [ ] Setup → dashboard transition (needs a tick function, so layer this on top of structure-matching once it merges): point at a synthetic file that a second script is appending to; verify the metric chart accumulates and the verdict pill changes colour as the appended data crosses thresholds.
 
 ---
@@ -118,6 +119,10 @@ New modules under `scilink/agents/exp_agents/`:
 New UI component:
 
 - `scilink/ui/components/live_panel.py` — Streamlit panel with `render_live_panel()` entry point. Includes inline `_render_setup` and `_render_dashboard` functions and an `_discover_live_enabled_skills()` helper that walks `list_all_skills()` and filters to those whose frontmatter declares `live_tick.tick_fn`.
+
+New CLI surface:
+
+- `scilink/cli/live.py` (~415 lines) — `scilink live <data_path> --skill xrd [...]` for headless / SSH / cron / CI use. Same `LiveSession`, same data sources, same trigger taxonomy as the UI; output is per-tick / per-trigger / per-LLM-response log lines instead of the Streamlit dashboard. Includes a built-in `--replay <jsonl> [--replay-speed N] [--replay-llm-redo]` mode for trigger-threshold tuning against a recorded session. SIGINT / SIGTERM gracefully drain the JSONL writer and let any in-flight `run_task` complete. Routed from `scilink/cli/main.py` and listed in `scilink help`.
 
 Modified files:
 
