@@ -157,6 +157,14 @@ runs any pending LLM call to completion).
         help="Seconds between qualitative-check LLM calls. Default: 45.",
     )
     parser.add_argument(
+        "--additional-guidance", default=None,
+        help="Session-specific watch-for instructions appended to the "
+             "skill's baseline qualitative-check guidance. E.g. \"alert "
+             "me if the (111) peak loses intensity by more than 30% — "
+             "sample undergoes amorphization above 700 K\". The Stage-1 "
+             "cheap LLM sees the skill baseline + this additional text.",
+    )
+    parser.add_argument(
         "--api-key", default=None,
         help="LLM API key. Falls back to ANTHROPIC_API_KEY / "
              "CLAUDE_API_KEY / GEMINI_API_KEY / OPENAI_API_KEY.",
@@ -234,6 +242,20 @@ def _infer_light_model(main_model: str) -> str:
     return "gemini-3.5-flash"
 
 
+def _compose_guidance(skill_guidance, additional_guidance) -> str:
+    """Concatenate skill baseline + operator session-specific guidance.
+    Mirrors the helper of the same name in ui/components/live_panel.py."""
+    parts: list[str] = []
+    if skill_guidance and str(skill_guidance).strip():
+        parts.append(str(skill_guidance).strip())
+    if additional_guidance and str(additional_guidance).strip():
+        parts.append(
+            "Session-specific guidance from the operator:\n"
+            + str(additional_guidance).strip()
+        )
+    return "\n\n".join(parts)
+
+
 def _build_policy(args, *, skill_meta: dict | None = None,
                    resolved_api_key: str | None = None):
     """Build the trigger policy for a live session.
@@ -287,13 +309,16 @@ def _build_policy(args, *, skill_meta: dict | None = None,
     qcheck = ((skill_meta or {}).get("live_reading") or {}).get("qualitative_check") or {}
     guidance = qcheck.get("guidance")
     qcheck_enabled = qcheck.get("enabled", True)
+    additional_guidance = (getattr(args, "additional_guidance", None) or "").strip() or None
     # Framework fallback: if the skill declares no deterministic triggers
-    # AND no qualitative_check.guidance, give it generic LLM-only monitoring
+    # AND no qualitative_check.guidance AND the operator provided no
+    # session-specific guidance either, install generic LLM-only monitoring
     # so a minimum-viable skill (just a reading_fn) is still useful out of
     # the box. Logged so skill authors notice and can ship specific guidance.
     if (light_model and resolved_api_key
             and not skill_triggers
-            and (not guidance or not qcheck_enabled)):
+            and (not guidance or not qcheck_enabled)
+            and not additional_guidance):
         guidance = DEFAULT_QUALITATIVE_GUIDANCE
         qcheck_enabled = True
         import logging
@@ -301,11 +326,15 @@ def _build_policy(args, *, skill_meta: dict | None = None,
             "Skill declares no live_reading.triggers and no "
             "qualitative_check.guidance — using framework's default "
             "qualitative-check guidance. For tailored monitoring, "
-            "add a qualitative_check.guidance block to the skill's frontmatter."
+            "add a qualitative_check.guidance block to the skill's frontmatter "
+            "or pass --additional-guidance on the command line."
         )
-    if (light_model and qcheck_enabled and guidance and resolved_api_key):
+
+    # Compose: skill baseline + operator-supplied session guidance
+    composed_guidance = _compose_guidance(guidance, additional_guidance)
+    if (light_model and qcheck_enabled and composed_guidance and resolved_api_key):
         triggers.append(QualitativeProgressTrigger(
-            guidance=str(guidance),
+            guidance=composed_guidance,
             model=light_model,
             api_key=resolved_api_key,
             interval_sec=float(args.qualitative_interval or qcheck.get("interval_sec", 45.0)),

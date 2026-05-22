@@ -58,6 +58,22 @@ def render_live_panel() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _compose_guidance(skill_guidance: Optional[str],
+                       additional_guidance: Optional[str]) -> str:
+    """Concatenate the skill's baseline qualitative-check guidance with the
+    operator's session-specific watch-for instructions. Either part may
+    be empty; returns "" only when both are."""
+    parts: list[str] = []
+    if skill_guidance and str(skill_guidance).strip():
+        parts.append(str(skill_guidance).strip())
+    if additional_guidance and str(additional_guidance).strip():
+        parts.append(
+            "Session-specific guidance from the operator:\n"
+            + str(additional_guidance).strip()
+        )
+    return "\n\n".join(parts)
+
+
 def _infer_light_model(main_model: str) -> str:
     """Default cheap/fast companion for the qualitative-check trigger.
 
@@ -101,6 +117,7 @@ matching this schema — no prose, no markdown fences:
   "reading_interval_sec": 2.0,                // float, seconds between readings
   "threshold": null | <float 0..1>,           // optional per-session ThresholdCrossTrigger
   "chemistry_hint": null | ["Si","O"] | [["Si"],["Ge"]],   // optional; for structure_matching skills
+  "additional_guidance": null | "<text>",     // session-specific watch-for guidance — see below
   "summary": "one sentence describing what you extracted"
 }}
 
@@ -119,6 +136,16 @@ triggers from prose — they fire automatically. The only ADDITIVE
 per-session trigger you can extract here is a ThresholdCrossTrigger:
 if the user says "alert me when FOM > 0.7" or "fire when confidence
 crosses 0.85", set ``threshold`` to that float. Otherwise leave null.
+
+additional_guidance: extract any session-specific qualitative
+watch-for instructions the user mentions — "watch for the 47° peak
+because this sample undergoes amorphization above 700 K", "alert me
+if intensity ratio between (111) and (220) drifts more than 30%",
+"keep an eye on noise floor in the high-2θ region", etc. These get
+concatenated with the skill's baseline qualitative guidance so the
+Stage-1 cheap LLM sees both. Leave as null when the user gives no
+domain-specific cues. Strip out source-kind / interval / skill-pick
+language — those go in their own fields, not here.
 
 Pick the skill_label whose description best matches the experiment.
 If nothing matches, use "diagnostics/live_passthrough".
@@ -231,20 +258,25 @@ def _render_setup() -> None:
     description = st.text_area(
         "Describe your experiment",
         key="live_description",
-        height=150,
+        height=180,
         placeholder=(
             "Examples:\n"
-            "• I'm running an XRD scan on a Si sample. The instrument writes "
-            "scan_XXXX.csv files into a folder, one per measurement. Alert me "
-            "when the verdict changes or when a new peak appears.\n\n"
+            "• I'm running an XRD scan on a Si sample at 800 K. The "
+            "instrument writes scan_XXXX.csv files into a folder, one per "
+            "measurement. Watch specifically for the (111) peak losing "
+            "intensity — this sample undergoes amorphization above ~700 K.\n\n"
             "• Single CSV file gets rewritten as the scan progresses. "
-            "Check every 3 seconds."
+            "Check every 3 seconds. Alert me when confidence crosses 0.85.\n\n"
+            "• Time-resolved Raman series, files accumulating in /data/run42/. "
+            "Keep an eye on the D-band intensity ratio."
         ),
         help=(
             "Plain language. The LLM extracts the source kind, reading "
-            "interval, triggers, and any chemistry hint, then starts the "
-            "session. The dashboard header shows the parsed config so you "
-            "can spot a mis-parse and Stop + re-describe if needed."
+            "interval, optional threshold, chemistry hint, and any "
+            "domain-specific watch-for instructions (which get appended "
+            "to the skill's baseline qualitative guidance). The dashboard "
+            "header shows the parsed config so you can spot a mis-parse "
+            "and Stop + re-describe if needed."
         ),
     )
 
@@ -360,6 +392,11 @@ def _start_from_parsed(*, parsed: dict, data_path: str, model: str,
     st.session_state.live_chemistry_hint = parsed.get("chemistry_hint")
     st.session_state.live_parsed_config = parsed
 
+    # Session-specific qualitative-check guidance from the operator's
+    # prose. Concatenated with the skill's baseline guidance at trigger
+    # construction time so the Stage-1 LLM sees both.
+    additional_guidance = (parsed.get("additional_guidance") or "").strip() or None
+
     _spin_up_live_session(
         model=model,
         api_key=api_key,
@@ -371,6 +408,7 @@ def _start_from_parsed(*, parsed: dict, data_path: str, model: str,
         reading_interval_sec=float(parsed.get("reading_interval_sec", 2.0)),
         triggers=triggers,
         light_model=light_model,
+        additional_guidance=additional_guidance,
     )
 
 
@@ -416,6 +454,7 @@ def _spin_up_live_session(
     reading_interval_sec: float,
     triggers: dict,
     light_model: Optional[str] = None,
+    additional_guidance: Optional[str] = None,
 ) -> None:
     from scilink.agents.exp_agents.analysis_orchestrator import (
         AnalysisMode,
@@ -509,15 +548,19 @@ def _spin_up_live_session(
         )
 
     # Qualitative-progress (Stage 1 LLM, cheap/fast) — added when the
-    # operator supplied a light model AND the skill declares guidance.
+    # operator supplied a light model AND the skill (or framework
+    # fallback, or operator prompt) provides guidance.
     qcheck = skill.get("meta", {}).get("live_reading", {}).get("qualitative_check") or {}
     guidance = qcheck.get("guidance")
     qcheck_enabled = qcheck.get("enabled", True)
     # Framework fallback: if the skill declares no deterministic triggers
-    # AND no qualitative guidance, give it generic LLM-only monitoring so
-    # a minimum-viable skill (just reading_fn) is useful out of the box.
+    # AND no qualitative guidance AND the operator didn't write any
+    # session-specific guidance either, install generic LLM-only
+    # monitoring so a minimum-viable skill (just reading_fn) is useful
+    # out of the box.
     if (light_model and api_key and not skill_triggers
-            and (not guidance or not qcheck_enabled)):
+            and (not guidance or not qcheck_enabled)
+            and not additional_guidance):
         guidance = DEFAULT_QUALITATIVE_GUIDANCE
         qcheck_enabled = True
         import logging
@@ -525,11 +568,16 @@ def _spin_up_live_session(
             "Skill declares no live_reading.triggers and no "
             "qualitative_check.guidance — using framework's default "
             "qualitative-check guidance. For tailored monitoring, "
-            "add a qualitative_check.guidance block to the skill's frontmatter."
+            "add a qualitative_check.guidance block to the skill's frontmatter "
+            "or describe the watch-fors in the live-session description."
         )
-    if light_model and qcheck_enabled and guidance:
+
+    # Compose the final guidance string: skill baseline + operator
+    # session-specific additions. Either part may be empty.
+    composed_guidance = _compose_guidance(guidance, additional_guidance)
+    if light_model and qcheck_enabled and composed_guidance:
         trigger_list.append(QualitativeProgressTrigger(
-            guidance=str(guidance),
+            guidance=composed_guidance,
             model=light_model,
             api_key=api_key,
             interval_sec=float(qcheck.get("interval_sec", 45.0)),
@@ -622,6 +670,7 @@ def _render_dashboard() -> None:
     )
     chem = parsed.get("chemistry_hint")
     chem_blob = f" · chemistry `{chem}`" if chem else ""
+    extra_guidance = (parsed.get("additional_guidance") or "").strip()
 
     col_h1, col_h2 = st.columns([4, 1])
     with col_h1:
@@ -633,6 +682,9 @@ def _render_dashboard() -> None:
             f"source `{source_kind}`{source_detail} · "
             f"{n_triggers} active triggers{threshold_blob}{chem_blob}"
         )
+        if extra_guidance:
+            with st.expander("Session-specific guidance"):
+                st.write(extra_guidance)
     with col_h2:
         if st.button("Stop Session", type="primary"):
             session.stop(timeout=3.0)
