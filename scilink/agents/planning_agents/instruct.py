@@ -861,3 +861,62 @@ Your output must define two variables: `answer` (the result) and `summary` (a on
 
 Return a JSON object with a single key "code" containing ONLY the TODO lines as a string.
 Example: {{"code": "data = [read_json(f) for f in json_files[:5]]\\nanswer = len(data)\\nsummary = \\"Found 5 records\\""}}"""
+
+
+SCREEN_DATABASE_CODEGEN_PROMPT = """Write a deterministic database SCREENING script that produces a ranked top-K candidate list.
+
+This is the production screening pass — a follow-up to earlier exploratory
+`query_knowledge_data` calls. The script scans every file, filters by the QUERY
+criteria, scores/ranks survivors, and emits a structured JSON result.
+
+DIRECTORY: {directory}
+CONTENTS: {files_by_extension}
+TOTAL FILES: {total_files}
+
+SAMPLE FILENAMES (first 20): {filenames}
+
+{sample_sections}
+{prior_exploration_block}
+QUERY: {query}
+TOP-K to retain: {top_k}
+
+The script below provides imports, file discovery, and reader functions.
+Complete ONLY the TODO section.
+
+```
+{scaffold}
+# --- TODO: filter every file by the QUERY criteria; score/rank survivors;
+#           retain the top-{top_k}. At the end of your TODO, define:
+#             n_scanned        (int)         — total files scanned
+#             results          (list[dict])  — ranked survivors, best first;
+#                                              each dict has at least `name`
+#                                              plus the fields used for
+#                                              filtering and ranking
+#             filters_applied  (dict)        — filter criteria you applied
+#             ranking_metric   (str)         — what you ranked by
+#             summary          (str)         — 1-2 sentence narrative
+# ---
+
+# --- END TODO ---
+import json as _json
+print(_json.dumps({{
+    "n_scanned":       n_scanned,
+    "n_passed":        len(results),
+    "results":         results[:{top_k}],
+    "filters_applied": filters_applied,
+    "ranking_metric":  ranking_metric,
+    "summary":         summary,
+}}))
+```
+
+When PRIOR EXPLORATION FINDINGS are provided above, treat them as ground truth
+about the schema (field names, value ranges, nested paths) — do not re-discover.
+
+Write the **minimal** code that answers the QUERY. Use the single simplest
+matching path the data supports. Do not add speculative fallbacks or handlers
+for schema variations you have not seen in the samples or prior exploration.
+
+For directories larger than ~10,000 files, use `multiprocessing.Pool` with
+`imap_unordered` and chunksize ≥ 256 — a serial loop will not finish in time.
+
+Return a JSON object with a single key "code" containing ONLY the TODO lines as a string."""

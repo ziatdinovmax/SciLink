@@ -21,11 +21,12 @@ skill. Sections whose heading isn't in the canonical vocabulary are preserved
 under the ``extras`` key (lowercased heading → body) and a warning is logged.
 """
 
+import importlib
 import logging
 import os
 import re
 from pathlib import Path
-from typing import Dict, List
+from typing import Callable, Dict, List, Optional
 
 import yaml
 
@@ -315,3 +316,86 @@ def _parse_sections(text: str, source: str = "<skill>") -> tuple[Dict[str, str],
             )
 
     return sections, extras
+
+
+def resolve_tick_fn(skill_meta: Optional[dict]) -> Optional[Callable]:
+    """Resolve a skill's ``live_tick.tick_fn`` dotted path to a callable.
+
+    Skill frontmatter declares the live-monitoring tick function under
+    a ``live_tick:`` block::
+
+        ---
+        description: ...
+        live_tick:
+          enabled: true
+          tick_fn: my_package.live_tick:my_tick
+          data_type: spectrum_1d        # optional, informational
+          trigger_overrides:            # optional
+            heartbeat_sec: 30
+        ---
+
+    This helper imports the dotted path and returns the callable so a
+    ``LiveSession`` can be constructed with it. Behaviors:
+
+      - Returns ``None`` if ``skill_meta`` is None / empty, has no
+        ``live_tick:`` block, or has ``enabled: false``. Callers
+        interpret this as "this skill is not live-mode-enabled."
+      - Raises :class:`ValueError` on a malformed dotted path (must be
+        ``module.path:attribute``).
+      - Raises :class:`ImportError` when the module can't be imported
+        — message includes the original error.
+      - Raises :class:`AttributeError` when the attribute doesn't
+        exist on the module.
+      - Raises :class:`TypeError` when the attribute exists but isn't
+        callable.
+
+    Strict errors are deliberate: a skill that claims to be
+    live-mode-enabled but ships a broken tick_fn should fail loudly
+    at session-construction time, not silently fall back to no live
+    mode.
+    """
+    if not skill_meta:
+        return None
+    block = skill_meta.get("live_tick")
+    if not block or not isinstance(block, dict):
+        return None
+    # Explicit disable: skill author commented out the tick by setting enabled: false
+    enabled = block.get("enabled", True)
+    if enabled is False:
+        return None
+    dotted = block.get("tick_fn")
+    if not dotted or not isinstance(dotted, str):
+        return None
+    if ":" not in dotted:
+        raise ValueError(
+            "live_tick.tick_fn must be 'module.path:function_name'; "
+            f"got {dotted!r}"
+        )
+    module_path, attr_name = dotted.split(":", 1)
+    module_path = module_path.strip()
+    attr_name = attr_name.strip()
+    if not module_path or not attr_name:
+        raise ValueError(
+            "live_tick.tick_fn must be 'module.path:function_name'; "
+            f"got {dotted!r}"
+        )
+    try:
+        module = importlib.import_module(module_path)
+    except ImportError as e:
+        raise ImportError(
+            f"live_tick.tick_fn module {module_path!r} could not be imported "
+            f"(skill claims live-mode but the tick module is missing): {e}"
+        ) from e
+    try:
+        fn = getattr(module, attr_name)
+    except AttributeError as e:
+        raise AttributeError(
+            f"live_tick.tick_fn: module {module_path!r} has no attribute "
+            f"{attr_name!r}"
+        ) from e
+    if not callable(fn):
+        raise TypeError(
+            f"live_tick.tick_fn {dotted!r} is not callable; got "
+            f"{type(fn).__name__}"
+        )
+    return fn

@@ -172,6 +172,17 @@ def resolve_primary_data_path(data_input: Union[str, Dict[str, str], None]) -> O
         print(f"  - 🔍 Found saved user description: {saved_desc_file.name}")
         return {"file_path": str(path), "metadata_path": str(saved_desc_file)}
 
+    # Priority D: Session-internal artifacts (produced by the agent itself
+    # earlier in this session — screening CSVs, scalarizer outputs, etc.).
+    # The agent already knows what's in them; the metadata prompt is asking
+    # the human about something the agent just wrote. Skip the prompt and
+    # let the parser infer from headers.
+    for parent in path.parents:
+        if parent.name.startswith("meta_session_") or parent.name == "campaign_outputs":
+            print(f"  - ℹ️  Session-internal file ({path.name}); "
+                  "skipping metadata prompt — parser will use headers.")
+            return {"file_path": str(path), "metadata_path": None}
+
     # 4. Interactive Fallback
     from .user_interface import get_dataset_description
     

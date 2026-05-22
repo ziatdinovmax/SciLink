@@ -22,6 +22,7 @@ from .instruct import (
     BO_OBJECTIVE_DISTILL_PROMPT,
     KNOWLEDGE_QUERY_CODEGEN_PROMPT,
     KNOWLEDGE_QUERY_DIRECTORY_CODEGEN_PROMPT,
+    SCREEN_DATABASE_CODEGEN_PROMPT,
 )
 from ..lit_agents.optimize_query import optimize_search_query, is_molecule_design_objective
 from ...skills.loader import list_skills, load_skill
@@ -810,7 +811,17 @@ class OrchestratorTools:
             parameters={
                 "specific_objective": {"type": "string", "description": "Research objective"},
                 "knowledge_paths": {"type": "string", "description": "Comma-separated paths to papers/reports/docs folders"},
-                "primary_data_set": {"type": "string", "description": "Path to experimental data file or folder"},
+                "primary_data_set": {
+                    "type": "string",
+                    "description": (
+                        "Path to a RAW EXPERIMENTAL data file or folder — "
+                        "instrument measurements, composition assays, isotherms "
+                        "the user collected. NOT for intermediate artifacts "
+                        "produced by upstream tool calls in this session "
+                        "(screening CSVs, scalarizer outputs, BO logs); those "
+                        "belong in `knowledge_paths` or `additional_context`."
+                    ),
+                },
                 "additional_context": {"type": "string", "description": "Lab constraints, equipment, reagents, budget, etc."},
                 "skill": {
                     "type": "string",
@@ -3476,8 +3487,18 @@ class OrchestratorTools:
                 return summary
             return repr(data)[:2000]
 
+        from functools import lru_cache as _lru_cache
+
+        @_lru_cache(maxsize=32)
         def _inspect_directory(dir_path: str) -> dict:
-            """Summarize directory contents for LLM-driven querying."""
+            """Summarize directory contents for LLM-driven querying.
+
+            Memoized: per-orchestrator-instance cache keyed on `dir_path`.
+            The directory listing is static for the lifetime of a planning
+            session, so repeated qkd/screen_database calls on the same
+            database reuse the inspection (saves ~1-3s per call on large
+            directories). Callers must treat the return dict as read-only.
+            """
             from collections import Counter
 
             p = Path(dir_path)
@@ -3817,6 +3838,8 @@ class OrchestratorTools:
 
             scripts_dir = Path(self.orch.base_dir) / "knowledge_query_scripts"
             scripts_dir.mkdir(parents=True, exist_ok=True)
+            debug_dir = scripts_dir / "_debug"
+            debug_dir.mkdir(parents=True, exist_ok=True)
 
             last_error = None
             for attempt in range(2):
@@ -3831,7 +3854,7 @@ class OrchestratorTools:
                         generation_config={"max_output_tokens": 8192, "temperature": 0.0},
                     )
                     # Log raw response for debugging
-                    raw_log_path = scripts_dir / f"kq_dir_raw_{abs(hash(query)) % 10000:04d}_a{attempt}.txt"
+                    raw_log_path = debug_dir / f"kq_dir_raw_{abs(hash(query)) % 10000:04d}_a{attempt}.txt"
                     raw_log_path.write_text(response.text)
                     # LLM returns JSON: {"code": "...TODO lines..."}
                     result, parse_error = parse_json_from_response(response)
@@ -3911,7 +3934,7 @@ class OrchestratorTools:
             """Query a knowledge data file or directory database with natural language."""
             import subprocess
 
-            print(f"  ⚡ Tool: Querying knowledge data: '{query[:80]}...'")
+            print(f"  ⚡ Tool: Querying knowledge data: '{query}'")
 
             # 1. Discover queryable files / directory databases. Informational
             #    only — an explicit `file_name` path is resolved directly below,
@@ -4079,6 +4102,295 @@ class OrchestratorTools:
                 }
             },
             required=["query"]
+        )
+
+        # ─── screen_database — production filter+rank, follow-up to qkd ────
+        def _thread_all_exploration_results(max_items: int = 20) -> str:
+            """Collect ALL prior `query_knowledge_data` tool results from the
+            session's chat history (regardless of which file/directory they
+            targeted) and format them as a PRIOR EXPLORATION FINDINGS block
+            for the screen_database codegen prompt. Returns "" when no
+            exploration history is available."""
+            try:
+                msgs = getattr(self.orch, "messages", None) or []
+                qkd_call_ids = set()
+                hits = []
+                for m in msgs:
+                    role = m.get("role") if isinstance(m, dict) else None
+                    if role == "assistant":
+                        for tc in (m.get("tool_calls") or []):
+                            fn = tc.get("function") if isinstance(tc, dict) else None
+                            fn_name = fn.get("name") if isinstance(fn, dict) else None
+                            tc_id = tc.get("id") if isinstance(tc, dict) else None
+                            if fn_name == "query_knowledge_data" and tc_id:
+                                qkd_call_ids.add(tc_id)
+                    elif role == "tool" and m.get("tool_call_id") in qkd_call_ids:
+                        try:
+                            content = m.get("content", "")
+                            payload = json.loads(content) if isinstance(content, str) else content
+                        except (json.JSONDecodeError, TypeError):
+                            continue
+                        if not isinstance(payload, dict) or payload.get("status") != "success":
+                            continue
+                        hits.append({
+                            "query":   payload.get("query", ""),
+                            "file":    payload.get("file", ""),
+                            "answer":  payload.get("answer"),
+                            "summary": payload.get("summary", ""),
+                        })
+                if not hits:
+                    return ""
+                hits = hits[-max_items:]
+                lines = [
+                    "",
+                    "PRIOR EXPLORATION FINDINGS (from earlier query_knowledge_data",
+                    "calls; treat as ground truth about schema and value ranges —",
+                    "do not re-discover):",
+                    "",
+                ]
+                for i, r in enumerate(hits, 1):
+                    ans_str = json.dumps(r["answer"], default=str)
+                    if len(ans_str) > 1500:
+                        ans_str = ans_str[:1500] + "... (truncated)"
+                    lines.append(f"  [{i}] file: {r['file']}")
+                    lines.append(f"      Q: {r['query']}")
+                    lines.append(f"      A: {ans_str}")
+                    if r["summary"]:
+                        lines.append(f"      summary: {r['summary']}")
+                    lines.append("")
+                return "\n".join(lines)
+            except Exception:
+                # Defensive — never let exploration-context wiring break screening.
+                return ""
+
+        def screen_database(query: str, database_path: str,
+                            top_k: int = 50, max_retries: int = 3) -> str:
+            """Production database screening — filter + rank → top-K JSON."""
+            import subprocess
+            from scilink.executors import require_sandbox_approval
+
+            print(f"  ⚡ Tool: screen_database  '{query}'  top_k={top_k}")
+
+            if not require_sandbox_approval(
+                interactive=True, allow_override=True,
+                context=f"Database screening over {database_path}",
+            ):
+                return json.dumps({"status": "error",
+                                   "message": "Sandbox approval denied — screening cannot run."})
+
+            # Resolve to an absolute directory path (direct → fallback discovery).
+            direct = Path(database_path).expanduser()
+            if direct.is_dir():
+                dir_path, dir_name = str(direct.resolve()), direct.name
+            else:
+                target, err = _resolve_knowledge_data_file(database_path)
+                if err:
+                    return err
+                if isinstance(target, dict) and target.get("type") == "directory":
+                    dir_path, dir_name = target["path"], target["name"]
+                elif isinstance(target, str) and Path(target).is_dir():
+                    dir_path, dir_name = target, Path(target).name
+                else:
+                    return json.dumps({
+                        "status": "error",
+                        "message": (f"screen_database requires a directory database; "
+                                    f"got '{database_path}'. For single CSV/XLSX "
+                                    f"files use query_knowledge_data."),
+                    })
+
+            print(f"    - Inspecting directory: {dir_name}")
+            try:
+                info = _inspect_directory(dir_path)
+            except Exception as e:
+                return json.dumps({"status": "error", "message": f"Failed to inspect directory: {e}"})
+            if not info["sample_files"]:
+                return json.dumps({"status": "error", "message": "Directory is empty or unreadable."})
+
+            scaffold = _build_directory_scaffold(info)
+            sample_sections = []
+            for s in info["sample_files"]:
+                sample_sections.append(f"--- {s['name']} ({s['ext']}) ---\n{s['content']}")
+            sample_text = "\nSAMPLE FILE CONTENTS:\n" + "\n\n".join(sample_sections) if sample_sections else ""
+
+            prior_context = _thread_all_exploration_results()
+
+            prompt = SCREEN_DATABASE_CODEGEN_PROMPT.format(
+                directory=info["directory"],
+                files_by_extension=info["files_by_extension"],
+                total_files=info["total_files"],
+                filenames=info["all_filenames_sample"],
+                sample_sections=sample_text,
+                prior_exploration_block=prior_context,
+                scaffold=scaffold,
+                query=query,
+                top_k=top_k,
+            )
+
+            scripts_dir = Path(self.orch.base_dir) / "knowledge_query_scripts"
+            scripts_dir.mkdir(parents=True, exist_ok=True)
+            debug_dir = scripts_dir / "_debug"
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            safe_name = re.sub(r'[^A-Za-z0-9._-]+', '_', dir_name)
+            hash_str  = f"{abs(hash((dir_name, query))) % 10000:04d}"
+            script_path = scripts_dir / f"screen_{safe_name}_{hash_str}.py"
+            result_path = scripts_dir / f"screen_{safe_name}_{hash_str}_result.json"
+
+            last_error = None
+            for attempt in range(max_retries):
+                current_prompt = prompt
+                if last_error:
+                    current_prompt += (
+                        f"\n\n**PREVIOUS ERROR (attempt {attempt}):** {last_error}\n"
+                        "Fix the script. If PRIOR EXPLORATION FINDINGS are above, "
+                        "re-read them — schema/field-name mistakes are the most common cause."
+                    )
+
+                try:
+                    from scilink.knowledge import parse_json_from_response
+                    # No max_output_tokens cap — screening codegen needs room for
+                    # legitimate complexity (filter + score + multiprocessing + sort).
+                    response = self.orch.planner.model.generate_content(
+                        [current_prompt],
+                        generation_config={"temperature": 0.0},
+                    )
+                    (debug_dir / f"screen_{safe_name}_{hash_str}_a{attempt}.txt").write_text(response.text)
+                    parsed, parse_error = parse_json_from_response(response)
+                    if parse_error or not parsed or "code" not in parsed:
+                        body = _extract_code_block(response.text) or response.text.strip()
+                        body = re.sub(r'^```\w*\s*', '', body)
+                        body = re.sub(r'\s*```$', '', body)
+                    else:
+                        body = parsed["code"]
+                    # Force `fork` start method so the LLM-generated multiprocessing.Pool()
+                    # works on macOS without an `if __name__` guard (the alternative —
+                    # spawn — re-imports the script and recursively spawns workers).
+                    mp_preamble = (
+                        "import multiprocessing as _scilink_mp\n"
+                        "try: _scilink_mp.set_start_method('fork', force=True)\n"
+                        "except (RuntimeError, ValueError): pass\n"
+                    )
+                    code = (
+                        f"{scaffold}\n"
+                        f"{mp_preamble}"
+                        f"{body}\n"
+                        f"import json as _json\n"
+                        f"print(_json.dumps({{\n"
+                        f"    \"n_scanned\":       n_scanned,\n"
+                        f"    \"n_passed\":        len(results),\n"
+                        f"    \"results\":         results[:{top_k}],\n"
+                        f"    \"filters_applied\": filters_applied,\n"
+                        f"    \"ranking_metric\":  ranking_metric,\n"
+                        f"    \"summary\":         summary,\n"
+                        f"}}))\n"
+                    )
+                except Exception as e:
+                    return json.dumps({"status": "error", "message": f"Codegen failed: {e}"})
+
+                script_path.write_text(code)
+                print(f"    - Running: {script_path.name} (attempt {attempt + 1}/{max_retries})")
+
+                try:
+                    proc = subprocess.run(
+                        ["python", str(script_path)],
+                        capture_output=True, text=True, timeout=120,
+                    )
+                    if proc.returncode != 0:
+                        last_error = proc.stderr.strip()[-800:]
+                        continue
+                    result_obj = None
+                    for line in reversed(proc.stdout.strip().splitlines()):
+                        line = line.strip()
+                        if line.startswith('{') and line.endswith('}'):
+                            try:
+                                cand = json.loads(line)
+                                if "n_scanned" in cand and "results" in cand:
+                                    result_obj = cand
+                                    break
+                            except json.JSONDecodeError:
+                                continue
+                    if not result_obj:
+                        last_error = f"No valid screening-result JSON in output: {proc.stdout[-400:]}"
+                        continue
+
+                    full = {
+                        "query": query,
+                        "database_path": dir_path,
+                        "n_scanned": result_obj.get("n_scanned"),
+                        "n_passed":  result_obj.get("n_passed"),
+                        "filters_applied": result_obj.get("filters_applied"),
+                        "ranking_metric":  result_obj.get("ranking_metric"),
+                        "results":   result_obj.get("results", []),
+                        "summary":   result_obj.get("summary", ""),
+                        "exploration_context_used": bool(prior_context),
+                        "top_k_requested": top_k,
+                        "script_path": str(script_path),
+                        "attempts_used": attempt + 1,
+                    }
+                    result_path.write_text(json.dumps(full, indent=2, default=str))
+                    print(
+                        f"    - ✅ Screened: {full['n_passed']} of {full['n_scanned']} "
+                        f"passed; saved {result_path.name}"
+                    )
+                    preview = full["results"][:min(10, len(full["results"]))]
+                    return json.dumps({
+                        "status": "success",
+                        "output_path": str(result_path),
+                        "script_path": str(script_path),
+                        "n_scanned": full["n_scanned"],
+                        "n_passed":  full["n_passed"],
+                        "filters_applied": full["filters_applied"],
+                        "ranking_metric":  full["ranking_metric"],
+                        "summary":   full["summary"],
+                        "top_k_preview": preview,
+                    })
+                except subprocess.TimeoutExpired:
+                    last_error = "Script timed out (120s limit)."
+                    continue
+
+            return json.dumps({
+                "status": "error",
+                "message": f"Screening failed after {max_retries} attempts.",
+                "last_error": last_error,
+                "script_path": str(script_path),
+            })
+
+        self._register_tool(
+            func=screen_database,
+            name="screen_database",
+            description=(
+                "Production database screening — filter + rank an entire "
+                "directory database (folder of JSON / CSV records) by criteria "
+                "expressed in natural language, persist the ranked top-K to a "
+                "JSON file, and return a preview. Use as a follow-up to a few "
+                "exploratory `query_knowledge_data` calls — ALL prior "
+                "`query_knowledge_data` answers from this session are "
+                "auto-threaded into the screening codegen prompt as schema "
+                "ground truth, so call exploration FIRST. Scope: deterministic "
+                "local-file filter / rank only. Sandbox-gated."
+            ),
+            parameters={
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Filter criteria + ranking metric in natural language. "
+                        "Be explicit about numeric thresholds, the ranking "
+                        "direction, and any composite scoring formula."
+                    ),
+                },
+                "database_path": {
+                    "type": "string",
+                    "description": (
+                        "Absolute path to the directory database to screen, or "
+                        "the bare directory name if listed under the knowledge "
+                        "directory."
+                    ),
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "Number of top-ranked entries to retain. Default 50.",
+                },
+            },
+            required=["query", "database_path"],
         )
 
         # =====================================================================

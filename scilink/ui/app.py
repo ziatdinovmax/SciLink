@@ -300,6 +300,17 @@ def _start_task(prompt: str) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════
+# Live mode: short-circuits the welcome screen and the active-session
+# tab UI both — the live panel handles its own setup + dashboard
+# inline (it bootstraps its own AnalysisOrchestratorAgent at the
+# "Start Live Session" click).
+# ══════════════════════════════════════════════════════════════════
+if st.session_state.get("app_mode") == "live":
+    from scilink.ui.components.live_panel import render_live_panel
+    render_live_panel()
+    st.stop()
+
+# ══════════════════════════════════════════════════════════════════
 # Welcome screen (before session is started)
 # ══════════════════════════════════════════════════════════════════
 if not st.session_state.agent_initialized:
