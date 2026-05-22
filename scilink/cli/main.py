@@ -153,6 +153,11 @@ def main():
         sys.argv = [sys.argv[0] + ' analyze'] + sys.argv[2:]
         return analyze_main()
 
+    elif command == 'live':
+        from scilink.cli.live import main as live_main
+        sys.argv = [sys.argv[0] + ' live'] + sys.argv[2:]
+        return live_main()
+
     elif command in ('explore', 'meta'):  # 'meta' kept as a back-compat alias
         from scilink.cli.meta import main as meta_main
         sys.argv = [f"{sys.argv[0]} {command}"] + sys.argv[2:]
@@ -202,6 +207,11 @@ Available Commands:
 
   analyze       Analysis agents for microscopy, spectroscopy, and
                 experimental data processing
+
+  live          Real-time monitoring of an in-progress measurement.
+                Polls a file the instrument is writing to and invokes
+                the LLM only on interesting events (verdict change,
+                new feature, confidence reversal, periodic heartbeat).
 
   plan          Interactive planning orchestrator for experimental design
                 and Bayesian optimization workflows
