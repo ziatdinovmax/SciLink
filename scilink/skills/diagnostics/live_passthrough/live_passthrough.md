@@ -4,6 +4,18 @@ live_reading:
   enabled: true
   reading_fn: scilink.skills.diagnostics.live_passthrough.live_reading:passthrough_reading
   data_type: spectrum_1d
+  # Skill owns the deterministic trigger taxonomy. Framework auto-injects
+  # ManualTrigger (UI button) and QualitativeProgressTrigger (from the
+  # qualitative_check block below); everything else is declared here.
+  triggers:
+    - type: scilink.agents.exp_agents.live_triggers:VerdictChangeTrigger
+    - type: scilink.agents.exp_agents.live_triggers:NewFeatureTrigger
+      config:
+        lookback: 5
+    - type: scilink.agents.exp_agents.live_triggers:ConfidenceReversalTrigger
+      config:
+        window: 5
+        min_reversal: 1.0      # one whole peak dropped (peak_count is integer)
   qualitative_check:
     enabled: true
     interval_sec: 45

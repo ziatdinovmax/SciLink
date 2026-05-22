@@ -99,12 +99,7 @@ matching this schema — no prose, no markdown fences:
   "source_strategy": "newest" | "unseen",     // only used when source_kind == directory_watch
   "source_sort_by": "mtime" | "name",         // only used when source_kind == directory_watch
   "reading_interval_sec": 2.0,                // float, seconds between readings
-  "triggers": {{
-    "verdict_change":  true | false,          // fire on verdict transitions
-    "new_feature":     true | false,          // fire when a new peak / feature appears
-    "reversal":        true | false,          // fire on confidence reversal
-    "threshold":       null | <float 0..1>     // null = no threshold-cross trigger
-  }},
+  "threshold": null | <float 0..1>,           // optional per-session ThresholdCrossTrigger
   "chemistry_hint": null | ["Si","O"] | [["Si"],["Ge"]],   // optional; for structure_matching skills
   "summary": "one sentence describing what you extracted"
 }}
@@ -118,12 +113,12 @@ Source-kind disambiguation rules:
 
 Reading-interval defaults to 2.0 s unless the user specifies otherwise.
 
-Trigger defaults (when the user doesn't say): verdict_change=true,
-new_feature=true, reversal=true, threshold=null.
-
-If the user explicitly disables a trigger ("skip the verdict-change
-trigger") set it to false. If they mention a confidence threshold
-("alert me when FOM > 0.7"), set threshold to that float.
+Triggers: each skill ships its own deterministic trigger taxonomy
+(declared in skill frontmatter). The user can't toggle the skill's
+triggers from prose — they fire automatically. The only ADDITIVE
+per-session trigger you can extract here is a ThresholdCrossTrigger:
+if the user says "alert me when FOM > 0.7" or "fire when confidence
+crosses 0.85", set ``threshold`` to that float. Otherwise leave null.
 
 Pick the skill_label whose description best matches the experiment.
 If nothing matches, use "diagnostics/live_passthrough".
@@ -198,43 +193,6 @@ def _extract_json(text: str) -> Optional[dict]:
         with st.expander("Raw LLM response"):
             st.code(candidate[:2000])
         return None
-
-
-def _render_parsed_preview(parsed: dict) -> None:
-    """Render the parsed config as a readable preview."""
-    st.markdown("**Parsed configuration**")
-    summary = parsed.get("summary", "")
-    if summary:
-        st.caption(summary)
-
-    triggers = parsed.get("triggers", {}) or {}
-    trigger_list = []
-    if triggers.get("verdict_change", True):
-        trigger_list.append("verdict change")
-    if triggers.get("new_feature", True):
-        trigger_list.append("new feature")
-    if triggers.get("reversal", True):
-        trigger_list.append("confidence reversal")
-    if triggers.get("threshold") is not None:
-        trigger_list.append(f"threshold cross at {triggers['threshold']:.2f}")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        st.write(f"**Skill:**  `{parsed.get('skill_label', '?')}`")
-        st.write(f"**Source:**  `{parsed.get('source_kind', '?')}`")
-        if parsed.get("source_kind") == "directory_watch":
-            st.write(
-                f"&nbsp;&nbsp;&nbsp;pattern `{parsed.get('source_pattern', '*.txt')}`, "
-                f"strategy `{parsed.get('source_strategy', 'newest')}`, "
-                f"sort `{parsed.get('source_sort_by', 'mtime')}`",
-                unsafe_allow_html=True,
-            )
-        chem = parsed.get("chemistry_hint")
-        if chem:
-            st.write(f"**Chemistry hint:**  `{chem}`")
-    with col2:
-        st.write(f"**Reading interval:**  `{parsed.get('reading_interval_sec', 2.0)} s`")
-        st.write(f"**Triggers:**  {', '.join(trigger_list) or '_none_'}")
 
 
 def _render_setup() -> None:
@@ -383,22 +341,17 @@ def _start_from_parsed(*, parsed: dict, data_path: str, model: str,
         if source_kind == "directory_watch" else {}
     )
     triggers_in = parsed.get("triggers", {}) or {}
-    # Heartbeat (periodic status update during quiet stretches) is OFF by
-    # default in the UI flow — most users want event-driven alerts only,
-    # and a heartbeat firing every minute on a stable scan is just noise.
-    # CLI / programmatic users can still enable it explicitly via
-    # `scilink live --heartbeat-sec N` or by passing
-    # `triggers["heartbeat"] = True` to _spin_up_live_session.
+    # Skill owns the deterministic-trigger list now. The only per-session
+    # additive knobs surfaced in the NL parse are ``threshold`` (adds a
+    # ThresholdCrossTrigger). The parser may also still emit the old
+    # `triggers` block out of habit — accept both shapes for backwards
+    # compatibility with older skills / older parser outputs.
+    threshold_val = parsed.get("threshold")
+    if threshold_val is None:
+        # Older parse shape: triggers.threshold
+        threshold_val = triggers_in.get("threshold")
     triggers = {
-        "verdict_change": bool(triggers_in.get("verdict_change", True)),
-        "new_feature":    bool(triggers_in.get("new_feature", True)),
-        "reversal":       bool(triggers_in.get("reversal", True)),
-        "heartbeat":      False,
-        "heartbeat_sec":  None,
-        "threshold":      (
-            float(triggers_in["threshold"])
-            if triggers_in.get("threshold") is not None else None
-        ),
+        "threshold": float(threshold_val) if threshold_val is not None else None,
     }
 
     # Stash the chemistry hint where the reading function reads it,
@@ -541,20 +494,18 @@ def _spin_up_live_session(
     else:
         source = MtimePollFileSource(data_path)
 
-    # Trigger policy from the UI choices
-    trigger_list = []
-    if triggers["verdict_change"]:
-        trigger_list.append(VerdictChangeTrigger())
-    if triggers["new_feature"]:
-        trigger_list.append(NewFeatureTrigger())
-    if triggers["reversal"]:
-        trigger_list.append(ConfidenceReversalTrigger())
+    # Trigger policy:
+    #   1. Skill owns the deterministic-trigger list (frontmatter
+    #      live_reading.triggers); resolved here.
+    #   2. Per-session additions: optional ThresholdCrossTrigger,
+    #      framework-injected QualitativeProgressTrigger + ManualTrigger.
+    from scilink.skills.loader import resolve_triggers_from_skill
+    trigger_list = list(resolve_triggers_from_skill(skill.get("meta", {})))
     if triggers["threshold"] is not None:
         trigger_list.append(
             ThresholdCrossTrigger(threshold=triggers["threshold"], direction="above")
         )
-    if triggers["heartbeat"]:
-        trigger_list.append(HeartbeatTrigger(interval_sec=triggers["heartbeat_sec"]))
+
     # Qualitative-progress (Stage 1 LLM, cheap/fast) — added when the
     # operator supplied a light model AND the skill declares guidance.
     qcheck = skill.get("meta", {}).get("live_reading", {}).get("qualitative_check") or {}
@@ -639,14 +590,18 @@ def _render_dashboard() -> None:
             f"sort `{parsed.get('source_sort_by', 'mtime')}`)"
         )
 
-    trigger_names = []
-    triggers_in = parsed.get("triggers", {}) or {}
-    if triggers_in.get("verdict_change", True): trigger_names.append("verdict change")
-    if triggers_in.get("new_feature", True):    trigger_names.append("new feature")
-    if triggers_in.get("reversal", True):       trigger_names.append("reversal")
-    if triggers_in.get("threshold") is not None:
-        trigger_names.append(f"threshold>{triggers_in['threshold']:.2f}")
-    triggers_blob = ", ".join(trigger_names) or "—"
+    # Trigger summary in the header — count of active triggers in the
+    # session's policy (skill-declared + framework-injected). Avoids
+    # reaching into the parsed-config triggers dict (which is gone now
+    # that skills own the deterministic list).
+    n_triggers = len(getattr(session.policy, "triggers", []))
+    extra_threshold = parsed.get("threshold")
+    if extra_threshold is None:
+        # Backwards compat with older parse shape
+        extra_threshold = (parsed.get("triggers") or {}).get("threshold")
+    threshold_blob = (
+        f" · threshold>{extra_threshold:.2f}" if extra_threshold is not None else ""
+    )
     chem = parsed.get("chemistry_hint")
     chem_blob = f" · chemistry `{chem}`" if chem else ""
 
@@ -658,7 +613,7 @@ def _render_dashboard() -> None:
         )
         st.caption(
             f"source `{source_kind}`{source_detail} · "
-            f"triggers: {triggers_blob}{chem_blob}"
+            f"{n_triggers} active triggers{threshold_blob}{chem_blob}"
         )
     with col_h2:
         if st.button("Stop Session", type="primary"):

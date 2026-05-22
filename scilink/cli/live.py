@@ -135,18 +135,11 @@ runs any pending LLM call to completion).
         default="above",
         help="Crossing direction for the threshold trigger. Default: above.",
     )
-    parser.add_argument(
-        "--no-verdict-trigger", action="store_true",
-        help="Disable the verdict-change trigger (rare — kept for replay tuning).",
-    )
-    parser.add_argument(
-        "--no-new-feature-trigger", action="store_true",
-        help="Disable the new-feature trigger.",
-    )
-    parser.add_argument(
-        "--no-reversal-trigger", action="store_true",
-        help="Disable the confidence-reversal trigger.",
-    )
+    # Note: skills now own the deterministic-trigger list (declared via
+    # live_reading.triggers in skill frontmatter). To disable a trigger
+    # the skill ships, edit the skill (or fork it via SCILINK_SKILLS_PATH).
+    # Per-session additions (threshold, heartbeat, qualitative) remain
+    # available via the flags below.
     parser.add_argument(
         "--model", default="claude-opus-4-6",
         help="LLM model to use for the slow loop. Default: claude-opus-4-6.",
@@ -243,18 +236,34 @@ def _infer_light_model(main_model: str) -> str:
 
 def _build_policy(args, *, skill_meta: dict | None = None,
                    resolved_api_key: str | None = None):
+    """Build the trigger policy for a live session.
+
+    Skill owns the deterministic-trigger list (declared via
+    ``live_reading.triggers`` in frontmatter); we resolve it via
+    :func:`scilink.skills.loader.resolve_triggers_from_skill`.
+
+    Framework adds:
+      - :class:`ThresholdCrossTrigger` if the operator passed
+        ``--threshold`` (additive per-session knob; skills usually don't
+        ship a session-specific threshold).
+      - :class:`HeartbeatTrigger` if ``--heartbeat-sec > 0`` (kept as a
+        per-session knob; off by default).
+      - :class:`QualitativeProgressTrigger` if the skill declares
+        ``qualitative_check.guidance`` AND the operator hasn't disabled
+        the cheap LLM via ``--qualitative-model none``.
+      - :class:`ManualTrigger` always (UI's "Interpret Now" button).
+    """
     from scilink.agents.exp_agents.live_triggers import (
-        ConfidenceReversalTrigger, HeartbeatTrigger, ManualTrigger,
-        NewFeatureTrigger, QualitativeProgressTrigger,
-        ThresholdCrossTrigger, TriggerPolicy, VerdictChangeTrigger,
+        HeartbeatTrigger, ManualTrigger, QualitativeProgressTrigger,
+        ThresholdCrossTrigger, TriggerPolicy,
     )
-    triggers = []
-    if not args.no_verdict_trigger:
-        triggers.append(VerdictChangeTrigger())
-    if not args.no_new_feature_trigger:
-        triggers.append(NewFeatureTrigger())
-    if not args.no_reversal_trigger:
-        triggers.append(ConfidenceReversalTrigger())
+    from scilink.skills.loader import resolve_triggers_from_skill
+
+    triggers: list = []
+    # 1. Skill-declared deterministic triggers
+    triggers.extend(resolve_triggers_from_skill(skill_meta))
+
+    # 2. Per-session additions
     if args.threshold is not None:
         triggers.append(ThresholdCrossTrigger(
             threshold=args.threshold, direction=args.threshold_direction,
@@ -262,10 +271,10 @@ def _build_policy(args, *, skill_meta: dict | None = None,
     if args.heartbeat_sec and args.heartbeat_sec > 0:
         triggers.append(HeartbeatTrigger(interval_sec=args.heartbeat_sec))
 
-    # Qualitative-progress (Stage 1 cheap-LLM trigger). Enabled when:
-    #   1. The user didn't disable it explicitly via --qualitative-model none
-    #   2. The skill declares a qualitative_check.guidance block
-    #   3. We have an API key to call the cheap model with
+    # 3. Qualitative-progress (Stage 1 cheap LLM). Enabled when:
+    #    - operator didn't disable via --qualitative-model none
+    #    - skill declares a qualitative_check.guidance block
+    #    - an API key is available
     light_arg = (args.qualitative_model or "").strip().lower()
     if light_arg == "none":
         light_model = None
@@ -285,7 +294,8 @@ def _build_policy(args, *, skill_meta: dict | None = None,
             history_n=int(qcheck.get("history_n", 10)),
         ))
 
-    triggers.append(ManualTrigger())  # always available
+    # 4. ManualTrigger always — the UI's "Interpret Now" button
+    triggers.append(ManualTrigger())
     return TriggerPolicy(triggers=triggers)
 
 
