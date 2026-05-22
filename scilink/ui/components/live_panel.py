@@ -272,47 +272,43 @@ def _render_setup() -> None:
         ),
         help=(
             "Plain language. The LLM extracts the source kind, reading "
-            "interval, triggers, and any chemistry hint, then shows you the "
-            "result for review before starting."
+            "interval, triggers, and any chemistry hint, then starts the "
+            "session. The dashboard header shows the parsed config so you "
+            "can spot a mis-parse and Stop + re-describe if needed."
         ),
     )
 
-    btn_col1, btn_col2 = st.columns([1, 3])
-    with btn_col1:
-        parse_clicked = st.button(
-            "Parse description",
-            disabled=not (description and description.strip() and resolved_key),
-            help=(
-                "Enter a description and ensure an API key is set in the sidebar."
-                if not (description and description.strip() and resolved_key)
-                else None
-            ),
-        )
-    if parse_clicked:
-        with st.spinner("Parsing description…"):
+    # Single-click flow: parse the description and start in one action.
+    # Disable until consent + non-empty data path + non-empty description.
+    start_disabled = (
+        not consent or not data_path
+        or not (description and description.strip())
+        or not resolved_key
+    )
+    start_help = None
+    if not consent:
+        start_help = "Check the code-execution consent box in the sidebar first."
+    elif not resolved_key:
+        start_help = "Set an API key in the sidebar (or LLM env var)."
+    elif not data_path:
+        start_help = "Enter a data file or directory path above."
+    elif not (description and description.strip()):
+        start_help = "Describe the experiment above."
+
+    if st.button(
+        "Start Live Session", type="primary",
+        disabled=start_disabled, help=start_help,
+    ):
+        with st.spinner("Parsing description and starting session…"):
             parsed = _parse_description(
                 description.strip(), model, resolved_key, skill_options,
             )
-        if parsed is not None:
-            st.session_state.live_parsed_config = parsed
-
-    parsed = st.session_state.get("live_parsed_config")
-    if parsed:
-        st.divider()
-        _render_parsed_preview(parsed)
-
-        start_disabled = not consent or not data_path
-        start_help = None
-        if not consent:
-            start_help = "Check the code-execution consent box in the sidebar first."
-        elif not data_path:
-            start_help = "Enter a data file or directory path above."
-        if st.button("Start Live Session", type="primary",
-                     disabled=start_disabled, help=start_help):
-            _start_from_parsed(
-                parsed=parsed, data_path=data_path,
-                model=model, api_key=resolved_key, skill_options=skill_options,
-            )
+        if parsed is None:
+            return  # _parse_description already surfaced the error
+        _start_from_parsed(
+            parsed=parsed, data_path=data_path,
+            model=model, api_key=resolved_key, skill_options=skill_options,
+        )
 
 
 def _start_from_parsed(*, parsed: dict, data_path: str, model: str,
@@ -365,8 +361,11 @@ def _start_from_parsed(*, parsed: dict, data_path: str, model: str,
         ),
     }
 
-    # Stash the chemistry hint where the tick fn reads it
+    # Stash the chemistry hint where the reading function reads it,
+    # and the full parsed config so the dashboard header can show what
+    # the LLM extracted (lets the user spot mis-parses post-start).
     st.session_state.live_chemistry_hint = parsed.get("chemistry_hint")
+    st.session_state.live_parsed_config = parsed
 
     _spin_up_live_session(
         model=model,
@@ -450,8 +449,17 @@ def _spin_up_live_session(
     session_dir = Path(f"{SESSION_DIR_PREFIXES['live']}_{ts}").resolve()
     session_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build the agent. live mode is autonomous — the LLM doesn't pause for
-    # mid-call human feedback during a reading-driven interpretation.
+    # Live mode is fixed at AUTONOMOUS. The standard autonomy modes are:
+    #   co-pilot  → pause after every step; needs many turns, but each
+    #               run_task call is single-turn → can't complete.
+    #   autopilot → pause at decision points via blocking input() prompts;
+    #               doesn't compose with a Streamlit fragment (locks the
+    #               page).
+    #   autonomous → run end-to-end, no pauses.
+    # Live mode is instrument-paced and event-driven; the agent's job is
+    # to interpret as events happen, not to ask permission per event.
+    # The sidebar's autonomy picker does NOT apply here — we deliberately
+    # ignore it.
     try:
         orch = AnalysisOrchestratorAgent(
             base_dir=str(session_dir),
@@ -565,18 +573,45 @@ def _render_dashboard() -> None:
     skill_label = st.session_state.get("live_skill_label", "?")
     data_path = st.session_state.get("live_data_path", "?")
 
-    # Header bar
+    # Header bar — shows the parsed config so the user can verify the
+    # LLM understood the experiment correctly. If it's wrong, click Stop,
+    # refine the description, and start a new session.
+    parsed = st.session_state.get("live_parsed_config", {}) or {}
+    source_kind = parsed.get("source_kind", "?")
+    source_detail = ""
+    if source_kind == "directory_watch":
+        source_detail = (
+            f" (pattern `{parsed.get('source_pattern', '*.txt')}`, "
+            f"sort `{parsed.get('source_sort_by', 'mtime')}`)"
+        )
+
+    trigger_names = []
+    triggers_in = parsed.get("triggers", {}) or {}
+    if triggers_in.get("verdict_change", True): trigger_names.append("verdict change")
+    if triggers_in.get("new_feature", True):    trigger_names.append("new feature")
+    if triggers_in.get("reversal", True):       trigger_names.append("reversal")
+    if triggers_in.get("threshold") is not None:
+        trigger_names.append(f"threshold>{triggers_in['threshold']:.2f}")
+    triggers_blob = ", ".join(trigger_names) or "—"
+    chem = parsed.get("chemistry_hint")
+    chem_blob = f" · chemistry `{chem}`" if chem else ""
+
     col_h1, col_h2 = st.columns([4, 1])
     with col_h1:
         st.markdown(
-            f"**Session active** · skill `{skill_label}` · data `{data_path}` "
-            f"· interval {session.reading_interval_sec:.1f}s"
+            f"**Session active** · skill `{skill_label}` · "
+            f"data `{data_path}` · interval `{session.reading_interval_sec:.1f}s`"
+        )
+        st.caption(
+            f"source `{source_kind}`{source_detail} · "
+            f"triggers: {triggers_blob}{chem_blob}"
         )
     with col_h2:
         if st.button("Stop Session", type="primary"):
             session.stop(timeout=3.0)
             st.session_state.live_session = None
             st.session_state.live_orch = None
+            st.session_state.live_parsed_config = None
             st.rerun()
 
     @st.fragment(run_every="2s")
