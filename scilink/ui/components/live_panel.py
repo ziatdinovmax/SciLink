@@ -55,26 +55,64 @@ def render_live_panel() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_sidebar_config() -> tuple[str, str, bool]:
+    """Read model / API key / consent from the standard sidebar fields.
+
+    Matches the keys the sidebar writes: cfg_model_preset / cfg_model_custom
+    (sidebar.py:213-222) and cfg_api_key / cfg_consent (lines 223, 267).
+    """
+    preset = st.session_state.get("cfg_model_preset", "")
+    if preset == "Custom":
+        model = st.session_state.get("cfg_model_custom", "") or ""
+    else:
+        model = preset or "claude-opus-4-6"
+    api_key = st.session_state.get("cfg_api_key") or ""
+    consent = bool(st.session_state.get("cfg_consent"))
+    return model, api_key, consent
+
+
 def _render_setup() -> None:
-    from scilink.skills.loader import list_all_skills, load_skill
+    # Sidebar prerequisites — same as analyze / plan / simulate modes:
+    # CONSENT is the only hard gate at the UI level (sidebar.py:343).
+    # The API key resolves through the standard chain at dispatch time:
+    # sidebar input → ANTHROPIC_API_KEY / GEMINI_API_KEY / OPENAI_API_KEY.
+    model, api_key, consent = _resolve_sidebar_config()
+
+    env_key = (
+        os.environ.get("ANTHROPIC_API_KEY")
+        or os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+    )
+
+    # Banner — only consent missing is strictly blocking; key missing is a soft warning
+    if not consent:
+        st.warning(
+            "Before starting a live session, please check the "
+            "**code-execution consent** box in the sidebar."
+        )
+    elif not api_key and not env_key:
+        st.info(
+            "No API key in the sidebar and no LLM env var set. You can "
+            "still configure a session below, but starting it will fail "
+            "until a key is provided."
+        )
+    else:
+        key_source = "sidebar" if api_key else "environment"
+        st.success(
+            f"Sidebar config ready · model **{model}** · API key from "
+            f"**{key_source}** · consent given."
+        )
 
     # Skills with a live_tick block — filter to those that resolve to an importable
     # tick_fn at session-start time so the user only sees options that will work.
     skill_options = _discover_live_enabled_skills()
 
     with st.form("live_session_setup"):
-        st.subheader("Start a live session")
-
-        # Model + API key from the standard sidebar fields
-        model = st.session_state.get("cfg_model") or "claude-opus-4-6"
-        api_key = (
-            st.session_state.get("cfg_api_key")
-            or os.environ.get("ANTHROPIC_API_KEY")
-            or os.environ.get("GEMINI_API_KEY")
-            or os.environ.get("OPENAI_API_KEY")
-            or ""
+        st.subheader("Live session — measurement setup")
+        st.caption(
+            "Configure the data source + skill + triggers below. Model and "
+            "API key are read from the sidebar fields."
         )
-        st.caption(f"Model: **{model}**  ·  API key: {'set' if api_key else '**MISSING — set in sidebar**'}")
 
         data_path = st.text_input(
             "Data file path",
@@ -135,14 +173,37 @@ def _render_setup() -> None:
                 disabled=not t_threshold,
             )
 
-        start = st.form_submit_button("Start Live Session", type="primary")
+        # Match the standard sidebar's pattern (sidebar.py:343): consent
+        # is the only strict UI-level gate. Missing API key surfaces as an
+        # error at dispatch time after env-var fallback fails.
+        start = st.form_submit_button(
+            "Start Live Session",
+            type="primary",
+            disabled=not consent,
+            help=(
+                "Check the code-execution consent box in the sidebar first."
+                if not consent else None
+            ),
+        )
 
     if not start:
         return
 
     # Validation
-    if not api_key:
-        st.error("API key required — set it in the sidebar first.")
+    if not consent:
+        st.error(
+            "Code-execution consent required — check the sidebar checkbox first."
+        )
+        return
+    # Resolve the actual key at dispatch time (sidebar input takes precedence
+    # over env vars, matching sidebar.py:663's resolution order).
+    resolved_key = api_key or env_key
+    if not resolved_key:
+        st.error(
+            "No API key — enter one in the sidebar or set "
+            "ANTHROPIC_API_KEY / GEMINI_API_KEY / OPENAI_API_KEY in the "
+            "environment."
+        )
         return
     if not data_path:
         st.error("Data file path is required.")
@@ -159,7 +220,7 @@ def _render_setup() -> None:
 
     _spin_up_live_session(
         model=model,
-        api_key=api_key,
+        api_key=resolved_key,
         data_path=data_path,
         source_kind=source_kind,
         skill_name=selected_skill["name"],
