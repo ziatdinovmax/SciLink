@@ -75,16 +75,39 @@ class LiveSession:
         skill_state: Optional[dict] = None,
         on_llm_response: Optional[Callable[[TriggerEvent, dict], None]] = None,
         on_reading: Optional[Callable[[LiveReadingResult], None]] = None,
+        # Adaptive-script support
+        session_dir: Optional[Path] = None,
+        adapt_model: Optional[str] = None,
+        adapt_api_key: Optional[str] = None,
+        adapt_description: Optional[str] = None,
+        adapt_additional_guidance: Optional[str] = None,
+        adapt_skill_context: Optional[str] = None,
     ) -> None:
         self.orch = orchestrator
         self.source = data_source
-        self.reading_fn = reading_fn
+        self._reading_fn: ReadingFn = reading_fn
+        self._reading_fn_lock = threading.Lock()
         self.reading_interval_sec = float(reading_interval_sec)
         self.policy = trigger_policy or default_policy()
         self.history_path = Path(history_path) if history_path else None
         self.skill_state = dict(skill_state) if skill_state else {}
         self.on_llm_response = on_llm_response
         self.on_reading = on_reading
+
+        # Adaptive script regeneration: the supervisor can request a new
+        # reading_fn mid-session. We need a place to save scripts and an
+        # LLM + API key to call. When session_dir + adapt_model are
+        # absent, adaptation is disabled (supervisor's "adapt" action
+        # falls back to "flag").
+        self.session_dir: Optional[Path] = Path(session_dir) if session_dir else None
+        self._adapt_model = adapt_model
+        self._adapt_api_key = adapt_api_key
+        self._adapt_description = adapt_description
+        self._adapt_additional_guidance = adapt_additional_guidance
+        self._adapt_skill_context = adapt_skill_context
+        self._adapt_version = 1   # initial script (if generated) is v1
+        self._adapt_count = 0
+        self._adapt_history: list[dict] = []  # one entry per regeneration
 
         self._history: deque[LiveReadingResult] = deque(maxlen=history_maxlen)
         self._history_lock = threading.Lock()
@@ -96,6 +119,10 @@ class LiveSession:
         self._session_state: dict = {}
         self._started_at: Optional[float] = None
         self._llm_dispatcher_busy = threading.Event()
+
+        # Cache the last K LatestData payloads for validating a
+        # regenerated reading_fn before hot-swapping.
+        self._validation_cache: deque[LatestData] = deque(maxlen=5)
 
         # Surface the ManualTrigger (if present) so force_interpretation()
         # can request it without searching the policy each call.
@@ -183,12 +210,23 @@ class LiveSession:
             # Use Event.wait so stop() can wake us early.
             self._stop.wait(timeout=sleep_for)
 
+    @property
+    def reading_fn(self) -> ReadingFn:
+        """Currently-active reading function. Lock-protected (atomically
+        swapped by the adaptation path)."""
+        with self._reading_fn_lock:
+            return self._reading_fn
+
     def _take_reading(self) -> None:
         data = self.source.read_latest()
         if data is None:
             return
+        # Cache for validation of any future regenerated reading_fn
+        self._validation_cache.append(data)
+        with self._reading_fn_lock:
+            active_fn = self._reading_fn
         try:
-            result = self.reading_fn(data, self._session_state, self.skill_state)
+            result = active_fn(data, self._session_state, self.skill_state)
         except Exception:  # noqa: BLE001
             _logger.exception("reading_fn raised; skipping this reading")
             return
@@ -242,9 +280,23 @@ class LiveSession:
                     coalesced.append(self._event_queue.get_nowait())
                 except queue.Empty:
                     break
+            # Route adapt events to script regeneration; everything else
+            # to the regular full-model interpretation path. If a batch
+            # contains BOTH, do the adapt first (it changes the active
+            # reading_fn) and then run interpretation with the surviving
+            # non-adapt events.
+            adapt_events = [
+                e for e in coalesced
+                if e.name == "qualitative_progress"
+                and (e.details or {}).get("action") == "adapt"
+            ]
+            other_events = [e for e in coalesced if e not in adapt_events]
             try:
                 self._llm_dispatcher_busy.set()
-                self._invoke_llm(coalesced)
+                for ev in adapt_events:
+                    self._adapt_reading_script(ev)
+                if other_events:
+                    self._invoke_llm(other_events)
             finally:
                 self._llm_dispatcher_busy.clear()
 
@@ -283,6 +335,122 @@ class LiveSession:
                 self.on_llm_response(latest_event, result)
             except Exception:  # noqa: BLE001
                 _logger.exception("on_llm_response callback raised")
+
+    # ------------------------------------------------------------------
+    # Adaptive-script regeneration
+    # ------------------------------------------------------------------
+
+    def _adapt_reading_script(self, event: TriggerEvent) -> None:
+        """Regenerate the per-reading analysis script in response to a
+        supervisor "adapt" event. Validates against the cache; only
+        hot-swaps if validation passes. All outcomes are JSONL-logged
+        and surfaced to the operator via the on_llm_response callback.
+        """
+        if not self.session_dir or not self._adapt_model or not self._adapt_api_key:
+            # Configured-off: log + fall through (no hot-swap, no failure)
+            self._write_jsonl({
+                "kind": "script_adaptation_skipped",
+                "timestamp": time.time(),
+                "reason": "adaptive-script regeneration not configured "
+                          "(no session_dir / adapt_model / adapt_api_key)",
+                "trigger_reason": (event.details or {}).get("reason", ""),
+            })
+            return
+        from .live_codegen import (
+            generate_reading_script, save_and_load_reading_script,
+            validate_reading_script,
+        )
+        deviation_reason = (event.details or {}).get("reason", "")
+        recent = self.history(n=10)
+        prior_summary = "Most recent script was activated at version v{}. ".format(
+            self._adapt_version
+        )
+        prior_summary += f"Supervisor flagged: {deviation_reason}\n\n"
+        prior_summary += "Recent readings:\n"
+        for r in recent[-6:]:
+            prior_summary += (
+                f"  t={r.timestamp:.1f} {r.metric_name}={r.primary_metric:.3f} "
+                f"verdict={r.verdict} features={len(r.detected_features)} "
+                f"notes={r.notes[:80]}\n"
+            )
+        source = generate_reading_script(
+            description=self._adapt_description or "(no description)",
+            additional_guidance=self._adapt_additional_guidance,
+            skill_context=self._adapt_skill_context,
+            model=self._adapt_model,
+            api_key=self._adapt_api_key,
+            prior_context=prior_summary,
+        )
+        if source is None:
+            self._write_jsonl({
+                "kind": "script_adaptation_failed",
+                "timestamp": time.time(),
+                "reason": "LLM code-generation returned no usable source",
+                "trigger_reason": deviation_reason,
+            })
+            return
+        new_version = self._adapt_version + 1
+        new_fn = save_and_load_reading_script(source, self.session_dir, new_version)
+        if new_fn is None:
+            self._write_jsonl({
+                "kind": "script_adaptation_failed",
+                "timestamp": time.time(),
+                "reason": "generated script failed to import",
+                "trigger_reason": deviation_reason,
+                "version": new_version,
+            })
+            return
+        # Validate against cached LatestData payloads. If validation
+        # fails, keep the current reading_fn — never swap to a broken
+        # script.
+        ok, reason = validate_reading_script(
+            new_fn, list(self._validation_cache), self.skill_state,
+        )
+        if not ok:
+            self._write_jsonl({
+                "kind": "script_adaptation_failed",
+                "timestamp": time.time(),
+                "reason": f"validation failed: {reason}",
+                "trigger_reason": deviation_reason,
+                "version": new_version,
+            })
+            return
+        # Hot-swap
+        with self._reading_fn_lock:
+            self._reading_fn = new_fn
+        self._adapt_version = new_version
+        self._adapt_count += 1
+        self._adapt_history.append({
+            "version": new_version,
+            "timestamp": time.time(),
+            "trigger_reason": deviation_reason,
+            "validation_note": reason,
+            "script_path": str(self.session_dir / f"reading_script_v{new_version}.py"),
+        })
+        self._write_jsonl({
+            "kind": "script_adapted",
+            "timestamp": time.time(),
+            "version": new_version,
+            "trigger_reason": deviation_reason,
+            "validation_note": reason,
+            "script_path": str(self.session_dir / f"reading_script_v{new_version}.py"),
+        })
+        # Surface to the UI via on_llm_response as a synthetic "adaptation" event
+        if self.on_llm_response is not None:
+            try:
+                self.on_llm_response(event, {
+                    "status": "success",
+                    "summary": (
+                        f"Analysis script adapted to v{new_version} in "
+                        f"response to: {deviation_reason}. {reason}"
+                    ),
+                    "key_findings": [],
+                    "files_produced": [str(self.session_dir /
+                                            f"reading_script_v{new_version}.py")],
+                    "warnings": [],
+                })
+            except Exception:  # noqa: BLE001
+                _logger.exception("on_llm_response callback raised on adaptation")
 
     # ------------------------------------------------------------------
     # Task / context shaping

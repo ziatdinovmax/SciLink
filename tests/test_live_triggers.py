@@ -325,10 +325,12 @@ class _FakeLLMCall:
         self.responses = list(responses)
         self.calls: list[dict] = []
 
-    def __call__(self, *, model, api_key, guidance, history_summary):
+    def __call__(self, *, model, api_key, guidance, history_summary,
+                 allow_adapt=True):
         self.calls.append({
             "model": model, "guidance": guidance,
             "history_summary": history_summary,
+            "allow_adapt": allow_adapt,
         })
         if not self.responses:
             return None

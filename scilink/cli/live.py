@@ -65,9 +65,18 @@ runs any pending LLM call to completion).
              "Omit with --replay.",
     )
     parser.add_argument(
-        "--skill", default="xrd",
-        help="Skill name (or domain/name) whose live_reading.reading_fn "
-             "drives the loop. Default: xrd.",
+        "--description", default=None,
+        help="Free-text description of the experiment. The LLM uses this "
+             "to generate the per-reading analysis script at session "
+             "start (and to regenerate it mid-session if the supervisor "
+             "detects a deviation that requires a different analysis "
+             "approach). Required for non-replay runs.",
+    )
+    parser.add_argument(
+        "--skill", default=None,
+        help="Optional skill name (or domain/name) to provide context "
+             "for the script generation. If omitted, the LLM generates "
+             "the script from the description alone.",
     )
     parser.add_argument(
         "--source-kind",
@@ -260,33 +269,32 @@ def _build_policy(args, *, skill_meta: dict | None = None,
                    resolved_api_key: str | None = None):
     """Build the trigger policy for a live session.
 
-    Skill owns the deterministic-trigger list (declared via
-    ``live_reading.triggers`` in frontmatter); we resolve it via
-    :func:`scilink.skills.loader.resolve_triggers_from_skill`.
+    Adaptive-script live mode pivots away from skill-declared
+    deterministic triggers. The policy is now:
 
-    Framework adds:
-      - :class:`ThresholdCrossTrigger` if the operator passed
-        ``--threshold`` (additive per-session knob; skills usually don't
-        ship a session-specific threshold).
-      - :class:`HeartbeatTrigger` if ``--heartbeat-sec > 0`` (kept as a
-        per-session knob; off by default).
-      - :class:`QualitativeProgressTrigger` if the skill declares
-        ``qualitative_check.guidance`` AND the operator hasn't disabled
-        the cheap LLM via ``--qualitative-model none``.
-      - :class:`ManualTrigger` always (UI's "Interpret Now" button).
+      1. :class:`QualitativeProgressTrigger` (the SUPERVISOR) — runs
+         every ~45 s on the cheap model; can decide ok / flag /
+         adapt. Adapt requests trigger script regeneration; flag
+         requests trigger full-model interpretation.
+      2. :class:`ThresholdCrossTrigger` if ``--threshold`` is passed
+         (per-session additive).
+      3. :class:`HeartbeatTrigger` if ``--heartbeat-sec > 0``
+         (per-session additive; off by default).
+      4. :class:`ManualTrigger` always — the "Interpret Now" button.
+
+    The supervisor's guidance is the concatenation of the skill's
+    qualitative_check guidance (if any) + the operator's
+    --additional-guidance. When both are empty, falls back to
+    DEFAULT_QUALITATIVE_GUIDANCE so the supervisor still has a job.
     """
     from scilink.agents.exp_agents.live_triggers import (
         DEFAULT_QUALITATIVE_GUIDANCE, HeartbeatTrigger, ManualTrigger,
         QualitativeProgressTrigger, ThresholdCrossTrigger, TriggerPolicy,
     )
-    from scilink.skills.loader import resolve_triggers_from_skill
 
     triggers: list = []
-    # 1. Skill-declared deterministic triggers
-    skill_triggers = resolve_triggers_from_skill(skill_meta)
-    triggers.extend(skill_triggers)
 
-    # 2. Per-session additions
+    # Per-session additions
     if args.threshold is not None:
         triggers.append(ThresholdCrossTrigger(
             threshold=args.threshold, direction=args.threshold_direction,
@@ -294,10 +302,7 @@ def _build_policy(args, *, skill_meta: dict | None = None,
     if args.heartbeat_sec and args.heartbeat_sec > 0:
         triggers.append(HeartbeatTrigger(interval_sec=args.heartbeat_sec))
 
-    # 3. Qualitative-progress (Stage 1 cheap LLM). Enabled when:
-    #    - operator didn't disable via --qualitative-model none
-    #    - skill declares a qualitative_check.guidance block
-    #    - an API key is available
+    # Supervisor (qualitative trigger with adapt enabled by default)
     light_arg = (args.qualitative_model or "").strip().lower()
     if light_arg == "none":
         light_model = None
@@ -310,27 +315,11 @@ def _build_policy(args, *, skill_meta: dict | None = None,
     guidance = qcheck.get("guidance")
     qcheck_enabled = qcheck.get("enabled", True)
     additional_guidance = (getattr(args, "additional_guidance", None) or "").strip() or None
-    # Framework fallback: if the skill declares no deterministic triggers
-    # AND no qualitative_check.guidance AND the operator provided no
-    # session-specific guidance either, install generic LLM-only monitoring
-    # so a minimum-viable skill (just a reading_fn) is still useful out of
-    # the box. Logged so skill authors notice and can ship specific guidance.
     if (light_model and resolved_api_key
-            and not skill_triggers
             and (not guidance or not qcheck_enabled)
             and not additional_guidance):
         guidance = DEFAULT_QUALITATIVE_GUIDANCE
         qcheck_enabled = True
-        import logging
-        logging.getLogger(__name__).info(
-            "Skill declares no live_reading.triggers and no "
-            "qualitative_check.guidance — using framework's default "
-            "qualitative-check guidance. For tailored monitoring, "
-            "add a qualitative_check.guidance block to the skill's frontmatter "
-            "or pass --additional-guidance on the command line."
-        )
-
-    # Compose: skill baseline + operator-supplied session guidance
     composed_guidance = _compose_guidance(guidance, additional_guidance)
     if (light_model and qcheck_enabled and composed_guidance and resolved_api_key):
         triggers.append(QualitativeProgressTrigger(
@@ -339,9 +328,9 @@ def _build_policy(args, *, skill_meta: dict | None = None,
             api_key=resolved_api_key,
             interval_sec=float(args.qualitative_interval or qcheck.get("interval_sec", 45.0)),
             history_n=int(qcheck.get("history_n", 10)),
+            enable_adaptation=True,
         ))
 
-    # 4. ManualTrigger always — the UI's "Interpret Now" button
     triggers.append(ManualTrigger())
     return TriggerPolicy(triggers=triggers)
 
@@ -363,14 +352,20 @@ def _run_live(args, log) -> int:
     from scilink.agents.exp_agents.analysis_orchestrator import (
         AnalysisMode, AnalysisOrchestratorAgent,
     )
+    from scilink.agents.exp_agents.live_codegen import (
+        generate_reading_script, save_and_load_reading_script,
+    )
     from scilink.agents.exp_agents.live_data_sources import (
         AppendOnlyFileSource, DirectoryWatchSource, MtimePollFileSource,
     )
     from scilink.agents.exp_agents.live_session import LiveSession
-    from scilink.skills.loader import load_skill, resolve_reading_fn
+    from scilink.skills.loader import load_skill
 
     if not args.data_path:
         log.error("data_path is required when not using --replay")
+        return 2
+    if not args.description:
+        log.error("--description is required (a free-text experiment summary)")
         return 2
 
     api_key = _resolve_api_key(args)
@@ -388,25 +383,50 @@ def _run_live(args, log) -> int:
     session_dir.mkdir(parents=True, exist_ok=True)
     log.info("Session dir: %s", session_dir)
 
-    # Skill resolution — accept either bare name or "domain/name"
-    if "/" in args.skill and not args.skill.startswith("/"):
-        domain, name = args.skill.split("/", 1)
-    else:
-        # Default domain for live reading currently is structure_matching for xrd;
-        # the loader's cross-domain fallback will find it from curve_fitting too.
-        name = args.skill
-        domain = "structure_matching" if name == "xrd" else "curve_fitting"
-    try:
-        skill = load_skill(name, domain=domain)
-    except Exception as e:
-        log.error("Failed to load skill %s/%s: %s", domain, name, e)
+    # Optional skill — provides context for codegen but isn't strictly
+    # required in adaptive-script mode. When --skill is omitted, the
+    # LLM generates the reading_fn from the description alone.
+    skill = {}
+    skill_context = None
+    if args.skill:
+        if "/" in args.skill and not args.skill.startswith("/"):
+            domain, name = args.skill.split("/", 1)
+        else:
+            name = args.skill
+            domain = "structure_matching" if name == "xrd" else "curve_fitting"
+        try:
+            skill = load_skill(name, domain=domain)
+            skill_context = (
+                f"Skill: {domain}/{name}\n"
+                f"Description: {skill.get('meta', {}).get('description', '')}\n\n"
+                f"Analysis section:\n{skill.get('analysis', '') or '(none)'}"
+            )
+            log.info("Skill loaded: %s/%s (context-only)", domain, name)
+        except Exception as e:
+            log.warning("Could not load skill %s: %s — proceeding without skill context",
+                        args.skill, e)
+
+    # Generate the initial per-reading analysis script via the full LLM
+    log.info("Generating initial reading_fn via %s …", args.model)
+    additional_guidance = (args.additional_guidance or "").strip() or None
+    script_source = generate_reading_script(
+        description=args.description,
+        additional_guidance=additional_guidance,
+        skill_context=skill_context,
+        model=args.model,
+        api_key=api_key,
+    )
+    if script_source is None:
+        log.error("LLM code generation failed — cannot start session.")
         return 3
-    reading_fn = resolve_reading_fn(skill.get("meta", {}))
+    reading_fn = save_and_load_reading_script(
+        script_source, session_dir, version=1
+    )
     if reading_fn is None:
-        log.error("Skill %s does not declare a live_reading.reading_fn. "
-                  "Check the skill's frontmatter.", args.skill)
+        log.error("Generated script failed to import — cannot start session.")
         return 3
-    log.info("Skill loaded: %s/%s", domain, name)
+    log.info("Initial reading_fn (v1) ready: %s",
+             session_dir / "reading_script_v1.py")
 
     # Data source
     if args.source_kind == "directory_watch":
@@ -456,6 +476,13 @@ def _run_live(args, log) -> int:
         skill_state=skill,
         on_reading=on_reading,
         on_llm_response=on_llm,
+        # Adaptive-script regeneration kwargs
+        session_dir=session_dir,
+        adapt_model=args.model,
+        adapt_api_key=api_key,
+        adapt_description=args.description,
+        adapt_additional_guidance=additional_guidance,
+        adapt_skill_context=skill_context,
     )
 
     chemistry = _parse_chemistry_hint(args.chemistry_hint)

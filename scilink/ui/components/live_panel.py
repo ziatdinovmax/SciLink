@@ -234,14 +234,11 @@ def _render_setup() -> None:
     )
     resolved_key = api_key or env_key
 
+    # Skills are now OPTIONAL context for codegen — no longer required.
+    # When present, their description + analysis section get folded into
+    # the script-generation prompt. When absent, the LLM generates from
+    # the operator's description alone.
     skill_options = _discover_live_enabled_skills()
-    if not skill_options:
-        st.warning(
-            "No skills with a `live_reading:` block found. The skill's "
-            "frontmatter needs `live_reading.reading_fn` set to a "
-            "module:function path."
-        )
-        return
 
     st.subheader("Start a live session")
 
@@ -319,11 +316,30 @@ def _render_setup() -> None:
     elif not (description and description.strip()):
         start_help = "Describe the experiment above."
 
+    # Optional skill picker for codegen CONTEXT only (not required)
+    skill_choice = None
+    selected_skill_for_codegen = None
+    if skill_options:
+        choices = ["(none — use description only)"] + [s["label"] for s in skill_options]
+        skill_choice = st.selectbox(
+            "Optional skill for codegen context", options=choices,
+            help=(
+                "If selected, the skill's description + analysis section "
+                "are passed as additional context to the LLM that "
+                "generates the per-reading analysis script. Optional — "
+                "the description alone is usually enough."
+            ),
+        )
+        if skill_choice and skill_choice != "(none — use description only)":
+            selected_skill_for_codegen = next(
+                (s for s in skill_options if s["label"] == skill_choice), None
+            )
+
     if st.button(
         "Start Live Session", type="primary",
         disabled=start_disabled, help=start_help,
     ):
-        with st.spinner("Parsing description and starting session…"):
+        with st.spinner("Parsing description, generating analysis script…"):
             parsed = _parse_description(
                 description.strip(), model, resolved_key, skill_options,
             )
@@ -333,6 +349,9 @@ def _render_setup() -> None:
         lm = (light_model or "").strip()
         if lm.lower() in ("", "none"):
             lm = None
+        # Force the selected skill (if any) — overrides the LLM's auto-pick
+        if selected_skill_for_codegen is not None:
+            parsed["skill_label"] = selected_skill_for_codegen["label"]
         _start_from_parsed(
             parsed=parsed, data_path=data_path,
             model=model, api_key=resolved_key, skill_options=skill_options,
@@ -343,18 +362,12 @@ def _render_setup() -> None:
 def _start_from_parsed(*, parsed: dict, data_path: str, model: str,
                         api_key: str, skill_options: list[dict],
                         light_model: Optional[str] = None) -> None:
-    # Resolve skill label → (domain, name)
-    skill_label = parsed.get("skill_label", "")
+    # Skill is OPTIONAL — used only for codegen context. If the parser
+    # picked a real skill, fold it in; otherwise proceed without.
+    skill_label = parsed.get("skill_label", "") or ""
     selected = next((s for s in skill_options if s["label"] == skill_label), None)
-    if selected is None:
-        # Fallback to diagnostics if the parser hallucinated a skill
-        selected = next(
-            (s for s in skill_options if s["label"] == "diagnostics/live_passthrough"),
-            None,
-        )
-    if selected is None:
-        st.error(f"Skill {skill_label!r} not available and no fallback found.")
-        return
+    skill_name = selected["name"] if selected else None
+    skill_domain = selected["domain"] if selected else None
 
     if not Path(data_path).exists():
         st.warning(
@@ -373,29 +386,22 @@ def _start_from_parsed(*, parsed: dict, data_path: str, model: str,
         if source_kind == "directory_watch" else {}
     )
     triggers_in = parsed.get("triggers", {}) or {}
-    # Skill owns the deterministic-trigger list now. The only per-session
-    # additive knobs surfaced in the NL parse are ``threshold`` (adds a
-    # ThresholdCrossTrigger). The parser may also still emit the old
-    # `triggers` block out of habit — accept both shapes for backwards
-    # compatibility with older skills / older parser outputs.
     threshold_val = parsed.get("threshold")
     if threshold_val is None:
-        # Older parse shape: triggers.threshold
         threshold_val = triggers_in.get("threshold")
     triggers = {
         "threshold": float(threshold_val) if threshold_val is not None else None,
     }
 
-    # Stash the chemistry hint where the reading function reads it,
-    # and the full parsed config so the dashboard header can show what
-    # the LLM extracted (lets the user spot mis-parses post-start).
     st.session_state.live_chemistry_hint = parsed.get("chemistry_hint")
     st.session_state.live_parsed_config = parsed
 
-    # Session-specific qualitative-check guidance from the operator's
-    # prose. Concatenated with the skill's baseline guidance at trigger
-    # construction time so the Stage-1 LLM sees both.
     additional_guidance = (parsed.get("additional_guidance") or "").strip() or None
+    # Pass the operator's full description through to codegen so the
+    # generated reading_fn knows the experiment shape.
+    description = (parsed.get("summary") or "").strip()
+    if not description:
+        description = st.session_state.get("live_description", "")
 
     _spin_up_live_session(
         model=model,
@@ -403,12 +409,13 @@ def _start_from_parsed(*, parsed: dict, data_path: str, model: str,
         data_path=data_path,
         source_kind=source_kind,
         source_kwargs=source_kwargs,
-        skill_name=selected["name"],
-        skill_domain=selected["domain"],
+        skill_name=skill_name,
+        skill_domain=skill_domain,
         reading_interval_sec=float(parsed.get("reading_interval_sec", 2.0)),
         triggers=triggers,
         light_model=light_model,
         additional_guidance=additional_guidance,
+        description=description,
     )
 
 
@@ -449,16 +456,21 @@ def _spin_up_live_session(
     data_path: str,
     source_kind: str,
     source_kwargs: Optional[dict] = None,
-    skill_name: str,
-    skill_domain: str,
+    skill_name: Optional[str] = None,
+    skill_domain: Optional[str] = None,
     reading_interval_sec: float,
     triggers: dict,
     light_model: Optional[str] = None,
     additional_guidance: Optional[str] = None,
+    description: str = "",
 ) -> None:
     from scilink.agents.exp_agents.analysis_orchestrator import (
         AnalysisMode,
         AnalysisOrchestratorAgent,
+    )
+    from scilink.agents.exp_agents.live_codegen import (
+        generate_reading_script,
+        save_and_load_reading_script,
     )
     from scilink.agents.exp_agents.live_data_sources import (
         AppendOnlyFileSource,
@@ -467,17 +479,14 @@ def _spin_up_live_session(
     )
     from scilink.agents.exp_agents.live_session import LiveSession
     from scilink.agents.exp_agents.live_triggers import (
-        ConfidenceReversalTrigger,
         DEFAULT_QUALITATIVE_GUIDANCE,
         HeartbeatTrigger,
         ManualTrigger,
-        NewFeatureTrigger,
         QualitativeProgressTrigger,
         ThresholdCrossTrigger,
         TriggerPolicy,
-        VerdictChangeTrigger,
     )
-    from scilink.skills.loader import load_skill, resolve_reading_fn
+    from scilink.skills.loader import load_skill
     from scilink.ui.config import SESSION_DIR_PREFIXES
 
     # Session dir parallels the analyze/plan/simulate pattern.
@@ -485,17 +494,7 @@ def _spin_up_live_session(
     session_dir = Path(f"{SESSION_DIR_PREFIXES['live']}_{ts}").resolve()
     session_dir.mkdir(parents=True, exist_ok=True)
 
-    # Live mode is fixed at AUTONOMOUS. The standard autonomy modes are:
-    #   co-pilot  → pause after every step; needs many turns, but each
-    #               run_task call is single-turn → can't complete.
-    #   autopilot → pause at decision points via blocking input() prompts;
-    #               doesn't compose with a Streamlit fragment (locks the
-    #               page).
-    #   autonomous → run end-to-end, no pauses.
-    # Live mode is instrument-paced and event-driven; the agent's job is
-    # to interpret as events happen, not to ask permission per event.
-    # The sidebar's autonomy picker does NOT apply here — we deliberately
-    # ignore it.
+    # Live mode is fixed at AUTONOMOUS (sidebar autonomy picker ignored).
     try:
         orch = AnalysisOrchestratorAgent(
             base_dir=str(session_dir),
@@ -507,18 +506,40 @@ def _spin_up_live_session(
         st.error(f"Failed to initialize agent: {e}")
         return
 
-    # Resolve the skill's reading function (fails fast on broken dotted path).
-    try:
-        skill = load_skill(skill_name, domain=skill_domain)
-        reading_fn = resolve_reading_fn(skill.get("meta", {}))
-    except Exception as e:
-        st.error(f"Failed to load skill {skill_domain}/{skill_name}: {e}")
-        return
-    if reading_fn is None:
-        st.error(
-            f"Skill {skill_domain}/{skill_name} does not declare a live_reading.reading_fn. "
-            "Pick another skill."
+    # Optional skill — context-only for codegen
+    skill = {}
+    skill_context = None
+    if skill_name and skill_domain:
+        try:
+            skill = load_skill(skill_name, domain=skill_domain)
+            skill_context = (
+                f"Skill: {skill_domain}/{skill_name}\n"
+                f"Description: {skill.get('meta', {}).get('description', '')}\n\n"
+                f"Analysis section:\n{skill.get('analysis', '') or '(none)'}"
+            )
+        except Exception as e:
+            st.warning(
+                f"Could not load skill {skill_domain}/{skill_name}: {e} — "
+                "proceeding without skill context."
+            )
+
+    # Generate the initial reading_fn via the full LLM
+    with st.spinner("Generating initial analysis script…"):
+        script_source = generate_reading_script(
+            description=description or "(no description provided)",
+            additional_guidance=additional_guidance,
+            skill_context=skill_context,
+            model=model,
+            api_key=api_key,
         )
+    if script_source is None:
+        st.error("LLM code generation failed — cannot start session.")
+        return
+    reading_fn = save_and_load_reading_script(
+        script_source, session_dir, version=1,
+    )
+    if reading_fn is None:
+        st.error("Generated script failed to import — cannot start session.")
         return
 
     # Data source
@@ -534,46 +555,23 @@ def _spin_up_live_session(
     else:
         source = MtimePollFileSource(data_path)
 
-    # Trigger policy:
-    #   1. Skill owns the deterministic-trigger list (frontmatter
-    #      live_reading.triggers); resolved here.
-    #   2. Per-session additions: optional ThresholdCrossTrigger,
-    #      framework-injected QualitativeProgressTrigger + ManualTrigger.
-    from scilink.skills.loader import resolve_triggers_from_skill
-    skill_triggers = list(resolve_triggers_from_skill(skill.get("meta", {})))
-    trigger_list = list(skill_triggers)
+    # Trigger policy: adaptive mode only ships framework triggers —
+    # ManualTrigger, optional ThresholdCrossTrigger, and the supervisor
+    # (QualitativeProgressTrigger with enable_adaptation=True).
+    trigger_list: list = []
     if triggers["threshold"] is not None:
         trigger_list.append(
             ThresholdCrossTrigger(threshold=triggers["threshold"], direction="above")
         )
 
-    # Qualitative-progress (Stage 1 LLM, cheap/fast) — added when the
-    # operator supplied a light model AND the skill (or framework
-    # fallback, or operator prompt) provides guidance.
     qcheck = skill.get("meta", {}).get("live_reading", {}).get("qualitative_check") or {}
     guidance = qcheck.get("guidance")
     qcheck_enabled = qcheck.get("enabled", True)
-    # Framework fallback: if the skill declares no deterministic triggers
-    # AND no qualitative guidance AND the operator didn't write any
-    # session-specific guidance either, install generic LLM-only
-    # monitoring so a minimum-viable skill (just reading_fn) is useful
-    # out of the box.
-    if (light_model and api_key and not skill_triggers
+    if (light_model and api_key
             and (not guidance or not qcheck_enabled)
             and not additional_guidance):
         guidance = DEFAULT_QUALITATIVE_GUIDANCE
         qcheck_enabled = True
-        import logging
-        logging.getLogger(__name__).info(
-            "Skill declares no live_reading.triggers and no "
-            "qualitative_check.guidance — using framework's default "
-            "qualitative-check guidance. For tailored monitoring, "
-            "add a qualitative_check.guidance block to the skill's frontmatter "
-            "or describe the watch-fors in the live-session description."
-        )
-
-    # Compose the final guidance string: skill baseline + operator
-    # session-specific additions. Either part may be empty.
     composed_guidance = _compose_guidance(guidance, additional_guidance)
     if light_model and qcheck_enabled and composed_guidance:
         trigger_list.append(QualitativeProgressTrigger(
@@ -582,8 +580,9 @@ def _spin_up_live_session(
             api_key=api_key,
             interval_sec=float(qcheck.get("interval_sec", 45.0)),
             history_n=int(qcheck.get("history_n", 10)),
+            enable_adaptation=True,
         ))
-    trigger_list.append(ManualTrigger())  # always-on so "Interpret Now" works
+    trigger_list.append(ManualTrigger())  # "Interpret Now" button
     policy = TriggerPolicy(triggers=trigger_list)
 
     session = LiveSession(
@@ -595,10 +594,14 @@ def _spin_up_live_session(
         history_path=session_dir / "live_readings.jsonl",
         skill_state=skill,
         on_llm_response=lambda ev, result: _record_llm_response(ev, result),
+        # Adaptive script regeneration kwargs
+        session_dir=session_dir,
+        adapt_model=model,
+        adapt_api_key=api_key,
+        adapt_description=description,
+        adapt_additional_guidance=additional_guidance,
+        adapt_skill_context=skill_context,
     )
-    # Thread the parsed chemistry hint (if any) into the session state the
-    # tick / reading function reads from. The structure_matching/xrd
-    # reading_fn uses session_state["chemistry_hint"] to scope its DB query.
     chem_hint = st.session_state.get("live_chemistry_hint")
     if chem_hint is not None:
         session._session_state["chemistry_hint"] = chem_hint
@@ -609,8 +612,11 @@ def _spin_up_live_session(
     st.session_state.live_session = session
     st.session_state.live_session_dir = str(session_dir)
     st.session_state.live_data_path = data_path
-    st.session_state.live_skill_label = f"{skill_domain}/{skill_name}"
-    st.session_state.live_session_feed = []  # list of {"timestamp", "event", "summary"}
+    st.session_state.live_skill_label = (
+        f"{skill_domain}/{skill_name}" if (skill_domain and skill_name)
+        else "(codegen — no skill)"
+    )
+    st.session_state.live_session_feed = []
     st.rerun()
 
 
@@ -674,9 +680,15 @@ def _render_dashboard() -> None:
 
     col_h1, col_h2 = st.columns([4, 1])
     with col_h1:
+        script_version = getattr(session, "_adapt_version", 1)
+        adapt_count = getattr(session, "_adapt_count", 0)
+        adapt_blob = (
+            f" · script `v{script_version}` ({adapt_count} adaptation{'s' if adapt_count != 1 else ''})"
+        )
         st.markdown(
             f"**Session active** · skill `{skill_label}` · "
             f"data `{data_path}` · interval `{session.reading_interval_sec:.1f}s`"
+            f"{adapt_blob}"
         )
         st.caption(
             f"source `{source_kind}`{source_detail} · "
@@ -685,6 +697,14 @@ def _render_dashboard() -> None:
         if extra_guidance:
             with st.expander("Session-specific guidance"):
                 st.write(extra_guidance)
+        # Show the active analysis script source for transparency
+        script_path = (
+            Path(st.session_state.get("live_session_dir", ""))
+            / f"reading_script_v{script_version}.py"
+        )
+        if script_path.is_file():
+            with st.expander(f"Active analysis script (v{script_version})"):
+                st.code(script_path.read_text(), language="python")
     with col_h2:
         if st.button("Stop Session", type="primary"):
             session.stop(timeout=3.0)

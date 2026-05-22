@@ -348,29 +348,35 @@ class ManualTrigger:
 
 
 class QualitativeProgressTrigger:
-    """Periodically asks a cheap/fast LLM whether the recent reading
-    history shows qualitatively interesting patterns the deterministic
-    triggers miss.
+    """Periodically asks a cheap/fast LLM ("the supervisor") whether the
+    recent reading history shows qualitatively interesting patterns
+    that warrant operator attention OR a regeneration of the analysis
+    script.
 
-    The "two-stage LLM" architecture:
+    The "two-stage LLM" architecture, now with three actions:
       Stage 1 — small/fast model (this trigger): looks at last N readings
-                + skill-provided guidance, returns yes/no.
-      Stage 2 — full model (the slow loop): on yes, produces the
-                user-facing interpretation as usual.
+                + guidance, returns one of:
+                  - "ok"    → no event
+                  - "flag"  → fire TriggerEvent; full model interprets in feed
+                  - "adapt" → fire TriggerEvent with action="adapt"; live
+                              session regenerates the reading_fn instead
+                              of producing a user-facing interpretation
+      Stage 2 — full model (slow loop): on "flag", produces the
+                user-facing interpretation in the decision feed; on
+                "adapt", regenerates the per-reading analysis script.
 
-    Cost discipline:
-      - Runs at most every ``interval_sec`` (default 45 s), not every
-        reading. ~80 calls/hour at the default cadence.
-      - Each call sees only the last ``history_n`` readings summarized
-        as compact JSON — keeps tokens low.
-      - Default model is the cheapest in each provider's family
-        (Haiku / GPT-mini / Gemini Flash); skill author / operator can
-        override.
+    The "adapt" action is the load-bearing feature of adaptive live
+    mode: the supervisor decides the current analysis script's
+    assumptions don't match what it's seeing (e.g. peaks have
+    structure the script can't represent, baseline is drifting in a
+    way the metric doesn't capture, the data shape changed). The
+    session then asks the full model to rewrite the reading_fn,
+    validates the result, and hot-swaps if validation passes.
 
-    Skill side: the frontmatter's ``live_reading.qualitative_check``
-    block carries the guidance string + interval. See
-    ``scilink/skills/diagnostics/live_passthrough/live_passthrough.md``
-    for the reference shape.
+    Set ``enable_adaptation=False`` when the trigger should only
+    flag-or-not (e.g. when no model/api_key is available for the
+    adaptation path, or when the operator explicitly wants pure
+    flagging).
     """
 
     name = "qualitative_progress"
@@ -383,17 +389,16 @@ class QualitativeProgressTrigger:
         api_key: str,
         interval_sec: float = 45.0,
         history_n: int = 10,
+        enable_adaptation: bool = True,
     ) -> None:
         self.guidance = guidance.strip() or "Watch for any qualitative changes in the reading trend."
         self.model = model
         self.api_key = api_key
         self.interval_sec = float(interval_sec)
         self.history_n = int(history_n)
+        self.enable_adaptation = bool(enable_adaptation)
         self._last_checked_at: Optional[float] = None
-        # Suppress repeated firings for the same situation: dedupe by
-        # (reason, severity) within a single session unless the metric
-        # has clearly moved on. Keep it simple: store the last fired
-        # reason; if the next decision repeats verbatim, skip it.
+        # Dedupe repeated reasons within a session
         self._last_fired_reason: Optional[str] = None
 
     def evaluate(self, history: list[LiveReadingResult]) -> Optional[TriggerEvent]:
@@ -401,34 +406,48 @@ class QualitativeProgressTrigger:
             return None
         latest = history[-1]
         if self._last_checked_at is None:
-            # First evaluation — set the clock but don't fire immediately
-            # (lets the deterministic triggers go first on session start).
             self._last_checked_at = latest.timestamp
             return None
         if (latest.timestamp - self._last_checked_at) < self.interval_sec:
             return None
         self._last_checked_at = latest.timestamp
 
-        # Build the compact prompt
         recent = history[-self.history_n :]
         summary = _summarize_history_for_llm(recent)
         decision = _call_qualitative_check(
             model=self.model, api_key=self.api_key,
             guidance=self.guidance, history_summary=summary,
+            allow_adapt=self.enable_adaptation,
         )
         if decision is None:
-            return None  # LLM call failed; logged, no fire
-        if not decision.get("fire"):
+            return None  # LLM call failed
+
+        # Action: ok / flag / adapt. Legacy `fire` field maps to flag.
+        action = decision.get("action")
+        if action is None:
+            # Legacy schema fall-through
+            action = "flag" if decision.get("fire") else "ok"
+        if action not in ("ok", "flag", "adapt"):
             return None
+        if action == "ok":
+            return None
+        if action == "adapt" and not self.enable_adaptation:
+            # Supervisor returned adapt but session isn't set up for it
+            # — fall back to flag so the operator at least hears about it.
+            action = "flag"
+
         reason = (decision.get("reason") or "").strip()
-        if reason and reason == self._last_fired_reason:
-            # Same reason as last fire — skip to avoid spamming the feed
+        if action == "flag" and reason and reason == self._last_fired_reason:
+            # Same flag reason as last time — suppress spam (adapt events
+            # never deduped — each adapt request matters)
             return None
-        self._last_fired_reason = reason
+        if action == "flag":
+            self._last_fired_reason = reason
         return TriggerEvent(
             timestamp=latest.timestamp,
             name=self.name,
             details={
+                "action": action,
                 "reason": reason,
                 "severity": decision.get("severity", "medium"),
                 "model": self.model,
@@ -456,31 +475,46 @@ DEFAULT_QUALITATIVE_GUIDANCE = (
 )
 
 
-_QUAL_SYSTEM_PROMPT = """You are a fast, cheap quality monitor for a live scientific measurement.
+_QUAL_SYSTEM_PROMPT = """You are the supervisor for a live scientific measurement. You see the recent readings from an in-progress experiment + the operator's guidance, and decide whether the current analysis is still adequate.
 
-You see the last few readings from an in-progress experiment plus the
-skill's guidance about what to watch for. Decide whether the recent
-trend warrants a full interpretation by the main model.
+You pick ONE of three actions:
 
-Bias toward "fire" only when something is genuinely interesting — not
-just because data is arriving. The deterministic triggers
-(verdict-change, new-feature, confidence-reversal) already handle clean
-transitions; your job is to catch QUALITATIVE patterns those miss:
-intensity-ratio drift, noise-floor creep, slowed peak emergence,
-sample drift, detector saturation, unexpected feature, etc.
+  "ok"    — Nothing notable. The current analysis script is doing its
+            job; no LLM interpretation needed. (This should be the
+            most common decision.)
+
+  "flag"  — Something interesting is happening that the operator
+            should see in their decision feed. Examples: a new
+            feature appearing, intensity ratio drifting,
+            noise-floor creep, slowed progress, unexpected dip,
+            verdict transition. The full model will produce a
+            user-facing interpretation. Pick this when the current
+            analysis script IS capturing what's happening but the
+            pattern warrants narration.
+
+  "adapt" — The current analysis script's assumptions don't match
+            what you're seeing. Examples: peaks have shoulders the
+            script doesn't model, background shape changed, data
+            range shifted, the script's verdict logic feels
+            mis-calibrated for what's actually in the data. Pick
+            this when the script needs to be REWRITTEN, not just
+            commented on. The session will regenerate the reading_fn
+            and hot-swap if the new version validates.
+
+Bias toward "ok". Only pick "flag" or "adapt" when the recent history
+clearly shows a pattern from the guidance below. Bias toward "flag"
+over "adapt" — adaptation is expensive and disruptive; only request
+it when narration alone won't suffice.
 
 Return ONE JSON object — no prose, no markdown fences:
 
 {
-  "fire": true | false,
-  "reason": "one-sentence description of what's interesting (or empty when fire=false)",
+  "action": "ok" | "flag" | "adapt",
+  "reason": "one-sentence justification (empty when action=ok)",
   "severity": "low" | "medium" | "high"
 }
 
-Default: fire=false. Only flip to true when the recent history clearly
-shows one of the patterns the guidance asks you to watch for.
-
-SKILL GUIDANCE:
+GUIDANCE:
 {guidance}
 """
 
@@ -526,6 +560,7 @@ def _resolve_provider_api_key(model: str, fallback_key: str) -> Optional[str]:
 
 def _call_qualitative_check(
     *, model: str, api_key: str, guidance: str, history_summary: str,
+    allow_adapt: bool = True,
 ) -> Optional[dict]:
     """Make the small-model call and parse the JSON response.
 
@@ -537,6 +572,11 @@ def _call_qualitative_check(
     cross-provider usage (Claude main + Gemini light) work without
     extra UI plumbing, as long as the operator has both provider keys
     in the environment.
+
+    ``allow_adapt`` lets the caller restrict the supervisor to ok/flag
+    when adaptation isn't available (e.g. no full model + api key
+    configured for script regeneration). When False, the system
+    prompt's "adapt" option is suppressed.
     """
     try:
         import litellm
@@ -549,6 +589,15 @@ def _call_qualitative_check(
 
     resolved_key = _resolve_provider_api_key(model, api_key)
     system = _QUAL_SYSTEM_PROMPT.replace("{guidance}", guidance)
+    if not allow_adapt:
+        # Strip the adapt branch when the session can't regenerate scripts
+        system = system.replace(
+            'You pick ONE of three actions:',
+            'You pick ONE of two actions:',
+        ).replace(
+            '  "action": "ok" | "flag" | "adapt",',
+            '  "action": "ok" | "flag",',
+        )
     user_msg = f"Recent readings:\n{history_summary}\n\nReturn the JSON decision."
     try:
         resp = litellm.completion(
