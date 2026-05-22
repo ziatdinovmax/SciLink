@@ -2,8 +2,8 @@
 
 A live session owns three threads:
 
-  1. **Tick thread** — polls the data source every ``tick_interval_sec``,
-     calls the skill's ``tick_fn``, appends the result to the rolling
+  1. **Reading thread** — polls the data source every ``reading_interval_sec``,
+     calls the skill's ``reading_fn``, appends the result to the rolling
      history, writes a JSONL line, and evaluates the trigger policy.
      Trigger events go onto an in-process queue.
 
@@ -20,9 +20,9 @@ A live session owns three threads:
      ``on_llm_response`` callback. Does not block on either worker.
 
 JSONL persistence is opt-in via ``history_path``. The schema is one
-record per line, distinguished by a ``"kind"`` field: ``"tick"``,
+record per line, distinguished by a ``"kind"`` field: ``"reading"``,
 ``"trigger"``, ``"llm_response"``, or ``"session_end"``. Replay
-(see :meth:`replay`) reads the same JSONL back tick-by-tick.
+(see :meth:`replay`) reads the same JSONL back reading-by-reading.
 """
 
 from __future__ import annotations
@@ -44,15 +44,15 @@ from .live_triggers import (
     TriggerPolicy,
     default_policy,
 )
-from .live_types import LiveTickResult
+from .live_types import LiveReadingResult
 
 _logger = logging.getLogger(__name__)
 
 
-# A tick function receives the latest data, a mutable session-scoped state dict
-# (whatever the function wants to carry across ticks), and the active skill
-# state dict (frontmatter + sections). It returns a LiveTickResult.
-TickFn = Callable[[LatestData, dict, dict], LiveTickResult]
+# A reading function receives the latest data, a mutable session-scoped state
+# dict (whatever the function wants to carry across readings), and the active
+# skill state dict (frontmatter + sections). It returns a LiveReadingResult.
+ReadingFn = Callable[[LatestData, dict, dict], LiveReadingResult]
 
 
 class LiveSession:
@@ -66,31 +66,31 @@ class LiveSession:
         self,
         orchestrator: Any,                       # AnalysisOrchestratorAgent
         data_source: LiveDataSource,
-        tick_fn: TickFn,
+        reading_fn: ReadingFn,
         *,
-        tick_interval_sec: float = 2.0,
+        reading_interval_sec: float = 2.0,
         trigger_policy: Optional[TriggerPolicy] = None,
         history_path: Optional[Path] = None,
         history_maxlen: int = 2000,
         skill_state: Optional[dict] = None,
         on_llm_response: Optional[Callable[[TriggerEvent, dict], None]] = None,
-        on_tick: Optional[Callable[[LiveTickResult], None]] = None,
+        on_reading: Optional[Callable[[LiveReadingResult], None]] = None,
     ) -> None:
         self.orch = orchestrator
         self.source = data_source
-        self.tick_fn = tick_fn
-        self.tick_interval_sec = float(tick_interval_sec)
+        self.reading_fn = reading_fn
+        self.reading_interval_sec = float(reading_interval_sec)
         self.policy = trigger_policy or default_policy()
         self.history_path = Path(history_path) if history_path else None
         self.skill_state = dict(skill_state) if skill_state else {}
         self.on_llm_response = on_llm_response
-        self.on_tick = on_tick
+        self.on_reading = on_reading
 
-        self._history: deque[LiveTickResult] = deque(maxlen=history_maxlen)
+        self._history: deque[LiveReadingResult] = deque(maxlen=history_maxlen)
         self._history_lock = threading.Lock()
         self._jsonl_lock = threading.Lock()
         self._stop = threading.Event()
-        self._tick_thread: Optional[threading.Thread] = None
+        self._reading_thread: Optional[threading.Thread] = None
         self._dispatch_thread: Optional[threading.Thread] = None
         self._event_queue: "queue.Queue[TriggerEvent]" = queue.Queue()
         self._session_state: dict = {}
@@ -109,21 +109,21 @@ class LiveSession:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Spin up the tick and dispatch threads. Idempotent."""
-        if self._tick_thread is not None and self._tick_thread.is_alive():
+        """Spin up the reading and dispatch threads. Idempotent."""
+        if self._reading_thread is not None and self._reading_thread.is_alive():
             return
         self._stop.clear()
         self._started_at = time.time()
         self._write_jsonl({"kind": "session_start", "timestamp": self._started_at})
-        self._tick_thread = threading.Thread(
-            target=self._tick_loop, name="LiveSession-tick", daemon=True,
+        self._reading_thread = threading.Thread(
+            target=self._reading_loop, name="LiveSession-reading", daemon=True,
         )
         self._dispatch_thread = threading.Thread(
             target=self._dispatch_loop, name="LiveSession-dispatch", daemon=True,
         )
-        self._tick_thread.start()
+        self._reading_thread.start()
         self._dispatch_thread.start()
-        _logger.info("LiveSession started (interval=%.2fs)", self.tick_interval_sec)
+        _logger.info("LiveSession started (interval=%.2fs)", self.reading_interval_sec)
 
     def stop(self, *, timeout: float = 5.0) -> None:
         """Signal both worker threads to exit and wait briefly for them.
@@ -134,7 +134,7 @@ class LiveSession:
             return
         self._stop.set()
         # Best-effort join — daemon threads will die with the process anyway.
-        for th in (self._tick_thread, self._dispatch_thread):
+        for th in (self._reading_thread, self._dispatch_thread):
             if th is not None and th.is_alive():
                 th.join(timeout=timeout)
         self._write_jsonl({"kind": "session_end", "timestamp": time.time()})
@@ -144,17 +144,17 @@ class LiveSession:
     # Public state inspection
     # ------------------------------------------------------------------
 
-    def latest(self) -> Optional[LiveTickResult]:
+    def latest(self) -> Optional[LiveReadingResult]:
         with self._history_lock:
             return self._history[-1] if self._history else None
 
-    def history(self, n: Optional[int] = None) -> list[LiveTickResult]:
+    def history(self, n: Optional[int] = None) -> list[LiveReadingResult]:
         with self._history_lock:
             items = list(self._history)
         return items if n is None else items[-n:]
 
     def force_interpretation(self) -> None:
-        """Request a manual interpretation on the next tick.
+        """Request a manual interpretation on the next reading.
 
         No-op when the active policy doesn't include a :class:`ManualTrigger`
         (operator disabled it).
@@ -171,30 +171,30 @@ class LiveSession:
     # Worker bodies
     # ------------------------------------------------------------------
 
-    def _tick_loop(self) -> None:
+    def _reading_loop(self) -> None:
         while not self._stop.is_set():
             t0 = time.monotonic()
             try:
-                self._tick_once()
+                self._take_reading()
             except Exception:  # noqa: BLE001
-                _logger.exception("tick loop iteration raised; continuing")
+                _logger.exception("reading loop iteration raised; continuing")
             elapsed = time.monotonic() - t0
-            sleep_for = max(0.0, self.tick_interval_sec - elapsed)
+            sleep_for = max(0.0, self.reading_interval_sec - elapsed)
             # Use Event.wait so stop() can wake us early.
             self._stop.wait(timeout=sleep_for)
 
-    def _tick_once(self) -> None:
+    def _take_reading(self) -> None:
         data = self.source.read_latest()
         if data is None:
             return
         try:
-            result = self.tick_fn(data, self._session_state, self.skill_state)
+            result = self.reading_fn(data, self._session_state, self.skill_state)
         except Exception:  # noqa: BLE001
-            _logger.exception("tick_fn raised; skipping this tick")
+            _logger.exception("reading_fn raised; skipping this reading")
             return
-        if not isinstance(result, LiveTickResult):
+        if not isinstance(result, LiveReadingResult):
             _logger.warning(
-                "tick_fn returned %r, expected LiveTickResult — skipping",
+                "reading_fn returned %r, expected LiveReadingResult — skipping",
                 type(result).__name__,
             )
             return
@@ -203,7 +203,7 @@ class LiveSession:
             history_snapshot = list(self._history)
 
         self._write_jsonl({
-            "kind": "tick",
+            "kind": "reading",
             "timestamp": result.timestamp,
             "metric": result.primary_metric,
             "metric_name": result.metric_name,
@@ -213,11 +213,11 @@ class LiveSession:
             "raw": _serializable(result.raw),
         })
 
-        if self.on_tick is not None:
+        if self.on_reading is not None:
             try:
-                self.on_tick(result)
+                self.on_reading(result)
             except Exception:  # noqa: BLE001
-                _logger.exception("on_tick callback raised; continuing")
+                _logger.exception("on_reading callback raised; continuing")
 
         events = self.policy.evaluate(history_snapshot)
         for ev in events:
@@ -386,4 +386,4 @@ def _serializable(obj: Any) -> Any:
     return str(obj)
 
 
-__all__ = ["LiveSession", "TickFn"]
+__all__ = ["LiveSession", "ReadingFn"]

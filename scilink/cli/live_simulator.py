@@ -7,11 +7,11 @@ that's actively measuring. Writes data to disk every N seconds in one
 of three layouts so you can exercise each LiveDataSource shape
 without needing a real instrument:
 
-  --mode rewrite     single CSV file, rewritten in full each tick
+  --mode rewrite     single CSV file, rewritten in full each reading
                      (pair with `scilink live ... --source-kind mtime_poll`)
-  --mode append      single CSV file, intensity rows appended each tick
+  --mode append      single CSV file, intensity rows appended each reading
                      (pair with `scilink live ... --source-kind append_only`)
-  --mode directory   one file per tick into a folder
+  --mode directory   one file per reading into a folder
                      (pair with `scilink live ... --source-kind directory_watch`)
 
 Typical use: open two terminals.
@@ -108,7 +108,7 @@ def _append_pattern(path: Path, grid: np.ndarray, intensity: np.ndarray) -> None
     NOTE: append_only as a data source returns the just-appended bytes.
     A user pairing this simulator's --mode append with --source-kind
     append_only on the consumer side will see the full pattern as the
-    first chunk and then... an empty appended chunk on subsequent ticks
+    first chunk and then... an empty appended chunk on subsequent readings
     (because the pattern hasn't grown — only intensity values change).
     The 'rewrite' mode is therefore the right pairing for most scans
     where intensity counts accumulate at the same 2θ positions. We

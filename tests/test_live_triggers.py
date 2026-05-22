@@ -18,7 +18,7 @@ from scilink.agents.exp_agents.live_triggers import (
     default_policy,
     from_overrides,
 )
-from scilink.agents.exp_agents.live_types import LiveTickResult, TriggerEvent
+from scilink.agents.exp_agents.live_types import LiveReadingResult, TriggerEvent
 
 
 # --- Helpers ------------------------------------------------------------------
@@ -30,8 +30,8 @@ def _tick(
     verdict: str = "marginal",
     features: list[dict] | None = None,
     metric_name: str = "figure_of_merit",
-) -> LiveTickResult:
-    return LiveTickResult(
+) -> LiveReadingResult:
+    return LiveReadingResult(
         timestamp=ts if ts is not None else time.time(),
         primary_metric=metric,
         metric_name=metric_name,
@@ -40,8 +40,8 @@ def _tick(
     )
 
 
-def _hist(*ticks: LiveTickResult) -> list[LiveTickResult]:
-    return list(ticks)
+def _hist(*readings: LiveReadingResult) -> list[LiveReadingResult]:
+    return list(readings)
 
 
 # --- Protocol -----------------------------------------------------------------
@@ -62,7 +62,7 @@ def test_all_triggers_satisfy_protocol():
 
 def test_verdict_change_fires_on_transition():
     t = VerdictChangeTrigger()
-    # First tick — records baseline, no event
+    # First reading — records baseline, no event
     assert t.evaluate(_hist(_tick(verdict="marginal"))) is None
     # Same verdict — no event
     assert t.evaluate(_hist(_tick(verdict="marginal"), _tick(verdict="marginal"))) is None
@@ -81,7 +81,7 @@ def test_verdict_change_reset_re_arms():
     t = VerdictChangeTrigger()
     t.evaluate(_hist(_tick(verdict="accept")))
     t.reset()
-    # After reset, first tick is again baseline — no event
+    # After reset, first reading is again baseline — no event
     assert t.evaluate(_hist(_tick(verdict="reject"))) is None
 
 
@@ -109,7 +109,7 @@ def test_new_feature_no_change_no_event():
 
 def test_new_feature_needs_baseline():
     t = NewFeatureTrigger(lookback=3)
-    # Single tick — no baseline window yet
+    # Single reading — no baseline window yet
     assert t.evaluate(_hist(_tick(features=[{"p": 1}]))) is None
 
 
@@ -198,7 +198,7 @@ def test_threshold_cross_validates_direction():
 
 def test_heartbeat_fires_after_interval():
     t = HeartbeatTrigger(interval_sec=10.0)
-    # First tick — records baseline
+    # First reading — records baseline
     assert t.evaluate(_hist(_tick(ts=100.0))) is None
     # 5s later — not enough
     assert t.evaluate(_hist(_tick(ts=105.0))) is None
@@ -246,7 +246,7 @@ def test_policy_fires_union_of_constituent_triggers():
 
 
 def test_policy_swallows_trigger_exceptions():
-    """A broken trigger must not kill the tick loop."""
+    """A broken trigger must not kill the reading loop."""
     class _Broken:
         name = "broken"
         def evaluate(self, history):

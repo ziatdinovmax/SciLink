@@ -1,6 +1,6 @@
 """Tests for the LiveSession class.
 
-Exercises lifecycle, tick cadence, single-flight LLM dispatch,
+Exercises lifecycle, reading cadence, single-flight LLM dispatch,
 JSONL persistence, and callback / error paths. Uses a mocked
 ``AnalysisOrchestratorAgent.run_task`` so no LLM is involved.
 """
@@ -26,7 +26,7 @@ from scilink.agents.exp_agents.live_triggers import (
     TriggerPolicy,
     VerdictChangeTrigger,
 )
-from scilink.agents.exp_agents.live_types import LiveTickResult
+from scilink.agents.exp_agents.live_types import LiveReadingResult
 
 
 # ---------------------------------------------------------------------------
@@ -66,22 +66,22 @@ class _MockOrch:
 def _make_tick_fn(metric_seq: list[float] | None = None,
                   verdict_seq: list[str] | None = None,
                   features_seq: list[list[dict]] | None = None):
-    """Build a tick_fn that emits a deterministic sequence of LiveTickResult."""
+    """Build a reading_fn that emits a deterministic sequence of LiveReadingResult."""
     idx = {"i": 0}
 
-    def tick(latest_data: LatestData, session_state: dict, skill_state: dict) -> LiveTickResult:
+    def reading(latest_data: LatestData, session_state: dict, skill_state: dict) -> LiveReadingResult:
         i = idx["i"]
         idx["i"] += 1
-        return LiveTickResult(
+        return LiveReadingResult(
             timestamp=time.time(),
             primary_metric=(metric_seq[i] if metric_seq else 0.5),
             metric_name="figure_of_merit",
             verdict=(verdict_seq[i] if verdict_seq else "marginal"),
             detected_features=(features_seq[i] if features_seq else []),
-            notes=f"tick #{i}",
+            notes=f"reading #{i}",
         )
 
-    return tick, idx
+    return reading, idx
 
 
 def _wait_for(predicate, *, timeout: float = 3.0, interval: float = 0.05) -> bool:
@@ -101,8 +101,8 @@ def _wait_for(predicate, *, timeout: float = 3.0, interval: float = 0.05) -> boo
 def test_start_stop_idempotent(tmp_path):
     orch = _MockOrch()
     source = CallbackSource()
-    tick_fn, _ = _make_tick_fn()
-    s = LiveSession(orch, source, tick_fn, tick_interval_sec=0.05)
+    reading_fn, _ = _make_tick_fn()
+    s = LiveSession(orch, source, reading_fn, reading_interval_sec=0.05)
     s.start()
     s.start()  # idempotent — does not raise
     s.stop()
@@ -112,9 +112,9 @@ def test_start_stop_idempotent(tmp_path):
 def test_start_writes_session_start_line(tmp_path):
     orch = _MockOrch()
     src = CallbackSource()
-    tick_fn, _ = _make_tick_fn()
+    reading_fn, _ = _make_tick_fn()
     path = tmp_path / "live.jsonl"
-    s = LiveSession(orch, src, tick_fn, history_path=path, tick_interval_sec=0.1)
+    s = LiveSession(orch, src, reading_fn, history_path=path, reading_interval_sec=0.1)
     s.start()
     s.stop(timeout=1.0)
     lines = [json.loads(l) for l in path.read_text().splitlines()]
@@ -123,15 +123,15 @@ def test_start_writes_session_start_line(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Tick cadence + history
+# Reading cadence + history
 # ---------------------------------------------------------------------------
 
 
 def test_tick_fires_when_data_arrives(tmp_path):
     orch = _MockOrch()
     src = CallbackSource()
-    tick_fn, idx = _make_tick_fn(metric_seq=[0.5, 0.6, 0.7])
-    s = LiveSession(orch, src, tick_fn, tick_interval_sec=0.05)
+    reading_fn, idx = _make_tick_fn(metric_seq=[0.5, 0.6, 0.7])
+    s = LiveSession(orch, src, reading_fn, reading_interval_sec=0.05)
     s.start()
     try:
         for _ in range(3):
@@ -149,11 +149,11 @@ def test_tick_fires_when_data_arrives(tmp_path):
 def test_tick_skipped_when_source_returns_none(tmp_path):
     orch = _MockOrch()
     src = CallbackSource()
-    tick_fn, idx = _make_tick_fn()
-    s = LiveSession(orch, src, tick_fn, tick_interval_sec=0.05)
+    reading_fn, idx = _make_tick_fn()
+    s = LiveSession(orch, src, reading_fn, reading_interval_sec=0.05)
     s.start()
     try:
-        time.sleep(0.5)  # No pushes → no ticks
+        time.sleep(0.5)  # No pushes → no readings
         assert idx["i"] == 0
         assert s.history() == []
     finally:
@@ -169,12 +169,12 @@ def test_tick_fn_exception_does_not_crash_loop(tmp_path):
         call_count["n"] += 1
         if call_count["n"] == 1:
             raise RuntimeError("first call boom")
-        return LiveTickResult(
+        return LiveReadingResult(
             timestamp=time.time(), primary_metric=0.9,
             metric_name="m", verdict="accept",
         )
 
-    s = LiveSession(orch, src, flaky_tick, tick_interval_sec=0.05)
+    s = LiveSession(orch, src, flaky_tick, reading_interval_sec=0.05)
     s.start()
     try:
         src.push(text="d1")
@@ -194,11 +194,11 @@ def test_tick_fn_exception_does_not_crash_loop(tmp_path):
 def test_trigger_event_emits_jsonl_line(tmp_path):
     orch = _MockOrch()
     src = CallbackSource()
-    tick_fn, _ = _make_tick_fn(verdict_seq=["marginal", "marginal", "accept"])
+    reading_fn, _ = _make_tick_fn(verdict_seq=["marginal", "marginal", "accept"])
     path = tmp_path / "live.jsonl"
     s = LiveSession(
-        orch, src, tick_fn,
-        tick_interval_sec=0.05,
+        orch, src, reading_fn,
+        reading_interval_sec=0.05,
         trigger_policy=TriggerPolicy(triggers=[VerdictChangeTrigger()]),
         history_path=path,
     )
@@ -213,7 +213,7 @@ def test_trigger_event_emits_jsonl_line(tmp_path):
     lines = [json.loads(l) for l in path.read_text().splitlines()]
     kinds = [l["kind"] for l in lines]
     assert kinds[0] == "session_start"
-    assert "tick" in kinds
+    assert "reading" in kinds
     assert "trigger" in kinds
     assert "llm_response" in kinds
     assert kinds[-1] == "session_end"
@@ -222,11 +222,11 @@ def test_trigger_event_emits_jsonl_line(tmp_path):
 def test_jsonl_is_chronological(tmp_path):
     orch = _MockOrch()
     src = CallbackSource()
-    tick_fn, _ = _make_tick_fn(verdict_seq=["marginal", "accept", "reject"])
+    reading_fn, _ = _make_tick_fn(verdict_seq=["marginal", "accept", "reject"])
     path = tmp_path / "live.jsonl"
     s = LiveSession(
-        orch, src, tick_fn,
-        tick_interval_sec=0.05,
+        orch, src, reading_fn,
+        reading_interval_sec=0.05,
         trigger_policy=TriggerPolicy(triggers=[VerdictChangeTrigger()]),
         history_path=path,
     )
@@ -252,10 +252,10 @@ def test_single_flight_coalesces_concurrent_events(tmp_path):
     orch = _MockOrch(delay=0.4)  # each LLM call takes 0.4s
     src = CallbackSource()
     # Three back-to-back verdict changes — should NOT produce three LLM calls
-    tick_fn, _ = _make_tick_fn(verdict_seq=["marginal", "accept", "marginal", "accept"])
+    reading_fn, _ = _make_tick_fn(verdict_seq=["marginal", "accept", "marginal", "accept"])
     s = LiveSession(
-        orch, src, tick_fn,
-        tick_interval_sec=0.05,
+        orch, src, reading_fn,
+        reading_interval_sec=0.05,
         trigger_policy=TriggerPolicy(triggers=[VerdictChangeTrigger()]),
     )
     s.start()
@@ -277,10 +277,10 @@ def test_single_flight_coalesces_concurrent_events(tmp_path):
 def test_llm_busy_flag_reflects_state(tmp_path):
     orch = _MockOrch(delay=0.5)
     src = CallbackSource()
-    tick_fn, _ = _make_tick_fn(verdict_seq=["marginal", "accept"])
+    reading_fn, _ = _make_tick_fn(verdict_seq=["marginal", "accept"])
     s = LiveSession(
-        orch, src, tick_fn,
-        tick_interval_sec=0.05,
+        orch, src, reading_fn,
+        reading_interval_sec=0.05,
         trigger_policy=TriggerPolicy(triggers=[VerdictChangeTrigger()]),
     )
     s.start()
@@ -303,10 +303,10 @@ def test_llm_run_task_failure_logged_not_raised(tmp_path):
 
     path = tmp_path / "live.jsonl"
     src = CallbackSource()
-    tick_fn, _ = _make_tick_fn(verdict_seq=["marginal", "accept"])
+    reading_fn, _ = _make_tick_fn(verdict_seq=["marginal", "accept"])
     s = LiveSession(
-        _RaisingOrch(), src, tick_fn,
-        tick_interval_sec=0.05,
+        _RaisingOrch(), src, reading_fn,
+        reading_interval_sec=0.05,
         trigger_policy=TriggerPolicy(triggers=[VerdictChangeTrigger()]),
         history_path=path,
     )
@@ -332,12 +332,12 @@ def test_llm_run_task_failure_logged_not_raised(tmp_path):
 def test_on_tick_callback_fires_for_each_tick(tmp_path):
     orch = _MockOrch()
     src = CallbackSource()
-    tick_fn, _ = _make_tick_fn()
-    received: list[LiveTickResult] = []
+    reading_fn, _ = _make_tick_fn()
+    received: list[LiveReadingResult] = []
     s = LiveSession(
-        orch, src, tick_fn,
-        tick_interval_sec=0.05,
-        on_tick=received.append,
+        orch, src, reading_fn,
+        reading_interval_sec=0.05,
+        on_reading=received.append,
     )
     s.start()
     try:
@@ -352,15 +352,15 @@ def test_on_tick_callback_fires_for_each_tick(tmp_path):
 def test_on_llm_response_callback_fires_with_event_and_result(tmp_path):
     orch = _MockOrch()
     src = CallbackSource()
-    tick_fn, _ = _make_tick_fn(verdict_seq=["marginal", "accept"])
+    reading_fn, _ = _make_tick_fn(verdict_seq=["marginal", "accept"])
     seen: list[tuple] = []
 
     def callback(event, result):
         seen.append((event.name, result.get("status")))
 
     s = LiveSession(
-        orch, src, tick_fn,
-        tick_interval_sec=0.05,
+        orch, src, reading_fn,
+        reading_interval_sec=0.05,
         trigger_policy=TriggerPolicy(triggers=[VerdictChangeTrigger()]),
         on_llm_response=callback,
     )
@@ -378,10 +378,10 @@ def test_on_llm_response_callback_fires_with_event_and_result(tmp_path):
 def test_force_interpretation_fires_manual_trigger(tmp_path):
     orch = _MockOrch()
     src = CallbackSource()
-    tick_fn, _ = _make_tick_fn()
+    reading_fn, _ = _make_tick_fn()
     s = LiveSession(
-        orch, src, tick_fn,
-        tick_interval_sec=0.05,
+        orch, src, reading_fn,
+        reading_interval_sec=0.05,
         trigger_policy=TriggerPolicy(triggers=[ManualTrigger()]),
     )
     s.start()
@@ -400,10 +400,10 @@ def test_force_interpretation_fires_manual_trigger(tmp_path):
 def test_force_interpretation_without_manual_trigger_is_noop(tmp_path):
     orch = _MockOrch()
     src = CallbackSource()
-    tick_fn, _ = _make_tick_fn()
+    reading_fn, _ = _make_tick_fn()
     s = LiveSession(
-        orch, src, tick_fn,
-        tick_interval_sec=0.05,
+        orch, src, reading_fn,
+        reading_interval_sec=0.05,
         trigger_policy=TriggerPolicy(triggers=[VerdictChangeTrigger()]),  # no manual
     )
     s.start()
@@ -416,17 +416,17 @@ def test_force_interpretation_without_manual_trigger_is_noop(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# End-to-end: file source + simple peak-count tick_fn
+# End-to-end: file source + simple peak-count reading_fn
 # ---------------------------------------------------------------------------
 
 
-def _peak_count_tick(data: LatestData, session_state: dict, skill_state: dict) -> LiveTickResult:
-    """Trivial tick_fn for the end-to-end stub test: count '|' chars as peaks."""
+def _peak_count_tick(data: LatestData, session_state: dict, skill_state: dict) -> LiveReadingResult:
+    """Trivial reading_fn for the end-to-end stub test: count '|' chars as peaks."""
     text = data.text or ""
     n_peaks = text.count("|")
     verdict = "accept" if n_peaks >= 3 else "marginal"
     features = [{"position": i} for i, c in enumerate(text) if c == "|"]
-    return LiveTickResult(
+    return LiveReadingResult(
         timestamp=time.time(),
         primary_metric=float(n_peaks),
         metric_name="peak_count",
@@ -437,8 +437,8 @@ def _peak_count_tick(data: LatestData, session_state: dict, skill_state: dict) -
 
 
 def test_end_to_end_with_file_source(tmp_path):
-    """Mtime-poll file source + peak-count tick_fn. Verifies the full
-    pipeline (tick → trigger → LLM dispatch → JSONL) end-to-end against
+    """Mtime-poll file source + peak-count reading_fn. Verifies the full
+    pipeline (reading → trigger → LLM dispatch → JSONL) end-to-end against
     a file that grows over time. MtimePollFileSource returns the full
     content on each change so peak count accumulates as bars are
     appended."""
@@ -448,7 +448,7 @@ def test_end_to_end_with_file_source(tmp_path):
     src = MtimePollFileSource(data_path)
     s = LiveSession(
         orch, src, _peak_count_tick,
-        tick_interval_sec=0.1,
+        reading_interval_sec=0.1,
         trigger_policy=TriggerPolicy(triggers=[VerdictChangeTrigger()]),
         history_path=tmp_path / "live.jsonl",
     )
@@ -471,4 +471,4 @@ def test_end_to_end_with_file_source(tmp_path):
     # JSONL has the expected line kinds
     lines = [json.loads(l) for l in (tmp_path / "live.jsonl").read_text().splitlines()]
     kinds = {l["kind"] for l in lines}
-    assert {"session_start", "tick", "trigger", "llm_response", "session_end"} <= kinds
+    assert {"session_start", "reading", "trigger", "llm_response", "session_end"} <= kinds

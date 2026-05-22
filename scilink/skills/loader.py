@@ -253,17 +253,17 @@ def _parse_sections(text: str, source: str = "<skill>") -> tuple[Dict[str, str],
     return sections, extras
 
 
-def resolve_tick_fn(skill_meta: Optional[dict]) -> Optional[Callable]:
-    """Resolve a skill's ``live_tick.tick_fn`` dotted path to a callable.
+def resolve_reading_fn(skill_meta: Optional[dict]) -> Optional[Callable]:
+    """Resolve a skill's ``live_reading.reading_fn`` dotted path to a callable.
 
-    Skill frontmatter declares the live-monitoring tick function under
-    a ``live_tick:`` block::
+    Skill frontmatter declares the live-monitoring reading function under
+    a ``live_reading:`` block::
 
         ---
         description: ...
-        live_tick:
+        live_reading:
           enabled: true
-          tick_fn: my_package.live_tick:my_tick
+          reading_fn: my_package.live_reading:my_tick
           data_type: spectrum_1d        # optional, informational
           trigger_overrides:            # optional
             heartbeat_sec: 30
@@ -273,7 +273,7 @@ def resolve_tick_fn(skill_meta: Optional[dict]) -> Optional[Callable]:
     ``LiveSession`` can be constructed with it. Behaviors:
 
       - Returns ``None`` if ``skill_meta`` is None / empty, has no
-        ``live_tick:`` block, or has ``enabled: false``. Callers
+        ``live_reading:`` block, or has ``enabled: false``. Callers
         interpret this as "this skill is not live-mode-enabled."
       - Raises :class:`ValueError` on a malformed dotted path (must be
         ``module.path:attribute``).
@@ -285,25 +285,25 @@ def resolve_tick_fn(skill_meta: Optional[dict]) -> Optional[Callable]:
         callable.
 
     Strict errors are deliberate: a skill that claims to be
-    live-mode-enabled but ships a broken tick_fn should fail loudly
+    live-mode-enabled but ships a broken reading_fn should fail loudly
     at session-construction time, not silently fall back to no live
     mode.
     """
     if not skill_meta:
         return None
-    block = skill_meta.get("live_tick")
+    block = skill_meta.get("live_reading")
     if not block or not isinstance(block, dict):
         return None
-    # Explicit disable: skill author commented out the tick by setting enabled: false
+    # Explicit disable: skill author commented out the reading by setting enabled: false
     enabled = block.get("enabled", True)
     if enabled is False:
         return None
-    dotted = block.get("tick_fn")
+    dotted = block.get("reading_fn")
     if not dotted or not isinstance(dotted, str):
         return None
     if ":" not in dotted:
         raise ValueError(
-            "live_tick.tick_fn must be 'module.path:function_name'; "
+            "live_reading.reading_fn must be 'module.path:function_name'; "
             f"got {dotted!r}"
         )
     module_path, attr_name = dotted.split(":", 1)
@@ -311,26 +311,26 @@ def resolve_tick_fn(skill_meta: Optional[dict]) -> Optional[Callable]:
     attr_name = attr_name.strip()
     if not module_path or not attr_name:
         raise ValueError(
-            "live_tick.tick_fn must be 'module.path:function_name'; "
+            "live_reading.reading_fn must be 'module.path:function_name'; "
             f"got {dotted!r}"
         )
     try:
         module = importlib.import_module(module_path)
     except ImportError as e:
         raise ImportError(
-            f"live_tick.tick_fn module {module_path!r} could not be imported "
-            f"(skill claims live-mode but the tick module is missing): {e}"
+            f"live_reading.reading_fn module {module_path!r} could not be imported "
+            f"(skill claims live-mode but the reading module is missing): {e}"
         ) from e
     try:
         fn = getattr(module, attr_name)
     except AttributeError as e:
         raise AttributeError(
-            f"live_tick.tick_fn: module {module_path!r} has no attribute "
+            f"live_reading.reading_fn: module {module_path!r} has no attribute "
             f"{attr_name!r}"
         ) from e
     if not callable(fn):
         raise TypeError(
-            f"live_tick.tick_fn {dotted!r} is not callable; got "
+            f"live_reading.reading_fn {dotted!r} is not callable; got "
             f"{type(fn).__name__}"
         )
     return fn

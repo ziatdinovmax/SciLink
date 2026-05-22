@@ -13,7 +13,7 @@ Use cases:
   - **Post-hoc audit.** Walk the timeline of detected features and
     decisions a session produced; export to a report.
 
-The replay function reads only ``kind == "tick"`` lines (the data
+The replay function reads only ``kind == "reading"`` lines (the data
 record). Trigger events and LLM responses from the original run are
 recomputed when ``llm_mode="redo"`` and echoed when
 ``llm_mode="skip"`` (default). The original session's
@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
 from .live_triggers import TriggerEvent, TriggerPolicy, default_policy
-from .live_types import LiveTickResult
+from .live_types import LiveReadingResult
 
 _logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ _logger = logging.getLogger(__name__)
 class ReplayReport:
     """Structured summary of a replay run."""
 
-    tick_count: int = 0
+    reading_count: int = 0
     trigger_count: int = 0
     trigger_event_counts: dict[str, int] = field(default_factory=dict)
     trigger_events: list[TriggerEvent] = field(default_factory=list)
@@ -48,8 +48,8 @@ class ReplayReport:
     duration_sec: float = 0.0
 
 
-def _iter_tick_lines(path: Path) -> Iterator[dict]:
-    """Yield only the ``kind == "tick"`` entries from a session JSONL."""
+def _iter_reading_lines(path: Path) -> Iterator[dict]:
+    """Yield only the ``kind == "reading"`` entries from a session JSONL."""
     with path.open("r", encoding="utf-8") as f:
         for raw in f:
             raw = raw.strip()
@@ -60,7 +60,7 @@ def _iter_tick_lines(path: Path) -> Iterator[dict]:
             except json.JSONDecodeError as e:
                 _logger.debug("Skipping malformed JSONL line: %s", e)
                 continue
-            if entry.get("kind") == "tick":
+            if entry.get("kind") == "reading":
                 yield entry
 
 
@@ -79,8 +79,8 @@ def _iter_llm_lines(path: Path) -> Iterator[dict]:
                 yield entry
 
 
-def _entry_to_tick_result(entry: dict) -> LiveTickResult:
-    return LiveTickResult(
+def _entry_to_tick_result(entry: dict) -> LiveReadingResult:
+    return LiveReadingResult(
         timestamp=float(entry["timestamp"]),
         primary_metric=float(entry.get("metric", entry.get("primary_metric", 0.0))),
         metric_name=str(entry.get("metric_name", "metric")),
@@ -96,7 +96,7 @@ def replay_jsonl(
     *,
     trigger_policy: Optional[TriggerPolicy] = None,
     speed: Optional[float] = None,
-    on_tick: Optional[Callable[[LiveTickResult], None]] = None,
+    on_reading: Optional[Callable[[LiveReadingResult], None]] = None,
     on_event: Optional[Callable[[TriggerEvent], None]] = None,
     orchestrator: Any = None,
     llm_mode: str = "skip",
@@ -104,8 +104,8 @@ def replay_jsonl(
     """Replay a recorded session's JSONL stream.
 
     Args:
-        path: ``live_ticks.jsonl`` path from a previous session.
-        trigger_policy: Policy to evaluate against the replayed ticks.
+        path: ``live_readings.jsonl`` path from a previous session.
+        trigger_policy: Policy to evaluate against the replayed readings.
             Defaults to :func:`default_policy` — same as a live session.
             Pass a tweaked policy to test thresholds against the same
             data without re-running the experiment.
@@ -114,9 +114,9 @@ def replay_jsonl(
             time. ``10.0`` plays 10× faster. Useful for debugging:
             ``1.0`` recreates the live cadence so you can watch the
             decision feed unfold.
-        on_tick: Optional callback invoked with each rebuilt
-            ``LiveTickResult`` (in chronological order). Useful for
-            driving a UI replay or extracting per-tick metrics.
+        on_reading: Optional callback invoked with each rebuilt
+            ``LiveReadingResult`` (in chronological order). Useful for
+            driving a UI replay or extracting per-reading metrics.
         on_event: Optional callback invoked with each fired
             ``TriggerEvent``. Useful for inspecting which triggers
             fired during the replay.
@@ -128,7 +128,7 @@ def replay_jsonl(
             trigger that fires.
 
     Returns:
-        :class:`ReplayReport` summarizing tick / trigger / LLM counts
+        :class:`ReplayReport` summarizing reading / trigger / LLM counts
         and the structured event timeline.
     """
     if llm_mode not in ("skip", "redo"):
@@ -146,13 +146,13 @@ def replay_jsonl(
     else:
         original_llm = []
 
-    rolling: list[LiveTickResult] = []
+    rolling: list[LiveReadingResult] = []
     last_ts: Optional[float] = None
     started_at = time.monotonic()
 
-    for entry in _iter_tick_lines(path):
+    for entry in _iter_reading_lines(path):
         result = _entry_to_tick_result(entry)
-        # Cadence: sleep proportional to inter-tick delta if speed is set
+        # Cadence: sleep proportional to inter-reading delta if speed is set
         if speed is not None and last_ts is not None and result.timestamp > last_ts:
             delta = result.timestamp - last_ts
             sleep_for = delta / max(float(speed), 1e-9)
@@ -161,12 +161,12 @@ def replay_jsonl(
         last_ts = result.timestamp
 
         rolling.append(result)
-        report.tick_count += 1
-        if on_tick is not None:
+        report.reading_count += 1
+        if on_reading is not None:
             try:
-                on_tick(result)
+                on_reading(result)
             except Exception:  # noqa: BLE001
-                _logger.exception("on_tick callback raised")
+                _logger.exception("on_reading callback raised")
 
         events = policy.evaluate(rolling)
         for ev in events:

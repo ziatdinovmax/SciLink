@@ -1,8 +1,8 @@
 ---
 description: Diagnostics live-mode skill — counts peaks in 2-column CSV / whitespace data and emits verdict by peak count. For testing live-mode plumbing (UI, CLI, simulator) without depending on any scientific skill.
-live_tick:
+live_reading:
   enabled: true
-  tick_fn: scilink.skills.diagnostics.live_passthrough.live_tick:passthrough_tick
+  reading_fn: scilink.skills.diagnostics.live_passthrough.live_reading:passthrough_reading
   data_type: spectrum_1d
   trigger_overrides:
     heartbeat_sec: 30
@@ -18,14 +18,14 @@ that:
 
 - The live mode UI / CLI / `LiveSession` / replay can be exercised
   end-to-end without depending on any specific scientific skill.
-- Skill authors implementing their own `live_tick` have a minimal
+- Skill authors implementing their own `live_reading` have a minimal
   reference for the contract.
 - Reviewers can verify the live-mode infrastructure on a clean branch
   without setting up a structure-matching fixture / API key chain.
 
 ## analysis
 
-The tick function:
+The reading function:
 
 1. Parses the latest data text as a 2-column CSV (or whitespace-
    delimited) `(x, y)` table.
@@ -40,7 +40,7 @@ The tick function:
    ≥4 peaks  → accept
    ```
 
-4. Emits `LiveTickResult` with `primary_metric = peak count`,
+4. Emits `LiveReadingResult` with `primary_metric = peak count`,
    `detected_features = [{position, intensity}, ...]`, and a one-line
    `notes` description.
 
@@ -50,5 +50,5 @@ over time.
 
 ## implementation
 
-See `live_tick.py` in this folder. ~50 lines; no external dependencies
+See `live_reading.py` in this folder. ~50 lines; no external dependencies
 beyond numpy/scipy (already required by SciLink).

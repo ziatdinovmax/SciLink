@@ -1,7 +1,7 @@
 """Data sources for live-monitoring sessions.
 
 A :class:`LiveDataSource` knows how to detect "new data" and hand the
-current payload to the tick loop. Each tick the session calls
+current payload to the reading loop. Each reading the session calls
 ``source.read_latest()``; the source returns a :class:`LatestData`
 object when something new exists and ``None`` otherwise.
 
@@ -15,7 +15,7 @@ Three concrete sources ship in v1:
     append formats (some diffractometers and many streaming data
     pipelines).
   - :class:`CallbackSource` — in-process. Caller pushes payloads via
-    ``push(...)``; the tick loop consumes them via ``read_latest()``.
+    ``push(...)``; the reading loop consumes them via ``read_latest()``.
     Used by tests and by future instrument-API integrations that have
     their own callback / websocket / message-queue layer.
 
@@ -36,9 +36,9 @@ _logger = logging.getLogger(__name__)
 
 @dataclass
 class LatestData:
-    """The payload :class:`LiveDataSource.read_latest` hands to the tick loop.
+    """The payload :class:`LiveDataSource.read_latest` hands to the reading loop.
 
-    The `source_kind`, `path`, `text` fields are convention; tick
+    The `source_kind`, `path`, `text` fields are convention; reading
     functions read the fields they understand. Anything source-specific
     that doesn't fit the common shape lives in ``extras`` — e.g.
     :class:`AppendOnlyFileSource` records ``offset_start`` / ``offset_end``
@@ -58,8 +58,8 @@ class LiveDataSource(Protocol):
 
     ``read_latest`` must be safe to call from a background thread at
     high frequency. It must NOT block on slow I/O — file sources should
-    return ``None`` and let the next tick try again rather than stall
-    the tick loop on a transient OSError.
+    return ``None`` and let the next reading try again rather than stall
+    the reading loop on a transient OSError.
     """
 
     name: str
@@ -174,7 +174,7 @@ class AppendOnlyFileSource:
 
 
 class DirectoryWatchSource:
-    """Watch a directory for new files; return the contents of the newest each tick.
+    """Watch a directory for new files; return the contents of the newest each reading.
 
     Right shape for "each new datapoint is a new file" scenarios — time-
     resolved XRD where the instrument writes ``scan_0001.txt``,
@@ -182,17 +182,17 @@ class DirectoryWatchSource:
     series where every acquisition is its own file in a session
     directory.
 
-    Each tick:
+    Each reading:
       - lists files in ``directory`` matching ``pattern``
       - selects the latest by ``sort_by`` ("mtime" default; "name" for
         zero-padded sequential filenames where alphabetical = chronological)
       - returns its text content the first time it's seen
-      - returns None on subsequent ticks until a newer file appears
+      - returns None on subsequent readings until a newer file appears
 
     For workflows where you want EVERY new file (not just the latest)
-    surfaced one-at-a-time, use ``strategy='unseen'`` — each tick the
+    surfaced one-at-a-time, use ``strategy='unseen'`` — each reading the
     source returns the next-unseen file in sort order, so a burst of N
-    files spawns N ticks before going quiet.
+    files spawns N readings before going quiet.
     """
 
     def __init__(
@@ -282,18 +282,18 @@ class DirectoryWatchSource:
 
 
 class CallbackSource:
-    """In-process source. Caller pushes payloads; the tick loop consumes them.
+    """In-process source. Caller pushes payloads; the reading loop consumes them.
 
     Used by:
       - tests (the test pushes synthetic data on a schedule)
       - future instrument-API integrations whose vendor SDK delivers
         new data via its own callback / event-loop and you want to
-        bridge into SciLink's tick loop without polling a file
+        bridge into SciLink's reading loop without polling a file
 
     Holds one pending payload at a time. A push while a previous push
     is still un-consumed replaces it — live mode cares about the most
     recent snapshot, not the full history. The JSONL stream preserves
-    every observed tick anyway.
+    every observed reading anyway.
     """
 
     def __init__(self) -> None:

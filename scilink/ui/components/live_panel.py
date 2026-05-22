@@ -4,8 +4,8 @@ Renders one of two views depending on session state:
 
   Setup view  — when no live session is active. Shows a form for
                 data-source path, skill picker (filtered to skills
-                whose frontmatter declares a ``live_tick.tick_fn``),
-                tick interval, and trigger toggles. "Start" button
+                whose frontmatter declares a ``live_reading.reading_fn``),
+                reading interval, and trigger toggles. "Start" button
                 instantiates an ``AnalysisOrchestratorAgent`` and a
                 :class:`LiveSession` and stashes both in
                 ``st.session_state``.
@@ -40,7 +40,7 @@ def render_live_panel() -> None:
     st.header("Live Monitoring")
     st.caption(
         "Real-time agent interpretation of an in-progress measurement. "
-        "The fast tick loop runs every couple of seconds; the LLM is "
+        "The fast reading loop runs every couple of seconds; the LLM is "
         "invoked only when an interesting event fires."
     )
 
@@ -103,8 +103,8 @@ def _render_setup() -> None:
             f"**{key_source}** · consent given."
         )
 
-    # Skills with a live_tick block — filter to those that resolve to an importable
-    # tick_fn at session-start time so the user only sees options that will work.
+    # Skills with a live_reading block — filter to those that resolve to an importable
+    # reading_fn at session-start time so the user only sees options that will work.
     skill_options = _discover_live_enabled_skills()
 
     with st.form("live_session_setup"):
@@ -127,25 +127,25 @@ def _render_setup() -> None:
         with col1:
             if skill_options:
                 skill_label = st.selectbox(
-                    "Tick skill",
+                    "Reading skill",
                     options=[s["label"] for s in skill_options],
-                    help="Skill whose live_tick function drives the metric.",
+                    help="Skill whose live_reading function drives the metric.",
                 )
                 selected_skill = next(
                     s for s in skill_options if s["label"] == skill_label
                 )
             else:
                 st.warning(
-                    "No skills with a `live_tick:` block found. The skill's "
-                    "frontmatter needs `live_tick.tick_fn` set to a "
+                    "No skills with a `live_reading:` block found. The skill's "
+                    "frontmatter needs `live_reading.reading_fn` set to a "
                     "module:function path."
                 )
                 selected_skill = None
         with col2:
-            tick_interval = st.number_input(
-                "Tick interval (seconds)",
+            reading_interval = st.number_input(
+                "Reading interval (seconds)",
                 min_value=0.5, max_value=60.0, value=2.0, step=0.5,
-                help="How often to poll the data source and run the tick function.",
+                help="How often to poll the data source and run the reading function.",
             )
 
         st.markdown("**Source type**")
@@ -159,7 +159,7 @@ def _render_setup() -> None:
                 "`append_only` — single FILE, return only newly-appended "
                 "bytes (incremental writers).\n"
                 "`directory_watch` — DIRECTORY of files, return the newest "
-                "each tick (time-resolved experiments where each datapoint "
+                "each reading (time-resolved experiments where each datapoint "
                 "is a new file). The path above should then point at the "
                 "directory, not a single file."
             ),
@@ -174,7 +174,7 @@ def _render_setup() -> None:
             with dir_col2:
                 dir_strategy = st.selectbox(
                     "Strategy", options=["newest", "unseen"],
-                    help=("'newest' returns just the latest file each tick; "
+                    help=("'newest' returns just the latest file each reading; "
                           "'unseen' walks each new file once in sort order."),
                 )
             with dir_col3:
@@ -242,11 +242,11 @@ def _render_setup() -> None:
     if not Path(data_path).exists():
         st.warning(
             f"Path does not exist yet: {data_path}. The session will start "
-            "and the tick loop will pick up the file once your instrument "
+            "and the reading loop will pick up the file once your instrument "
             "creates it."
         )
     if selected_skill is None:
-        st.error("No live-tick-enabled skill available to drive the session.")
+        st.error("No live-reading-enabled skill available to drive the session.")
         return
 
     _spin_up_live_session(
@@ -261,7 +261,7 @@ def _render_setup() -> None:
         } if source_kind == "directory_watch" else {},
         skill_name=selected_skill["name"],
         skill_domain=selected_skill["domain"],
-        tick_interval_sec=float(tick_interval),
+        reading_interval_sec=float(reading_interval),
         triggers={
             "verdict_change": t_verdict,
             "new_feature": t_new_feature,
@@ -275,7 +275,7 @@ def _render_setup() -> None:
 
 def _discover_live_enabled_skills() -> list[dict]:
     """Walk all available skills; return those whose frontmatter declares
-    a non-empty `live_tick.tick_fn`. Caller still resolves the dotted
+    a non-empty `live_reading.reading_fn`. Caller still resolves the dotted
     path at start time so we fail fast on bad paths."""
     from scilink.skills.loader import list_all_skills, load_skill
 
@@ -286,12 +286,12 @@ def _discover_live_enabled_skills() -> list[dict]:
                 parsed = load_skill(name, domain=domain)
             except Exception:
                 continue
-            block = parsed.get("meta", {}).get("live_tick") or {}
+            block = parsed.get("meta", {}).get("live_reading") or {}
             if not isinstance(block, dict):
                 continue
             if not block.get("enabled", True):
                 continue
-            if not block.get("tick_fn"):
+            if not block.get("reading_fn"):
                 continue
             out.append({
                 "name": name,
@@ -312,7 +312,7 @@ def _spin_up_live_session(
     source_kwargs: Optional[dict] = None,
     skill_name: str,
     skill_domain: str,
-    tick_interval_sec: float,
+    reading_interval_sec: float,
     triggers: dict,
 ) -> None:
     from scilink.agents.exp_agents.analysis_orchestrator import (
@@ -334,7 +334,7 @@ def _spin_up_live_session(
         TriggerPolicy,
         VerdictChangeTrigger,
     )
-    from scilink.skills.loader import load_skill, resolve_tick_fn
+    from scilink.skills.loader import load_skill, resolve_reading_fn
     from scilink.ui.config import SESSION_DIR_PREFIXES
 
     # Session dir parallels the analyze/plan/simulate pattern.
@@ -343,7 +343,7 @@ def _spin_up_live_session(
     session_dir.mkdir(parents=True, exist_ok=True)
 
     # Build the agent. live mode is autonomous — the LLM doesn't pause for
-    # mid-call human feedback during a tick-driven interpretation.
+    # mid-call human feedback during a reading-driven interpretation.
     try:
         orch = AnalysisOrchestratorAgent(
             base_dir=str(session_dir),
@@ -355,16 +355,16 @@ def _spin_up_live_session(
         st.error(f"Failed to initialize agent: {e}")
         return
 
-    # Resolve the skill's tick function (fails fast on broken dotted path).
+    # Resolve the skill's reading function (fails fast on broken dotted path).
     try:
         skill = load_skill(skill_name, domain=skill_domain)
-        tick_fn = resolve_tick_fn(skill.get("meta", {}))
+        reading_fn = resolve_reading_fn(skill.get("meta", {}))
     except Exception as e:
         st.error(f"Failed to load skill {skill_domain}/{skill_name}: {e}")
         return
-    if tick_fn is None:
+    if reading_fn is None:
         st.error(
-            f"Skill {skill_domain}/{skill_name} does not declare a live_tick.tick_fn. "
+            f"Skill {skill_domain}/{skill_name} does not declare a live_reading.reading_fn. "
             "Pick another skill."
         )
         return
@@ -402,10 +402,10 @@ def _spin_up_live_session(
     session = LiveSession(
         orchestrator=orch,
         data_source=source,
-        tick_fn=tick_fn,
-        tick_interval_sec=tick_interval_sec,
+        reading_fn=reading_fn,
+        reading_interval_sec=reading_interval_sec,
         trigger_policy=policy,
-        history_path=session_dir / "live_ticks.jsonl",
+        history_path=session_dir / "live_readings.jsonl",
         skill_state=skill,
         on_llm_response=lambda ev, result: _record_llm_response(ev, result),
     )
@@ -455,7 +455,7 @@ def _render_dashboard() -> None:
     with col_h1:
         st.markdown(
             f"**Session active** · skill `{skill_label}` · data `{data_path}` "
-            f"· interval {session.tick_interval_sec:.1f}s"
+            f"· interval {session.reading_interval_sec:.1f}s"
         )
     with col_h2:
         if st.button("Stop Session", type="primary"):
@@ -480,7 +480,7 @@ def _render_dashboard() -> None:
             f"### {verdict_color} **{verdict.upper()}**  ·  "
             f"{metric_name}: **{metric_value:.3f}**  ·  "
             f"LLM: {'⏳ busy' if session.llm_busy else '✅ idle'}  ·  "
-            f"ticks: {len(hist)}"
+            f"readings: {len(hist)}"
         )
 
         col_left, col_right = st.columns([3, 2])
@@ -490,11 +490,11 @@ def _render_dashboard() -> None:
             if hist:
                 metrics_series = [t.primary_metric for t in hist]
                 st.line_chart(metrics_series, height=200, use_container_width=True)
-                st.caption(f"{metric_name} over time ({len(hist)} ticks)")
+                st.caption(f"{metric_name} over time ({len(hist)} readings)")
             else:
-                st.info("Waiting for first tick — data source has not produced new data yet.")
+                st.info("Waiting for first reading — data source has not produced new data yet.")
 
-            # Show detected features for the latest tick, if any
+            # Show detected features for the latest reading, if any
             if latest and latest.detected_features:
                 with st.expander(f"Detected features ({len(latest.detected_features)})"):
                     st.json(latest.detected_features[:30])
@@ -526,7 +526,7 @@ def _render_dashboard() -> None:
             session.force_interpretation()
             st.toast("Manual interpretation requested.")
 
-        st.caption(f"Session dir: `{session_dir}` · JSONL: `live_ticks.jsonl`")
+        st.caption(f"Session dir: `{session_dir}` · JSONL: `live_readings.jsonl`")
 
     _live_view()
 

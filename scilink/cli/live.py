@@ -3,7 +3,7 @@
 scilink live — real-time monitoring of an in-progress measurement.
 
 Polls a file the instrument is writing to, runs a skill-registered
-tick function every couple of seconds, and invokes the LLM only when
+reading function every couple of seconds, and invokes the LLM only when
 an "interesting event" fires (verdict change, new feature, confidence
 reversal, periodic heartbeat). Mirrors the UI's Live Mode but for
 headless / SSH / cron use cases.
@@ -38,13 +38,13 @@ Examples:
   scilink live /tmp/raman_live.txt --skill xrd \\
       --source-kind append_only --threshold 0.8 --heartbeat-sec 30
 
-  # Custom output directory and tick cadence
+  # Custom output directory and reading cadence
   scilink live ~/scan.csv --skill xrd \\
-      --tick-interval 1.0 --output-dir ./my_live_session
+      --reading-interval 1.0 --output-dir ./my_live_session
 
   # Replay a previously-recorded JSONL against a (possibly different)
   # trigger policy — useful for tuning thresholds
-  scilink live --replay ./live_session_20260521_180448/live_ticks.jsonl \\
+  scilink live --replay ./live_session_20260521_180448/live_readings.jsonl \\
       --threshold 0.9
 
 Environment variables (any of these will be picked up):
@@ -61,12 +61,12 @@ runs any pending LLM call to completion).
     parser.add_argument(
         "data_path", nargs="?",
         help="File OR directory the instrument is writing to (see "
-             "--source-kind). Polled every --tick-interval seconds. "
+             "--source-kind). Polled every --reading-interval seconds. "
              "Omit with --replay.",
     )
     parser.add_argument(
         "--skill", default="xrd",
-        help="Skill name (or domain/name) whose live_tick.tick_fn "
+        help="Skill name (or domain/name) whose live_reading.reading_fn "
              "drives the loop. Default: xrd.",
     )
     parser.add_argument(
@@ -80,7 +80,7 @@ runs any pending LLM call to completion).
             "  append_only     — single file, return only newly-appended "
             "bytes.\n"
             "  directory_watch — folder of files, return the newest each "
-            "tick (time-resolved experiments where each datapoint is a "
+            "reading (time-resolved experiments where each datapoint is a "
             "new file). Combine with --pattern to filter (e.g. '*.csv')."
         ),
     )
@@ -94,8 +94,8 @@ runs any pending LLM call to completion).
         default="newest",
         help=(
             "directory_watch only. 'newest' (default) returns just the "
-            "latest file each tick; 'unseen' walks each new file once "
-            "in sort order, so a burst of N files produces N ticks."
+            "latest file each reading; 'unseen' walks each new file once "
+            "in sort order, so a burst of N files produces N readings."
         ),
     )
     parser.add_argument(
@@ -109,8 +109,8 @@ runs any pending LLM call to completion).
         ),
     )
     parser.add_argument(
-        "--tick-interval", type=float, default=2.0,
-        help="Seconds between ticks. Default: 2.0.",
+        "--reading-interval", type=float, default=2.0,
+        help="Seconds between readings. Default: 2.0.",
     )
     parser.add_argument(
         "--duration", type=float, default=None,
@@ -156,7 +156,7 @@ runs any pending LLM call to completion).
     )
     parser.add_argument(
         "--output-dir", default=None,
-        help="Session directory (live_ticks.jsonl lives here). "
+        help="Session directory (live_readings.jsonl lives here). "
              "Default: ./live_session_YYYYMMDD_HHMMSS.",
     )
     parser.add_argument(
@@ -168,8 +168,8 @@ runs any pending LLM call to completion).
     )
     parser.add_argument(
         "--replay",
-        help="Path to a previous session's live_ticks.jsonl. When set, "
-             "the data_path argument is ignored and the recorded ticks "
+        help="Path to a previous session's live_readings.jsonl. When set, "
+             "the data_path argument is ignored and the recorded readings "
              "are re-emitted against the configured trigger policy "
              "(no LLM calls by default; use --replay-llm-redo to "
              "re-fire run_task per trigger).",
@@ -260,7 +260,7 @@ def _run_live(args, log) -> int:
         AppendOnlyFileSource, DirectoryWatchSource, MtimePollFileSource,
     )
     from scilink.agents.exp_agents.live_session import LiveSession
-    from scilink.skills.loader import load_skill, resolve_tick_fn
+    from scilink.skills.loader import load_skill, resolve_reading_fn
 
     if not args.data_path:
         log.error("data_path is required when not using --replay")
@@ -285,7 +285,7 @@ def _run_live(args, log) -> int:
     if "/" in args.skill and not args.skill.startswith("/"):
         domain, name = args.skill.split("/", 1)
     else:
-        # Default domain for live tick currently is structure_matching for xrd;
+        # Default domain for live reading currently is structure_matching for xrd;
         # the loader's cross-domain fallback will find it from curve_fitting too.
         name = args.skill
         domain = "structure_matching" if name == "xrd" else "curve_fitting"
@@ -294,9 +294,9 @@ def _run_live(args, log) -> int:
     except Exception as e:
         log.error("Failed to load skill %s/%s: %s", domain, name, e)
         return 3
-    tick_fn = resolve_tick_fn(skill.get("meta", {}))
-    if tick_fn is None:
-        log.error("Skill %s does not declare a live_tick.tick_fn. "
+    reading_fn = resolve_reading_fn(skill.get("meta", {}))
+    if reading_fn is None:
+        log.error("Skill %s does not declare a live_reading.reading_fn. "
                   "Check the skill's frontmatter.", args.skill)
         return 3
     log.info("Skill loaded: %s/%s", domain, name)
@@ -320,7 +320,7 @@ def _run_live(args, log) -> int:
         source = MtimePollFileSource(args.data_path)
         log.info("Data source: mtime_poll (%s)", args.data_path)
 
-    # Orchestrator (AUTONOMOUS — no human-feedback prompts during live ticks)
+    # Orchestrator (AUTONOMOUS — no human-feedback prompts during live readings)
     try:
         orch = AnalysisOrchestratorAgent(
             base_dir=str(session_dir),
@@ -334,19 +334,19 @@ def _run_live(args, log) -> int:
 
     policy = _build_policy(args)
 
-    def on_tick(result):
+    def on_reading(result):
         log.info("[TICK] %s", _format_tick(result))
 
     def on_llm(event, result):
         log.info("[LLM ] %s", _format_llm(event, result))
 
     session = LiveSession(
-        orchestrator=orch, data_source=source, tick_fn=tick_fn,
-        tick_interval_sec=args.tick_interval,
+        orchestrator=orch, data_source=source, reading_fn=reading_fn,
+        reading_interval_sec=args.reading_interval,
         trigger_policy=policy,
-        history_path=session_dir / "live_ticks.jsonl",
+        history_path=session_dir / "live_readings.jsonl",
         skill_state=skill,
-        on_tick=on_tick,
+        on_reading=on_reading,
         on_llm_response=on_llm,
     )
 
@@ -364,7 +364,7 @@ def _run_live(args, log) -> int:
     signal.signal(signal.SIGINT, _on_signal)
     signal.signal(signal.SIGTERM, _on_signal)
 
-    log.info("Starting LiveSession (tick interval %.1fs)", args.tick_interval)
+    log.info("Starting LiveSession (reading interval %.1fs)", args.reading_interval)
     session.start()
 
     started_at = time.monotonic()
@@ -377,7 +377,7 @@ def _run_live(args, log) -> int:
     finally:
         session.stop(timeout=15.0)
     log.info("Session ended.")
-    log.info("JSONL: %s", session_dir / "live_ticks.jsonl")
+    log.info("JSONL: %s", session_dir / "live_readings.jsonl")
     return 0
 
 
@@ -403,25 +403,25 @@ def _run_replay(args, log) -> int:
             model_name=args.model, analysis_mode=AnalysisMode.AUTONOMOUS,
         )
 
-    def on_tick(result):
+    def on_reading(result):
         log.info("[TICK] %s", _format_tick(result))
 
     def on_event(ev):
         log.info("[TRIG] %s  %s", ev.name,
-                  {k: v for k, v in (ev.details or {}).items() if k != "tick_ref"})
+                  {k: v for k, v in (ev.details or {}).items() if k != "reading_ref"})
 
     log.info("Replaying %s ...", args.replay)
     report = replay_jsonl(
         args.replay,
         trigger_policy=policy,
         speed=args.replay_speed,
-        on_tick=on_tick,
+        on_reading=on_reading,
         on_event=on_event,
         orchestrator=orch,
         llm_mode="redo" if args.replay_llm_redo else "skip",
     )
     log.info("Replay complete.")
-    log.info("  ticks:           %d", report.tick_count)
+    log.info("  readings:           %d", report.reading_count)
     log.info("  triggers fired:  %d (by name: %s)",
              report.trigger_count, dict(report.trigger_event_counts))
     log.info("  LLM responses:   %d", len(report.llm_responses))

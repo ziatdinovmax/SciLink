@@ -1,4 +1,4 @@
-"""Diagnostics live_tick — counts peaks in 2-column data, verdicts by count.
+"""Diagnostics live_reading — counts peaks in 2-column data, verdicts by count.
 
 Pure plumbing-test, not a scientific skill. Lets the live-monitoring
 infrastructure be exercised end-to-end without depending on any
@@ -6,7 +6,7 @@ domain-specific skill.
 
 See the sibling ``live_passthrough.md`` for the user-facing
 description. The frontmatter wires this function as the
-``live_tick.tick_fn`` for the ``diagnostics/live_passthrough`` skill.
+``live_reading.reading_fn`` for the ``diagnostics/live_passthrough`` skill.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import time
 import numpy as np
 
 from scilink.agents.exp_agents.live_data_sources import LatestData
-from scilink.agents.exp_agents.live_types import LiveTickResult
+from scilink.agents.exp_agents.live_types import LiveReadingResult
 
 _logger = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ def _parse_two_column(text: str) -> tuple[np.ndarray, np.ndarray]:
     """Parse CSV / whitespace-delimited two-column text → (x, y) arrays.
 
     Tolerates header lines and `#` comments. Mirrors the parser the
-    structure_matching/xrd live_tick uses, kept inline so this skill
+    structure_matching/xrd live_reading uses, kept inline so this skill
     has no cross-skill imports.
     """
     if not text:
@@ -82,13 +82,13 @@ def _verdict_for_count(n: int) -> str:
     return "accept"
 
 
-def passthrough_tick(latest_data: LatestData, session_state: dict,
-                      skill_state: dict) -> LiveTickResult:
-    """The tick function. See module docstring."""
+def passthrough_reading(latest_data: LatestData, session_state: dict,
+                      skill_state: dict) -> LiveReadingResult:
+    """The reading function. See module docstring."""
     text = latest_data.text or ""
     x, y = _parse_two_column(text)
     if x.size < 5:
-        return LiveTickResult(
+        return LiveReadingResult(
             timestamp=time.time(),
             primary_metric=0.0,
             metric_name="peak_count",
@@ -102,7 +102,7 @@ def passthrough_tick(latest_data: LatestData, session_state: dict,
         {"position": float(x[i]), "intensity": float(y[i])}
         for i in peak_idxs
     ]
-    return LiveTickResult(
+    return LiveReadingResult(
         timestamp=time.time(),
         primary_metric=float(n_peaks),
         metric_name="peak_count",
@@ -118,4 +118,4 @@ def passthrough_tick(latest_data: LatestData, session_state: dict,
     )
 
 
-__all__ = ["passthrough_tick"]
+__all__ = ["passthrough_reading"]

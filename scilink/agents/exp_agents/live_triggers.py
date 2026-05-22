@@ -1,22 +1,22 @@
 """Trigger taxonomy for live-monitoring sessions.
 
-Each trigger inspects the rolling ``LiveTickResult`` history each tick
+Each trigger inspects the rolling ``LiveReadingResult`` history each reading
 and emits a :class:`TriggerEvent` (or ``None``) when its condition is
-met. :class:`TriggerPolicy` composes a set of triggers; one tick can
+met. :class:`TriggerPolicy` composes a set of triggers; one reading can
 fire several events from different triggers.
 
 The taxonomy is **what counts as "interesting"** — when the LLM
 "slow loop" should be invoked to produce a textual interpretation.
-The framework reads only the structured ``LiveTickResult`` fields, so
+The framework reads only the structured ``LiveReadingResult`` fields, so
 new trigger types plug in without touching skills or the session.
 
 Built-in triggers (v1):
 
   - :class:`VerdictChangeTrigger` — reject ↔ marginal ↔ accept transitions
   - :class:`NewFeatureTrigger` — feature appears that wasn't seen in
-    the previous N ticks
+    the previous N readings
   - :class:`ConfidenceReversalTrigger` — metric was monotonically
-    improving for K ticks; now reverses
+    improving for K readings; now reverses
   - :class:`ThresholdCrossTrigger` — metric crosses a configured
     boundary in either direction
   - :class:`HeartbeatTrigger` — periodic narrative even when nothing
@@ -36,7 +36,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional, Protocol, runtime_checkable
 
-from .live_types import LiveTickResult, TriggerEvent, Verdict
+from .live_types import LiveReadingResult, TriggerEvent, Verdict
 
 
 # ---------------------------------------------------------------------------
@@ -46,12 +46,12 @@ from .live_types import LiveTickResult, TriggerEvent, Verdict
 
 @runtime_checkable
 class Trigger(Protocol):
-    """A trigger evaluates the rolling history each tick."""
+    """A trigger evaluates the rolling history each reading."""
 
     name: str
 
     def evaluate(
-        self, history: list[LiveTickResult]
+        self, history: list[LiveReadingResult]
     ) -> Optional[TriggerEvent]: ...
 
     def reset(self) -> None: ...
@@ -63,7 +63,7 @@ class Trigger(Protocol):
 
 
 class VerdictChangeTrigger:
-    """Fires when the latest tick's verdict differs from the previous.
+    """Fires when the latest reading's verdict differs from the previous.
 
     The most generally-useful trigger for phase-ID workflows. Both
     "marginal → accept" and "accept → marginal" should prompt the LLM
@@ -75,7 +75,7 @@ class VerdictChangeTrigger:
     def __init__(self) -> None:
         self._last_seen: Optional[Verdict] = None
 
-    def evaluate(self, history: list[LiveTickResult]) -> Optional[TriggerEvent]:
+    def evaluate(self, history: list[LiveReadingResult]) -> Optional[TriggerEvent]:
         if not history:
             return None
         latest = history[-1]
@@ -91,7 +91,7 @@ class VerdictChangeTrigger:
             timestamp=latest.timestamp,
             name=self.name,
             details={"from": previous, "to": latest.verdict},
-            triggering_tick=latest,
+            triggering_reading=latest,
         )
 
     def reset(self) -> None:
@@ -99,12 +99,12 @@ class VerdictChangeTrigger:
 
 
 class NewFeatureTrigger:
-    """Fires when an entry in ``detected_features`` is new vs. recent ticks.
+    """Fires when an entry in ``detected_features`` is new vs. recent readings.
 
     Skill-specific: each modality decides what "a feature" means
     (XRD = peak position; Raman = peak position + assignment; STM
-    = lattice symmetry, etc.). The trigger compares the latest tick's
-    feature set to the union of the previous ``lookback`` ticks. New
+    = lattice symmetry, etc.). The trigger compares the latest reading's
+    feature set to the union of the previous ``lookback`` readings. New
     elements in the set fire the trigger.
 
     Feature equality is via a configurable key function (default: the
@@ -119,7 +119,7 @@ class NewFeatureTrigger:
         self.lookback = lookback
         self.key = key or (lambda f: tuple(sorted(f.items())))
 
-    def evaluate(self, history: list[LiveTickResult]) -> Optional[TriggerEvent]:
+    def evaluate(self, history: list[LiveReadingResult]) -> Optional[TriggerEvent]:
         if len(history) < 2:
             return None
         latest = history[-1]
@@ -150,7 +150,7 @@ class NewFeatureTrigger:
                 "new_features": new_features,
                 "baseline_lookback": len(baseline_window),
             },
-            triggering_tick=latest,
+            triggering_reading=latest,
         )
 
     def reset(self) -> None:
@@ -160,9 +160,9 @@ class NewFeatureTrigger:
 class ConfidenceReversalTrigger:
     """Fires when an improving trend reverses.
 
-    Looks at the last ``window`` ticks; if ``primary_metric`` was
+    Looks at the last ``window`` readings; if ``primary_metric`` was
     monotonically improving for at least ``window - 1`` of them and
-    the latest tick reverses by more than ``min_reversal``, fires.
+    the latest reading reverses by more than ``min_reversal``, fires.
 
     "Improving" depends on the metric direction. Most scoring metrics
     (correlation, FOM) are higher-is-better; cost-style metrics
@@ -187,7 +187,7 @@ class ConfidenceReversalTrigger:
                 f"got {direction!r}"
             )
 
-    def evaluate(self, history: list[LiveTickResult]) -> Optional[TriggerEvent]:
+    def evaluate(self, history: list[LiveReadingResult]) -> Optional[TriggerEvent]:
         if len(history) < self.window + 1:
             return None
         recent = history[-self.window - 1 :]
@@ -220,7 +220,7 @@ class ConfidenceReversalTrigger:
                 "reversal_magnitude": float(reversal),
                 "direction": self.direction,
             },
-            triggering_tick=recent[-1],
+            triggering_reading=recent[-1],
         )
 
     def reset(self) -> None:
@@ -248,7 +248,7 @@ class ThresholdCrossTrigger:
         self.name = name or f"threshold_{direction}_{threshold:.2f}"
         self._last_relation: Optional[str] = None  # "above" or "below"
 
-    def evaluate(self, history: list[LiveTickResult]) -> Optional[TriggerEvent]:
+    def evaluate(self, history: list[LiveReadingResult]) -> Optional[TriggerEvent]:
         if not history:
             return None
         latest = history[-1]
@@ -274,7 +274,7 @@ class ThresholdCrossTrigger:
                 "metric_name": latest.metric_name,
                 "metric": latest.primary_metric,
             },
-            triggering_tick=latest,
+            triggering_reading=latest,
         )
 
     def reset(self) -> None:
@@ -293,7 +293,7 @@ class HeartbeatTrigger:
         self.interval_sec = float(interval_sec)
         self._last_fired_at: Optional[float] = None
 
-    def evaluate(self, history: list[LiveTickResult]) -> Optional[TriggerEvent]:
+    def evaluate(self, history: list[LiveReadingResult]) -> Optional[TriggerEvent]:
         if not history:
             return None
         latest = history[-1]
@@ -308,7 +308,7 @@ class HeartbeatTrigger:
             timestamp=latest.timestamp,
             name=self.name,
             details={"interval_sec": self.interval_sec},
-            triggering_tick=latest,
+            triggering_reading=latest,
         )
 
     def reset(self) -> None:
@@ -330,7 +330,7 @@ class ManualTrigger:
         self.pending = True
         self._last_request_ts = time.time()
 
-    def evaluate(self, history: list[LiveTickResult]) -> Optional[TriggerEvent]:
+    def evaluate(self, history: list[LiveReadingResult]) -> Optional[TriggerEvent]:
         if not self.pending or not history:
             return None
         latest = history[-1]
@@ -339,7 +339,7 @@ class ManualTrigger:
             timestamp=self._last_request_ts or latest.timestamp,
             name=self.name,
             details={"reason": "user_requested_interpretation"},
-            triggering_tick=latest,
+            triggering_reading=latest,
         )
 
     def reset(self) -> None:
@@ -357,7 +357,7 @@ class TriggerPolicy:
     """A composable list of triggers.
 
     Evaluating the policy returns the list of events that fired this
-    tick. The session writes one JSONL line per event and enqueues
+    reading. The session writes one JSONL line per event and enqueues
     each for the LLM dispatcher. The dispatcher's single-flight
     semantics decides whether a fresh ``run_task`` runs immediately
     or coalesces into the in-flight call.
@@ -368,12 +368,12 @@ class TriggerPolicy:
 
     triggers: list[Trigger] = field(default_factory=list)
 
-    def evaluate(self, history: list[LiveTickResult]) -> list[TriggerEvent]:
+    def evaluate(self, history: list[LiveReadingResult]) -> list[TriggerEvent]:
         events: list[TriggerEvent] = []
         for t in self.triggers:
             try:
                 ev = t.evaluate(history)
-            except Exception:  # noqa: BLE001 — trigger bug shouldn't crash the tick loop
+            except Exception:  # noqa: BLE001 — trigger bug shouldn't crash the reading loop
                 continue
             if ev is not None:
                 events.append(ev)

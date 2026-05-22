@@ -289,7 +289,7 @@ def test_directory_watch_sort_by_name_lex_order(tmp_path):
 
 def test_directory_watch_strategy_unseen_walks_each_file_once(tmp_path):
     """In 'unseen' strategy, three files in the directory produce three
-    distinct ticks (in sort order), then None thereafter."""
+    distinct readings (in sort order), then None thereafter."""
     (tmp_path / "a.txt").write_text("alpha")
     time.sleep(0.01)
     (tmp_path / "b.txt").write_text("beta")

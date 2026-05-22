@@ -3,7 +3,7 @@
 Kept in a separate module so :mod:`live_triggers` and
 :mod:`live_session` can both import the dataclasses without a circular
 dependency. Nothing here imports SciLink agent / controller code, so
-skill-side ``tick_fn`` modules can also import these types without
+skill-side ``reading_fn`` modules can also import these types without
 pulling the orchestrator's transitive heavyweight deps (threading,
 LiteLLM wrappers, etc.).
 """
@@ -14,20 +14,22 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
 
-# Coarse phase-ID verdict bucket. Skill tick functions return one of these so
+# Coarse phase-ID verdict bucket. Reading functions return one of these so
 # triggers can reason about transitions without parsing free text.
 Verdict = Literal["accept", "marginal", "reject", "unknown"]
 
 
 @dataclass
-class LiveTickResult:
-    """Output of a skill's ``tick_fn``; consumed by triggers + JSONL writer + UI.
+class LiveReadingResult:
+    """Output of a skill's ``reading_fn``; consumed by triggers + JSONL writer + UI.
 
-    Universal fields cover what the trigger policy and UI need. Anything
-    skill-specific lives in ``raw`` — for replay (so a follow-up
-    analysis can reconstruct exactly what the tick saw) and for the
-    LLM context dict (so the slow loop sees the full tick payload, not
-    just the summarized verdict).
+    A "reading" is one evaluation of the current data stream — the
+    live-mode analogue of an instrument reading. Universal fields
+    cover what the trigger policy and UI need. Anything skill-specific
+    lives in ``raw`` — for replay (so a follow-up analysis can
+    reconstruct exactly what the reading saw) and for the LLM context
+    dict (so the slow loop sees the full payload, not just the
+    summarized verdict).
     """
 
     timestamp: float
@@ -52,7 +54,7 @@ class TriggerEvent:
     timestamp: float
     name: str
     details: dict[str, Any] = field(default_factory=dict)
-    triggering_tick: Optional[LiveTickResult] = None
+    triggering_reading: Optional[LiveReadingResult] = None
 
 
-__all__ = ["Verdict", "LiveTickResult", "TriggerEvent"]
+__all__ = ["Verdict", "LiveReadingResult", "TriggerEvent"]
