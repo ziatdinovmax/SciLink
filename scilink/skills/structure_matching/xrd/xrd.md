@@ -5,6 +5,14 @@ quality_gate:
   accept_threshold: 0.70
   hard_reject_threshold: 0.40
   direction: higher_is_better
+live_tick:
+  enabled: true
+  tick_fn: scilink.skills.structure_matching.xrd.live_tick:xrd_live_tick
+  data_type: spectrum_1d
+  wavelength: CuKa
+  trigger_overrides:
+    heartbeat_sec: 45
+    confidence_threshold: 0.7
 ---
 # XRD Structure Matching Skill
 
