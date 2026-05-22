@@ -158,6 +158,11 @@ def main():
         sys.argv = [sys.argv[0] + ' live'] + sys.argv[2:]
         return live_main()
 
+    elif command == 'live-simulator':
+        from scilink.cli.live_simulator import main as live_sim_main
+        sys.argv = [sys.argv[0] + ' live-simulator'] + sys.argv[2:]
+        return live_sim_main()
+
     elif command in ('explore', 'meta'):  # 'meta' kept as a back-compat alias
         from scilink.cli.meta import main as meta_main
         sys.argv = [f"{sys.argv[0]} {command}"] + sys.argv[2:]
@@ -212,6 +217,12 @@ Available Commands:
                 Polls a file the instrument is writing to and invokes
                 the LLM only on interesting events (verdict change,
                 new feature, confidence reversal, periodic heartbeat).
+
+  live-simulator  Black-box experiment emitter for testing live mode
+                without a real instrument. Pretends to be a
+                diffractometer scanning an Si pattern peak-by-peak;
+                three output layouts (rewrite / append / directory)
+                match the three live-mode source kinds.
 
   plan          Interactive planning orchestrator for experimental design
                 and Bayesian optimization workflows
