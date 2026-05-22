@@ -91,7 +91,6 @@ matching this schema — no prose, no markdown fences:
     "verdict_change":  true | false,          // fire on verdict transitions
     "new_feature":     true | false,          // fire when a new peak / feature appears
     "reversal":        true | false,          // fire on confidence reversal
-    "heartbeat_sec":   60.0 | 0,              // 0 disables the periodic heartbeat
     "threshold":       null | <float 0..1>     // null = no threshold-cross trigger
   }},
   "chemistry_hint": null | ["Si","O"] | [["Si"],["Ge"]],   // optional; for structure_matching skills
@@ -108,12 +107,11 @@ Source-kind disambiguation rules:
 Reading-interval defaults to 2.0 s unless the user specifies otherwise.
 
 Trigger defaults (when the user doesn't say): verdict_change=true,
-new_feature=true, reversal=true, heartbeat_sec=60.0, threshold=null.
+new_feature=true, reversal=true, threshold=null.
 
-If the user explicitly disables a trigger ("no heartbeat", "skip the
-verdict-change trigger") set it to false / 0 accordingly. If they
-mention a confidence threshold ("alert me when FOM > 0.7"), set
-threshold to that float.
+If the user explicitly disables a trigger ("skip the verdict-change
+trigger") set it to false. If they mention a confidence threshold
+("alert me when FOM > 0.7"), set threshold to that float.
 
 Pick the skill_label whose description best matches the experiment.
 If nothing matches, use "diagnostics/live_passthrough".
@@ -205,8 +203,6 @@ def _render_parsed_preview(parsed: dict) -> None:
         trigger_list.append("new feature")
     if triggers.get("reversal", True):
         trigger_list.append("confidence reversal")
-    if triggers.get("heartbeat_sec"):
-        trigger_list.append(f"heartbeat every {triggers['heartbeat_sec']:.0f}s")
     if triggers.get("threshold") is not None:
         trigger_list.append(f"threshold cross at {triggers['threshold']:.2f}")
 
@@ -351,13 +347,18 @@ def _start_from_parsed(*, parsed: dict, data_path: str, model: str,
         if source_kind == "directory_watch" else {}
     )
     triggers_in = parsed.get("triggers", {}) or {}
+    # Heartbeat (periodic status update during quiet stretches) is OFF by
+    # default in the UI flow — most users want event-driven alerts only,
+    # and a heartbeat firing every minute on a stable scan is just noise.
+    # CLI / programmatic users can still enable it explicitly via
+    # `scilink live --heartbeat-sec N` or by passing
+    # `triggers["heartbeat"] = True` to _spin_up_live_session.
     triggers = {
         "verdict_change": bool(triggers_in.get("verdict_change", True)),
         "new_feature":    bool(triggers_in.get("new_feature", True)),
         "reversal":       bool(triggers_in.get("reversal", True)),
-        "heartbeat":      bool(triggers_in.get("heartbeat_sec", 60.0)),
-        "heartbeat_sec":  float(triggers_in.get("heartbeat_sec") or 60.0)
-                          if triggers_in.get("heartbeat_sec") else None,
+        "heartbeat":      False,
+        "heartbeat_sec":  None,
         "threshold":      (
             float(triggers_in["threshold"])
             if triggers_in.get("threshold") is not None else None

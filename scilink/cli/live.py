@@ -5,7 +5,7 @@ scilink live — real-time monitoring of an in-progress measurement.
 Polls a file the instrument is writing to, runs a skill-registered
 reading function every couple of seconds, and invokes the LLM only when
 an "interesting event" fires (verdict change, new feature, confidence
-reversal, periodic heartbeat). Mirrors the UI's Live Mode but for
+reversal, optional periodic status updates). Mirrors the UI's Live Mode but for
 headless / SSH / cron use cases.
 """
 
@@ -34,7 +34,7 @@ Examples:
   scilink live ~/diffractometer/scan.csv --skill xrd
 
   # Append-only data source (instrument writes incrementally) + a
-  # tighter accept threshold + heartbeat every 30 s
+  # tighter accept threshold + periodic status update every 30 s
   scilink live /tmp/raman_live.txt --skill xrd \\
       --source-kind append_only --threshold 0.8 --heartbeat-sec 30
 
@@ -118,10 +118,12 @@ runs any pending LLM call to completion).
              "Default: run until Ctrl-C.",
     )
     parser.add_argument(
-        "--heartbeat-sec", type=float, default=60.0,
-        help="Heartbeat trigger interval (LLM produces a routine "
-             "narrative every N seconds even when nothing changed). "
-             "Set to 0 to disable. Default: 60.",
+        "--heartbeat-sec", type=float, default=0.0,
+        help="Periodic status update interval — the LLM produces a "
+             "routine narrative every N seconds even when nothing has "
+             "changed. Off by default (most scans don't want noise on "
+             "quiet stretches). Set to a positive number (e.g. 60) to "
+             "enable periodic updates.",
     )
     parser.add_argument(
         "--threshold", type=float, default=None,
