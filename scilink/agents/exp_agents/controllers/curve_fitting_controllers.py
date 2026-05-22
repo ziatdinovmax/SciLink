@@ -2258,27 +2258,37 @@ Remember: Rejecting a good fit (R² > {accept_threshold:.2f}) to chase marginal 
         gate = _gate(state)
         if gate.metric != "r_squared":
             value = gate.extract(fit_result.get("fit_quality"))
+            # Canonical verdict schema — must match the keys downstream
+            # consumers actually read (curve_fitting_controllers.py:2839, :3094
+            # read `fit_acceptable`; :2871 reads `issues_found`; :2848 reads
+            # `physically_better_than_best`). The earlier short-circuit
+            # emitted `should_accept` / `issues`, which silently defaulted
+            # downstream — non-R² gates were effectively inert. Reviewer
+            # caught it on PR #193.
             if gate.is_accept(value):
                 cmp = "≥" if gate.direction == "higher_is_better" else "≤"
                 return {
-                    "should_accept": True,
+                    "fit_acceptable": True,
                     "overall_assessment": (
                         f"Skill workflow gate satisfied: {gate.metric} = "
                         f"{value:.4f} {cmp} {gate.accept_threshold:.4f}. "
                         f"Curve-fit R² verifier bypassed for non-R² gates."
                     ),
-                    "issues": [],
-                    "recommended_action": "accept_as_is",
+                    "issues_found": [],
+                    "recommended_action": "none",
+                    "physically_better_than_best": False,
+                    "comparison_note": "N/A — non-R² gate (no prior-best comparison)",
                 }
             elif gate.is_hard_reject(value):
+                value_str = f"{value:.4f}" if isinstance(value, (int, float)) else "missing"
                 return {
-                    "should_accept": False,
+                    "fit_acceptable": False,
                     "overall_assessment": (
                         f"Skill workflow gate hard-rejects: {gate.metric} = "
-                        f"{value if value is not None else 'missing'} "
-                        f"vs hard-reject threshold {gate.hard_reject_threshold}."
+                        f"{value_str} vs hard-reject threshold "
+                        f"{gate.hard_reject_threshold:.4f}."
                     ),
-                    "issues": [{
+                    "issues_found": [{
                         "location": "Workflow scoring",
                         "problem": f"{gate.metric} below acceptable range",
                         "suggested_fix": (
@@ -2288,18 +2298,32 @@ Remember: Rejecting a good fit (R² > {accept_threshold:.2f}) to chase marginal 
                         ),
                     }],
                     "recommended_action": "retry_fitting_attempt_with_changes",
+                    "physically_better_than_best": False,
+                    "comparison_note": "N/A — non-R² gate (no prior-best comparison)",
                 }
             else:
+                # Marginal: between accept and hard-reject. Treat as
+                # acceptable (don't trigger retry), but flag as marginal
+                # in the verdict so the synthesis layer can qualify it.
                 return {
-                    "should_accept": False,
+                    "fit_acceptable": True,
                     "overall_assessment": (
                         f"Skill workflow gate marginal: {gate.metric} = "
                         f"{value:.4f}. Below accept threshold "
                         f"{gate.accept_threshold:.4f} but above hard-reject; "
                         f"synthesis will report as marginal."
                     ),
-                    "issues": [],
-                    "recommended_action": "accept_as_is",
+                    "issues_found": [{
+                        "location": "Workflow scoring",
+                        "problem": f"{gate.metric} marginal (below accept threshold)",
+                        "suggested_fix": (
+                            "Acceptable as-is; downstream synthesis will "
+                            "qualify confidence as marginal."
+                        ),
+                    }],
+                    "recommended_action": "none",
+                    "physically_better_than_best": False,
+                    "comparison_note": "N/A — non-R² gate (no prior-best comparison)",
                 }
         if not fit_result.get("visualization_bytes"):
             self.logger.warning("      No visualization available for LLM verification")
