@@ -231,14 +231,14 @@ def _parse_chemistry_hint(raw: Optional[str]):
 
 
 def _infer_light_model(main_model: str) -> str:
-    m = (main_model or "").lower()
-    if "claude" in m:
-        return "claude-haiku-4-5-20251001"
-    if m.startswith(("gpt-", "openai/")):
-        return "gpt-5-mini" if "5" in m else "gpt-4o-mini"
-    if "gemini" in m:
-        return "gemini/gemini-2.0-flash"
-    return ""
+    """Default cheap/fast companion for the qualitative-check trigger.
+
+    Gemini 3.5 Flash regardless of main-model provider — cheapest
+    production-grade option, overridable with --qualitative-model.
+    Cross-provider usage needs GEMINI_API_KEY in addition to whatever
+    key the main model uses.
+    """
+    return "gemini-3.5-flash"
 
 
 def _build_policy(args, *, skill_meta: dict | None = None,

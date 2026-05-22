@@ -492,6 +492,29 @@ def _summarize_history_for_llm(readings: list[LiveReadingResult]) -> str:
     return "\n".join(lines)
 
 
+def _resolve_provider_api_key(model: str, fallback_key: str) -> Optional[str]:
+    """Pick the API key matching ``model``'s provider, preferring env vars
+    so cross-provider light-model usage works (e.g. Claude main + Gemini
+    light: the sidebar's ANTHROPIC_API_KEY isn't valid for Gemini calls,
+    so we look up GEMINI_API_KEY / GOOGLE_API_KEY from env instead).
+    Falls back to ``fallback_key`` only when no provider-specific env
+    var is set."""
+    import os
+    m = (model or "").lower()
+    if "gemini" in m:
+        return (os.environ.get("GEMINI_API_KEY")
+                or os.environ.get("GOOGLE_API_KEY")
+                or fallback_key)
+    if "claude" in m or m.startswith("anthropic/"):
+        return (os.environ.get("ANTHROPIC_API_KEY")
+                or os.environ.get("CLAUDE_API_KEY")
+                or fallback_key)
+    if (m.startswith(("gpt-", "openai/", "o1-", "o3-"))
+            or "openai" in m):
+        return os.environ.get("OPENAI_API_KEY") or fallback_key
+    return fallback_key
+
+
 def _call_qualitative_check(
     *, model: str, api_key: str, guidance: str, history_summary: str,
 ) -> Optional[dict]:
@@ -499,6 +522,12 @@ def _call_qualitative_check(
 
     Returns None on any failure (import, network, JSON parse, missing
     keys). Failures are logged and the caller treats them as "don't fire."
+
+    The api_key is resolved by provider — if model is from a different
+    provider than fallback_key's, env vars take precedence. This makes
+    cross-provider usage (Claude main + Gemini light) work without
+    extra UI plumbing, as long as the operator has both provider keys
+    in the environment.
     """
     try:
         import litellm
@@ -509,12 +538,13 @@ def _call_qualitative_check(
     except ImportError:
         _normalize_model_name = lambda m: m  # noqa: E731
 
+    resolved_key = _resolve_provider_api_key(model, api_key)
     system = _QUAL_SYSTEM_PROMPT.replace("{guidance}", guidance)
     user_msg = f"Recent readings:\n{history_summary}\n\nReturn the JSON decision."
     try:
         resp = litellm.completion(
             model=_normalize_model_name(model),
-            api_key=api_key,
+            api_key=resolved_key,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user_msg},

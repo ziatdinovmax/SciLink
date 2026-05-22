@@ -59,17 +59,15 @@ def render_live_panel() -> None:
 
 
 def _infer_light_model(main_model: str) -> str:
-    """Pick a sensible cheap/fast companion for the qualitative-check
-    trigger based on the sidebar's main model. Returns "" if no good
-    default is known (user can fill it in)."""
-    m = (main_model or "").lower()
-    if "claude" in m:
-        return "claude-haiku-4-5-20251001"
-    if m.startswith(("gpt-", "openai/")):
-        return "gpt-5-mini" if "5" in m else "gpt-4o-mini"
-    if "gemini" in m:
-        return "gemini/gemini-2.0-flash"
-    return ""
+    """Default cheap/fast companion for the qualitative-check trigger.
+
+    Gemini 3.5 Flash regardless of which provider the main model uses —
+    cheapest production-grade option across the board, and the user
+    can override in the panel's text field. Cross-provider usage
+    (e.g. Claude main + Gemini light) requires GEMINI_API_KEY in the
+    environment in addition to the main provider's key.
+    """
+    return "gemini-3.5-flash"
 
 
 def _resolve_sidebar_config() -> tuple[str, str, bool]:
@@ -305,8 +303,12 @@ def _render_setup() -> None:
             "Cheap/fast model that periodically (~45 s) checks whether "
             "the recent reading history shows qualitative patterns the "
             "deterministic triggers (verdict change / new feature / "
-            "reversal) miss. Defaults to a small model matching the "
-            "sidebar's provider. Leave blank or type 'none' to disable."
+            "reversal) miss. Default is Gemini 3.5 Flash; override with "
+            "any litellm-compatible model name. Leave blank or type "
+            "'none' to disable. "
+            "Note: if the light model is a different provider than the "
+            "main model, the corresponding env var must be set "
+            "(GEMINI_API_KEY, OPENAI_API_KEY, etc.)."
         ),
     )
 
