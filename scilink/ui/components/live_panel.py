@@ -115,11 +115,12 @@ def _render_setup() -> None:
         )
 
         data_path = st.text_input(
-            "Data file path",
+            "Data file or directory path",
             value="",
-            placeholder="/path/to/in-progress-scan.csv",
-            help="Path to a file your instrument writes to as it scans. "
-                 "SciLink polls this file every tick.",
+            placeholder="/path/to/in-progress-scan.csv  (file)  OR  "
+                        "/path/to/scan_directory/  (directory)",
+            help="Single file (for mtime_poll / append_only) OR directory "
+                 "(for directory_watch — see Source type below).",
         )
 
         col1, col2 = st.columns(2)
@@ -149,14 +150,44 @@ def _render_setup() -> None:
 
         st.markdown("**Source type**")
         source_kind = st.radio(
-            "Data source", options=["mtime_poll", "append_only"],
+            "Data source",
+            options=["mtime_poll", "append_only", "directory_watch"],
             label_visibility="collapsed", horizontal=True,
             help=(
-                "`mtime_poll` rereads the whole file each time it changes "
-                "(rewriting instruments). `append_only` returns only the "
-                "newly-appended bytes (incremental writers)."
+                "`mtime_poll` — single FILE, re-read on mtime change "
+                "(rewriting instruments).\n"
+                "`append_only` — single FILE, return only newly-appended "
+                "bytes (incremental writers).\n"
+                "`directory_watch` — DIRECTORY of files, return the newest "
+                "each tick (time-resolved experiments where each datapoint "
+                "is a new file). The path above should then point at the "
+                "directory, not a single file."
             ),
         )
+        if source_kind == "directory_watch":
+            dir_col1, dir_col2, dir_col3 = st.columns(3)
+            with dir_col1:
+                dir_pattern = st.text_input(
+                    "File pattern", value="*.txt",
+                    help="Glob filter applied to files in the directory.",
+                )
+            with dir_col2:
+                dir_strategy = st.selectbox(
+                    "Strategy", options=["newest", "unseen"],
+                    help=("'newest' returns just the latest file each tick; "
+                          "'unseen' walks each new file once in sort order."),
+                )
+            with dir_col3:
+                dir_sort = st.selectbox(
+                    "Sort by", options=["mtime", "name"],
+                    help=("'mtime' (default) is universal; 'name' is right "
+                          "for zero-padded sequential filenames where mtime "
+                          "may be unreliable (NFS, virtual filesystems)."),
+                )
+        else:
+            dir_pattern = "*.txt"
+            dir_strategy = "newest"
+            dir_sort = "mtime"
 
         with st.expander("Triggers (default: verdict change + new feature + reversal + heartbeat)"):
             t_verdict = st.checkbox("Verdict change", value=True)
@@ -223,6 +254,11 @@ def _render_setup() -> None:
         api_key=resolved_key,
         data_path=data_path,
         source_kind=source_kind,
+        source_kwargs={
+            "pattern": dir_pattern,
+            "strategy": dir_strategy,
+            "sort_by": dir_sort,
+        } if source_kind == "directory_watch" else {},
         skill_name=selected_skill["name"],
         skill_domain=selected_skill["domain"],
         tick_interval_sec=float(tick_interval),
@@ -273,6 +309,7 @@ def _spin_up_live_session(
     api_key: str,
     data_path: str,
     source_kind: str,
+    source_kwargs: Optional[dict] = None,
     skill_name: str,
     skill_domain: str,
     tick_interval_sec: float,
@@ -284,6 +321,7 @@ def _spin_up_live_session(
     )
     from scilink.agents.exp_agents.live_data_sources import (
         AppendOnlyFileSource,
+        DirectoryWatchSource,
         MtimePollFileSource,
     )
     from scilink.agents.exp_agents.live_session import LiveSession
@@ -332,7 +370,14 @@ def _spin_up_live_session(
         return
 
     # Data source
-    if source_kind == "append_only":
+    if source_kind == "directory_watch":
+        source = DirectoryWatchSource(
+            data_path,
+            pattern=(source_kwargs or {}).get("pattern", "*.txt"),
+            strategy=(source_kwargs or {}).get("strategy", "newest"),
+            sort_by=(source_kwargs or {}).get("sort_by", "mtime"),
+        )
+    elif source_kind == "append_only":
         source = AppendOnlyFileSource(data_path)
     else:
         source = MtimePollFileSource(data_path)

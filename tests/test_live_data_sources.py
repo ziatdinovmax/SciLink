@@ -21,6 +21,7 @@ import pytest
 from scilink.agents.exp_agents.live_data_sources import (
     AppendOnlyFileSource,
     CallbackSource,
+    DirectoryWatchSource,
     LatestData,
     LiveDataSource,
     MtimePollFileSource,
@@ -216,3 +217,113 @@ def test_callback_reset_clears_buffer():
     src.push(text="x")
     src.reset()
     assert src.read_latest() is None
+
+
+# --- DirectoryWatchSource -----------------------------------------------------
+
+def test_directory_watch_missing_dir_returns_none(tmp_path):
+    src = DirectoryWatchSource(tmp_path / "no_such_dir")
+    assert src.read_latest() is None
+
+
+def test_directory_watch_empty_dir_returns_none(tmp_path):
+    src = DirectoryWatchSource(tmp_path)
+    assert src.read_latest() is None
+
+
+def test_directory_watch_returns_newest_file_by_mtime(tmp_path):
+    (tmp_path / "a.txt").write_text("alpha")
+    time.sleep(0.02)
+    (tmp_path / "b.txt").write_text("beta")
+    src = DirectoryWatchSource(tmp_path, pattern="*.txt")
+    out = src.read_latest()
+    assert out is not None
+    assert out.path.name == "b.txt"
+    assert out.text == "beta"
+    assert out.extras["filename"] == "b.txt"
+    assert out.extras["n_files_total"] == 2
+
+
+def test_directory_watch_pattern_filters_files(tmp_path):
+    (tmp_path / "a.txt").write_text("alpha")
+    (tmp_path / "b.csv").write_text("beta")
+    src = DirectoryWatchSource(tmp_path, pattern="*.csv")
+    out = src.read_latest()
+    assert out is not None
+    assert out.path.name == "b.csv"
+
+
+def test_directory_watch_same_newest_returns_none_second_call(tmp_path):
+    (tmp_path / "a.txt").write_text("alpha")
+    src = DirectoryWatchSource(tmp_path)
+    assert src.read_latest() is not None
+    assert src.read_latest() is None
+
+
+def test_directory_watch_new_file_surfaced(tmp_path):
+    (tmp_path / "a.txt").write_text("alpha")
+    src = DirectoryWatchSource(tmp_path)
+    src.read_latest()  # prime on 'a'
+    time.sleep(0.02)
+    (tmp_path / "b.txt").write_text("beta")
+    out = src.read_latest()
+    assert out is not None and out.path.name == "b.txt"
+
+
+def test_directory_watch_sort_by_name_lex_order(tmp_path):
+    """When sort_by='name', alphabetical order picks the newest. Useful for
+    zero-padded sequential filenames where mtime might be unreliable."""
+    # Create out-of-order on disk
+    (tmp_path / "scan_0003.txt").write_text("third")
+    time.sleep(0.02)
+    (tmp_path / "scan_0001.txt").write_text("first")
+    time.sleep(0.02)
+    (tmp_path / "scan_0002.txt").write_text("second")
+
+    src = DirectoryWatchSource(tmp_path, pattern="scan_*.txt", sort_by="name")
+    out = src.read_latest()
+    assert out is not None
+    assert out.path.name == "scan_0003.txt"  # alphabetically last
+    assert out.text == "third"
+
+
+def test_directory_watch_strategy_unseen_walks_each_file_once(tmp_path):
+    """In 'unseen' strategy, three files in the directory produce three
+    distinct ticks (in sort order), then None thereafter."""
+    (tmp_path / "a.txt").write_text("alpha")
+    time.sleep(0.01)
+    (tmp_path / "b.txt").write_text("beta")
+    time.sleep(0.01)
+    (tmp_path / "c.txt").write_text("gamma")
+    src = DirectoryWatchSource(tmp_path, strategy="unseen", sort_by="mtime")
+    out1 = src.read_latest(); out2 = src.read_latest(); out3 = src.read_latest()
+    out4 = src.read_latest()
+    assert [o.path.name for o in (out1, out2, out3)] == ["a.txt", "b.txt", "c.txt"]
+    assert out4 is None
+
+
+def test_directory_watch_reset_re_surfaces_files(tmp_path):
+    (tmp_path / "a.txt").write_text("alpha")
+    src = DirectoryWatchSource(tmp_path)
+    assert src.read_latest() is not None
+    assert src.read_latest() is None
+    src.reset()
+    out = src.read_latest()
+    assert out is not None
+    assert out.path.name == "a.txt"
+
+
+def test_directory_watch_validates_strategy():
+    with pytest.raises(ValueError, match="strategy"):
+        DirectoryWatchSource("/tmp", strategy="random")
+
+
+def test_directory_watch_validates_sort_by():
+    with pytest.raises(ValueError, match="sort_by"):
+        DirectoryWatchSource("/tmp", sort_by="size")
+
+
+def test_directory_watch_protocol_conformance(tmp_path):
+    src = DirectoryWatchSource(tmp_path)
+    assert isinstance(src, LiveDataSource)
+    assert src.name == "directory_watch"

@@ -173,6 +173,114 @@ class AppendOnlyFileSource:
         self._offset = 0
 
 
+class DirectoryWatchSource:
+    """Watch a directory for new files; return the contents of the newest each tick.
+
+    Right shape for "each new datapoint is a new file" scenarios — time-
+    resolved XRD where the instrument writes ``scan_0001.txt``,
+    ``scan_0002.txt``, ... as the experiment progresses, or a Raman
+    series where every acquisition is its own file in a session
+    directory.
+
+    Each tick:
+      - lists files in ``directory`` matching ``pattern``
+      - selects the latest by ``sort_by`` ("mtime" default; "name" for
+        zero-padded sequential filenames where alphabetical = chronological)
+      - returns its text content the first time it's seen
+      - returns None on subsequent ticks until a newer file appears
+
+    For workflows where you want EVERY new file (not just the latest)
+    surfaced one-at-a-time, use ``strategy='unseen'`` — each tick the
+    source returns the next-unseen file in sort order, so a burst of N
+    files spawns N ticks before going quiet.
+    """
+
+    def __init__(
+        self,
+        directory: str | Path,
+        pattern: str = "*.txt",
+        *,
+        strategy: str = "newest",
+        sort_by: str = "mtime",
+    ):
+        if strategy not in ("newest", "unseen"):
+            raise ValueError(
+                f"strategy must be 'newest' or 'unseen'; got {strategy!r}"
+            )
+        if sort_by not in ("mtime", "name"):
+            raise ValueError(
+                f"sort_by must be 'mtime' or 'name'; got {sort_by!r}"
+            )
+        self.directory = Path(directory)
+        self.pattern = pattern
+        self.strategy = strategy
+        self.sort_by = sort_by
+        # 'newest' tracks just the last-returned path.
+        # 'unseen' tracks the full set of returned paths.
+        self._last_returned: Optional[Path] = None
+        self._seen: set[Path] = set()
+        self.name = "directory_watch"
+
+    def _list_files(self) -> list[Path]:
+        try:
+            files = list(self.directory.glob(self.pattern))
+        except OSError:
+            return []
+        if self.sort_by == "mtime":
+            def _key(p: Path) -> float:
+                try:
+                    return p.stat().st_mtime
+                except OSError:
+                    return 0.0
+            files.sort(key=_key)
+        else:  # "name"
+            files.sort(key=lambda p: p.name)
+        return files
+
+    def read_latest(self) -> Optional[LatestData]:
+        if not self.directory.is_dir():
+            return None
+        files = self._list_files()
+        if not files:
+            return None
+        if self.strategy == "newest":
+            chosen = files[-1]
+            if chosen == self._last_returned:
+                return None
+            self._last_returned = chosen
+        else:  # "unseen"
+            chosen = None
+            for f in files:
+                if f not in self._seen:
+                    chosen = f
+                    break
+            if chosen is None:
+                return None
+            self._seen.add(chosen)
+        try:
+            text = chosen.read_text()
+        except OSError as e:
+            _logger.debug("read_text failed for %s: %s", chosen, e)
+            return None
+        return LatestData(
+            timestamp=time.time(),
+            source_kind=self.name,
+            path=chosen,
+            text=text,
+            extras={
+                "directory": str(self.directory),
+                "pattern": self.pattern,
+                "filename": chosen.name,
+                "n_files_total": len(files),
+                "strategy": self.strategy,
+            },
+        )
+
+    def reset(self) -> None:
+        self._last_returned = None
+        self._seen.clear()
+
+
 class CallbackSource:
     """In-process source. Caller pushes payloads; the tick loop consumes them.
 
@@ -221,5 +329,6 @@ __all__ = [
     "LiveDataSource",
     "MtimePollFileSource",
     "AppendOnlyFileSource",
+    "DirectoryWatchSource",
     "CallbackSource",
 ]

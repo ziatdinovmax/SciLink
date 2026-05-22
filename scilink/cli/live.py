@@ -60,8 +60,9 @@ runs any pending LLM call to completion).
     )
     parser.add_argument(
         "data_path", nargs="?",
-        help="File the instrument is writing to. Polled every "
-             "--tick-interval seconds. Omit with --replay.",
+        help="File OR directory the instrument is writing to (see "
+             "--source-kind). Polled every --tick-interval seconds. "
+             "Omit with --replay.",
     )
     parser.add_argument(
         "--skill", default="xrd",
@@ -69,12 +70,43 @@ runs any pending LLM call to completion).
              "drives the loop. Default: xrd.",
     )
     parser.add_argument(
-        "--source-kind", choices=("mtime_poll", "append_only"),
+        "--source-kind",
+        choices=("mtime_poll", "append_only", "directory_watch"),
         default="mtime_poll",
-        help="How to detect new data. 'mtime_poll' (default) re-reads "
-             "the whole file when its mtime advances; 'append_only' "
-             "tracks a byte offset and returns only the newly-"
-             "appended chunk.",
+        help=(
+            "How to detect new data:\n"
+            "  mtime_poll      — single file, re-read on mtime change "
+            "(default; instruments that rewrite the file).\n"
+            "  append_only     — single file, return only newly-appended "
+            "bytes.\n"
+            "  directory_watch — folder of files, return the newest each "
+            "tick (time-resolved experiments where each datapoint is a "
+            "new file). Combine with --pattern to filter (e.g. '*.csv')."
+        ),
+    )
+    parser.add_argument(
+        "--pattern", default="*.txt",
+        help="Glob pattern for --source-kind directory_watch. Default: '*.txt'.",
+    )
+    parser.add_argument(
+        "--directory-strategy",
+        choices=("newest", "unseen"),
+        default="newest",
+        help=(
+            "directory_watch only. 'newest' (default) returns just the "
+            "latest file each tick; 'unseen' walks each new file once "
+            "in sort order, so a burst of N files produces N ticks."
+        ),
+    )
+    parser.add_argument(
+        "--directory-sort",
+        choices=("mtime", "name"),
+        default="mtime",
+        help=(
+            "directory_watch only. Sort files by 'mtime' (default) or "
+            "'name' (alphabetical — useful for zero-padded sequential "
+            "filenames where mtime is unreliable)."
+        ),
     )
     parser.add_argument(
         "--tick-interval", type=float, default=2.0,
@@ -225,7 +257,7 @@ def _run_live(args, log) -> int:
         AnalysisMode, AnalysisOrchestratorAgent,
     )
     from scilink.agents.exp_agents.live_data_sources import (
-        AppendOnlyFileSource, MtimePollFileSource,
+        AppendOnlyFileSource, DirectoryWatchSource, MtimePollFileSource,
     )
     from scilink.agents.exp_agents.live_session import LiveSession
     from scilink.skills.loader import load_skill, resolve_tick_fn
@@ -270,10 +302,23 @@ def _run_live(args, log) -> int:
     log.info("Skill loaded: %s/%s", domain, name)
 
     # Data source
-    source_cls = (AppendOnlyFileSource if args.source_kind == "append_only"
-                  else MtimePollFileSource)
-    source = source_cls(args.data_path)
-    log.info("Data source: %s (%s)", args.source_kind, args.data_path)
+    if args.source_kind == "directory_watch":
+        source = DirectoryWatchSource(
+            args.data_path,
+            pattern=args.pattern,
+            strategy=args.directory_strategy,
+            sort_by=args.directory_sort,
+        )
+        log.info(
+            "Data source: directory_watch (%s, pattern=%r, strategy=%s, sort_by=%s)",
+            args.data_path, args.pattern, args.directory_strategy, args.directory_sort,
+        )
+    elif args.source_kind == "append_only":
+        source = AppendOnlyFileSource(args.data_path)
+        log.info("Data source: append_only (%s)", args.data_path)
+    else:
+        source = MtimePollFileSource(args.data_path)
+        log.info("Data source: mtime_poll (%s)", args.data_path)
 
     # Orchestrator (AUTONOMOUS — no human-feedback prompts during live ticks)
     try:
