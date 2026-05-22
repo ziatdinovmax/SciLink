@@ -2,13 +2,14 @@
 
 Renders one of two views depending on session state:
 
-  Setup view  — when no live session is active. Shows a form for
-                data-source path, skill picker (filtered to skills
-                whose frontmatter declares a ``live_reading.reading_fn``),
-                reading interval, and trigger toggles. "Start" button
-                instantiates an ``AnalysisOrchestratorAgent`` and a
-                :class:`LiveSession` and stashes both in
-                ``st.session_state``.
+  Setup view  — when no live session is active. The user enters a
+                data path and describes the experiment in natural
+                language; an LLM parse extracts the structured config
+                (skill, source kind, reading interval, triggers) for
+                the user to review before starting the session. The
+                model + API key + consent come from the standard
+                sidebar fields (no panel-level prereqs banner — that
+                matches how analyze / plan / simulate work).
 
   Dashboard   — when a live session is running. Layout: latest data
                 plot + metric time-series chart on the left, decision
@@ -21,11 +22,13 @@ Renders one of two views depending on session state:
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import streamlit as st
 
@@ -71,205 +74,309 @@ def _resolve_sidebar_config() -> tuple[str, str, bool]:
     return model, api_key, consent
 
 
-def _render_setup() -> None:
-    # Sidebar prerequisites — same as analyze / plan / simulate modes:
-    # CONSENT is the only hard gate at the UI level (sidebar.py:343).
-    # The API key resolves through the standard chain at dispatch time:
-    # sidebar input → ANTHROPIC_API_KEY / GEMINI_API_KEY / OPENAI_API_KEY.
-    model, api_key, consent = _resolve_sidebar_config()
+_PARSE_SYSTEM_PROMPT = """You extract structured live-monitoring configuration from a scientist's plain-language description of an experiment.
 
+You will be given a short description of an in-progress measurement
+(XRD, Raman, EELS, generic spectroscopy, etc.). Return ONE JSON object
+matching this schema — no prose, no markdown fences:
+
+{{
+  "skill_label": "<domain/name>",            // see AVAILABLE_SKILLS below
+  "source_kind": "mtime_poll" | "append_only" | "directory_watch",
+  "source_pattern": "*.csv",                  // glob, only used when source_kind == directory_watch
+  "source_strategy": "newest" | "unseen",     // only used when source_kind == directory_watch
+  "source_sort_by": "mtime" | "name",         // only used when source_kind == directory_watch
+  "reading_interval_sec": 2.0,                // float, seconds between readings
+  "triggers": {{
+    "verdict_change":  true | false,          // fire on verdict transitions
+    "new_feature":     true | false,          // fire when a new peak / feature appears
+    "reversal":        true | false,          // fire on confidence reversal
+    "heartbeat_sec":   60.0 | 0,              // 0 disables the periodic heartbeat
+    "threshold":       null | <float 0..1>     // null = no threshold-cross trigger
+  }},
+  "chemistry_hint": null | ["Si","O"] | [["Si"],["Ge"]],   // optional; for structure_matching skills
+  "summary": "one sentence describing what you extracted"
+}}
+
+Source-kind disambiguation rules:
+  - The instrument **rewrites a single file** as the scan progresses  → mtime_poll
+  - The instrument **appends to a single file** (one new row per step) → append_only
+  - The instrument writes **one file per measurement into a folder**   → directory_watch
+  If the user says "a folder of files" or names a pattern like
+  "scan_XXXX.csv", choose directory_watch.
+
+Reading-interval defaults to 2.0 s unless the user specifies otherwise.
+
+Trigger defaults (when the user doesn't say): verdict_change=true,
+new_feature=true, reversal=true, heartbeat_sec=60.0, threshold=null.
+
+If the user explicitly disables a trigger ("no heartbeat", "skip the
+verdict-change trigger") set it to false / 0 accordingly. If they
+mention a confidence threshold ("alert me when FOM > 0.7"), set
+threshold to that float.
+
+Pick the skill_label whose description best matches the experiment.
+If nothing matches, use "diagnostics/live_passthrough".
+
+AVAILABLE_SKILLS:
+{available_skills}
+"""
+
+
+def _parse_description(
+    description: str, model: str, api_key: str,
+    skill_options: list[dict],
+) -> Optional[dict]:
+    """Call the LLM to convert a natural-language description into a
+    structured config dict. Returns None on failure (caller surfaces error)."""
+    try:
+        import litellm
+    except ImportError:
+        st.error("LiteLLM not available; cannot parse description.")
+        return None
+
+    from scilink.wrappers.litellm_wrapper import _normalize_model_name
+
+    skills_blob = "\n".join(
+        f"  - {s['label']}: {s['description'][:200]}"
+        for s in skill_options
+    ) or "  (no live-reading-enabled skills found)"
+    system = _PARSE_SYSTEM_PROMPT.format(available_skills=skills_blob)
+
+    try:
+        resp = litellm.completion(
+            model=_normalize_model_name(model),
+            api_key=api_key,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": description.strip()},
+            ],
+            max_tokens=800,
+            temperature=0.0,
+        )
+    except Exception as e:
+        st.error(f"LLM call failed: {e}")
+        return None
+
+    try:
+        text = resp.choices[0].message.content or ""
+    except Exception as e:
+        st.error(f"Unexpected LLM response shape: {e}")
+        return None
+
+    return _extract_json(text)
+
+
+def _extract_json(text: str) -> Optional[dict]:
+    """Pull a JSON object out of the LLM response (tolerates surrounding text)."""
+    # Strip common code-fence wrappers
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    candidate = fenced.group(1) if fenced else None
+    if candidate is None:
+        first = text.find("{")
+        last = text.rfind("}")
+        if first == -1 or last <= first:
+            st.error("No JSON object found in LLM response.")
+            with st.expander("Raw LLM response"):
+                st.code(text[:2000])
+            return None
+        candidate = text[first : last + 1]
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError as e:
+        st.error(f"Failed to parse LLM JSON: {e}")
+        with st.expander("Raw LLM response"):
+            st.code(candidate[:2000])
+        return None
+
+
+def _render_parsed_preview(parsed: dict) -> None:
+    """Render the parsed config as a readable preview."""
+    st.markdown("**Parsed configuration**")
+    summary = parsed.get("summary", "")
+    if summary:
+        st.caption(summary)
+
+    triggers = parsed.get("triggers", {}) or {}
+    trigger_list = []
+    if triggers.get("verdict_change", True):
+        trigger_list.append("verdict change")
+    if triggers.get("new_feature", True):
+        trigger_list.append("new feature")
+    if triggers.get("reversal", True):
+        trigger_list.append("confidence reversal")
+    if triggers.get("heartbeat_sec"):
+        trigger_list.append(f"heartbeat every {triggers['heartbeat_sec']:.0f}s")
+    if triggers.get("threshold") is not None:
+        trigger_list.append(f"threshold cross at {triggers['threshold']:.2f}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.write(f"**Skill:**  `{parsed.get('skill_label', '?')}`")
+        st.write(f"**Source:**  `{parsed.get('source_kind', '?')}`")
+        if parsed.get("source_kind") == "directory_watch":
+            st.write(
+                f"&nbsp;&nbsp;&nbsp;pattern `{parsed.get('source_pattern', '*.txt')}`, "
+                f"strategy `{parsed.get('source_strategy', 'newest')}`, "
+                f"sort `{parsed.get('source_sort_by', 'mtime')}`",
+                unsafe_allow_html=True,
+            )
+        chem = parsed.get("chemistry_hint")
+        if chem:
+            st.write(f"**Chemistry hint:**  `{chem}`")
+    with col2:
+        st.write(f"**Reading interval:**  `{parsed.get('reading_interval_sec', 2.0)} s`")
+        st.write(f"**Triggers:**  {', '.join(trigger_list) or '_none_'}")
+
+
+def _render_setup() -> None:
+    # Sidebar handles model / API key / consent — same as analyze / plan /
+    # simulate. No prereqs banner here; the sidebar IS the visible status,
+    # and the Start button gates on consent (sidebar.py:343 pattern).
+    model, api_key, consent = _resolve_sidebar_config()
     env_key = (
         os.environ.get("ANTHROPIC_API_KEY")
         or os.environ.get("GEMINI_API_KEY")
         or os.environ.get("OPENAI_API_KEY")
     )
-
-    # Banner — only consent missing is strictly blocking; key missing is a soft warning
-    if not consent:
-        st.warning(
-            "Before starting a live session, please check the "
-            "**code-execution consent** box in the sidebar."
-        )
-    elif not api_key and not env_key:
-        st.info(
-            "No API key in the sidebar and no LLM env var set. You can "
-            "still configure a session below, but starting it will fail "
-            "until a key is provided."
-        )
-    else:
-        key_source = "sidebar" if api_key else "environment"
-        st.success(
-            f"Sidebar config ready · model **{model}** · API key from "
-            f"**{key_source}** · consent given."
-        )
-
-    # Skills with a live_reading block — filter to those that resolve to an importable
-    # reading_fn at session-start time so the user only sees options that will work.
-    skill_options = _discover_live_enabled_skills()
-
-    with st.form("live_session_setup"):
-        st.subheader("Live session — measurement setup")
-        st.caption(
-            "Configure the data source + skill + triggers below. Model and "
-            "API key are read from the sidebar fields."
-        )
-
-        data_path = st.text_input(
-            "Data file or directory path",
-            value="",
-            placeholder="/path/to/in-progress-scan.csv  (file)  OR  "
-                        "/path/to/scan_directory/  (directory)",
-            help="Single file (for mtime_poll / append_only) OR directory "
-                 "(for directory_watch — see Source type below).",
-        )
-
-        col1, col2 = st.columns(2)
-        with col1:
-            if skill_options:
-                skill_label = st.selectbox(
-                    "Reading skill",
-                    options=[s["label"] for s in skill_options],
-                    help="Skill whose live_reading function drives the metric.",
-                )
-                selected_skill = next(
-                    s for s in skill_options if s["label"] == skill_label
-                )
-            else:
-                st.warning(
-                    "No skills with a `live_reading:` block found. The skill's "
-                    "frontmatter needs `live_reading.reading_fn` set to a "
-                    "module:function path."
-                )
-                selected_skill = None
-        with col2:
-            reading_interval = st.number_input(
-                "Reading interval (seconds)",
-                min_value=0.5, max_value=60.0, value=2.0, step=0.5,
-                help="How often to poll the data source and run the reading function.",
-            )
-
-        st.markdown("**Source type**")
-        source_kind = st.radio(
-            "Data source",
-            options=["mtime_poll", "append_only", "directory_watch"],
-            label_visibility="collapsed", horizontal=True,
-            help=(
-                "`mtime_poll` — single FILE, re-read on mtime change "
-                "(rewriting instruments).\n"
-                "`append_only` — single FILE, return only newly-appended "
-                "bytes (incremental writers).\n"
-                "`directory_watch` — DIRECTORY of files, return the newest "
-                "each reading (time-resolved experiments where each datapoint "
-                "is a new file). The path above should then point at the "
-                "directory, not a single file."
-            ),
-        )
-        if source_kind == "directory_watch":
-            dir_col1, dir_col2, dir_col3 = st.columns(3)
-            with dir_col1:
-                dir_pattern = st.text_input(
-                    "File pattern", value="*.txt",
-                    help="Glob filter applied to files in the directory.",
-                )
-            with dir_col2:
-                dir_strategy = st.selectbox(
-                    "Strategy", options=["newest", "unseen"],
-                    help=("'newest' returns just the latest file each reading; "
-                          "'unseen' walks each new file once in sort order."),
-                )
-            with dir_col3:
-                dir_sort = st.selectbox(
-                    "Sort by", options=["mtime", "name"],
-                    help=("'mtime' (default) is universal; 'name' is right "
-                          "for zero-padded sequential filenames where mtime "
-                          "may be unreliable (NFS, virtual filesystems)."),
-                )
-        else:
-            dir_pattern = "*.txt"
-            dir_strategy = "newest"
-            dir_sort = "mtime"
-
-        with st.expander("Triggers (default: verdict change + new feature + reversal + heartbeat)"):
-            t_verdict = st.checkbox("Verdict change", value=True)
-            t_new_feature = st.checkbox("New feature appears", value=True)
-            t_reversal = st.checkbox("Confidence reversal", value=True)
-            t_heartbeat = st.checkbox("Heartbeat", value=True)
-            heartbeat_sec = st.number_input(
-                "Heartbeat interval (s)", min_value=10, max_value=600, value=60,
-                disabled=not t_heartbeat,
-            )
-            t_threshold = st.checkbox("Confidence threshold cross", value=False)
-            threshold_value = st.number_input(
-                "Threshold", min_value=0.0, max_value=1.0, value=0.7, step=0.05,
-                disabled=not t_threshold,
-            )
-
-        # Match the standard sidebar's pattern (sidebar.py:343): consent
-        # is the only strict UI-level gate. Missing API key surfaces as an
-        # error at dispatch time after env-var fallback fails.
-        start = st.form_submit_button(
-            "Start Live Session",
-            type="primary",
-            disabled=not consent,
-            help=(
-                "Check the code-execution consent box in the sidebar first."
-                if not consent else None
-            ),
-        )
-
-    if not start:
-        return
-
-    # Validation
-    if not consent:
-        st.error(
-            "Code-execution consent required — check the sidebar checkbox first."
-        )
-        return
-    # Resolve the actual key at dispatch time (sidebar input takes precedence
-    # over env vars, matching sidebar.py:663's resolution order).
     resolved_key = api_key or env_key
-    if not resolved_key:
-        st.error(
-            "No API key — enter one in the sidebar or set "
-            "ANTHROPIC_API_KEY / GEMINI_API_KEY / OPENAI_API_KEY in the "
-            "environment."
+
+    skill_options = _discover_live_enabled_skills()
+    if not skill_options:
+        st.warning(
+            "No skills with a `live_reading:` block found. The skill's "
+            "frontmatter needs `live_reading.reading_fn` set to a "
+            "module:function path."
         )
         return
-    if not data_path:
-        st.error("Data file path is required.")
+
+    st.subheader("Start a live session")
+
+    data_path = st.text_input(
+        "Data file or directory path",
+        key="live_data_path_input",
+        placeholder="/path/to/in-progress-scan.csv   OR   /path/to/scan_directory/",
+        help=(
+            "Single file (instrument rewrites or appends as it scans) "
+            "OR directory (instrument writes one file per measurement step)."
+        ),
+    )
+
+    description = st.text_area(
+        "Describe your experiment",
+        key="live_description",
+        height=150,
+        placeholder=(
+            "Examples:\n"
+            "• I'm running an XRD scan on a Si sample. The instrument writes "
+            "scan_XXXX.csv files into a folder, one per measurement. Alert me "
+            "when the verdict changes or when a new peak appears.\n\n"
+            "• Single CSV file gets rewritten as the scan progresses. "
+            "Check every 3 seconds. Heartbeat every 30s. No threshold trigger."
+        ),
+        help=(
+            "Plain language. The LLM extracts the source kind, reading "
+            "interval, triggers, and any chemistry hint, then shows you the "
+            "result for review before starting."
+        ),
+    )
+
+    btn_col1, btn_col2 = st.columns([1, 3])
+    with btn_col1:
+        parse_clicked = st.button(
+            "Parse description",
+            disabled=not (description and description.strip() and resolved_key),
+            help=(
+                "Enter a description and ensure an API key is set in the sidebar."
+                if not (description and description.strip() and resolved_key)
+                else None
+            ),
+        )
+    if parse_clicked:
+        with st.spinner("Parsing description…"):
+            parsed = _parse_description(
+                description.strip(), model, resolved_key, skill_options,
+            )
+        if parsed is not None:
+            st.session_state.live_parsed_config = parsed
+
+    parsed = st.session_state.get("live_parsed_config")
+    if parsed:
+        st.divider()
+        _render_parsed_preview(parsed)
+
+        start_disabled = not consent or not data_path
+        start_help = None
+        if not consent:
+            start_help = "Check the code-execution consent box in the sidebar first."
+        elif not data_path:
+            start_help = "Enter a data file or directory path above."
+        if st.button("Start Live Session", type="primary",
+                     disabled=start_disabled, help=start_help):
+            _start_from_parsed(
+                parsed=parsed, data_path=data_path,
+                model=model, api_key=resolved_key, skill_options=skill_options,
+            )
+
+
+def _start_from_parsed(*, parsed: dict, data_path: str, model: str,
+                        api_key: str, skill_options: list[dict]) -> None:
+    # Resolve skill label → (domain, name)
+    skill_label = parsed.get("skill_label", "")
+    selected = next((s for s in skill_options if s["label"] == skill_label), None)
+    if selected is None:
+        # Fallback to diagnostics if the parser hallucinated a skill
+        selected = next(
+            (s for s in skill_options if s["label"] == "diagnostics/live_passthrough"),
+            None,
+        )
+    if selected is None:
+        st.error(f"Skill {skill_label!r} not available and no fallback found.")
         return
+
     if not Path(data_path).exists():
         st.warning(
             f"Path does not exist yet: {data_path}. The session will start "
             "and the reading loop will pick up the file once your instrument "
             "creates it."
         )
-    if selected_skill is None:
-        st.error("No live-reading-enabled skill available to drive the session.")
-        return
+
+    source_kind = parsed.get("source_kind", "mtime_poll")
+    source_kwargs = (
+        {
+            "pattern": parsed.get("source_pattern", "*.txt"),
+            "strategy": parsed.get("source_strategy", "newest"),
+            "sort_by": parsed.get("source_sort_by", "mtime"),
+        }
+        if source_kind == "directory_watch" else {}
+    )
+    triggers_in = parsed.get("triggers", {}) or {}
+    triggers = {
+        "verdict_change": bool(triggers_in.get("verdict_change", True)),
+        "new_feature":    bool(triggers_in.get("new_feature", True)),
+        "reversal":       bool(triggers_in.get("reversal", True)),
+        "heartbeat":      bool(triggers_in.get("heartbeat_sec", 60.0)),
+        "heartbeat_sec":  float(triggers_in.get("heartbeat_sec") or 60.0)
+                          if triggers_in.get("heartbeat_sec") else None,
+        "threshold":      (
+            float(triggers_in["threshold"])
+            if triggers_in.get("threshold") is not None else None
+        ),
+    }
+
+    # Stash the chemistry hint where the tick fn reads it
+    st.session_state.live_chemistry_hint = parsed.get("chemistry_hint")
 
     _spin_up_live_session(
         model=model,
-        api_key=resolved_key,
+        api_key=api_key,
         data_path=data_path,
         source_kind=source_kind,
-        source_kwargs={
-            "pattern": dir_pattern,
-            "strategy": dir_strategy,
-            "sort_by": dir_sort,
-        } if source_kind == "directory_watch" else {},
-        skill_name=selected_skill["name"],
-        skill_domain=selected_skill["domain"],
-        reading_interval_sec=float(reading_interval),
-        triggers={
-            "verdict_change": t_verdict,
-            "new_feature": t_new_feature,
-            "reversal": t_reversal,
-            "heartbeat": t_heartbeat,
-            "heartbeat_sec": float(heartbeat_sec) if t_heartbeat else None,
-            "threshold": float(threshold_value) if t_threshold else None,
-        },
+        source_kwargs=source_kwargs,
+        skill_name=selected["name"],
+        skill_domain=selected["domain"],
+        reading_interval_sec=float(parsed.get("reading_interval_sec", 2.0)),
+        triggers=triggers,
     )
 
 
@@ -409,6 +516,13 @@ def _spin_up_live_session(
         skill_state=skill,
         on_llm_response=lambda ev, result: _record_llm_response(ev, result),
     )
+    # Thread the parsed chemistry hint (if any) into the session state the
+    # tick / reading function reads from. The structure_matching/xrd
+    # reading_fn uses session_state["chemistry_hint"] to scope its DB query.
+    chem_hint = st.session_state.get("live_chemistry_hint")
+    if chem_hint is not None:
+        session._session_state["chemistry_hint"] = chem_hint
+    session._session_state["candidates_dir"] = str(session_dir / "candidates")
     session.start()
 
     st.session_state.live_orch = orch
