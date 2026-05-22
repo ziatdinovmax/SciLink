@@ -252,6 +252,22 @@ def _render_setup() -> None:
         ),
     )
 
+    reference_path = st.text_input(
+        "Reference spectrum (optional, recommended)",
+        key="live_reference_data_path",
+        placeholder="/path/to/representative_spectrum.csv",
+        help=(
+            "A single file containing a representative reading of your "
+            "experiment — e.g. the first spectrum captured manually or a "
+            "stored example from a similar past run. The framework runs "
+            "the LLM-generated analysis script against this file before "
+            "starting the session; if the script fails (raises, returns "
+            "wrong shape, etc.), it's regenerated with the failure "
+            "context — same iterative-retry loop analyze mode uses. "
+            "If omitted, validation is conservative ('does it import?')."
+        ),
+    )
+
     description = st.text_area(
         "Describe your experiment",
         key="live_description",
@@ -469,8 +485,8 @@ def _spin_up_live_session(
         AnalysisOrchestratorAgent,
     )
     from scilink.agents.exp_agents.live_codegen import (
-        generate_reading_script,
-        save_and_load_reading_script,
+        generate_and_validate_with_retry,
+        latest_data_from_file,
     )
     from scilink.agents.exp_agents.live_data_sources import (
         AppendOnlyFileSource,
@@ -523,24 +539,51 @@ def _spin_up_live_session(
                 "proceeding without skill context."
             )
 
-    # Generate the initial reading_fn via the full LLM
-    with st.spinner("Generating initial analysis script…"):
-        script_source = generate_reading_script(
+    # Generate + validate the initial reading_fn. If the operator
+    # supplied a reference spectrum file, validate the script against
+    # it (analyze-mode parity: must successfully fit one example before
+    # going live). If validation fails, regenerate with the failure
+    # context up to 3 times — same iterative-retry pattern analyze mode
+    # uses for its fit scripts.
+    reference_path = st.session_state.get("live_reference_data_path")
+    reference_payloads = []
+    if reference_path:
+        ref = latest_data_from_file(reference_path)
+        if ref is None:
+            st.warning(
+                f"Reference spectrum path not readable: {reference_path}. "
+                "Proceeding with conservative validation (script will be "
+                "imported but not exercised on real data)."
+            )
+        else:
+            reference_payloads.append(ref)
+
+    with st.spinner(
+        f"Generating initial analysis script (validating against "
+        f"{'reference spectrum' if reference_payloads else 'imports only — no reference data provided'})…"
+    ):
+        reading_fn, final_version, attempts = generate_and_validate_with_retry(
             description=description or "(no description provided)",
             additional_guidance=additional_guidance,
             skill_context=skill_context,
             model=model,
             api_key=api_key,
+            session_dir=session_dir,
+            reference_data=reference_payloads,
+            max_attempts=3,
         )
-    if script_source is None:
-        st.error("LLM code generation failed — cannot start session.")
-        return
-    reading_fn = save_and_load_reading_script(
-        script_source, session_dir, version=1,
-    )
     if reading_fn is None:
-        st.error("Generated script failed to import — cannot start session.")
+        st.error(
+            "All 3 attempts at generating a working analysis script failed:\n\n"
+            + "\n".join(f"  • {a}" for a in attempts)
+        )
         return
+    if attempts:
+        st.info(
+            f"Initial script generated and validated on attempt v{final_version} "
+            f"after {len(attempts)} prior attempt(s):"
+            + "\n" + "\n".join(f"  • {a}" for a in attempts)
+        )
 
     # Data source
     if source_kind == "directory_watch":
@@ -602,6 +645,9 @@ def _spin_up_live_session(
         adapt_additional_guidance=additional_guidance,
         adapt_skill_context=skill_context,
     )
+    # Sync the session's adapt-version cursor with whatever version
+    # validation activated (may be > 1 if retries were needed).
+    session._adapt_version = final_version
     chem_hint = st.session_state.get("live_chemistry_hint")
     if chem_hint is not None:
         session._session_state["chemistry_hint"] = chem_hint

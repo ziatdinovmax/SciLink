@@ -249,8 +249,124 @@ def validate_reading_script(
     return True, "validated against {} sample readings".format(len(sample_history))
 
 
+def generate_and_validate_with_retry(
+    *,
+    description: str,
+    additional_guidance: Optional[str],
+    skill_context: Optional[str],
+    model: str,
+    api_key: str,
+    session_dir: Path,
+    reference_data: list[LatestData],
+    skill_state: Optional[dict] = None,
+    max_attempts: int = 3,
+    start_version: int = 1,
+    initial_prior_context: Optional[str] = None,
+) -> tuple[Optional[Callable], int, list[str]]:
+    """Generate a reading_fn, validate against reference data, retry on failure.
+
+    Mirrors analyze-mode's verification loop: the LLM gets the failure
+    reason + its previous attempt as context for the next try. Returns
+    ``(reading_fn, final_version, attempt_log)``. ``reading_fn`` is None
+    when all attempts exhausted.
+
+    The ``reference_data`` list is the gate: the script must process at
+    least one of these payloads without raising AND produce a
+    well-shaped :class:`LiveReadingResult`. Pass the operator's stored
+    reference spectrum (or the first reading captured by the session)
+    here. An empty list falls through to the conservative
+    "imported cleanly" pass.
+
+    Args:
+        description, additional_guidance, skill_context: forwarded to
+            :func:`generate_reading_script` on each attempt.
+        session_dir: where to save attempted scripts (one per version).
+        reference_data: payloads the script must successfully process.
+        skill_state: passed to :func:`validate_reading_script`.
+        max_attempts: cap on retries; default 3.
+        start_version: first version number to use. Subsequent attempts
+            increment. Useful when resuming or adapting (caller passes
+            current_version + 1).
+        initial_prior_context: optional context for the FIRST attempt
+            (e.g. "the previously-active script was rejected because X
+            — generate a fresh one avoiding that").
+
+    Returns:
+        ``(reading_fn, version, attempts)`` — ``reading_fn`` is None on
+        full failure; ``version`` is the version of the script that
+        passed (or the last attempted); ``attempts`` is a list of
+        human-readable failure reasons (length up to max_attempts;
+        empty when the first attempt validated).
+    """
+    attempts: list[str] = []
+    prior = initial_prior_context
+
+    for attempt_idx in range(max_attempts):
+        version = start_version + attempt_idx
+        source = generate_reading_script(
+            description=description,
+            additional_guidance=additional_guidance,
+            skill_context=skill_context,
+            model=model,
+            api_key=api_key,
+            prior_context=prior,
+        )
+        if source is None:
+            attempts.append(
+                f"attempt v{version}: LLM code-gen returned no source"
+            )
+            prior = "\n".join(attempts)
+            continue
+
+        fn = save_and_load_reading_script(source, session_dir, version)
+        if fn is None:
+            attempts.append(
+                f"attempt v{version}: generated script failed to import "
+                "(syntax error or missing reading_fn)"
+            )
+            prior = "\n".join(attempts) + "\n\nPrevious source was:\n" + source
+            continue
+
+        ok, reason = validate_reading_script(fn, reference_data, skill_state)
+        if ok:
+            return fn, version, attempts
+        attempts.append(f"attempt v{version}: {reason}")
+        prior = (
+            "\n".join(attempts)
+            + "\n\nPrevious source was:\n" + source
+            + "\n\nFix the issue and produce a new full script."
+        )
+
+    return None, start_version + max_attempts - 1, attempts
+
+
+def latest_data_from_file(path: str | Path) -> Optional[LatestData]:
+    """Build a :class:`LatestData` from a single file on disk.
+
+    Convenience for the upfront-validation path: the operator points at
+    a stored reference spectrum, and we wrap it in the same
+    ``LatestData`` shape the data sources produce so codegen +
+    validation can run against it.
+    """
+    p = Path(path).expanduser().resolve()
+    if not p.is_file():
+        return None
+    try:
+        text = p.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        text = None
+    return LatestData(
+        timestamp=time.time(),
+        source_kind="reference_file",
+        path=p,
+        text=text,
+    )
+
+
 __all__ = [
     "generate_reading_script",
     "save_and_load_reading_script",
     "validate_reading_script",
+    "generate_and_validate_with_retry",
+    "latest_data_from_file",
 ]

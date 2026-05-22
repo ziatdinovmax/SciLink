@@ -356,63 +356,45 @@ class LiveSession:
                 "trigger_reason": (event.details or {}).get("reason", ""),
             })
             return
-        from .live_codegen import (
-            generate_reading_script, save_and_load_reading_script,
-            validate_reading_script,
-        )
+        from .live_codegen import generate_and_validate_with_retry
+
         deviation_reason = (event.details or {}).get("reason", "")
         recent = self.history(n=10)
-        prior_summary = "Most recent script was activated at version v{}. ".format(
-            self._adapt_version
+        prior_summary = (
+            f"Most recent script was activated at version v{self._adapt_version}. "
+            f"Supervisor flagged: {deviation_reason}\n\nRecent readings:\n"
         )
-        prior_summary += f"Supervisor flagged: {deviation_reason}\n\n"
-        prior_summary += "Recent readings:\n"
         for r in recent[-6:]:
             prior_summary += (
                 f"  t={r.timestamp:.1f} {r.metric_name}={r.primary_metric:.3f} "
                 f"verdict={r.verdict} features={len(r.detected_features)} "
                 f"notes={r.notes[:80]}\n"
             )
-        source = generate_reading_script(
+
+        # Use the same generate + validate + retry loop the session-start
+        # path uses. Validation samples come from the rolling cache of
+        # actually-observed LatestData payloads — guaranteed-real input
+        # the new script must handle.
+        new_fn, new_version, attempts = generate_and_validate_with_retry(
             description=self._adapt_description or "(no description)",
             additional_guidance=self._adapt_additional_guidance,
             skill_context=self._adapt_skill_context,
             model=self._adapt_model,
             api_key=self._adapt_api_key,
-            prior_context=prior_summary,
+            session_dir=self.session_dir,
+            reference_data=list(self._validation_cache),
+            skill_state=self.skill_state,
+            max_attempts=3,
+            start_version=self._adapt_version + 1,
+            initial_prior_context=prior_summary,
         )
-        if source is None:
-            self._write_jsonl({
-                "kind": "script_adaptation_failed",
-                "timestamp": time.time(),
-                "reason": "LLM code-generation returned no usable source",
-                "trigger_reason": deviation_reason,
-            })
-            return
-        new_version = self._adapt_version + 1
-        new_fn = save_and_load_reading_script(source, self.session_dir, new_version)
         if new_fn is None:
             self._write_jsonl({
                 "kind": "script_adaptation_failed",
                 "timestamp": time.time(),
-                "reason": "generated script failed to import",
+                "reason": "all 3 regeneration attempts failed",
                 "trigger_reason": deviation_reason,
-                "version": new_version,
-            })
-            return
-        # Validate against cached LatestData payloads. If validation
-        # fails, keep the current reading_fn — never swap to a broken
-        # script.
-        ok, reason = validate_reading_script(
-            new_fn, list(self._validation_cache), self.skill_state,
-        )
-        if not ok:
-            self._write_jsonl({
-                "kind": "script_adaptation_failed",
-                "timestamp": time.time(),
-                "reason": f"validation failed: {reason}",
-                "trigger_reason": deviation_reason,
-                "version": new_version,
+                "attempts": attempts,
             })
             return
         # Hot-swap
@@ -420,6 +402,10 @@ class LiveSession:
             self._reading_fn = new_fn
         self._adapt_version = new_version
         self._adapt_count += 1
+        reason = (
+            f"validated against {len(self._validation_cache)} cached readings"
+            + (f" after {len(attempts)} prior attempt(s)" if attempts else "")
+        )
         self._adapt_history.append({
             "version": new_version,
             "timestamp": time.time(),

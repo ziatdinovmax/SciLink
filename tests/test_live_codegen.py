@@ -227,3 +227,130 @@ def test_generate_returns_none_on_llm_failure():
             skill_context=None, model="m", api_key="k",
         )
     assert source is None
+
+
+# --- generate_and_validate_with_retry ----------------------------------------
+
+from scilink.agents.exp_agents.live_codegen import (
+    generate_and_validate_with_retry,
+    latest_data_from_file,
+)
+
+
+def _resp(content):
+    return _FakeResp(content)
+
+
+def test_retry_succeeds_on_first_attempt(tmp_path):
+    """Good script first try → no retries, version 1."""
+    with patch("litellm.completion", return_value=_resp(_GOOD_SCRIPT)):
+        fn, version, attempts = generate_and_validate_with_retry(
+            description="x", additional_guidance=None, skill_context=None,
+            model="m", api_key="k", session_dir=tmp_path,
+            reference_data=_mk_history(2),
+        )
+    assert fn is not None
+    assert version == 1
+    assert attempts == []
+
+
+def test_retry_succeeds_after_initial_failures(tmp_path):
+    """First attempt produces a broken script; second succeeds."""
+    bad_then_good = [
+        _resp("def reading_fn(latest_data, session_state, skill_state):\n"
+              "    raise RuntimeError('first try fail')\n"),
+        _resp(_GOOD_SCRIPT),
+    ]
+    with patch("litellm.completion", side_effect=bad_then_good):
+        fn, version, attempts = generate_and_validate_with_retry(
+            description="x", additional_guidance=None, skill_context=None,
+            model="m", api_key="k", session_dir=tmp_path,
+            reference_data=_mk_history(2),
+        )
+    assert fn is not None
+    assert version == 2  # second attempt
+    assert len(attempts) == 1
+    assert "raised" in attempts[0].lower()
+
+
+def test_retry_gives_up_after_max_attempts(tmp_path):
+    """Three failed attempts → returns None + 3 attempt records."""
+    raising = (
+        "def reading_fn(latest_data, session_state, skill_state):\n"
+        "    raise ValueError('always fail')\n"
+    )
+    with patch("litellm.completion", return_value=_resp(raising)):
+        fn, version, attempts = generate_and_validate_with_retry(
+            description="x", additional_guidance=None, skill_context=None,
+            model="m", api_key="k", session_dir=tmp_path,
+            reference_data=_mk_history(1), max_attempts=3,
+        )
+    assert fn is None
+    assert version == 3  # last attempted version
+    assert len(attempts) == 3
+    assert all("ValueError" in a for a in attempts)
+
+
+def test_retry_handles_codegen_returning_none(tmp_path):
+    """When the LLM returns nothing useful, that's also a retryable failure."""
+    with patch("litellm.completion",
+                side_effect=[_resp("not a script"), _resp(_GOOD_SCRIPT)]):
+        fn, version, attempts = generate_and_validate_with_retry(
+            description="x", additional_guidance=None, skill_context=None,
+            model="m", api_key="k", session_dir=tmp_path,
+            reference_data=_mk_history(1),
+        )
+    assert fn is not None
+    assert "no source" in attempts[0]
+
+
+def test_retry_uses_start_version(tmp_path):
+    """When called from the adapt path, start_version increments past the
+    current active version — generated scripts are saved under
+    reading_script_v{start_version+i}.py."""
+    with patch("litellm.completion", return_value=_resp(_GOOD_SCRIPT)):
+        fn, version, attempts = generate_and_validate_with_retry(
+            description="x", additional_guidance=None, skill_context=None,
+            model="m", api_key="k", session_dir=tmp_path,
+            reference_data=_mk_history(1), start_version=5,
+        )
+    assert version == 5
+    assert (tmp_path / "reading_script_v5.py").is_file()
+
+
+def test_retry_empty_reference_data_passes_conservatively(tmp_path):
+    """No reference data → conservative pass (script imported cleanly is enough)."""
+    with patch("litellm.completion", return_value=_resp(_GOOD_SCRIPT)):
+        fn, version, attempts = generate_and_validate_with_retry(
+            description="x", additional_guidance=None, skill_context=None,
+            model="m", api_key="k", session_dir=tmp_path,
+            reference_data=[],
+        )
+    assert fn is not None
+    assert attempts == []
+
+
+# --- latest_data_from_file ---------------------------------------------------
+
+def test_latest_data_from_file_reads_text(tmp_path):
+    p = tmp_path / "ref.csv"
+    p.write_text("two_theta,intensity\n28.4,100\n47.3,60\n")
+    ref = latest_data_from_file(p)
+    assert ref is not None
+    assert ref.path == p
+    assert ref.text and "28.4" in ref.text
+    assert ref.source_kind == "reference_file"
+
+
+def test_latest_data_from_file_missing_returns_none(tmp_path):
+    assert latest_data_from_file(tmp_path / "nonexistent.csv") is None
+
+
+def test_latest_data_from_file_binary_returns_none_text(tmp_path):
+    """Binary file → text=None but the LatestData is still constructed
+    (the script may use .extras or .path instead)."""
+    p = tmp_path / "binary.dat"
+    p.write_bytes(b"\x00\x01\xff\xfe")
+    ref = latest_data_from_file(p)
+    assert ref is not None
+    assert ref.text is None

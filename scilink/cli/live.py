@@ -73,6 +73,16 @@ runs any pending LLM call to completion).
              "approach). Required for non-replay runs.",
     )
     parser.add_argument(
+        "--reference-data", default=None,
+        help="Path to a representative reading (e.g. the first spectrum "
+             "captured manually, or a stored example from a similar past "
+             "run). The generated analysis script is validated against "
+             "this file before the session starts; on failure, the script "
+             "is regenerated with the failure context, up to 3 attempts. "
+             "Without this, validation is conservative ('does the "
+             "script import cleanly?').",
+    )
+    parser.add_argument(
         "--skill", default=None,
         help="Optional skill name (or domain/name) to provide context "
              "for the script generation. If omitted, the LLM generates "
@@ -353,7 +363,7 @@ def _run_live(args, log) -> int:
         AnalysisMode, AnalysisOrchestratorAgent,
     )
     from scilink.agents.exp_agents.live_codegen import (
-        generate_reading_script, save_and_load_reading_script,
+        generate_and_validate_with_retry, latest_data_from_file,
     )
     from scilink.agents.exp_agents.live_data_sources import (
         AppendOnlyFileSource, DirectoryWatchSource, MtimePollFileSource,
@@ -406,27 +416,53 @@ def _run_live(args, log) -> int:
             log.warning("Could not load skill %s: %s — proceeding without skill context",
                         args.skill, e)
 
-    # Generate the initial per-reading analysis script via the full LLM
-    log.info("Generating initial reading_fn via %s …", args.model)
+    # Generate + validate the initial reading_fn (analyze-mode parity).
+    # If --reference-data is provided, the script must process it
+    # successfully; on failure, regenerate with the failure context.
+    reference_payloads = []
+    if args.reference_data:
+        ref = latest_data_from_file(args.reference_data)
+        if ref is None:
+            log.warning(
+                "Reference spectrum path not readable: %s. "
+                "Proceeding with conservative validation only.",
+                args.reference_data,
+            )
+        else:
+            reference_payloads.append(ref)
+            log.info("Reference spectrum loaded: %s (%d bytes)",
+                     args.reference_data,
+                     len(ref.text) if ref.text else 0)
+    else:
+        log.info("No --reference-data given; validation is import-only.")
+
     additional_guidance = (args.additional_guidance or "").strip() or None
-    script_source = generate_reading_script(
+    log.info("Generating initial reading_fn via %s (max 3 attempts)…",
+             args.model)
+    reading_fn, final_version, attempts = generate_and_validate_with_retry(
         description=args.description,
         additional_guidance=additional_guidance,
         skill_context=skill_context,
         model=args.model,
         api_key=api_key,
-    )
-    if script_source is None:
-        log.error("LLM code generation failed — cannot start session.")
-        return 3
-    reading_fn = save_and_load_reading_script(
-        script_source, session_dir, version=1
+        session_dir=session_dir,
+        reference_data=reference_payloads,
+        max_attempts=3,
     )
     if reading_fn is None:
-        log.error("Generated script failed to import — cannot start session.")
+        log.error(
+            "All 3 attempts at generating a working analysis script failed:"
+        )
+        for a in attempts:
+            log.error("  %s", a)
         return 3
-    log.info("Initial reading_fn (v1) ready: %s",
-             session_dir / "reading_script_v1.py")
+    if attempts:
+        log.info("Script v%d validated after %d prior attempt(s):",
+                 final_version, len(attempts))
+        for a in attempts:
+            log.info("  %s", a)
+    log.info("Active reading_fn: %s",
+             session_dir / f"reading_script_v{final_version}.py")
 
     # Data source
     if args.source_kind == "directory_watch":
@@ -484,6 +520,7 @@ def _run_live(args, log) -> int:
         adapt_additional_guidance=additional_guidance,
         adapt_skill_context=skill_context,
     )
+    session._adapt_version = final_version
 
     chemistry = _parse_chemistry_hint(args.chemistry_hint)
     if chemistry is not None:
