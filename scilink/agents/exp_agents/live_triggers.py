@@ -620,19 +620,40 @@ def _call_qualitative_check(
                 {"role": "system", "content": system},
                 {"role": "user", "content": user_msg},
             ],
-            max_tokens=200,
-            temperature=0.0,
+            # max_tokens=2000: Gemini 3.x has internal "thinking" tokens that
+            # consume the budget BEFORE the visible answer; 200 was being
+            # eaten entirely by thinking and the JSON came back truncated
+            # (finish_reason="length", content like '{"action": "ok", "').
+            # 2000 is comfortable for thinking + the short JSON response and
+            # still keeps cost negligible (~$0.001/call at Gemini Flash rates).
+            max_tokens=2000,
+            # temperature=1.0 — Gemini 3.x literally warns that
+            # temperature<1 "can cause infinite loops, degraded reasoning,
+            # and failure on complex tasks" (silently returns empty
+            # content). 1.0 is the provider's recommended default for the
+            # gemini-3 family. Supervisor decisions are judgment calls
+            # where the small added variation is acceptable; the dedupe
+            # logic on _last_fired_reason handles repeated firings.
+            temperature=1.0,
         )
         text = resp.choices[0].message.content or ""
     except Exception as e:
         # Surface the exception in logs — the observability JSONL just sees
         # "error" without context, which makes "supervisor calls keep failing"
-        # impossible to diagnose. Common causes: wrong model name (e.g.
-        # "gemini-3.5-flash" doesn't exist; "gemini-2.5-flash" does),
-        # missing/wrong provider key, rate limit.
+        # impossible to diagnose. Common causes: wrong model name,
+        # missing/wrong provider key, rate limit, network.
         _logger.warning(
             "Supervisor LLM call failed (model=%s): %s: %s",
             model, type(e).__name__, e,
+        )
+        return None
+    if not text.strip():
+        # LLM call succeeded but returned no content. Most often:
+        # provider safety filter, content quota exhausted, or
+        # temperature/parameter mismatch (Gemini 3 with temp<1).
+        _logger.warning(
+            "Supervisor LLM call returned empty content (model=%s); "
+            "treating as no-decision.", model,
         )
         return None
 
@@ -651,7 +672,10 @@ def _call_qualitative_check(
         parsed = json.loads(candidate)
     except json.JSONDecodeError:
         return None
-    if not isinstance(parsed, dict) or "fire" not in parsed:
+    # Accept either schema:
+    #   new: {"action": "ok"|"flag"|"adapt", ...}
+    #   legacy: {"fire": true|false, ...} (mapped to action by the caller)
+    if not isinstance(parsed, dict) or not ("action" in parsed or "fire" in parsed):
         return None
     return parsed
 
