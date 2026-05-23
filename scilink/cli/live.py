@@ -253,12 +253,12 @@ def _parse_chemistry_hint(raw: Optional[str]):
 def _infer_light_model(main_model: str) -> str:
     """Default cheap/fast companion for the qualitative-check trigger.
 
-    Gemini 3.5 Flash regardless of main-model provider — cheapest
+    Gemini 2.5 Flash regardless of main-model provider — cheapest
     production-grade option, overridable with --qualitative-model.
     Cross-provider usage needs GEMINI_API_KEY in addition to whatever
     key the main model uses.
     """
-    return "gemini-3.5-flash"
+    return "gemini-2.5-flash"
 
 
 def _compose_guidance(skill_guidance, additional_guidance) -> str:

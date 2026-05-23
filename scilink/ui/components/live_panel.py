@@ -77,13 +77,13 @@ def _compose_guidance(skill_guidance: Optional[str],
 def _infer_light_model(main_model: str) -> str:
     """Default cheap/fast companion for the qualitative-check trigger.
 
-    Gemini 3.5 Flash regardless of which provider the main model uses —
+    Gemini 2.5 Flash regardless of which provider the main model uses —
     cheapest production-grade option across the board, and the user
     can override in the panel's text field. Cross-provider usage
     (e.g. Claude main + Gemini light) requires GEMINI_API_KEY in the
     environment in addition to the main provider's key.
     """
-    return "gemini-3.5-flash"
+    return "gemini-2.5-flash"
 
 
 def _resolve_sidebar_config() -> tuple[str, str, bool]:

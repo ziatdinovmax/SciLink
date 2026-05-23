@@ -624,7 +624,16 @@ def _call_qualitative_check(
             temperature=0.0,
         )
         text = resp.choices[0].message.content or ""
-    except Exception:
+    except Exception as e:
+        # Surface the exception in logs — the observability JSONL just sees
+        # "error" without context, which makes "supervisor calls keep failing"
+        # impossible to diagnose. Common causes: wrong model name (e.g.
+        # "gemini-3.5-flash" doesn't exist; "gemini-2.5-flash" does),
+        # missing/wrong provider key, rate limit.
+        _logger.warning(
+            "Supervisor LLM call failed (model=%s): %s: %s",
+            model, type(e).__name__, e,
+        )
         return None
 
     # Extract JSON tolerantly (LLMs sometimes wrap in fences or prose)
