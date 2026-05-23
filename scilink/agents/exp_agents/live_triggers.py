@@ -34,7 +34,7 @@ from __future__ import annotations
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
 from .live_types import LiveReadingResult, TriggerEvent, Verdict
 
@@ -400,6 +400,11 @@ class QualitativeProgressTrigger:
         self._last_checked_at: Optional[float] = None
         # Dedupe repeated reasons within a session
         self._last_fired_reason: Optional[str] = None
+        # Observability hook: callable(decision_dict_or_None, latest_reading).
+        # Set by LiveSession.start() to write a JSONL "supervisor_check"
+        # line for every call (including ok decisions and LLM failures).
+        # Without this hook, ok decisions and failures leave no trace.
+        self._observability_writer: Optional[Callable[[Any, LiveReadingResult], None]] = None
 
     def evaluate(self, history: list[LiveReadingResult]) -> Optional[TriggerEvent]:
         if not history:
@@ -419,8 +424,16 @@ class QualitativeProgressTrigger:
             guidance=self.guidance, history_summary=summary,
             allow_adapt=self.enable_adaptation,
         )
+        # Observability: write every supervisor call to JSONL, regardless
+        # of outcome. Makes "ok" decisions and LLM failures visible so
+        # operators can confirm the supervisor is alive.
+        if self._observability_writer is not None:
+            try:
+                self._observability_writer(decision, latest)
+            except Exception:  # noqa: BLE001 — observability must never break the trigger
+                pass
         if decision is None:
-            return None  # LLM call failed
+            return None  # LLM call failed (failure already logged via the writer)
 
         # Action: ok / flag / adapt. Legacy `fire` field maps to flag.
         action = decision.get("action")

@@ -142,6 +142,18 @@ class LiveSession:
         self._stop.clear()
         self._started_at = time.time()
         self._write_jsonl({"kind": "session_start", "timestamp": self._started_at})
+
+        # Wire supervisor-observability: for any QualitativeProgressTrigger
+        # in the policy, install our JSONL writer as its observability
+        # hook. The trigger writes a "supervisor_check" record per call,
+        # including ok decisions and LLM failures. Without this, silent
+        # supervisor activity leaves the operator wondering whether the
+        # cheap-LLM loop is alive at all.
+        from .live_triggers import QualitativeProgressTrigger
+        for t in self.policy.triggers:
+            if isinstance(t, QualitativeProgressTrigger):
+                t._observability_writer = self._record_supervisor_check
+
         self._reading_thread = threading.Thread(
             target=self._reading_loop, name="LiveSession-reading", daemon=True,
         )
@@ -151,6 +163,18 @@ class LiveSession:
         self._reading_thread.start()
         self._dispatch_thread.start()
         _logger.info("LiveSession started (interval=%.2fs)", self.reading_interval_sec)
+
+    def _record_supervisor_check(self, decision, latest) -> None:
+        """Write a JSONL line for every supervisor LLM call. Decision may
+        be None (LLM call failed) or a dict with action/reason/severity."""
+        self._write_jsonl({
+            "kind": "supervisor_check",
+            "timestamp": time.time(),
+            "reading_timestamp": getattr(latest, "timestamp", None),
+            "action": (decision or {}).get("action") if decision else "error",
+            "reason": (decision or {}).get("reason", "") if decision else "(LLM call failed)",
+            "severity": (decision or {}).get("severity", "") if decision else "",
+        })
 
     def stop(self, *, timeout: float = 5.0) -> None:
         """Signal both worker threads to exit and wait briefly for them.
