@@ -297,6 +297,11 @@ def _render_setup() -> None:
     # cheap, fast, periodically checks for patterns the deterministic
     # triggers miss). The main model from the sidebar still does the
     # full-quality interpretations when any trigger fires.
+    #
+    # Split into two stacked fields so the operator can supply a different
+    # API key when the light model is from a different provider than the
+    # main one (e.g. main = Claude Opus, light = Gemini Flash — needs a
+    # GEMINI_API_KEY). Both fields are optional.
     light_default = _infer_light_model(model)
     light_model = st.text_input(
         "Qualitative-check model (optional)",
@@ -308,10 +313,20 @@ def _render_setup() -> None:
             "deterministic triggers (verdict change / new feature / "
             "reversal) miss. Default is Gemini 3.5 Flash; override with "
             "any litellm-compatible model name. Leave blank or type "
-            "'none' to disable. "
-            "Note: if the light model is a different provider than the "
-            "main model, the corresponding env var must be set "
-            "(GEMINI_API_KEY, OPENAI_API_KEY, etc.)."
+            "'none' to disable."
+        ),
+    )
+    light_api_key = st.text_input(
+        "Qualitative-check API key (optional)",
+        value=st.session_state.get("live_light_api_key", ""),
+        key="live_light_api_key",
+        type="password",
+        help=(
+            "Only needed if the qualitative-check model uses a different "
+            "provider than the sidebar's main model (e.g. main = Claude, "
+            "qualitative = Gemini). Leave blank to use the main API key "
+            "or the provider-matching env var "
+            "(GEMINI_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY)."
         ),
     )
 
@@ -365,19 +380,22 @@ def _render_setup() -> None:
         lm = (light_model or "").strip()
         if lm.lower() in ("", "none"):
             lm = None
+        # Operator-supplied API key for the light model (optional)
+        lak = (light_api_key or "").strip() or None
         # Force the selected skill (if any) — overrides the LLM's auto-pick
         if selected_skill_for_codegen is not None:
             parsed["skill_label"] = selected_skill_for_codegen["label"]
         _start_from_parsed(
             parsed=parsed, data_path=data_path,
             model=model, api_key=resolved_key, skill_options=skill_options,
-            light_model=lm,
+            light_model=lm, light_api_key=lak,
         )
 
 
 def _start_from_parsed(*, parsed: dict, data_path: str, model: str,
                         api_key: str, skill_options: list[dict],
-                        light_model: Optional[str] = None) -> None:
+                        light_model: Optional[str] = None,
+                        light_api_key: Optional[str] = None) -> None:
     # Skill is OPTIONAL — used only for codegen context. If the parser
     # picked a real skill, fold it in; otherwise proceed without.
     skill_label = parsed.get("skill_label", "") or ""
@@ -430,6 +448,7 @@ def _start_from_parsed(*, parsed: dict, data_path: str, model: str,
         reading_interval_sec=float(parsed.get("reading_interval_sec", 2.0)),
         triggers=triggers,
         light_model=light_model,
+        light_api_key=light_api_key,
         additional_guidance=additional_guidance,
         description=description,
     )
@@ -477,6 +496,7 @@ def _spin_up_live_session(
     reading_interval_sec: float,
     triggers: dict,
     light_model: Optional[str] = None,
+    light_api_key: Optional[str] = None,
     additional_guidance: Optional[str] = None,
     description: str = "",
 ) -> None:
@@ -617,10 +637,14 @@ def _spin_up_live_session(
         qcheck_enabled = True
     composed_guidance = _compose_guidance(guidance, additional_guidance)
     if light_model and qcheck_enabled and composed_guidance:
+        # Operator-supplied light-model API key wins; else fall back to
+        # the main API key (which _resolve_provider_api_key in the trigger
+        # will further fall through to env vars matching the model's provider).
+        supervisor_api_key = light_api_key or api_key
         trigger_list.append(QualitativeProgressTrigger(
             guidance=composed_guidance,
             model=light_model,
-            api_key=api_key,
+            api_key=supervisor_api_key,
             interval_sec=float(qcheck.get("interval_sec", 45.0)),
             history_n=int(qcheck.get("history_n", 10)),
             enable_adaptation=True,
