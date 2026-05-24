@@ -246,26 +246,17 @@ def _render_setup() -> None:
         "Data file or directory path",
         key="live_data_path_input",
         placeholder="/path/to/in-progress-scan.csv   OR   /path/to/scan_directory/",
-        help=(
-            "Single file (instrument rewrites or appends as it scans) "
-            "OR directory (instrument writes one file per measurement step)."
-        ),
+        help="Single file (instrument rewrites or appends as it scans) "
+             "OR directory (instrument writes one file per measurement step).",
     )
 
     reference_path = st.text_input(
         "Reference spectrum (optional, recommended)",
         key="live_reference_data_path",
         placeholder="/path/to/representative_spectrum.csv",
-        help=(
-            "A single file containing a representative reading of your "
-            "experiment — e.g. the first spectrum captured manually or a "
-            "stored example from a similar past run. The framework runs "
-            "the LLM-generated analysis script against this file before "
-            "starting the session; if the script fails (raises, returns "
-            "wrong shape, etc.), it's regenerated with the failure "
-            "context — same iterative-retry loop analyze mode uses. "
-            "If omitted, validation is conservative ('does it import?')."
-        ),
+        help="A single file containing a representative reading of your "
+             "experiment — e.g. the first spectrum captured manually or a "
+             "stored example from a similar past run.",
     )
 
     description = st.text_area(
@@ -283,14 +274,9 @@ def _render_setup() -> None:
             "• Time-resolved Raman series, files accumulating in /data/run42/. "
             "Keep an eye on the D-band intensity ratio."
         ),
-        help=(
-            "Plain language. The LLM extracts the source kind, reading "
-            "interval, optional threshold, chemistry hint, and any "
-            "domain-specific watch-for instructions (which get appended "
-            "to the skill's baseline qualitative guidance). The dashboard "
-            "header shows the parsed config so you can spot a mis-parse "
-            "and Stop + re-describe if needed."
-        ),
+        help="Plain language. The LLM extracts the source kind, reading "
+             "interval, optional threshold, chemistry hint, and any "
+             "domain-specific watch-for instructions.",
     )
 
     # Light-model picker + optional API key for the qualitative-progress
@@ -305,14 +291,9 @@ def _render_setup() -> None:
             "Qualitative-check model (optional)",
             value=st.session_state.get("live_light_model", light_default),
             key="live_light_model",
-            help=(
-                "Cheap/fast model that periodically (~45 s) checks whether "
-                "the recent reading history shows qualitative patterns the "
-                "deterministic triggers (verdict change / new feature / "
-                "reversal) miss. Default is Gemini 3.5 Flash; override with "
-                "any litellm-compatible model name. Leave blank or type "
-                "'none' to disable."
-            ),
+            help="Cheap/fast model that periodically (~45 s) checks whether "
+                 "the recent reading history shows qualitative patterns the "
+                 "deterministic triggers miss.",
         )
     with qk_col:
         light_api_key = st.text_input(
@@ -320,13 +301,8 @@ def _render_setup() -> None:
             value=st.session_state.get("live_light_api_key", ""),
             key="live_light_api_key",
             type="password",
-            help=(
-                "Only needed if the qualitative-check model uses a different "
-                "provider than the sidebar's main model (e.g. main = Claude, "
-                "qualitative = Gemini). Leave blank to use the main API key "
-                "or the provider-matching env var "
-                "(GEMINI_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY)."
-            ),
+            help="Only needed if the qualitative-check model uses a "
+                 "different provider than the sidebar's main model.",
         )
 
     # Single-click flow: parse the description and start in one action.
@@ -353,12 +329,9 @@ def _render_setup() -> None:
         choices = ["(none — use description only)"] + [s["label"] for s in skill_options]
         skill_choice = st.selectbox(
             "Optional skill for codegen context", options=choices,
-            help=(
-                "If selected, the skill's description + analysis section "
-                "are passed as additional context to the LLM that "
-                "generates the per-reading analysis script. Optional — "
-                "the description alone is usually enough."
-            ),
+            help="If selected, the skill's description + analysis section "
+                 "are passed as additional context to the LLM that "
+                 "generates the per-reading analysis script.",
         )
         if skill_choice and skill_choice != "(none — use description only)":
             selected_skill_for_codegen = next(
