@@ -49,7 +49,7 @@ SciLink provides three complementary agent systems that cover the full scientifi
   (no human review). The mode selects who holds the acceptance gate on
   agent commitments.
 
-- **Simulated-annealing agentic pipelines.** Hold scientific priors strictly
+- **Simulated-annealing agentic pipelines.** Hold domain priors strictly
   at first, then progressively thaw the lock on the implementation plan
   and domain-rule strictness only when iterative refinements fail to
   converge — inspired by Metropolis–Hastings, with verifier-driven acceptance.
