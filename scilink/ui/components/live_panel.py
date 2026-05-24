@@ -293,42 +293,41 @@ def _render_setup() -> None:
         ),
     )
 
-    # Light-model picker for the qualitative-progress trigger (Stage 1 LLM —
-    # cheap, fast, periodically checks for patterns the deterministic
-    # triggers miss). The main model from the sidebar still does the
-    # full-quality interpretations when any trigger fires.
-    #
-    # Split into two stacked fields so the operator can supply a different
-    # API key when the light model is from a different provider than the
-    # main one (e.g. main = Claude Opus, light = Gemini Flash — needs a
-    # GEMINI_API_KEY). Both fields are optional.
+    # Light-model picker + optional API key for the qualitative-progress
+    # trigger (Stage 1 LLM). Side-by-side: model name on the left, API
+    # key on the right. Both fields are optional. The main sidebar
+    # model still does the full-quality interpretations when any trigger
+    # fires; the qualitative model is the cheap supervisor.
     light_default = _infer_light_model(model)
-    light_model = st.text_input(
-        "Qualitative-check model (optional)",
-        value=st.session_state.get("live_light_model", light_default),
-        key="live_light_model",
-        help=(
-            "Cheap/fast model that periodically (~45 s) checks whether "
-            "the recent reading history shows qualitative patterns the "
-            "deterministic triggers (verdict change / new feature / "
-            "reversal) miss. Default is Gemini 3.5 Flash; override with "
-            "any litellm-compatible model name. Leave blank or type "
-            "'none' to disable."
-        ),
-    )
-    light_api_key = st.text_input(
-        "Qualitative-check API key (optional)",
-        value=st.session_state.get("live_light_api_key", ""),
-        key="live_light_api_key",
-        type="password",
-        help=(
-            "Only needed if the qualitative-check model uses a different "
-            "provider than the sidebar's main model (e.g. main = Claude, "
-            "qualitative = Gemini). Leave blank to use the main API key "
-            "or the provider-matching env var "
-            "(GEMINI_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY)."
-        ),
-    )
+    qm_col, qk_col = st.columns(2)
+    with qm_col:
+        light_model = st.text_input(
+            "Qualitative-check model (optional)",
+            value=st.session_state.get("live_light_model", light_default),
+            key="live_light_model",
+            help=(
+                "Cheap/fast model that periodically (~45 s) checks whether "
+                "the recent reading history shows qualitative patterns the "
+                "deterministic triggers (verdict change / new feature / "
+                "reversal) miss. Default is Gemini 3.5 Flash; override with "
+                "any litellm-compatible model name. Leave blank or type "
+                "'none' to disable."
+            ),
+        )
+    with qk_col:
+        light_api_key = st.text_input(
+            "Qualitative-check API key (optional)",
+            value=st.session_state.get("live_light_api_key", ""),
+            key="live_light_api_key",
+            type="password",
+            help=(
+                "Only needed if the qualitative-check model uses a different "
+                "provider than the sidebar's main model (e.g. main = Claude, "
+                "qualitative = Gemini). Leave blank to use the main API key "
+                "or the provider-matching env var "
+                "(GEMINI_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY)."
+            ),
+        )
 
     # Single-click flow: parse the description and start in one action.
     # Disable until consent + non-empty data path + non-empty description.
