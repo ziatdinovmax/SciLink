@@ -26,6 +26,11 @@ from ...executors import require_sandbox_approval
 from ...skills.loader import load_skill
 
 from ._deprecation import normalize_params
+import litellm
+from ...auth import (
+    get_internal_proxy_key,
+    APIKeyNotFoundError,
+)
 
 
 class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
@@ -88,6 +93,16 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             api_key, google_api_key, base_url, local_model,
             source="HyperspectralAnalysisAgent"
         )
+
+        # Auto-discover API keys: delegate model→provider→env-var resolution to LiteLLM
+        # (validate_environment tells us which env vars LiteLLM expects for this model).
+        # If those aren't set, fall back to the internal-proxy key (SCILINK_API_KEY).
+        if self.api_key is None and self.base_url is None:
+            env = litellm.validate_environment(model_name)
+            if not env["keys_in_environment"]:
+                self.api_key = get_internal_proxy_key()
+                if not self.api_key:
+                    raise APIKeyNotFoundError(", ".join(env["missing_keys"]) or "unknown")
         
         super().__init__(
             api_key=self.api_key,

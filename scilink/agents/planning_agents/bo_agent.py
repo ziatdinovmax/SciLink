@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 import PIL.Image as PIL_Image
 
-from ...auth import get_internal_proxy_key
+import litellm
+from ...auth import (
+    get_internal_proxy_key,
+    APIKeyNotFoundError,
+)
 from scilink.knowledge import parse_json_from_response
 from .bo_tools import get_optimizer
 from .instruct import (
@@ -205,6 +209,16 @@ class BOAgent(BaseAgent):
             )
         else:
             # PUBLIC LITELLM
+            # Auto-discover API key: delegate model→provider→env-var resolution to LiteLLM
+            # (validate_environment tells us which env vars LiteLLM expects for this model).
+            # If those aren't set, fall back to the internal-proxy key (SCILINK_API_KEY).
+            if api_key is None:
+                env = litellm.validate_environment(model_name)
+                if not env["keys_in_environment"]:
+                    api_key = get_internal_proxy_key()
+                    if not api_key:
+                        raise APIKeyNotFoundError(", ".join(env["missing_keys"]) or "unknown")
+
             logging.info(f"🌐 BOAgent using LiteLLM: {model_name}")
             self.model = LiteLLMGenerativeModel(
                 model=model_name,

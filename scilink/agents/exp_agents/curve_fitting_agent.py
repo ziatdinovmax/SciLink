@@ -40,6 +40,11 @@ from .preprocess import CurvePreprocessingAgent
 from .pipelines.curve_fitting_pipelines import create_unified_curve_fitting_pipeline
 from ...skills._shared.curve_fitting_tools import load_curve_data, plot_curve_to_bytes
 from ._deprecation import normalize_params
+import litellm
+from ...auth import (
+    get_internal_proxy_key,
+    APIKeyNotFoundError,
+)
 from ...skills.loader import load_skill
 
 from .instruct import (
@@ -200,6 +205,16 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         self.api_key, self.base_url = normalize_params(
             api_key, google_api_key, base_url, local_model, source="CurveFittingAgent"
         )
+
+        # Auto-discover API keys: delegate model→provider→env-var resolution to LiteLLM
+        # (validate_environment tells us which env vars LiteLLM expects for this model).
+        # If those aren't set, fall back to the internal-proxy key (SCILINK_API_KEY).
+        if self.api_key is None and self.base_url is None:
+            env = litellm.validate_environment(model_name)
+            if not env["keys_in_environment"]:
+                self.api_key = get_internal_proxy_key()
+                if not self.api_key:
+                    raise APIKeyNotFoundError(", ".join(env["missing_keys"]) or "unknown")
 
         super().__init__(
             api_key=self.api_key,

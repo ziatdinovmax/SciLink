@@ -7,10 +7,10 @@ from io import StringIO
 from typing import Optional, Dict, Any
 from pathlib import Path
 
+import litellm
 from ...auth import (
     get_api_key,
     get_internal_proxy_key,
-    infer_provider,
     APIKeyNotFoundError,
 )
 from .structure_agent import StructureGenerator
@@ -63,15 +63,15 @@ class StructureOrchestrator:
             max_refinement_cycles: Maximum validator-guided correction cycles.
             script_timeout: Timeout (seconds) for executing generated ASE scripts.
         """
-        # Auto-discover API keys: infer provider from the generator model
-        # (LiteLLM routes by model prefix, so the key must match the model's
-        # provider). Fall back to the internal-proxy key (SCILINK_API_KEY) when
-        # no provider-specific key is set.
+        # Auto-discover API keys: delegate model→provider→env-var resolution to LiteLLM
+        # (validate_environment tells us which env vars LiteLLM expects for this model).
+        # If those aren't set, fall back to the internal-proxy key (SCILINK_API_KEY).
         if api_key is None and base_url is None:
-            provider = infer_provider(generator_model) or 'google'
-            api_key = get_api_key(provider) or get_internal_proxy_key()
-            if not api_key:
-                raise APIKeyNotFoundError(provider)
+            env = litellm.validate_environment(generator_model)
+            if not env["keys_in_environment"]:
+                api_key = get_internal_proxy_key()
+                if not api_key:
+                    raise APIKeyNotFoundError(", ".join(env["missing_keys"]) or "unknown")
 
         if mp_api_key is None:
             mp_api_key = get_api_key('materials_project')
