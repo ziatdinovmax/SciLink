@@ -1,0 +1,51 @@
+spec_version: "0.1.0"
+name: scilink
+version: 0.0.30
+description: >
+  SciLink is an LLM-powered scientific research automation platform that
+  employs a system of intelligent agents to automate experimental design,
+  data analysis, and iterative optimization workflows. Three orchestrator
+  modes — analyze, plan, and simulate — cover the full scientific research
+  cycle: multi-modal data analysis (microscopy, spectroscopy, hyperspectral
+  imaging), Bayesian-optimization-driven experimental campaign design, and
+  DFT/classical-MD computational simulation. Domain experts extend the
+  platform via pluggable skill bundles without modifying core agent code.
+  Supports co-pilot, autopilot, and autonomous operation modes, plus an
+  MCP server interface and web UI.
+author: ziatdinovmax
+license: MIT
+
+model:
+  preferred: anthropic:claude-sonnet-4-6
+  fallback:
+    - google:gemini-2-0-flash
+    - openai:gpt-4o
+  constraints:
+    temperature: 0.3
+
+skills:
+  - planning-agent
+  - analysis-agent
+  - simulation-agent
+  - meta-orchestrator
+  - rag-knowledge-query
+  - bayesian-optimization
+  - dft-workflow
+  - image-analysis
+  - spectroscopy-analysis
+  - hyperspectral-analysis
+
+runtime:
+  max_turns: 100
+  timeout: 1800
+  budget_usd: 20
+
+compliance:
+  risk_tier: standard
+  supervision:
+    human_in_the_loop: destructive
+    kill_switch: true
+  recordkeeping:
+    audit_logging: true
+  data_governance:
+    pii_handling: none
