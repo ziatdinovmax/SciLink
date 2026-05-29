@@ -1260,3 +1260,24 @@ def get_optimal_analysis_data(hspy_data: np.ndarray) -> tuple[np.ndarray, str]:
         quality = "Very Low"
     note = f"Raw Data ({quality} quality, SNR≈{snr:.1f})"
     return hspy_data, note
+
+
+def reconstruct_cube(components: np.ndarray, abundance_maps: np.ndarray) -> np.ndarray:
+    """Rank-k reconstruction of the data cube from a decomposition.
+
+    Args:
+        components: ``(n_components, n_channels)`` spectral signatures.
+        abundance_maps: ``(H, W, n_components)`` spatial loadings.
+
+    Returns:
+        ``(H, W, n_channels)`` reconstructed cube = ``abundance_maps @ components``.
+
+    This is the decomposition's denoised, rank-k approximation of the data.
+    It lives in whatever intensity space the decomposition was fit in — which
+    may be normalized/clipped relative to the raw cube — so it is reliable for
+    *shape*-based features (peak position, width) but its absolute intensity
+    scale should not be trusted for quantification. Offered to the per-pixel
+    codegen as an *optional* fit target for noisy features (issue #219); the
+    raw cube remains the base input.
+    """
+    return abundance_maps @ components

@@ -1,13 +1,7 @@
 import logging
 from typing import Callable, List
 from ..controllers.hyperspectral_controllers import (
-    RunPreprocessingController,
-    GetInitialComponentParamsController,
-    RunComponentTestLoopController,
-    CreateElbowPlotController,
-    GetFinalComponentSelectionController,
-    RunFinalSpectralUnmixingController,
-    CreateAnalysisPlotsController,
+    DecompositionController,
     BuildHyperspectralPromptController,
     RunDynamicAnalysisController,
     SelectRefinementTargetController,
@@ -42,41 +36,18 @@ def create_hyperspectral_iteration_pipeline(
 
     pipeline = []
 
-    # --- SPECTRAL DECOMPOSITION (owns its own input prep) ---
-    # Preprocessing is no longer a standalone universal stage: it cleans the cube
-    # *for decomposition* and is the decomposition tool's first substage. The
-    # per-pixel codegen receives the RAW cube and owns its own fittability
-    # denoising. See docs/hyperspectral_codegen_relocation.md.
+    # --- SPECTRAL DECOMPOSITION (one cohesive, model-bearing step) ---
+    # The decomposition is a single composite controller that owns its own input
+    # prep, component estimation, elbow scan, LLM selection, final unmixing, and
+    # validation plots, and leaves the decomposition contract in `state`. It
+    # cleans the cube *for decomposition* internally; the per-pixel codegen
+    # downstream receives the RAW cube and owns its own fittability denoising.
+    # See issue #220 / docs/hyperspectral_codegen_relocation.md.
     if settings.get('enabled', True):
-
-        # [🧠 LLM] Initial component/method guess — also decides skip_decomposition,
-        # using SNR estimated from the raw cube (prep runs after this).
-        if settings.get('auto_components', True):
-            pipeline.append(GetInitialComponentParamsController(
-                model, logger, generation_config, safety_settings, parse_fn
-            ))
-
-        # [🛠️ Tool] Decomposition's own prep substage — runs after the skip
-        # decision; internally gated on `skip_decomposition`.
-        if settings.get('run_preprocessing', True):
-            pipeline.append(RunPreprocessingController(logger, preprocessor))
-
-        # Rest of the auto-component workflow operates on the cleaned cube.
-        if settings.get('auto_components', True):
-            # [🛠️ Tool] Run NMF loop to get errors
-            pipeline.append(RunComponentTestLoopController(logger, settings))
-            # [🛠️ Tool] Create elbow plot from errors
-            pipeline.append(CreateElbowPlotController(logger, settings))
-            # [🛠️ LLM] Select final n_components from elbow plot
-            pipeline.append(GetFinalComponentSelectionController(
-                model, logger, generation_config, safety_settings, parse_fn
-            ))
-
-        # [🛠️ Tool] Run final NMF
-        pipeline.append(RunFinalSpectralUnmixingController(logger, settings))
-
-        # [🛠️ Tool] Create all plots for analysis
-        pipeline.append(CreateAnalysisPlotsController(logger, settings))
+        pipeline.append(DecompositionController(
+            model, logger, generation_config, safety_settings,
+            settings, preprocessor, parse_fn
+        ))
 
     # --- 3. ITERATION ANALYSIS & REFINEMENT DECISION ---
 

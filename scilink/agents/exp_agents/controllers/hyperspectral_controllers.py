@@ -3,6 +3,7 @@ import numpy as np
 import json
 import os
 import re
+import inspect
 from datetime import datetime
 import base64
 import cv2
@@ -167,6 +168,7 @@ def build_code_generation_prompt(
     objective: str | None = None,
     required_outputs: list[str] | None = None,
     skill_implementation: str | None = None,
+    reconstruction_available: bool = False,
 ) -> str:
     skill_section = ""
     if skill_implementation:
@@ -217,6 +219,30 @@ Frame your feature extraction around answering this objective. Prioritize extrac
 The user has indicated interest in: {hints}
 Prioritize this guidance in your analysis, but also capture any other significant features present in the data.
 """
+    signature = (
+        "analyze_feature(data, axis, reconstruction=None)"
+        if reconstruction_available
+        else "analyze_feature(data, axis)"
+    )
+
+    reconstruction_section = ""
+    if reconstruction_available:
+        reconstruction_section = f"""
+
+### OPTIONAL DENOISED INPUT — `reconstruction`
+Your function is also handed a third argument, `reconstruction`: the rank-k
+decomposition (NMF/PCA/ICA) approximation of the cube, same shape as `data`
+({h}, {w}, {e}). It is a **denoised** version of the data, but it lives in the
+decomposition's processed intensity space — so trust it for *shape*-based
+quantities (peak position, peak width, edge onset) on noisy features, and use
+the RAW `data` for anything intensity/quantification-related.
+
+This is an **option, not a requirement**: `data` (raw) is always the base input.
+Use `reconstruction` only when the raw signal for your feature is too noisy to
+fit reliably; otherwise fit `data` directly. `reconstruction` may be `None` —
+always guard with `if reconstruction is not None:` before using it.
+"""
+
     return f"""
 You are a Python Data Scientist specialized in Spectroscopy.
 The standard NMF tool failed to model a spectral feature described as: "{target_desc}".
@@ -253,7 +279,7 @@ Your code will run in a restricted `exec()` sandbox.
 4. **Return Format:** You must return a dictionary, not a print statement or a plot.
 
 ### 4. YOUR GOAL
-Write a function `analyze_feature(data, axis)` that:
+Write a function `{signature}` that:
 1. Reshapes data to (pixels, energy).
 2. Implements the specific math required.
 3. Returns a DICTIONARY containing the results.
@@ -265,7 +291,7 @@ This is the RAW cube — no smoothing/clipping/despiking has been applied for yo
 noise/spike/negative handling you judge necessary for a stable per-pixel fit —
 the goal is fittable spectra — but do NOT erase the feature you are measuring.
 If performing derivative-based operations (like `find_peaks` or `curve_fit`) on noisy data, apply appropriate smoothing to ensure convergence.
-{hints_section}
+{reconstruction_section}{hints_section}
 ### REQUIRED RETURN FORMAT
 {{
     "maps": {{
@@ -298,6 +324,38 @@ def _sanitize_filename(text: str) -> str:
     safe_text = re.sub(r'[^\w\-\_]', '', text.replace(" ", "_"))
     return safe_text
 
+
+def _invoke_analyze_feature(func, data, axis, reconstruction):
+    """Call the generated ``analyze_feature``, passing the optional rank-k
+    ``reconstruction`` only when the function actually declares it.
+
+    The reconstruction is an *option*, not a contract (issue #219): a function
+    that keeps the legacy two-argument signature is valid and simply fits the
+    raw ``data``. We never force the third argument on such a function — doing
+    so would raise ``TypeError`` and break a perfectly good 2-arg fit.
+    """
+    if reconstruction is None:
+        return func(data, axis)
+    try:
+        params = inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return func(data, axis)
+    accepts_var_kw = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+    if "reconstruction" in params or accepts_var_kw:
+        return func(data, axis, reconstruction=reconstruction)
+    positional = [
+        p for p in params.values()
+        if p.kind in (inspect.Parameter.POSITIONAL_ONLY,
+                      inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    if len(positional) >= 3 or any(
+        p.kind == inspect.Parameter.VAR_POSITIONAL for p in params.values()
+    ):
+        return func(data, axis, reconstruction)
+    return func(data, axis)
+
 class RunPreprocessingController:
     """
     [🛠️ Tool Step] The decomposition tool's own input-prep substage.
@@ -316,7 +374,7 @@ class RunPreprocessingController:
     def execute(self, state: dict) -> dict:
         if state.get("error_dict"):
             return state
-        self.logger.info("\n\n🛠️ --- DECOMPOSITION PREP (clean cube for decomposition) --- 🛠️\n")
+        self.logger.info("\n\n🛠️ --- DECOMPOSITION PREP --- 🛠️\n")
 
         # If decomposition is skipped, the per-pixel codegen uses the RAW cube
         # anyway — no decomposition-prep is needed. Just surface SNR/mask so any
@@ -906,7 +964,72 @@ class CreateAnalysisPlotsController:
                 self.logger.warning(f"Failed to create structure overlays: {e}")
 
         self.logger.info("✅ Tool Complete: Final analysis plots created and saved.")
-        return state    
+        return state
+
+class DecompositionController:
+    """
+    [🧩 Composite Step] The cohesive spectral-decomposition step.
+
+    Wraps the whole decomposition sub-pipeline — its own input prep, initial
+    component/method estimation, the elbow scan, the LLM component selection,
+    the final unmixing, and the validation plots — behind one controller that
+    leaves the decomposition contract in ``state`` (``final_components``,
+    ``final_abundance_maps``, ``final_reconstruction_error``, ``data_quality``
+    SNR, ``preprocessing_mask``). The per-pixel codegen downstream reads that
+    contract; this remains a model-bearing step *inside* the iteration loop, so
+    the decompose↔re-plan feedback edge is preserved (see issue #220 and
+    docs/hyperspectral_codegen_relocation.md).
+
+    Internally it composes the same sub-controllers that previously sat as
+    separate pipeline entries, run in order. Each sub-controller already guards
+    on ``error_dict`` and ``skip_decomposition``, so the composite is a thin
+    sequential driver — gating on ``auto_components`` / ``run_preprocessing`` is
+    applied here at construction time exactly as the pipeline factory did before.
+    """
+    def __init__(self, model, logger, generation_config, safety_settings,
+                 settings: dict, preprocessor: HyperspectralPreprocessingAgent,
+                 parse_fn: Callable):
+        self.logger = logger
+
+        stages = []
+        # [🧠 LLM] Initial component/method guess — also decides
+        # skip_decomposition, using SNR estimated from the raw cube
+        # (prep runs after this).
+        if settings.get('auto_components', True):
+            stages.append(GetInitialComponentParamsController(
+                model, logger, generation_config, safety_settings, parse_fn
+            ))
+
+        # [🛠️ Tool] Decomposition's own prep substage — runs after the skip
+        # decision; internally gated on skip_decomposition.
+        if settings.get('run_preprocessing', True):
+            stages.append(RunPreprocessingController(logger, preprocessor))
+
+        # Rest of the auto-component workflow operates on the cleaned cube.
+        if settings.get('auto_components', True):
+            stages.append(RunComponentTestLoopController(logger, settings))
+            stages.append(CreateElbowPlotController(logger, settings))
+            stages.append(GetFinalComponentSelectionController(
+                model, logger, generation_config, safety_settings, parse_fn
+            ))
+
+        stages.append(RunFinalSpectralUnmixingController(logger, settings))
+        stages.append(CreateAnalysisPlotsController(logger, settings))
+
+        self.stages = stages
+
+    def execute(self, state: dict) -> dict:
+        if state.get("error_dict"):
+            return state
+        self.logger.info("\n\n🧩 --- SPECTRAL DECOMPOSITION --- 🧩\n")
+        for stage in self.stages:
+            state = stage.execute(state)
+            if state.get("error_dict"):
+                self.logger.warning(
+                    f"Decomposition halted: {stage.__class__.__name__} reported an error."
+                )
+                break
+        return state
 
 class BuildHyperspectralPromptController:
     """
@@ -1663,7 +1786,32 @@ class RunDynamicAnalysisController:
         # owns its own fittability denoising. See docs/hyperspectral_codegen_relocation.md.
         optimal_data, processing_note = tools.get_optimal_analysis_data(state["original_hspy_data"])
         self.logger.info(f"📊 Dynamic Analysis Prep: {processing_note}")
-        
+
+        # Offer the rank-k decomposition reconstruction as an OPTIONAL, denoised
+        # fit target alongside the raw cube (issue #219). The generated code may
+        # use it for shape-based features on noisy data, but raw stays the base
+        # input. None when decomposition was skipped or produced no components.
+        reconstruction = None
+        components = state.get("final_components")
+        abundance_maps = state.get("final_abundance_maps")
+        if components is not None and abundance_maps is not None:
+            try:
+                reconstruction = tools.reconstruct_cube(components, abundance_maps)
+                if reconstruction.shape != optimal_data.shape:
+                    self.logger.warning(
+                        f"Reconstruction shape {reconstruction.shape} != raw "
+                        f"{optimal_data.shape}; not offering it to codegen."
+                    )
+                    reconstruction = None
+                else:
+                    self.logger.info(
+                        "🧩 Offering rank-k decomposition reconstruction as an "
+                        "optional denoised codegen input."
+                    )
+            except Exception as e:
+                self.logger.warning(f"Could not build reconstruction cube: {e}")
+                reconstruction = None
+
         # --- MAIN LOOP: Process each target description separately ---
         for i, target in enumerate(custom_targets, 1):
             target_desc = target.get("description", "Analyze feature")
@@ -1695,6 +1843,7 @@ class RunDynamicAnalysisController:
                 # baseline, library choice). Empty string when no skill is
                 # active or no implementation section is defined.
                 skill_implementation=_render_skill_block(state, "implementation"),
+                reconstruction_available=reconstruction is not None,
             )
 
             # Append a preprocessing-mask hint when one exists and identifies
@@ -1758,7 +1907,9 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                         # --- D. RUN ON DATA ---
                         self.logger.info(f"    Executing generated code (timeout: {self.executor_timeout}s)...")
                         func = local_scope["analyze_feature"]
-                        result_dict = func(optimal_data, state["energy_axis"])
+                        result_dict = _invoke_analyze_feature(
+                            func, optimal_data, state["energy_axis"], reconstruction
+                        )
                     
                     # Validation
                     if not isinstance(result_dict, dict): raise ValueError("Function return must be a dict.")
