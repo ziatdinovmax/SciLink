@@ -2204,8 +2204,8 @@ plan as specified and let the retry pipeline handle actual runtime failures.
 *(NumPy 2.x: aliases removed in NumPy 2.0 raise `AttributeError` — use `np.trapezoid` not `np.trapz`; prefer `scipy.integrate.trapezoid` for integration.)*
 
 **Requirements:**
-1. Load data (handle .npy, .csv, .txt). The data you load is RAW — no preprocessing
-   has been applied upstream.
+1. Load the data array `data.npy` from the working directory (`np.load`). The data
+   you load is RAW — no preprocessing has been applied upstream.
 2. Preprocess in-script as appropriate — YOU own this; there is no separate
    preprocessing step. Apply only what is clearly warranted for this data (or
    nothing). HARD CONSTRAINTS:

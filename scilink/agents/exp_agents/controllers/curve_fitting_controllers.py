@@ -314,9 +314,33 @@ def _resolve_column_mapping(state: dict):
     xi, yi = resolve(cm.get("x")), resolve(cm.get("y"))
     if xi is None or yi is None or xi == yi:
         return None
+    # Resolve usable extra columns (skip role=ignore, unresolvable, or x/y dups)
+    # to concrete indices so the fit can stage them as per-spectrum operands.
+    extras_resolved = []
+    for e in (cm.get("extras") or []):
+        if not isinstance(e, dict):
+            continue
+        if str(e.get("role", "")).strip().lower() == "ignore":
+            continue
+        ei = resolve(e.get("ref"))
+        if ei is None or ei in (xi, yi):
+            continue
+        extras_resolved.append({
+            "index": ei,
+            "name": names[ei] if ei < len(names) else f"col_{ei}",
+            "role": str(e.get("role", "")),
+            "use": str(e.get("use", "")),
+        })
     return {"x_index": xi, "y_index": yi, "names": names,
             "note": state.get("column_mapping_note", ""),
-            "extras": cm.get("extras", [])}
+            "extras": cm.get("extras", []),
+            "extras_resolved": extras_resolved}
+
+
+def _operand_filename(name: str) -> str:
+    """Canonical per-spectrum operand filename for an extra column."""
+    safe = re.sub(r"[^0-9A-Za-z_-]", "_", str(name)).strip("_") or "operand"
+    return f"{safe}.npy"
 
 
 def _append_fit_domain_guidance(prompt: list, state: dict) -> None:
@@ -1886,6 +1910,57 @@ Your guidance: '''
         self.parallel_workers = _resolve_parallel_workers(parallel_workers)
         self.conformance_instructions = conformance_instructions
 
+    def _extract_extra_operands(self, state: dict, data_path: str) -> dict:
+        """Per-spectrum extra columns the planner flagged for use (Phase 2).
+
+        Reloads the raw file (or the retained array for array/DataFrame input),
+        slices each resolved extra column into a 1-D array aligned to the data
+        rows, and returns ``{canonical_filename: array}`` to stage as operands.
+        """
+        mapping = state.get("column_mapping_locked")
+        if not mapping or not mapping.get("extras_resolved"):
+            return {}
+        raw = None
+        p = Path(data_path)
+        if p.exists() and p.is_file():
+            try:
+                from ....skills._shared.curve_fitting_tools import load_curve_data
+                raw = np.asarray(load_curve_data(str(p), auto_orient=False))
+            except Exception:  # noqa: BLE001
+                raw = None
+        if raw is None and state.get("raw_first_spectrum_full") is not None:
+            raw = np.asarray(state["raw_first_spectrum_full"])
+        if raw is None or raw.ndim != 2:
+            return {}
+        if raw.shape[0] < raw.shape[1]:          # orient to (n_points, n_cols)
+            raw = raw.T
+        operands = {}
+        for e in mapping["extras_resolved"]:
+            i = e["index"]
+            if i < raw.shape[1]:
+                operands[_operand_filename(e["name"])] = raw[:, i]
+        return operands
+
+    def _extra_operand_block(self, state: dict) -> str:
+        """Codegen-prompt description of the staged extra-column operands."""
+        mapping = state.get("column_mapping_locked")
+        if not mapping or not mapping.get("extras_resolved"):
+            return ""
+        lines = []
+        for e in mapping["extras_resolved"]:
+            use = e.get("use") or e.get("role") or "an additional measured column"
+            lines.append(f"- `{_operand_filename(e['name'])}` — column "
+                         f"\"{e['name']}\"; intended use: {use}")
+        return (
+            "\n**Per-point operand arrays the planner SELECTED from the same file** "
+            "(1-D, aligned to the data rows, in the working directory):\n"
+            + "\n".join(lines) +
+            "\n- These were chosen deliberately. Load each with `np.load` and incorporate "
+            "it into the fit as its intended use describes; do not ignore a provided "
+            "operand or substitute your own assumption for what it provides. Skip one "
+            "only if it is genuinely unusable, and say why in the summary.\n"
+        )
+
     def _generate_fitting_script(
         self,
         state: dict,
@@ -1894,6 +1969,7 @@ Your guidance: '''
         prior_script: Optional[str] = None,
         prior_r2: float = 0.0,
         prior_issues: Optional[list] = None,
+        extra_operand_block: str = "",
     ) -> str:
         config = state.get("locked_fitting_config", {})
         context_parts = []
@@ -1961,6 +2037,9 @@ Your guidance: '''
                 "required. Do NOT report findings about a reference as if it were a "
                 "measurement; it is an operand for transforming the primary.\n"
             )
+        # Phase 2: extra columns from the same file (e.g. an uncertainty column
+        # the planner flagged), staged per-spectrum as canonical operand files.
+        auxiliary_block += extra_operand_block
 
         prompt = self.script_instructions.format(
             analysis_approach=config.get("analysis_approach", "Fit the data"),
@@ -2208,6 +2287,12 @@ Your guidance: '''
         output_prefix = f"spectrum_{spectrum_idx:04d}"
         item_dir = self.output_dir / output_prefix
 
+        # Phase 2: extra columns the planner flagged (e.g. an uncertainty column)
+        # are staged per-spectrum as canonical operand files and described to the
+        # codegen LLM, which decides how to use them (e.g. weighted least-squares).
+        extra_operands = self._extract_extra_operands(state, data_path)
+        operand_block = self._extra_operand_block(state)
+
         script = None
         last_error = ""
         run = None
@@ -2223,6 +2308,7 @@ Your guidance: '''
                         prior_script=refine_from_script,
                         prior_r2=refine_from_r2,
                         prior_issues=refine_from_issues,
+                        extra_operand_block=operand_block,
                     )
                     if not script_uses_canonical_input(script):
                         last_error = (
@@ -2258,7 +2344,8 @@ Your guidance: '''
                     script, diagnosis = self._correct_script(state, script, last_error)
                     script_errors.append({"error": last_error, "diagnosis": diagnosis})
 
-                run = stage_and_run(self.executor, script, curve_data, item_dir)
+                run = stage_and_run(self.executor, script, curve_data, item_dir,
+                                    aux=extra_operands)
                 exec_result = run["exec"]
 
                 if run["status"] == "success":
