@@ -31,6 +31,8 @@ from datetime import datetime
 from typing import Callable, Optional, Any, Dict, List
 import numpy as np
 
+from .._locked_exec import stage_and_run, script_uses_canonical_input, DATA_NAME
+
 
 def _active_skill_names(state: dict) -> list[str]:
     """Return names of all currently-loaded skills from a pipeline state dict.
@@ -2106,35 +2108,6 @@ Your guidance: '''
             self.logger.debug("Plan conformance check failed: %s", exc)
             return None
 
-    def _adapt_script_for_spectrum(self, base_script: str, data_path: str, output_prefix: str) -> str:
-        # Forward slashes so Windows paths like 'C:\Users\...' don't trigger
-        # re.sub's backslash-escape interpretation in the replacement string.
-        data_path = data_path.replace('\\', '/')
-        adapted = base_script
-        adapted = adapted.replace('fit_visualization.png', f'{output_prefix}_fit.png')
-        adapted = re.sub(r'spectrum_\d{4}_fit\.png', f'{output_prefix}_fit.png', adapted)
-        adapted = re.sub(r'spectrum_\d{4}_T\d+K_fit\.png', f'{output_prefix}_fit.png', adapted)
-        adapted = re.sub(
-            r'np\.load\s*\(\s*["\'"].*?temp_spectrum_\d+\.npy["\'"]\s*\)',
-            f'np.load("{data_path}")',
-            adapted
-        )
-        adapted = re.sub(r'(["\'"]).*?temp_spectrum_\d+\.npy\1', f'"{data_path}"', adapted)
-        adapted = re.sub(r'DATA_PATH\s*=\s*["\'"].*?["\'"]', f'DATA_PATH = "{data_path}"', adapted)
-        adapted = re.sub(r'data_path\s*=\s*["\'"].*?["\'"]', f'data_path = "{data_path}"', adapted)
-        # Neutralize LLM-introduced `glob.glob('*.npy')` fallbacks: in parallel
-        # fan-out, multiple spectra's temp files coexist briefly, and a glob
-        # for `*.npy` can find a sibling spectrum's file instead of the
-        # adapted one. Constrain each glob to the pinned data_path. The
-        # `[^()]` class refuses to span nested parens so calls like
-        # `glob.glob(os.path.join(d, '*.npy'))` are left intact rather than
-        # being chopped mid-expression.
-        adapted = re.sub(
-            r'glob\.glob\s*\([^()]*\.npy[^()]*\)',
-            f'["{data_path}"]',
-            adapted,
-        )
-        return adapted
 
     def _compute_statistics(self, curve_data: np.ndarray) -> dict:
         if curve_data.ndim == 1:
@@ -2229,37 +2202,34 @@ Your guidance: '''
         refine_from_issues: Optional[list] = None,
     ) -> dict:
         stats = self._compute_statistics(curve_data)
-        temp_data_path = self.output_dir / f"temp_spectrum_{spectrum_idx}.npy"
-        np.save(temp_data_path, curve_data)
+        # Per-spectrum working dir: the locked script runs VERBATIM here with data
+        # staged as the canonical DATA_NAME and viz written canonically — no
+        # per-spectrum source rewriting, no cross-item glob hazard.
         output_prefix = f"spectrum_{spectrum_idx:04d}"
-        
-        # Clean up any existing visualization files for this spectrum to ensure fresh output
-        for old_viz in [
-            self.output_dir / f"{output_prefix}_fit.png",
-            self.output_dir / "fit_visualization.png",
-        ]:
-            if old_viz.exists():
-                try:
-                    os.remove(old_viz)
-                except:
-                    pass
-        
+        item_dir = self.output_dir / output_prefix
+
         script = None
         last_error = ""
-        exec_result = None
+        run = None
         script_errors: list[dict] = []
 
         for attempt in range(1, self.MAX_ATTEMPTS + 1):
             try:
                 if base_script is not None and attempt == 1:
-                    script = self._adapt_script_for_spectrum(base_script, str(temp_data_path), output_prefix)
+                    script = base_script   # reuse VERBATIM (loads DATA_NAME from cwd)
                 elif attempt == 1:
                     script = self._generate_fitting_script(
-                        state, str(temp_data_path), stats,
+                        state, DATA_NAME, stats,
                         prior_script=refine_from_script,
                         prior_r2=refine_from_r2,
                         prior_issues=refine_from_issues,
                     )
+                    if not script_uses_canonical_input(script):
+                        last_error = (
+                            f"Script must load the data from '{DATA_NAME}' in the "
+                            "current working directory (np.load), not another path."
+                        )
+                        continue
                     # Check conformance with locked plan on fresh generation
                     conformance = self._check_plan_conformance(state, script)
                     if conformance and not conformance.get("conformant", True):
@@ -2288,49 +2258,42 @@ Your guidance: '''
                     script, diagnosis = self._correct_script(state, script, last_error)
                     script_errors.append({"error": last_error, "diagnosis": diagnosis})
 
-                exec_result = self.executor.execute_script(script, working_dir=str(self.output_dir))
+                run = stage_and_run(self.executor, script, curve_data, item_dir)
+                exec_result = run["exec"]
 
-                if exec_result.get("status") == "success":
-                    # Check if the script actually produced the expected outputs
-                    stdout = exec_result.get("stdout", "")
-                    has_fit_results = "FIT_RESULTS_JSON:" in stdout
-                    
-                    # Check for visualization file
-                    viz_path = self.output_dir / f"{output_prefix}_fit.png"
-                    if not viz_path.exists():
-                        viz_path = self.output_dir / "fit_visualization.png"
-                    has_visualization = viz_path.exists()
-                    
+                if run["status"] == "success":
+                    has_fit_results = "FIT_RESULTS_JSON:" in run["stdout"]
+                    has_visualization = run["visualization_path"] is not None
+
                     if has_fit_results and has_visualization:
-                        # Script truly succeeded - produced expected outputs
                         break
                     else:
-                        # Script ran but didn't produce expected outputs
                         missing = []
                         if not has_fit_results:
                             missing.append("FIT_RESULTS_JSON output")
                         if not has_visualization:
                             missing.append("visualization file")
-                        last_error = f"Script executed but did not produce expected outputs. Missing: {', '.join(missing)}. The script must print 'FIT_RESULTS_JSON:{{...}}' with fit results and save a visualization to '{output_prefix}_fit.png'."
+                        last_error = (
+                            f"Script executed but did not produce expected outputs. "
+                            f"Missing: {', '.join(missing)}. The script must print "
+                            f"'FIT_RESULTS_JSON:{{...}}' with fit results and save "
+                            f"'visualization.png' in the working directory."
+                        )
                         self.logger.warning(f"    ⚠️ Attempt {attempt}: Script ran but missing outputs: {', '.join(missing)}")
-                        if attempt >= self.MAX_ATTEMPTS:
-                            # Last attempt also failed to produce outputs
-                            exec_result["status"] = "failed"
-                            exec_result["message"] = last_error
                 else:
                     last_error = exec_result.get("message", "Unknown error")
                     self.logger.warning(f"    ⚠️ Attempt {attempt} failed: {last_error[:100]}")
             except Exception as e:
                 last_error = str(e)
                 self.logger.error(f"    ❌ Attempt {attempt} error: {e}")
-        
-        if temp_data_path.exists():
-            try:
-                os.remove(temp_data_path)
-            except:
-                pass
-        
-        if exec_result is None or exec_result.get("status") != "success":
+
+        # Success iff the final run produced BOTH the marker and the viz (matches
+        # the break condition); run["status"] alone is a snapshot and can be
+        # "success" even when outputs are missing.
+        ok = (run is not None and run["status"] == "success"
+              and run["visualization_path"] is not None
+              and "FIT_RESULTS_JSON:" in run["stdout"])
+        if not ok:
             return {
                 "index": spectrum_idx,
                 "name": spectrum_name,
@@ -2341,22 +2304,9 @@ Your guidance: '''
                 "script": script,
                 "script_errors": script_errors,
             }
-        
-        fit_results = _parse_script_markers(exec_result.get("stdout"))
-        
-        viz_path = self.output_dir / f"{output_prefix}_fit.png"
-        if not viz_path.exists():
-            viz_path = self.output_dir / "fit_visualization.png"
-        
-        viz_bytes = None
-        if viz_path.exists():
-            with open(viz_path, "rb") as f:
-                viz_bytes = f.read()
-            final_viz_path = self.output_dir / f"{output_prefix}_fit.png"
-            if viz_path != final_viz_path:
-                viz_path.rename(final_viz_path)
-            viz_path = final_viz_path
-        
+
+        fit_results = _parse_script_markers(run["stdout"])
+
         return {
             "index": spectrum_idx,
             "name": spectrum_name,
@@ -2367,8 +2317,8 @@ Your guidance: '''
             "parameters": fit_results.get("parameters", {}),
             "fit_quality": fit_results.get("fit_quality", {}),
             "deviation_note": fit_results.get("deviation_note") or fit_results.get("summary"),
-            "visualization_path": str(viz_path) if viz_path.exists() else None,
-            "visualization_bytes": viz_bytes,
+            "visualization_path": run["visualization_path"],
+            "visualization_bytes": run["visualization_bytes"],
             "statistics": stats,
             "script": script,
             "script_errors": script_errors,

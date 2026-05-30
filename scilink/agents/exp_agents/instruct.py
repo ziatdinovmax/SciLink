@@ -2193,7 +2193,7 @@ plan as specified and let the retry pipeline handle actual runtime failures.
 **Context:** {context}
 
 **Data:**
-- Path: `{data_path}`
+- Path: `{data_path}` (a numpy array in the CURRENT WORKING DIRECTORY — `np.load` it)
 - Points: {n_points}
 - X: [{x_min:.6g}, {x_max:.6g}]
 - Y: [{y_min:.6g}, {y_max:.6g}]
@@ -2227,7 +2227,7 @@ plan as specified and let the retry pipeline handle actual runtime failures.
    If you preprocess, keep both the raw and processed arrays so you can plot them.
 3. Implement your fitting approach (fit over the plan's fit domain).
 4. Compute R² and RMSE
-5. Save `fit_visualization.png`: data + fit + residuals (show individual components if multiple peaks).
+5. Save `visualization.png` (in the current working directory): data + fit + residuals (show individual components if multiple peaks).
    If you applied any preprocessing, ALSO plot the raw data faintly (light grey,
    low alpha) so the reviewer can confirm preprocessing did not distort the
    fitted features.
@@ -3165,7 +3165,7 @@ code.
 **Context:** {context}
 
 **Data:**
-- Path: `{data_path}`
+- Path: `{data_path}` (a numpy array in the CURRENT WORKING DIRECTORY — `np.load` it)
 - Shape: {shape}
 - dtype: {dtype}
 - Intensity range: [{intensity_min}, {intensity_max}]
@@ -3174,12 +3174,11 @@ code.
 {tool_inventory}
 
 **Requirements:**
-1. Load image: use `np.load(path)` for .npy, or `cv2.imread(path, cv2.IMREAD_UNCHANGED)` \
-for standard formats (remember cv2 loads BGR — convert to RGB if 3-channel color). \
+1. Load the image array with `np.load("{data_path}")` from the current working directory. \
 Check the image shape — it may have 2 or more channels that are not RGB. Access channels \
 via `image[:,:,0]`, `image[:,:,1]`, etc. Do not assume grayscale or RGB.
 2. Implement the analysis pipeline
-3. Save visualization(s): `analysis_visualization.png` showing original image alongside \
+3. Save visualization(s): `visualization.png` showing original image alongside \
 key analysis results. Use subplots with clear labels. For basic/foundational analyses, \
 keep it concise (2-4 subplots). For complex analyses with multiple derived quantities, \
 up to 6 subplots is acceptable. For segmentation tasks, the first subplot MUST show the \

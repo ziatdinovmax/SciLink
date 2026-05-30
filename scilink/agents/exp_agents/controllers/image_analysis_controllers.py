@@ -31,6 +31,8 @@ from datetime import datetime
 from typing import Callable, Optional, Any, Dict, List
 import numpy as np
 
+from .._locked_exec import stage_and_run, script_uses_canonical_input, DATA_NAME, VIZ_NAME
+
 
 # Anthropic's API rejects images over 5 MB. Cap below that with headroom
 # for base64 expansion and other margin so generated visualizations don't
@@ -2285,38 +2287,6 @@ Your guidance: '''
             self.logger.debug("Plan conformance check failed: %s", exc)
             return None
 
-    def _adapt_script_for_image(self, base_script: str, data_path: str, output_prefix: str) -> str:
-        """Adapt a base analysis script for a different image in the series."""
-        # Forward slashes so Windows paths like 'C:\Users\...' don't trigger
-        # re.sub's backslash-escape interpretation in the replacement string.
-        data_path = data_path.replace('\\', '/')
-        adapted = base_script
-        # Replace visualization output filenames
-        adapted = adapted.replace('analysis_visualization.png', f'{output_prefix}_analysis.png')
-        adapted = re.sub(r'image_\d{4}_analysis\.png', f'{output_prefix}_analysis.png', adapted)
-        # Replace data path references
-        adapted = re.sub(
-            r'np\.load\s*\(\s*["\'"].*?temp_image_\d+\.npy["\'"]\s*\)',
-            f'np.load("{data_path}")',
-            adapted
-        )
-        adapted = re.sub(r'(["\'"]).*?temp_image_\d+\.npy\1', f'"{data_path}"', adapted)
-        adapted = re.sub(r'DATA_PATH\s*=\s*["\'"].*?["\'"]', f'DATA_PATH = "{data_path}"', adapted)
-        adapted = re.sub(r'data_path\s*=\s*["\'"].*?["\'"]', f'data_path = "{data_path}"', adapted)
-        # Neutralize LLM-introduced `glob.glob('*.npy')` fallbacks: in parallel
-        # fan-out, multiple images' temp files coexist briefly, and a glob
-        # for `*.npy` can find a sibling image's file instead of the
-        # adapted one. Constrain each glob to the pinned data_path. The
-        # `[^()]` class refuses to span nested parens so calls like
-        # `glob.glob(os.path.join(d, '*.npy'))` are left intact rather than
-        # being chopped mid-expression.
-        adapted = re.sub(
-            r'glob\.glob\s*\([^()]*\.npy[^()]*\)',
-            f'["{data_path}"]',
-            adapted,
-        )
-        return adapted
-
     @staticmethod
     def _load_image_data(image_path: str) -> np.ndarray:
         """Load image data from file, handling various formats."""
@@ -2345,10 +2315,10 @@ Your guidance: '''
 
         Two independent ways to carry a previous script forward:
 
-        - ``base_script`` — series-level adaptation. When provided, the first
-          attempt substitutes data paths / output names via
-          ``_adapt_script_for_image`` without invoking the LLM. Used to
-          keep pipeline consistent across images in a series.
+        - ``base_script`` — series-level reuse. When provided, the first attempt
+          runs it VERBATIM (no LLM) in this image's working directory, where the
+          image is staged as the canonical ``data.npy``. Used to keep the
+          pipeline consistent across images in a series.
         - ``refine_from_script`` — refinement-iteration adaptation. When
           provided, the first attempt calls ``_generate_analysis_script``
           with ``base_script=refine_from_script`` so the refinement prompt
@@ -2361,45 +2331,36 @@ Your guidance: '''
         """
         stats = compute_image_statistics(image_data)
 
-        # Create working directory for this image
+        # Per-image working directory: the locked script runs VERBATIM here with the
+        # image staged as the canonical DATA_NAME and the viz written canonically —
+        # no per-image source rewriting, no cross-item glob hazard.
         working_dir = self.output_dir / f"image_{image_idx:04d}"
         working_dir.mkdir(parents=True, exist_ok=True)
-
-        # Save image as .npy for the script to load
-        temp_data_path = working_dir / f"temp_image_{image_idx}.npy"
-        np.save(temp_data_path, image_data)
         output_prefix = f"image_{image_idx:04d}"
-
-        # Clean up any existing visualization files for this image
-        for old_viz in [
-            working_dir / f"{output_prefix}_analysis.png",
-            working_dir / "analysis_visualization.png",
-        ]:
-            if old_viz.exists():
-                try:
-                    os.remove(old_viz)
-                except Exception:
-                    pass
 
         script = None
         last_error = ""
-        exec_result = None
+        run = None
         script_errors = []
         last_diagnosis = None
 
         for attempt in range(1, self.MAX_ATTEMPTS + 1):
             try:
                 if base_script is not None and attempt == 1:
-                    script = self._adapt_script_for_image(
-                        base_script, str(temp_data_path), output_prefix
-                    )
+                    script = base_script   # reuse VERBATIM (loads DATA_NAME from cwd)
                 elif attempt == 1:
                     script = self._generate_analysis_script(
                         state,
-                        str(temp_data_path),
+                        DATA_NAME,
                         stats,
                         base_script=refine_from_script,
                     )
+                    if not script_uses_canonical_input(script):
+                        last_error = (
+                            f"Script must load the image from '{DATA_NAME}' in the "
+                            "current working directory (np.load), not another path."
+                        )
+                        continue
                     # Check conformance with locked plan on fresh generation
                     conformance = self._check_conformance(state, script)
                     if conformance and not conformance.get("conformant", True):
@@ -2432,19 +2393,12 @@ Your guidance: '''
                 # Sanitize the script
                 script = self._sanitize_script(script)
 
-                exec_result = self.executor.execute_script(
-                    script, working_dir=str(working_dir)
-                )
+                run = stage_and_run(self.executor, script, image_data, working_dir)
+                exec_result = run["exec"]
 
-                if exec_result.get("status") == "success":
-                    stdout = exec_result.get("stdout", "")
-                    has_results = "IMAGE_ANALYSIS_RESULTS_JSON:" in stdout
-
-                    # Check for visualization file
-                    viz_path = working_dir / f"{output_prefix}_analysis.png"
-                    if not viz_path.exists():
-                        viz_path = working_dir / "analysis_visualization.png"
-                    has_visualization = viz_path.exists()
+                if run["status"] == "success":
+                    has_results = "IMAGE_ANALYSIS_RESULTS_JSON:" in run["stdout"]
+                    has_visualization = run["visualization_path"] is not None
 
                     if has_results and has_visualization:
                         break
@@ -2458,8 +2412,7 @@ Your guidance: '''
                             f"Script executed but did not produce expected outputs. "
                             f"Missing: {', '.join(missing)}. The script must print "
                             f"'IMAGE_ANALYSIS_RESULTS_JSON:{{...}}' with analysis results "
-                            f"and save a visualization to '{output_prefix}_analysis.png' "
-                            f"or 'analysis_visualization.png'."
+                            f"and save 'visualization.png' in the working directory."
                         )
                         self.logger.warning(
                             f"    Attempt {attempt}: Script ran but missing outputs: "
@@ -2471,9 +2424,6 @@ Your guidance: '''
                             "fix": (last_diagnosis or "")[:300] or None,
                         })
                         last_diagnosis = None
-                        if attempt >= self.MAX_ATTEMPTS:
-                            exec_result["status"] = "failed"
-                            exec_result["message"] = last_error
                 else:
                     last_error = exec_result.get("message", "Unknown error")
                     self.logger.warning(
@@ -2494,14 +2444,12 @@ Your guidance: '''
                     "fix": None,
                 })
 
-        # Clean up temp data file
-        if temp_data_path.exists():
-            try:
-                os.remove(temp_data_path)
-            except Exception:
-                pass
-
-        if exec_result is None or exec_result.get("status") != "success":
+        # Success iff the final run produced BOTH the marker and the viz (matches
+        # the break condition); run["status"] alone is a snapshot.
+        ok = (run is not None and run["status"] == "success"
+              and run["visualization_path"] is not None
+              and "IMAGE_ANALYSIS_RESULTS_JSON:" in run["stdout"])
+        if not ok:
             return {
                 "index": image_idx,
                 "name": image_name,
@@ -2515,7 +2463,7 @@ Your guidance: '''
 
         # Parse results from stdout
         analysis_results = {}
-        for line in (exec_result.get("stdout") or "").splitlines():
+        for line in run["stdout"].splitlines():
             if line.startswith("IMAGE_ANALYSIS_RESULTS_JSON:"):
                 try:
                     analysis_results = json.loads(
@@ -2524,20 +2472,6 @@ Your guidance: '''
                 except json.JSONDecodeError:
                     pass
                 break
-
-        # Read visualization file
-        viz_path = working_dir / f"{output_prefix}_analysis.png"
-        if not viz_path.exists():
-            viz_path = working_dir / "analysis_visualization.png"
-
-        viz_bytes = None
-        if viz_path.exists():
-            with open(viz_path, "rb") as f:
-                viz_bytes = f.read()
-            final_viz_path = working_dir / f"{output_prefix}_analysis.png"
-            if viz_path != final_viz_path:
-                viz_path.rename(final_viz_path)
-            viz_path = final_viz_path
 
         return {
             "index": image_idx,
@@ -2550,8 +2484,8 @@ Your guidance: '''
             "quality_metrics": analysis_results.get("quality_metrics", {}),
             "summary": analysis_results.get("summary"),
             "saved_arrays": analysis_results.get("saved_arrays", {}),
-            "visualization_path": str(viz_path) if viz_path.exists() else None,
-            "visualization_bytes": viz_bytes,
+            "visualization_path": run["visualization_path"],
+            "visualization_bytes": run["visualization_bytes"],
             "statistics": stats,
             "script": script,
             "script_errors": script_errors,
@@ -3887,43 +3821,16 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
                         self.logger.info(f"    Change type: {change_type}")
                     patched_script = result["script"]
 
-                    # Execute the patched script
+                    # Execute the patched script VERBATIM in the per-image dir
                     working_dir = self.output_dir / f"image_{image_idx:04d}"
-                    working_dir.mkdir(parents=True, exist_ok=True)
-                    temp_data_path = working_dir / f"temp_image_{image_idx}.npy"
-                    np.save(temp_data_path, image_data)
-                    output_prefix = f"image_{image_idx:04d}"
-
-                    # Remove old viz files before running the patched
-                    # script so we only find genuinely new output.
-                    # On revert the original is restored from in-memory
-                    # visualization_bytes.
-                    canonical_viz = working_dir / f"{output_prefix}_analysis.png"
-                    for old_viz in [
-                        canonical_viz,
-                        working_dir / "analysis_visualization.png",
-                    ]:
-                        if old_viz.exists():
-                            try:
-                                os.remove(old_viz)
-                            except Exception:
-                                pass
-
+                    canonical_viz = working_dir / VIZ_NAME
                     patched_script = self._sanitize_script(patched_script)
-                    exec_result = self.executor.execute_script(
-                        patched_script, working_dir=str(working_dir)
-                    )
+                    run = stage_and_run(self.executor, patched_script, image_data, working_dir)
+                    exec_result = run["exec"]
 
-                    if temp_data_path.exists():
-                        try:
-                            os.remove(temp_data_path)
-                        except Exception:
-                            pass
-
-                    if exec_result.get("status") == "success":
-                        stdout = exec_result.get("stdout", "")
+                    if run["status"] == "success":
                         analysis_results = {}
-                        for line in stdout.splitlines():
+                        for line in run["stdout"].splitlines():
                             if line.startswith("IMAGE_ANALYSIS_RESULTS_JSON:"):
                                 try:
                                     analysis_results = json.loads(
@@ -3935,20 +3842,7 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
                                     pass
                                 break
 
-                        viz_path = canonical_viz
-                        if not viz_path.exists():
-                            viz_path = working_dir / "analysis_visualization.png"
-
-                        viz_bytes = None
-                        if viz_path.exists():
-                            with open(viz_path, "rb") as f:
-                                viz_bytes = f.read()
-                            # Normalize to canonical name
-                            if viz_path != canonical_viz:
-                                try:
-                                    viz_path.replace(canonical_viz)
-                                except Exception:
-                                    pass
+                        viz_bytes = run["visualization_bytes"]
 
                         if analysis_results and viz_bytes:
                             user_guided_result = {
