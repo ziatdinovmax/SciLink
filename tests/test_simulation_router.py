@@ -59,6 +59,17 @@ def test_discover_scale_agents_includes_periodic_dft():
     assert "vasp" in scales["periodic_dft"]["supported"]
 
 
+def test_discover_scale_agents_includes_molecular_qc():
+    """MolecularQCAgent should be discovered with the nwchem bundle.
+
+    Canary that the agent registered in discover_scale_agents() and that
+    supported_software() finds the skills/molecular_qc/nwchem bundle.
+    """
+    scales = discover_scale_agents()
+    assert "molecular_qc" in scales
+    assert "nwchem" in scales["molecular_qc"]["supported"]
+
+
 # ─── candidate_engines: intersection ───────────────────────────────
 
 

@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 # scale's foundation agent resolves the engine to a skill bundle.
 _DEFAULT_ENGINE = {
     "periodic_dft": "vasp",
+    "molecular_qc": "nwchem",
     "molecular_dynamics": "lammps",
 }
 
@@ -105,6 +106,20 @@ def _generate_inputs(
             structure_file=structure_file, request=request, software=software,
         )
         # PeriodicDFTAgent already returns input_files as {filename: contents}.
+        if result.get("status") == "success":
+            agent.save_inputs(result, output_dir)
+        return result
+
+    if scale == "molecular_qc":
+        from .molecular_qc_agent import MolecularQCAgent
+        agent = MolecularQCAgent(
+            api_key=api_key, base_url=base_url, model_name=model_name,
+        )
+        result = agent.generate_inputs(
+            structure_file=structure_file, request=request, software=software,
+        )
+        # MolecularQCAgent returns input_files as {filename: contents} and,
+        # for single-deck engines, an entry_file the refinement loop runs.
         if result.get("status") == "success":
             agent.save_inputs(result, output_dir)
         return result
