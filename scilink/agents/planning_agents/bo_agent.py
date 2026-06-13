@@ -197,7 +197,7 @@ class BOAgent(BaseAgent):
                     "Set SCILINK_API_KEY environment variable or pass api_key parameter."
                 )
             
-            logging.info(f"🏛️ BOAgent using internal proxy: {base_url}")
+            logging.debug(f"🏛️ BOAgent using internal proxy: {base_url}")
             self.model = OpenAIAsGenerativeModel(
                 model=model_name,
                 api_key=api_key,
@@ -205,7 +205,7 @@ class BOAgent(BaseAgent):
             )
         else:
             # PUBLIC LITELLM
-            logging.info(f"🌐 BOAgent using LiteLLM: {model_name}")
+            logging.debug(f"🌐 BOAgent using LiteLLM: {model_name}")
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
                 api_key=api_key

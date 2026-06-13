@@ -90,7 +90,7 @@ class NoveltyScorer:
                     "Set SCILINK_API_KEY environment variable or pass api_key parameter."
                 )
             
-            self.logger.info(f"🏛️ NoveltyScorer using internal proxy: {base_url}")
+            self.logger.debug(f"🏛️ NoveltyScorer using internal proxy: {base_url}")
             self.model = OpenAIAsGenerativeModel(
                 model=model_name,
                 api_key=api_key,
@@ -104,7 +104,7 @@ class NoveltyScorer:
                     "Install with: pip install litellm"
                 )
             
-            self.logger.info(f"🌐 NoveltyScorer using LiteLLM: {model_name}")
+            self.logger.debug(f"🌐 NoveltyScorer using LiteLLM: {model_name}")
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
                 api_key=api_key

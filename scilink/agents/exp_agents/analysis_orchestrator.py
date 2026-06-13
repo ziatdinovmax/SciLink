@@ -656,6 +656,7 @@ class AnalysisOrchestratorAgent:
         self._discover_plugin_agents()
 
         # Initialize tools registry (reads agent registry via _sync_from_registry)
+        print("🤖 Agent: Hiring sub-agents...")
         self.tools = AnalysisOrchestratorTools(self)
 
         # Get appropriate system prompt (agent list built from registry)
@@ -667,7 +668,7 @@ class AnalysisOrchestratorAgent:
         
         # Initialize LLM
         if base_url:
-            logging.info(f"🏛️ Orchestrator using internal proxy: {base_url}")
+            logging.debug(f"🏛️ Orchestrator using internal proxy: {base_url}")
             self.model = OpenAIAsGenerativeModel(
                 model=model_name,
                 api_key=api_key,
@@ -676,7 +677,7 @@ class AnalysisOrchestratorAgent:
             self.use_openai = True
             self.tools_for_model = self.tools.openai_schemas
         else:
-            logging.info(f"🌐 Orchestrator using LiteLLM: {model_name}")
+            logging.debug(f"🌐 Orchestrator using LiteLLM: {model_name}")
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
                 api_key=api_key,

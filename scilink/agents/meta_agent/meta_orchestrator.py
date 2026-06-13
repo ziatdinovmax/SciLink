@@ -443,14 +443,14 @@ class MetaOrchestratorAgent:
 
         # Initialize LLM (dual path, copied from AnalysisOrchestratorAgent).
         if base_url:
-            logging.info(f"🏛️ Meta orchestrator using internal proxy: {base_url}")
+            logging.debug(f"🏛️ Meta orchestrator using internal proxy: {base_url}")
             self.model = OpenAIAsGenerativeModel(
                 model=model_name, api_key=api_key, base_url=base_url
             )
             self.use_openai = True
             self.tools_for_model = self.tools.openai_schemas
         else:
-            logging.info(f"🌐 Meta orchestrator using LiteLLM: {model_name}")
+            logging.debug(f"🌐 Meta orchestrator using LiteLLM: {model_name}")
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
                 api_key=api_key,

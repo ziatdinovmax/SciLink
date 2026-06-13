@@ -137,7 +137,7 @@ class PlanningAgent(BaseAgent):
                     "Using api_key for all requests."
                 )
             
-            logging.info(f"🏛️ PlanningAgent using internal proxy: {base_url}")
+            logging.debug(f"🏛️ PlanningAgent using internal proxy: {base_url}")
             self.model = OpenAIAsGenerativeModel(
                 model=model_name,
                 api_key=api_key,
@@ -148,7 +148,7 @@ class PlanningAgent(BaseAgent):
             
         else:
             # PUBLIC LITELLM - can use different keys per provider
-            logging.info(f"🌐 PlanningAgent using LiteLLM: {model_name}")
+            logging.debug(f"🌐 PlanningAgent using LiteLLM: {model_name}")
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
                 api_key=api_key  # Can be None - LiteLLM reads env vars
@@ -267,7 +267,7 @@ class PlanningAgent(BaseAgent):
         
         if docs_loaded: print("    - ✅ Docs KB loaded.")
         if code_loaded: print("    - ✅ Code KB loaded.")
-        if not self._kb_is_built: print("    - ⚠️  No pre-built KBs found.")
+        if not self._kb_is_built: logging.debug("No pre-built KBs found.")
 
     def _initialize_state(self, objective: str, **kwargs) -> Dict[str, Any]:
         """Creates the foundational state dictionary for a new research task."""
