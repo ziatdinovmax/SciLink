@@ -57,6 +57,22 @@ applied.
 3. Fit Voigt peaks to the background-subtracted data.
 4. Report R² on the FULL spectrum (background + peaks vs original data).
 
+**The inelastic background must be physically constrained, never free
+analytic terms.** Use a Shirley or Tougaard background — pre-subtracted (step 2,
+the default recipe here) or iterated jointly with the peaks (active Shirley, as
+CasaXPS does). Both are constrained: their shape is *determined by* the
+spectrum's inelastic tail, not freely optimized. What is NOT allowed is adding a
+*free-form analytic background* — an erf/sigmoid "inelastic shelf", a
+polynomial, an arbitrary spline — whose amplitude or shape are free model
+parameters. Those parameters trade intensity with the asymmetric metallic tail,
+inflating the higher-BE area and **biasing the chemical-state fraction** (e.g.
+metallic:oxide) even while *raising* R². A free background that climbs to match
+the high-BE plateau has absorbed peak intensity — a red flag. If a
+properly-backgrounded fit has poorer R² than a free-background fit, the
+properly-backgrounded one is usually the physically correct result: prefer
+fixing the background endpoints/model over switching to a free analytic
+background.
+
 **Complete XPS fitting template** — adapt this pattern for any XPS region:
 
 ```python
@@ -246,6 +262,22 @@ contamination.
 - Peak positions should match known chemical states within ±0.5 eV (after charge correction).
 - R² > 0.99 is expected for well-resolved XPS peaks; R² < 0.95 indicates a poor model.
 - Residuals should show no systematic structure (check for missed components or incorrect background).
+- **R² alone does NOT certify a chemical-state quantification.** When the fit's
+  purpose is a chemical-state fraction (e.g. metallic:oxide), a high R² can hide
+  a wrong area partition. Before accepting, also require: (a) the area ratio of
+  interest is *stable* — re-seeding amplitudes or perturbing the background
+  endpoints by a few percent must not swing it by more than ~10%; an unstable
+  ratio means the partition is ill-conditioned, not determined. (b) The residual
+  in the spin-orbit OVERLAP window (where one species' 2p1/2 sits under
+  another's 2p3/2 — e.g. ~458–461 eV for Ti 2p) has no dipolar/oscillatory
+  (sign-changing) structure; such structure signals intensity-sharing between
+  the overlapping doublets even at R² > 0.95. Reject the fit on these grounds
+  even when R² passes — do not let the R² threshold approve it.
+- **Background sanity:** the inelastic background must be Shirley or Tougaard
+  (pre-subtracted or active/iterated — both physically constrained). If the
+  reported model instead includes a FREE analytic background term — erf/sigmoid
+  "shelf", polynomial, or arbitrary spline with fitted parameters — the fit is
+  invalid regardless of R² (see analysis section).
 - If more than 5 components are needed in a single spectral region, verify physical justification.
 - Gaussian width should be consistent (within ±0.3 eV) across components in the same region.
 - **Differential charging:** On insulating samples, peaks may appear

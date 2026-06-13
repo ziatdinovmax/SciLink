@@ -524,11 +524,56 @@ def _append_fit_domain_guidance(prompt: list, state: dict) -> None:
     )
 
 
+# Domain-skill strictness by annealing temperature — the whole skill relaxes
+# uniformly as the fit "heats up": mandatory (T=0) → guidance (T=1) →
+# reference/overridable (T=2), at EVERY stage (planning, interpretation,
+# conformance; codegen/verification anneal via the class
+# _SKILL_STRICTNESS_SCHEDULE). Physics grounding is the baseline's job, not a
+# non-anneable skill rule. Each frame is
+# (skill_header_label, intro_text, validation_header_label); frame 0 reproduces
+# the original mandatory wording verbatim so a first run (T=0) is unchanged.
+_SKILL_STRICTNESS_FRAMES = (
+    ("MANDATORY Domain Skill Rules",
+     "The following rules are MANDATORY. Your analysis plan and implementation "
+     "MUST conform to these domain-specific requirements. These rules encode "
+     "validated domain expertise and take precedence over general-purpose defaults. "
+     "Do NOT substitute your own preferences where these rules specify a method, "
+     "treatment, or constraint.",
+     "MANDATORY Domain Validation Rules"),
+    ("Domain Skill Guidance",
+     "Follow these domain rules unless the data clearly requires a different "
+     "approach. If you deviate from a rule, explain why.",
+     "Domain Validation Guidance"),
+    ("Domain Skill Reference",
+     "Use these domain rules as context. Override any rule where the data "
+     "warrants it, justifying the deviation from what you observe. Physical "
+     "soundness of the result — not rule-adherence — is the standard here.",
+     "Domain Validation Reference"),
+)
+
+
+def _skill_annealing_level(state: dict) -> int:
+    """Effective skill-strictness temperature for skill injection.
+
+    The fit loop seeds ``_annealing_level`` as it escalates; planning runs
+    before that and interpretation after, so fall back to the run's starting
+    level (``_starting_annealing_level``) when ``_annealing_level`` is unset.
+    A re-run launched hot therefore re-plans with the skill already relaxed.
+    """
+    level = state.get("_annealing_level")
+    if level is None:
+        level = state.get("_starting_annealing_level") or 0
+    return max(0, min(int(level), len(_SKILL_STRICTNESS_FRAMES) - 1))
+
+
 def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
     """Append domain skill knowledge to an LLM prompt for the given stage.
 
-    With multiple skills loaded, each skill's section is appended in order
-    (most-relevant first) so the LLM can attribute guidance to its source.
+    The skill's binding strength tracks the annealing temperature (see
+    ``_SKILL_STRICTNESS_FRAMES``): mandatory when frozen (T=0), overridable
+    when hot (T=2). With multiple skills loaded, each skill's section is
+    appended in order (most-relevant first) so the LLM can attribute guidance
+    to its source.
 
     Args:
         prompt: Mutable list of prompt parts to extend.
@@ -542,6 +587,9 @@ def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
     if not skills:
         return
 
+    skill_label, intro_text, validation_label = _SKILL_STRICTNESS_FRAMES[
+        _skill_annealing_level(state)
+    ]
     intro_appended = False
     for sections in skills:
         if not sections:
@@ -551,15 +599,9 @@ def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
             continue
         skill_name = sections.get("name", "domain skill")
 
-        prompt.append(f"\n## MANDATORY Domain Skill Rules: {skill_name} ({stage})")
+        prompt.append(f"\n## {skill_label}: {skill_name} ({stage})")
         if not intro_appended:
-            prompt.append(
-                "The following rules are MANDATORY. Your analysis plan and implementation "
-                "MUST conform to these domain-specific requirements. These rules encode "
-                "validated domain expertise and take precedence over general-purpose defaults. "
-                "Do NOT substitute your own preferences where these rules specify a method, "
-                "treatment, or constraint."
-            )
+            prompt.append(intro_text)
             intro_appended = True
         prompt.append(content)
 
@@ -568,7 +610,7 @@ def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
         if stage in ("planning", "interpretation"):
             validation = sections.get("validation", "")
             if validation:
-                prompt.append(f"\n## MANDATORY Domain Validation Rules ({skill_name})")
+                prompt.append(f"\n## {validation_label} ({skill_name})")
                 prompt.append(validation)
 
 
@@ -2566,8 +2608,14 @@ Your guidance: '''
                 if content:
                     rules_parts.append(f"### {stage.title()} rules\n{content}")
             if rules_parts:
+                # Conformance checks the script against the (evolving) locked
+                # plan; the skill framing here anneals with temperature too, so
+                # a justified T=2 deviation from the skill is not re-flagged as
+                # mandatory non-conformance.
+                _skill_label = _SKILL_STRICTNESS_FRAMES[
+                    _skill_annealing_level(state)][0]
                 skill_rules_text = (
-                    f"\n**MANDATORY Domain Skill Rules ({skill_name}):**\n"
+                    f"\n**{_skill_label} ({skill_name}):**\n"
                     + "\n".join(rules_parts)
                     + "\n"
                 )
@@ -3009,8 +3057,10 @@ Remember: Rejecting a good fit (R² > {accept_threshold:.2f}) to chase marginal 
         "original plan based on what you observe in the data and residuals.\n",
     )
 
-    # Same annealing applied to domain skill strictness during fitting.
-    # Planning and interpretation stages always keep skills mandatory.
+    # Domain skill strictness during codegen/verification. Planning,
+    # interpretation, and conformance anneal the same way via the module-level
+    # _SKILL_STRICTNESS_FRAMES — the whole skill relaxes uniformly with
+    # temperature; physics grounding is the baseline's responsibility.
     _SKILL_STRICTNESS_SCHEDULE = (
         # T=0: mandatory
         "## MANDATORY Domain Skill Rules ({name})\n"
