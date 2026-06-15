@@ -92,7 +92,7 @@ class ScalarizerAgent(BaseAgent):
                     "Set SCILINK_API_KEY environment variable or pass api_key parameter."
                 )
             
-            logging.info(f"🏛️ ScalarizerAgent using internal proxy: {base_url}")
+            logging.debug(f"🏛️ ScalarizerAgent using internal proxy: {base_url}")
             self.model = OpenAIAsGenerativeModel(
                 model=model_name,
                 api_key=api_key,
@@ -100,7 +100,7 @@ class ScalarizerAgent(BaseAgent):
             )
         else:
             # PUBLIC LITELLM
-            logging.info(f"🌐 ScalarizerAgent using LiteLLM: {model_name}")
+            logging.debug(f"🌐 ScalarizerAgent using LiteLLM: {model_name}")
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
                 api_key=api_key

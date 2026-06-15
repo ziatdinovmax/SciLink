@@ -346,11 +346,49 @@ def _active_skill_names(state: dict) -> list[str]:
     return [legacy] if legacy else []
 
 
+# Domain-skill strictness by annealing temperature — the whole skill relaxes
+# uniformly as the analysis "heats up", at EVERY stage (planning, interpretation;
+# codegen/verification anneal via the class _SKILL_STRICTNESS_SCHEDULE). Image
+# skills are advisory by design (composable, not authoritative like curve
+# fitting's), so even T=0 is "expertise to inform", softening to "context" at
+# T=2. Each frame is (skill_header_label, intro_text, validation_header_label);
+# frame 0 reproduces the original wording verbatim so a first run is unchanged.
+_SKILL_STRICTNESS_FRAMES = (
+    ("Domain Expertise",
+     "The following guidance is from validated domain expertise. "
+     "Use it to inform your approach.",
+     "Domain Validation Guidance"),
+    ("Domain Expertise (reference)",
+     "Use this validated domain expertise as reference. If the data clearly "
+     "requires a different approach, deviate and explain why.",
+     "Domain Validation Reference"),
+    ("Domain Expertise (context)",
+     "Use this domain expertise as background context. Override any guidance "
+     "where the data warrants it — explain the deviation.",
+     "Domain Validation Context"),
+)
+
+
+def _skill_annealing_level(state: dict) -> int:
+    """Effective skill-strictness temperature for skill injection.
+
+    The analysis loop seeds ``_annealing_level`` as it escalates; planning runs
+    before that and interpretation after, so fall back to the run's starting
+    level (``_starting_annealing_level``) when ``_annealing_level`` is unset.
+    A re-run launched hot therefore re-plans with the skill already relaxed.
+    """
+    level = state.get("_annealing_level")
+    if level is None:
+        level = state.get("_starting_annealing_level") or 0
+    return max(0, min(int(level), len(_SKILL_STRICTNESS_FRAMES) - 1))
+
+
 def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
     """Append domain skill knowledge to an LLM prompt for the given stage.
 
-    With multiple skills loaded, sections from each are appended in order
-    so the LLM can attribute guidance to its source.
+    The skill's binding strength tracks the annealing temperature (see
+    ``_SKILL_STRICTNESS_FRAMES``). With multiple skills loaded, sections from
+    each are appended in order so the LLM can attribute guidance to its source.
 
     Args:
         prompt: Mutable list of prompt parts to extend.
@@ -366,6 +404,9 @@ def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
     if not skills:
         return
 
+    skill_label, intro_text, validation_label = _SKILL_STRICTNESS_FRAMES[
+        _skill_annealing_level(state)
+    ]
     intro_appended = False
     for sections in skills:
         if not sections:
@@ -374,12 +415,9 @@ def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
         if not content:
             continue
         skill_name = sections.get("name", "domain skill")
-        prompt.append(f"\n## Domain Expertise: {skill_name} ({stage})")
+        prompt.append(f"\n## {skill_label}: {skill_name} ({stage})")
         if not intro_appended:
-            prompt.append(
-                "The following guidance is from validated domain expertise. "
-                "Use it to inform your approach."
-            )
+            prompt.append(intro_text)
             intro_appended = True
         prompt.append(content)
 
@@ -387,7 +425,7 @@ def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
         if stage in ("planning", "interpretation"):
             validation = sections.get("validation", "")
             if validation:
-                prompt.append(f"\n## Domain Validation Guidance: {skill_name}")
+                prompt.append(f"\n## {validation_label}: {skill_name}")
                 prompt.append(validation)
 
 
@@ -1948,8 +1986,10 @@ class UnifiedImageProcessingController:
         "",
     )
 
-    # Same annealing applied to domain skill strictness during analysis.
-    # Planning and interpretation stages always keep skills at T=0 (guidance).
+    # Domain skill strictness during codegen/verification. Planning and
+    # interpretation anneal the same way via the module-level
+    # _SKILL_STRICTNESS_FRAMES — the whole skill relaxes uniformly with
+    # temperature; physics grounding is the baseline's responsibility.
     _SKILL_STRICTNESS_SCHEDULE = (
         # T=0: guidance (default for image analysis — softer than curve fitting's "mandatory")
         "## Domain Expertise Guidance ({name})\n"

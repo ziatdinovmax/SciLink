@@ -755,7 +755,7 @@ class PlanningOrchestratorAgent:
         
         # --- LLM Initialization ---
         if base_url:
-            logging.info(f"🏛️ Orchestrator using internal proxy: {base_url}")
+            logging.debug(f"🏛️ Orchestrator using internal proxy: {base_url}")
             self.model = OpenAIAsGenerativeModel(
                 model=model_name,
                 api_key=api_key,
@@ -764,7 +764,7 @@ class PlanningOrchestratorAgent:
             self.use_openai = True
             self.tools_for_model = self.tools.openai_schemas
         else:
-            logging.info(f"🌐 Orchestrator using LiteLLM: {model_name}")
+            logging.debug(f"🌐 Orchestrator using LiteLLM: {model_name}")
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
                 api_key=api_key,

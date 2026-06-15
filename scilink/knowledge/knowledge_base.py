@@ -57,14 +57,14 @@ class KnowledgeBase:
         
         # Initialize embedding client
         if base_url:
-            logging.info(f"🏛️ KnowledgeBase using internal proxy for embeddings")
+            logging.debug(f"🏛️ KnowledgeBase using internal proxy for embeddings")
             self.embedding_client = OpenAIAsEmbeddingModel(
                 model=embedding_model,
                 api_key=api_key,
                 base_url=base_url
             )
         elif use_litellm:
-            logging.info(f"🌐 KnowledgeBase using LiteLLM for embeddings: {embedding_model}")
+            logging.debug(f"🌐 KnowledgeBase using LiteLLM for embeddings: {embedding_model}")
             self.embedding_client = LiteLLMEmbeddingModel(
                 model=embedding_model,
                 api_key=api_key
