@@ -71,10 +71,15 @@ structure-matching = [
 ]
 ff = [
     # Engine-neutral force-field parameterization. OpenFF Interchange is the
-    # canonical parameterized system (exports natively to LAMMPS/GROMACS/OpenMM);
+    # canonical parameterized system (exports natively to LAMMPS/GROMACS/OpenMM).
+    # Charges come from NAGL (OpenFF's ML AM1-BCC surrogate) so the OpenFF path
+    # needs no AmberTools/OpenEye and stays pip-installable; AmberTools (conda
+    # only) is required separately solely for the secondary AMBER backend.
     # ParmEd bridges the AMBER (prmtop) pipeline; rdkit validates component SMILES.
     "openff-toolkit>=0.16",
     "openff-interchange>=0.4",
+    "openff-nagl>=0.5",
+    "openff-nagl-models>=0.3",
     "parmed>=4.0",
     "rdkit>=2023.3",
 ]

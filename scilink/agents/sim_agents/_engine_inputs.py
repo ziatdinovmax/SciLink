@@ -59,8 +59,10 @@ def _load_interchange(system: ParameterizedSystem):
                 f"ParameterizedSystem.interchange_path missing: "
                 f"{system.interchange_path!r}"
             )
+        # OpenFF Interchange (>=0.5, pydantic v2): deserialize the JSON the FF
+        # skill wrote with model_dump_json (same [ff] env → version-safe).
         with open(system.interchange_path) as fh:
-            return Interchange.from_json(fh.read())
+            return Interchange.model_validate_json(fh.read())
 
     if system.source_format == "amber":
         prmtop, inpcrd = system.amber_files
