@@ -31,6 +31,7 @@ orchestrator class, and no hardcoded engine filenames anywhere.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -143,6 +144,30 @@ def _generate_inputs(
         f"Supported: {sorted(_DEFAULT_ENGINE)}. Adding a scale means a new "
         "foundation agent + skill bundle and one branch here."
     )
+
+
+def _load_components_manifest(structure_path: str) -> Optional[Dict[str, Any]]:
+    """Load a ``components.json`` manifest sitting next to a generated structure.
+
+    Condensed structure generation writes this alongside the coordinate file:
+    ``{"components": [{"name", "smiles", "count"}, ...]}`` in coordinate order.
+    It is the force-field step's bridge from a packed box to per-species
+    chemistry. Returns the manifest dict, or None when absent / unreadable (a
+    crystal/molecular structure, an MLIP-MD run, or a caller-supplied data file
+    has none — the FF step is then skipped).
+    """
+    if not structure_path:
+        return None
+    manifest = os.path.join(os.path.dirname(os.path.abspath(structure_path)),
+                            "components.json")
+    if not os.path.isfile(manifest):
+        return None
+    try:
+        with open(manifest) as fh:
+            data = json.load(fh)
+        return data if data.get("components") else None
+    except Exception:
+        return None
 
 
 def run_complete_workflow(
@@ -263,6 +288,49 @@ def run_complete_workflow(
             return result
         result["steps_completed"].append("structure_generation")
         structure_path = structure_result["final_structure_path"]
+
+    # ── Step 1.5: force-field parameterization (MD, force-field-based only) ──
+    # Turn a packed box of coordinates into an engine-native, parameterized
+    # input (e.g. a typed LAMMPS data file) via the engine-neutral FF stack:
+    # ForceFieldAgent.parameterize -> ParameterizedSystem -> write_md_inputs.
+    # Gated on a components.json manifest, so MLIP-driven MD (potential-based,
+    # no manifest), pre-built data files, and non-MD scales are untouched. When
+    # the caller already supplied force_field_files, respect them.
+    if (scale == "molecular_dynamics" and force_field_files is None):
+        manifest = _load_components_manifest(structure_path)
+        if manifest:
+            try:
+                from .force_field_agent import ForceFieldAgent
+                from ._engine_inputs import write_md_inputs
+                ff_agent = ForceFieldAgent(
+                    working_dir=output_dir, api_key=api_key,
+                    base_url=base_url, model_name=model_name,
+                )
+                psystem = ff_agent.parameterize(
+                    components=manifest["components"],
+                    coordinates_file=structure_path,
+                    working_dir=output_dir,
+                )
+                written = write_md_inputs(psystem, software, output_dir)
+                structure_path = written["structure_file"]
+                force_field_files = written["force_field_files"] or None
+                result["force_field"] = {
+                    "status": "success", "backend": psystem.backend,
+                    "n_atoms": psystem.n_atoms,
+                    "total_charge": psystem.total_charge,
+                }
+                result["steps_completed"].append("force_field")
+            except Exception as e:
+                result["final_status"] = "failed_force_field"
+                result["force_field"] = {"status": "error", "message": str(e)}
+                return result
+        else:
+            result.setdefault("warnings", []).append(
+                "molecular_dynamics run with no components.json manifest next to "
+                "the structure and no force_field_files supplied — skipping "
+                "force-field parameterization; the deck may read raw coordinates "
+                "and fail to run."
+            )
 
     # ── Step 2: input generation (routed to the scale's foundation agent) ──
     try:

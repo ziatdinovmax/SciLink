@@ -64,6 +64,13 @@ fallback for when no packing library is available.
   `ase.io.write("structure.extxyz", atoms, format="extxyz")`, then print the exact
   line `STRUCTURE_SAVED:structure.extxyz`. Do not write a VASP POSCAR here — the engine-native
   input (e.g. a LAMMPS data file) is produced by the downstream force-field / engine step.
+- **Components manifest (required):** also write `components.json` next to the structure, listing
+  each distinct species and its count **in the same order the atoms appear in the coordinate
+  file**, with a SMILES per species — e.g.
+  `{"components": [{"name": "water", "smiles": "O", "count": 500}, {"name": "Na+", "smiles":
+  "[Na+]", "count": 9}, {"name": "Cl-", "smiles": "[Cl-]", "count": 9}]}`. The downstream
+  force-field step needs this to know which molecule each atom belongs to (a packed box is only
+  coordinates); the component order and counts must match the packing exactly.
 
 ## Validation
 
