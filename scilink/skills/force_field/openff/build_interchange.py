@@ -22,8 +22,9 @@ from typing import Any, Dict, List
 from ..._shared._spec import ToolSpec
 
 _FF_EXTRA_HINT = (
-    "OpenFF force-field parameterization requires the force-field extra:  "
-    "pip install scilink[ff]"
+    "OpenFF force-field parameterization requires the OpenFF stack, which is "
+    "conda-forge only (not pip):  conda install -c conda-forge openff-toolkit "
+    "openff-interchange openff-nagl openff-nagl-models parmed rdkit"
 )
 
 # OpenFF's released NAGL AM1-BCC surrogate model — partial charges without QM.

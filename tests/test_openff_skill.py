@@ -31,7 +31,7 @@ def test_registry_resolves_build_interchange():
 
 def test_build_interchange_guards_missing_ff_deps():
     from scilink.skills.force_field.openff.build_interchange import build_interchange
-    with pytest.raises(ImportError, match=r"scilink\[ff\]"):
+    with pytest.raises(ImportError, match=r"conda-forge"):
         build_interchange([{"name": "w", "smiles": "O", "count": 1}],
                           "/tmp/does_not_exist.extxyz")
 

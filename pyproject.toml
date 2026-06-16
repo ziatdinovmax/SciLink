@@ -69,17 +69,18 @@ structure-matching = [
     "pulp>=2.7.0",
     "pyarrow>=14.0",
 ]
+# Force-field parameterization (engine-neutral, OpenFF Interchange core). NOTE:
+# the OpenFF stack is CONDA-FORGE ONLY — openff-toolkit's PyPI releases are
+# yanked, so `pip install scilink[ff]` cannot provide it. Install with conda:
+#
+#   conda install -c conda-forge openff-toolkit openff-interchange \
+#       openff-nagl openff-nagl-models parmed rdkit
+#
+# Charges come from NAGL (OpenFF's ML AM1-BCC surrogate) so the OpenFF path needs
+# no AmberTools/OpenEye; AmberTools (conda too) is needed only for the secondary
+# AMBER backend. This extra lists only the pip-installable pieces; the openff-*
+# packages above must come from conda-forge.
 ff = [
-    # Engine-neutral force-field parameterization. OpenFF Interchange is the
-    # canonical parameterized system (exports natively to LAMMPS/GROMACS/OpenMM).
-    # Charges come from NAGL (OpenFF's ML AM1-BCC surrogate) so the OpenFF path
-    # needs no AmberTools/OpenEye and stays pip-installable; AmberTools (conda
-    # only) is required separately solely for the secondary AMBER backend.
-    # ParmEd bridges the AMBER (prmtop) pipeline; rdkit validates component SMILES.
-    "openff-toolkit>=0.16",
-    "openff-interchange>=0.4",
-    "openff-nagl>=0.5",
-    "openff-nagl-models>=0.3",
     "parmed>=4.0",
     "rdkit>=2023.3",
 ]

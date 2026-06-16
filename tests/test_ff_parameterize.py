@@ -36,7 +36,7 @@ def test_parameterize_amber_path_pending(tmp_path):
 def test_parameterize_openff_path_guards_missing_ff_deps(tmp_path):
     # components + coordinates routes to OpenFF; without [ff] the build_interchange
     # tool raises an actionable scilink[ff] error (never a silent failure).
-    with pytest.raises(ImportError, match=r"scilink\[ff\]"):
+    with pytest.raises(ImportError, match=r"conda-forge"):
         _agent(tmp_path).parameterize(
             components=[{"name": "water", "smiles": "O", "count": 1}],
             coordinates_file=str(tmp_path / "structure.extxyz"),

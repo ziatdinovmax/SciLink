@@ -31,7 +31,9 @@ _FILE_WRITING_ENGINES = {"lammps", "gromacs"}
 
 _FF_EXTRA_HINT = (
     "OpenFF Interchange is required to write engine inputs from a parameterized "
-    "system. Install the force-field extra:  pip install scilink[ff]"
+    "system. The OpenFF stack is conda-forge only (not pip):  conda install -c "
+    "conda-forge openff-toolkit openff-interchange openff-nagl openff-nagl-models "
+    "parmed rdkit"
 )
 
 
