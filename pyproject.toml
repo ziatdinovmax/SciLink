@@ -69,10 +69,20 @@ structure-matching = [
     "pulp>=2.7.0",
     "pyarrow>=14.0",
 ]
+ff = [
+    # Engine-neutral force-field parameterization. OpenFF Interchange is the
+    # canonical parameterized system (exports natively to LAMMPS/GROMACS/OpenMM);
+    # ParmEd bridges the AMBER (prmtop) pipeline; rdkit validates component SMILES.
+    "openff-toolkit>=0.16",
+    "openff-interchange>=0.4",
+    "parmed>=4.0",
+    "rdkit>=2023.3",
+]
 all = [
     "scilink[sim]",
     "scilink[ui]",
     "scilink[structure-matching]",
+    "scilink[ff]",
 ]
 
 [project.urls]
