@@ -420,7 +420,7 @@ if not st.session_state.agent_initialized:
     with col_c:
         # Mode selector — centered above the logo
         if st.session_state.app_mode is None:
-            st.session_state.app_mode = "analyze"
+            st.session_state.app_mode = "meta"
         # Fall back if a stale session_state still says "simulate" but the
         # [sim] extras are no longer installed.
         if st.session_state.app_mode == "simulate" and not simulate_enabled():
@@ -445,7 +445,7 @@ if not st.session_state.agent_initialized:
         _cur_mode = _mode_map[st.session_state.app_mode]
         _cur_desc = _cur_mode["description"]
         if _cur_mode.get("beta"):
-            _cur_desc = f"BETA · {_cur_desc}"
+            _cur_desc = f"Mission Control · {_cur_desc}"
         st.markdown(
             f'<p style="text-align:center;color:#6B7A8C;font-size:0.85em;'
             f'margin-top:-4px;margin-bottom:12px">'
