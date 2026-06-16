@@ -1265,6 +1265,60 @@ Provide a brief summary of what the results mean and any actions needed.
 
         return params
 
+    def parameterize(self, *,
+                     components: Optional[List[Dict[str, Any]]] = None,
+                     coordinates_file: Optional[str] = None,
+                     pdb_file: Optional[str] = None,
+                     research_goal: str = "",
+                     **ff_kwargs) -> "ParameterizedSystem":
+        """Produce an engine-neutral ``ParameterizedSystem`` (the contract an MD
+        engine's ``write_md_inputs`` consumes).
+
+        Routes by input, not by engine — and writes NO engine input files:
+
+        * **OpenFF** (``components`` manifest + ``coordinates_file``): a packed
+          box of SMILES-defined species (solvents, ions, electrolytes) is
+          parameterized with SMIRNOFF + NAGL charges into a serialized OpenFF
+          Interchange (``source_format="interchange"``).
+        * **AMBER** (``pdb_file``): proteins / nucleic acids via the tleap
+          pipeline → a prmtop/inpcrd pair (``source_format="amber"``). [pending]
+        """
+        if components and coordinates_file:
+            return self._parameterize_openff(components, coordinates_file, **ff_kwargs)
+        if pdb_file:
+            raise NotImplementedError(
+                "The AMBER (pdb_file) parameterization path is not yet wired into "
+                "parameterize(); use the OpenFF path (components + coordinates_file)."
+            )
+        raise ValueError(
+            "parameterize() needs either (components + coordinates_file) for the "
+            "OpenFF backend or pdb_file for the AMBER backend."
+        )
+
+    def _parameterize_openff(self, components: List[Dict[str, Any]],
+                             coordinates_file: str,
+                             working_dir: Optional[str] = None,
+                             **ff_kwargs) -> "ParameterizedSystem":
+        """OpenFF backend: build a serialized Interchange via the openff skill's
+        ``build_interchange`` tool (resolved through the registry, so the agent
+        names no force-field package)."""
+        from ._parameterized_system import ParameterizedSystem, ComponentSpec
+        from ...skills._shared._registry import get_tool_function
+
+        build = get_tool_function("build_interchange", active_skills=["openff"])
+        res = build(components, coordinates_file,
+                    working_dir=working_dir or self.working_dir, **ff_kwargs)
+        comps = [c if isinstance(c, ComponentSpec) else ComponentSpec(
+            name=c.get("name", ""), smiles=c["smiles"], count=int(c["count"]),
+            charge=float(c.get("charge", 0.0))) for c in components]
+        return ParameterizedSystem(
+            backend=ff_kwargs.get("force_field", "openff-2.2.0"),
+            source_format="interchange",
+            n_atoms=int(res["n_atoms"]), total_charge=float(res["total_charge"]),
+            components=comps, coordinates_file=coordinates_file,
+            interchange_path=res["interchange_path"],
+        )
+
     def generate_lammps_parameters(self,
                                parameter_info: Dict[str, Any],
                                data_file: str) -> Dict[str, str]:
