@@ -152,6 +152,7 @@ def _export_files(interchange, software: str, working_dir: str) -> Dict[str, Any
         # convention (system.data — the deck's default read_data target).
         data_file = os.path.join(working_dir, "system.data")
         interchange.to_lammps_datafile(data_file)
+        _orthogonalize_zero_tilt(data_file)
         return {"structure_file": data_file, "force_field_files": {}}
     if software == "gromacs":
         interchange.to_gromacs(prefix)
@@ -160,6 +161,38 @@ def _export_files(interchange, software: str, working_dir: str) -> Dict[str, Any
             "force_field_files": {"topology": _first_existing(f"{prefix}.top")},
         }
     raise ValueError(f"unhandled file-writing engine {software!r}")
+
+
+def _orthogonalize_zero_tilt(data_file: str) -> None:
+    """Drop a zero-tilt ``xy xz yz`` line so LAMMPS treats the box as orthogonal.
+
+    OpenFF Interchange always writes an ``xy xz yz`` tilt line, which makes
+    LAMMPS treat the box as triclinic even when the tilt is exactly zero. A
+    needlessly triclinic box forces ``kspace_style`` to be (re)declared after
+    ``read_data`` — PPPM aborts with "Must redefine kspace_style after changing
+    to triclinic box" otherwise — and adds overhead. For the common orthorhombic
+    case we strip the line so the deck reads a plain orthogonal box. A nonzero
+    tilt (a genuinely triclinic cell) is left untouched.
+    """
+    try:
+        with open(data_file) as fh:
+            lines = fh.readlines()
+    except OSError:
+        return
+    out, changed = [], False
+    for ln in lines:
+        parts = ln.split()
+        if len(parts) == 6 and parts[3:] == ["xy", "xz", "yz"]:
+            try:
+                if all(abs(float(p)) < 1e-8 for p in parts[:3]):
+                    changed = True
+                    continue  # drop zero-tilt line -> orthogonal box
+            except ValueError:
+                pass
+        out.append(ln)
+    if changed:
+        with open(data_file, "w") as fh:
+            fh.writelines(out)
 
 
 def _first_existing(*paths: str) -> str:

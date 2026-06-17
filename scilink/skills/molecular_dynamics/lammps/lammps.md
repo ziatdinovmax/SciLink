@@ -162,14 +162,19 @@ every needed `*_style` (`pair_style`, plus `bond_style` / `angle_style` /
 `dihedral_style` for the bonded sections present) **before** `read_data`, and do
 **not** emit `pair_coeff` / `bond_coeff`. LAMMPS reads the coefficients from the
 data file at `read_data` time; parsing a `Pair Coeffs` section with no prior
-`pair_style` aborts with "Must define pair_style before Pair Coeffs". Set
-`kspace_style` (e.g. `pppm 1e-4`) with the styles when the pair_style carries a
-`coul/long` term.
+`pair_style` aborts with "Must define pair_style before Pair Coeffs". Only the
+coefficient-parsing styles move before `read_data` — put `kspace_style` (e.g.
+`pppm 1e-4`, needed for a `coul/long` pair_style) **after** `read_data`. A
+typed Interchange data file carries an `xy xz yz` line, so the box is triclinic
+and PPPM aborts with "Must redefine kspace_style after changing to triclinic
+box" if `kspace_style` is declared first.
 
 ### Forbidden patterns
 - pair_coeff before pair_style
 - read_data before pair_style when the data file has inline Pair Coeffs (a
-  fully-typed FF data file) — declare the styles first
+  fully-typed FF data file) — declare the coefficient styles first
+- kspace_style before read_data — declare kspace AFTER read_data (PPPM aborts on
+  a triclinic data file, which any OpenFF Interchange export is)
 - kspace_style with EAM/Tersoff/SW (no Coulomb)
 - kspace_style missing with coul/long or buck/coul/long
 - bond_style or fix shake with atom_style atomic

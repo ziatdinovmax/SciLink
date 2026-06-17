@@ -39,3 +39,28 @@ def test_condensed_skill_requires_components_manifest():
     from scilink.skills.loader import load_skill
     impl = load_skill("condensed", domain="structure_generation").get("implementation", "")
     assert "components.json" in impl
+
+
+def test_orthogonalize_zero_tilt_drops_line(tmp_path):
+    # A zero-tilt 'xy xz yz' line (always written by Interchange) is removed so
+    # LAMMPS reads an orthogonal box — avoids the triclinic/PPPM ordering trap.
+    from scilink.agents.sim_agents._engine_inputs import _orthogonalize_zero_tilt
+    data = tmp_path / "system.data"
+    data.write_text(
+        "0 36 xlo xhi\n0 36 ylo yhi\n0 36 zlo zhi\n"
+        "0.0 0.0 0.0 xy xz yz\n\nMasses\n\n1 1.008\n"
+    )
+    _orthogonalize_zero_tilt(str(data))
+    assert "xy xz yz" not in data.read_text()
+
+
+def test_orthogonalize_keeps_nonzero_tilt(tmp_path):
+    # A genuinely triclinic cell (nonzero tilt) must be preserved.
+    from scilink.agents.sim_agents._engine_inputs import _orthogonalize_zero_tilt
+    data = tmp_path / "system.data"
+    data.write_text(
+        "0 36 xlo xhi\n0 36 ylo yhi\n0 36 zlo zhi\n"
+        "1.5 0.0 0.0 xy xz yz\n\nMasses\n\n1 1.008\n"
+    )
+    _orthogonalize_zero_tilt(str(data))
+    assert "1.5 0.0 0.0 xy xz yz" in data.read_text()

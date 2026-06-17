@@ -587,6 +587,20 @@ def validate_script(
                     f"before Pair Coeffs')."
                 )
 
+    # kspace_style does NOT parse data-file sections, so unlike the coeff styles
+    # it must come AFTER read_data: a data file with an 'xy xz yz' line (any
+    # OpenFF Interchange export) makes the box triclinic, and PPPM aborts with
+    # "Must redefine kspace_style after changing to triclinic box" if declared
+    # first. It never needs to precede read_data.
+    if {"kspace_style", "read_data"} <= set(command_order):
+        if command_order.index("kspace_style") < command_order.index("read_data"):
+            errors.append(
+                "'kspace_style' before 'read_data' — declare it AFTER read_data "
+                "(PPPM must be set after the box is defined; a triclinic data "
+                "file otherwise aborts with 'Must redefine kspace_style after "
+                "changing to triclinic box')."
+            )
+
     # ── Forbidden combinations ──
     pair_style = result["pair_style"] or ""
     atom_style = result["atom_style"] or ""

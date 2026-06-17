@@ -574,10 +574,33 @@ class TestValidateTypedDataFileOrdering:
             "units real\natom_style full\nboundary p p p\n"
             "pair_style lj/cut/coul/long 9.0\nbond_style harmonic\n"
             "angle_style harmonic\ndihedral_style fourier\n"
-            "kspace_style pppm 1e-4\nread_data system.data\nrun 0\n"
+            "read_data system.data\nkspace_style pppm 1e-4\nrun 0\n"
         )
         r = lammps_tools.validate_script(self._write(tmp_path, good), self._TYPED)
         assert not any("before 'read_data'" in e.lower() for e in r["errors"]), r["errors"]
+
+    def test_kspace_before_read_data_flagged(self, tmp_path):
+        # kspace_style does not parse Coeffs; declaring it before read_data
+        # aborts on a triclinic data file ("Must redefine kspace_style ...").
+        bad = (
+            "units real\natom_style full\nboundary p p p\n"
+            "pair_style lj/cut/coul/long 9.0\nbond_style harmonic\n"
+            "angle_style harmonic\ndihedral_style fourier\n"
+            "kspace_style pppm 1e-4\nread_data system.data\nrun 0\n"
+        )
+        r = lammps_tools.validate_script(self._write(tmp_path, bad), self._TYPED)
+        assert r["valid"] is False
+        assert any("kspace_style" in e and "read_data" in e for e in r["errors"])
+
+    def test_kspace_after_read_data_passes(self, tmp_path):
+        good = (
+            "units real\natom_style full\nboundary p p p\n"
+            "pair_style lj/cut/coul/long 9.0\nbond_style harmonic\n"
+            "angle_style harmonic\ndihedral_style fourier\n"
+            "read_data system.data\nkspace_style pppm 1e-4\nrun 0\n"
+        )
+        r = lammps_tools.validate_script(self._write(tmp_path, good), self._TYPED)
+        assert not any("kspace_style" in e for e in r["errors"]), r["errors"]
 
     def test_bare_data_file_unaffected(self, tmp_path):
         # No inline coeffs -> the classic read_data-then-styles ordering is fine.
