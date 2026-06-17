@@ -154,8 +154,22 @@ ReaxFF:
 12. minimize (if needed)
 13. run
 
+**Fully-typed force-field data files invert steps 2–4.** When the data file
+already contains inline coefficients (the data-file analysis reports
+`Coefficients in data file: Yes` — e.g. an OpenFF Interchange export with `Pair
+Coeffs` / `Bond Coeffs` / `Angle Coeffs` / `Dihedral Coeffs` sections), declare
+every needed `*_style` (`pair_style`, plus `bond_style` / `angle_style` /
+`dihedral_style` for the bonded sections present) **before** `read_data`, and do
+**not** emit `pair_coeff` / `bond_coeff`. LAMMPS reads the coefficients from the
+data file at `read_data` time; parsing a `Pair Coeffs` section with no prior
+`pair_style` aborts with "Must define pair_style before Pair Coeffs". Set
+`kspace_style` (e.g. `pppm 1e-4`) with the styles when the pair_style carries a
+`coul/long` term.
+
 ### Forbidden patterns
 - pair_coeff before pair_style
+- read_data before pair_style when the data file has inline Pair Coeffs (a
+  fully-typed FF data file) — declare the styles first
 - kspace_style with EAM/Tersoff/SW (no Coulomb)
 - kspace_style missing with coul/long or buck/coul/long
 - bond_style or fix shake with atom_style atomic

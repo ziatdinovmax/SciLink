@@ -540,3 +540,52 @@ class TestCheckLammps:
         assert "packages" in result
         assert isinstance(result["available"], bool)
         assert isinstance(result["packages"], list)
+
+
+# =====================================================================
+# validate_script — fully-typed FF data file ordering (OpenFF Interchange)
+# =====================================================================
+
+class TestValidateTypedDataFileOrdering:
+    """A data file with inline coefficients needs *_style BEFORE read_data."""
+
+    _TYPED = {"has_pair_coeffs": True, "bond_types": 4,
+              "angle_types": 4, "dihedral_types": 1}
+
+    def _write(self, tmp_path, body):
+        p = tmp_path / "in.lammps"
+        p.write_text(body)
+        return str(p)
+
+    def test_read_data_before_styles_flagged(self, tmp_path):
+        bad = (
+            "units real\natom_style full\nboundary p p p\n"
+            "read_data system.data\n"
+            "pair_style lj/cut/coul/long 9.0\nbond_style harmonic\n"
+            "angle_style harmonic\ndihedral_style fourier\n"
+            "kspace_style pppm 1e-4\nrun 0\n"
+        )
+        r = lammps_tools.validate_script(self._write(tmp_path, bad), self._TYPED)
+        assert r["valid"] is False
+        assert any("before 'read_data'" in e.lower() for e in r["errors"])
+
+    def test_styles_before_read_data_passes(self, tmp_path):
+        good = (
+            "units real\natom_style full\nboundary p p p\n"
+            "pair_style lj/cut/coul/long 9.0\nbond_style harmonic\n"
+            "angle_style harmonic\ndihedral_style fourier\n"
+            "kspace_style pppm 1e-4\nread_data system.data\nrun 0\n"
+        )
+        r = lammps_tools.validate_script(self._write(tmp_path, good), self._TYPED)
+        assert not any("before 'read_data'" in e.lower() for e in r["errors"]), r["errors"]
+
+    def test_bare_data_file_unaffected(self, tmp_path):
+        # No inline coeffs -> the classic read_data-then-styles ordering is fine.
+        bare = (
+            "units metal\natom_style atomic\nboundary p p p\n"
+            "read_data system.data\npair_style eam/alloy\n"
+            "pair_coeff * * Cu.eam.alloy Cu\nrun 0\n"
+        )
+        r = lammps_tools.validate_script(self._write(tmp_path, bare),
+                                         {"has_pair_coeffs": False})
+        assert not any("before 'read_data'" in e.lower() for e in r["errors"]), r["errors"]

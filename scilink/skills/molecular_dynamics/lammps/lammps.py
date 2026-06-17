@@ -561,6 +561,32 @@ def validate_script(
     _before("pair_style", "pair_coeff", "'pair_coeff' before 'pair_style'")
     _before("bond_style", "bond_coeff", "'bond_coeff' before 'bond_style'")
 
+    # A fully-typed force-field data file (e.g. from OpenFF Interchange) carries
+    # inline Pair/Bond/Angle/Dihedral Coeffs. LAMMPS parses those sections AT
+    # read_data time, so the matching *_style commands must be declared BEFORE
+    # read_data — the reverse of the bare-data-file ordering. Omitting/ordering
+    # them wrong aborts the run with e.g. "Must define pair_style before Pair
+    # Coeffs". Only the styles the data file actually needs (by section/type
+    # counts) are required.
+    if (system_info and system_info.get("has_pair_coeffs")
+            and "read_data" in command_order):
+        rd = command_order.index("read_data")
+        needed = ["pair_style"]
+        if system_info.get("bond_types", 0):
+            needed.append("bond_style")
+        if system_info.get("angle_types", 0):
+            needed.append("angle_style")
+        if system_info.get("dihedral_types", 0):
+            needed.append("dihedral_style")
+        for style in needed:
+            if style not in commands_seen or command_order.index(style) > rd:
+                errors.append(
+                    f"Data file has inline coefficients, so '{style}' must be "
+                    f"declared BEFORE 'read_data' (LAMMPS parses the *Coeffs "
+                    f"sections at read_data time, e.g. 'Must define pair_style "
+                    f"before Pair Coeffs')."
+                )
+
     # ── Forbidden combinations ──
     pair_style = result["pair_style"] or ""
     atom_style = result["atom_style"] or ""
