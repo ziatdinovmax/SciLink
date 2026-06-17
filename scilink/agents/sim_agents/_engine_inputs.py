@@ -143,10 +143,15 @@ def _export_files(interchange, software: str, working_dir: str) -> Dict[str, Any
     """
     prefix = os.path.join(working_dir, "system")
     if software == "lammps":
-        # Interchange.to_lammps writes a LAMMPS data file (the deck read_data's
-        # it). Newer Interchange returns the path / writes "<prefix>.lmp".
-        interchange.to_lammps(prefix)
-        data_file = _first_existing(f"{prefix}.lmp", f"{prefix}.data")
+        # Write ONLY the typed data file (topology + masses + Pair/Bond/Angle
+        # coeffs); the deck that read_data's it — pair_style, kspace, fixes — is
+        # the MD skill's job. We deliberately avoid Interchange.to_lammps, which
+        # ALSO emits a runnable input script and raises on mixed h-bond
+        # constraints (rigid water + flexible solute); to_lammps_datafile is the
+        # deterministic data-only export. Name matches the LAMMPS skill's
+        # convention (system.data — the deck's default read_data target).
+        data_file = os.path.join(working_dir, "system.data")
+        interchange.to_lammps_datafile(data_file)
         return {"structure_file": data_file, "force_field_files": {}}
     if software == "gromacs":
         interchange.to_gromacs(prefix)

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Lennard-Jones (vdW) parameters for monatomic metal cations that the OpenFF
+  Sage line does NOT cover. Sage ships vdW for the common monovalent ions
+  (Na+, K+, Li+, Cl-, ...) but not for divalent / transition-metal cations,
+  for which create_interchange silently assigns NO vdW (a zero-repulsion point
+  charge). This supplement is auto-included by build_interchange so those ions
+  get physical parameters; the parameterization completeness gate backstops any
+  ion still missing here.
+
+  Values: Li, Song & Merz 12-6 "IOD" set (ion-oxygen-distance optimized) for
+  TIP3P water — J. Chem. Theory Comput. 2013, 9, 2733 and 2015, 11, 1645.
+  Tabulated as (Rmin/2 [A], epsilon [kcal/mol]); converted to SMIRNOFF sigma via
+  sigma = (Rmin/2) * 2 / 2^(1/6). The IOD set reproduces ion-water distances and
+  coordination, which is the structurally relevant choice for NMR validation.
+
+  NOTE: confirm each value against the cited tables for the specific water model
+  in use before publication-grade runs; extending to another cation is one
+  <Atom> line (the engine-neutral "add a backend = edit a skill" pattern).
+-->
+<SMIRNOFF version="0.3" aromaticity_model="OEAroModel_MDL">
+  <vdW version="0.3" potential="Lennard-Jones-12-6" combining_rules="Lorentz-Berthelot"
+       scale12="0.0" scale13="0.0" scale14="0.5" scale15="1.0"
+       cutoff="9.0 * angstrom" switch_width="1.0 * angstrom" method="cutoff">
+    <!-- Divalent transition / alkaline-earth cations (Sage has none). -->
+    <Atom smirks="[#30+2:1]" id="ion-Zn2+" sigma="2.169 * angstrom" epsilon="0.0125976 * mole**-1 * kilocalorie"/>
+    <Atom smirks="[#12+2:1]" id="ion-Mg2+" sigma="2.114 * angstrom" epsilon="0.0148861 * mole**-1 * kilocalorie"/>
+    <Atom smirks="[#20+2:1]" id="ion-Ca2+" sigma="2.629 * angstrom" epsilon="0.0936220 * mole**-1 * kilocalorie"/>
+  </vdW>
+</SMIRNOFF>

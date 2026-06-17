@@ -27,8 +27,12 @@ needs no AmberTools or OpenEye and is fully pip-installable.
    with the coordinates).
 2. **Force field.** Default to the latest Sage (`openff-2.2.0.offxml`). For
    **water**, add the matching water model as an extra force field (e.g.
-   `tip3p.offxml`) rather than charging water with NAGL. Monatomic ions need an
-   ion model in the force-field set when Sage does not cover them.
+   `tip3p.offxml`) rather than charging water with NAGL. Sage ships vdW for the
+   common monovalent ions (Na⁺, K⁺, Li⁺, Cl⁻, …); **divalent / transition-metal
+   cations** (Zn²⁺, Mg²⁺, Ca²⁺, …) it does not, and `build_interchange` auto-
+   includes a bundled metal-ion vdW supplement (Li–Merz 12-6) for those — no
+   action needed. A cation not in that supplement is caught by the completeness
+   gate (below); extend the supplement or pass parameters via `extra_force_fields`.
 3. **Periodicity.** A **periodic box is required** — LAMMPS/GROMACS
    electrostatics use PME, which an in-vacuum system cannot express. The packed
    box from structure generation supplies the cell.
@@ -62,6 +66,11 @@ here — that is the engine skill's job.
 - `UnassignedValenceError` / "no parameters assigned": the SMILES has chemistry
   the force field does not cover (wrong/incomplete SMILES, an ion or metal Sage
   lacks). Fix the SMILES or add the right force-field file (water/ion model).
+- "received no Lennard-Jones parameters and would be unphysical point charges":
+  the completeness gate fired — a species (named in the message) got no vdW.
+  Almost always a metal cation outside the bundled supplement; add its vdW to
+  `metal_ion_vdw.offxml` or pass a covering force field. The build refuses to
+  emit a half-parameterized system rather than producing silently wrong physics.
 - Atom-count mismatch between topology and coordinates: the component manifest's
   SMILES/counts/order do not match the packed box — correct the manifest.
 - NAGL charge errors: the molecule is outside NAGL's organic training domain
