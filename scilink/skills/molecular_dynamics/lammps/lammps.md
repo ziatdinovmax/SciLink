@@ -244,21 +244,29 @@ kspace_style pppm 1.0e-5
 (dynamics with timestep 1.0, Tdamp 100.0, Pdamp 1000.0)
 ```
 
-### Biomolecular (AMBER, coefficients in data file)
+### Biomolecular / typed force-field data file (AMBER / GAFF / OpenFF — coefficients in the data file)
+The data file carries Pair/Bond/Angle/Dihedral Coeffs, so **every `*_style` is
+declared BEFORE `read_data`** and **`kspace_style` AFTER it** (see Command
+ordering). `pair_modify` follows `pair_style`. Do **not** issue
+`pair_coeff`/`bond_coeff` — `read_data` supplies them.
 ```
 units real
 atom_style full
 boundary p p p
-read_data {data_filename}
-pair_style lj/charmm/coul/long 10.0 12.0
-pair_modify mix arithmetic
+# --- force-field styles FIRST (coeffs are read from the data file) ---
+pair_style lj/cut/coul/long 10.0          # GAFF/OpenFF; lj/charmm/coul/long 10.0 12.0 for CHARMM
+pair_modify mix arithmetic tail yes        # Lorentz-Berthelot; MUST follow pair_style
 bond_style harmonic
 angle_style harmonic
-dihedral_style fourier
-improper_style cvff
-special_bonds amber
-kspace_style pppm 1.0e-5
-fix SHAKE all shake 1.0e-5 100 0 m 1.008
+dihedral_style fourier                     # match the data file (OpenFF/Interchange: fourier)
+# improper_style cvff                      # only if the data file has impropers (improper types > 0)
+special_bonds amber                        # AMBER/GAFF/OpenFF 1-4 scaling
+read_data {data_filename}
+# --- kspace AFTER read_data (PPPM binds to the box; required for a triclinic data file) ---
+kspace_style pppm 1.0e-4
+neighbor 2.0 bin
+neigh_modify every 1 delay 0 check yes
+fix SHAKE all shake 1.0e-5 100 0 m 1.008   # constrains X-H bonds (rigid water); enables 2 fs
 (dynamics with timestep 2.0, Tdamp 100.0, Pdamp 1000.0)
 ```
 

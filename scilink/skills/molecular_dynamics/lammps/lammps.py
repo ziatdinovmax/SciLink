@@ -559,6 +559,7 @@ def validate_script(
 
     _before("units", "read_data", "'read_data' before 'units'")
     _before("pair_style", "pair_coeff", "'pair_coeff' before 'pair_style'")
+    _before("pair_style", "pair_modify", "'pair_modify' before 'pair_style'")
     _before("bond_style", "bond_coeff", "'bond_coeff' before 'bond_style'")
 
     # A fully-typed force-field data file (e.g. from OpenFF Interchange) carries
