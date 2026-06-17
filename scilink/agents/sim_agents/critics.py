@@ -293,6 +293,46 @@ def _run_deterministic_syntax_check(
     return result if isinstance(result, list) else []
 
 
+def _has_runnable_content(text: str) -> bool:
+    """Whether a proposed input file has any non-comment, non-blank line.
+
+    Engine-neutral: ``#`` and ``!`` are the comment markers across the engines
+    we target (LAMMPS, VASP). A whole-file fix that is only comments/blank is a
+    no-op deck — running it does nothing — so it is not a real fix.
+    """
+    return any(
+        s and not s.startswith(("#", "!"))
+        for s in (line.strip() for line in text.splitlines())
+    )
+
+
+def _drop_vacuous_fix(report: Dict[str, Any]) -> None:
+    """Reject a ``suggested_fixes`` set containing a vacuous (all-comment) file.
+
+    The post-run critic can return an "explanation as comments" deck with no
+    executable commands; running it wastes a refine cycle on a no-op (returncode
+    0, no output) that then re-reads as ``needs_fixes``. ``suggested_fixes`` are
+    whole-file replacements, so a file with no runnable line is not a usable fix
+    — drop the whole proposal (the loop then stops cleanly rather than re-running
+    nothing) and record why.
+    """
+    fixes = report.get("suggested_fixes")
+    if not isinstance(fixes, dict) or not fixes:
+        return
+    vacuous = [name for name, text in fixes.items()
+               if isinstance(text, str) and not _has_runnable_content(text)]
+    if vacuous:
+        report["suggested_fixes"] = None
+        note = (
+            f"Discarded the proposed fix: file(s) {vacuous} contain no "
+            "executable commands (comments/blank only) — not a runnable input."
+        )
+        report["diagnostic_notes"] = (
+            f"{report.get('diagnostic_notes') or ''} {note}".strip()
+        )
+        logging.getLogger(__name__).warning(note)
+
+
 def _format_syntax_issues(issues: List[Dict[str, Any]]) -> str:
     """Render deterministic syntax issues as a prompt block.
 
@@ -812,4 +852,6 @@ class RunCritic(_CriticBase):
         report.setdefault("status", "success")
         if fixes_mode == "skip":
             report["suggested_fixes"] = None
+        else:
+            _drop_vacuous_fix(report)
         return report
