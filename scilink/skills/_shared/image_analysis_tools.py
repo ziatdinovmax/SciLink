@@ -5,6 +5,8 @@ from io import BytesIO
 import os
 import logging
 
+from ._spec import ToolSpec
+
 logger = logging.getLogger(__name__)
 
 MAX_THUMBNAIL_DIM = 1024
@@ -351,3 +353,57 @@ def create_image_montage(
     plt.close(fig)
     buf.seek(0)
     return buf.getvalue()
+
+
+TOOL_SPECS = [
+    ToolSpec(
+        name="resolve_pixel_size_nm",
+        description=(
+            "Resolve nm-per-pixel from metadata + image shape. The robust, "
+            "calibration-correct way to get pixel size — use this instead of "
+            "hand-rolling the arithmetic. It divides field_of_view by the image "
+            "array SHAPE; never divide by a metadata pixel-count field like "
+            "n_cols/width (usually absent, silently leaving pixel size None). "
+            "Never raises."
+        ),
+        import_line=(
+            "from scilink.skills._shared.image_analysis_tools import resolve_pixel_size_nm"
+        ),
+        signature="resolve_pixel_size_nm(metadata, image_shape) -> dict | None",
+        agents=["image_analysis"],
+        when_to_use=(
+            "Whenever a step needs pixel size in nm (spacing/lattice measurements, "
+            "fourier_reflection_map, converting pixel distances to physical units). "
+            "Pass the system_info/metadata dict and image.shape."
+        ),
+        parameters={
+            "metadata": {
+                "type": "dict",
+                "description": (
+                    "The system_info / metadata dict (may nest the payload under "
+                    "a 'system_info' key; both are handled)."
+                ),
+            },
+            "image_shape": {
+                "type": "tuple",
+                "description": (
+                    "numpy image.shape — shape[0]=rows (height), shape[1]=cols (width)."
+                ),
+            },
+        },
+        required=["metadata", "image_shape"],
+        returns=(
+            "dict {'x': nm_per_px, 'y': nm_per_px, 'source': str} where 'x' is the "
+            "horizontal (column) pixel size, or None if it cannot be resolved. "
+            "Read the scalar as px['x'] — there are NO 'pixel_size_nm' / "
+            "'pixel_size_nm_x' keys; handle the None case with a guard."
+        ),
+        example=(
+            "px = resolve_pixel_size_nm(metadata, image.shape)\n"
+            "if px is None:\n"
+            "    raise ValueError('pixel size unavailable; cannot convert to nm')\n"
+            "nm_per_px = px['x']           # horizontal nm/pixel\n"
+            "distance_nm = distance_px * nm_per_px"
+        ),
+    ),
+]
