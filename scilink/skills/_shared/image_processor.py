@@ -10,6 +10,25 @@ MAX_IMG_DIM = 1024
 logger = logging.getLogger(__name__)
 
 
+def _normalize_to_uint8(img_array):
+    """Min-max normalize a non-uint8 array to uint8 (no-op if already uint8)."""
+    if img_array.dtype == np.uint8:
+        return img_array
+    float_array = img_array.astype(np.float64)
+    # Guard against NaN/Inf (common in float-encoded scientific TIFFs)
+    if not np.all(np.isfinite(float_array)):
+        finite = float_array[np.isfinite(float_array)]
+        fill = float(np.min(finite)) if finite.size else 0.0
+        hi = float(np.max(finite)) if finite.size else 0.0
+        float_array = np.nan_to_num(float_array, nan=fill, posinf=hi, neginf=fill)
+    min_val, max_val = np.min(float_array), np.max(float_array)
+    if max_val - min_val > 1e-6:
+        normalized_array = (float_array - min_val) / (max_val - min_val)
+    else:
+        normalized_array = np.zeros_like(float_array)
+    return (normalized_array * 255).astype(np.uint8)
+
+
 def load_image(image_path):
     """Load an image from file (PNG, JPG, TIF, .npy, or .h5/.hdf5/.nxs)."""
     try:
@@ -22,26 +41,24 @@ def load_image(image_path):
             else:
                 from scilink.utils.hdf5_utils import load_hdf5_signal
                 img_array = load_hdf5_signal(image_path)
-            if img_array.dtype == np.uint8:
-                return img_array
-            else:
-                # Normalize float arrays to uint8
-                float_array = img_array.astype(np.float64)
-                min_val, max_val = np.min(float_array), np.max(float_array)
-                if max_val - min_val > 1e-6:
-                    normalized_array = (float_array - min_val) / (max_val - min_val)
-                else:
-                    normalized_array = np.zeros_like(float_array)
-                uint8_array = (normalized_array * 255).astype(np.uint8)
-                return uint8_array
+            return _normalize_to_uint8(img_array)
         else:
-            # Standard image loading
-            img = cv2.imread(image_path)
+            # Standard image loading. IMREAD_UNCHANGED preserves bit depth and
+            # channel count so high-bit-depth / 32-bit-float scientific TIFFs
+            # load (the default IMREAD_COLOR flag returns None on those).
+            img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
             if img is None:
                 raise ValueError(f"Could not load image from {image_path}")
-            # Convert OpenCV's BGR to standard RGB
-            return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    
+            # Convert OpenCV's BGR to standard RGB for colour images;
+            # grayscale (2-D) and 2-channel images are left as-is.
+            if img.ndim == 3 and img.shape[2] == 3:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            elif img.ndim == 3 and img.shape[2] == 4:
+                img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
+            # Float / high-bit-depth arrays must be normalized to uint8 so
+            # downstream PIL/JPEG encoding works (mode 'F' has no JPEG path).
+            return _normalize_to_uint8(img)
+
     except Exception as e:
         print(f"Error loading image: {e}")
         raise
