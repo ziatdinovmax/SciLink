@@ -2402,6 +2402,14 @@ If you identify problems, return:
 }}}}
 Include series_analysis_plan only if this is a series with regimes that need revision.
 Only flag genuine problems — do not redesign a reasonable plan.
+
+An explicit requirement in the stated objective (e.g. a region to exclude, a parameter
+to report) is a constraint, not an assumption to second-guess. If the data make such a
+requirement look hard to satisfy — a feature you cannot clearly see, a region that looks
+ambiguous — flag it and propose a more robust way to meet it; do NOT remove the
+requirement from the model, parameters, or strategy. The user saw something you may not.
+Drop a requirement only if it is physically impossible on this data, and then say so
+explicitly in `issues`.
 """
 
 

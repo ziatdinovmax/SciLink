@@ -1838,6 +1838,12 @@ class HumanFeedbackRefinementController:
         )
 
         prompt_parts = [prompt_text]
+        # Inject the user's objective so the validator judges the plan against
+        # what was actually asked — not the data plot alone. Without this, an
+        # explicit requirement (a region to exclude, a parameter to report) is
+        # invisible here and gets silently stripped when the data looks
+        # ambiguous. Mirrors the planning prompt and ImageAnalysis._validate_plan.
+        _append_objective_context(prompt_parts, state)
         _append_skill_context(prompt_parts, state, "planning")
 
         # For a series, show the multi-spectrum scout overlay (the single
