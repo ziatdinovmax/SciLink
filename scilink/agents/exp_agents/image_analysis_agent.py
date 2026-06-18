@@ -431,6 +431,11 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         handled_system_info, series_metadata = self._extract_series_metadata(
             handled_system_info, series_metadata
         )
+        # Canonicalize a filename-keyed `values` dict into a file-ordered list
+        # (consumers expect a list — see _normalize_series_values).
+        series_metadata = self._normalize_series_values(
+            series_metadata, image_paths
+        )
 
         # Recover embedded file metadata (e.g. TIFF tags / ImageDescription) that
         # OpenCV-based pixel loading drops, and fold it into system_info without

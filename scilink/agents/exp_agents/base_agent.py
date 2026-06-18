@@ -358,6 +358,38 @@ class LLMAgentMixin:
             series_metadata = system_info.pop("series")
         return system_info, series_metadata
 
+    @staticmethod
+    def _normalize_series_values(
+        series_metadata: dict | None,
+        ordered_paths: list | None,
+    ) -> dict | None:
+        """Coerce ``series_metadata['values']`` from a filename-keyed dict into
+        a list aligned to *ordered_paths* (file order) — the contract every
+        downstream consumer assumes (``values[idx]``, ``min``/``max``, the trend
+        codegen). The orchestrator normalizes this when it sorts a series, but
+        sidecar / continuation paths can hand the agent the raw
+        ``{filename: value}`` dict; a dict reaching a list-expecting consumer
+        raises ``'<' not supported between instances of 'dict' and 'dict'``
+        (min/max) or a ``KeyError`` (``values[int]``).
+
+        Idempotent: a list passes through unchanged. Only rewrites when every
+        spectrum finds a value — a partial/mismatched map is left as-is so the
+        caller's existing fallbacks (and the defensive consumer guards) handle
+        it rather than silently mis-aligning values to spectra.
+        """
+        if not series_metadata or not ordered_paths:
+            return series_metadata
+        values = series_metadata.get("values")
+        if not isinstance(values, dict):
+            return series_metadata
+        import os
+        by_name = {os.path.basename(str(k)): v for k, v in values.items()}
+        aligned = [by_name.get(os.path.basename(str(p))) for p in ordered_paths]
+        if aligned and all(v is not None for v in aligned):
+            series_metadata = dict(series_metadata)
+            series_metadata["values"] = aligned
+        return series_metadata
+
     def _build_system_info_prompt_section(self, system_info: Dict[str, Any]) -> str:
         """Build the system information section for LLM prompts."""
         if not system_info:

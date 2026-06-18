@@ -687,6 +687,12 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         handled_system_info, series_metadata = self._extract_series_metadata(
             handled_system_info, series_metadata
         )
+        # Canonicalize a filename-keyed `values` dict into a file-ordered list
+        # (sidecar/continuation paths can hand us the raw dict; consumers expect
+        # a list — see _normalize_series_values).
+        series_metadata = self._normalize_series_values(
+            series_metadata, spectrum_paths
+        )
 
         # Build initial state
         state = {

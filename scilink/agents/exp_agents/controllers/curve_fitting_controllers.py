@@ -1643,6 +1643,12 @@ class HumanFeedbackRefinementController:
 
             series_metadata = state.get("series_metadata", {})
             values = series_metadata.get("values", [])
+            # Defensive: a filename-keyed dict should be normalized upstream
+            # (_normalize_series_values), but tolerate it here so a stray dict
+            # can't crash planning (min/max over dicts) — display only needs the
+            # scalar range, so value-order is irrelevant.
+            if isinstance(values, dict):
+                values = list(values.values())
             unit = series_metadata.get("unit", "")
 
             for i, regime in enumerate(regimes, 1):
@@ -2125,7 +2131,11 @@ class HumanFeedbackRefinementController:
             self.logger.info(f"  Approach: {state['analysis_approach']}")
             self.logger.info(f"  Model: {state['physical_model']}")
 
-            if self.enable_human_feedback:
+            # On a verbatim locked-script reuse turn (#172) the plan is
+            # foreordained to re-run the prior script unchanged, so re-approving
+            # it is pointless interruption. Planning still ran above (downstream
+            # stages need its fields); we only skip the display/approval gate.
+            if self.enable_human_feedback and not state.get("reuse_locked_script"):
                 iteration = 0
                 while iteration < self.max_iterations:
                     state = self._get_human_feedback(state)

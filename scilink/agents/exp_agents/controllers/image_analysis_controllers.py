@@ -1150,6 +1150,11 @@ class ImagePlanningController:
 
             series_metadata = state.get("series_metadata", {})
             values = series_metadata.get("values", [])
+            # Defensive: tolerate a filename-keyed dict (normalized upstream by
+            # _normalize_series_values) so a stray dict can't crash planning via
+            # min/max — display only needs the scalar range.
+            if isinstance(values, dict):
+                values = list(values.values())
             unit = series_metadata.get("unit", "")
 
             for i, regime in enumerate(regimes, 1):
@@ -1714,7 +1719,11 @@ class ImagePlanningController:
             # Validate plan against actual images
             state = self._validate_plan(state)
 
-            if self.enable_human_feedback:
+            # On a verbatim locked-script reuse turn (#172) the plan is
+            # foreordained to re-run the prior script unchanged, so re-approving
+            # it is pointless interruption. Planning still ran above (downstream
+            # stages need its fields); we only skip the display/approval gate.
+            if self.enable_human_feedback and not state.get("reuse_locked_script"):
                 iteration = 0
                 while iteration < self.max_iterations:
                     state = self._get_human_feedback(state)
