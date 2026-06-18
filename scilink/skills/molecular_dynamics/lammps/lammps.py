@@ -217,6 +217,65 @@ def _detect_vacuum_gap(
 
     return result
 
+def _dihedral_style_from_coeffs(coeffs: List[str]) -> str:
+    """Infer dihedral_style from one Dihedral Coeffs row's coefficient arity."""
+    n = len(coeffs)
+    if n == 3:
+        return "harmonic"               # K d n
+    if n >= 4:
+        # fourier: m K1 n1 d1 [K2 n2 d2 ...] — leading integer term count, 1+3m total
+        try:
+            m = int(coeffs[0])
+            if m >= 1 and n == 1 + 3 * m:
+                return "fourier"
+        except ValueError:
+            pass
+        if n == 4:
+            return "opls"               # K1 K2 K3 K4
+    return ""
+
+
+def _detect_ff_styles(lines: List[str]) -> Dict[str, str]:
+    """Infer the bond/angle/dihedral/improper styles a data file's Coeffs require.
+
+    A LAMMPS data file carries Coeffs but not the *_style commands; the style is
+    implied by the coefficient arity. Declaring a mismatched style makes
+    read_data abort ("Incorrect args for <...> coefficients"). We read the first
+    data row of each Coeffs section and map its arity to the common
+    SMIRNOFF/AMBER/GAFF styles; an unrecognized arity is omitted (no claim)
+    rather than guessed.
+    """
+    coeff_headers = {"Bond Coeffs", "Angle Coeffs",
+                     "Dihedral Coeffs", "Improper Coeffs"}
+    enders = {"Atoms", "Velocities", "Bonds", "Angles", "Dihedrals",
+              "Impropers", "Masses", "Pair Coeffs"}
+    styles: Dict[str, str] = {}
+    section = None
+    for raw in lines:
+        s = raw.strip()
+        if s in coeff_headers:
+            section = s
+            continue
+        if section is None:
+            continue
+        if not s or s.startswith("#"):
+            continue
+        if s in enders:
+            section = None
+            continue
+        coeffs = s.split("#", 1)[0].split()[1:]   # drop the type id
+        n = len(coeffs)
+        if section == "Bond Coeffs" and "bond" not in styles:
+            styles["bond"] = "harmonic" if n == 2 else ""
+        elif section == "Angle Coeffs" and "angle" not in styles:
+            styles["angle"] = "harmonic" if n == 2 else ("charmm" if n == 4 else "")
+        elif section == "Dihedral Coeffs" and "dihedral" not in styles:
+            styles["dihedral"] = _dihedral_style_from_coeffs(coeffs)
+        elif section == "Improper Coeffs" and "improper" not in styles:
+            styles["improper"] = "cvff" if n == 3 else ""
+    return {k: v for k, v in styles.items() if v}
+
+
 def parse_data_file(data_file: str) -> Dict[str, Any]:
     """
     Parse a LAMMPS data file to extract system information.
@@ -236,6 +295,7 @@ def parse_data_file(data_file: str) -> Dict[str, Any]:
         "box_dimensions": [0.0, 0.0, 0.0],
         "has_pair_coeffs": False,
         "has_bond_coeffs": False,
+        "required_styles": {},
         "atom_style": "unknown",
         "atom_type_labels": {},
         "mass_map": {},
@@ -303,6 +363,8 @@ def parse_data_file(data_file: str) -> Dict[str, Any]:
     section_names = {l.strip() for l in lines}
     info["has_pair_coeffs"] = "Pair Coeffs" in section_names
     info["has_bond_coeffs"] = "Bond Coeffs" in section_names
+    # Styles implied by the Coeffs arity (the deck must declare these exactly).
+    info["required_styles"] = _detect_ff_styles(lines)
 
     # ── Parse Masses ──
     in_masses = False
@@ -443,6 +505,13 @@ def format_type_info(data_file: str) -> str:
         f"  Coefficients in data file: {'Yes' if info['has_pair_coeffs'] else 'No'}",
         f"  System category: {info['system_category']}",
     ]
+    rs = info.get("required_styles") or {}
+    if rs:
+        lines.append(
+            "  Required styles (the data file's Coeffs are in these formats — "
+            "declare EXACTLY these, a mismatch aborts read_data): "
+            + ", ".join(f"{k}_style {v}" for k, v in rs.items())
+        )
     if info["has_vacuum"]:
         lines.append(f"  Vacuum gap: {info['vacuum_axis']} axis (surface/slab)")
     lines.append("")
@@ -601,6 +670,29 @@ def validate_script(
                 "file otherwise aborts with 'Must redefine kspace_style after "
                 "changing to triclinic box')."
             )
+
+    # Declared bond/angle/dihedral/improper styles must match the format the data
+    # file's Coeffs are in (read_data aborts: "Incorrect args for <...>
+    # coefficients"). required_styles is inferred from the data file by
+    # parse_data_file; only flag a genuine mismatch (both sides known).
+    required_styles = (system_info or {}).get("required_styles") or {}
+    if required_styles:
+        declared_styles: Dict[str, str] = {}
+        for line in lines:
+            p = line.strip().split("#", 1)[0].split()
+            if len(p) >= 2 and p[0] in (
+                "bond_style", "angle_style", "dihedral_style", "improper_style"
+            ):
+                declared_styles[p[0].split("_", 1)[0]] = p[1].lower()
+        for kind, need in required_styles.items():
+            have = declared_styles.get(kind)
+            if have and have != need:
+                errors.append(
+                    f"{kind}_style is '{have}' but the data file's {kind} "
+                    f"coefficients are in '{need}' format — declare "
+                    f"'{kind}_style {need}' (read_data otherwise aborts with "
+                    f"'Incorrect args for {kind} coefficients')."
+                )
 
     # ── Forbidden combinations ──
     pair_style = result["pair_style"] or ""

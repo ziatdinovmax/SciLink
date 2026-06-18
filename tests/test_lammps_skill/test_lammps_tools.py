@@ -579,6 +579,49 @@ class TestValidateTypedDataFileOrdering:
         r = lammps_tools.validate_script(self._write(tmp_path, good), self._TYPED)
         assert not any("before 'read_data'" in e.lower() for e in r["errors"]), r["errors"]
 
+    _DATA = (
+        "4 atoms\n1 atom types\n1 bond types\n1 angle types\n1 dihedral types\n"
+        "0 10 xlo xhi\n0 10 ylo yhi\n0 10 zlo zhi\n\nMasses\n\n1 12.011\n\n"
+        "Pair Coeffs\n\n1 0.1 3.4\n\n"
+        "Bond Coeffs\n\n1 300.0 1.5\n\n"             # 2 args -> harmonic
+        "Angle Coeffs\n\n1 50.0 109.5\n\n"           # 2 args -> harmonic
+        "Dihedral Coeffs\n\n1 1 0.2 3 0\n\n"         # fourier (m=1)
+        "Atoms\n\n1 1 1 0.0 0 0 0\n"
+    )
+
+    def _data(self, tmp_path):
+        d = tmp_path / "system.data"
+        d.write_text(self._DATA)
+        return str(d)
+
+    def test_required_styles_inferred_from_coeffs(self, tmp_path):
+        info = lammps_tools.parse_data_file(self._data(tmp_path))
+        assert info["required_styles"] == {
+            "bond": "harmonic", "angle": "harmonic", "dihedral": "fourier"}
+
+    def test_dihedral_style_mismatch_flagged(self, tmp_path):
+        info = lammps_tools.parse_data_file(self._data(tmp_path))
+        bad = (
+            "units real\natom_style full\nboundary p p p\n"
+            "pair_style lj/cut/coul/long 9.0\nbond_style harmonic\n"
+            "angle_style harmonic\ndihedral_style harmonic\n"   # wrong: data is fourier
+            "read_data system.data\nkspace_style pppm 1e-4\nrun 0\n"
+        )
+        r = lammps_tools.validate_script(self._write(tmp_path, bad), info)
+        assert r["valid"] is False
+        assert any("dihedral" in e and "fourier" in e for e in r["errors"])
+
+    def test_matching_dihedral_style_passes(self, tmp_path):
+        info = lammps_tools.parse_data_file(self._data(tmp_path))
+        good = (
+            "units real\natom_style full\nboundary p p p\n"
+            "pair_style lj/cut/coul/long 9.0\nbond_style harmonic\n"
+            "angle_style harmonic\ndihedral_style fourier\n"
+            "read_data system.data\nkspace_style pppm 1e-4\nrun 0\n"
+        )
+        r = lammps_tools.validate_script(self._write(tmp_path, good), info)
+        assert not any("coefficients are in" in e for e in r["errors"]), r["errors"]
+
     def test_pair_modify_before_pair_style_flagged(self, tmp_path):
         bad = (
             "units real\natom_style full\nboundary p p p\n"
