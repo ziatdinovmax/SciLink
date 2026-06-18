@@ -169,10 +169,20 @@ goal you picked above:
   structures. Verify stoichiometric ratios in all cases. Detected
   positions from a prior detection step should come from
   `prior_analysis_paths`, not be re-detected here.
-- *If goal is lattice parameter / zone axis:* use FFT for periodicity
-  (NN distance is not the lattice parameter for multi-sublattice
-  structures — true unit cell may be 2× or more of the shortest column
-  spacing) and `find_zone_axes` for lattice vectors.
+- *If goal is lattice parameter / lattice vector / zone axis:* a lattice
+  vector is the translation that maps the crystal onto itself — one column
+  onto the next column **of the same species**. Measure it from the FFT
+  fundamental reflections (or `find_zone_axes`), NOT from the nearest-
+  neighbor spacing of detected columns. When the projection resolves more
+  than one inequivalent column per cell (multiple sublattices / a basis),
+  the NN distance is *shorter* than the lattice constant by a projection-
+  dependent factor (√2, √3, 2×, … — derive it from the resolved geometry
+  or measure the repeat directly; never assume a value). Report the
+  quantity the objective names: "lattice constant / parameter / vector" →
+  the repeat period; "nearest-neighbor distance / bond length" → the NN. If
+  the request offers them as alternatives or is ambiguous, report both,
+  explicitly labeled, with their geometric relation — never silently
+  substitute one for the other.
 - *If goal is vacancy / missing-column search:* two complementary
   routes — pick by data quality, or run both as a cross-check.
   **Real-space route** (defect typing, needs reliable columns): requires
@@ -456,6 +466,16 @@ Report in both pixels and physical units when calibration is
 available, and note the calibration-driven uncertainty band when
 matching against literature.
 
+**Nearest-neighbor distance vs lattice constant:** these coincide only
+for a lattice with one column per projected cell. When the projection
+resolves more than one column per cell (multiple sublattices / a basis),
+the NN distance is a column-to-column spacing that is *not* a lattice
+translation and is smaller than the lattice constant by a geometry-
+dependent factor. Keep them as distinct quantities — never label an NN
+distance as the lattice constant. To report a lattice constant, take it
+from the periodicity (FFT fundamental / same-species repeat) or convert
+the NN by the factor implied by the resolved geometry.
+
 ### advanced
 **Sublattice assignment:** Use chemical identity from intensity and
 positional analysis to interpret which sublattice corresponds to which
@@ -497,6 +517,14 @@ literature as informational (likely calibration), not a pass/fail
 failure. Hard checks should be self-consistency: ratio of measured
 spacings (b/a) matching the expected ratio, or FFT peaks forming a
 consistent reciprocal lattice.
+
+**Reported quantity matches the request, and ballparks compare like with
+like:** confirm the headline number is the quantity the objective named,
+and that any expected-value check compares the same quantity — a lattice-
+constant expectation must not be applied to a nearest-neighbor measurement,
+or vice versa (they differ by a projection-dependent factor). A value that
+misses a ballpark *only* because the wrong quantity was compared is a
+labeling error to fix in reporting, not a bad measurement to reject.
 
 **DCNN preprocessing check:** if the step uses `detect_atoms_dcnn`,
 flag any pipeline step that preprocesses the image before the DCNN
