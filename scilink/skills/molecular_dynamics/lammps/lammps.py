@@ -527,6 +527,42 @@ def format_type_info(data_file: str) -> str:
     return "\n".join(lines)
 
 
+# ─── Dry-run twin (cheap setup-only validation) ──────────────────────
+
+def prepare_dry_run(script: str) -> str:
+    """Return a setup-only "dry-run" twin of a LAMMPS deck.
+
+    The twin keeps every command LAMMPS validates at setup (units, atom_style,
+    the force-field styles, read_data, kspace_style, fixes) but trims the
+    dynamics so it costs ~one force evaluation: every ``run N`` becomes
+    ``run 0``, ``minimize ...`` becomes a setup-only ``minimize 0.0 0.0 0 0``,
+    and output commands (dump/restart/write_*) are dropped. Running it surfaces
+    syntax/setup errors — style/coeff mismatches, command ordering, kspace vs.
+    triclinic — in ~1 s, without doing real dynamics. If the deck has no
+    run/minimize, a ``run 0`` is appended so setup actually executes.
+    """
+    drop = {"dump", "dump_modify", "undump", "restart",
+            "write_dump", "write_restart", "write_data"}
+    out: List[str] = []
+    has_setup = False
+    for line in script.splitlines():
+        s = line.strip()
+        kw = s.split()[0].lower() if s else ""
+        if kw == "run":
+            out.append("run 0")
+            has_setup = True
+        elif kw == "minimize":
+            out.append("minimize 0.0 0.0 0 0")
+            has_setup = True
+        elif kw in drop:
+            continue
+        else:
+            out.append(line)
+    if not has_setup:
+        out.append("run 0")
+    return "\n".join(out) + "\n"
+
+
 # ─── Script Validation ───────────────────────────────────────────────
 
 def validate_script(

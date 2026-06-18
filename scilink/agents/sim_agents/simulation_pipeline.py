@@ -459,6 +459,7 @@ def _collect_phases(
             input_files=spec.get("input_files") or {},
             run_command=cmd,
             run_dir=str(run_dir),
+            entry_file=entry or "",
         ))
     return phases
 
@@ -516,6 +517,7 @@ def _collect_stages(
             input_files=spec.get("input_files") or {},
             run_command=_command(entry, spec.get("run_command")),
             run_dir=str(rdir),
+            entry_file=entry or "",
         )
 
     stages = []

@@ -666,3 +666,45 @@ class TestValidateTypedDataFileOrdering:
         r = lammps_tools.validate_script(self._write(tmp_path, bare),
                                          {"has_pair_coeffs": False})
         assert not any("before 'read_data'" in e.lower() for e in r["errors"]), r["errors"]
+
+
+# =====================================================================
+# prepare_dry_run — setup-only twin for the dry-run gate
+# =====================================================================
+
+class TestPrepareDryRun:
+    def test_run_becomes_run_zero(self):
+        out = lammps_tools.prepare_dry_run("units real\nrun 2000000\n")
+        assert "run 0" in out
+        assert "2000000" not in out
+
+    def test_minimize_becomes_setup_only(self):
+        out = lammps_tools.prepare_dry_run("minimize 1.0e-4 1.0e-6 5000 50000\n")
+        assert "minimize 0.0 0.0 0 0" in out
+        assert "50000" not in out
+
+    def test_output_commands_dropped(self):
+        deck = ("pair_style lj/cut/coul/long 9.0\n"
+                "dump 1 all custom 1000 t.dump id type x y z\n"
+                "restart 10000 a.restart b.restart\n"
+                "write_data final.data\nrun 100\n")
+        out = lammps_tools.prepare_dry_run(deck)
+        for token in ("dump", "restart", "write_data"):
+            assert token not in out
+        assert "pair_style lj/cut/coul/long 9.0" in out   # setup preserved
+
+    def test_setup_commands_preserved(self):
+        deck = ("units real\natom_style full\npair_style lj/cut/coul/long 9.0\n"
+                "bond_style harmonic\nread_data system.data\n"
+                "kspace_style pppm 1e-4\nfix SHAKE all shake 1e-5 100 0 m 1.008\n"
+                "run 5000\n")
+        out = lammps_tools.prepare_dry_run(deck)
+        for line in ("units real", "pair_style lj/cut/coul/long 9.0",
+                     "read_data system.data", "kspace_style pppm 1e-4",
+                     "fix SHAKE all shake 1e-5 100 0 m 1.008"):
+            assert line in out
+
+    def test_run_zero_appended_when_no_dynamics(self):
+        # A deck with no run/minimize still needs a run 0 so setup executes.
+        out = lammps_tools.prepare_dry_run("units real\nread_data system.data\n")
+        assert out.strip().endswith("run 0")
