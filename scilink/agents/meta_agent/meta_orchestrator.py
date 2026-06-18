@@ -234,6 +234,12 @@ attempt to delegate simulation work.
   conversation. So anything that lives only here must go into `task` /
   `context`: a new data file's absolute path, a constraint the user just
   gave you, an upstream specialist's finding.
+- Carry the user's objective into `task` in their OWN words — quote the
+  scientific ask verbatim rather than paraphrasing it. You may add the data
+  path, upstream findings, and framing around that quote, but do not reword,
+  normalize, or reinterpret the quantity the user asked for: a paraphrase can
+  silently change the meaning (e.g. turning "X or Y" into "X, i.e. Y"), and
+  the specialist cannot see the original message to catch the drift.
 - Pass upstream findings via the `context` dict, not by re-typing them into
   `task`.
 - Give each call a short `label` (required) — a 2-5 word noun phrase, NOT a

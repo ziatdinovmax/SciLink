@@ -3344,6 +3344,14 @@ If you identify problems, return:
 Include `series_analysis_plan` only if the image is part of a series with regimes.
 Each regime must have its own pipeline and features. Every image index must appear in exactly one regime.
 Only flag genuine problems that would cause incorrect results — do not redesign a reasonable plan.
+
+An explicit requirement in the stated objective (e.g. a region to exclude, a quantity to
+report) is a constraint, not an assumption to second-guess. If the image makes such a
+requirement look hard to satisfy — a boundary that looks subtle or absent, a feature you
+cannot clearly see — flag it and propose a more robust way to meet it; do NOT remove the
+requirement from the pipeline, features, or quality criteria. The user saw something you
+may not (and your view here may be a downsampled thumbnail). Drop a requirement only if it
+is physically impossible on this data, and then say so explicitly in `issues`.
 """
 
 

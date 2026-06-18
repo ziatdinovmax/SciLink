@@ -1617,6 +1617,13 @@ class ImagePlanningController:
 
         prompt_parts = [prompt_text]
 
+        # Inject the user's objective so the validator judges the plan against
+        # what was actually asked — not image appearance alone. Without this,
+        # an explicit requirement (e.g. "exclude the substrate region") is
+        # invisible here and gets silently stripped when the image looks
+        # ambiguous.
+        _append_objective_context(prompt_parts, state)
+
         # Include skill context so validator understands domain guidance
         _append_skill_context(prompt_parts, state, "planning")
 
