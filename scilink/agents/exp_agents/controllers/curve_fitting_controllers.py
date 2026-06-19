@@ -416,7 +416,9 @@ def _append_structure_zoom(prompt: list, state: dict) -> bool:
             "type: a shoulder may need an extra component, a knee an extra decay "
             "term, a split edge two features. Use them to choose the "
             "model/approach and seed feature positions; absence of an obvious "
-            "peak does not mean absence of structure."
+            "peak does not mean absence of structure. If a domain skill is "
+            "loaded, cross-reference these regions against the features that "
+            "technique expects."
         )
         for label, png in panels:
             prompt.append(f"\n**{label}:**")
