@@ -956,22 +956,28 @@ def test_join_approval_digit_overrides_winner(tmp_path, monkeypatch):
     assert result["anchor_judge"]["human_override"] is True
 
 
-def test_join_approval_more_triggers_escalation(tmp_path, monkeypatch):
-    model = _judge_model('{"selected_index": 0, "reasoning": "ok"}')
+def test_fast_accept_skips_menu_even_with_feedback(tmp_path, monkeypatch):
+    # A strong first attempt fast-accepts to a lone candidate. The best-of-N
+    # join-approval menu (and its old manual 'more' escalation) is meaningless
+    # for one result, so it is skipped even with human feedback enabled — the
+    # winner proceeds straight to interpretation and input() is never called.
+    # (Removed in commit 0d0a3a6; this guards against the menu reappearing.)
+    model = _judge_model('{"selected_index": 0, "reasoning": "unused"}')
     c = _controller(tmp_path, model, enable_human_feedback=True)
     seen = []
     _stub_execute(c, {
         "cand_00": _canned_result(0.85, True, tag="cand_00"),  # fast-accept
-        "cand_01": _canned_result(0.9, True, tag="cand_01"),
-        "cand_02": _canned_result(0.8, True, tag="cand_02"),
     }, seen)
 
-    _patch_input(monkeypatch, ["more", ""])
+    def explode(prompt=""):
+        raise AssertionError("input() must not be called for a lone candidate")
+
+    monkeypatch.setattr("builtins.input", explode)
     result = _run(c, _esc_state(3))
 
-    assert len(seen) == 3
-    assert result["anchor_judge"]["escalated"] is True
-    assert len(result["anchor_candidates"]) == 3
+    assert len(seen) == 1
+    assert result["anchor_judge"]["escalated"] is False
+    assert len(result["anchor_candidates"]) == 1
 
 
 def test_join_approval_not_fired_when_feedback_disabled(tmp_path, monkeypatch):
