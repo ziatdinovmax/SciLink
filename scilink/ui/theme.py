@@ -182,7 +182,8 @@ div:has(> [data-testid="stMarkdown"] .theme-toggle-anchor) + div button:hover {
 /* Fan-out confirm — force Cancel/Launch to IDENTICAL box size and shape.
    Equal st.columns fixes width; the secondary (Cancel) and primary (Launch)
    otherwise differ in height/box-model, so pin both to one height + padding. */
-div:has(> [data-testid="stMarkdown"] .fanout-actions-anchor) + div .stButton > button {
+div:has(> [data-testid="stMarkdown"] .fanout-actions-anchor) + div .stButton > button,
+div:has(> [data-testid="stMarkdown"] .bestofn-actions-anchor) + div .stButton > button {
     min-height: 2.75rem !important;
     height: 2.75rem !important;
     padding-top: 0 !important;
@@ -193,8 +194,10 @@ div:has(> [data-testid="stMarkdown"] .fanout-actions-anchor) + div .stButton > b
 }
 /* Cancel (secondary) gets a solid neutral fill so it reads as the SAME box as
    the purple primary Launch — equal size AND equal shape, color = the only
-   difference (grey = abort, purple = go). */
-div:has(> [data-testid="stMarkdown"] .fanout-actions-anchor) + div .stButton > button[kind="secondary"] {
+   difference (grey = abort, purple = go). Same treatment for the best-of-N
+   "Accept judge's pick" (secondary) vs "Use selected" (primary). */
+div:has(> [data-testid="stMarkdown"] .fanout-actions-anchor) + div .stButton > button[kind="secondary"],
+div:has(> [data-testid="stMarkdown"] .bestofn-actions-anchor) + div .stButton > button[kind="secondary"] {
     background-color: #3A4556 !important;
     color: #C7D0DC !important;
 }

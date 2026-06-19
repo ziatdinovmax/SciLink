@@ -866,6 +866,13 @@ else:
                         format_func=lambda i: _labels.get(i, f"Candidate {i}"),
                         key="bestofn_choice",
                     )
+                    # Pin both action buttons to equal height/shape (theme.py);
+                    # the secondary "Accept" otherwise renders taller than the
+                    # primary "Use selected".
+                    st.markdown(
+                        '<span class="bestofn-actions-anchor"></span>',
+                        unsafe_allow_html=True,
+                    )
                     col_use, col_pick = st.columns(2)
                     with col_use:
                         if st.button("Use selected", type="primary", width="stretch"):
