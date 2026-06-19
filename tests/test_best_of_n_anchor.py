@@ -1091,8 +1091,13 @@ def test_resolve_default_image_agent_gets_three():
     assert _resolve_n_candidates(ImageAnalysisAgent(), None) == 3
 
 
-def test_resolve_default_other_agent_gets_one():
-    assert _resolve_n_candidates(CurveFittingAgent(), None) == 1
+def test_resolve_default_curve_agent_gets_three():
+    # Curve now auto-escalates by default (skill-gated in the agent).
+    assert _resolve_n_candidates(CurveFittingAgent(), None) == 3
+
+
+def test_resolve_default_unsupporting_agent_gets_one():
+    assert _resolve_n_candidates(_NoSupportAgent(), None) is None
 
 
 def test_resolve_explicit_request_wins():
@@ -1186,3 +1191,57 @@ def test_curve_fanout_replan_disabled_by_flag(tmp_path):
     _run_curve(c, state)
 
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# Skill-gated curve auto-escalation
+# ---------------------------------------------------------------------------
+
+def test_curve_auto_escalation_suppressed_when_skill_active(tmp_path):
+    # Auto-default (candidate_escalation=True) + a loaded skill -> single
+    # skill-guided fit; the fan-out is suppressed (candidates would converge).
+    c = _curve_controller(tmp_path)
+    seen = []
+    _stub_fit(c, {"_direct": _canned_fit(0.99, True, tag="x")}, seen)
+    state = _curve_state(3)
+    state["candidate_escalation"] = True
+    state["skill_name"] = "xps"
+    result = _run_curve(c, state)
+    assert len(seen) == 1
+    assert seen[0].get("_candidate_tag") is None   # single path
+    assert "anchor_candidates" not in result
+
+
+def test_curve_auto_escalation_fires_when_no_skill(tmp_path):
+    # Auto-default + NO skill -> escalation engages; a weak attempt 0 fans out.
+    model = _judge_model('{"selected_index": 1, "reasoning": "ok"}')
+    c = _curve_controller(tmp_path, model)
+    seen = []
+    _stub_fit(c, {
+        "cand_00": _canned_fit(0.90, True, tag="cand_00"),  # weak -> escalate
+        "cand_01": _canned_fit(0.99, True, tag="cand_01"),
+        "cand_02": _canned_fit(0.98, True, tag="cand_02"),
+    }, seen)
+    state = _curve_state(3)
+    state["candidate_escalation"] = True   # no skill_name set
+    result = _run_curve(c, state)
+    assert len(seen) == 3
+    assert result["anchor_judge"]["escalated"] is True
+
+
+def test_curve_explicit_count_honored_despite_skill(tmp_path):
+    # Explicit "run 3" (candidate_escalation=False) is honored even with a
+    # skill active -> fan-out is NOT suppressed.
+    model = _judge_model('{"selected_index": 0, "reasoning": "ok"}')
+    c = _curve_controller(tmp_path, model)
+    seen = []
+    _stub_fit(c, {
+        "cand_00": _canned_fit(0.99, True, tag="cand_00"),
+        "cand_01": _canned_fit(0.98, True, tag="cand_01"),
+        "cand_02": _canned_fit(0.97, True, tag="cand_02"),
+    }, seen)
+    state = _curve_state(3)
+    state["candidate_escalation"] = False
+    state["skill_name"] = "xps"
+    result = _run_curve(c, state)
+    assert len(seen) == 3

@@ -175,11 +175,18 @@ _GLOBAL_METADATA_NAMES = frozenset([
 ])
 
 # Best-of-N defaults per agent class when the LLM passes no n_candidates.
-# Image analysis shows real run-to-run variance, so it fans out by default;
-# agents absent from this dict default to a single attempt. Deterministic
-# policy in code (not prompt prose) — an explicit tool param still overrides.
+# Both image and curve fitting fan out by default *in escalation mode* —
+# attempt 0 runs alone and is fast-accepted when strong, so the extra cost is
+# paid only when the first attempt is weak. Image fans out because of run-to-
+# run variance; curve fitting because, with no domain skill to pin the
+# technique, a weak fit has high plan variance and independent candidates can
+# recover it (the agent suppresses the fan-out to 1 when a skill IS active —
+# the candidates would just converge on the mandated model). Agents absent
+# from this dict default to a single attempt. Deterministic policy in code
+# (not prompt prose) — an explicit tool param still overrides exactly.
 _DEFAULT_N_CANDIDATES_BY_AGENT_CLASS = {
     "ImageAnalysisAgent": 3,
+    "CurveFittingAgent": 3,
 }
 
 
@@ -3042,15 +3049,18 @@ class AnalysisOrchestratorTools:
                         "an LLM judge compares the finished attempts "
                         "(verification scores/R² + output visualizations) and "
                         "locks the winner — reduces run-to-run variance. Leave "
-                        "UNSET for the per-agent default (image analysis runs "
-                        "3 automatically; curve fitting and others run 1). Set "
-                        "ONLY when the user explicitly asks for more/fewer "
-                        "parallel attempts (e.g. 'try 5 candidates' → 5; "
-                        "'single attempt / cheapest run' → 1). When UNSET, the "
-                        "image default runs in escalation mode (the first "
+                        "UNSET for the per-agent default: image analysis and "
+                        "curve fitting auto-run in ESCALATION mode (the first "
                         "attempt is accepted immediately if strong; the rest "
-                        "launch only if it is weak); an explicit value forces "
-                        "exactly N parallel attempts."
+                        "launch only if it is weak — so the extra cost is paid "
+                        "only on a weak first attempt). Curve fitting suppresses "
+                        "this to a single fit when a domain skill is active (the "
+                        "candidates would converge on the mandated model); other "
+                        "agents run 1. Set ONLY when the user explicitly asks "
+                        "for more/fewer parallel attempts (e.g. 'try 5 "
+                        "candidates' → 5; 'single attempt / cheapest run' → 1); "
+                        "an explicit value forces exactly N parallel attempts "
+                        "(no escalation, and not skill-suppressed)."
                     )
                 }
             },

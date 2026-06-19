@@ -4525,6 +4525,23 @@ Return JSON with:
         attempts after a fast-accept.
         """
         n = max(1, int(state.get("n_candidates") or 1))
+        escalation = bool(state.get("candidate_escalation"))
+        # Skill-gated auto-escalation: the n>1 + escalation default is an AUTO
+        # ensemble (no explicit user count, used when curve fitting has no
+        # skill to guide it — high plan variance). A loaded domain skill PINS
+        # the technique, so independent candidates would just converge on the
+        # mandated model; run one skill-guided fit instead. An EXPLICIT user
+        # count (candidate_escalation False, e.g. "run 3 candidates") is always
+        # honored, skill or not.
+        if escalation and n > 1:
+            _active = _active_skill_names(state)
+            if _active:
+                self.logger.info(
+                    f"   Skill active ({', '.join(_active)}) — single "
+                    f"skill-guided fit; auto best-of-N suppressed (pass an "
+                    f"explicit n_candidates to force it)."
+                )
+                n = 1
         if n == 1 or reuse_script:
             return self._fit_with_quality_control(
                 state=state, curve_data=curve_data, data_path=data_path,
@@ -4533,7 +4550,6 @@ Return JSON with:
                 reuse_script=reuse_script, reuse_source=reuse_source,
             )
 
-        escalation = bool(state.get("candidate_escalation"))
         spectrum_config = state.get("locked_fitting_config", {})
 
         import threading as _threading
