@@ -666,7 +666,6 @@ else:
                 content = task.result if task.result is not None else f"Error: {task.error}"
                 # Strip markdown image tags with local file paths — images are
                 # rendered separately via st.image() from _find_new_images()
-                import re
                 content = re.sub(r"!\[[^\]]*\]\([^)]+\)\n?", "", content).strip()
                 new_images = _find_new_images()
                 new_reports = _find_new_html_reports()
@@ -727,7 +726,6 @@ else:
                     _render_fanout_confirm(req.context)
                 elif req.context:
                     import html as _html
-                    import re
 
                     display_ctx = req.context
                     lines = display_ctx.split("\n")
