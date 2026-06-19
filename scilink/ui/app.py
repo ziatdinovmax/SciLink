@@ -263,6 +263,51 @@ def _find_new_html_reports() -> list[str]:
     return new
 
 
+def _parse_bestofn_review(context: str, prompt: str):
+    """Parse the best-of-N candidate review from captured stdout.
+
+    Returns ``(candidates, default_idx)`` where ``candidates`` is a list of
+    ``{"idx": int, "label": str}`` for the MOST RECENT review block and
+    ``default_idx`` is the judge's pick. Returns ``None`` when the buffer is
+    not a best-of-N review — the modal then falls back to the generic text
+    box, so any parse miss degrades gracefully (no regression). Works for both
+    curve (``R²=``) and image (``score=``) reviews; the agent-side
+    ``_get_bestofn_join_approval`` contract is unchanged (the chosen index is
+    sent as the same bare digit it already parses).
+    """
+    # Gate on the CURRENT input() prompt — only the best-of-N choice prompt
+    # contains "accept candidate". This prevents a stale review block left in
+    # the accumulated session buffer from hijacking a later, unrelated feedback
+    # prompt (plan/code/scalarizer/etc.).
+    if not prompt or "accept candidate" not in prompt:
+        return None
+    if not context or "BEST-OF-N CANDIDATES" not in context:
+        return None
+    import re
+    # Only the latest review block (the buffer accumulates the whole session).
+    block = context[context.rfind("BEST-OF-N CANDIDATES"):]
+    cands: dict[int, str] = {}
+    pick = None
+    for m in re.finditer(
+        r"Candidate (\d+):\s*([^=]+)=([0-9.eE+\-]+),\s*approved=(\w+),"
+        r"\s*iterations=(\d+)(.*)", block):
+        idx = int(m.group(1))
+        metric, value = m.group(2).strip(), m.group(3)
+        approved = m.group(4).lower() == "true"
+        iters = m.group(5)
+        mark = "✓ approved" if approved else "✗ below gate"
+        cands[idx] = f"Candidate {idx} — {metric}={value} · {mark} · {iters} iter"
+        if "judge pick" in m.group(6).lower():
+            pick = idx
+    if not cands:
+        return None
+    if pick is None:
+        pm = re.search(r"accept candidate (\d+)", prompt or "")
+        pick = int(pm.group(1)) if pm else min(cands)
+    ordered = [{"idx": i, "label": cands[i]} for i in sorted(cands)]
+    return ordered, pick
+
+
 def _run_agent_chat(task: ChatTask, agent, user_input: str) -> None:
     """Target for the background thread."""
     import logging
@@ -655,7 +700,15 @@ else:
                     for img in previews:
                         st.session_state.known_images.add(img)
                 for img_path in st.session_state._feedback_preview_images:
-                    st.image(img_path)
+                    # Caption best-of-N candidate fits with their number so the
+                    # plot lines up with the radio selector below; other preview
+                    # images (single fit, hyperspectral grid) render as before.
+                    _bn = re.search(r"bestofn_candidate_(\d+)_review",
+                                    Path(img_path).name)
+                    if _bn:
+                        st.image(img_path, caption=f"Candidate {int(_bn.group(1))}")
+                    else:
+                        st.image(img_path)
     
                 # Show generated code files during code review
                 _ctx_tail_early = (req.context or "")[-1500:]
@@ -731,6 +784,10 @@ else:
                 _ctx_tail = (req.context or "")[-1500:]
                 _prompt = req.prompt or ""
                 _is_keep_revert = "revert to original" in _ctx_tail.lower()
+                # Best-of-N candidate review: parse the candidate list so we can
+                # render a radio selector (scales to any N, unlike one button
+                # per candidate). None -> falls through to the generic text box.
+                _bestofn_data = _parse_bestofn_review(req.context or "", _prompt)
                 # (_is_fanout_confirm computed above, before the context render)
                 if "Context" in _prompt or "MISSING METADATA" in _ctx_tail:
                     _input_label = "Describe your data (optional):"
@@ -792,6 +849,37 @@ else:
                         if st.button("🔀 Launch parallel analysis", type="primary",
                                      width="stretch"):
                             req.response = "y"
+                            req.event.set()
+                            st.session_state.pop("_feedback_preview_images", None)
+                            st.session_state.pop("_code_review_files", None)
+                            st.rerun(scope="app")
+                # Best-of-N review: a radio over the candidates (scales to any N)
+                # + "Use selected" / "Accept judge's pick". Sends the chosen
+                # index as the bare digit _get_bestofn_join_approval parses, or
+                # "" to accept the pick — identical to the text-box contract.
+                elif _bestofn_data:
+                    _cands, _pick = _bestofn_data
+                    _opts = [c["idx"] for c in _cands]
+                    _labels = {c["idx"]: c["label"] for c in _cands}
+                    _default = _opts.index(_pick) if _pick in _opts else 0
+                    _choice = st.radio(
+                        "Select the candidate to lock:",
+                        _opts, index=_default,
+                        format_func=lambda i: _labels.get(i, f"Candidate {i}"),
+                        key="bestofn_choice",
+                    )
+                    col_use, col_pick = st.columns(2)
+                    with col_use:
+                        if st.button("Use selected", type="primary", width="stretch"):
+                            req.response = str(_choice)
+                            req.event.set()
+                            st.session_state.pop("_feedback_preview_images", None)
+                            st.session_state.pop("_code_review_files", None)
+                            st.rerun(scope="app")
+                    with col_pick:
+                        if st.button(f"Accept judge's pick (Candidate {_pick})",
+                                     type="secondary", width="stretch"):
+                            req.response = ""
                             req.event.set()
                             st.session_state.pop("_feedback_preview_images", None)
                             st.session_state.pop("_code_review_files", None)
