@@ -262,6 +262,170 @@ def _render_region_zoom_panels(x, y, fit, diag, max_panels: int = 3,
         return []
 
 
+def _extract_xy(curve_data):
+    """(x, y) from a 1-D curve array, mirroring AnalyzeDataController's
+    heuristic: 1-D -> (index, data); [2,N] -> rows; [N,2] -> columns. Returns
+    None if the shape isn't a recognizable single curve."""
+    try:
+        d = np.asarray(curve_data, float)
+        if d.ndim == 1:
+            return np.arange(d.size, dtype=float), d
+        if d.ndim == 2 and d.shape[0] == 2:
+            return d[0], d[1]
+        if d.ndim == 2 and d.shape[1] == 2:
+            return d[:, 0], d[:, 1]
+    except Exception:
+        pass
+    return None
+
+
+def _data_structure_diagnostics(x, y, n_windows: int = 16):
+    """Fit-FREE "where is the hard-to-resolve structure?" diagnostics for the
+    PLANNING stage. The planner sees only the full-range plot, which squashes
+    fine structure under the dominant features. This is ANALYSIS-AGNOSTIC — it
+    does NOT assume peaks: per window it removes a local LINE (the part a
+    glance already resolves) and scores the leftover structure, so it flags
+    bumps / shoulders / unresolved doublets for spectra AND steep knees /
+    inflections / edges for decays, steps and monotonic curves. (A line, not a
+    quadratic — a quadratic would mimic a single bump and hide it.) A compression factor
+    (global span / local span) boosts regions that carry real structure yet are
+    SQUASHED in the full view — exactly the ones the planner would otherwise
+    miss. Same output shape as ``_residual_diagnostics`` so the zoom renderer is
+    reused. Returns ``None`` on unusable input (caller degrades to no panels).
+    """
+    try:
+        x = np.asarray(x, float).ravel()
+        y = np.asarray(y, float).ravel()
+        m = np.isfinite(x) & np.isfinite(y)
+        if int(m.sum()) < 16:
+            return None
+        x, y = x[m], y[m]
+        order = np.argsort(x)
+        x, y = x[order], y[order]
+        sigma = _robust_noise_sigma(y) or (float(np.std(y)) or 1.0)
+        global_span = float(np.ptp(y)) or 1.0
+        edges = np.linspace(x.min(), x.max(), n_windows + 1)
+        windows = []
+        for i, (a, b) in enumerate(zip(edges[:-1], edges[1:])):
+            wm = (x >= a) & (x <= b) if i == n_windows - 1 else (x >= a) & (x < b)
+            if int(wm.sum()) < 5:
+                continue
+            xw, yw = x[wm], y[wm]
+            xc = xw - xw.mean()
+            try:                                    # local LINE = the resolvable trend
+                dr = yw - np.polyval(np.polyfit(xc, yw, 1), xc)
+            except Exception:
+                dr = yw - yw.mean()
+            # Sign-changes of the BIN-AVERAGED detrend residual: systematic local
+            # structure (a shoulder -> 1, an unresolved doublet -> several), not
+            # point noise.
+            nb = int(min(10, max(3, dr.size // 8)))
+            cuts = np.linspace(0, dr.size, nb + 1).astype(int)
+            bmeans = np.array([dr[cuts[k]:cuts[k + 1]].mean()
+                               for k in range(nb) if cuts[k + 1] > cuts[k]])
+            bsigns = np.sign(bmeans)
+            bsigns = bsigns[bsigns != 0]
+            sign_changes = int(np.sum(bsigns[:-1] != bsigns[1:])) if bsigns.size > 1 else 0
+            rms_over_noise = float(np.sqrt(np.mean(dr ** 2)) / sigma)
+            local_span = float(np.ptp(yw)) or sigma
+            compression = max(1.0, global_span / local_span)
+            j = int(np.argmax(np.abs(dr)))
+            windows.append({
+                "x_lo": float(a), "x_hi": float(b),
+                "rms_over_noise": rms_over_noise,
+                "max_abs_norm": float(np.abs(dr[j]) / sigma),
+                "x_at_max": float(xw[j]),
+                "sign_changes": sign_changes,
+                "compression": compression,
+                # structured AND squashed sorts to the top
+                "_score": rms_over_noise * (compression ** 0.5),
+            })
+        # Keep only windows with real structure (not noise); squashed-structured first.
+        windows = [w for w in windows if w["rms_over_noise"] >= 2.5]
+        windows.sort(key=lambda w: w["_score"], reverse=True)
+        return {"noise_sigma": sigma, "global_span": global_span,
+                "worst_windows": windows[:5]}
+    except Exception:
+        return None
+
+
+def _render_data_zoom_panels(x, y, diag, max_panels: int = 3, pad_frac: float = 0.15):
+    """Zoomed, locally-rescaled DATA views of the most structured-but-squashed
+    regions, for the PLANNING stage (no fit exists yet). Returns
+    ``[(label, png_bytes), ...]`` (empty when nothing systematic / unrenderable
+    — caller degrades gracefully)."""
+    if not diag or not diag.get("worst_windows"):
+        return []
+    try:
+        from io import BytesIO
+        from matplotlib import pyplot as plt
+        x = np.asarray(x, float).ravel()
+        y = np.asarray(y, float).ravel()
+        if x.shape[0] != y.shape[0]:
+            return []
+        order = np.argsort(x)
+        x, y = x[order], y[order]
+        panels = []
+        for w in diag["worst_windows"]:
+            if len(panels) >= max_panels:
+                break
+            lo, hi = float(w["x_lo"]), float(w["x_hi"])
+            pad = (hi - lo) * pad_frac
+            mask = (x >= lo - pad) & (x <= hi + pad)
+            if int(mask.sum()) < 4:
+                continue
+            xs, ys = x[mask], y[mask]
+            fig, ax = plt.subplots(figsize=(6, 3.2))
+            ax.plot(xs, ys, "-o", ms=3, lw=1.0, color="#1f77b4")
+            ax.set_title(
+                f"Region {lo:.1f}–{hi:.1f} (true x axis)  |  local structure "
+                f"{float(w.get('rms_over_noise', 0.0)):.1f}×noise, "
+                f"{int(w.get('sign_changes', 0))} sign-changes",
+                fontsize=9)
+            ax.set_xlabel("x (data axis)")
+            ax.set_ylabel("Intensity (local scale)")
+            fig.tight_layout()
+            buf = BytesIO()
+            fig.savefig(buf, format="png", dpi=110)
+            plt.close(fig)
+            panels.append((f"Region {lo:.1f}–{hi:.1f}", buf.getvalue()))
+        return panels
+    except Exception:
+        return []
+
+
+def _append_structure_zoom(prompt: list, state: dict) -> bool:
+    """Append fit-free 'hard-to-resolve region' zoom panels to a planning /
+    validation prompt, so the planner sees fine structure the full-range plot
+    squashes. No-op (returns False) for multi-spectrum stacks or unstructured
+    data. Analysis-agnostic — works for spectra, decays, edges, steps."""
+    try:
+        xy = _extract_xy(state.get("curve_data"))
+        if xy is None:
+            return False
+        panels = _render_data_zoom_panels(
+            xy[0], xy[1], _data_structure_diagnostics(xy[0], xy[1]))
+        if not panels:
+            return False
+        prompt.append(
+            "\n## Hard-to-resolve regions (zoomed, fit-free)\n"
+            "Each window below carries fine structure that the full-range plot "
+            "above SQUASHES — cropped to its true x-range and y-rescaled to the "
+            "LOCAL data. Detected GEOMETRICALLY (deviation from a smooth local "
+            "trend), with NO assumed model, so they apply whatever the analysis "
+            "type: a shoulder may need an extra component, a knee an extra decay "
+            "term, a split edge two features. Use them to choose the "
+            "model/approach and seed feature positions; absence of an obvious "
+            "peak does not mean absence of structure."
+        )
+        for label, png in panels:
+            prompt.append(f"\n**{label}:**")
+            prompt.append({"mime_type": "image/png", "data": png})
+        return True
+    except Exception:
+        return False
+
+
 def _active_skill_names(state: dict) -> list[str]:
     """Return names of all currently-loaded skills from a pipeline state dict.
 
@@ -1739,6 +1903,8 @@ class HumanFeedbackRefinementController:
             "\n## Metadata\n" + json.dumps(state.get("system_info", {}), indent=2),
         ]
 
+        # Fit-free zoom into hard-to-resolve regions the full plot squashes.
+        _append_structure_zoom(prompt, state)
         _append_objective_context(prompt, state)
         _append_fit_domain_guidance(prompt, state)
         _append_column_structure(prompt, state)
@@ -1853,6 +2019,10 @@ class HumanFeedbackRefinementController:
         if data_plot:
             prompt_parts.append("\n**Data:**")
             prompt_parts.append({"mime_type": "image/png", "data": data_plot})
+        # Same fit-free zoom into hard-to-resolve regions so the validator can
+        # catch unresolved structure the plan mischaracterized (no-op for series
+        # stacks, where _extract_xy returns None).
+        _append_structure_zoom(prompt_parts, state)
 
         try:
             response = self.model.generate_content(
