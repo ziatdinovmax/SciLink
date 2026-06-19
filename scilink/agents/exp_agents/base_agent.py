@@ -294,29 +294,35 @@ class LLMAgentMixin:
         - dict with top-level keys (e.g., {"sample": "...", "technique": "..."}) -> returned as-is
         - dict with nested "system_info" key -> extracts the nested dict
         - str (file path to JSON) -> loads and processes as above
-        
+        - str (free-text metadata, not a file) -> {"description": <text>}
+
         This allows users to pass either:
         - A flat system_info dict directly
         - A full metadata file that contains a "system_info" key
         - A path to either type of JSON file
+        - A plain descriptive string (e.g. "17O NMR of D2O, shift vs intensity")
         """
         if system_info is None:
             return {}
-        
-        # Load from file if string path provided
+
+        # A string is either a path to a JSON metadata file or free-text
+        # metadata. Try to load it as a file; if it is not a readable path,
+        # PRESERVE it as free text rather than discarding it — a descriptive
+        # string is a natural metadata input, and dropping it silently blinds
+        # skill selection and every downstream metadata-dependent prompt.
         if isinstance(system_info, str):
             try:
                 with open(system_info, 'r') as f:
                     system_info = json.load(f)
-            except FileNotFoundError:
-                self.logger.error(f"system_info file not found: {system_info}")
-                return {}
             except json.JSONDecodeError as e:
+                # An existing file that is not valid JSON — a genuine error.
                 self.logger.error(f"Invalid JSON in system_info file {system_info}: {e}")
                 return {}
-            except Exception as e:
-                self.logger.error(f"Error loading system_info from {system_info}: {e}")
-                return {}
+            except (FileNotFoundError, OSError, ValueError):
+                # Not a readable path (missing file, name too long, null byte,
+                # ordinary prose) -> treat the string as free-text metadata.
+                self.logger.debug("system_info is free-text (not a file path); preserving as description")
+                return {"description": system_info}
         
         # Ensure we have a dict at this point
         if not isinstance(system_info, dict):
