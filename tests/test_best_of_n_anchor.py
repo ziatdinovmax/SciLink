@@ -730,6 +730,23 @@ def test_escalation_hot_anneal_fans_out(tmp_path):
     )
 
 
+def test_escalation_started_hot_is_not_struggle(tmp_path):
+    # A fit that STARTED at hot (a caller / re-run set the starting level) and
+    # stayed there did NOT climb under stall — it's a clean win, so fast-accept
+    # with no escalation. Only CLIMBING into hot (start < hot) counts.
+    model = _judge_model('{"selected_index": 0, "reasoning": "unused"}')
+    c = _controller(tmp_path, model)
+    seen = []
+    _stub_execute(c, {
+        "cand_00": _canned_result(0.9, True, tag="cand_00", levels=[2, 2, 2]),
+    }, seen)
+
+    result = _run(c, _esc_state(3))
+
+    assert len(seen) == 1
+    assert result["anchor_judge"]["escalated"] is False
+
+
 def test_no_escalation_flag_keeps_fixed_n(tmp_path):
     model = _judge_model('{"selected_index": 0, "reasoning": "ok"}')
     c = _controller(tmp_path, model)
@@ -856,6 +873,21 @@ def test_curve_escalation_hot_fans_out_despite_high_r2(tmp_path):
     result = _run_curve(c, state)
     assert len(seen) == 3
     assert result["anchor_judge"]["escalated"] is True
+
+
+def test_curve_escalation_started_hot_is_not_struggle(tmp_path):
+    # A high-R² fit that STARTED at hot (caller / re-run set T=2) and stayed
+    # there is a clean win, not a struggle -> fast-accept, no escalation.
+    c = _curve_controller(tmp_path)
+    seen = []
+    _stub_fit(c, {
+        "cand_00": _canned_fit(0.99, True, tag="cand_00", levels=[2, 2, 2]),
+    }, seen)
+    state = _curve_state(3)
+    state["candidate_escalation"] = True
+    result = _run_curve(c, state)
+    assert len(seen) == 1
+    assert result["anchor_judge"]["escalated"] is False
 
 
 # ---------------------------------------------------------------------------

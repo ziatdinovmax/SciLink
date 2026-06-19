@@ -4698,9 +4698,11 @@ Return JSON with:
             if not self._candidate_fast_accept(candidates[0], _gate(state)):
                 escalated = True
                 self.logger.info(
-                    f"First attempt weak "
+                    f"First attempt not a clean win "
                     f"(R²={candidates[0]['score']:.4f}, "
-                    f"iterations={candidates[0]['iterations']}) - "
+                    f"iterations={candidates[0]['iterations']}, "
+                    f"climbed_to_hot="
+                    f"{self._candidate_climbed_to_hot(candidates[0])}) - "
                     f"escalating to {n} candidates"
                 )
                 _run_attempts(range(1, n))
@@ -4823,14 +4825,28 @@ Return JSON with:
             (it.get("annealing_level", 0) for it in iters), default=0
         )
 
+    def _candidate_climbed_to_hot(self, c: dict) -> bool:
+        """True only if the loop ESCALATED into hot annealing under stall — it
+        started below hot and had to climb there. A fit that STARTED at hot (a
+        caller / re-run set the starting annealing level) did not struggle, so
+        reaching hot is not held against it (that must NOT auto-escalate)."""
+        iters = (
+            (c["result"].get("quality_history") or {})
+            .get("verification_iterations") or []
+        )
+        if not iters:
+            return False
+        levels = [it.get("annealing_level", 0) for it in iters]
+        hot = self._hot_annealing_level
+        return max(levels) >= hot and levels[0] < hot
+
     def _candidate_fast_accept(self, c: dict, gate) -> bool:
         value = gate.extract((c["result"] or {}).get("fit_quality") or {})
         return (
             c["success"]
             and c["approved"]
             and gate.clears_by_fast_margin(value, self.ESCALATION_MARGIN_FRACTION)
-            and self._candidate_max_annealing_level(c)
-            < self._hot_annealing_level
+            and not self._candidate_climbed_to_hot(c)
         )
 
     def _get_bestofn_join_approval(

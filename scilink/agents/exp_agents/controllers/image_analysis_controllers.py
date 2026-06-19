@@ -4105,11 +4105,11 @@ Return JSON with:
                 # so escalation explores alternatives rather than resampling the
                 # one plan that just underperformed.
                 self.logger.info(
-                    f"First attempt weak "
+                    f"First attempt not a clean win "
                     f"(score={candidates[0]['score']:.2f}, "
                     f"iterations={candidates[0]['iterations']}, "
-                    f"max_annealing_level="
-                    f"{self._candidate_max_annealing_level(candidates[0])}) - "
+                    f"climbed_to_hot="
+                    f"{self._candidate_climbed_to_hot(candidates[0])}) - "
                     f"escalating to {n} independently-planned candidates"
                 )
                 _run_attempts(range(1, n))
@@ -4199,15 +4199,15 @@ Return JSON with:
     # verification loop's own telemetry, not a raw iteration count:
     #   - it failed, was not approved, or declined (#289), OR
     #   - it landed only razor-thin above threshold, OR
-    #   - the adaptive annealing loop had to go HOT (fully relax the plan
-    #     constraints) to get there.
-    # The annealing level is a far better "did it fight" signal than the
-    # old `iterations <= 2`: the loop starts frozen and escalates only when
-    # the score stalls (or many of the budget's iterations pass), so reaching
-    # hot directly encodes that the cold/warm regime could not solve the
-    # image. The margin is now a thin backstop against a barely-over approval
-    # (was 0.15, which rejected genuinely good ~0.80 results and fanned out
-    # needlessly — the trigger for this gate's redesign).
+    #   - the adaptive annealing loop had to CLIMB into HOT (escalate to fully
+    #     relaxed plan constraints under stall) to get there.
+    # Note the signal is CLIMBING into hot, not BEING at hot: if a caller
+    # (an orchestrator / a re-run / a deepen turn) STARTS the fit at hot, then
+    # operating at hot is the baseline, not a struggle — reaching hot in that
+    # case must NOT trigger escalation. So we compare the trajectory's max
+    # level against its STARTING level. The margin is a thin backstop against a
+    # barely-over approval (was 0.15, which rejected genuinely good ~0.80
+    # results and fanned out needlessly — the trigger for this gate's redesign).
     ESCALATION_SCORE_MARGIN = 0.05
 
     @property
@@ -4224,6 +4224,21 @@ Return JSON with:
         return max(
             (it.get("annealing_level", 0) for it in iters), default=0
         )
+
+    def _candidate_climbed_to_hot(self, c: dict) -> bool:
+        """True only if the loop ESCALATED into hot annealing under stall —
+        i.e. it started below hot and had to climb there. A fit that STARTED at
+        hot (a caller set the starting annealing level) did not struggle, so
+        reaching hot is not held against it."""
+        iters = (
+            (c["result"].get("quality_history") or {})
+            .get("verification_iterations") or []
+        )
+        if not iters:
+            return False
+        levels = [it.get("annealing_level", 0) for it in iters]
+        hot = self._hot_annealing_level
+        return max(levels) >= hot and levels[0] < hot
 
     def _candidate_fast_accept(self, c: dict) -> bool:
         # Never fast-accept a null/decline (#289): the verifier scores
@@ -4244,8 +4259,7 @@ Return JSON with:
             and c["approved"]
             and c["score"] >= self.quality_threshold
             + self.ESCALATION_SCORE_MARGIN
-            and self._candidate_max_annealing_level(c)
-            < self._hot_annealing_level
+            and not self._candidate_climbed_to_hot(c)
         )
 
     def _get_bestofn_join_approval(
