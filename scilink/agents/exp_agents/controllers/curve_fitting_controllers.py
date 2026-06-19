@@ -279,19 +279,75 @@ def _extract_xy(curve_data):
     return None
 
 
-def _data_structure_diagnostics(x, y, n_windows: int = 16):
+_STRUCTURE_RMS_FLOOR = 2.5  # window structure must be this many × noise to count
+
+
+def _score_scale(x, y, sigma, global_span, n_windows):
+    """Score sliding windows at ONE scale. Window centers step by width/4 so a
+    window lands ON each feature regardless of grid alignment (a fixed grid
+    splits a narrow feature across a boundary and misses it). Returns the
+    windows whose structure clears the noise floor."""
+    width = (x.max() - x.min()) / n_windows
+    if width <= 0:
+        return []
+    half = width / 2.0
+    out = []
+    for c in np.arange(x.min() + half, x.max() - half + 1e-9, width / 4.0):
+        lo, hi = c - half, c + half
+        wm = (x >= lo) & (x <= hi)
+        if int(wm.sum()) < 6:
+            continue
+        xw, yw = x[wm], y[wm]
+        xc = xw - xw.mean()
+        try:                                    # local LINE = the resolvable trend
+            dr = yw - np.polyval(np.polyfit(xc, yw, 1), xc)
+        except Exception:
+            dr = yw - yw.mean()
+        rms_over_noise = float(np.sqrt(np.mean(dr ** 2)) / sigma)
+        if rms_over_noise < _STRUCTURE_RMS_FLOOR:    # no structure above the noise
+            continue
+        # Sign-changes of the BIN-AVERAGED detrend residual: systematic local
+        # structure (a shoulder -> 1, an unresolved doublet -> several), not noise.
+        nb = int(min(10, max(3, dr.size // 8)))
+        cuts = np.linspace(0, dr.size, nb + 1).astype(int)
+        bmeans = np.array([dr[cuts[k]:cuts[k + 1]].mean()
+                           for k in range(nb) if cuts[k + 1] > cuts[k]])
+        bsigns = np.sign(bmeans)
+        bsigns = bsigns[bsigns != 0]
+        sign_changes = int(np.sum(bsigns[:-1] != bsigns[1:])) if bsigns.size > 1 else 0
+        local_span = float(np.ptp(yw)) or sigma
+        compression = max(1.0, global_span / local_span)
+        j = int(np.argmax(np.abs(dr)))
+        out.append({
+            "x_lo": float(lo), "x_hi": float(hi), "x_mid": float(c),
+            "rms_over_noise": rms_over_noise,
+            "max_abs_norm": float(np.abs(dr[j]) / sigma),
+            "x_at_max": float(xw[j]),
+            "sign_changes": sign_changes,
+            "compression": compression,
+            # structured AND squashed sorts to the top. Compression is weighted
+            # LINEARLY so a small feature hidden under a tall one — the actually-
+            # hard-to-resolve case — outranks the tall feature's own (already-
+            # visible) flanks. Safe because the rms floor excludes squashed noise.
+            "_score": rms_over_noise * compression,
+        })
+    return out
+
+
+def _data_structure_diagnostics(x, y, scales=(8, 16, 32)):
     """Fit-FREE "where is the hard-to-resolve structure?" diagnostics for the
     PLANNING stage. The planner sees only the full-range plot, which squashes
-    fine structure under the dominant features. This is ANALYSIS-AGNOSTIC — it
-    does NOT assume peaks: per window it removes a local LINE (the part a
-    glance already resolves) and scores the leftover structure, so it flags
-    bumps / shoulders / unresolved doublets for spectra AND steep knees /
-    inflections / edges for decays, steps and monotonic curves. (A line, not a
-    quadratic — a quadratic would mimic a single bump and hide it.) A compression factor
-    (global span / local span) boosts regions that carry real structure yet are
-    SQUASHED in the full view — exactly the ones the planner would otherwise
-    miss. Same output shape as ``_residual_diagnostics`` so the zoom renderer is
-    reused. Returns ``None`` on unusable input (caller degrades to no panels).
+    fine structure under the dominant features. ANALYSIS-AGNOSTIC — no assumed
+    model: per window it removes a local LINE (the part a glance already
+    resolves) and scores the leftover structure, so it flags bumps / shoulders /
+    unresolved doublets for spectra AND fine structure on edges / steep knees
+    for decays, steps and monotonic curves.
+
+    MULTI-SCALE: runs several window scales and merges (cross-scale non-max
+    suppression), so it adapts to ANY feature width — narrow shoulders and broad
+    humps alike — with no single ``n_windows`` to tune. Precision-first: a window
+    must clear the noise floor to count, so featureless / noisy data flags
+    nothing (a clean no-op). Returns ``None`` on unusable input.
     """
     try:
         x = np.asarray(x, float).ravel()
@@ -304,47 +360,23 @@ def _data_structure_diagnostics(x, y, n_windows: int = 16):
         x, y = x[order], y[order]
         sigma = _robust_noise_sigma(y) or (float(np.std(y)) or 1.0)
         global_span = float(np.ptp(y)) or 1.0
-        edges = np.linspace(x.min(), x.max(), n_windows + 1)
-        windows = []
-        for i, (a, b) in enumerate(zip(edges[:-1], edges[1:])):
-            wm = (x >= a) & (x <= b) if i == n_windows - 1 else (x >= a) & (x < b)
-            if int(wm.sum()) < 5:
-                continue
-            xw, yw = x[wm], y[wm]
-            xc = xw - xw.mean()
-            try:                                    # local LINE = the resolvable trend
-                dr = yw - np.polyval(np.polyfit(xc, yw, 1), xc)
-            except Exception:
-                dr = yw - yw.mean()
-            # Sign-changes of the BIN-AVERAGED detrend residual: systematic local
-            # structure (a shoulder -> 1, an unresolved doublet -> several), not
-            # point noise.
-            nb = int(min(10, max(3, dr.size // 8)))
-            cuts = np.linspace(0, dr.size, nb + 1).astype(int)
-            bmeans = np.array([dr[cuts[k]:cuts[k + 1]].mean()
-                               for k in range(nb) if cuts[k + 1] > cuts[k]])
-            bsigns = np.sign(bmeans)
-            bsigns = bsigns[bsigns != 0]
-            sign_changes = int(np.sum(bsigns[:-1] != bsigns[1:])) if bsigns.size > 1 else 0
-            rms_over_noise = float(np.sqrt(np.mean(dr ** 2)) / sigma)
-            local_span = float(np.ptp(yw)) or sigma
-            compression = max(1.0, global_span / local_span)
-            j = int(np.argmax(np.abs(dr)))
-            windows.append({
-                "x_lo": float(a), "x_hi": float(b),
-                "rms_over_noise": rms_over_noise,
-                "max_abs_norm": float(np.abs(dr[j]) / sigma),
-                "x_at_max": float(xw[j]),
-                "sign_changes": sign_changes,
-                "compression": compression,
-                # structured AND squashed sorts to the top
-                "_score": rms_over_noise * (compression ** 0.5),
-            })
-        # Keep only windows with real structure (not noise); squashed-structured first.
-        windows = [w for w in windows if w["rms_over_noise"] >= 2.5]
-        windows.sort(key=lambda w: w["_score"], reverse=True)
+        cand = []
+        for nw in scales:
+            cand.extend(_score_scale(x, y, sigma, global_span, nw))
+        # Cross-scale non-max suppression: highest score first; drop any window
+        # that overlaps an already-kept one (its center inside the kept range or
+        # vice-versa) so the result is up to 5 DISTINCT regions, each at the
+        # scale that best resolved it.
+        cand.sort(key=lambda w: w["_score"], reverse=True)
+        kept = []
+        for w in cand:
+            if not any((k["x_lo"] <= w["x_mid"] <= k["x_hi"])
+                       or (w["x_lo"] <= k["x_mid"] <= w["x_hi"]) for k in kept):
+                kept.append(w)
+            if len(kept) >= 5:
+                break
         return {"noise_sigma": sigma, "global_span": global_span,
-                "worst_windows": windows[:5]}
+                "worst_windows": kept}
     except Exception:
         return None
 
@@ -408,17 +440,22 @@ def _append_structure_zoom(prompt: list, state: dict) -> bool:
         if not panels:
             return False
         prompt.append(
-            "\n## Hard-to-resolve regions (zoomed, fit-free)\n"
-            "Each window below carries fine structure that the full-range plot "
-            "above SQUASHES — cropped to its true x-range and y-rescaled to the "
-            "LOCAL data. Detected GEOMETRICALLY (deviation from a smooth local "
-            "trend), with NO assumed model, so they apply whatever the analysis "
+            "\n## Candidate hard-to-resolve regions (zoomed, fit-free — ADVISORY)\n"
+            "The full-range plot above is the PRIMARY evidence. The windows below "
+            "are candidate regions where a smooth local trend leaves leftover "
+            "structure — cropped to their true x-range and y-rescaled to the LOCAL "
+            "data so squashed detail becomes visible. They are detected "
+            "GEOMETRICALLY (NO assumed model), so they apply whatever the analysis "
             "type: a shoulder may need an extra component, a knee an extra decay "
-            "term, a split edge two features. Use them to choose the "
-            "model/approach and seed feature positions; absence of an obvious "
-            "peak does not mean absence of structure. If a domain skill is "
-            "loaded, cross-reference these regions against the features that "
-            "technique expects."
+            "term, a split edge two features.\n"
+            "Treat them as HINTS, not findings: VERIFY each against the full plot "
+            "and the noise level before acting on it, and IGNORE any that look "
+            "like noise or are already clearly resolved in the full view. They "
+            "never override the full plot — at worst they are redundant. Use the "
+            "ones that hold up to choose the model/approach and seed feature "
+            "positions; absence of a flagged window does not mean absence of "
+            "structure. If a domain skill is loaded, cross-reference these regions "
+            "against the features that technique expects."
         )
         for label, png in panels:
             prompt.append(f"\n**{label}:**")

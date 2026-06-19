@@ -43,13 +43,18 @@ def test_unresolved_doublet_has_sign_changes():
     assert top["sign_changes"] >= 1
 
 
-def test_edge_step_is_flagged():
-    # A sigmoid edge (no peaks) — structure is the edge, not a maximum.
+def test_fine_structure_on_edge_is_flagged():
+    # An edge carrying unresolved fine structure (ELNES-like bump) — the
+    # SQUASHED part that matters. (A pure smooth edge is fully visible in the
+    # full plot, so it is correctly NOT flagged — precision: flag hidden
+    # structure, never the already-resolvable broad shape.)
     x = np.linspace(0, 100, 1000)
-    y = 10.0 / (1 + np.exp(-(x - 55) / 1.5)) + rng.normal(0, 0.05, x.size)
+    edge = 10.0 / (1 + np.exp(-(x - 50) / 1.5))
+    y = edge + 0.8 * np.exp(-0.5 * ((x - 58) / 1.0) ** 2) + rng.normal(0, 0.04, x.size)
     diag = _data_structure_diagnostics(x, y)
-    assert diag and diag["worst_windows"]
-    assert _windows_cover(diag, 55), "edge region should be flagged"
+    assert _windows_cover(diag, 58), "fine structure on the edge should be flagged"
+
+
 
 
 def test_flat_noise_flags_nothing():
