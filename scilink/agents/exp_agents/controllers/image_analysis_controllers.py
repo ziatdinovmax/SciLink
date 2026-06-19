@@ -1273,6 +1273,65 @@ class ImagePlanningController:
 
         return state
 
+    def _lock_config(self, state: dict) -> None:
+        """Freeze the current plan fields into ``locked_analysis_config`` (and
+        per-regime configs for a multi-regime series). Shared by ``execute``
+        and the per-candidate ``replan_headless`` so both lock identically."""
+        state["locked_analysis_config"] = {
+            "analysis_approach": state.get("analysis_approach"),
+            "processing_pipeline": state.get("processing_pipeline"),
+            "features_to_extract": state.get("features_to_extract", []),
+            "quality_criteria": state.get("quality_criteria"),
+            "expected_outputs": state.get("expected_outputs", []),
+        }
+
+        series_plan = state.get("series_analysis_plan")
+        if series_plan and series_plan.get("regimes"):
+            regime_configs = {}
+            for regime in series_plan["regimes"]:
+                regime_config = {
+                    "analysis_approach": state.get("analysis_approach"),
+                    "processing_pipeline": regime.get(
+                        "processing_pipeline", state.get("processing_pipeline")
+                    ),
+                    "features_to_extract": regime.get(
+                        "features_to_extract",
+                        state.get("features_to_extract", []),
+                    ),
+                    "quality_criteria": state.get("quality_criteria"),
+                    "expected_outputs": state.get("expected_outputs", []),
+                }
+                for idx in regime.get("image_indices", []):
+                    regime_configs[idx] = regime_config
+            state["regime_configs"] = regime_configs
+            self.logger.info(
+                f"  Locked {len(series_plan['regimes'])} regime "
+                f"configuration(s) for series processing."
+            )
+        else:
+            state["regime_configs"] = None
+            self.logger.info(
+                "  Analysis configuration locked for series processing."
+            )
+
+    def replan_headless(self, state: dict) -> dict:
+        """Generate a fresh, INDEPENDENT plan for one best-of-N candidate.
+
+        Mirrors ``execute``'s planning — one ``_plan_analysis`` (NO diversity
+        suffix: divergence between candidates comes from inherent sampling,
+        like running the agent again) + ``_validate_plan`` + ``_lock_config`` —
+        but with NO candidate-plan selection and NO human feedback. The fan-out
+        calls this per candidate (>=1) so each starts from its own approach
+        instead of a shared locked plan. Mutates and returns ``state``.
+        """
+        plan = self._plan_analysis(state)
+        state = self._apply_plan_to_state(state, plan)
+        self.logger.info(f"  Approach: {state['analysis_approach']}")
+        self.logger.info(f"  Pipeline: {state['processing_pipeline']}")
+        state = self._validate_plan(state)
+        self._lock_config(state)
+        return state
+
     def _generate_candidate_plans(self, state: dict) -> dict:
         """Generate N candidate plans with different approaches, select the best."""
         from ..instruct import IMAGE_ANALYSIS_PLAN_DIVERSITY_SUFFIX
@@ -1749,43 +1808,7 @@ class ImagePlanningController:
                     self.logger.warning("  Max iterations reached.")
                     print("Max refinements reached. Proceeding with current plan.")
 
-            state["locked_analysis_config"] = {
-                "analysis_approach": state.get("analysis_approach"),
-                "processing_pipeline": state.get("processing_pipeline"),
-                "features_to_extract": state.get("features_to_extract", []),
-                "quality_criteria": state.get("quality_criteria"),
-                "expected_outputs": state.get("expected_outputs", []),
-            }
-
-            # Build per-regime configs if series plan has multiple regimes
-            series_plan = state.get("series_analysis_plan")
-            if series_plan and series_plan.get("regimes"):
-                regime_configs = {}
-                for regime in series_plan["regimes"]:
-                    regime_config = {
-                        "analysis_approach": state.get("analysis_approach"),
-                        "processing_pipeline": regime.get(
-                            "processing_pipeline", state.get("processing_pipeline")
-                        ),
-                        "features_to_extract": regime.get(
-                            "features_to_extract",
-                            state.get("features_to_extract", []),
-                        ),
-                        "quality_criteria": state.get("quality_criteria"),
-                        "expected_outputs": state.get("expected_outputs", []),
-                    }
-                    for idx in regime.get("image_indices", []):
-                        regime_configs[idx] = regime_config
-                state["regime_configs"] = regime_configs
-                self.logger.info(
-                    f"  Locked {len(series_plan['regimes'])} regime "
-                    f"configuration(s) for series processing."
-                )
-            else:
-                state["regime_configs"] = None
-                self.logger.info(
-                    "  Analysis configuration locked for series processing."
-                )
+            self._lock_config(state)
 
         except Exception as e:
             self.logger.warning(f"Planning failed: {e}, using fallback")
@@ -2052,6 +2075,7 @@ Your guidance: '''
         max_verification_iterations: int = None,
         conformance_instructions: str = "",
         refinement_instructions: str = "",
+        replanner: Any = None,
     ):
         self.model = model
         self.logger = logger
@@ -2070,6 +2094,10 @@ Your guidance: '''
         self.max_verification_iterations = max_verification_iterations if max_verification_iterations is not None else self.DEFAULT_MAX_VERIFICATION_ITERATIONS
         self.quality_threshold = self.DEFAULT_QUALITY_THRESHOLD
         self.conformance_instructions = conformance_instructions
+        # Planning controller used to give each best-of-N fan-out candidate
+        # (>=1) its OWN independent plan (ensemble diversity). None on helper
+        # instances (e.g. adaptive refit) -> candidates share the locked plan.
+        self.replanner = replanner
 
     def _generate_analysis_script(
         self,
@@ -3933,6 +3961,17 @@ Return JSON with:
             # candidate keeps clean, unprefixed — but still visible — logs.
             register_worker(_parent_thread, f"cand_{i:02d}", prefix=tagged)
             try:
+                # Ensemble diversity: each fan-out candidate (>=1) generates its
+                # OWN independent plan — like running the agent again, divergent
+                # approaches from inherent sampling, not a shared locked plan.
+                # Candidate 0 keeps the (human-approved) primary plan. Toggle
+                # off with state["independent_candidate_plans"] = False.
+                if (i >= 1 and self.replanner is not None
+                        and job_state.get("independent_candidate_plans", True)):
+                    self.logger.info(
+                        "Planning an independent approach for this candidate..."
+                    )
+                    self.replanner.replan_headless(job_state)
                 result = self._execute_and_verify(
                     state=job_state, image_data=image_data,
                     data_path=data_path, image_name=image_name,
@@ -4061,11 +4100,17 @@ Return JSON with:
             _run_attempts([0])
             if not self._candidate_fast_accept(candidates[0]):
                 escalated = True
+                # Attempt 0 was weak. Fan out to genuinely different approaches:
+                # each candidate >=1 replans independently (see _run_candidate),
+                # so escalation explores alternatives rather than resampling the
+                # one plan that just underperformed.
                 self.logger.info(
                     f"First attempt weak "
                     f"(score={candidates[0]['score']:.2f}, "
-                    f"iterations={candidates[0]['iterations']}) - "
-                    f"escalating to {n} candidates"
+                    f"iterations={candidates[0]['iterations']}, "
+                    f"max_annealing_level="
+                    f"{self._candidate_max_annealing_level(candidates[0])}) - "
+                    f"escalating to {n} independently-planned candidates"
                 )
                 _run_attempts(range(1, n))
         else:
@@ -4149,19 +4194,41 @@ Return JSON with:
         }
         return result
 
-    # Escalation fast-accept gate: attempt 0 is accepted without fan-out when
-    # it passed verification with margin and converged quickly. Margin 0.15
-    # calibrated on 12 live fixed-3 runs (8 real TEM/OM/AFM benchmark images
-    # + 4 synthetic ground-truth runs): every fast-fire at score >= 0.85 was
-    # cost-free vs the full 3-way judge; the single fire below 0.85 (0.82)
-    # was the only real miss.
-    ESCALATION_SCORE_MARGIN = 0.15
-    ESCALATION_MAX_FAST_ITERS = 2
+    # Escalation fast-accept gate: attempt 0 is accepted without fan-out
+    # UNLESS it shows a sign of struggle. "Struggle" is read from the
+    # verification loop's own telemetry, not a raw iteration count:
+    #   - it failed, was not approved, or declined (#289), OR
+    #   - it landed only razor-thin above threshold, OR
+    #   - the adaptive annealing loop had to go HOT (fully relax the plan
+    #     constraints) to get there.
+    # The annealing level is a far better "did it fight" signal than the
+    # old `iterations <= 2`: the loop starts frozen and escalates only when
+    # the score stalls (or many of the budget's iterations pass), so reaching
+    # hot directly encodes that the cold/warm regime could not solve the
+    # image. The margin is now a thin backstop against a barely-over approval
+    # (was 0.15, which rejected genuinely good ~0.80 results and fanned out
+    # needlessly — the trigger for this gate's redesign).
+    ESCALATION_SCORE_MARGIN = 0.05
+
+    @property
+    def _hot_annealing_level(self) -> int:
+        return len(self._CONSTRAINT_ANNEALING_SCHEDULE) - 1
+
+    @staticmethod
+    def _candidate_max_annealing_level(c: dict) -> int:
+        """Highest annealing level the candidate's verification loop reached."""
+        iters = (
+            (c["result"].get("quality_history") or {})
+            .get("verification_iterations") or []
+        )
+        return max(
+            (it.get("annealing_level", 0) for it in iters), default=0
+        )
 
     def _candidate_fast_accept(self, c: dict) -> bool:
         # Never fast-accept a null/decline (#289): the verifier scores
         # rigorous nulls high (no visible errors to deduct) and they converge
-        # fast, so both fast-accept criteria are biased toward them. A decline
+        # fast, so the fast-accept criteria are biased toward them. A decline
         # always escalates so the judge can compare it against attempts that
         # actually delivered. Absent result_type (older verifier output) is
         # treated as delivered.
@@ -4177,7 +4244,8 @@ Return JSON with:
             and c["approved"]
             and c["score"] >= self.quality_threshold
             + self.ESCALATION_SCORE_MARGIN
-            and c["iterations"] <= self.ESCALATION_MAX_FAST_ITERS
+            and self._candidate_max_annealing_level(c)
+            < self._hot_annealing_level
         )
 
     def _get_bestofn_join_approval(

@@ -213,6 +213,17 @@ attempt to delegate simulation work.
   fallback when fan-out is not appropriate; still end with ONE correlated
   interpretation across modalities — not N separate reports.
 
+**ENSEMBLE / BEST-OF-N ON ONE DATASET (distinct from the above):**
+- Several INDEPENDENT analysis trajectories over the SAME single dataset,
+  judge-compared to cut run-to-run variance — the user asking to "run it 3
+  ways", "an ensemble of 3", or "best-of-N" — is NOT the dataset fan-out
+  (that needs MULTIPLE complementary datasets). Keep it a SINGLE
+  `delegate_to_analysis` and state the candidate count in its `task` (e.g.
+  "run as best-of-3: 3 independent candidate analyses"); the specialist maps
+  that to `run_analysis`'s `n_candidates`. This is the right answer when there
+  is only one dataset but the user wants multiple attempts — do NOT decline it
+  just because the dataset fan-out doesn't apply.
+
 **THE DELEGATION CONTRACT:**
 - `delegate_to_analysis(task, context)` and `delegate_to_planning(task,
   context)` run the specialist and return a structured JSON result: status,

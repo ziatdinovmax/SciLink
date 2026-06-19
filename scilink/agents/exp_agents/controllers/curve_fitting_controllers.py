@@ -2177,46 +2177,7 @@ class HumanFeedbackRefinementController:
                     "  Column mapping unresolved/absent — heuristic X/Y selection."
                 )
 
-            state["locked_fitting_config"] = {
-                "analysis_approach": state.get("analysis_approach"),
-                "physical_model": state.get("physical_model") or "Model to be determined from the data",
-                "parameters_to_extract": state.get("parameters_to_extract", []),
-                "fitting_strategy": state.get("fitting_strategy"),
-                "column_mapping": column_mapping,
-            }
-
-            # Build per-regime configs if series plan has multiple regimes
-            series_plan = state.get("series_analysis_plan")
-            if series_plan and series_plan.get("regimes"):
-                regime_configs = {}
-                for regime in series_plan["regimes"]:
-                    regime_config = {
-                        "analysis_approach": state.get("analysis_approach"),
-                        "physical_model": regime.get(
-                            "physical_model", state.get("physical_model")
-                        ),
-                        "parameters_to_extract": regime.get(
-                            "parameters_to_extract",
-                            state.get("parameters_to_extract", []),
-                        ),
-                        "fitting_strategy": regime.get(
-                            "fitting_strategy", state.get("fitting_strategy")
-                        ),
-                        # Column roles are a file property — same across regimes.
-                        "column_mapping": column_mapping,
-                    }
-                    for idx in regime.get("spectrum_indices", []):
-                        regime_configs[idx] = regime_config
-                state["regime_configs"] = regime_configs
-                self.logger.info(
-                    f"  ✅ Locked {len(series_plan['regimes'])} regime "
-                    f"configuration(s) for series processing."
-                )
-            else:
-                state["regime_configs"] = None
-                self.logger.info(
-                    "  ✅ Fitting configuration locked for series processing."
-                )
+            self._lock_config(state, column_mapping)
 
         except Exception as e:
             self.logger.warning(f"⚠️ Planning failed: {e}, using fallback")
@@ -2240,6 +2201,74 @@ class HumanFeedbackRefinementController:
             state["series_analysis_plan"] = None
             state["regime_configs"] = None
 
+        return state
+
+    def _lock_config(self, state: dict, column_mapping) -> None:
+        """Freeze the current fitting-plan fields into ``locked_fitting_config``
+        (and per-regime configs). Shared by ``execute`` and the per-candidate
+        ``replan_headless`` so both lock identically. ``column_mapping`` is a
+        file-structure property resolved once and passed in — candidates
+        inherit the primary plan's mapping rather than re-resolving it."""
+        state["locked_fitting_config"] = {
+            "analysis_approach": state.get("analysis_approach"),
+            "physical_model": state.get("physical_model") or "Model to be determined from the data",
+            "parameters_to_extract": state.get("parameters_to_extract", []),
+            "fitting_strategy": state.get("fitting_strategy"),
+            "column_mapping": column_mapping,
+        }
+
+        # Build per-regime configs if series plan has multiple regimes
+        series_plan = state.get("series_analysis_plan")
+        if series_plan and series_plan.get("regimes"):
+            regime_configs = {}
+            for regime in series_plan["regimes"]:
+                regime_config = {
+                    "analysis_approach": state.get("analysis_approach"),
+                    "physical_model": regime.get(
+                        "physical_model", state.get("physical_model")
+                    ),
+                    "parameters_to_extract": regime.get(
+                        "parameters_to_extract",
+                        state.get("parameters_to_extract", []),
+                    ),
+                    "fitting_strategy": regime.get(
+                        "fitting_strategy", state.get("fitting_strategy")
+                    ),
+                    # Column roles are a file property — same across regimes.
+                    "column_mapping": column_mapping,
+                }
+                for idx in regime.get("spectrum_indices", []):
+                    regime_configs[idx] = regime_config
+            state["regime_configs"] = regime_configs
+            self.logger.info(
+                f"  ✅ Locked {len(series_plan['regimes'])} regime "
+                f"configuration(s) for series processing."
+            )
+        else:
+            state["regime_configs"] = None
+            self.logger.info(
+                "  ✅ Fitting configuration locked for series processing."
+            )
+
+    def replan_headless(self, state: dict) -> dict:
+        """Generate a fresh, INDEPENDENT fitting plan for one best-of-N
+        candidate.
+
+        Mirrors ``execute``'s planning — one ``_plan_analysis`` + ``_validate_plan``
+        + lock — with NO human feedback and NO candidate pre-selection.
+        Divergence comes from inherent sampling, which is especially valuable
+        for SKILL-LESS curves where initial-plan variance (model family, peak
+        count, background) is high; when an authoritative technique skill is
+        active the plans naturally converge on the mandated model (correct).
+        COLUMN MAPPING is a file-structure property already resolved and
+        applied to the shared data by the primary plan, so candidates INHERIT
+        it (no re-resolve, no re-slice). Mutates and returns ``state``.
+        """
+        state = self._plan_analysis(state)
+        self.logger.info(f"  Approach: {state['analysis_approach']}")
+        self.logger.info(f"  Model: {state['physical_model']}")
+        state = self._validate_plan(state)
+        self._lock_config(state, state.get("column_mapping_locked"))
         return state
 
 
@@ -2420,6 +2449,7 @@ Your guidance: '''
         max_verification_iterations: int = None,
         conformance_instructions: str = "",
         parallel_workers: Optional[int] = None,
+        replanner: Any = None,
     ):
         self.model = model
         self.logger = logger
@@ -2432,6 +2462,10 @@ Your guidance: '''
         self.quality_instructions = quality_instructions
         self.output_dir = Path(output_dir)
         self.plot_fn = plot_fn
+        # Planning controller used to give each best-of-N fan-out candidate
+        # (>=1) its OWN independent fitting plan (ensemble diversity; most
+        # valuable for skill-less curves). None -> candidates share the plan.
+        self.replanner = replanner
         self.r2_threshold = r2_threshold if r2_threshold is not None else self.DEFAULT_R2_THRESHOLD
         # Vestigial: the alternative-models loop was removed in favor of
         # patience-counter-driven hot annealing inside the verification
@@ -4520,6 +4554,18 @@ Return JSON with:
             # lone candidate keeps clean, unprefixed — but still visible — logs.
             register_worker(_parent_thread, f"cand_{i:02d}", prefix=tagged)
             try:
+                # Ensemble diversity: each fan-out candidate (>=1) generates its
+                # OWN independent fitting plan — like running the agent again.
+                # Especially valuable for skill-less curves (high plan variance);
+                # with an authoritative skill the plans converge on the mandated
+                # model. Candidate 0 keeps the (human-approved) primary plan.
+                # Toggle off with state["independent_candidate_plans"] = False.
+                if (i >= 1 and self.replanner is not None
+                        and job_state.get("independent_candidate_plans", True)):
+                    self.logger.info(
+                        "Planning an independent approach for this candidate..."
+                    )
+                    self.replanner.replan_headless(job_state)
                 result = self._fit_with_quality_control(
                     state=job_state, curve_data=curve_data,
                     data_path=data_path, spectrum_name=spectrum_name,
@@ -4633,7 +4679,7 @@ Return JSON with:
                 f"fanning out only if it is weak"
             )
             _run_attempts([0])
-            if not self._candidate_fast_accept(candidates[0]):
+            if not self._candidate_fast_accept(candidates[0], _gate(state)):
                 escalated = True
                 self.logger.info(
                     f"First attempt weak "
@@ -4723,21 +4769,52 @@ Return JSON with:
         }
         return result
 
-    # Escalation fast-accept gate: attempt 0 is accepted without fan-out when
-    # it passed the R² gate with margin and converged quickly. The margin is
-    # capped near 1.0 (an r2_threshold of 0.999 leaves no room for +0.02).
-    ESCALATION_R2_MARGIN = 0.02
-    ESCALATION_MAX_FAST_ITERS = 2
+    # Escalation fast-accept gate: attempt 0 skips the fan-out only when it
+    # cleared the acceptance metric WITH MARGIN and did NOT have to anneal
+    # "hot" to get there. Fit quality has TWO parts — the numeric metric
+    # (objective goodness-of-fit: R², or a skill's χ²/RMSE/FOM) and physical
+    # correctness (a verifier judgment, folded into `approved`). The metric
+    # half is a strong, objective signal; the physical-correctness half is
+    # SUBJECTIVE, and is exactly where a hot-annealed OVER-FIT (T=2 grants full
+    # model freedom to add components) can post a great metric, be physically
+    # wrong, and slip past a lenient verifier. The annealing-"struggle" check
+    # (max level < hot) corroborates that approval was earned WITHOUT relaxing
+    # the model. (Replaces the old `iterations <= 2` proxy, which fanned out
+    # needlessly on good-but-slow fits and did nothing about over-fit risk.)
+    #
+    # The margin is METRIC-AGNOSTIC: a fraction of the gate's accept↔hard-reject
+    # band, applied in the gate's direction, capped near the metric's optimum
+    # (QualityGate.clears_by_fast_margin). For the default R² gate (band 0.05,
+    # best 1.0) the fraction 0.4 reproduces the old absolute +0.02 / 0.97 bar
+    # exactly; a lower-is-better χ² gate instead requires value <= accept -
+    # margin. The R² `final_r2` score is NOT used as the bar — the gate reads
+    # its own metric from `fit_quality`, so a skill scored by χ²/RMSE is no
+    # longer wrongly required to also post a high R².
+    ESCALATION_MARGIN_FRACTION = 0.4
 
-    def _candidate_fast_accept(self, c: dict) -> bool:
-        fast_thr = self.r2_threshold + min(
-            self.ESCALATION_R2_MARGIN, (1.0 - self.r2_threshold) / 2
+    @property
+    def _hot_annealing_level(self) -> int:
+        return len(self._CONSTRAINT_ANNEALING_SCHEDULE) - 1
+
+    @staticmethod
+    def _candidate_max_annealing_level(c: dict) -> int:
+        """Highest annealing level the candidate's verification loop reached."""
+        iters = (
+            (c["result"].get("quality_history") or {})
+            .get("verification_iterations") or []
         )
+        return max(
+            (it.get("annealing_level", 0) for it in iters), default=0
+        )
+
+    def _candidate_fast_accept(self, c: dict, gate) -> bool:
+        value = gate.extract((c["result"] or {}).get("fit_quality") or {})
         return (
             c["success"]
             and c["approved"]
-            and c["score"] >= fast_thr
-            and c["iterations"] <= self.ESCALATION_MAX_FAST_ITERS
+            and gate.clears_by_fast_margin(value, self.ESCALATION_MARGIN_FRACTION)
+            and self._candidate_max_annealing_level(c)
+            < self._hot_annealing_level
         )
 
     def _get_bestofn_join_approval(

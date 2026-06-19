@@ -67,7 +67,18 @@ def _controller(tmp_path, model=None,
 
 def _canned_result(score: float, approved: bool, success: bool = True,
                    tag: str = "", iterations: int = 1,
-                   result_type: str = "delivered") -> dict:
+                   result_type: str = "delivered",
+                   levels: list | None = None) -> dict:
+    # `levels` sets the annealing level of each verification iteration — the
+    # struggle signal the fast-accept gate reads. When omitted, all
+    # `iterations` entries are cold (level 0).
+    if levels is None:
+        levels = [0] * iterations
+    iters = [
+        {"score": score, "annealing_level": lvl, "issues": [],
+         "result_type": result_type}
+        for lvl in levels
+    ]
     return {
         "index": 0,
         "name": "image_0000",
@@ -81,10 +92,7 @@ def _canned_result(score: float, approved: bool, success: bool = True,
         "quality_history": {
             "final_score": score,
             "approved": approved,
-            "verification_iterations": [
-                {"score": score, "annealing_level": 0, "issues": [],
-                 "result_type": result_type}
-            ] * iterations,
+            "verification_iterations": iters,
         },
     }
 
@@ -370,23 +378,33 @@ def _curve_controller(tmp_path, model=None,
 
 
 def _canned_fit(r2: float, approved: bool, success: bool = True,
-                tag: str = "") -> dict:
+                tag: str = "", iterations: int = 1,
+                levels: list | None = None,
+                fit_quality: dict | None = None) -> dict:
+    # `levels` sets the annealing level of each verification iteration (the
+    # struggle signal the fast-accept gate reads). When omitted, all
+    # `iterations` entries are cold (level 0). `fit_quality` overrides the
+    # metric dict the gate reads (for non-R² gate tests).
+    if levels is None:
+        levels = [0] * iterations
+    iters = [
+        {"r_squared": r2, "annealing_level": lvl, "issues": []}
+        for lvl in levels
+    ]
     return {
         "index": 0,
         "name": "spectrum_0000",
         "success": success,
         "model_type": "exp_decay",
         "parameters": {"tau": 1.0},
-        "fit_quality": {"r_squared": r2},
+        "fit_quality": fit_quality if fit_quality is not None else {"r_squared": r2},
         "visualization_bytes": b"\x89PNG" + tag.encode(),
         "visualization_path": f"/tmp/{tag or 'fit'}.png",
         "script": "print('fit')",
         "quality_history": {
             "final_r2": r2,
             "approved": approved,
-            "verification_iterations": [
-                {"r_squared": r2, "annealing_level": 0, "issues": []}
-            ],
+            "verification_iterations": iters,
         },
     }
 
@@ -401,6 +419,17 @@ def _stub_fit(controller, results_by_tag: dict, record: list):
 
     controller._fit_with_quality_control = stub
     return stub
+
+
+class _StubReplanner:
+    """Records which candidates were independently replanned."""
+
+    def __init__(self, calls: list):
+        self.calls = calls
+
+    def replan_headless(self, state: dict) -> dict:
+        self.calls.append(state.get("_candidate_tag"))
+        return state
 
 
 def _curve_state(n: int) -> dict:
@@ -570,7 +599,7 @@ def test_escalation_fast_accepts_strong_first_attempt(tmp_path):
     model = _judge_model('{"selected_index": 0, "reasoning": "unused"}')
     c = _controller(tmp_path, model)
     seen = []
-    # 0.85 >= 0.7 + 0.1 margin, 1 iteration -> fast accept
+    # 0.85 >= 0.7 + 0.05 backstop, never went hot (level 0) -> fast accept
     _stub_execute(c, {
         "cand_00": _canned_result(0.85, True, tag="cand_00"),
     }, seen)
@@ -588,9 +617,9 @@ def test_escalation_weak_score_fans_out(tmp_path):
     model = _judge_model('{"selected_index": 0, "reasoning": "ok"}')
     c = _controller(tmp_path, model)
     seen = []
-    # 0.72 approved but below 0.8 fast-accept bar -> escalate
+    # 0.72 approved but below the 0.75 backstop -> escalate.
     _stub_execute(c, {
-        "cand_00": _canned_result(0.72, True, tag="cand_00"),
+        "cand_00": _canned_result(0.72, True, tag="cand_00", levels=[0, 0]),
         "cand_01": _canned_result(0.85, True, tag="cand_01"),
         "cand_02": _canned_result(0.80, True, tag="cand_02"),
     }, seen)
@@ -639,31 +668,52 @@ def test_escalation_decline_never_fast_accepts(tmp_path):
     assert result["anchor_judge"]["escalated"] is True
 
 
-def test_escalation_below_calibrated_margin_fans_out(tmp_path):
-    # Margin is 0.15 (calibrated live): 0.82 approved in 2 iters — the exact
-    # shape of the one real miss observed — must escalate.
-    model = _judge_model('{"selected_index": 1, "reasoning": "ok"}')
+def test_escalation_good_score_cold_fast_accepts(tmp_path):
+    # Redesign: a genuinely good first attempt (0.80, approved) that reached
+    # threshold WITHOUT going hot fast-accepts, even over a few iterations.
+    # This is the exact case the old iters<=2 / margin-0.15 gate over-
+    # escalated — a 0.80/level-1 run fanned out 3x and still won (the live
+    # session that triggered this redesign).
+    model = _judge_model('{"selected_index": 0, "reasoning": "unused"}')
     c = _controller(tmp_path, model)
     seen = []
     _stub_execute(c, {
-        "cand_00": _canned_result(0.82, True, tag="cand_00", iterations=2),
-        "cand_01": _canned_result(0.86, True, tag="cand_01"),
-        "cand_02": _canned_result(0.80, True, tag="cand_02"),
+        "cand_00": _canned_result(0.80, True, tag="cand_00", levels=[0, 0, 1]),
     }, seen)
 
     result = _run(c, _esc_state(3))
 
-    assert len(seen) == 3
-    assert result["anchor_judge"]["escalated"] is True
+    assert len(seen) == 1
+    model.generate_content.assert_not_called()
+    assert result["anchor_judge"]["escalated"] is False
 
 
-def test_escalation_slow_convergence_fans_out(tmp_path):
+def test_escalation_high_score_many_cold_iters_fast_accepts(tmp_path):
+    # Redesign: iteration COUNT no longer gates. A high score reached over
+    # several iterations that never left the cold/warm regime is not a
+    # struggle -> fast-accept.
+    model = _judge_model('{"selected_index": 0, "reasoning": "unused"}')
+    c = _controller(tmp_path, model)
+    seen = []
+    _stub_execute(c, {
+        "cand_00": _canned_result(0.9, True, tag="cand_00", levels=[0, 0, 1]),
+    }, seen)
+
+    result = _run(c, _esc_state(3))
+
+    assert len(seen) == 1
+    model.generate_content.assert_not_called()
+    assert result["anchor_judge"]["escalated"] is False
+
+
+def test_escalation_hot_anneal_fans_out(tmp_path):
+    # The struggle signal: even a strong score escalates if the loop had to go
+    # HOT (fully relax plan constraints) to reach it — that's not a clean win.
     model = _judge_model('{"selected_index": 0, "reasoning": "ok"}')
     c = _controller(tmp_path, model)
     seen = []
-    # High score but 3 verification iterations (> 2) -> not fast-accepted
     _stub_execute(c, {
-        "cand_00": _canned_result(0.9, True, tag="cand_00", iterations=3),
+        "cand_00": _canned_result(0.9, True, tag="cand_00", levels=[0, 1, 2]),
         "cand_01": _canned_result(0.85, True, tag="cand_01"),
         "cand_02": _canned_result(0.80, True, tag="cand_02"),
     }, seen)
@@ -672,6 +722,12 @@ def test_escalation_slow_convergence_fans_out(tmp_path):
 
     assert len(seen) == 3
     assert result["anchor_judge"]["escalated"] is True
+    # No annealing-level seeding any more (superseded by independent per-
+    # candidate plans): fan-out attempts use the caller's default start.
+    by_tag = {s["_candidate_tag"]: s for s in seen}
+    assert all(
+        s.get("_starting_annealing_level") is None for s in by_tag.values()
+    )
 
 
 def test_no_escalation_flag_keeps_fixed_n(tmp_path):
@@ -714,6 +770,92 @@ def test_curve_escalation_fast_accept_and_escalate(tmp_path):
     result2 = _run_curve(c2, state2)
     assert len(seen2) == 3
     assert result2["anchor_judge"]["escalated"] is True
+
+
+def test_curve_escalation_high_r2_many_iters_fast_accepts(tmp_path):
+    # Gate redesign: iteration COUNT no longer gates. A fit that cleared the
+    # bar (0.99 >= 0.97), approved, and never went hot fast-accepts no matter
+    # how many iterations it took — the old `iterations <= 2` proxy would have
+    # escalated this good-but-slow fit.
+    c = _curve_controller(tmp_path)
+    seen = []
+    _stub_fit(c, {
+        "cand_00": _canned_fit(0.99, True, tag="cand_00", levels=[0, 0, 0, 0, 0]),
+    }, seen)
+    state = _curve_state(3)
+    state["candidate_escalation"] = True
+    result = _run_curve(c, state)
+    assert len(seen) == 1
+    assert result["anchor_judge"]["escalated"] is False
+
+
+def _chi2_gate():
+    from scilink.agents.exp_agents.quality_gate import QualityGate
+    # lower_is_better: accept χ² <= 1.5, hard-reject > 3.0, optimum 0.0.
+    # band 1.5 -> fast margin 0.4*1.5 = 0.6 -> fast bar χ² <= 0.9.
+    return QualityGate(metric="reduced_chi2", accept_threshold=1.5,
+                       hard_reject_threshold=3.0, direction="lower_is_better",
+                       best_value=0.0)
+
+
+def test_curve_escalation_lower_is_better_metric_fast_accepts(tmp_path):
+    # χ² gate: a comfortably-low χ² (0.8 <= 0.9) approved fit fast-accepts —
+    # the gate reads χ² from fit_quality, not R².
+    c = _curve_controller(tmp_path)
+    seen = []
+    _stub_fit(c, {
+        "cand_00": _canned_fit(0.5, True, tag="cand_00",
+                               fit_quality={"reduced_chi2": 0.8, "r_squared": 0.5}),
+    }, seen)
+    state = _curve_state(3)
+    state["candidate_escalation"] = True
+    state["quality_gate"] = _chi2_gate()
+    result = _run_curve(c, state)
+    assert len(seen) == 1
+    assert result["anchor_judge"]["escalated"] is False
+
+
+def test_curve_escalation_metric_aware_escalates_on_high_r2_bad_chi2(tmp_path):
+    # THE bug fix: R²=0.99 is high (old R²-only gate would have fast-accepted),
+    # but the active metric is χ²=1.4 — approved (<=1.5) yet above the χ² fast
+    # bar (0.9). The metric-aware gate correctly escalates on the real metric.
+    model = _judge_model('{"selected_index": 0, "reasoning": "ok"}')
+    c = _curve_controller(tmp_path, model)
+    seen = []
+    _stub_fit(c, {
+        "cand_00": _canned_fit(0.99, True, tag="cand_00",
+                               fit_quality={"reduced_chi2": 1.4, "r_squared": 0.99}),
+        "cand_01": _canned_fit(0.99, True, tag="cand_01",
+                               fit_quality={"reduced_chi2": 0.7, "r_squared": 0.99}),
+        "cand_02": _canned_fit(0.99, True, tag="cand_02",
+                               fit_quality={"reduced_chi2": 0.8, "r_squared": 0.99}),
+    }, seen)
+    state = _curve_state(3)
+    state["candidate_escalation"] = True
+    state["quality_gate"] = _chi2_gate()
+    result = _run_curve(c, state)
+    assert len(seen) == 3
+    assert result["anchor_judge"]["escalated"] is True
+
+
+def test_curve_escalation_hot_fans_out_despite_high_r2(tmp_path):
+    # The struggle signal guards the SUBJECTIVE (physical-correctness) half of
+    # approval: even a high, approved R² escalates if the fit had to anneal HOT
+    # (full model freedom) to get there — a hot-annealed over-fit can post high
+    # R² yet be physically wrong, so don't fast-accept it.
+    model = _judge_model('{"selected_index": 0, "reasoning": "ok"}')
+    c = _curve_controller(tmp_path, model)
+    seen = []
+    _stub_fit(c, {
+        "cand_00": _canned_fit(0.99, True, tag="cand_00", levels=[0, 1, 2]),
+        "cand_01": _canned_fit(0.98, True, tag="cand_01"),
+        "cand_02": _canned_fit(0.985, True, tag="cand_02"),
+    }, seen)
+    state = _curve_state(3)
+    state["candidate_escalation"] = True
+    result = _run_curve(c, state)
+    assert len(seen) == 3
+    assert result["anchor_judge"]["escalated"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -971,3 +1113,76 @@ def test_resolve_escalation_default_path_only():
     assert _resolve_candidate_escalation(ImageAnalysisAgent(), 1) is False
     # Agent without the param -> never.
     assert _resolve_candidate_escalation(_NoSupportAgent(), None) is False
+
+
+# ---------------------------------------------------------------------------
+# Per-candidate independent planning (ensemble diversity)
+# ---------------------------------------------------------------------------
+
+def test_image_fanout_replans_candidates_above_zero(tmp_path):
+    # Candidate 0 keeps the primary plan; candidates >=1 each replan.
+    model = _judge_model('{"selected_index": 0, "reasoning": "ok"}')
+    c = _controller(tmp_path, model)
+    calls = []
+    c.replanner = _StubReplanner(calls)
+    seen = []
+    _stub_execute(c, {
+        f"cand_0{i}": _canned_result(0.8, True, tag=f"cand_0{i}")
+        for i in range(3)
+    }, seen)
+
+    _run(c, _base_state(3))  # fixed-N: all three run
+
+    assert sorted(calls) == ["cand_01", "cand_02"]
+
+
+def test_image_fanout_replan_disabled_by_flag(tmp_path):
+    model = _judge_model('{"selected_index": 0, "reasoning": "ok"}')
+    c = _controller(tmp_path, model)
+    calls = []
+    c.replanner = _StubReplanner(calls)
+    seen = []
+    _stub_execute(c, {
+        f"cand_0{i}": _canned_result(0.8, True, tag=f"cand_0{i}")
+        for i in range(3)
+    }, seen)
+
+    state = _base_state(3)
+    state["independent_candidate_plans"] = False
+    _run(c, state)
+
+    assert calls == []
+
+
+def test_curve_fanout_replans_candidates_above_zero(tmp_path):
+    model = _judge_model('{"selected_index": 0, "reasoning": "ok"}')
+    c = _curve_controller(tmp_path, model)
+    calls = []
+    c.replanner = _StubReplanner(calls)
+    seen = []
+    _stub_fit(c, {
+        f"cand_0{i}": _canned_fit(0.99, True, tag=f"cand_0{i}")
+        for i in range(3)
+    }, seen)
+
+    _run_curve(c, _curve_state(3))
+
+    assert sorted(calls) == ["cand_01", "cand_02"]
+
+
+def test_curve_fanout_replan_disabled_by_flag(tmp_path):
+    model = _judge_model('{"selected_index": 0, "reasoning": "ok"}')
+    c = _curve_controller(tmp_path, model)
+    calls = []
+    c.replanner = _StubReplanner(calls)
+    seen = []
+    _stub_fit(c, {
+        f"cand_0{i}": _canned_fit(0.99, True, tag=f"cand_0{i}")
+        for i in range(3)
+    }, seen)
+
+    state = _curve_state(3)
+    state["independent_candidate_plans"] = False
+    _run_curve(c, state)
+
+    assert calls == []

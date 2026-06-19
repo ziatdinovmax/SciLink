@@ -163,19 +163,18 @@ def create_unified_curve_fitting_pipeline(
         )
 
     # Step 2: Human feedback refinement on fitting approach
-    pipeline.append(
-        HumanFeedbackRefinementController(
-            model=model,
-            logger=logger,
-            generation_config=generation_config,
-            safety_settings=safety_settings,
-            parse_fn=parse_fn,
-            instructions=CURVE_ANALYSIS_INSTRUCTIONS,
-            output_dir=output_dir,
-            enable_human_feedback=enable_human_feedback,
-            max_iterations=5
-        )
+    planning_controller = HumanFeedbackRefinementController(
+        model=model,
+        logger=logger,
+        generation_config=generation_config,
+        safety_settings=safety_settings,
+        parse_fn=parse_fn,
+        instructions=CURVE_ANALYSIS_INSTRUCTIONS,
+        output_dir=output_dir,
+        enable_human_feedback=enable_human_feedback,
+        max_iterations=5
     )
+    pipeline.append(planning_controller)
 
     # Step 3: Literature search (runs once, uses first spectrum context)
     pipeline.append(
@@ -207,6 +206,9 @@ def create_unified_curve_fitting_pipeline(
             max_verification_iterations=max_verification_iterations,
             conformance_instructions=PLAN_CONFORMANCE_CHECK_INSTRUCTIONS,
             parallel_workers=parallel_workers,
+            # Lets each best-of-N fan-out candidate (>=1) plan its own
+            # independent fitting approach instead of sharing the locked plan.
+            replanner=planning_controller,
         )
     )
 

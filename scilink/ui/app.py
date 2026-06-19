@@ -310,12 +310,19 @@ def _run_agent_chat(task: ChatTask, agent, user_input: str) -> None:
     log_handler.setFormatter(logging.Formatter("%(message)s"))
     _this_thread = threading.get_ident()
     # Best-of-N candidate attempts run in worker threads spawned by this
-    # chat thread; effective_thread maps them back so their detailed
-    # narration (candidate-prefixed at the record factory) stays in the
-    # verbose panel without admitting other sessions' threads.
-    from scilink.utils.log_context import effective_thread
+    # chat thread; effective_thread maps them back so their narration stays
+    # in the verbose panel without admitting other sessions' threads. During
+    # a CONCURRENT fan-out, keep_in_fanout_panel trims each candidate's
+    # per-attempt detail to milestones (executing / verification / outcome) so
+    # the panel stays readable; a lone attempt and the CLI keep full detail.
+    from scilink.utils.log_context import effective_thread, keep_in_fanout_panel
     log_handler.addFilter(
-        lambda record: effective_thread(record.thread) == _this_thread
+        lambda record: (
+            effective_thread(record.thread) == _this_thread
+            and keep_in_fanout_panel(
+                record.thread, record.getMessage(), record.levelno
+            )
+        )
     )
     root_logger = logging.getLogger()
     # Lower root to INFO so agent logger.info() messages (execution
