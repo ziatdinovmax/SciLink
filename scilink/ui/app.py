@@ -28,13 +28,23 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text or "")
 
 
+# 💭 reasoning colors. Meta and specialist both print the SAME 💭 glyph; a
+# meta-delegated specialist tags its line with an invisible U+2063 marker so its
+# reasoning renders in a distinct (warm) color from the meta's own (cool) 💭,
+# without changing the visible glyph. The marker is stripped before display.
+_THOUGHT_MARK = "\u2063"           # INVISIBLE SEPARATOR — specialist source tag
+_META_THOUGHT_COLOR = "#6ec1e4"    # muted cyan — meta's own deliberation
+_SPECIALIST_THOUGHT_COLOR = "#c9a06a"  # muted amber — a delegated specialist
+
+
 def _log_to_html(text: str) -> str:
     """ANSI-strip a captured log and HTML-escape it. The agent's 💭 reasoning
-    lines render dim+italic (a muted aside); the 🤖 answer header renders
-    bold+bright (the deliverable) — the HTML equivalents of the terminal styling."""
+    lines render dim+italic (a muted aside) — cool for the meta, warm for a
+    meta-delegated specialist (tagged by an invisible U+2063 marker); the 🤖
+    answer header renders bold+bright (the deliverable)."""
     import html as _html
 
-    out, in_thought = [], False
+    out, in_thought, thought_color = [], False, _META_THOUGHT_COLOR
     for line in _strip_ansi(text).split("\n"):
         stripped = line.lstrip()
         if stripped.startswith("🤖"):
@@ -44,11 +54,15 @@ def _log_to_html(text: str) -> str:
             continue
         if stripped.startswith("💭"):
             in_thought = True
+            # A specialist's first thought line carries the invisible marker; pick
+            # the color from it and hold it across this block's continuation lines.
+            thought_color = (_SPECIALIST_THOUGHT_COLOR if _THOUGHT_MARK in line
+                             else _META_THOUGHT_COLOR)
         elif in_thought and not line.startswith("     "):
             in_thought = False
-        esc = _html.escape(line)
+        esc = _html.escape(line.replace(_THOUGHT_MARK, ""))  # drop the source tag
         if in_thought:
-            esc = f'<span style="color:#6ec1e4;font-style:italic">{esc}</span>'
+            esc = f'<span style="color:{thought_color};font-style:italic">{esc}</span>'
         out.append(esc)
     return "\n".join(out)
 

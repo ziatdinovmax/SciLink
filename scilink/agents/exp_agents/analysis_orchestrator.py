@@ -1644,7 +1644,15 @@ class AnalysisOrchestratorAgent:
         style, reset = (("\033[2;3;36m", "\033[0m")
                         if sys.stdout.isatty() else ("", ""))
         body = text.replace("\n", "\n     ")  # indent continuation lines
-        print(f"\n  {style}💭 {body}{reset}\n")
+        # Tag a meta-delegated run's reasoning with an INVISIBLE marker (U+2063)
+        # right after 💭 so the UI renders it a distinct color from the meta's
+        # own 💭 while the visible glyph stays identical. ANSI color can't carry
+        # this: the UI captures non-tty output (no ANSI emitted) and re-colors by
+        # the 💭 marker, so the source must ride in the text. Gated on
+        # `_agent_label` (the 🤖-answer attribution mechanism); a standalone
+        # session keeps a plain 💭, unchanged.
+        mark = "\u2063" if getattr(self, "_agent_label", "Agent") != "Agent" else ""
+        print(f"\n  {style}💭{mark} {body}{reset}\n")
 
     def _print_agent_answer(self, text) -> None:
         """Print the agent's final answer — a *deliverable*, the third output
