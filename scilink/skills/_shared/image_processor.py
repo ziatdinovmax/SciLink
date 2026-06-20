@@ -10,8 +10,15 @@ MAX_IMG_DIM = 1024
 logger = logging.getLogger(__name__)
 
 
-def _normalize_to_uint8(img_array):
-    """Min-max normalize a non-uint8 array to uint8 (no-op if already uint8)."""
+def _normalize_to_uint8(img_array, p_low=0.5, p_high=99.5):
+    """Normalize a non-uint8 array to uint8 for display (no-op if already uint8).
+
+    Uses PERCENTILE clipping (default 0.5-99.5), not raw min-max: a single hot
+    or dead pixel — extremely common in scientific float TIFFs (X-ray spikes,
+    detector defects) — makes plain min-max collapse the whole image to near-
+    black. Percentile clipping is what makes float-encoded STEM/TEM data render
+    as a visible image instead of a blank frame.
+    """
     if img_array.dtype == np.uint8:
         return img_array
     float_array = img_array.astype(np.float64)
@@ -21,11 +28,13 @@ def _normalize_to_uint8(img_array):
         fill = float(np.min(finite)) if finite.size else 0.0
         hi = float(np.max(finite)) if finite.size else 0.0
         float_array = np.nan_to_num(float_array, nan=fill, posinf=hi, neginf=fill)
-    min_val, max_val = np.min(float_array), np.max(float_array)
-    if max_val - min_val > 1e-6:
-        normalized_array = (float_array - min_val) / (max_val - min_val)
-    else:
-        normalized_array = np.zeros_like(float_array)
+    lo, hi = np.percentile(float_array, [p_low, p_high])
+    if hi - lo > 1e-6:
+        normalized_array = np.clip((float_array - lo) / (hi - lo), 0.0, 1.0)
+    else:                                    # flat image: fall back to min-max
+        mn, mx = float(float_array.min()), float(float_array.max())
+        normalized_array = ((float_array - mn) / (mx - mn)
+                            if mx - mn > 1e-6 else np.zeros_like(float_array))
     return (normalized_array * 255).astype(np.uint8)
 
 
@@ -42,10 +51,26 @@ def load_image(image_path):
                 from scilink.utils.hdf5_utils import load_hdf5_signal
                 img_array = load_hdf5_signal(image_path)
             return _normalize_to_uint8(img_array)
+        elif ext in ('.tif', '.tiff'):
+            # Scientific TIFFs (32-bit float, compressed, multi-page, BigTIFF)
+            # are read most reliably by tifffile; OpenCV's TIFF path silently
+            # returns None on 32-bit-float samples ("can not handle images with
+            # 32-bit samples") — the exact failure that renders LLTO/HAADF data
+            # as a blank frame to the vision model. Fall back to cv2 only if
+            # tifffile is unavailable.
+            try:
+                import tifffile
+                img = tifffile.imread(image_path)
+                if img.ndim == 3 and img.shape[-1] == 1:
+                    img = img[..., 0]                 # singleton channel -> 2-D
+            except ImportError:
+                img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+                if img is None:
+                    raise ValueError(f"Could not load image from {image_path}")
+            return _normalize_to_uint8(img)
         else:
-            # Standard image loading. IMREAD_UNCHANGED preserves bit depth and
-            # channel count so high-bit-depth / 32-bit-float scientific TIFFs
-            # load (the default IMREAD_COLOR flag returns None on those).
+            # Standard 8-bit formats (PNG/JPG/BMP). IMREAD_UNCHANGED preserves
+            # bit depth and channel count.
             img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
             if img is None:
                 raise ValueError(f"Could not load image from {image_path}")
