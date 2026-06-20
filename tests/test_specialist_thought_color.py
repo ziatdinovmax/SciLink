@@ -13,6 +13,7 @@ from scilink.agents.exp_agents.analysis_orchestrator import AnalysisOrchestrator
 from scilink.agents.planning_agents.planning_orchestrator import PlanningOrchestratorAgent
 from scilink.ui.app import (
     _log_to_html, _THOUGHT_MARK, _META_THOUGHT_COLOR, _SPECIALIST_THOUGHT_COLOR,
+    _HANDOFF_COLOR,
 )
 
 THOUGHT = "\U0001F4AD"  # 💭
@@ -75,3 +76,36 @@ def test_structural_headers_not_thought_colored():
         html = _log_to_html(f"  {header}")
         assert _META_THOUGHT_COLOR not in html
         assert _SPECIALIST_THOUGHT_COLOR not in html
+
+
+@pytest.mark.parametrize("banner", [
+    "  🧪 Delegating to analysis specialist: fit the edge...",
+    "  📋 Delegating to planning specialist: design campaign...",
+    "  🧬 Fusing delegations [0, 1]...",
+])
+def test_handoff_banner_is_pronounced(banner):
+    html = _log_to_html(banner)
+    assert _HANDOFF_COLOR in html and "font-weight:bold" in html
+
+
+def test_structural_emoji_headers_are_not_handoffs():
+    # A bare 📋/🧪 header (plan/step) must NOT be styled as a handoff banner.
+    for header in ("  📋 PROPOSED FITTING PLAN", "  🧪 Step 1: ForceFieldAgent"):
+        assert _HANDOFF_COLOR not in _log_to_html(header)
+
+
+def test_handoff_ends_preceding_thought_block():
+    # A 💭 line immediately followed by a handoff: the banner must render as a
+    # handoff (gold), not inherit the thought color.
+    html = _log_to_html("  💭 I will delegate\n"
+                        "  🧪 Delegating to analysis specialist: x")
+    banner_line = next(l for l in html.split("\n") if "Delegating" in l)
+    assert _HANDOFF_COLOR in banner_line
+    assert _META_THOUGHT_COLOR not in banner_line
+
+
+def test_handoff_matches_ansi_wrapped_terminal_form():
+    # The terminal emits a bold-ANSI-wrapped banner; after ANSI strip it must
+    # still be recognized as a handoff.
+    html = _log_to_html("  \x1b[1;33m🧪 Delegating to analysis specialist: x\x1b[0m")
+    assert _HANDOFF_COLOR in html

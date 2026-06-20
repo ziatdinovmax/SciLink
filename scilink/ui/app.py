@@ -35,6 +35,12 @@ def _strip_ansi(text: str) -> str:
 _THOUGHT_MARK = "\u2063"           # INVISIBLE SEPARATOR — specialist source tag
 _META_THOUGHT_COLOR = "#6ec1e4"    # muted cyan — meta's own deliberation
 _SPECIALIST_THOUGHT_COLOR = "#c9a06a"  # muted amber — a delegated specialist
+_HANDOFF_COLOR = "#f0c674"         # bright gold — meta -> specialist handoff banner
+
+# Meta handoff announcements (printed by MetaOrchestratorTools): the meta
+# delegating to / fusing specialists. Matched on emoji+phrase so a generic
+# 🧪/📋 structural header elsewhere is not mistaken for a handoff.
+_HANDOFF_PREFIXES = ("🧪 Delegating to", "📋 Delegating to", "🧬 Fusing delegations")
 
 
 def _log_to_html(text: str) -> str:
@@ -51,6 +57,18 @@ def _log_to_html(text: str) -> str:
             # Final-answer header — emphasized, and it ends any reasoning block.
             in_thought = False
             out.append(f'<span style="color:#7fdfff;font-weight:bold">{_html.escape(line)}</span>')
+            continue
+        if stripped.startswith(_HANDOFF_PREFIXES):
+            # Meta -> specialist handoff — a pronounced section divider so the
+            # transition into (and back out of) a delegation is obvious. Rendered
+            # as a banded row (bold gold on a faint tint with a left rule), which
+            # the <pre> log pane supports. Ends any reasoning block.
+            in_thought = False
+            out.append(
+                f'<span style="display:inline-block;color:{_HANDOFF_COLOR};'
+                f"font-weight:bold;background:#2e2a1f;border-left:3px solid "
+                f'{_HANDOFF_COLOR};padding:1px 8px">{_html.escape(stripped)}</span>'
+            )
             continue
         if stripped.startswith("💭"):
             in_thought = True

@@ -13,8 +13,16 @@ refactor".
 
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import Any, Callable, Dict
+
+
+def _handoff(text: str) -> str:
+    """Bold a meta -> specialist handoff banner on a real terminal so the
+    delegation transition stands out; plain on non-tty (captured/redirected
+    output, e.g. the UI, which styles the banner itself in `_log_to_html`)."""
+    return f"\033[1;33m{text}\033[0m" if sys.stdout.isatty() else text
 
 
 # ── Upload inspection ────────────────────────────────────────────────
@@ -264,7 +272,7 @@ class MetaOrchestratorTools:
         def delegate_to_analysis(task: str, context: dict = None,
                                  context_from: list = None,
                                  label: str = None) -> str:
-            print(f"  🧪 Delegating to analysis specialist: {task[:80]}...")
+            print("  " + _handoff(f"🧪 Delegating to analysis specialist: {task[:80]}..."))
             return self.orch._delegate("analysis", task, context, context_from, label)
 
         self._register_tool(
@@ -337,7 +345,7 @@ class MetaOrchestratorTools:
         def delegate_to_planning(task: str, context: dict = None,
                                  context_from: list = None,
                                  label: str = None) -> str:
-            print(f"  📋 Delegating to planning specialist: {task[:80]}...")
+            print("  " + _handoff(f"📋 Delegating to planning specialist: {task[:80]}..."))
             return self.orch._delegate("planning", task, context, context_from, label)
 
         self._register_tool(
@@ -488,7 +496,7 @@ class MetaOrchestratorTools:
 
         # -- fuse_delegations -----------------------------------------------
         def fuse_delegations(delegation_indices: list, focus: str = None) -> str:
-            print(f"  🧬 Fusing delegations {delegation_indices}...")
+            print("  " + _handoff(f"🧬 Fusing delegations {delegation_indices}..."))
             return self.orch._fuse_delegations(delegation_indices, focus)
 
         self._register_tool(
