@@ -1641,7 +1641,11 @@ class AnalysisOrchestratorAgent:
         # structural tool-call log — but only on a real terminal, else the raw
         # escape codes would litter captured/redirected output. Blank lines
         # before and after set the thought apart from the tool call it triggers.
-        style, reset = (("\033[2;3;36m", "\033[0m")
+        # A meta-delegated run reasons in AMBER (33), the meta's own in CYAN (36),
+        # so the CLI distinguishes them the way the UI does (dim + italic either way).
+        specialist = getattr(self, "_agent_label", "Agent") != "Agent"
+        color = "33" if specialist else "36"
+        style, reset = ((f"\033[2;3;{color}m", "\033[0m")
                         if sys.stdout.isatty() else ("", ""))
         body = text.replace("\n", "\n     ")  # indent continuation lines
         # Tag a meta-delegated run's reasoning with an INVISIBLE marker (U+2063)
@@ -1651,7 +1655,7 @@ class AnalysisOrchestratorAgent:
         # the 💭 marker, so the source must ride in the text. Gated on
         # `_agent_label` (the 🤖-answer attribution mechanism); a standalone
         # session keeps a plain 💭, unchanged.
-        mark = "\u2063" if getattr(self, "_agent_label", "Agent") != "Agent" else ""
+        mark = "\u2063" if specialist else ""
         print(f"\n  {style}💭{mark} {body}{reset}\n")
 
     def _print_agent_answer(self, text) -> None:
@@ -1664,8 +1668,16 @@ class AnalysisOrchestratorAgent:
         """
         import sys
         label = getattr(self, "_agent_label", "Agent")
-        bold, reset = ("\033[1;96m", "\033[0m") if sys.stdout.isatty() else ("", "")
-        print(f"\n{bold}🤖 {label}:{reset}")
+        # A delegated specialist's answer header takes the specialist color (bold
+        # AMBER, 33) so it matches that specialist's reasoning; the meta's own
+        # answer stays bold BRIGHT CYAN (96). The UI mirrors this by the invisible
+        # U+2063 marker after 🤖 (it captures non-tty output, so it can't read the
+        # ANSI and re-colors by the marker instead).
+        specialist = label != "Agent"
+        code = "1;33" if specialist else "1;96"
+        mark = "\u2063" if specialist else ""
+        bold, reset = (f"\033[{code}m", "\033[0m") if sys.stdout.isatty() else ("", "")
+        print(f"\n{bold}🤖{mark} {label}:{reset}")
         print(text if text is not None else "")
 
     def _handle_litellm_chat(self, user_input: str) -> str:

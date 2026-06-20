@@ -45,18 +45,24 @@ _HANDOFF_PREFIXES = ("🧪 Delegating to", "📋 Delegating to", "🧬 Fusing de
 
 def _log_to_html(text: str) -> str:
     """ANSI-strip a captured log and HTML-escape it. The agent's 💭 reasoning
-    lines render dim+italic (a muted aside) — cool for the meta, warm for a
-    meta-delegated specialist (tagged by an invisible U+2063 marker); the 🤖
-    answer header renders bold+bright (the deliverable)."""
+    lines render dim+italic (a muted aside) and the 🤖 answer header bold+bright
+    — cool cyan for the meta, warm amber for a meta-delegated specialist (both
+    tagged by an invisible U+2063 marker, so a specialist's reasoning AND answer
+    header match its color)."""
     import html as _html
 
     out, in_thought, thought_color = [], False, _META_THOUGHT_COLOR
     for line in _strip_ansi(text).split("\n"):
         stripped = line.lstrip()
         if stripped.startswith("🤖"):
-            # Final-answer header — emphasized, and it ends any reasoning block.
+            # Answer header — emphasized, and it ends any reasoning block. A
+            # delegated specialist's header carries the marker -> specialist
+            # color (matching its reasoning); the meta's own stays bright cyan.
             in_thought = False
-            out.append(f'<span style="color:#7fdfff;font-weight:bold">{_html.escape(line)}</span>')
+            ans_color = (_SPECIALIST_THOUGHT_COLOR if _THOUGHT_MARK in line
+                         else "#7fdfff")
+            clean = _html.escape(line.replace(_THOUGHT_MARK, ""))
+            out.append(f'<span style="color:{ans_color};font-weight:bold">{clean}</span>')
             continue
         if stripped.startswith(_HANDOFF_PREFIXES):
             # Meta -> specialist handoff — a pronounced section divider so the

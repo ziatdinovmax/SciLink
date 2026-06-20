@@ -1,10 +1,16 @@
-"""Meta vs. meta-delegated-specialist reasoning are the SAME visible 💭 glyph
-but render in different UI colors, driven by an invisible U+2063 source marker.
+"""Meta vs. meta-delegated-specialist output is told apart by COLOR while the
+visible 💭 glyph stays identical:
 
-Guards: the marker is emitted only when delegated (gated on `_agent_label`),
-the visible glyph is unchanged, and `_log_to_html` colors + strips it.
+  * UI — driven by an invisible U+2063 source marker (emitted only when
+    delegated); `_log_to_html` colors meta cool cyan / specialist warm amber for
+    both the 💭 reasoning lines AND the 🤖 answer header, and strips the marker.
+  * CLI — the reasoning/answer ANSI color itself differs (cyan vs amber), since
+    captured non-tty output carries no ANSI for the UI to read.
+
+Both are gated on `_agent_label`; a standalone session is unchanged.
 """
 import io
+import sys
 from contextlib import redirect_stdout
 
 import pytest
@@ -17,10 +23,21 @@ from scilink.ui.app import (
 )
 
 THOUGHT = "\U0001F4AD"  # 💭
+ROBOT = "\U0001F916"    # 🤖
+ESC = "\x1b"            # ANSI escape — what the CLI emits on a real tty
+
+ALL = [AnalysisOrchestratorAgent, PlanningOrchestratorAgent]
 
 
 class _Stub:
     pass
+
+
+class _FakeTTY(io.StringIO):
+    """A StringIO that reports as a terminal, so the printers emit ANSI."""
+
+    def isatty(self):
+        return True
 
 
 def _emit(cls, label, text="reasoning here"):
@@ -30,6 +47,21 @@ def _emit(cls, label, text="reasoning here"):
     buf = io.StringIO()
     with redirect_stdout(buf):
         cls._print_assistant_reasoning(s, text)
+    return buf.getvalue()
+
+
+def _emit_tty(cls, method, label, text="text"):
+    """Capture a printer's output as if writing to a real terminal (ANSI on)."""
+    s = _Stub()
+    if label is not None:
+        s._agent_label = label
+    buf = _FakeTTY()
+    old = sys.stdout
+    sys.stdout = buf
+    try:
+        getattr(cls, method)(s, text)
+    finally:
+        sys.stdout = old
     return buf.getvalue()
 
 
@@ -92,6 +124,61 @@ def test_structural_emoji_headers_are_not_handoffs():
     # A bare 📋/🧪 header (plan/step) must NOT be styled as a handoff banner.
     for header in ("  📋 PROPOSED FITTING PLAN", "  🧪 Step 1: ForceFieldAgent"):
         assert _HANDOFF_COLOR not in _log_to_html(header)
+
+
+# ── 🤖 answer header: specialist matches its thought color (UI) ──────────────
+
+def _emit_answer(cls, label, text="the answer"):
+    s = _Stub()
+    if label is not None:
+        s._agent_label = label
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        cls._print_agent_answer(s, text)
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize("cls", ALL)
+def test_specialist_answer_header_marked_visible_glyph_unchanged(cls):
+    out = _emit_answer(cls, "Analysis specialist")
+    assert _THOUGHT_MARK in out
+    assert ROBOT in out.replace(_THOUGHT_MARK, "")  # plain 🤖 still visible
+
+
+@pytest.mark.parametrize("cls", ALL)
+def test_standalone_answer_header_has_no_marker(cls):
+    assert _THOUGHT_MARK not in _emit_answer(cls, None)
+
+
+def test_ui_specialist_answer_header_is_specialist_color():
+    html = _log_to_html(_emit_answer(AnalysisOrchestratorAgent, "Analysis specialist"))
+    assert _SPECIALIST_THOUGHT_COLOR in html   # same color as its thoughts
+    assert "#7fdfff" not in html               # not the meta cyan
+    assert _THOUGHT_MARK not in html           # marker stripped
+
+
+def test_ui_meta_answer_header_stays_cyan():
+    html = _log_to_html(_emit_answer(AnalysisOrchestratorAgent, None))
+    assert "#7fdfff" in html
+    assert _SPECIALIST_THOUGHT_COLOR not in html
+
+
+# ── CLI: the ANSI color itself differs (cyan meta / amber specialist) ────────
+
+@pytest.mark.parametrize("cls", ALL)
+def test_cli_reasoning_color_differs(cls):
+    meta = _emit_tty(cls, "_print_assistant_reasoning", None)
+    spec = _emit_tty(cls, "_print_assistant_reasoning", "Analysis specialist")
+    assert f"{ESC}[2;3;36m" in meta   # dim italic cyan
+    assert f"{ESC}[2;3;33m" in spec   # dim italic amber
+
+
+@pytest.mark.parametrize("cls", ALL)
+def test_cli_answer_header_color_differs(cls):
+    meta = _emit_tty(cls, "_print_agent_answer", None)
+    spec = _emit_tty(cls, "_print_agent_answer", "Analysis specialist")
+    assert f"{ESC}[1;96m" in meta     # bold bright cyan
+    assert f"{ESC}[1;33m" in spec     # bold amber
 
 
 def test_handoff_ends_preceding_thought_block():
