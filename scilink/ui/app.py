@@ -31,11 +31,7 @@ def _strip_ansi(text: str) -> str:
 def _log_to_html(text: str) -> str:
     """ANSI-strip a captured log and HTML-escape it. The agent's 💭 reasoning
     lines render dim+italic (a muted aside); the 🤖 answer header renders
-    bold+bright (the deliverable) — the HTML equivalents of the terminal styling.
-    💭 is the reserved reasoning marker; a meta-delegated specialist tags its
-    reasoning as `💭 🧪` (analysis) / `💭 📋` (planning) — the source emoji rides
-    INSIDE the 💭 line, so it stays distinguishable without making 🧪/📋 (heavily
-    used as plan/report/step headers elsewhere) trigger thought-styling."""
+    bold+bright (the deliverable) — the HTML equivalents of the terminal styling."""
     import html as _html
 
     out, in_thought = [], False

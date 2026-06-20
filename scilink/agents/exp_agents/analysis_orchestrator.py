@@ -1644,16 +1644,7 @@ class AnalysisOrchestratorAgent:
         style, reset = (("\033[2;3;36m", "\033[0m")
                         if sys.stdout.isatty() else ("", ""))
         body = text.replace("\n", "\n     ")  # indent continuation lines
-        # 💭 stays the reserved reasoning marker; a meta-delegated run tags its
-        # reasoning with the SAME emoji the delegation banner uses (🧪 analysis)
-        # so the specialist's thoughts are distinguishable from the meta's own
-        # 💭 where they interleave in a meta session. A standalone session
-        # (default label) prints a plain 💭, unchanged. The tag rides INSIDE the
-        # 💭 line so 🧪 — heavily used elsewhere as a step/header glyph — never
-        # itself triggers thought-styling. Mirrors `_print_agent_answer`'s
-        # label-based 🤖 attribution.
-        tag = "🧪 " if getattr(self, "_agent_label", "Agent") != "Agent" else ""
-        print(f"\n  {style}💭 {tag}{body}{reset}\n")
+        print(f"\n  {style}💭 {body}{reset}\n")
 
     def _print_agent_answer(self, text) -> None:
         """Print the agent's final answer — a *deliverable*, the third output
