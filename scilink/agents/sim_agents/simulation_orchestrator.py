@@ -455,7 +455,11 @@ class SimulationOrchestratorAgent:
         #      loop in BOTH handlers (the two `for tool_call in …` sites in
         #      `_handle_openai_chat` / `_handle_litellm_chat`). Shows the interim
         #      reasoning dim+italic so a deliberate step doesn't read as a silent
-        #      jump to "🔧 Calling tool".
+        #      jump to "🔧 Calling tool". Follow the per-mode convention: print a
+        #      plain 💭 standalone, and when meta-delegated (label != "Agent") tag
+        #      the reasoning as `💭 <delegation-emoji> ` so the source is visible
+        #      without the bare emoji triggering thought-styling — gated on
+        #      `_agent_label` exactly as analysis (💭 🧪) and planning (💭 📋) do.
         #   2. 🤖 Answer — copy `_print_agent_answer(self, text)` and call
         #      `self._print_agent_answer(response)` just before `return response`
         #      below. NB: unlike analysis/planning (which print "🤖 Agent:" in
@@ -465,8 +469,9 @@ class SimulationOrchestratorAgent:
         #      creates the sim child, set
         #      `child._agent_label = "Simulation specialist"` (mirrors the
         #      analysis/planning children in MetaOrchestratorAgent).
-        #   4. UI — no change needed; `ui/app.py::_log_to_html` already styles 💭
-        #      (dim italic) and the 🤖 header (bold) regardless of source.
+        #   4. UI — no change needed; `ui/app.py::_log_to_html` keys thought
+        #      blocks off the leading 💭, and the `💭 <emoji>` tag rides inside
+        #      that line, so it is styled dim+italic like the others for free.
         self._last_chat_hit_iter_cap = False
         if self.use_openai:
             response = self._handle_openai_chat(user_input)
