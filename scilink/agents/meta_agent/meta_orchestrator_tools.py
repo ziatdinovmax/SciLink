@@ -25,6 +25,20 @@ def _handoff(text: str) -> str:
     return f"\033[1;33m{text}\033[0m" if sys.stdout.isatty() else text
 
 
+def _task_summary(task: str, n: int = 80) -> str:
+    """One-line preview of a delegated task for the handoff banner.
+
+    The banner styles its whole line (bold on the terminal, a band in the UI).
+    A task is often multi-line — a one-line instruction followed by structured
+    detail such as a 'Primary data file: <path>' line — and the raw ``task[:80]``
+    used to carry those newlines into the banner, so the styling bled across the
+    blank line onto the next line in the terminal. Collapse to the first
+    non-blank line, truncated, with an ellipsis when anything was dropped."""
+    first = next((ln.strip() for ln in (task or "").splitlines() if ln.strip()), "")
+    dropped = len(first) > n or len((task or "").strip().splitlines()) > 1
+    return first[:n] + ("…" if dropped else "")
+
+
 # ── Upload inspection ────────────────────────────────────────────────
 # Lightweight, content-based file probes so the meta-agent routes each
 # uploaded file from evidence (array shape, table columns, document text)
@@ -272,7 +286,7 @@ class MetaOrchestratorTools:
         def delegate_to_analysis(task: str, context: dict = None,
                                  context_from: list = None,
                                  label: str = None) -> str:
-            print("  " + _handoff(f"🧪 Delegating to analysis specialist: {task[:80]}..."))
+            print("  " + _handoff(f"🧪 Delegating to analysis specialist: {_task_summary(task)}"))
             return self.orch._delegate("analysis", task, context, context_from, label)
 
         self._register_tool(
@@ -345,7 +359,7 @@ class MetaOrchestratorTools:
         def delegate_to_planning(task: str, context: dict = None,
                                  context_from: list = None,
                                  label: str = None) -> str:
-            print("  " + _handoff(f"📋 Delegating to planning specialist: {task[:80]}..."))
+            print("  " + _handoff(f"📋 Delegating to planning specialist: {_task_summary(task)}"))
             return self.orch._delegate("planning", task, context, context_from, label)
 
         self._register_tool(

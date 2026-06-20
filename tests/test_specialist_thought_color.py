@@ -181,6 +181,26 @@ def test_cli_answer_header_color_differs(cls):
     assert f"{ESC}[1;33m" in spec     # bold amber
 
 
+# ── handoff banner: a multi-line task must not bleed into the banner ─────────
+
+def test_handoff_task_summary_collapses_multiline():
+    # The reported CLI bug: a multi-line task carried its newline + the
+    # "Primary data file:" line into the bold banner span. The summary must be
+    # one line so the styling can't span past it.
+    from scilink.agents.meta_agent.meta_orchestrator_tools import _task_summary
+    task = ("Analyze a STEM HAADF microscopy image of an LLTO thin film.\n\n"
+            "Primary data file: /path/to/data.npy")
+    s = _task_summary(task)
+    assert "\n" not in s
+    assert "Primary data file" not in s
+    assert s.startswith("Analyze a STEM HAADF")
+
+
+def test_handoff_task_summary_no_ellipsis_when_complete():
+    from scilink.agents.meta_agent.meta_orchestrator_tools import _task_summary
+    assert _task_summary("Fit the decay") == "Fit the decay"  # short, single line
+
+
 def test_handoff_ends_preceding_thought_block():
     # A 💭 line immediately followed by a handoff: the banner must render as a
     # handoff (gold), not inherit the thought color.
