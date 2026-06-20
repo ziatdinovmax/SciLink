@@ -196,6 +196,23 @@ goal you picked above:
   distance / bond length" → the NN. If the request offers them as
   alternatives or is ambiguous, report both, explicitly labeled, with their
   geometric relation — never silently substitute one for the other.
+- *If goal is locating or excluding a film/substrate (or grain) interface:*
+  between two lattice-matched phases (e.g. a perovskite film on a perovskite
+  substrate) the boundary is CHEMICAL, not structural — the reflection set /
+  lattice spacing is identical on both sides, so FFT/periodicity-based
+  detection is physically blind to it. The discriminator is the per-column
+  **Z-contrast step** (HAADF intensity ∝ Z², so a heavier-cation substrate is
+  brighter) or an ordering **superstructure** that appears/disappears across
+  the boundary. Therefore do NOT flat-field / background-divide before
+  interface detection: that erases the very Z-contrast step that marks the
+  interface along with any global shading. A *smooth* low-frequency brightness
+  ramp is a shading/thickness artifact and is not the interface; a *sustained
+  per-column intensity step* is — separate them with a per-row mean
+  column-intensity profile (on the raw image) and a significance-tested
+  superstructure-satellite map, not a row-mean of flat-fielded intensity. If
+  neither a Z-contrast step nor a superstructure change is found, the interface
+  is genuinely absent from the field of view (report that) — but do not
+  conclude "no interface" merely because the FFT was uniform.
 - *If goal is vacancy / missing-column search:* two complementary
   routes — pick by data quality, or run both as a cross-check.
   **Real-space route** (defect typing, needs reliable columns): requires
