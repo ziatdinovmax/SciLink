@@ -56,8 +56,10 @@ def lattice_discontinuity_map(image, pixel_size_nm=None, params=None):
             dissim_floor (0.05): absolute spectral-dissimilarity a boundary cell
                 must clear above the uniform-crystal baseline. LOWER to catch a
                 faint/subtle boundary, RAISE if noise is flagged.
-            dissim_sigma (4.0): robustness multiplier (median + sigma*MAD) for
-                the statistical part of the boundary threshold.
+            dissim_sigma (2.0): robustness multiplier (median + sigma*MAD) for
+                the statistical part of the boundary threshold. LOWER (e.g. 1.5)
+                to recover a subtle/coherent twin the default misses, RAISE
+                (e.g. 4.0) if noise is being flagged as a boundary.
             orient_jump_deg (8.0) / spacing_jump_frac (0.05): CLASSIFICATION
                 thresholds — orientation change above the former → grain/twin,
                 spacing change above the latter → interface/second-phase.
@@ -82,7 +84,7 @@ def lattice_discontinuity_map(image, pixel_size_nm=None, params=None):
     min_bf = float(p.get("min_boundary_frac", 0.03))
     nb = int(p.get("azimuthal_bins", 36))
     smooth = float(p.get("smooth", 0.6))
-    dissim_sigma = float(p.get("dissim_sigma", 4.0))
+    dissim_sigma = float(p.get("dissim_sigma", 2.0))
     abs_floor = float(p.get("dissim_floor", 0.05))
 
     img = _to_gray(image)
@@ -332,8 +334,9 @@ TOOL_SPEC = ToolSpec(
             "Optional knobs (robust defaults; tune them): window_px (64) / "
             "window_nm — window side (must span a few periods; smaller = tighter "
             "localization, worse orientation/spacing resolution); overlap (0.5); "
-            "dissim_floor (0.05) and dissim_sigma (4.0) — DETECTION threshold on "
-            "spectral dissimilarity, LOWER dissim_floor for a subtle boundary; "
+            "dissim_floor (0.05) and dissim_sigma (2.0) — DETECTION threshold on "
+            "spectral dissimilarity, LOWER either (dissim_sigma→1.5) to recover a "
+            "subtle/coherent twin, RAISE if noise is flagged; "
             "orient_jump_deg (8.0) and spacing_jump_frac (0.05) — CLASSIFICATION "
             "thresholds; min_boundary_frac (0.03) — below this it is a single "
             "crystal; azimuthal_bins (36); smooth (0.6).")},
