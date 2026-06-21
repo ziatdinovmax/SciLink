@@ -338,9 +338,13 @@ goal you picked above:
   illumination → built-in peak detection → 2D Gaussian refinement
   (built into `detect_atoms` via `refine=True`).
 
-Both paths end with the same statistics: column count, intensity
-distribution, nearest-neighbor distances, and lattice parameters from
-FFT.
+Both paths end the same way: QC the detection with
+`detection_quality_panels` (save its `figure_bytes` as the visualization,
+and judge over/under-detection from its metrics — see `## planning` and
+`## validation`), then report column count, intensity distribution, and
+nearest-neighbor distances. For the **lattice parameters**, use
+`measure_lattice_constant` (the deterministic, harmonic-safe tool), not a
+hand-rolled FFT-peak pick.
 
 ### advanced
 
