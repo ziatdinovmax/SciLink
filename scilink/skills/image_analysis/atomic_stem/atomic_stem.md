@@ -196,6 +196,16 @@ goal you picked above:
   distance / bond length" → the NN. If the request offers them as
   alternatives or is ambiguous, report both, explicitly labeled, with their
   geometric relation — never silently substitute one for the other.
+  **This applies even when the lattice constant is a BYPRODUCT of another
+  objective** (e.g. reporting the cell while characterizing fringe spacing for
+  a defect study): whenever a lattice constant, cell parameter, or inter-axis
+  angle is reported, get it from `measure_lattice_constant`, NOT by hand-picking
+  two spacings from a `fourier_reflection_map` census as "the axes". The census
+  lists reflection *spacings*, not lattice vectors — pairing e.g. a {110}
+  face-diagonal (≈ a/√2) with a {100} axial spot yields a spurious ~45°
+  "oblique" cell. `measure_lattice_constant` resolves the true basis (and flags
+  `low_confidence` when the lattice is layered or under-sampled, e.g. below
+  ~12 px per cell), so route cell determination through it every time.
 - *If goal is locating or excluding a film/substrate (or grain) interface:*
   between two lattice-matched phases (e.g. a perovskite film on a perovskite
   substrate) the boundary is CHEMICAL, not structural — the reflection set /
@@ -227,6 +237,16 @@ goal you picked above:
   an independent confirmation of real-space candidates. It returns typed
   signatures (deficit vs excess, lattice-coherence dip) but candidates
   still need real-space confirmation crops for chemical interpretation.
+- *If goal is planar-defect detection (stacking fault, intergrowth, anti-
+  phase / twin boundary):* the defect is a *localized break in periodicity* —
+  a fringe-spacing jump, inserted/missing plane, or lateral phase shift across
+  a line. General caution (the same one as flat-fielding an interface): any
+  preprocessing that suppresses a background/banding component — de-streaking,
+  row/column-mean or background subtraction, high-pass — will also erase a
+  defect that lives in that component, so search on data that preserves it.
+  Then separate a localized structural discontinuity (the defect) from a
+  periodic full-width modulation (normal layering) or a uniform line (detector
+  artifact).
 - *If goal is displacement / strain mapping:* requires an ideal
   lattice from a prior step. Map displacements spatially; report only
   distortions exceeding the position fit uncertainty. Distinguish

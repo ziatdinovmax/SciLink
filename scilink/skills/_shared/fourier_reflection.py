@@ -135,7 +135,15 @@ def fourier_reflection_map(image_array, pixel_size_nm, d_nm=None, params=None):
             if r["is_satellite_candidate"] and r["sigma"] >= min_sigma]
     strongest_sat = sats[0]["d_nm"] if sats else None   # reflections sorted by sigma
 
-    out = {"reflections": reflections, "strongest_satellite_d_nm": strongest_sat}
+    out = {"reflections": reflections, "strongest_satellite_d_nm": strongest_sat,
+           # Guard against a common misuse: these are reflection SPACINGS, not
+           # real-space lattice vectors. Pairing two of them as cell axes (e.g.
+           # a {110} face-diagonal at ~a/sqrt2 with a {100} axial spot) gives a
+           # spurious ~45deg "oblique" cell. For the unit cell / lattice
+           # constant / inter-axis angle, use measure_lattice_constant instead.
+           "cell_note": ("reflection spacings, NOT lattice vectors — do not pair "
+                         "them as cell axes; use measure_lattice_constant for the "
+                         "unit cell / lattice constant / angle")}
 
     # --- choose which reflection to map ---
     # Default = STRONGEST significant reflection (general, defensible: the main
@@ -230,6 +238,13 @@ TOOL_SPEC = ToolSpec(
         "heterogeneity is unknown ('what domains exist?'); reach for "
         "fourier_reflection_map when you can name or first detect the reflection "
         "of interest and want to map WHERE it is.\n"
+        "\n"
+        "NOT for the unit cell: the returned `reflections` are spacings, not "
+        "lattice vectors. Do NOT pick two of them as cell axes — a {110} "
+        "face-diagonal (~a/sqrt2) paired with a {100} axial spot yields a "
+        "spurious ~45deg oblique cell. For the lattice constant / cell "
+        "parameters / inter-axis angle (even as a byproduct), use "
+        "measure_lattice_constant.\n"
         "\n"
         "Calibrate first: pass the true square-pixel size (nm/px). If pixels are "
         "anisotropic, resample to square physical pixels before calling.\n"
