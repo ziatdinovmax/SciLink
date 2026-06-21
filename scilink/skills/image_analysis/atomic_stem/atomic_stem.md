@@ -110,6 +110,22 @@ when `fov_nm` is unknown or the DCNN result looks poor.
   band and rescaling affects only completeness — the default is usually
   fine; just avoid the coarse end, where detection collapses sharply.) Do
   not preprocess.
+
+  **Choosing `target_pixel_size` — narrow by NN, DECIDE by eye.** The NN
+  number alone is not a sufficient arbiter (a lattice can read a plausible NN
+  yet still resolve only one of two sublattices). When separate sublattices
+  must be resolved — any multi-sublattice material, and always before
+  `type_sublattice_defects` — select it visually: sweep the few NN-bracketed
+  candidates, run `detection_quality_panels` (full-frame overlay + zoom crops +
+  NN/heatmap metrics) for each, assemble them into ONE comparison figure, and
+  **save that as the step visualization** so the verification step makes (or
+  confirms) the choice. Pick the value whose zoom crops show BOTH sublattices
+  resolved with no split/duplicate columns and no coverage gaps — not merely
+  the largest column count. A detected NN at the *lattice constant* rather than
+  the *inter-sublattice* spacing means the dim sublattice is unresolved → go
+  finer. Do NOT run `type_sublattice_defects` until detection visually resolves
+  the target sublattices; spending the verification step on this choice is the
+  right use of it, because every downstream defect call depends on it.
 - `detect_atoms` (classical peak detection): more general-purpose
   baseline; use when `fov_nm` is unknown or when DCNN results look poor. **Preprocessing
   applies here, not to the DCNN path** — background subtraction or
