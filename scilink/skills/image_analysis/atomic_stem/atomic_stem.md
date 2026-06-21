@@ -254,17 +254,41 @@ goal you picked above:
   preprocessing that suppresses a background/banding component — de-streaking,
   row/column-mean or background subtraction, high-pass — will also erase a
   defect that lives in that component, so search on data that preserves it.
-  Then separate a localized structural discontinuity (the defect) from a
-  periodic full-width modulation (normal layering) or a uniform line (detector
-  artifact).
-- *If goal is displacement / strain mapping:* requires an ideal
-  lattice from a prior step. Map displacements spatially; report only
-  distortions exceeding the position fit uncertainty. Distinguish
-  fitted-lattice residuals (local disorder) from deviations against a
-  known ideal lattice (true strain). (A reciprocal-space alternative —
-  the *phase* channel of the superlattice-mapping pipeline below — gives
-  a continuous strain/displacement field without first detecting atoms;
-  prefer it when columns are too noisy to fit reliably.)
+  Localize and classify it with `lattice_discontinuity_map` (next bullet),
+  which runs on the RAW image; separate a localized structural discontinuity
+  (the defect) from a periodic full-width modulation (normal layering) or a
+  uniform line (detector artifact).
+- *If goal is displacement / strain mapping (incl. dislocations / Burgers
+  vectors, precipitate-interface coherency, twin-boundary displacement):*
+  the dedicated tool is the **`gpa_strain` skill** (Geometric Phase
+  Analysis) — it returns the referenced in-plane strain tensor
+  (εxx, εyy, εxy) and lattice rotation (ωxy) against an undistorted
+  reference region, without first detecting atoms. Co-activate it; do NOT
+  hand-roll strain from the *unreferenced* raw FFT phase. Its caveat: GPA
+  assumes ONE dominant lattice, so it is for SMALL distortions / coherent
+  regions — across a large misorientation use `lattice_discontinuity_map`
+  (below) instead. (A real-space alternative when columns fit cleanly: map
+  displacements of detected positions vs an ideal lattice from a prior
+  step.)
+
+- *If goal is locating / classifying a grain or twin boundary, a planar
+  defect (stacking fault, intergrowth, antiphase band), or an incoherent
+  interface:* use the registered tool **`lattice_discontinuity_map`** — a
+  sliding-window local-FFT map whose neighbour spectral dissimilarity
+  detects the boundary line and whose orientation/spacing jumps classify
+  it (orientation→grain/twin, spacing→interface/second-phase, coherence
+  drop only→stacking fault/disorder). Save its `figure_bytes` as the
+  visualization and read `boundaries`. Run it on the RAW image — do not
+  de-streak / background-subtract first (that erases a defect that lives
+  in the banding). Pick among the reciprocal-space tools by question:
+  `run_fft_nmf_analysis` is the EXPLORATORY decomposer (unknown
+  heterogeneity, "how many domains"); `lattice_discontinuity_map` is the
+  sharp LOCALIZER (where is the boundary + what type); `gpa_strain` gives
+  the strain MAGNITUDE near it; `fourier_reflection_map` maps a specific
+  superstructure reflection's domain. NOTE the scope: a COHERENT
+  lattice-matched chemical interface (same orientation+spacing+coherence
+  both sides) is invisible to this tool — detect that via the per-column
+  Z-contrast step (see the film/substrate interface bullet above).
 
 - *If goal is superlattice / satellite-reflection mapping:* use the
   registered tool `fourier_reflection_map` (see `analysis` for the call).
