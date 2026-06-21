@@ -509,21 +509,31 @@ sites; restrict the vacancy search to the interior to avoid edge false
 positives; verify candidates with a forced Gaussian fit at the expected
 position.
 
-For a multi-sublattice lattice (ABO3 perovskite, dichalcogenide, …)
-**separate the sublattices first, then type defects per sublattice** — a
-defect is defined relative to its own sublattice. Assign each column to a
-sublattice by **local environment / geometry** — `local_env_gmm` (patch-
-based) or the honeycomb/lattice site from detect-subtract-detect — **NOT by
-raw column intensity**: a substitutional dopant is a column of *anomalous
-intensity on its sublattice*, so an intensity-based split misfiles it into
-the other sublattice (a dim dopant on the bright sublattice lands in the
-dim cluster) and hides it. Then, within each geometric class: a **vacancy**
-is a site the class's ideal lattice predicts (`find_missing_atoms` on that
-class) with no detection; a **substitution / dopant** is an *intensity
-outlier within that class* (amplitude anomalous for its sublattice —
-comparing amplitudes *across* sublattices is meaningless, the species
-differ). Use raw intensities for the outlier test. Two common failures:
-skipping the separation entirely (all columns treated as one population),
+For a multi-sublattice lattice (ABO3 perovskite, dichalcogenide, …) use the
+registered tool **`type_sublattice_defects(image, positions)`** — it runs the
+whole per-sublattice chain in one call and returns a figure + per-sublattice
+vacancy/dopant lists. **Prerequisite: clean detection** — both sublattices
+resolved AND not over-detected (confirm via NN at the inter-sublattice
+spacing; over-detection / column-splitting fabricates false defects, so fix
+`target_pixel_size` first). The paragraph below is what the tool does (and
+why), and how to tune it via its knobs (`dopant_sigma`, `vacancy_enclosure`,
+`edge_margin_px`).
+
+**Why per-sublattice, done right:** a defect is defined relative to its own
+sublattice. Assign each column to a sublattice by **local environment /
+geometry** (`local_env_gmm`, patch-based) — **NOT by raw column intensity**:
+a substitutional dopant is a column of *anomalous intensity on its
+sublattice*, so an intensity-based split misfiles it into the other
+sublattice (a dim dopant on the bright sublattice lands in the dim cluster)
+and hides it. Then, within each geometric class: a **vacancy** is an interior
+ideal-lattice site with no detected column *and* image intensity at
+background (a site with column-level intensity is a missed detection, not a
+vacancy); a **substitution / dopant** is an *intensity outlier within that
+class*, measured against the column's *local* same-sublattice neighbours so a
+slow illumination/thickness gradient is not mistaken for dopants (comparing
+amplitudes *across* sublattices is meaningless — the species differ). Use raw
+intensities. Two common failures the tool avoids: skipping the separation
+entirely (all columns treated as one population),
 and separating by intensity (which buries the very dopants being sought).
 
 Do NOT infer "the dim sublattice was not resolved" from the absence of a

@@ -847,6 +847,250 @@ def local_env_gmm(
     }
 
 
+def _sublattice_vacancies(cp, med_nn, margin, shape, enclosure,
+                          image=None, occupied_intensity=None):
+    """Interior sites of one sublattice with no detected column (vacancies).
+
+    Data-driven and lattice-agnostic (no global indexing, so no drift over
+    large or strained fields): for every atom, reflect each of its nearest
+    neighbours to the opposite side (``2p - q``) — that opposite site is where
+    the lattice "expects" another atom. A reflected site that is (a) empty,
+    (b) interior, and (c) enclosed by at least ``enclosure`` detected columns
+    within ~1 NN is a vacancy candidate. Works for square, hexagonal, and
+    oblique sublattices alike.
+
+    Critical disambiguation (when ``image``/``occupied_intensity`` are given):
+    a true vacancy has *no atom*, so the image there sits near the
+    inter-column background; a mere *detection miss* still has a real column
+    (full intensity) at the site. Candidates whose image intensity is a sizable
+    fraction of a real column are rejected as missed detections, not vacancies
+    — so vacancy counts do not inflate when detection under-finds a dim
+    sublattice.
+    """
+    H, W = shape
+    cp = np.asarray(cp, float)
+    if len(cp) < 12:
+        return []
+    tree = cKDTree(cp)
+    k = min(9, len(cp))
+    dists, idxs = tree.query(cp, k=k)
+    # NN spacing WITHIN this sublattice (not the global inter-sublattice
+    # spacing) — the bond scale for a sublattice is its own lattice constant.
+    nn = float(np.median(dists[:, 1]))
+    bond_max = 1.4 * nn
+    empty_tol = 0.4 * nn
+    cand = []
+    for i, p in enumerate(cp):
+        for j in range(1, k):
+            q = cp[idxs[i, j]]
+            if dists[i, j] > bond_max:
+                break  # neighbours are distance-sorted; no closer bonds left
+            r = 2.0 * p - q  # site opposite q across p
+            if tree.query(r)[0] > empty_tol:  # genuinely empty
+                cand.append(r)
+    if not cand:
+        return []
+    cand = np.array(cand)
+    # Merge votes for the same empty site, then keep only interior, enclosed ones.
+    ctree = cKDTree(cand)
+    used = np.zeros(len(cand), bool)
+    vac = []
+    for i in range(len(cand)):
+        if used[i]:
+            continue
+        grp = ctree.query_ball_point(cand[i], empty_tol)
+        used[list(grp)] = True
+        s = cand[list(grp)].mean(0)
+        if not (margin < s[0] < W - margin and margin < s[1] < H - margin):
+            continue
+        if tree.query(s)[0] <= empty_tol:  # an atom is actually there
+            continue
+        if len(tree.query_ball_point(s, bond_max)) < enclosure:  # not enclosed
+            continue
+        if image is not None and occupied_intensity:
+            # reject missed detections: a real (undetected) column still has
+            # near-full intensity here; a true vacancy sits near background.
+            xi, yi = int(round(s[0])), int(round(s[1]))
+            rr = max(1, int(round(0.15 * nn)))
+            patch = image[max(0, yi - rr):yi + rr + 1, max(0, xi - rr):xi + rr + 1]
+            if patch.size and float(patch.max()) > 0.6 * occupied_intensity:
+                continue
+        vac.append((float(s[0]), float(s[1])))
+    return vac
+
+
+def type_sublattice_defects(
+    image,
+    positions,
+    n_sublattices=2,
+    window_size=None,
+    pixel_size_nm=None,
+    dopant_sigma=3.5,
+    edge_margin_px=None,
+    vacancy_enclosure=3,
+    random_state=1,
+):
+    """Per-sublattice point-defect typing on a multi-sublattice lattice.
+
+    Encapsulates the chain that an LLM tends to get wrong when it improvises:
+    (1) separate sublattices by **local environment** (``local_env_gmm``) —
+    NOT by raw column intensity, because a substitutional dopant is itself an
+    anomalous-intensity column, so an intensity split misfiles it into the
+    wrong sublattice and hides it; (2) per sublattice, flag **vacancies**
+    (interior ideal-lattice sites with no detected column) and **dopants**
+    (amplitude outliers *within* that sublattice). Border columns are excluded
+    (unreliable fits). Run only after BOTH sublattices are resolved by
+    detection (confirm via NN at the inter-sublattice spacing).
+
+    Args:
+        image: 2D grayscale array — pass it RAW (un-normalized); intensity
+            carries the Z-contrast that distinguishes species and dopants.
+        positions: (N, 2) detected column positions (x, y).
+        n_sublattices: number of sublattices to separate (default 2).
+        window_size: local-environment patch side in px (default ~1.5× median
+            NN ≈ one lattice parameter). Larger captures more neighbourhood.
+        pixel_size_nm: nm/px; if given, defect coordinates are also in nm.
+        dopant_sigma: robust (MAD) z-score threshold for an intensity outlier
+            within a sublattice. LOWER (e.g. 2.5) to catch subtler
+            substitutions, RAISE (e.g. 5) if noise produces false dopants.
+        edge_margin_px: exclude defects within this many px of the border
+            (default 1.5× median NN). RAISE if border fits are unreliable,
+            LOWER to include near-edge defects.
+        vacancy_enclosure: how many of a candidate empty site's 4 lattice
+            neighbours must be occupied for it to count (default 3 of 4).
+            RAISE to 4 for only fully-enclosed vacancies (fewer false
+            positives at domain edges), LOWER to 2 near boundaries.
+        random_state: seed for the GMM separation.
+
+    Returns:
+        dict with 'figure_bytes' (PNG: sublattices colour-coded + vacancies +
+        dopants), 'metrics' (per-sublattice counts, separation_score,
+        vacancies, dopants — each with x/y[/x_nm/y_nm], sublattice, and for
+        dopants a signed z and a lighter/heavier-substitution label), and
+        'flags'.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from io import BytesIO
+
+    img = np.asarray(image, float)
+    if img.ndim != 2:
+        img = img[..., 0] if (img.ndim == 3 and img.shape[-1] <= 4) else img.reshape(img.shape[-2:])
+    H, W = img.shape
+    pos = np.asarray(positions, float)
+    if pos.ndim != 2 or pos.shape[1] < 2:
+        raise ValueError(f"positions must be (N,2); got {pos.shape}")
+    pos = pos[:, :2]
+    flags = []
+    if len(pos) < 20:
+        return {"figure_bytes": None,
+                "metrics": {"error": "too few columns for sublattice typing"},
+                "flags": ["insufficient_columns"]}
+
+    med_nn = float(np.median(cKDTree(pos).query(pos, k=2)[0][:, 1]))
+    win = int(window_size) if window_size else max(8, int(round(1.5 * med_nn)))
+    margin = float(edge_margin_px) if edge_margin_px is not None else 1.5 * med_nn
+
+    # (1) separation by LOCAL ENVIRONMENT (not raw intensity)
+    sep = local_env_gmm(img, pos, n_components=int(n_sublattices),
+                        window_size=win, random_state=int(random_state))
+    spos, scls = sep["positions"], sep["classes"]
+    if len(spos) < 12:
+        return {"figure_bytes": None,
+                "metrics": {"error": "sublattice separation produced too few classified columns"},
+                "flags": ["separation_failed"]}
+
+    r = max(1, int(round(med_nn * 0.2)))
+    def _peak(p):
+        x, y = int(round(p[0])), int(round(p[1]))
+        return float(img[max(0, y - r):y + r + 1, max(0, x - r):x + r + 1].max())
+    inten = np.array([_peak(p) for p in spos])
+
+    present = [c for c in range(int(n_sublattices)) if np.any(scls == c)]
+    means = {c: float(inten[scls == c].mean()) for c in present}
+    order = sorted(present, key=lambda c: -means[c])  # brightest first
+    pooled = np.mean([inten[scls == c].std() for c in present]) + 1e-9
+    sep_score = (max(means.values()) - min(means.values())) / pooled if len(present) > 1 else 0.0
+    if sep_score < 2.0:
+        flags.append("low_separation_score")
+
+    def _interior(p):
+        return margin < p[0] < W - margin and margin < p[1] < H - margin
+
+    sublattices, all_vac, all_dop = [], [], []
+    for rank, c in enumerate(order):
+        cp, ci = spos[scls == c], inten[scls == c]
+        # Gradient-robust intensity: ratio of each column to the median of its
+        # OWN-sublattice neighbours, so a slow illumination/thickness gradient
+        # across the field does not masquerade as dopants. A dopant is then a
+        # column anomalous vs its LOCAL same-species surroundings.
+        if len(cp) >= 8:
+            kk = min(13, len(cp))
+            nb_idx = cKDTree(cp).query(cp, k=kk)[1]
+            local_ref = np.array([np.median(ci[nb_idx[t, 1:]]) for t in range(len(cp))])
+            metric = ci / (local_ref + 1e-9)
+        else:
+            metric = ci
+        med = np.median(metric); mad = np.median(np.abs(metric - med)) * 1.4826 + 1e-9
+        z = (metric - med) / mad
+        dops = []
+        for p, zz in zip(cp[np.abs(z) > dopant_sigma], z[np.abs(z) > dopant_sigma]):
+            if _interior(p):
+                d = {"x": float(p[0]), "y": float(p[1]), "z": float(zz),
+                     "kind": "lighter-substitution" if zz < 0 else "heavier-substitution",
+                     "sublattice": rank}
+                if pixel_size_nm:
+                    d["x_nm"], d["y_nm"] = float(p[0] * pixel_size_nm), float(p[1] * pixel_size_nm)
+                dops.append(d)
+        vacs = []
+        for vx, vy in _sublattice_vacancies(cp, med_nn, margin, (H, W),
+                                            int(vacancy_enclosure),
+                                            image=img, occupied_intensity=float(np.median(ci))):
+            v = {"x": vx, "y": vy, "sublattice": rank}
+            if pixel_size_nm:
+                v["x_nm"], v["y_nm"] = float(vx * pixel_size_nm), float(vy * pixel_size_nm)
+            vacs.append(v)
+        all_dop += dops; all_vac += vacs
+        sublattices.append({"rank": rank, "n_columns": int(len(cp)),
+                            "mean_intensity": means[c],
+                            "n_vacancies": len(vacs), "n_dopants": len(dops)})
+
+    # figure
+    fig, ax = plt.subplots(1, 2, figsize=(13, 6.5))
+    colors = plt.cm.tab10(np.linspace(0, 1, 10))
+    for a in ax:
+        a.imshow(img, cmap="gray"); a.axis("off")
+    ax[0].set_title("Sublattices (by local environment)")
+    for rank, c in enumerate(order):
+        cp = spos[scls == c]
+        ax[0].scatter(cp[:, 0], cp[:, 1], s=8, color=colors[rank],
+                      label=f"sublattice {rank} (I~{means[c]:.2f})")
+    ax[0].legend(loc="upper right", fontsize=8, framealpha=0.7)
+    ax[1].set_title(f"Defects: {len(all_vac)} vacancies (□), {len(all_dop)} dopants (○)")
+    for v in all_vac:
+        ax[1].scatter(v["x"], v["y"], s=90, facecolors="none", edgecolors="cyan", marker="s", linewidths=1.6)
+    for d in all_dop:
+        col = "lime" if d["z"] < 0 else "magenta"
+        ax[1].scatter(d["x"], d["y"], s=90, facecolors="none", edgecolors=col, marker="o", linewidths=1.6)
+    buf = BytesIO(); fig.tight_layout(); fig.savefig(buf, format="png", dpi=110); plt.close(fig)
+
+    return {
+        "figure_bytes": buf.getvalue(),
+        "metrics": {
+            "n_columns_classified": int(len(spos)),
+            "separation_score": float(sep_score),
+            "sublattices": sublattices,
+            "n_vacancies": len(all_vac),
+            "n_dopants": len(all_dop),
+            "vacancies": all_vac,
+            "dopants": all_dop,
+            "median_nn_px": med_nn,
+        },
+        "flags": flags,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Tool specs
 # ---------------------------------------------------------------------------
@@ -1154,6 +1398,54 @@ TOOL_SPECS = [
             "average local-environment image per cluster), 'positions' ((M, 2) (x, y) "
             "of atoms successfully classified — may be smaller than N if patches were "
             "cropped at the image border), and 'classes' ((M,) 0-indexed cluster id)."
+        ),
+    ),
+    ToolSpec(
+        name="type_sublattice_defects",
+        description=(
+            "Per-sublattice point-defect typing for a multi-sublattice atomic lattice. "
+            "Separates sublattices by LOCAL ENVIRONMENT (not raw intensity, which would "
+            "hide a substitutional dopant), then flags vacancies (interior ideal-lattice "
+            "sites with no detected column) and dopants (intensity outliers within a "
+            "sublattice). Returns a figure and per-sublattice defect lists."
+        ),
+        import_line="from scilink.skills.image_analysis.atomic_stem.atom_finding import type_sublattice_defects",
+        signature=(
+            "type_sublattice_defects(image, positions, n_sublattices=2, window_size=None, "
+            "pixel_size_nm=None, dopant_sigma=3.5, edge_margin_px=None, "
+            "vacancy_enclosure=3, random_state=1) -> dict"
+        ),
+        agents=["image_analysis"],
+        when_to_use=(
+            "After BOTH sublattices of a multi-sublattice lattice are resolved by "
+            "detection (perovskite ABO3, dichalcogenide MoS2-type, any structure with a "
+            "basis) and the objective is per-sublattice point defects. Confirm both "
+            "sublattices are resolved first (NN at the inter-sublattice spacing, not the "
+            "unit-cell repeat). Do NOT separate sublattices by raw column intensity "
+            "yourself — that misfiles a dim dopant into the dim sublattice and hides it; "
+            "this tool separates by local environment. Lattice-agnostic (square, "
+            "hexagonal, oblique). Assumes bright-column (HAADF) intensity convention. "
+            "Requires the atomai package (used for the local-environment separation)."
+        ),
+        parameters={
+            "image": {"type": "ndarray", "description": "2D grayscale array. Pass RAW (un-normalized) — intensity carries the Z-contrast that distinguishes species and dopants."},
+            "positions": {"type": "ndarray", "description": "(N, 2) detected column positions (x, y) from detect_atoms / detect_atoms_dcnn, with BOTH sublattices resolved."},
+            "n_sublattices": {"type": "int", "description": "Number of sublattices / distinct column species to separate (default 2; set to 3+ for more complex bases)."},
+            "window_size": {"type": "int", "description": "Local-environment patch side in px for separation (default ~1.5x median NN, i.e. ~one lattice parameter). Larger captures more neighbourhood context."},
+            "pixel_size_nm": {"type": "float", "description": "nm/px; if given, defect coordinates are also reported in nm."},
+            "dopant_sigma": {"type": "float", "description": "Robust (MAD) z-score threshold for an intensity outlier within a sublattice. LOWER (e.g. 2.5) to catch subtler substitutions; RAISE (e.g. 5) if noise produces false dopants."},
+            "edge_margin_px": {"type": "float", "description": "Exclude defects within this many px of the border (default 1.5x median NN). RAISE if border fits are unreliable; LOWER to include near-edge defects."},
+            "vacancy_enclosure": {"type": "int", "description": "How many of a candidate empty site's 4 lattice neighbours must be occupied to count as a vacancy (default 3 of 4). RAISE to 4 for only fully-enclosed vacancies (fewer false positives at domain/grain edges); LOWER to 2 to catch vacancies near boundaries."},
+            "random_state": {"type": "int", "description": "Seed for the GMM separation (default 1; fixed for reproducibility)."},
+        },
+        required=["image", "positions"],
+        returns=(
+            "dict with 'figure_bytes' (PNG: sublattices colour-coded + vacancies (squares) "
+            "+ dopants (circles)), 'metrics' (separation_score, per-sublattice "
+            "n_columns/mean_intensity/n_vacancies/n_dopants, and 'vacancies'/'dopants' "
+            "lists each with x/y[/x_nm/y_nm], sublattice index, and for dopants a signed z "
+            "and lighter/heavier-substitution label), and 'flags' (e.g. "
+            "low_separation_score when the sublattices are not cleanly distinguished)."
         ),
     ),
 ]
