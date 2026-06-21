@@ -289,6 +289,20 @@ goal you picked above:
   lattice-matched chemical interface (same orientation+spacing+coherence
   both sides) is invisible to this tool — detect that via the per-column
   Z-contrast step (see the film/substrate interface bullet above).
+- *If the lattice-change tools above (`lattice_discontinuity_map`,
+  `fourier_reflection_map`) come back silent/unconvincing BUT a sustained
+  dark/bright trough or step crosses the field:* you are in the
+  **intensity/thickness-step regime**, not the lattice-change regime. A
+  boundary whose projected lattice is near-continuous — an INCLINED
+  grain/phase boundary (seen as a Z-contrast/thickness trough) or a
+  lattice-matched CHEMICAL interface — carries no orientation or spacing
+  jump, so *no* lattice-orientation method (FFT, structure tensor, per-column
+  angle map) can localize it: the signal is in the intensity field, not the
+  lattice. Detect the step itself with the intensity-step recipe (see
+  `## analysis`) — de-lattice the RAW image, isolate a sustained step from
+  smooth shading, trace the connected gradient ridge (orientation-agnostic).
+  Report it as an inclined/chemical boundary; if only smooth shading is
+  present and no ridge forms, report no boundary rather than forcing one.
 
 - *If goal is superlattice / satellite-reflection mapping:* use the
   registered tool `fourier_reflection_map` (see `analysis` for the call).
@@ -508,6 +522,26 @@ reflections is reconstructed as part of the pattern and will NOT appear.
 If a clearly visible lattice returns `periodic=False`, the note reports
 the best candidate snr — lower `min_peak_snr` only when that margin is
 small; far below the gate means the image is not periodic.
+
+**Intensity/thickness-step (Z-contrast) boundary detection** — for a
+boundary that does NOT change the projected lattice and is therefore
+invisible to every FFT/lattice-change tool: an INCLINED grain/phase
+boundary (its projected lattice is near-continuous, so it shows only as a
+Z-contrast/thickness trough) or a lattice-matched CHEMICAL interface. The
+signal lives in the non-periodic intensity field, not the lattice. No
+registered tool — generate the detector (it is standard image processing;
+the choice of operator is yours). The non-obvious constraints, not the
+exact code, are what matter: (1) work on the RAW image — flat-fielding
+erases the very step you are after; (2) remove the periodic lattice
+(unit-cell-scale local mean, or notch the Bragg peaks) to expose the
+slowly-varying intensity field; (3) separate a *sustained, localized*
+step/trough from a *smooth, global* shading ramp (e.g. against a
+much-larger-scale background) — the ramp is thickness/shading, not a
+boundary; (4) the boundary is an *extended line* (a connected ridge),
+orientation-agnostic so it handles horizontal, vertical, and diagonal/V
+loci alike, whereas an isolated compact dip is a point defect
+(→ `fft_defect_map`). If no ridge forms and only smooth shading is present,
+report no boundary rather than forcing one.
 
 **Strain and displacement:** Map displacements from ideal lattice
 positions spatially across the image. Only report distortions exceeding
