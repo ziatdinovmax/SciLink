@@ -139,11 +139,19 @@ def lattice_discontinuity_map(image, pixel_size_nm=None, params=None):
             specvec[(iy, ix)] = v / (v.sum() + 1e-12)
             az = np.bincount(abin[band], weights=P[band], minlength=nb)
             azim[iy, ix] = az
-            theta[iy, ix] = (np.argmax(az) + 0.5) / nb * 180.0
+            # DISPLAY orientation: circular MEAN of the azimuthal profile (mod
+            # 180), not argmax — argmax flips between symmetry-equivalent /
+            # different reflection families window-to-window and renders the map
+            # as a meaningless checkerboard.
+            phi = (np.arange(nb) + 0.5) / nb * np.pi
+            theta[iy, ix] = (np.degrees(0.5 * np.arctan2((az * np.sin(2 * phi)).sum(),
+                                                         (az * np.cos(2 * phi)).sum())) % 180.0)
             rad = np.bincount(rbin[band], weights=P[band], minlength=win + 1)[:nr + 1]
             radp[iy, ix] = rad
-            rpk = np.argmax(rad[1:]) + 1
-            dmap[iy, ix] = win / max(rpk, 1)
+            # DISPLAY spacing: power-weighted radial CENTROID (stable), not the
+            # argmax bin (which also flips between {100}/{110}-type rings).
+            ri = np.arange(1, nr + 1)
+            dmap[iy, ix] = win / max((ri * rad[1:]).sum() / (rad[1:].sum() + 1e-12), 1.0)
 
     valid = np.array([[(iy, ix) in specvec for ix in range(gw)] for iy in range(gh)])
     if valid.sum() < 4:
