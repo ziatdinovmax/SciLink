@@ -2676,6 +2676,22 @@ Score: 0.0 (nothing captured) to 1.0 (everything captured).
 - For measurement tasks: do extracted values match visual estimates from the image?
 Score: 0.0 (entirely wrong) to 1.0 (all output is correct).
 
+**Wrong science vs. over-production — two causes of low Correctness that need
+opposite feedback.** *Wrong science*: the output is in the wrong place or
+absent — edges off the real boundary, the wrong region analyzed, hallucinated
+or missed structure. The fix is to reanalyze. *Over-production*: a single
+coherent dominant finding IS present and correctly located, but the output
+renders far more structure than the evidence supports — a per-object/per-atom
+edge mesh, dozens of micro-regions, a marker haze — so most of the rendered
+detail is noise riding on a correct result. Score the noise honestly in both
+cases (do NOT inflate an over-produced result), but DIAGNOSE which one it is:
+when the cause is over-production, set `recommended_action` (and the matching
+`suggested_fix`) to "the dominant finding is correct — reduce the output to the
+evidence-supported structure (e.g. the single dominant boundary contour) and
+re-render; prefer simplifying the existing result over switching approach."
+This steers refinement to simplify a correct result rather than abandon it for
+a worse one.
+
 ### C. Relevance — does the output address what was asked?
 - Does the analysis extract the features listed in the quality criteria?
 - **Does the PRIMARY reported summary statistic and the headline figure
