@@ -3281,7 +3281,11 @@ Judge primarily from the visualizations against the original image:
    capture? Missed objects do not appear as errors — a clean overlay can still
    be badly incomplete. Actively scan the original image for clearly-visible
    targets a candidate failed to mark, and weight under-detection exactly as
-   seriously as over-detection.
+   seriously as over-detection. For DENSE atom-column detection, judge from the
+   zoom-in overlay panels and the reported NN/heatmap metrics (a spike of short
+   NN distances = duplicates; coverage gaps = misses) — NOT from a count-vs-
+   expected ratio, which is only order-of-magnitude for multi-sublattice
+   materials, so a moderate ratio (~1.3x) is not over-detection.
 2. **Correctness**: does the output correspond to real structures (not noise,
    artifacts, or hallucinated features)? Do reported values match visual
    estimates from the image?

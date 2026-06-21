@@ -2657,7 +2657,12 @@ target objects that are NOT marked in the visualization, estimate the fraction
 missed, and lower Completeness by that fraction (also list them under
 `missed_features`). Treat under-detection (missing real objects) as exactly as
 serious as over-detection (adding false ones) — do NOT score misses with a
-lighter touch than false positives. This does NOT apply to data-driven
+lighter touch than false positives. For DENSE atom-column detection, judge
+over/under-detection from the zoom-in overlay panels and the reported
+NN/heatmap metrics (short-NN-distance spike = duplicates; coverage gaps =
+misses), NOT from a count-vs-expected ratio — that ratio is only
+order-of-magnitude for multi-sublattice materials, so a moderate value
+(~1.3x) is not over-detection. This does NOT apply to data-driven
 decompositions (NMF/PCA/ICA/FFT), which produce basis patterns rather than a
 per-object census, and it does not mean nitpicking a few small/ambiguous
 features (see below) — it means catching the case where a substantial,

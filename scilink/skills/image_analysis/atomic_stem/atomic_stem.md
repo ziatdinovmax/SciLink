@@ -107,13 +107,23 @@ Refine detected positions with 2D Gaussian fitting (built into
 `detect_atoms`, available via `refine_positions` after
 `detect_atoms_dcnn`) for sub-pixel precision.
 
-**Validate the choice with an expected count:** estimate the visible
-atomic columns from image dimensions, pixel calibration (if available),
-and known lattice parameters for the material — count all sublattices
-visible in HAADF (number of unit cells × visible column types per
-cell). Compare detected count against this estimate; significant
-discrepancy (outside 0.90-1.10×) suggests detection issues or a
-structurally interesting region worth reporting.
+**QC the detection with `detection_quality_panels`, not a count.** After
+detecting columns, call the registered tool `detection_quality_panels`
+(image, positions, pixel_size_nm, and the DCNN `heatmap` when available)
+and **save its `figure_bytes` as the step visualization** — a full-frame
+overlay of thousands of marks is an unjudgeable haze, so the tool adds
+targeted zoom-in panels (placed at the most-suspect regions) plus the
+nearest-neighbor distance histogram, which is what actually reveals
+problems. Read its `metrics`: `short_pair_fraction` (a spike of
+anomalously short NN distances → duplicate/split marks = over-detection),
+`coverage_gap_fraction` (large unmarked regions = misses), and
+`heatmap_hit_fraction` (detections off every DCNN peak = spurious). Do
+NOT judge detection by an absolute count or an a-priori "expected count":
+the resolved columns-per-cell depends on the zone axis and on which
+columns are bright enough to resolve, which is unreliable to predict for
+multi-sublattice / complex structures — so a moderate detected/expected
+ratio (e.g. ~1.3×) is NOT over-detection. An expected count is at most an
+order-of-magnitude sanity check (~0.5-2×).
 
 **Calibration awareness.** Absolute spacings derived from images
 typically carry a few percent uncertainty in scale: pixel-size metadata
@@ -555,10 +565,20 @@ phase channel of the same reflection is a displacement/strain field (GPA).
 ## validation
 
 ### foundational
-**Detection completeness:** Detected vs expected column count (from
-image area and unit cell) should be within 0.90-1.10.
+**Detection completeness / over-detection:** judge from
+`detection_quality_panels` — its targeted zoom-in overlays and metrics, not
+a count ratio. Over-detection = high `short_pair_fraction` (a spike of
+anomalously short NN distances from split/duplicate marks) and/or
+detections off the DCNN peaks (low `heatmap_hit_fraction`); under-detection
+= high `coverage_gap_fraction` and clearly-visible columns unmarked in the
+gap zoom. A structure-based expected count is only an order-of-magnitude
+sanity check (~0.5-2×): resolved columns-per-cell is unreliable to predict
+for multi-sublattice / complex structures, so a moderate detected/expected
+ratio is NOT over-detection.
 
-**NN distance consistency:** CV below 15% for well-ordered crystals.
+**NN distance consistency:** CV below ~15% for well-ordered crystals — and a
+clean unimodal NN distribution at the expected column spacing means the
+detection is correct *regardless of the absolute count*.
 
 **Unit cell sanity:** Measured lattice parameters should be in the
 right ballpark of known bulk values, but absolute scale carries a
