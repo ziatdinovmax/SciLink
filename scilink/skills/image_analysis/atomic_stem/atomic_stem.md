@@ -517,7 +517,14 @@ resolved AND not over-detected (confirm via NN at the inter-sublattice
 spacing; over-detection / column-splitting fabricates false defects, so fix
 `target_pixel_size` first). The paragraph below is what the tool does (and
 why), and how to tune it via its knobs (`dopant_sigma`, `vacancy_enclosure`,
-`edge_margin_px`).
+`edge_margin_px`). **Limits (check the returned `flags`):** dopant typing and
+superstructure flagging generalize across lattice types; vacancy recall is
+high on hexagonal/rectangular lattices and clusters but only PARTIAL on
+tightly-interpenetrating square lattices (dim interstitial sites) — cross-
+check vacancies with `fft_defect_map`. And it assumes a complete sublattice
+with sparse random defects: if a superstructure flag fires (ordered/abundant
+defects), map the satellite with `fourier_reflection_map` rather than counting
+point defects.
 
 **Why per-sublattice, done right:** a defect is defined relative to its own
 sublattice. Assign each column to a sublattice by **local environment /

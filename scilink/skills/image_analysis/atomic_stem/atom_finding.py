@@ -872,25 +872,51 @@ def _sublattice_vacancies(cp, med_nn, margin, shape, enclosure,
     if len(cp) < 12:
         return []
     tree = cKDTree(cp)
-    k = min(9, len(cp))
-    dists, idxs = tree.query(cp, k=k)
-    # NN spacing WITHIN this sublattice (not the global inter-sublattice
-    # spacing) — the bond scale for a sublattice is its own lattice constant.
-    nn = float(np.median(dists[:, 1]))
-    bond_max = 1.4 * nn
-    empty_tol = 0.4 * nn
+    # Primitive vectors of THIS sublattice, from the most frequent short
+    # neighbour displacements (a high-recurrence displacement is a true lattice
+    # translation). This carries the correct, possibly anisotropic per-direction
+    # lengths — square, rectangular (a≠b), hexagonal and oblique alike — and is
+    # more reliable for a single sublattice than generic zone-axis detection.
+    kk = min(7, len(cp))
+    dists0, idxs0 = tree.query(cp, k=kk)
+    short = float(np.median(dists0[:, 1]))
+    binsz = 0.3 * short
+    counts = {}
+    for i in range(len(cp)):
+        for j in range(1, kk):
+            d = cp[idxs0[i, j]] - cp[i]
+            key = (int(round(d[0] / binsz)), int(round(d[1] / binsz)))
+            if key == (0, 0):
+                continue
+            counts.setdefault(key, []).append(d)
+    # keep displacements recurring across a meaningful fraction of atoms
+    vecs = sorted((np.mean(v, 0) for k, v in counts.items() if len(v) > 0.2 * len(cp)),
+                  key=lambda u: np.hypot(*u))
+    if len(vecs) < 2:
+        return []
+    v1 = vecs[0]
+    v2 = None
+    for v in vecs[1:]:
+        if abs(v1[0] * v[1] - v1[1] * v[0]) > 0.2 * np.linalg.norm(v1) * np.linalg.norm(v):
+            v2 = v
+            break
+    if v2 is None:
+        return []
+    Lmin = min(np.linalg.norm(v1), np.linalg.norm(v2))
+    Lmax = max(np.linalg.norm(v1), np.linalg.norm(v2))
+    empty_tol = 0.35 * Lmin
+    # Every lattice site sits at p ± v1 or p ± v2 from a neighbour, so these
+    # offsets generate all candidate sites (including around a vacancy).
     cand = []
-    for i, p in enumerate(cp):
-        for j in range(1, k):
-            q = cp[idxs[i, j]]
-            if dists[i, j] > bond_max:
-                break  # neighbours are distance-sorted; no closer bonds left
-            r = 2.0 * p - q  # site opposite q across p
-            if tree.query(r)[0] > empty_tol:  # genuinely empty
-                cand.append(r)
+    for p in cp:
+        for off in (v1, -v1, v2, -v2):
+            s = p + off
+            if tree.query(s)[0] > empty_tol:  # genuinely empty
+                cand.append(s)
     if not cand:
         return []
     cand = np.array(cand)
+    bond_max = 1.2 * Lmax
     # Merge votes for the same empty site, then keep only interior, enclosed ones.
     ctree = cKDTree(cand)
     used = np.zeros(len(cand), bool)
@@ -911,7 +937,7 @@ def _sublattice_vacancies(cp, med_nn, margin, shape, enclosure,
             # reject missed detections: a real (undetected) column still has
             # near-full intensity here; a true vacancy sits near background.
             xi, yi = int(round(s[0])), int(round(s[1]))
-            rr = max(1, int(round(0.15 * nn)))
+            rr = max(1, int(round(0.15 * Lmin)))
             patch = image[max(0, yi - rr):yi + rr + 1, max(0, xi - rr):xi + rr + 1]
             if patch.size and float(patch.max()) > 0.6 * occupied_intensity:
                 continue
@@ -1055,6 +1081,23 @@ def type_sublattice_defects(
         sublattices.append({"rank": rank, "n_columns": int(len(cp)),
                             "mean_intensity": means[c],
                             "n_vacancies": len(vacs), "n_dopants": len(dops)})
+
+    # Superstructure / ordered-phase guard. This tool assumes a COMPLETE
+    # sublattice with SPARSE, random point defects. When the flagged defect
+    # fraction is large, the columns are more likely an ordered phase (ordered
+    # vacancies/dopants, charge ordering) than a population of independent
+    # point defects — that regime is a superstructure to MAP, not point defects
+    # to count (use fourier_reflection_map on the satellite reflection).
+    defect_frac = (len(all_vac) + len(all_dop)) / max(1, len(spos))
+    if defect_frac > 0.15:
+        flags.append("high_defect_fraction_possible_superstructure")
+    # A large sublattice-population imbalance is the other superstructure tell
+    # (e.g. ordered vacancies that leave a self-consistent sparser lattice the
+    # geometry alone cannot see as vacancies): flag it for a reflection check.
+    if len(sublattices) >= 2:
+        cnts = sorted(s["n_columns"] for s in sublattices)
+        if cnts[0] > 0 and cnts[-1] / cnts[0] > 1.5:
+            flags.append("sublattice_population_imbalance_check_superstructure")
 
     # figure
     fig, ax = plt.subplots(1, 2, figsize=(13, 6.5))
@@ -1425,7 +1468,21 @@ TOOL_SPECS = [
             "yourself — that misfiles a dim dopant into the dim sublattice and hides it; "
             "this tool separates by local environment. Lattice-agnostic (square, "
             "hexagonal, oblique). Assumes bright-column (HAADF) intensity convention. "
-            "Requires the atomai package (used for the local-environment separation)."
+            "Requires the atomai package (used for the local-environment separation). "
+            "LIMITS (read the 'flags'): (1) needs clean detection — over/under-"
+            "detection fabricates or hides defects, so fix target_pixel_size first "
+            "(NN at the physical column spacing). (2) Dopant typing and superstructure "
+            "flagging are robust across lattice types; vacancy recall is high on "
+            "hexagonal/rectangular lattices and for vacancy clusters, but PARTIAL on "
+            "tightly-interpenetrating square lattices where the defective sublattice "
+            "sits at dim interstitial sites enclosed by bright neighbours — cross-check "
+            "vacancies with fft_defect_map (reciprocal-space, geometry-independent) and "
+            "consider lowering vacancy_enclosure. (3) Assumes a COMPLETE sublattice with "
+            "SPARSE random defects: an ORDERED/abundant defect arrangement is a "
+            "superstructure, not point defects — when 'high_defect_fraction_possible_"
+            "superstructure' or 'sublattice_population_imbalance_check_superstructure' is "
+            "flagged, map the satellite reflection with fourier_reflection_map instead of "
+            "counting sites. (4) HAADF bright-column intensity convention."
         ),
         parameters={
             "image": {"type": "ndarray", "description": "2D grayscale array. Pass RAW (un-normalized) — intensity carries the Z-contrast that distinguishes species and dopants."},
