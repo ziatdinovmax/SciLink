@@ -84,21 +84,34 @@ orientation-only heterogeneity.
 
 **For atom-resolved detection — choose the detector:**
 
-Default to `detect_atoms_dcnn` when the material is in its training set
-**and** `fov_nm` is available from metadata; otherwise use the
-classical `detect_atoms`.
+Default to `detect_atoms_dcnn` for a crystalline zone-axis lattice when
+`fov_nm` is available from metadata; fall back to classical `detect_atoms`
+when `fov_nm` is unknown or the DCNN result looks poor.
 
-- `detect_atoms_dcnn` (AtomNet3 DCNN ensemble): best for transition-
+- `detect_atoms_dcnn` (AtomNet3 DCNN ensemble): trained on transition-
   metal oxides (perovskites, layered perovskites, cuprate
-  superconductors) and graphene; needs `fov_nm` from metadata.
-  **Pass the raw image without preprocessing** — no CLAHE, no contrast
-  normalization, no background subtraction, no bandpass filtering. The
-  model is trained on raw images and handles intensity gradients
-  internally; added preprocessing degrades detection. If weak columns
-  are missed, lower the `threshold` parameter; do not preprocess.
+  superconductors) and graphene, but the honeycomb-trained model
+  generalizes well to other 2D honeycomb lattices — transition-metal
+  dichalcogenides (MoS2-type) included — so try it for any zone-axis
+  2D/honeycomb material, not only the named classes; needs `fov_nm` from
+  metadata. **Pass the raw image without preprocessing** — no CLAHE, no
+  contrast normalization, no background subtraction, no bandpass
+  filtering. The model is trained on raw images and handles intensity
+  gradients internally; added preprocessing degrades detection. If weak
+  columns are missed, lower the `threshold` parameter. If a dense lattice
+  resolves only its bright sublattice — sparse detection, nearest-neighbor
+  spacing larger than expected — the resampling is too coarse: lower
+  `target_pixel_size` (finer; the image is resampled to it before
+  inference) to recover the dim sublattice. Conversely, if the detected NN
+  falls *below* the physical column spacing (spurious/split columns, common
+  on noisy data), it is too fine — raise it. Tune by matching the detected
+  NN to the expected physical column spacing. (For a *single*-sublattice
+  material there is no dim sublattice to recover, so NN stays put across the
+  band and rescaling affects only completeness — the default is usually
+  fine; just avoid the coarse end, where detection collapses sharply.) Do
+  not preprocess.
 - `detect_atoms` (classical peak detection): more general-purpose
-  baseline; use when material is outside the DCNN's training set, when
-  `fov_nm` is unknown, or when DCNN results look poor. **Preprocessing
+  baseline; use when `fov_nm` is unknown or when DCNN results look poor. **Preprocessing
   applies here, not to the DCNN path** — background subtraction or
   bandpass filtering before detection helps with non-uniform
   illumination.
@@ -491,10 +504,34 @@ analysis — local normalization removes the Z-contrast difference
 between species. Verify that each sublattice has consistent intensity
 and the expected stoichiometric ratio.
 
-**Defect identification:** Compare detected positions to ideal lattice
-sites. Restrict vacancy search to the interior of the detected region
-to avoid edge false positives. Verify vacancy candidates with forced
-Gaussian fit at expected position.
+**Defect identification.** Compare detected positions to ideal lattice
+sites; restrict the vacancy search to the interior to avoid edge false
+positives; verify candidates with a forced Gaussian fit at the expected
+position.
+
+For a multi-sublattice lattice (ABO3 perovskite, dichalcogenide, …)
+**separate the sublattices first, then type defects per sublattice** — a
+defect is defined relative to its own sublattice. Assign each column to a
+sublattice by **local environment / geometry** — `local_env_gmm` (patch-
+based) or the honeycomb/lattice site from detect-subtract-detect — **NOT by
+raw column intensity**: a substitutional dopant is a column of *anomalous
+intensity on its sublattice*, so an intensity-based split misfiles it into
+the other sublattice (a dim dopant on the bright sublattice lands in the
+dim cluster) and hides it. Then, within each geometric class: a **vacancy**
+is a site the class's ideal lattice predicts (`find_missing_atoms` on that
+class) with no detection; a **substitution / dopant** is an *intensity
+outlier within that class* (amplitude anomalous for its sublattice —
+comparing amplitudes *across* sublattices is meaningless, the species
+differ). Use raw intensities for the outlier test. Two common failures:
+skipping the separation entirely (all columns treated as one population),
+and separating by intensity (which buries the very dopants being sought).
+
+Do NOT infer "the dim sublattice was not resolved" from the absence of a
+bimodal nearest-neighbor peak: when both sublattices are resolved the NN
+distribution is unimodal *at the inter-sublattice spacing* (honeycomb edge,
+body-center), not the unit-cell repeat. Confirm resolution from the
+`local_env_gmm` classes, a detected count near the full two-sublattice
+expectation, or an NN matching the inter-column spacing.
 
 **FFT point-defect mapping** — use the registered tool `fft_defect_map`
 (reciprocal-space, atom-detection-free) when columns are unreliable to

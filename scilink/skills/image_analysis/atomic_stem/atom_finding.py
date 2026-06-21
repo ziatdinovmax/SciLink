@@ -938,7 +938,7 @@ TOOL_SPECS = [
             },
             "target_pixel_size": {
                 "type": "float",
-                "description": "Target pixel size in Angstroms (default 0.25).",
+                "description": "Target pixel size in Angstroms the image is resampled to before inference (default 0.25). If a dense lattice's dim sublattice is missed (sparse detection), LOWER it (finer); too coarse a value drops the dim sublattice.",
             },
             "threshold": {
                 "type": "float",
