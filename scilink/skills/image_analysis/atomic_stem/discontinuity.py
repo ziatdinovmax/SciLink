@@ -65,6 +65,11 @@ def lattice_discontinuity_map(image, pixel_size_nm=None, params=None):
                 spacing change above the latter → interface/second-phase.
             min_boundary_frac (0.03): below this boundary-cell fraction the field
                 is reported as a single crystal.
+            min_region_frac (0.01): minimum connected-component size (as a
+                fraction of the window grid) a boundary locus must reach to
+                count — speckle below this is dropped as false-positive
+                contrast. RAISE to suppress scattered patches on a noisy image,
+                LOWER to keep a short/faint boundary segment.
             azimuthal_bins (36): angular resolution of the orientation profile.
             smooth (0.6): Gaussian smoothing of the dissimilarity map.
 
@@ -82,6 +87,7 @@ def lattice_discontinuity_map(image, pixel_size_nm=None, params=None):
     orient_jump = float(p.get("orient_jump_deg", 8.0))
     spacing_jump = float(p.get("spacing_jump_frac", 0.05))
     min_bf = float(p.get("min_boundary_frac", 0.03))
+    min_region_frac = float(p.get("min_region_frac", 0.01))
     nb = int(p.get("azimuthal_bins", 36))
     smooth = float(p.get("smooth", 0.6))
     dissim_sigma = float(p.get("dissim_sigma", 2.0))
@@ -184,6 +190,17 @@ def lattice_discontinuity_map(image, pixel_size_nm=None, params=None):
     med = float(np.median(diss)); mad = float(np.median(np.abs(diss - med))) + 1e-9
     thr = max(med + dissim_sigma * 1.4826 * mad, abs_floor)
     bmask = diss > thr
+
+    # A real boundary is a connected locus; isolated speckle that clears the
+    # threshold on a noisy image is false-positive contrast, not a boundary.
+    # Drop sub-size connected components BEFORE measuring/displaying so the
+    # fraction and the overlay map reflect clean contours, not scattered patches.
+    min_region = max(2, int(gh * gw * min_region_frac))
+    lbl0, n0 = ndi.label(bmask)
+    if n0:
+        sizes = ndi.sum(np.ones_like(lbl0, float), lbl0, np.arange(1, n0 + 1))
+        keep = np.where(sizes >= min_region)[0] + 1
+        bmask = np.isin(lbl0, keep) if keep.size else np.zeros_like(bmask)
     boundary_fraction = float(bmask.mean())
     score = diss
 
@@ -192,7 +209,7 @@ def lattice_discontinuity_map(image, pixel_size_nm=None, params=None):
     boundaries = []
     for k in range(1, nlab + 1):
         cell = lbl == k
-        if cell.sum() < max(2, gh * gw * 0.01):
+        if cell.sum() < min_region:
             continue
         # classify by comparing the FULL azimuthal/radial profiles on the two
         # sides of the boundary (robust; per-cell argmax flips between symmetry-
@@ -339,7 +356,9 @@ TOOL_SPEC = ToolSpec(
             "subtle/coherent twin, RAISE if noise is flagged; "
             "orient_jump_deg (8.0) and spacing_jump_frac (0.05) — CLASSIFICATION "
             "thresholds; min_boundary_frac (0.03) — below this it is a single "
-            "crystal; azimuthal_bins (36); smooth (0.6).")},
+            "crystal; min_region_frac (0.01) — min connected boundary size, "
+            "RAISE to suppress scattered false-positive patches on a noisy "
+            "image; azimuthal_bins (36); smooth (0.6).")},
     },
     required=["image"],
     returns=(
