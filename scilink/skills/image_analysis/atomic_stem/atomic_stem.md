@@ -141,9 +141,17 @@ when `fov_nm` is unknown or the DCNN result looks poor.
   **save that as the step visualization** so the verification step makes (or
   confirms) the choice. Pick the value whose zoom crops show BOTH sublattices
   resolved with no split/duplicate columns and no coverage gaps — not merely
-  the largest column count. A detected NN at the *lattice constant* rather than
-  the *inter-sublattice* spacing means the dim sublattice is unresolved → go
-  finer. Do NOT run `type_sublattice_defects` until detection visually resolves
+  the largest column count. **Get the target NN deterministically from
+  `measure_lattice_constant`** (its `nn_distance_nm` is the FFT-measured spacing
+  of the resolved sublattices) instead of computing the inter-sublattice spacing
+  from the lattice constant by hand — that projected distance is easy to
+  mis-derive, and aiming at a too-small target makes the loop keep lowering
+  `target_pixel_size` until it over-detects. Tune toward that measured NN:
+  detected NN *above* it (near the full lattice constant) → the dim sublattice is
+  unresolved → go finer; detected NN *below* it together with a
+  `short_pair_fraction` spike / `duplicate_suspect` flag → OVER-detection
+  (split/duplicate columns) → go COARSER, do not keep lowering. Do NOT run
+  `type_sublattice_defects` until detection visually resolves
   the target sublattices; spending the verification step on this choice is the
   right use of it, because every downstream defect call depends on it.
 - `detect_atoms` (classical peak detection): more general-purpose
