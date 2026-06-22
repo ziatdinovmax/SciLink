@@ -651,7 +651,9 @@ cage centre, the two cation sublattices being the intensity extremes).
 from scilink.skills.image_analysis.atomic_stem.atom_finding import map_polarization
 res = map_polarization(image, positions, pixel_size_nm=px)   # positions = BOTH sublattices
 # res['metrics']: per-cell 'polarization'/'xy'/'magnitude'/'angle', median_magnitude_nm,
-#   direction_coherence (~1 coherent/domains, ~0 noise — judge realness by this, not figure appearance)
+#   direction_coherence (~1 coherent/domains, ~0 noise — judge realness by this, not figure appearance;
+#   low coherence = random noise OR domains finer than ~3 cells: for the latter, fourier_reflection_map
+#   shows a superstructure satellite, so check that before calling low coherence "noise")
 ```
 
 **Superlattice / satellite-reflection mapping** — use the registered

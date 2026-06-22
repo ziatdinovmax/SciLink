@@ -1182,7 +1182,12 @@ def map_polarization(image, positions, displaced="auto", n_cage=4,
         px/nm, per-cell 'polarization' vectors, 'xy', 'magnitude', 'angle',
         'direction_coherence' ~1 for a smooth/domain-structured field and ~0 for
         salt-and-pepper noise — a magnitude-independent way to tell a real field
-        from a degenerate one), and 'flags' (incl. low_direction_coherence_possible_noise).
+        from a degenerate one — but it assumes domains LARGER than the NN scale:
+        a finely-twinned/antiferroelectric ordering on the ~1-2-cell scale reads
+        as LOW coherence too, so low coherence means "random noise OR domains
+        finer than ~3 cells" — for the latter check fourier_reflection_map for a
+        superstructure satellite before concluding noise), and 'flags' (incl.
+        low_direction_coherence_noise_OR_finer_than_NN_domains).
         The DIRECTION panel of the figure is a SMOOTHED domain map (locally
         averaged unit vectors; opacity = local coherence) so coherent domains/walls
         show as solid colour while noise washes out — do not judge coherence from a
@@ -1293,7 +1298,7 @@ def map_polarization(image, positions, displaced="auto", n_cage=4,
         ii = cKDTree(sx).query(sx, k=kk)[1]
         coherence = float(np.median([np.mean(su[i] @ su[ii[i, 1:]].T) for i in range(len(sx))]))
     if coherence == coherence and coherence < 0.5:
-        flags.append("low_direction_coherence_possible_noise")
+        flags.append("low_direction_coherence_noise_OR_finer_than_NN_domains")
 
     # --- smoothed / coherence-gated direction-domain map ----------------------
     # Locally average the unit vectors on a coarse grid: the resultant angle is
@@ -1769,7 +1774,9 @@ TOOL_SPECS = [
             "dict with 'figure_bytes' (PNG: polarization quiver + direction-domain map + "
             "magnitude map; the DIRECTION panel is a SMOOTHED domain map, opacity=local "
             "coherence, so domains/walls show solid and noise washes out), 'metrics' (n_cells, "
-            "median_magnitude_px/nm, direction_coherence ~1=coherent/domains ~0=noise, and "
+            "median_magnitude_px/nm, direction_coherence ~1=coherent/domains ~0=noise OR "
+            "domains finer than ~3 cells [check fourier_reflection_map for a satellite before "
+            "calling low coherence noise], and "
             "per-cell polarization/xy/magnitude/angle lists), and "
             "'flags' (e.g. weak_sublattice_intensity_separation). Sign follows the "
             "displaced->reference convention; flip via 'displaced' to match a specific reference."
