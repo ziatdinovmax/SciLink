@@ -105,7 +105,12 @@ when `fov_nm` is unknown or the DCNN result looks poor.
   inference) to recover the dim sublattice. Conversely, if the detected NN
   falls *below* the physical column spacing (spurious/split columns, common
   on noisy data), it is too fine — raise it. Tune by matching the detected
-  NN to the expected physical column spacing. (For a *single*-sublattice
+  NN to the expected column spacing — and get that expected spacing
+  deterministically from `measure_lattice_constant` (its `nn_distance_nm`)
+  rather than computing it by hand, since aiming at a too-small target makes
+  the loop keep lowering `target_pixel_size` until it over-detects (the
+  `short_pair_fraction` / `duplicate_suspect` signature → go COARSER, not
+  finer). (For a *single*-sublattice
   material there is no dim sublattice to recover, so NN stays put across the
   band and rescaling affects only completeness — the default is usually
   fine; just avoid the coarse end, where detection collapses sharply.) Do
@@ -131,29 +136,22 @@ when `fov_nm` is unknown or the DCNN result looks poor.
   collapses detection to ~0 columns — if detection collapses to near-zero,
   suspect a unit error before retuning anything else.
 
-  **Choosing `target_pixel_size` — narrow by NN, DECIDE by eye.** The NN
-  number alone is not a sufficient arbiter (a lattice can read a plausible NN
-  yet still resolve only one of two sublattices). When separate sublattices
-  must be resolved — any multi-sublattice material, and always before
-  `type_sublattice_defects` — select it visually: sweep the few NN-bracketed
+  **Resolving SEPARATE sublattices — DECIDE by eye, not the NN number alone.**
+  This applies ONLY when separate sublattices must be resolved (a multi-
+  sublattice material, and always before `type_sublattice_defects` or ferroic
+  polarization mapping); for a single-sublattice lattice the general NN-matching
+  above is sufficient. In the multi-sublattice case the NN number alone is not a
+  sufficient arbiter — a lattice can read a plausible NN yet still resolve only
+  one of two sublattices — so select visually: sweep the few NN-bracketed
   candidates, run `detection_quality_panels` (full-frame overlay + zoom crops +
   NN/heatmap metrics) for each, assemble them into ONE comparison figure, and
   **save that as the step visualization** so the verification step makes (or
   confirms) the choice. Pick the value whose zoom crops show BOTH sublattices
-  resolved with no split/duplicate columns and no coverage gaps — not merely
-  the largest column count. **Get the target NN deterministically from
-  `measure_lattice_constant`** (its `nn_distance_nm` is the FFT-measured spacing
-  of the resolved sublattices) instead of computing the inter-sublattice spacing
-  from the lattice constant by hand — that projected distance is easy to
-  mis-derive, and aiming at a too-small target makes the loop keep lowering
-  `target_pixel_size` until it over-detects. Tune toward that measured NN:
-  detected NN *above* it (near the full lattice constant) → the dim sublattice is
-  unresolved → go finer; detected NN *below* it together with a
-  `short_pair_fraction` spike / `duplicate_suspect` flag → OVER-detection
-  (split/duplicate columns) → go COARSER, do not keep lowering. Do NOT run
-  `type_sublattice_defects` until detection visually resolves
-  the target sublattices; spending the verification step on this choice is the
-  right use of it, because every downstream defect call depends on it.
+  resolved with no split/duplicate columns and no coverage gaps — not merely the
+  largest column count. Do NOT run `type_sublattice_defects` until detection
+  visually resolves the target sublattices; spending the verification step on
+  this choice is the right use of it, because every downstream defect call
+  depends on it.
 - `detect_atoms` (classical peak detection): more general-purpose
   baseline; use when `fov_nm` is unknown or when DCNN results look poor. **Preprocessing
   applies here, not to the DCNN path** — background subtraction or
