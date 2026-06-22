@@ -1134,6 +1134,147 @@ def type_sublattice_defects(
     }
 
 
+def map_polarization(image, positions, displaced="auto", n_cage=4,
+                     pixel_size_nm=None, edge_margin_px=None, random_state=1):
+    """Per-unit-cell ferroelectric polarization / cation off-centering map.
+
+    For a two-sublattice (ABO3-type / interpenetrating) lattice where BOTH
+    sublattices are already resolved by detection, this measures the polar
+    distortion: the displacement of the "displaced" cation sublattice from the
+    centrosymmetric position defined by the surrounding "reference cage"
+    sublattice. That displacement field is the ferroelectric order parameter —
+    its direction maps domains, its discontinuities map domain walls.
+
+    Method (lattice-agnostic, no material constants): refine positions to
+    sub-pixel (polarization IS a sub-pixel displacement), split the columns
+    into two sublattices by intensity (2-component GMM — robust, not a fixed
+    threshold), pick the displaced sublattice, and for each displaced atom take
+    the centroid of its ``n_cage`` nearest reference-sublattice neighbours as
+    the centrosymmetric reference. ``P = reference_centroid - displaced_atom``.
+
+    Args:
+        image: 2D grayscale HAADF array (RAW — intensity separates the species).
+        positions: (N, 2) detected columns (x, y) with BOTH sublattices
+            resolved (confirm NN sits at the inter-sublattice spacing first).
+        displaced: which sublattice is the off-centering one — ``'auto'``
+            (default = the dimmer sublattice, the usual lighter B-cation
+            convention), ``'dim'``, or ``'bright'`` (when the off-centering
+            cation is the heavier/brighter one). Only flips the reference
+            choice / overall sign; the domain structure is unchanged.
+        n_cage: number of reference neighbours forming the centrosymmetric
+            cage (default 4 for a perovskite [100] projection; raise to match
+            the projected coordination of other structures/zone axes).
+        pixel_size_nm: nm/px; if given, magnitude is also reported in nm.
+        edge_margin_px: drop cells within this of the border (default 1.5×NN).
+        random_state: GMM seed.
+
+    Returns: dict with 'figure_bytes' (PNG: polarization quiver + direction-
+        domain map + magnitude map), and 'metrics' (n_cells, median magnitude
+        px/nm, per-cell 'polarization' vectors, 'xy', 'magnitude', 'angle',
+        'n_direction_clusters' as a domain-count proxy), and 'flags'. NOTE: the
+        sign follows the displacement→reference convention above (polarization
+        is often reported opposite to the cation displacement; flip via
+        ``displaced`` if matching a specific reference). Magnitude precision is
+        limited for very small polar displacements near the detection-noise
+        floor — direction/domains stay robust; treat tiny |P| cells cautiously.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from io import BytesIO
+    from sklearn.mixture import GaussianMixture
+
+    img = np.asarray(image, float)
+    if img.ndim != 2:
+        img = img[..., 0] if (img.ndim == 3 and img.shape[-1] <= 4) else img.reshape(img.shape[-2:])
+    H, W = img.shape
+    pos = np.asarray(positions, float)[:, :2]
+    if len(pos) < 20:
+        return {"figure_bytes": None, "metrics": {"error": "too few columns"}, "flags": ["insufficient_columns"]}
+    flags = []
+    try:
+        pos = np.asarray(refine_positions(img, pos)["positions"])[:, :2]  # sub-pixel for accurate |P|
+    except Exception:
+        flags.append("refine_failed_using_raw_positions")
+
+    nn = float(np.median(cKDTree(pos).query(pos, k=2)[0][:, 1]))
+    margin = float(edge_margin_px) if edge_margin_px is not None else 1.5 * nn
+    rr = max(1, int(round(0.2 * nn)))
+    I = np.array([img[max(0, int(round(p[1])) - rr):int(round(p[1])) + rr + 1,
+                      max(0, int(round(p[0])) - rr):int(round(p[0])) + rr + 1].max() for p in pos])
+    gm = GaussianMixture(2, random_state=int(random_state)).fit(I.reshape(-1, 1))
+    lab = gm.predict(I.reshape(-1, 1)); bright = int(np.argmax(gm.means_.ravel()))
+    sep = abs(gm.means_.ravel()[0] - gm.means_.ravel()[1]) / (np.sqrt(gm.covariances_.ravel()).mean() + 1e-9)
+    if sep < 1.5:
+        flags.append("weak_sublattice_intensity_separation")
+    disp_lab = bright if displaced == "bright" else (1 - bright)  # 'auto'/'dim' -> dimmer is displaced
+    disp = pos[lab == disp_lab]; ref = pos[lab != disp_lab]
+    if len(disp) < 10 or len(ref) < 10:
+        return {"figure_bytes": None, "metrics": {"error": "sublattice split failed",
+                "n_displaced": int(len(disp)), "n_reference": int(len(ref))}, "flags": flags + ["split_failed"]}
+
+    tref = cKDTree(ref); P = []; XY = []
+    for d in disp:
+        dd, ii = tref.query(d, k=int(n_cage))
+        if dd.max() > 1.3 * nn * np.sqrt(2):
+            continue
+        cen = ref[ii].mean(0)
+        if np.linalg.norm(cen - d) > 0.9 * nn:   # cage not centrosymmetric around d (edge) -> skip
+            continue
+        if not (margin < d[0] < W - margin and margin < d[1] < H - margin):
+            continue
+        P.append(cen - d); XY.append(d)
+    P = np.array(P); XY = np.array(XY)
+    if len(P) < 5:
+        return {"figure_bytes": None, "metrics": {"error": "no valid cells", "n_cells": int(len(P))}, "flags": flags}
+    mag = np.linalg.norm(P, axis=1); ang = (np.degrees(np.arctan2(P[:, 1], P[:, 0]))) % 360
+    # domain proxy: cluster polarization direction (cos/sin) of cells with sizable |P|
+    strong = mag > np.median(mag) * 0.5
+    nclust = 0
+    if strong.sum() > 20:
+        feat = np.column_stack([np.cos(np.radians(ang[strong])), np.sin(np.radians(ang[strong]))])
+        from sklearn.cluster import KMeans
+        best_k, best_in = 1, -1
+        for k in (1, 2, 3, 4):
+            if k >= strong.sum():
+                break
+            km = KMeans(k, n_init=3, random_state=int(random_state)).fit(feat)
+            # silhouette-ish: within vs spread
+            inertia = km.inertia_ / strong.sum()
+            if k == 1:
+                base = inertia
+            elif inertia < 0.3 * base and k > best_k:
+                best_k = k
+        nclust = best_k
+
+    fig, ax = plt.subplots(1, 3, figsize=(18, 6))
+    for a in ax:
+        a.imshow(img, cmap="gray"); a.axis("off"); a.set_aspect("equal")
+    ax[0].quiver(XY[:, 0], XY[:, 1], P[:, 0], P[:, 1], mag, cmap="viridis",
+                 scale=max(1e-6, np.median(mag)) * 40, width=0.003)
+    ax[0].set_title("polarization vectors")
+    s1 = ax[1].scatter(XY[:, 0], XY[:, 1], c=ang, cmap="hsv", s=6, vmin=0, vmax=360)
+    ax[1].set_title("polarization DIRECTION (domains)"); plt.colorbar(s1, ax=ax[1], fraction=0.046, label="deg")
+    s2 = ax[2].scatter(XY[:, 0], XY[:, 1], c=mag * (pixel_size_nm or 1), cmap="magma", s=6,
+                       vmax=np.percentile(mag, 98) * (pixel_size_nm or 1))
+    ax[2].set_title("|P| magnitude" + (" (nm)" if pixel_size_nm else " (px)")); plt.colorbar(s2, ax=ax[2], fraction=0.046)
+    buf = BytesIO(); fig.tight_layout(); fig.savefig(buf, format="png", dpi=110); plt.close(fig)
+
+    return {
+        "figure_bytes": buf.getvalue(),
+        "metrics": {
+            "n_cells": int(len(P)),
+            "median_magnitude_px": float(np.median(mag)),
+            "median_magnitude_nm": float(np.median(mag) * pixel_size_nm) if pixel_size_nm else None,
+            "n_direction_clusters": int(nclust),
+            "displaced_sublattice": displaced,
+            "polarization": P.tolist(), "xy": XY.tolist(),
+            "magnitude": mag.tolist(), "angle": ang.tolist(),
+        },
+        "flags": flags,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Tool specs
 # ---------------------------------------------------------------------------
@@ -1503,6 +1644,49 @@ TOOL_SPECS = [
             "lists each with x/y[/x_nm/y_nm], sublattice index, and for dopants a signed z "
             "and lighter/heavier-substitution label), and 'flags' (e.g. "
             "low_separation_score when the sublattices are not cleanly distinguished)."
+        ),
+    ),
+    ToolSpec(
+        name="map_polarization",
+        description=(
+            "Per-unit-cell ferroelectric polarization / cation off-centering map for a "
+            "two-sublattice (ABO3-type / interpenetrating) lattice. Measures the displacement "
+            "of the displaced cation sublattice from the centrosymmetric centroid of its "
+            "reference-cage neighbours — the ferroelectric order parameter whose direction maps "
+            "domains and whose discontinuities map domain walls. Returns figure + per-cell vectors."
+        ),
+        import_line="from scilink.skills.image_analysis.atomic_stem.atom_finding import map_polarization",
+        signature=(
+            "map_polarization(image, positions, displaced='auto', n_cage=4, "
+            "pixel_size_nm=None, edge_margin_px=None, random_state=1) -> dict"
+        ),
+        agents=["image_analysis"],
+        when_to_use=(
+            "Ferroic/ferroelectric distortion mapping on a perovskite or other interpenetrating "
+            "two-sublattice lattice, AFTER detection has resolved BOTH sublattices (the cage "
+            "cations AND the off-centering cations) — confirm both are resolved by an NN at the "
+            "inter-sublattice spacing, NOT the intra-sublattice repeat. Lattice-agnostic and "
+            "free of material constants. Assumes HAADF bright-column intensity. Reports the polar "
+            "displacement field; for tetragonality/shear, characterise the reference sublattice "
+            "with gpa_strain. Magnitude precision is limited for very small displacements near "
+            "the detection-noise floor (direction/domains remain robust)."
+        ),
+        parameters={
+            "image": {"type": "ndarray", "description": "2D grayscale HAADF (RAW — intensity separates the two species)."},
+            "positions": {"type": "ndarray", "description": "(N,2) detected columns (x,y) with BOTH sublattices resolved."},
+            "displaced": {"type": "str", "description": "Which sublattice off-centers: 'auto' (default, the dimmer/lighter cation — standard convention), 'dim', or 'bright' (when the off-centering cation is the heavier/brighter one). Only flips the reference/sign; domains unchanged."},
+            "n_cage": {"type": "int", "description": "Number of reference neighbours forming the centrosymmetric cage (default 4 = perovskite [100]; raise to match the projected coordination of another structure/zone axis)."},
+            "pixel_size_nm": {"type": "float", "description": "nm/px; if given, magnitude is also reported in nm."},
+            "edge_margin_px": {"type": "float", "description": "Exclude cells within this many px of the border (default 1.5x NN)."},
+            "random_state": {"type": "int", "description": "Seed for the intensity-split GMM (default 1)."},
+        },
+        required=["image", "positions"],
+        returns=(
+            "dict with 'figure_bytes' (PNG: polarization quiver + direction-domain map + "
+            "magnitude map), 'metrics' (n_cells, median_magnitude_px/nm, n_direction_clusters "
+            "as a domain-count proxy, and per-cell polarization/xy/magnitude/angle lists), and "
+            "'flags' (e.g. weak_sublattice_intensity_separation). Sign follows the "
+            "displaced->reference convention; flip via 'displaced' to match a specific reference."
         ),
     ),
 ]

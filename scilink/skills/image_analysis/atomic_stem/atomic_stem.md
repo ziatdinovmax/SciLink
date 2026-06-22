@@ -262,6 +262,21 @@ goal you picked above:
   neither a Z-contrast step nor a superstructure change is found, the interface
   is genuinely absent from the field of view (report that) — but do not
   conclude "no interface" merely because the FFT was uniform.
+- *If goal is ferroic / ferroelectric distortion (polarization, cation
+  off-centering, domains/domain walls) on a perovskite or other two-sublattice
+  lattice:* this needs BOTH cation sublattices resolved (the cage cations AND
+  the off-centering cations). They are interpenetrating, so the nearest neighbour
+  of every column is the *other* sublattice: a clean detection has its NN at the
+  **inter-sublattice spacing** (shorter than the intra-sublattice repeat). Do NOT
+  read that as a single-sublattice result, do NOT demand a *bimodal* NN split to
+  "prove" the second sublattice, and do NOT apply the over-detection / short-pair
+  guard to it — that guard rejects *duplicate marks on one column*, not a genuine
+  interleaved sublattice sitting one inter-sublattice spacing away. Once both are
+  resolved, map the polarization with the registered tool **`map_polarization`**
+  (see `analysis`): it splits the sublattices, takes each off-centering cation's
+  offset from the centrosymmetric centroid of its reference-cage neighbours, and
+  returns the per-cell polarization field (direction → domains, discontinuities →
+  walls). Tetragonality/shear come from `gpa_strain` on the reference sublattice.
 - *If goal is vacancy / missing-column search:* two complementary
   routes — pick by data quality, or run both as a cross-check.
   **Real-space route** (defect typing, needs reliable columns): requires
@@ -616,6 +631,22 @@ report no boundary rather than forcing one.
 **Strain and displacement:** Map displacements from ideal lattice
 positions spatially across the image. Only report distortions exceeding
 the position fit uncertainty.
+
+**Ferroelectric polarization** — use the registered tool `map_polarization`
+once detection has resolved BOTH cation sublattices (see the ferroic planning
+bullet). It refines positions to sub-pixel, splits the two sublattices by
+intensity, and for each off-centering cation measures the offset from the
+centrosymmetric centroid of its reference-cage neighbours; `figure_bytes` is
+the polarization quiver + direction-domain map + magnitude map, save it as the
+visualization. Set `displaced='bright'` if the off-centering cation is the
+heavier/brighter column; `n_cage` to the projected cage coordination (4 for
+[100] perovskite). Direction/domains are robust; treat very small |P| (near the
+position-fit noise floor) cautiously.
+```
+from scilink.skills.image_analysis.atomic_stem.atom_finding import map_polarization
+res = map_polarization(image, positions, pixel_size_nm=px)   # positions = BOTH sublattices
+# res['metrics']: per-cell 'polarization'/'xy'/'magnitude'/'angle', median_magnitude_nm, n_direction_clusters
+```
 
 **Superlattice / satellite-reflection mapping** — use the registered
 tool `fourier_reflection_map` (reciprocal-space, atom-detection-free;
