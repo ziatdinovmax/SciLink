@@ -111,6 +111,26 @@ when `fov_nm` is unknown or the DCNN result looks poor.
   fine; just avoid the coarse end, where detection collapses sharply.) Do
   not preprocess.
 
+  **The detector returns column POSITIONS only — it does NOT label species or
+  sublattice** (single-class detector). Sublattice/species identity is always
+  recovered *downstream* (intensity GMM, `local_env_gmm`, or inside a tool such
+  as `map_polarization`), never read off the detection itself. Consequence: the
+  NN histogram of the detected cloud reports detection *completeness*, NOT how
+  many sublattices the material has. A fully resolved interleaved A+B lattice is
+  ONE point cloud with a single SHORT NN (the inter-sublattice spacing — both
+  sublattices detected); do not mistake that unimodal NN for a single-sublattice
+  material. The genuine single-sublattice / under-detection signature is the
+  opposite: a NN at the larger intra-sublattice repeat (the lattice constant).
+
+  **`target_pixel_size` is in ÅNGSTRÖMS (Å), not nm.** This is the one
+  atomic_stem parameter in Å — `fov_nm` and the `pixel_size_nm` on
+  `map_polarization` / `fourier_reflection_map` are in nm. Default 0.25 Å
+  (= 0.025 nm/px); a typical good range is 0.15–0.30 Å, and the native pixel
+  size in Å is `fov_nm * 10 / image_width_px`. Do NOT pass an nm value
+  (e.g. 0.02): it is ~10× too small, over-resamples to a tiny grid, and
+  collapses detection to ~0 columns — if detection collapses to near-zero,
+  suspect a unit error before retuning anything else.
+
   **Choosing `target_pixel_size` — narrow by NN, DECIDE by eye.** The NN
   number alone is not a sufficient arbiter (a lattice can read a plausible NN
   yet still resolve only one of two sublattices). When separate sublattices
@@ -271,8 +291,17 @@ goal you picked above:
   read that as a single-sublattice result, do NOT demand a *bimodal* NN split to
   "prove" the second sublattice, and do NOT apply the over-detection / short-pair
   guard to it — that guard rejects *duplicate marks on one column*, not a genuine
-  interleaved sublattice sitting one inter-sublattice spacing away. Once both are
-  resolved, map the polarization with the registered tool **`map_polarization`**
+  interleaved sublattice sitting one inter-sublattice spacing away. **Do not
+  pre-decide sublattice resolvability from the NN histogram or the detection
+  count and then decline** — that decision is deterministic and belongs to
+  `map_polarization` itself, not to prose reasoning over the detection summary.
+  The tool performs the sublattice split (by intensity, or — for weak-contrast /
+  near-identical-Z cations — automatically by GEOMETRIC local environment) and
+  returns `split_failed` ONLY if the columns are genuinely one population. So
+  when the goal is ferroic, **run `map_polarization` and read its verdict**
+  rather than concluding "single, well-ordered sublattice" from a unimodal NN
+  and stopping. Once both are resolved, map the polarization with the registered
+  tool **`map_polarization`**
   (see `analysis`): it splits the sublattices, takes each off-centering cation's
   offset from the centrosymmetric centroid of its reference-cage neighbours, and
   returns the per-cell polarization field (direction → domains, discontinuities →
@@ -646,7 +675,12 @@ over-detection makes the tool return `{'error':'no valid cells'}`, so get the
 detection clean (NN at the inter-sublattice spacing, low nn_cv) before trusting
 |P|; also treat very small |P| (near the position-fit noise floor) cautiously.
 The tool assumes a displacive perovskite-type cage (off-centering cation at the
-cage centre, the two cation sublattices being the intensity extremes).
+cage centre, the two cation sublattices being the intensity extremes). When the
+two cations are NOT intensity-distinguishable (near-identical Z, weak HAADF
+contrast), it AUTOMATICALLY falls back to a GEOMETRIC split by local environment
+(`local_env_gmm`), flagged `geometric_separation_used_intensity_ambiguous`; the
+field is then valid up to a global sign (an arbitrary convention) — so weak
+intensity contrast is NOT a reason to decline.
 ```
 from scilink.skills.image_analysis.atomic_stem.atom_finding import map_polarization
 res = map_polarization(image, positions, pixel_size_nm=px)   # positions = BOTH sublattices

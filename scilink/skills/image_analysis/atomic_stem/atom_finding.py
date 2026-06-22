@@ -638,9 +638,18 @@ def detect_atoms_dcnn(
         fov_nm: Field of view in **nanometers** (from metadata or calibration).
         model_dir: Path to directory containing ``atomnet3*.tar`` model files.
             If *None*, models are auto-discovered or downloaded on first call.
-        target_pixel_size: Target pixel size in **Angstroms** for the model.
-            Default 0.25.  This value is approximate and may need tuning
-            for different materials.
+        target_pixel_size: Target pixel size in **ÅNGSTRÖMS (Å), NOT nm** — the
+            only parameter on this tool in Å; ``fov_nm`` here and
+            ``pixel_size_nm`` on the other atomic_stem tools are in nm. Default
+            0.25 Å (= 0.025 nm/px). The image is resampled to this size before
+            inference: ``resampled_px = fov_nm * 10 / target_pixel_size``. Keep
+            it within ~1–2× of the image's native pixel size in Å
+            (= ``fov_nm * 10 / image_width_px``); a typical good range is
+            0.15–0.30 Å. WARNING: passing an nm value here (e.g. 0.02 instead of
+            0.20) is ~10× too small, over-resamples to a tiny grid, and collapses
+            detection to ~0 columns — if detection collapses, suspect a unit
+            error first. Lower (finer) to recover a missed dim sublattice; raise
+            (coarser) if columns split/duplicate.
         threshold: Detection confidence threshold (0-1). Default 0.8.
         refine: Sub-pixel Gaussian refinement on detected peaks.
 
@@ -1258,45 +1267,80 @@ def map_polarization(image, positions, displaced="auto", n_cage=4,
         return {"figure_bytes": None, "metrics": {"error": "sublattice split failed",
                 "n_displaced": int(len(disp)), "n_reference": int(len(ref))}, "flags": flags + ["split_failed"]}
 
-    # Robustness to extra / spurious columns (over-detection, or a real third
-    # faint population the 2-way split lumps in): anchor everything on the
-    # REFERENCE-cage NN spacing (the bright, well-localized sublattice is the
-    # cleanest scale, unaffected by extra dim columns), and accept a displaced
-    # candidate only when it sits ~at the centrosymmetric centre of its cage —
-    # a genuine off-centering cation is within max_offset_frac of a cage centre,
-    # whereas an extra/spurious column elsewhere is not. This keeps real signal
-    # (we do NOT delete detections) while rejecting non-cage columns from the
-    # polarization pairing.
-    nn_ref = float(np.median(cKDTree(ref).query(ref, k=2)[0][:, 1]))
-    tref = cKDTree(ref); P = []; XY = []
-    for d in disp:
-        dd, ii = tref.query(d, k=int(n_cage))
-        if dd.max() > 1.3 * nn_ref * np.sqrt(2):   # cage neighbours must be local to the ref lattice
-            continue
-        cen = ref[ii].mean(0)
-        if np.linalg.norm(cen - d) > max_offset_frac * nn_ref:  # must sit ~at the cage centre
-            continue
-        if not (margin < d[0] < W - margin and margin < d[1] < H - margin):
-            continue
-        P.append(cen - d); XY.append(d)
-    P = np.array(P); XY = np.array(XY)
+    # Pair each off-centering cation to its reference cage and measure the offset.
+    # Robustness to extra / spurious columns (over-detection, or a real third faint
+    # population the 2-way split lumps in): anchor everything on the REFERENCE-cage
+    # NN spacing (the cleanest scale, unaffected by extra dim columns), and accept a
+    # displaced candidate only when it sits ~at the centrosymmetric centre of its
+    # cage — a genuine off-centering cation is within max_offset_frac of a cage
+    # centre, whereas an extra/spurious column elsewhere is not. This keeps real
+    # signal (we do NOT delete detections) while rejecting non-cage columns.
+    def _field(disp_s, ref_s):
+        nnr = float(np.median(cKDTree(ref_s).query(ref_s, k=2)[0][:, 1]))
+        tr = cKDTree(ref_s); Pl = []; XYl = []
+        for d in disp_s:
+            dd, ii = tr.query(d, k=int(n_cage))
+            if dd.max() > 1.3 * nnr * np.sqrt(2):   # cage neighbours must be local to the ref lattice
+                continue
+            cen = ref_s[ii].mean(0)
+            if np.linalg.norm(cen - d) > max_offset_frac * nnr:  # must sit ~at the cage centre
+                continue
+            if not (margin < d[0] < W - margin and margin < d[1] < H - margin):
+                continue
+            Pl.append(cen - d); XYl.append(d)
+        return np.array(Pl), np.array(XYl), nnr
+
+    # Spatial coherence (the noise guard): mean direction correlation to each strong
+    # cell's nearest neighbours — ~1 for a smooth/domain-structured field, ~0 for
+    # salt-and-pepper noise. Lets a verifier distinguish a real (even weak)
+    # polarization field from a degenerate one independent of how the per-cell
+    # figure renders, and drives the geometric-fallback decision below.
+    def _coherence(Pl, XYl):
+        if len(Pl) < 5:
+            return float("nan")
+        m = np.linalg.norm(Pl, axis=1); u = Pl / (m[:, None] + 1e-9)
+        st = m > np.median(m) * 0.5
+        if st.sum() <= 20:
+            return float("nan")
+        sx = XYl[st]; su = u[st]; kk = min(7, len(sx))
+        jj = cKDTree(sx).query(sx, k=kk)[1]
+        return float(np.median([np.mean(su[i] @ su[jj[i, 1:]].T) for i in range(len(sx))]))
+
+    P, XY, nn_ref = _field(disp, ref)
+    coherence = _coherence(P, XY)
+
+    # Outcome-based geometric-separation fallback for weak intensity contrast
+    # (near-identical-Z cations / weak HAADF contrast where the intensity GMM split
+    # is unreliable): if the intensity-split field is incoherent or empty, retry
+    # with a GEOMETRIC split by local environment (local_env_gmm) — the two
+    # interpenetrating sublattices have distinct neighbour arrangements in
+    # projection even when equally bright — and keep whichever split yields the more
+    # coherent field. Outcome-based (not a brittle intensity-separation threshold)
+    # because GMM separation on near-degenerate intensities is itself noise-
+    # dependent. The reference/displaced choice is then arbitrary, but the field is
+    # invariant to it up to a global sign (a convention anyway).
+    if not (coherence == coherence) or coherence < 0.5 or len(P) < 5:
+        try:
+            win = max(8, int(round(1.5 * nn)))
+            lg = local_env_gmm(img, pos, n_components=2, window_size=win,
+                               random_state=int(random_state))
+            gpos = np.asarray(lg["positions"], float)[:, :2]
+            gcls = np.asarray(lg["classes"])
+            dg = gpos[gcls == 0]; rg = gpos[gcls == 1]
+            if len(dg) >= 10 and len(rg) >= 10:
+                Pg, XYg, nng = _field(dg, rg)
+                cg = _coherence(Pg, XYg)
+                if (cg == cg) and len(Pg) >= 5 and (not (coherence == coherence) or cg > coherence):
+                    P, XY, nn_ref, coherence = Pg, XYg, nng, cg
+                    flags.append("geometric_separation_used_intensity_ambiguous")
+        except Exception:
+            flags.append("geometric_separation_attempt_failed")
+
     if len(P) < 5:
         return {"figure_bytes": None, "metrics": {"error": "no valid cells", "n_cells": int(len(P))}, "flags": flags}
     mag = np.linalg.norm(P, axis=1); ang = (np.degrees(np.arctan2(P[:, 1], P[:, 0]))) % 360
     unit = P / (mag[:, None] + 1e-9)
     strong = mag > np.median(mag) * 0.5
-
-    # --- spatial coherence metric (the noise guard) ---------------------------
-    # Mean direction correlation to each strong cell's nearest neighbours:
-    # ~1 for a smooth/domain-structured field, ~0 for salt-and-pepper noise.
-    # This lets a verifier distinguish a real (even weak) polarization field from
-    # a degenerate one independent of how the per-cell figure happens to render.
-    coherence = float("nan")
-    if strong.sum() > 20:
-        sx = XY[strong]; su = unit[strong]
-        kk = min(7, len(sx))
-        ii = cKDTree(sx).query(sx, k=kk)[1]
-        coherence = float(np.median([np.mean(su[i] @ su[ii[i, 1:]].T) for i in range(len(sx))]))
     if coherence == coherence and coherence < 0.5:
         flags.append("low_direction_coherence_noise_OR_finer_than_NN_domains")
 
@@ -1443,7 +1487,7 @@ TOOL_SPECS = [
             },
             "target_pixel_size": {
                 "type": "float",
-                "description": "Target pixel size in Angstroms the image is resampled to before inference (default 0.25). If a dense lattice's dim sublattice is missed (sparse detection), LOWER it (finer); too coarse a value drops the dim sublattice.",
+                "description": "Target pixel size in ÅNGSTRÖMS (Å), NOT nm — the only Å param here (fov_nm and pixel_size_nm elsewhere are in nm); default 0.25 Å = 0.025 nm/px. Image is resampled to it before inference (resampled_px = fov_nm*10/target_pixel_size); keep within ~1–2× of native (= fov_nm*10/image_width_px), typically 0.15–0.30 Å. WARNING: passing an nm value (e.g. 0.02 not 0.20) is ~10× too small and COLLAPSES detection to ~0 columns — suspect a unit error first if detection collapses. LOWER (finer) to recover a missed dim sublattice; RAISE (coarser) if columns split/duplicate.",
             },
             "threshold": {
                 "type": "float",
@@ -1757,7 +1801,12 @@ TOOL_SPECS = [
             "centre and the two cation sublattices are the INTENSITY EXTREMES (brightest = cage "
             "reference, dimmest = off-centering cation); a middle intensity population is ignored "
             "(reported via the third_intensity_population_present_using_extremes flag); exotic "
-            "orderings may violate these assumptions."
+            "orderings may violate these assumptions. (4) when the two sublattices are NOT "
+            "intensity-distinguishable (near-identical-Z cations, weak HAADF contrast), the tool "
+            "AUTOMATICALLY falls back to GEOMETRIC separation by local environment "
+            "(local_env_gmm) — flagged geometric_separation_used_intensity_ambiguous; the "
+            "reference/sign is then arbitrary (direction/magnitude unchanged up to a global sign), "
+            "so do NOT pre-decline a weak-contrast ferroelectric as single-sublattice."
         ),
         parameters={
             "image": {"type": "ndarray", "description": "2D grayscale HAADF (RAW — intensity separates the two species)."},
