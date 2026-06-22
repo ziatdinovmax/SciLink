@@ -810,6 +810,12 @@ or vice versa (they differ by a projection-dependent factor). A value that
 misses a ballpark *only* because the wrong quantity was compared is a
 labeling error to fix in reporting, not a bad measurement to reject.
 
+**Reject only against the actual imaging modality's physics.** Before discounting
+a finding as an artifact, confirm the proposed artifact mechanism — and any
+correction it implies — exists for this modality, not one imported from a
+different technique. A deterministic discriminator the tool already computed
+outranks a generic visual-coincidence suspicion.
+
 **DCNN preprocessing check:** if the step uses `detect_atoms_dcnn`,
 flag any pipeline step that preprocesses the image before the DCNN
 call (CLAHE, contrast normalization, background subtraction, bandpass

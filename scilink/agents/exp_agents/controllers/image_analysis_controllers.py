@@ -2628,6 +2628,8 @@ Your guidance: '''
 **PROCESSING PIPELINE:** {processing_pipeline}
 **QUALITY CRITERIA (defined during planning):** {quality_criteria}
 
+**DATASET METADATA** (judge against THIS imaging modality's physics — do not invoke an artifact mechanism, or a correction, that belongs to a different technique): {metadata}
+
 **EXTRACTED FEATURES:**
 {features}
 
@@ -2810,10 +2812,16 @@ Return JSON:
         tool_schedule = self._TOOL_CONSTRAINT_SCHEDULE
         tool_constraint = tool_schedule[min(level, len(tool_schedule) - 1)]
 
+        sysinfo = state.get("system_info")
+        metadata_str = (
+            json.dumps(sysinfo) if isinstance(sysinfo, dict) and sysinfo
+            else (str(sysinfo).strip() if sysinfo else "Not provided")
+        )
         prompt_text = self.QUALITY_VERIFICATION_PROMPT.format(
             analysis_approach=config.get("analysis_approach", "Unknown"),
             processing_pipeline=config.get("processing_pipeline", "Unknown"),
             quality_criteria=config.get("quality_criteria", "Visual inspection"),
+            metadata=metadata_str,
             features=features_str,
             metrics=metrics_str,
             quality_threshold=self.quality_threshold,
@@ -2857,15 +2865,29 @@ Return JSON:
                 "data": state["original_image_bytes"]
             })
 
-        # Include domain-specific validation criteria from skill
+        # Include domain context from the skill. The verifier judges physical
+        # plausibility, so it needs the same domain PHYSICS the analysis stage
+        # had — without it, it falls back on generic-imaging priors (e.g.
+        # "horizontal contrast band -> illumination/scan artifact") that may not
+        # apply to this modality. Inject the interpretation (physics) section as
+        # well as the validation criteria, not validation alone.
         skill_sections = state.get("skill_sections")
-        if skill_sections and skill_sections.get("validation"):
+        if skill_sections:
             skill_name = state.get("skill_name", "domain skill")
-            prompt_parts.append(
-                f"\n\n**Domain Validation Criteria ({skill_name}):**\n"
-                "Use these criteria when scoring completeness and correctness.\n\n"
-                + skill_sections["validation"]
-            )
+            if skill_sections.get("interpretation"):
+                prompt_parts.append(
+                    f"\n\n**Domain Physics & Interpretation ({skill_name}):**\n"
+                    "Judge physical plausibility against THIS modality's physics; "
+                    "do not invoke an artifact mechanism or correction that this "
+                    "modality does not support.\n\n"
+                    + skill_sections["interpretation"]
+                )
+            if skill_sections.get("validation"):
+                prompt_parts.append(
+                    f"\n\n**Domain Validation Criteria ({skill_name}):**\n"
+                    "Use these criteria when scoring completeness and correctness.\n\n"
+                    + skill_sections["validation"]
+                )
 
         state["_last_verify_error"] = None
         try:
