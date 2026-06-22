@@ -640,8 +640,13 @@ centrosymmetric centroid of its reference-cage neighbours; `figure_bytes` is
 the polarization quiver + direction-domain map + magnitude map, save it as the
 visualization. Set `displaced='bright'` if the off-centering cation is the
 heavier/brighter column; `n_cage` to the projected cage coordination (4 for
-[100] perovskite). Direction/domains are robust; treat very small |P| (near the
-position-fit noise floor) cautiously.
+[100] perovskite). Direction/domains are the robust output; MAGNITUDE is
+trustworthy only on clean detection — over-detection inflates it and extreme
+over-detection makes the tool return `{'error':'no valid cells'}`, so get the
+detection clean (NN at the inter-sublattice spacing, low nn_cv) before trusting
+|P|; also treat very small |P| (near the position-fit noise floor) cautiously.
+The tool assumes a displacive perovskite-type cage (off-centering cation at the
+cage centre, the two cation sublattices being the intensity extremes).
 ```
 from scilink.skills.image_analysis.atomic_stem.atom_finding import map_polarization
 res = map_polarization(image, positions, pixel_size_nm=px)   # positions = BOTH sublattices

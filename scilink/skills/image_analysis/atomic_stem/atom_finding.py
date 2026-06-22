@@ -1183,9 +1183,16 @@ def map_polarization(image, positions, displaced="auto", n_cage=4,
         'n_direction_clusters' as a domain-count proxy), and 'flags'. NOTE: the
         sign follows the displacement→reference convention above (polarization
         is often reported opposite to the cation displacement; flip via
-        ``displaced`` if matching a specific reference). Magnitude precision is
-        limited for very small polar displacements near the detection-noise
-        floor — direction/domains stay robust; treat tiny |P| cells cautiously.
+        ``displaced`` if matching a specific reference). LIMITS: direction/domains
+        are the robust output; magnitude is trustworthy only on CLEAN detection —
+        over-detection inflates it (~20% on real data) and extreme over-detection
+        returns ``{'error': 'no valid cells'}`` (fix ``target_pixel_size`` first
+        when magnitude matters), and magnitude is also imprecise for very small
+        |P| near the position-fit noise floor. Assumes a displacive perovskite-
+        type structure (off-centering cation ~at the cage centre; the two cation
+        sublattices are the intensity extremes — brightest cage, dimmest
+        off-centering; a middle population is ignored and flagged); exotic
+        orderings may violate this.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -1706,8 +1713,18 @@ TOOL_SPECS = [
             "inter-sublattice spacing, NOT the intra-sublattice repeat. Lattice-agnostic and "
             "free of material constants. Assumes HAADF bright-column intensity. Reports the polar "
             "displacement field; for tetragonality/shear, characterise the reference sublattice "
-            "with gpa_strain. Magnitude precision is limited for very small displacements near "
-            "the detection-noise floor (direction/domains remain robust)."
+            "with gpa_strain. "
+            "LIMITS: (1) DIRECTION/domains are the robust output; MAGNITUDE is trustworthy only "
+            "on CLEAN detection (NN at the inter-sublattice spacing, low nn_cv) — over-detected "
+            "input inflates magnitude (~20% on real over-detection), and EXTREME over-detection "
+            "returns {'error':'no valid cells'} (an honest failure, not a result), so fix "
+            "target_pixel_size first when magnitude matters. (2) magnitude is also imprecise for "
+            "very small displacements near the position-fit noise floor. (3) assumes a DISPLACIVE "
+            "perovskite-type structure: the off-centering cation sits ~at the reference-cage "
+            "centre and the two cation sublattices are the INTENSITY EXTREMES (brightest = cage "
+            "reference, dimmest = off-centering cation); a middle intensity population is ignored "
+            "(reported via the third_intensity_population_present_using_extremes flag); exotic "
+            "orderings may violate these assumptions."
         ),
         parameters={
             "image": {"type": "ndarray", "description": "2D grayscale HAADF (RAW — intensity separates the two species)."},
