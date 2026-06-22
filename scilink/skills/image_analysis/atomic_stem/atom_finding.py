@@ -1180,7 +1180,13 @@ def map_polarization(image, positions, displaced="auto", n_cage=4,
     Returns: dict with 'figure_bytes' (PNG: polarization quiver + direction-
         domain map + magnitude map), and 'metrics' (n_cells, median magnitude
         px/nm, per-cell 'polarization' vectors, 'xy', 'magnitude', 'angle',
-        'n_direction_clusters' as a domain-count proxy), and 'flags'. NOTE: the
+        'direction_coherence' ~1 for a smooth/domain-structured field and ~0 for
+        salt-and-pepper noise — a magnitude-independent way to tell a real field
+        from a degenerate one), and 'flags' (incl. low_direction_coherence_possible_noise).
+        The DIRECTION panel of the figure is a SMOOTHED domain map (locally
+        averaged unit vectors; opacity = local coherence) so coherent domains/walls
+        show as solid colour while noise washes out — do not judge coherence from a
+        raw per-cell scatter. NOTE: the
         sign follows the displacement→reference convention above (polarization
         is often reported opposite to the cation displacement; flip via
         ``displaced`` if matching a specific reference). LIMITS: direction/domains
@@ -1272,33 +1278,55 @@ def map_polarization(image, positions, displaced="auto", n_cage=4,
     if len(P) < 5:
         return {"figure_bytes": None, "metrics": {"error": "no valid cells", "n_cells": int(len(P))}, "flags": flags}
     mag = np.linalg.norm(P, axis=1); ang = (np.degrees(np.arctan2(P[:, 1], P[:, 0]))) % 360
-    # domain proxy: cluster polarization direction (cos/sin) of cells with sizable |P|
+    unit = P / (mag[:, None] + 1e-9)
     strong = mag > np.median(mag) * 0.5
-    nclust = 0
+
+    # --- spatial coherence metric (the noise guard) ---------------------------
+    # Mean direction correlation to each strong cell's nearest neighbours:
+    # ~1 for a smooth/domain-structured field, ~0 for salt-and-pepper noise.
+    # This lets a verifier distinguish a real (even weak) polarization field from
+    # a degenerate one independent of how the per-cell figure happens to render.
+    coherence = float("nan")
     if strong.sum() > 20:
-        feat = np.column_stack([np.cos(np.radians(ang[strong])), np.sin(np.radians(ang[strong]))])
-        from sklearn.cluster import KMeans
-        best_k, best_in = 1, -1
-        for k in (1, 2, 3, 4):
-            if k >= strong.sum():
-                break
-            km = KMeans(k, n_init=3, random_state=int(random_state)).fit(feat)
-            # silhouette-ish: within vs spread
-            inertia = km.inertia_ / strong.sum()
-            if k == 1:
-                base = inertia
-            elif inertia < 0.3 * base and k > best_k:
-                best_k = k
-        nclust = best_k
+        sx = XY[strong]; su = unit[strong]
+        kk = min(7, len(sx))
+        ii = cKDTree(sx).query(sx, k=kk)[1]
+        coherence = float(np.median([np.mean(su[i] @ su[ii[i, 1:]].T) for i in range(len(sx))]))
+    if coherence == coherence and coherence < 0.5:
+        flags.append("low_direction_coherence_possible_noise")
+
+    # --- smoothed / coherence-gated direction-domain map ----------------------
+    # Locally average the unit vectors on a coarse grid: the resultant angle is
+    # the local domain direction (hue) and the resultant length is the LOCAL
+    # coherence (used as opacity) — so coherent domains/walls show as solid
+    # colour while incoherent (noise) regions wash out to the grey image beneath.
+    import matplotlib.cm as cm
+    G = 64
+    gx = np.linspace(0, W, G); gy = np.linspace(0, H, G)
+    GX, GY = np.meshgrid(gx, gy)
+    gpts = np.column_stack([GX.ravel(), GY.ravel()])
+    rad = 2.5 * nn_ref
+    if strong.sum() >= 5:
+        st = cKDTree(XY[strong]); su = unit[strong]
+        nbr = st.query_ball_point(gpts, rad)
+    else:
+        nbr = [[] for _ in gpts]
+    hue = np.zeros(len(gpts)); coh_local = np.zeros(len(gpts))
+    for i, nb in enumerate(nbr):
+        if len(nb) >= 3:
+            v = su[nb].mean(0)
+            hue[i] = (np.degrees(np.arctan2(v[1], v[0])) % 360) / 360.0
+            coh_local[i] = min(1.0, np.hypot(v[0], v[1]))
+    rgba = cm.hsv(hue.reshape(G, G)); rgba[..., 3] = coh_local.reshape(G, G)
 
     fig, ax = plt.subplots(1, 3, figsize=(18, 6))
     for a in ax:
         a.imshow(img, cmap="gray"); a.axis("off"); a.set_aspect("equal")
-    ax[0].quiver(XY[:, 0], XY[:, 1], P[:, 0], P[:, 1], mag, cmap="viridis",
-                 scale=max(1e-6, np.median(mag)) * 40, width=0.003)
-    ax[0].set_title("polarization vectors")
-    s1 = ax[1].scatter(XY[:, 0], XY[:, 1], c=ang, cmap="hsv", s=6, vmin=0, vmax=360)
-    ax[1].set_title("polarization DIRECTION (domains)"); plt.colorbar(s1, ax=ax[1], fraction=0.046, label="deg")
+    ax[0].quiver(XY[strong, 0], XY[strong, 1], P[strong, 0], P[strong, 1], mag[strong],
+                 cmap="viridis", scale=max(1e-6, np.median(mag)) * 40, width=0.003)
+    ax[0].set_title("polarization vectors (|P|>0.5·median)")
+    ax[1].imshow(rgba, extent=[0, W, H, 0])
+    ax[1].set_title(f"DIRECTION domains (smoothed; coherence={coherence:.2f})")
     s2 = ax[2].scatter(XY[:, 0], XY[:, 1], c=mag * (pixel_size_nm or 1), cmap="magma", s=6,
                        vmax=np.percentile(mag, 98) * (pixel_size_nm or 1))
     ax[2].set_title("|P| magnitude" + (" (nm)" if pixel_size_nm else " (px)")); plt.colorbar(s2, ax=ax[2], fraction=0.046)
@@ -1310,7 +1338,7 @@ def map_polarization(image, positions, displaced="auto", n_cage=4,
             "n_cells": int(len(P)),
             "median_magnitude_px": float(np.median(mag)),
             "median_magnitude_nm": float(np.median(mag) * pixel_size_nm) if pixel_size_nm else None,
-            "n_direction_clusters": int(nclust),
+            "direction_coherence": coherence,   # ~1 coherent/domains, ~0 noise
             "displaced_sublattice": displaced,
             "polarization": P.tolist(), "xy": XY.tolist(),
             "magnitude": mag.tolist(), "angle": ang.tolist(),
@@ -1739,8 +1767,10 @@ TOOL_SPECS = [
         required=["image", "positions"],
         returns=(
             "dict with 'figure_bytes' (PNG: polarization quiver + direction-domain map + "
-            "magnitude map), 'metrics' (n_cells, median_magnitude_px/nm, n_direction_clusters "
-            "as a domain-count proxy, and per-cell polarization/xy/magnitude/angle lists), and "
+            "magnitude map; the DIRECTION panel is a SMOOTHED domain map, opacity=local "
+            "coherence, so domains/walls show solid and noise washes out), 'metrics' (n_cells, "
+            "median_magnitude_px/nm, direction_coherence ~1=coherent/domains ~0=noise, and "
+            "per-cell polarization/xy/magnitude/angle lists), and "
             "'flags' (e.g. weak_sublattice_intensity_separation). Sign follows the "
             "displaced->reference convention; flip via 'displaced' to match a specific reference."
         ),
