@@ -103,6 +103,68 @@ def _bicrystal(shape=(512, 512), a=24, theta_deg=14.0, s=3.0, noise=0.02, seed=0
     return np.clip(img, 0, None).astype(np.float32)
 
 
+def _full_square(shape=(480, 480), a=16, s=2.6, shift_frac=0.0,
+                 fault_disorder=0.0, axis="h", noise=0.01, seed=0):
+    """Square lattice tiling the WHOLE frame (no vacuum margin -> no spurious
+    edge boundaries). A mid-frame band (horizontal for axis='h', vertical for
+    axis='v') gets local positional disorder (``fault_disorder``, the COHERENCE
+    DROP the universal detector keys on — a pure shift or pure intensity dip is
+    invisible to the translation-/scale-invariant spectrum). If ``shift_frac``>0
+    the far half is shifted by that fraction of a period ALONG the boundary -> an
+    antiphase (stacking-fault) boundary; shift_frac=0 -> a non-translational
+    disorder band."""
+    rng = np.random.default_rng(seed)
+    H, W = shape; img = np.zeros((H, W)); fy = H / 2.0; fx = W / 2.0
+    ny, nx = H // a + 4, W // a + 4
+    for i in range(-2, ny):
+        for j in range(-2, nx):
+            y = float(i * a); x = float(j * a)
+            if axis == "h":
+                if y > fy:
+                    x += shift_frac * a
+                near = abs(y - fy) < 0.4 * a
+            else:
+                if x > fx:
+                    y += shift_frac * a
+                near = abs(x - fx) < 0.4 * a
+            if fault_disorder > 0 and near:
+                x += rng.normal(0, fault_disorder * a)
+                y += rng.normal(0, fault_disorder * a)
+            _gauss(img, x, y, 1.0, s)
+    img += rng.normal(0, noise, img.shape)
+    return np.clip(img, 0, None).astype(np.float32)
+
+
+def _stacking_fault(shape=(480, 480), a=16, shift_frac=0.5, axis="h", seed=0):
+    # antiphase shift + a coherence drop at the seam (so it is detectable)
+    return _full_square(shape, a, shift_frac=shift_frac, fault_disorder=0.22,
+                        axis=axis, seed=seed)
+
+
+def _horizontal_disorder_band(shape=(480, 480), a=16, seed=0):
+    # a coherence-drop band with NO lateral shift (amorphous band / scan-like) —
+    # must be detected but NOT typed as a stacking fault
+    return _full_square(shape, a, shift_frac=0.0, fault_disorder=0.22, seed=seed)
+
+
+def _spacing_interface(shape=(480, 480), a1=16, a2=22, s=2.6, noise=0.01, seed=0):
+    """Two domains sharing a vertical seam at x=W/2 with DIFFERENT lattice
+    spacing (a1 left, a2 right) -> an interface / second-phase (spacing change),
+    not a stacking fault. Ensures the lateral-shift code doesn't disturb the
+    spacing-change classification."""
+    rng = np.random.default_rng(seed)
+    H, W = shape; img = np.zeros((H, W)); fx = int(W / 2.0)
+    for a, x0, x1 in ((a1, 0, fx), (a2, fx, W)):
+        ny, nx = H // a + 4, (x1 - x0) // a + 4
+        for i in range(-2, ny):
+            for j in range(-2, nx):
+                x = x0 + j * a; y = i * a
+                if x0 - 1 <= x < x1 + 1:
+                    _gauss(img, x, y, 1.0, s)
+    img += rng.normal(0, noise, img.shape)
+    return np.clip(img, 0, None).astype(np.float32)
+
+
 def _match_count(found_xy, truth_xy, tol):
     if not truth_xy:
         return 0
@@ -200,6 +262,42 @@ class TestDiscontinuity:
         img = _bicrystal((512, 512), a=24, theta_deg=0.0, seed=2)
         r = lattice_discontinuity_map(img, pixel_size_nm=0.1)
         assert r["metrics"]["boundary_fraction"] < 0.15
+
+    @pytest.mark.parametrize("axis,shift,seed", [
+        ("h", 0.5, 1), ("h", 0.5, 7), ("h", 0.3, 3),   # horizontal antiphase, varied
+        ("v", 0.5, 2), ("v", 0.4, 5),                   # vertical antiphase
+    ])
+    def test_stacking_fault_lateral_shift_detected(self, axis, shift, seed):
+        # antiphase boundary: no orient/spacing change, but a lateral shift ->
+        # must be caught via lateral_shift, not dismissed as an artifact.
+        img = _stacking_fault(a=16, shift_frac=shift, axis=axis, seed=seed)
+        m = lattice_discontinuity_map(img, pixel_size_nm=0.1)["metrics"]
+        assert m["n_boundaries"] >= 1
+        # the fault region should be the dominant boundary
+        b = m["boundaries"][0]
+        assert b["orient_change_deg"] < 8 and b["spacing_change_pct"] < 10   # neither
+        assert b.get("lateral_shift_frac", 0) >= 0.18                        # but a real shift
+        assert "stacking fault" in b["type"] or "antiphase" in b["type"]
+
+    def test_orient_or_spacing_boundary_not_hijacked(self):
+        # a boundary with a real orientation/spacing change must keep its class
+        # and get NO lateral_shift_frac — the lateral-shift logic is scoped to
+        # the coherence-drop branch only (regression guard for that addition).
+        img = _spacing_interface(a1=16, a2=22, seed=1)
+        m = lattice_discontinuity_map(img, pixel_size_nm=0.1)["metrics"]
+        assert m["n_boundaries"] >= 1
+        for b in m["boundaries"]:
+            assert "stacking fault" not in b["type"] and "antiphase" not in b["type"]
+            assert "lateral_shift_frac" not in b      # only on coherence-drop bands
+
+    def test_disorder_band_not_called_stacking_fault(self):
+        # a coherence-drop band with NO lattice shift must NOT be typed as a
+        # stacking fault (lateral_shift_frac stays small).
+        img = _horizontal_disorder_band(a=16, seed=2)
+        r = lattice_discontinuity_map(img, pixel_size_nm=0.1)
+        for b in r["metrics"]["boundaries"]:
+            assert b.get("lateral_shift_frac", 0.0) < 0.2
+            assert "stacking fault" not in b["type"] and "antiphase" not in b["type"]
 
 
 # --------------------------------------------------------------------------- #

@@ -11,8 +11,11 @@ peak amplitude; a boundary is where those maps jump.
     disrupts the local periodicity, so the local FFT peak weakens right at it.
   * a jump in ORIENTATION classifies it as a grain / twin boundary;
   * a jump in SPACING classifies it as an interface / second phase / intergrowth;
-  * amplitude drop with neither → a stacking fault / antiphase band / amorphous
-    region.
+  * amplitude/coherence drop with neither → check the real-space LATERAL SHIFT
+    across the band: a fractional-period translational offset = a stacking fault
+    / antiphase boundary (the power spectrum is translation-invariant, so this is
+    the only signal that separates it from a non-translational disorder band or a
+    scan/contrast artifact, which show ~zero shift).
 
 Relationship to the other tools:
   * run_fft_nmf_analysis is the EXPLORATORY decomposer ("how many domains exist")
@@ -40,6 +43,54 @@ def _to_gray(a):
     if a.ndim == 3:
         a = a[..., :3].mean(-1)
     return a
+
+
+def _lateral_shift(gray, cy, cx, horizontal, win):
+    """Translational (lattice-phase) offset across a boundary, in REAL space.
+
+    The window power spectrum is translation-invariant, so a stacking fault /
+    antiphase boundary — which shifts the lattice laterally WITHOUT changing its
+    orientation or spacing — is invisible to the spectral dissimilarity. This
+    recovers exactly that: it cross-correlates a strip of the raw image on each
+    side of the boundary (offset past the disordered core) ALONG the boundary
+    direction, within +/- half a lattice period (so the offset is unambiguous),
+    and returns the shift as a fraction of the local period. ~0 = no shift (a
+    scan/contrast artifact or pure amorphization); a fractional-period shift =
+    a genuine translational planar fault. Returns None if not measurable.
+    """
+    H, W = gray.shape
+    t = max(6, int(round(win * 0.45)))      # strip thickness (~a couple of periods)
+    g = max(3, int(round(win * 0.25)))      # gap skipping the disordered band core
+    if horizontal:
+        y = int(round(cy))
+        a0, a1, b0, b1 = max(0, y - g - t), max(0, y - g), min(H, y + g), min(H, y + g + t)
+        if a1 - a0 < 4 or b1 - b0 < 4:
+            return None
+        pa, pb = gray[a0:a1].mean(0), gray[b0:b1].mean(0)
+    else:
+        x = int(round(cx))
+        a0, a1, b0, b1 = max(0, x - g - t), max(0, x - g), min(W, x + g), min(W, x + g + t)
+        if a1 - a0 < 4 or b1 - b0 < 4:
+            return None
+        pa, pb = gray[:, a0:a1].mean(1), gray[:, b0:b1].mean(1)
+    pa = pa - pa.mean(); pb = pb - pb.mean()
+    n = len(pa)
+    if n < 16 or pa.std() < 1e-6 or pb.std() < 1e-6:
+        return None
+    ac = np.correlate(pa, pa, "full")[n - 1:]          # local period from autocorr
+    lo = 3
+    if len(ac) <= lo + 2:
+        return None
+    period = int(np.argmax(ac[lo:]) + lo)
+    if period < 4:
+        return None
+    half = max(1, period // 2)
+    cc = np.correlate(pa, pb, "full"); mid = n - 1
+    seg = cc[mid - half: mid + half + 1]
+    lag = int(np.arange(-half, half + 1)[int(np.argmax(seg))])
+    return {"lateral_shift_px": float(abs(lag)),
+            "lateral_shift_frac": round(abs(lag) / period, 3),
+            "parallel_period_px": float(period)}
 
 
 def lattice_discontinuity_map(image, pixel_size_nm=None, params=None):
@@ -235,22 +286,44 @@ def lattice_discontinuity_map(image, pixel_size_nm=None, params=None):
         pkA = np.argmax(rA[1:]) + 1; pkB = np.argmax(rB[1:]) + 1
         dA, dB = win / max(pkA, 1), win / max(pkB, 1)
         sfrac = float(abs(dA - dB) / ((dA + dB) / 2 + 1e-9))
+        cyc, cxc = ndi.center_of_mass(cell)
+        cyp = float(cyc) * step + win / 2
+        cxp = float(cxc) * step + win / 2
+        ls = None
         if odeg >= orient_jump and odeg >= sfrac * 100:
             btype = "grain/twin boundary (orientation change)"
         elif sfrac >= spacing_jump:
             btype = "interface / second phase (spacing change)"
         else:
-            btype = "planar fault / disorder band (coherence drop)"
-        cyc, cxc = ndi.center_of_mass(cell)
-        boundaries.append({
+            # No orientation or spacing change: a coherence drop. This is the
+            # ambiguous class — a real translational planar fault (stacking
+            # fault / antiphase boundary) looks identical to a scan/contrast
+            # artifact or amorphization in the translation-invariant spectrum.
+            # Disambiguate in REAL space: a lateral lattice-phase shift across
+            # the band is the signature of a translational fault (an artifact
+            # shifts nothing). The boundary runs perpendicular to its long axis,
+            # so a "vertical" region (tall) is a vertical boundary -> measure the
+            # shift across x; a horizontal band -> across... measure along the
+            # boundary direction, which is the long axis (horizontal here).
+            ls = _lateral_shift(img, cyp, cxp, horizontal=not vertical, win=win)
+            lat = ls["lateral_shift_frac"] if ls else None
+            if lat is not None and lat >= 0.12:
+                btype = ("stacking fault / antiphase boundary "
+                         "(lateral lattice shift, no orientation/spacing change)")
+            else:
+                btype = "planar fault / disorder band (coherence drop)"
+        bd = {
             "type": btype,
-            "centroid_px": (round(float(cxc) * step + win / 2, 1),
-                            round(float(cyc) * step + win / 2, 1)),
+            "centroid_px": (round(cxp, 1), round(cyp, 1)),
             "orient_change_deg": round(odeg, 2),
             "spacing_change_pct": round(sfrac * 100, 2),
             "dissimilarity": round(float(diss[cell].mean()), 3),
             "n_cells": int(cell.sum()),
-        })
+        }
+        if ls:
+            bd["lateral_shift_frac"] = ls["lateral_shift_frac"]
+            bd["lateral_shift_px"] = round(ls["lateral_shift_px"], 1)
+        boundaries.append(bd)
     boundaries.sort(key=lambda b: -b["n_cells"])
 
     has_boundary = boundary_fraction >= min_bf and boundaries
@@ -337,12 +410,16 @@ TOOL_SPEC = ToolSpec(
         "chemical interface (perovskite film on perovskite substrate) has the "
         "same orientation/spacing/coherence on both sides and is INVISIBLE here "
         "— detect that via the per-column Z-contrast step instead (it is a "
-        "chemical, not structural, boundary). Likewise a perfectly COHERENT twin "
-        "whose mirror leaves the power spectrum unchanged shows no spectral "
-        "change — find it via a real-space displacement map / gpa_strain. The "
-        "tool detects boundaries that change local orientation, spacing, or "
-        "coherence; for very large or subtle-misorientation images tune "
-        "window_nm and dissim_floor."
+        "chemical, not structural, boundary). A layer-parallel planar fault "
+        "(stacking fault / antiphase boundary / intergrowth) shifts the lattice "
+        "TRANSLATIONALLY with no orientation or spacing change — invisible to the "
+        "(translation-invariant) power spectrum on its own, but the tool catches "
+        "it via a real-space lateral-shift check on every coherence-drop band and "
+        "reports lateral_shift_frac (so a horizontal/layer-parallel coherence "
+        "band with a fractional-period shift is a real stacking fault, NOT a scan "
+        "artifact — do not dismiss it as one). The tool detects boundaries that "
+        "change local orientation, spacing, or coherence; for very large or "
+        "subtle-misorientation images tune window_nm and dissim_floor."
     ),
     parameters={
         "image": {"type": "ndarray", "description": "2D grayscale atomic-resolution / lattice-fringe image."},
@@ -365,8 +442,13 @@ TOOL_SPEC = ToolSpec(
         "dict with 'figure_bytes' (PNG: raw, orientation map, spacing map, "
         "boundary overlay — SAVE as the visualization), 'metrics' "
         "(boundary_fraction; n_boundaries; dominant_type; 'boundaries' = list of "
-        "{type [grain/twin | interface/second-phase | planar-fault/disorder], "
-        "centroid_px, orient_change_deg, spacing_change_pct, dissimilarity, n_cells}; "
+        "{type [grain/twin | interface/second-phase | stacking-fault/antiphase | "
+        "planar-fault/disorder], centroid_px, orient_change_deg, "
+        "spacing_change_pct, dissimilarity, n_cells, and — for coherence-drop "
+        "bands — lateral_shift_frac (translational lattice-phase offset across "
+        "the band as a fraction of the period: ~0 = a non-translational disorder "
+        "band / scan-or-contrast artifact; a fractional-period shift, e.g. ~0.5, "
+        "= a genuine stacking fault / antiphase boundary)}; "
         "median_spacing; note), and 'flags' ('boundary_detected' or "
         "'single_crystal'; 'unresolved' if no clear lattice)."
     ),

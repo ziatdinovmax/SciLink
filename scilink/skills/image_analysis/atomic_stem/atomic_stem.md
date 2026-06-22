@@ -349,7 +349,17 @@ goal you picked above:
   sliding-window local-FFT map whose neighbour spectral dissimilarity
   detects the boundary line and whose orientation/spacing jumps classify
   it (orientation→grain/twin, spacing→interface/second-phase, coherence
-  drop only→stacking fault/disorder). Save its `figure_bytes` as the
+  drop with a fractional-period `lateral_shift_frac`→stacking
+  fault/antiphase boundary, coherence drop with ~zero shift→non-
+  translational disorder band or scan/contrast artifact). **In a LAYERED
+  material a planar fault runs PARALLEL to the layers, so a genuine
+  stacking fault / intergrowth appears as a layer-parallel (often
+  horizontal), full-width coherence-drop band with NO orientation or
+  spacing change — that geometry is evidence FOR a planar fault, not for a
+  scan artifact. Trust the tool's `lateral_shift_frac` (a fractional-period
+  lateral shift = a real translational fault); do NOT invent a "horizontal
+  full-width band = scan artifact" rule that overrides the tool's
+  classification.** Save its `figure_bytes` as the
   visualization and read `boundaries`. Run it on the RAW image — do not
   de-streak / background-subtract first (that erases a defect that lives
   in the banding). Pick among the reciprocal-space tools by question:
