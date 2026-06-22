@@ -300,12 +300,11 @@ goal you picked above:
   returns `split_failed` ONLY if the columns are genuinely one population. So
   when the goal is ferroic, **run `map_polarization` and read its verdict**
   rather than concluding "single, well-ordered sublattice" from a unimodal NN
-  and stopping. Once both are resolved, map the polarization with the registered
-  tool **`map_polarization`**
-  (see `analysis`): it splits the sublattices, takes each off-centering cation's
-  offset from the centrosymmetric centroid of its reference-cage neighbours, and
-  returns the per-cell polarization field (direction → domains, discontinuities →
-  walls). Tetragonality/shear come from `gpa_strain` on the reference sublattice.
+  and stopping. The registered tool **`map_polarization`** (see `analysis`) does
+  the rest: it splits the sublattices, takes each off-centering cation's offset
+  from the centrosymmetric centroid of its reference-cage neighbours, and returns
+  the per-cell polarization field (direction → domains, discontinuities → walls).
+  Tetragonality/shear come from `gpa_strain` on the reference sublattice.
 - *If goal is vacancy / missing-column search:* two complementary
   routes — pick by data quality, or run both as a cross-check.
   **Real-space route** (defect typing, needs reliable columns): requires
