@@ -1135,7 +1135,8 @@ def type_sublattice_defects(
 
 
 def map_polarization(image, positions, displaced="auto", n_cage=4,
-                     pixel_size_nm=None, edge_margin_px=None, random_state=1):
+                     pixel_size_nm=None, edge_margin_px=None,
+                     max_offset_frac=0.45, random_state=1):
     """Per-unit-cell ferroelectric polarization / cation off-centering map.
 
     For a two-sublattice (ABO3-type / interpenetrating) lattice where BOTH
@@ -1166,6 +1167,14 @@ def map_polarization(image, positions, displaced="auto", n_cage=4,
             the projected coordination of other structures/zone axes).
         pixel_size_nm: nm/px; if given, magnitude is also reported in nm.
         edge_margin_px: drop cells within this of the border (default 1.5×NN).
+        max_offset_frac: a displaced cation is accepted only if it sits within
+            this fraction of the reference-cage NN spacing from the cage centre
+            (default 0.45). This is the robustness knob against extra/spurious
+            columns (over-detection or a real third faint population): RAISE
+            toward ~0.6 if genuine large polar displacements are being dropped,
+            LOWER toward ~0.3 to be stricter when extra columns inflate the
+            field. The scale is the *reference* sublattice NN, so it is not
+            corrupted by extra dim columns.
         random_state: GMM seed.
 
     Returns: dict with 'figure_bytes' (PNG: polarization quiver + direction-
@@ -1202,24 +1211,52 @@ def map_polarization(image, positions, displaced="auto", n_cage=4,
     rr = max(1, int(round(0.2 * nn)))
     I = np.array([img[max(0, int(round(p[1])) - rr):int(round(p[1])) + rr + 1,
                       max(0, int(round(p[0])) - rr):int(round(p[0])) + rr + 1].max() for p in pos])
-    gm = GaussianMixture(2, random_state=int(random_state)).fit(I.reshape(-1, 1))
-    lab = gm.predict(I.reshape(-1, 1)); bright = int(np.argmax(gm.means_.ravel()))
-    sep = abs(gm.means_.ravel()[0] - gm.means_.ravel()[1]) / (np.sqrt(gm.covariances_.ravel()).mean() + 1e-9)
+    # Intensity-cluster the columns. Pick the number of populations by BIC over
+    # {2, 3}: real data often has a THIRD faint population (extra/O columns, or
+    # over-detection) beyond the two cation sublattices — forcing k=2 would lump
+    # it into the reference and corrupt the cage. With k=3 we use only the
+    # cleanest extremes (brightest = reference cage, dimmest = off-centering
+    # cation) and simply ignore the middle population.
+    Iv = I.reshape(-1, 1)
+    cand = []
+    for k in (2, 3):
+        if len(pos) > k * 5:
+            g = GaussianMixture(k, random_state=int(random_state)).fit(Iv)
+            cand.append((g.bic(Iv), g))
+    gm = min(cand, key=lambda t: t[0])[1]
+    means = gm.means_.ravel(); lab = gm.predict(Iv); order = np.argsort(means)
+    bright_lab, dim_lab = int(order[-1]), int(order[0])
+    sep = abs(means[bright_lab] - means[dim_lab]) / (np.sqrt(gm.covariances_.ravel()).mean() + 1e-9)
     if sep < 1.5:
         flags.append("weak_sublattice_intensity_separation")
-    disp_lab = bright if displaced == "bright" else (1 - bright)  # 'auto'/'dim' -> dimmer is displaced
-    disp = pos[lab == disp_lab]; ref = pos[lab != disp_lab]
+    if gm.n_components == 3:
+        flags.append("third_intensity_population_present_using_extremes")
+    if displaced == "bright":
+        disp_lab, ref_lab = bright_lab, dim_lab
+    else:  # 'auto' / 'dim' -> the dimmer (lighter) cation off-centers
+        disp_lab, ref_lab = dim_lab, bright_lab
+    disp = pos[lab == disp_lab]; ref = pos[lab == ref_lab]   # middle cluster (if any) ignored
     if len(disp) < 10 or len(ref) < 10:
         return {"figure_bytes": None, "metrics": {"error": "sublattice split failed",
                 "n_displaced": int(len(disp)), "n_reference": int(len(ref))}, "flags": flags + ["split_failed"]}
 
+    # Robustness to extra / spurious columns (over-detection, or a real third
+    # faint population the 2-way split lumps in): anchor everything on the
+    # REFERENCE-cage NN spacing (the bright, well-localized sublattice is the
+    # cleanest scale, unaffected by extra dim columns), and accept a displaced
+    # candidate only when it sits ~at the centrosymmetric centre of its cage —
+    # a genuine off-centering cation is within max_offset_frac of a cage centre,
+    # whereas an extra/spurious column elsewhere is not. This keeps real signal
+    # (we do NOT delete detections) while rejecting non-cage columns from the
+    # polarization pairing.
+    nn_ref = float(np.median(cKDTree(ref).query(ref, k=2)[0][:, 1]))
     tref = cKDTree(ref); P = []; XY = []
     for d in disp:
         dd, ii = tref.query(d, k=int(n_cage))
-        if dd.max() > 1.3 * nn * np.sqrt(2):
+        if dd.max() > 1.3 * nn_ref * np.sqrt(2):   # cage neighbours must be local to the ref lattice
             continue
         cen = ref[ii].mean(0)
-        if np.linalg.norm(cen - d) > 0.9 * nn:   # cage not centrosymmetric around d (edge) -> skip
+        if np.linalg.norm(cen - d) > max_offset_frac * nn_ref:  # must sit ~at the cage centre
             continue
         if not (margin < d[0] < W - margin and margin < d[1] < H - margin):
             continue
@@ -1658,7 +1695,8 @@ TOOL_SPECS = [
         import_line="from scilink.skills.image_analysis.atomic_stem.atom_finding import map_polarization",
         signature=(
             "map_polarization(image, positions, displaced='auto', n_cage=4, "
-            "pixel_size_nm=None, edge_margin_px=None, random_state=1) -> dict"
+            "pixel_size_nm=None, edge_margin_px=None, max_offset_frac=0.45, "
+            "random_state=1) -> dict"
         ),
         agents=["image_analysis"],
         when_to_use=(
@@ -1678,6 +1716,7 @@ TOOL_SPECS = [
             "n_cage": {"type": "int", "description": "Number of reference neighbours forming the centrosymmetric cage (default 4 = perovskite [100]; raise to match the projected coordination of another structure/zone axis)."},
             "pixel_size_nm": {"type": "float", "description": "nm/px; if given, magnitude is also reported in nm."},
             "edge_margin_px": {"type": "float", "description": "Exclude cells within this many px of the border (default 1.5x NN)."},
+            "max_offset_frac": {"type": "float", "description": "Robustness to extra/spurious columns: a displaced cation is accepted only within this fraction of the reference-cage NN spacing from the cage centre (default 0.45). RAISE (~0.6) if large genuine displacements are dropped; LOWER (~0.3) if extra columns inflate the field. Scale is the reference sublattice NN, robust to over-detection."},
             "random_state": {"type": "int", "description": "Seed for the intensity-split GMM (default 1)."},
         },
         required=["image", "positions"],
