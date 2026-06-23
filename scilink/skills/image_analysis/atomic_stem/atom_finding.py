@@ -1888,20 +1888,17 @@ TOOL_SPECS = [
         required=["image", "positions"],
         returns=(
             "dict with 'figure_bytes' (PNG: polarization quiver + SMOOTHED direction-domain map "
-            "+ magnitude map — SAVE THIS as the visualization; do NOT re-render your own quiver "
-            "[a wrong scale makes pm-displacements huge/unreadable] or re-segment the domains). "
-            "'metrics': n_cells, median_magnitude_px/nm, direction_coherence (~1=coherent/domains "
-            "~0=noise OR domains finer than ~3 cells [check fourier_reflection_map for a satellite "
-            "first]); the DOMAIN SEGMENTATION as data — n_domains, domains (list of {label, "
-            "n_cells, mean_angle_deg, fraction}; directions are PEAK-CLUSTERED, adaptive — NOT "
-            "fixed 0/90/180/270 bins), wall_fraction, and per-cell domain_label; net_polarization_"
-            "px/nm and net_to_local_ratio (mean/median|P|: «1 = genuine multi-domain field [net "
-            "cancels]; »1 = a uniform offset / scan-registration drift dominates, so absolute "
-            "magnitude is suspect — flag offset_dominated_field_check_registration); and per-cell "
-            "polarization/xy/magnitude/angle lists. READ domains/walls from these fields rather "
-            "than quantizing per-cell angles yourself. 'flags' (e.g. "
-            "weak_sublattice_intensity_separation). Sign follows the displaced->reference "
-            "convention; flip via 'displaced' to match a specific reference."
+            "+ magnitude map). 'metrics': n_cells, median_magnitude_px/nm, direction_coherence "
+            "(~1=coherent/domains ~0=noise OR domains finer than ~3 cells [check "
+            "fourier_reflection_map for a satellite first]); the DOMAIN SEGMENTATION as data — "
+            "n_domains, domains (list of {label, n_cells, mean_angle_deg, fraction}; directions are "
+            "PEAK-CLUSTERED, adaptive — NOT fixed 0/90/180/270 bins), wall_fraction, per-cell "
+            "domain_label; net_polarization_px/nm and net_to_local_ratio (mean/median|P|: «1 = "
+            "genuine multi-domain field [net cancels]; »1 = a uniform offset / scan-registration "
+            "drift dominates, so absolute magnitude is suspect — flag "
+            "offset_dominated_field_check_registration); per-cell polarization/xy/magnitude/angle "
+            "lists. 'flags' (e.g. weak_sublattice_intensity_separation). Sign follows the "
+            "displaced->reference convention; flip via 'displaced' to match a specific reference."
         ),
     ),
 ]

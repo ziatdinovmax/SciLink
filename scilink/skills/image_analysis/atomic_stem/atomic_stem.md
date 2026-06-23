@@ -701,14 +701,12 @@ intensity contrast is NOT a reason to decline.
 ```
 from scilink.skills.image_analysis.atomic_stem.atom_finding import map_polarization
 res = map_polarization(image, positions, pixel_size_nm=px)   # positions = BOTH sublattices
-# SAVE res['figure_bytes'] as the visualization — do NOT re-render your own quiver (a wrong
-#   scale draws pm-displacements as huge overlapping arrows) or re-segment the domains.
-# res['metrics'] gives the DOMAIN STRUCTURE as data — read it, don't re-derive:
-#   n_domains, domains[{label,n_cells,mean_angle_deg,fraction}] (directions PEAK-CLUSTERED,
-#     adaptive — do NOT quantize per-cell angles into fixed 0/90/180/270 bins),
-#   wall_fraction, per-cell domain_label;
+# res['figure_bytes']: quiver + smoothed direction-domain map + magnitude.
+# res['metrics'] gives the DOMAIN STRUCTURE as data:
+#   n_domains, domains[{label,n_cells,mean_angle_deg,fraction}] (directions peak-clustered/adaptive,
+#     not fixed cardinal bins), wall_fraction, per-cell domain_label;
 #   net_to_local_ratio (mean/median|P|: «1 = genuine multi-domain [net cancels]; »1 = a uniform
-#     offset / scan-registration drift dominates -> absolute |P| suspect, do not over-claim it);
+#     offset / scan-registration drift dominates -> absolute |P| suspect);
 #   direction_coherence (~1 coherent/domains, ~0 noise — judge realness by this, not figure appearance;
 #   low coherence = random noise OR domains finer than ~3 cells: for the latter, fourier_reflection_map
 #   shows a superstructure satellite, so check that before calling low coherence "noise");
