@@ -105,14 +105,12 @@ when `fov_nm` is unknown or the DCNN result looks poor.
   inference) to recover the dim sublattice. Conversely, if the detected NN
   falls *below* the physical column spacing (spurious/split columns, common
   on noisy data), it is too fine — raise it. Tune by matching the detected
-  NN to the expected column spacing. Read BOTH from tools, do not hand-compute
-  either: the detected NN is `detection_quality_panels`' `nn_median` (already in
-  nm when you pass `pixel_size_nm`), and the expected spacing is
-  `measure_lattice_constant`'s `nn_distance_nm` — recomputing NN from the
-  position array yourself invites a units/normalization slip that silently
-  breaks the match. Aiming at a too-small target makes the loop keep lowering
-  `target_pixel_size` until it over-detects (the `short_pair_fraction` /
-  `duplicate_suspect` signature → go COARSER, not finer). (For a *single*-sublattice
+  NN to the expected column spacing — and get that expected spacing
+  deterministically from `measure_lattice_constant` (its `nn_distance_nm`)
+  rather than computing it by hand, since aiming at a too-small target makes
+  the loop keep lowering `target_pixel_size` until it over-detects (the
+  `short_pair_fraction` / `duplicate_suspect` signature → go COARSER, not
+  finer). (For a *single*-sublattice
   material there is no dim sublattice to recover, so NN stays put across the
   band and rescaling affects only completeness — the default is usually
   fine; just avoid the coarse end, where detection collapses sharply.) Do
