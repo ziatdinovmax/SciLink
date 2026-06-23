@@ -3501,9 +3501,19 @@ Return JSON with:
                         # noisy quality scores keep resetting the stall
                         # counter. Each level gets ~max_iter/n_levels slots
                         # before the floor forces the next one.
-                        _floor = min(
-                            verification_iter // 2,
+                        # Front-loaded floor, adaptive to max_verification_iterations:
+                        # one iteration at level 0, then spread the remaining N-1
+                        # iterations evenly across the upper levels. This unlocks the
+                        # permissive T=1 (swap/modify) rung at iter 1 regardless of N
+                        # — swapping is then an OPTION, not a requirement, so reaching
+                        # it early is low-risk — while full-freedom T=2 (custom code,
+                        # where vetted tools get abandoned) stays a later resort
+                        # (~midway for a 3-level ladder). For N=7 this is
+                        # (0,1,1,1,2,2,2). Was linear `verification_iter // 2`.
+                        _N = max(self.max_verification_iterations, 2)
+                        _floor = 0 if verification_iter == 0 else min(
                             _n_anneal_levels - 1,
+                            1 + ((verification_iter - 1) * (_n_anneal_levels - 1)) // (_N - 1),
                         )
                         if _floor > _annealing_level:
                             self.logger.info(
