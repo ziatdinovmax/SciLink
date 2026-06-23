@@ -1146,8 +1146,9 @@ def type_sublattice_defects(
 def map_polarization(image, positions, displaced="auto", n_cage=4,
                      pixel_size_nm=None, edge_margin_px=None,
                      max_offset_frac=0.45, magnitude_outlier_k=6.0,
-                     domain_coherence_floor=0.4, max_wall_fraction=0.15,
-                     local_coherence_floor=0.82, random_state=1):
+                     max_magnitude_nm=0.12, domain_coherence_floor=0.4,
+                     max_wall_fraction=0.15, local_coherence_floor=0.82,
+                     random_state=1):
     """Per-unit-cell ferroelectric polarization / cation off-centering map.
 
     For a two-sublattice (ABO3-type / interpenetrating) lattice where BOTH
@@ -1347,11 +1348,26 @@ def map_polarization(image, positions, displaced="auto", n_cage=4,
     # (median/MAD are robust, so a genuinely uniform large field is NOT clipped).
     _m0 = np.linalg.norm(P, axis=1)
     _med0 = float(np.median(_m0)); _mad0 = float(np.median(np.abs(_m0 - _med0))) + 1e-9
-    _keep = _m0 <= _med0 + magnitude_outlier_k * 1.4826 * _mad0
-    n_outliers = int((~_keep).sum())
-    if n_outliers and int(_keep.sum()) >= 5:
-        P, XY = P[_keep], XY[_keep]
-        flags.append(f"clipped_{n_outliers}_unphysical_magnitude_outliers_likely_misfit")
+    _drop = _m0 > _med0 + magnitude_outlier_k * 1.4826 * _mad0           # relative (MAD) outliers
+    # Absolute physical ceiling: the MAD guard is magnitude-relative, so on a
+    # STRONG field (large median -> large MAD) a >physical tail survives. A
+    # ferroelectric cation off-centering above ~max_magnitude_nm (default 120 pm,
+    # well over the 40-80 pm common range) is almost surely a sublattice-pairing /
+    # fit failure, not a real displacement. Needs pixel_size_nm to convert.
+    n_over_ceiling = 0
+    if pixel_size_nm and max_magnitude_nm:
+        _over = _m0 > (float(max_magnitude_nm) / float(pixel_size_nm))
+        n_over_ceiling = int(_over.sum())
+        _drop = _drop | _over
+    n_dropped = int(_drop.sum())
+    if n_dropped and (len(P) - n_dropped) >= 5:
+        P, XY = P[~_drop], XY[~_drop]
+        flags.append(f"clipped_{n_dropped}_unphysical_magnitude_cells_likely_misfit")
+    # Surface the ceiling SPECIFICALLY only when a non-trivial FRACTION is over it
+    # (a systematic pairing/scale error worth the caller's attention) — a 1% tail is
+    # already covered by the generic clip flag above, so don't cry wolf on it.
+    if n_over_ceiling >= max(5, int(0.03 * len(_m0))):
+        flags.append(f"{n_over_ceiling}_cells_above_physical_ceiling_{int(round(max_magnitude_nm * 1000))}pm_check_pairing_or_scale")
     mag = np.linalg.norm(P, axis=1); ang = (np.degrees(np.arctan2(P[:, 1], P[:, 0]))) % 360
     unit = P / (mag[:, None] + 1e-9)
     strong = mag > np.median(mag) * 0.5
@@ -1910,8 +1926,8 @@ TOOL_SPECS = [
         signature=(
             "map_polarization(image, positions, displaced='auto', n_cage=4, "
             "pixel_size_nm=None, edge_margin_px=None, max_offset_frac=0.45, "
-            "magnitude_outlier_k=6.0, domain_coherence_floor=0.4, max_wall_fraction=0.15, "
-            "local_coherence_floor=0.82, random_state=1) -> dict"
+            "magnitude_outlier_k=6.0, max_magnitude_nm=0.12, domain_coherence_floor=0.4, "
+            "max_wall_fraction=0.15, local_coherence_floor=0.82, random_state=1) -> dict"
         ),
         agents=["image_analysis"],
         when_to_use=(
@@ -1947,7 +1963,8 @@ TOOL_SPECS = [
             "pixel_size_nm": {"type": "float", "description": "nm/px; if given, magnitude is also reported in nm."},
             "edge_margin_px": {"type": "float", "description": "Exclude cells within this many px of the border (default 1.5x NN)."},
             "max_offset_frac": {"type": "float", "description": "Robustness to extra/spurious columns: a displaced cation is accepted only within this fraction of the reference-cage NN spacing from the cage centre (default 0.45). RAISE (~0.6) if large genuine displacements are dropped; LOWER (~0.3) if extra columns inflate the field. Scale is the reference sublattice NN, robust to over-detection."},
-            "magnitude_outlier_k": {"type": "float", "description": "Robust per-cell |P| outlier clip, in MADs above the field median (default 6.0): a cell beyond this is a position-fit / A-B-pairing failure with unphysical |P| (e.g. >>80 pm) and is dropped (flag clipped_N_unphysical_magnitude_outliers). LOWER (~4) if stray huge vectors still corrupt the figure/stats; RAISE (~8) if genuine large displacements get clipped. Median/MAD are robust, so a uniformly large real field is NOT clipped."},
+            "magnitude_outlier_k": {"type": "float", "description": "Robust per-cell |P| outlier clip, in MADs above the field median (default 6.0): drops position-fit / A-B-pairing failures (flag clipped_N_unphysical_magnitude_cells). RELATIVE (median/MAD), so a uniformly large real field is NOT clipped, but on a strong field its high MAD lets a >physical tail through — that tail is caught by max_magnitude_nm. LOWER (~4) if stray huge vectors persist; RAISE (~8) if genuine large displacements get clipped."},
+            "max_magnitude_nm": {"type": "float", "description": "Absolute physical ceiling on per-cell |P| in nm (default 0.12 = 120 pm; needs pixel_size_nm; None disables). Complements the relative MAD clip: a displacement above this is almost surely a sublattice-pairing/scale error, not real ferroelectric off-centering (40-80 pm common, ~100 pm extreme). Cells above it are dropped and counted in the N_cells_above_physical_ceiling flag (the flag fires even when too many to drop = whole-field scale error). RAISE (~0.2) for exotic large-displacement materials; LOWER (~0.1) to be stricter."},
             "domain_coherence_floor": {"type": "float", "description": "Global-coherence floor for the noise guard (default 0.4): if direction_coherence is below this the field is treated as pure noise and a multi-domain partition is collapsed to ONE 'disordered' domain (flag field_noise_dominated_domains_unreliable). RAISE (~0.5) to be stricter; LOWER (~0.3) if real low-contrast domains get suppressed."},
             "max_wall_fraction": {"type": "float", "description": "Fragmentation half of the noise guard (default 0.15): a fragmented partition (wall_fraction above this) is collapsed to one 'disordered' domain ONLY when it is ALSO locally incoherent (see local_coherence_floor). A genuine multi-domain field has contiguous domains separated by a THIN wall (~0.05); noise speckle is ~0.25+. RAISE (~0.25) if real finely-twinned mosaics are collapsed; LOWER (~0.1) to reject more weak-field speckle. NOTE wall_fraction grows with domain count/fineness and with smaller crops, which is why it is gated by local_coherence (count/size-invariant) rather than used alone."},
             "local_coherence_floor": {"type": "float", "description": "Coherence half of the noise guard (default 0.82): the median within-neighbourhood direction agreement. A fragmented partition collapses only if local_coherence is BELOW this (= noise). A real multi-domain mosaic stays locally coherent (~0.95+) regardless of how many/small its domains are, so it is preserved. RAISE (~0.88) to treat more borderline fields as noise; LOWER (~0.75) if real low-contrast/imperfect domains are wrongly collapsed."},
