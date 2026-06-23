@@ -1145,7 +1145,9 @@ def type_sublattice_defects(
 
 def map_polarization(image, positions, displaced="auto", n_cage=4,
                      pixel_size_nm=None, edge_margin_px=None,
-                     max_offset_frac=0.45, random_state=1):
+                     max_offset_frac=0.45, magnitude_outlier_k=6.0,
+                     domain_coherence_floor=0.4, max_wall_fraction=0.15,
+                     random_state=1):
     """Per-unit-cell ferroelectric polarization / cation off-centering map.
 
     For a two-sublattice (ABO3-type / interpenetrating) lattice where BOTH
@@ -1338,6 +1340,18 @@ def map_polarization(image, positions, displaced="auto", n_cage=4,
 
     if len(P) < 5:
         return {"figure_bytes": None, "metrics": {"error": "no valid cells", "n_cells": int(len(P))}, "flags": flags}
+    # Robust per-cell |P| outlier guard: a cell whose offset sits many MADs above
+    # the field median is a position-fit failure / mis-paired A-B column, not a
+    # real polar distortion — it shows up as an unphysical |P| (e.g. >>80 pm) that
+    # corrupts the quiver, the |P| colorbar, and the domain field. Drop these cells
+    # (median/MAD are robust, so a genuinely uniform large field is NOT clipped).
+    _m0 = np.linalg.norm(P, axis=1)
+    _med0 = float(np.median(_m0)); _mad0 = float(np.median(np.abs(_m0 - _med0))) + 1e-9
+    _keep = _m0 <= _med0 + magnitude_outlier_k * 1.4826 * _mad0
+    n_outliers = int((~_keep).sum())
+    if n_outliers and int(_keep.sum()) >= 5:
+        P, XY = P[_keep], XY[_keep]
+        flags.append(f"clipped_{n_outliers}_unphysical_magnitude_outliers_likely_misfit")
     mag = np.linalg.norm(P, axis=1); ang = (np.degrees(np.arctan2(P[:, 1], P[:, 0]))) % 360
     unit = P / (mag[:, None] + 1e-9)
     strong = mag > np.median(mag) * 0.5
@@ -1412,6 +1426,7 @@ def map_polarization(image, positions, displaced="auto", n_cage=4,
     # PEAKS of the smoothed-direction histogram (adaptive — NOT fixed 0/90/180/270
     # bins), so non-cardinal ferroelectric domains are captured.
     domains = []; n_domains = 0; domain_labels = None; wall_fraction = float("nan")
+    local_coherence = float("nan")
     try:
         smv = np.full((len(XY), 2), np.nan)
         if strong.sum() >= 5:
@@ -1420,6 +1435,8 @@ def map_polarization(image, positions, displaced="auto", n_cage=4,
                 if len(nb) >= 3:
                     smv[i] = su_s[nb].mean(0)            # per-cell smoothed direction
         valid_c = ~np.isnan(smv[:, 0]) & (np.hypot(smv[:, 0], smv[:, 1]) > 0.2)
+        local_coherence = (float(np.median(np.hypot(smv[valid_c, 0], smv[valid_c, 1])))
+                           if valid_c.sum() else float("nan"))
         if valid_c.sum() >= 10:
             th = np.degrees(np.arctan2(smv[valid_c, 1], smv[valid_c, 0])) % 360
             hist, edges = np.histogram(th, bins=36, range=(0, 360))
@@ -1450,6 +1467,22 @@ def map_polarization(image, positions, displaced="auto", n_cage=4,
                 nn_i = cKDTree(XY[idxv]).query(XY[idxv], k=kk)[1]
                 wall = np.array([np.any(labv[nn_i[i, 1:]] != labv[i]) for i in range(len(idxv))])
                 wall_fraction = round(float(wall.mean()), 3)
+            # Noise / speckle guard: a genuine multi-domain partition has CONTIGUOUS
+            # domains separated by a thin wall (low wall_fraction); a noise-dominated
+            # weak field (vectors at/below the position-fit noise floor) fragments
+            # into spatially-interspersed speckle (high wall_fraction) or has globally
+            # incoherent directions. Either way the multi-domain count is spurious —
+            # collapse to ONE 'disordered' field rather than reporting fake domains.
+            if n_domains >= 2 and (
+                (coherence == coherence and coherence < domain_coherence_floor)      # globally incoherent => pure noise
+                or (wall_fraction == wall_fraction and wall_fraction > max_wall_fraction
+                    and coherence == coherence and coherence < 0.85)):               # speckle partition on a NOT-strongly-coherent field (a genuine multi-domain stays ~0.95+, so it is never collapsed regardless of grid size)
+                flags.append("field_noise_dominated_domains_unreliable")
+                domains = [{"label": 0, "n_cells": int(valid_c.sum()), "mean_angle_deg": None,
+                            "fraction": 1.0, "disordered": True}]
+                n_domains = 1
+                domain_labels = np.zeros(len(XY), int)
+                wall_fraction = float("nan")
     except Exception:
         flags.append("domain_segmentation_failed")
 
@@ -1470,6 +1503,7 @@ def map_polarization(image, positions, displaced="auto", n_cage=4,
             "median_magnitude_px": float(np.median(mag)),
             "median_magnitude_nm": float(np.median(mag) * pixel_size_nm) if pixel_size_nm else None,
             "direction_coherence": coherence,   # ~1 coherent/domains, ~0 noise
+            "local_coherence": local_coherence, # median resultant of the smoothed local direction; < domain_coherence_floor => noise-dominated, domain count unreliable
             "n_domains": int(n_domains),
             "domains": domains,                 # adaptive (peak-clustered) directions, NOT cardinal bins
             "wall_fraction": wall_fraction,
@@ -1870,6 +1904,7 @@ TOOL_SPECS = [
         signature=(
             "map_polarization(image, positions, displaced='auto', n_cage=4, "
             "pixel_size_nm=None, edge_margin_px=None, max_offset_frac=0.45, "
+            "magnitude_outlier_k=6.0, domain_coherence_floor=0.4, max_wall_fraction=0.15, "
             "random_state=1) -> dict"
         ),
         agents=["image_analysis"],
@@ -1906,6 +1941,9 @@ TOOL_SPECS = [
             "pixel_size_nm": {"type": "float", "description": "nm/px; if given, magnitude is also reported in nm."},
             "edge_margin_px": {"type": "float", "description": "Exclude cells within this many px of the border (default 1.5x NN)."},
             "max_offset_frac": {"type": "float", "description": "Robustness to extra/spurious columns: a displaced cation is accepted only within this fraction of the reference-cage NN spacing from the cage centre (default 0.45). RAISE (~0.6) if large genuine displacements are dropped; LOWER (~0.3) if extra columns inflate the field. Scale is the reference sublattice NN, robust to over-detection."},
+            "magnitude_outlier_k": {"type": "float", "description": "Robust per-cell |P| outlier clip, in MADs above the field median (default 6.0): a cell beyond this is a position-fit / A-B-pairing failure with unphysical |P| (e.g. >>80 pm) and is dropped (flag clipped_N_unphysical_magnitude_outliers). LOWER (~4) if stray huge vectors still corrupt the figure/stats; RAISE (~8) if genuine large displacements get clipped. Median/MAD are robust, so a uniformly large real field is NOT clipped."},
+            "domain_coherence_floor": {"type": "float", "description": "Global-coherence floor for the noise guard (default 0.4): if direction_coherence is below this the field is treated as pure noise and a multi-domain partition is collapsed to ONE 'disordered' domain (flag field_noise_dominated_domains_unreliable). RAISE (~0.5) to be stricter; LOWER (~0.3) if real low-contrast domains get suppressed."},
+            "max_wall_fraction": {"type": "float", "description": "Spatial-incoherence gate on domains (default 0.15): a genuine multi-domain field has contiguous domains separated by a THIN wall (small wall_fraction, ~0.05); a noise-dominated weak field fragments into interspersed speckle (high wall_fraction, ~0.25+). If n_domains>=2 and wall_fraction exceeds this, the partition is judged spurious and collapsed to one 'disordered' domain. LOWER (~0.1) to reject more weak-field speckle; RAISE (~0.25) if real finely-twinned domains (legitimately higher wall_fraction) are being collapsed."},
             "random_state": {"type": "int", "description": "Seed for the intensity-split GMM (default 1)."},
         },
         required=["image", "positions"],
@@ -1913,7 +1951,11 @@ TOOL_SPECS = [
             "dict with 'figure_bytes' (PNG: polarization quiver + SMOOTHED direction-domain map "
             "+ magnitude map). 'metrics': n_cells, median_magnitude_px/nm, direction_coherence "
             "(~1=coherent/domains ~0=noise OR domains finer than ~3 cells [check "
-            "fourier_reflection_map for a satellite first]); the DOMAIN SEGMENTATION as data — "
+            "fourier_reflection_map for a satellite first]); local_coherence (median local "
+            "smoothed-direction resultant; below domain_coherence_floor => noise-dominated, the "
+            "field is reported as a single 'disordered' domain via "
+            "field_noise_dominated_domains_unreliable — do NOT read a domain count or a clean "
+            "single domain off such a field); the DOMAIN SEGMENTATION as data — "
             "n_domains, domains (list of {label, n_cells, mean_angle_deg, fraction}; directions are "
             "PEAK-CLUSTERED, adaptive — NOT fixed 0/90/180/270 bins), wall_fraction, per-cell "
             "domain_label; net_polarization_px/nm and net_to_local_ratio (mean/median|P|: «1 = "
