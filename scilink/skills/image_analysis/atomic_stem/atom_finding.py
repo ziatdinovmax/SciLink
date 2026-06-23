@@ -1070,14 +1070,25 @@ def type_sublattice_defects(
         med = np.median(metric); mad = np.median(np.abs(metric - med)) * 1.4826 + 1e-9
         z = (metric - med) / mad
         dops = []
-        for p, zz in zip(cp[np.abs(z) > dopant_sigma], z[np.abs(z) > dopant_sigma]):
-            if _interior(p):
-                d = {"x": float(p[0]), "y": float(p[1]), "z": float(zz),
-                     "kind": "lighter-substitution" if zz < 0 else "heavier-substitution",
-                     "sublattice": rank}
-                if pixel_size_nm:
-                    d["x_nm"], d["y_nm"] = float(p[0] * pixel_size_nm), float(p[1] * pixel_size_nm)
-                dops.append(d)
+        _sel = np.abs(z) > dopant_sigma
+        for p, zz, mv in zip(cp[_sel], z[_sel], metric[_sel]):
+            if not _interior(p):
+                continue
+            # On a very UNIFORM sublattice the MAD is tiny, so a real, moderately
+            # off-intensity column (e.g. a substitution 40% dimmer/brighter than its
+            # neighbours) scores an absurd |z| (~25) and gets wrongly dismissed
+            # downstream as "physically impossible". Report a sanity-CAPPED z for the
+            # outlier flag, plus the raw intensity_ratio (this column / median of its
+            # same-sublattice neighbours) as the PHYSICAL descriptor — a ratio well
+            # above background (~vacancy) but below 1 is a genuine lighter substitution.
+            d = {"x": float(p[0]), "y": float(p[1]),
+                 "z": float(np.clip(zz, -10.0, 10.0)),
+                 "intensity_ratio": round(float(mv), 3),
+                 "kind": "lighter-substitution" if zz < 0 else "heavier-substitution",
+                 "sublattice": rank}
+            if pixel_size_nm:
+                d["x_nm"], d["y_nm"] = float(p[0] * pixel_size_nm), float(p[1] * pixel_size_nm)
+            dops.append(d)
         vacs = []
         for vx, vy in _sublattice_vacancies(cp, med_nn, margin, (H, W),
                                             int(vacancy_enclosure),
@@ -1909,8 +1920,14 @@ TOOL_SPECS = [
             "+ dopants (circles)), 'metrics' (separation_score, per-sublattice "
             "n_columns/mean_intensity/n_vacancies/n_dopants, and 'vacancies'/'dopants' "
             "lists each with x/y[/x_nm/y_nm], sublattice index, and for dopants a signed z "
-            "and lighter/heavier-substitution label), and 'flags' (e.g. "
-            "low_separation_score when the sublattices are not cleanly distinguished)."
+            "(robust MAD z, CAPPED at +-10 so a real outlier on a very uniform sublattice "
+            "is not reported as an absurd ~25-sigma 'impossible' value), an intensity_ratio "
+            "(this column / its same-sublattice neighbour median — the PHYSICAL descriptor: "
+            "<1 dimmer=lighter substitution, >1 brighter=heavier; a ratio near background "
+            "would be a vacancy not a dopant), and a lighter/heavier-substitution label), and "
+            "'flags' (e.g. low_separation_score when the sublattices are not cleanly "
+            "distinguished). To catch subtler substitutions, LOWER dopant_sigma; judge "
+            "candidates by intensity_ratio, not the (capped) z."
         ),
     ),
     ToolSpec(
