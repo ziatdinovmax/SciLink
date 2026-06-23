@@ -1984,7 +1984,14 @@ class UnifiedImageProcessingController:
         "Prefer keeping registered tools in the pipeline and expressing fixes "
         "through their documented parameters. If you must recommend replacing a "
         "tool with custom code, briefly state why the tool's parameters could "
-        "not address the issue.\n",
+        "not address the issue.\n"
+        "If the pipeline is effectively a SINGLE registered-tool call (its "
+        "documented parameters were already explored at the previous level), do "
+        "not keep re-tweaking those parameters — the next step is to REPLACE the "
+        "tool: prefer a DIFFERENT registered tool that targets the same goal a "
+        "different way; only if no such sibling tool fits is custom code "
+        "justified, and then state why the tool's parameters and the available "
+        "registered tools cannot address the issue.\n",
         # T=2 open — main annealing already grants full freedom
         "",
     )
