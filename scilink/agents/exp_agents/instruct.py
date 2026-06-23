@@ -3419,6 +3419,12 @@ original image, and the second MUST show a segmentation overlay (original image 
 colored semi-transparent masks and contour boundaries for each detected object). For \
 multi-channel images, show each channel as a separate grayscale subplot (do not try to \
 display a 2-channel array directly with imshow). \
+**`visualization.png` MUST contain the actual headline result figure.** If a registered tool \
+returns a `figure_bytes` that IS the result (e.g. a polarization/defect/QC map), write those \
+bytes directly to `visualization.png` (or embed them as panels in it). NEVER save the result to \
+a separate file and leave a placeholder panel in its place (e.g. a subplot titled "see \
+other_file.png") — only `visualization.png` is embedded in the report and shown to the verifier; \
+a placeholder there means the result is lost. \
 All visualizations must be saved to the current working directory. Use `dpi=100`.
 4. Save key output arrays to the current working directory as `.npy` files. \
 At minimum save the primary detection/segmentation result (label map, binary \
@@ -3507,7 +3513,14 @@ Check the image shape — it may have 2 or more channels that are not RGB. Acces
 via `image[:,:,0]`, `image[:,:,1]`, etc. Do not assume grayscale or RGB.
 2. Implement the refined analysis pipeline.
 3. Save visualization(s): `visualization.png` showing original image alongside \
-key analysis results. Use subplots with clear labels. All visualizations must be saved \
+key analysis results. Use subplots with clear labels. \
+**`visualization.png` MUST contain the actual headline result figure.** If a registered tool \
+returns a `figure_bytes` that IS the result (e.g. a polarization/defect/QC map), write those \
+bytes directly to `visualization.png` (or embed them as panels in it). NEVER save the result to \
+a separate file and leave a placeholder panel in its place (e.g. a subplot titled "see \
+other_file.png") — only `visualization.png` is embedded in the report and shown to the verifier; \
+a placeholder there means the result is lost. \
+All visualizations must be saved \
 to the current working directory. Use `dpi=100`.
 4. Save key output arrays to the current working directory as `.npy` files. \
 At minimum save the primary detection/segmentation result.
