@@ -1368,10 +1368,14 @@ def map_polarization(image, positions, displaced="auto", n_cage=4,
             coh_local[i] = min(1.0, np.hypot(v[0], v[1]))
     rgba = cm.hsv(hue.reshape(G, G)); rgba[..., 3] = coh_local.reshape(G, G)
 
-    fig, ax = plt.subplots(1, 3, figsize=(18, 6))
+    # Near-square 2x2 layout (renders large in the HTML report's grid cell — a
+    # wide 1x3 strip collapses to an unreadable sliver there). Cells: quiver,
+    # direction-domain map, |P| magnitude, and a direction colour-wheel key.
+    fig, axes = plt.subplots(2, 2, figsize=(13, 12.5))
+    ax = axes.ravel()
     # Show the dark HAADF image only FAINTLY as context, so the coloured
     # overlays (arrows / magnitude scatter) stay clearly visible on top of it.
-    for a in ax:
+    for a in (ax[0], ax[1], ax[2]):
         a.imshow(img, cmap="gray", alpha=0.5); a.axis("off"); a.set_aspect("equal")
     # Panel 0: arrows coloured by DIRECTION (hsv = always saturated, so they are
     # visible regardless of |P|, and the hue matches the direction-domain map in
@@ -1388,6 +1392,16 @@ def map_polarization(image, positions, displaced="auto", n_cage=4,
                        edgecolors="white", linewidths=0.3,
                        vmax=np.percentile(mag, 98) * (pixel_size_nm or 1))
     ax[2].set_title("|P| magnitude" + (" (nm)" if pixel_size_nm else " (px)")); plt.colorbar(s2, ax=ax[2], fraction=0.046)
+    # Panel 3: direction colour-wheel — the hue legend for panels 0 & 1 (which
+    # had no colorbar). hue at angle theta == arrow/domain hue for direction theta.
+    ax[3].remove()
+    axk = fig.add_subplot(2, 2, 4, projection="polar")
+    _tt = np.linspace(0, 2 * np.pi, 361); _rr = np.linspace(0.55, 1.0, 24)
+    _TT, _RR = np.meshgrid(_tt, _rr)
+    axk.pcolormesh(_TT, _RR, np.degrees(_TT), cmap="hsv", vmin=0, vmax=360, shading="auto")
+    axk.set_yticks([]); axk.set_xticks(np.deg2rad([0, 90, 180, 270]))
+    axk.set_xticklabels(["0°", "90°", "180°", "270°"])
+    axk.set_title("colour = polarization direction", fontsize=10, pad=14)
     buf = BytesIO(); fig.tight_layout(); fig.savefig(buf, format="png", dpi=110); plt.close(fig)
 
     # --- domain segmentation + wall localization (returned as DATA) -----------
