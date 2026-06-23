@@ -1147,7 +1147,7 @@ def map_polarization(image, positions, displaced="auto", n_cage=4,
                      pixel_size_nm=None, edge_margin_px=None,
                      max_offset_frac=0.45, magnitude_outlier_k=6.0,
                      domain_coherence_floor=0.4, max_wall_fraction=0.15,
-                     random_state=1):
+                     local_coherence_floor=0.82, random_state=1):
     """Per-unit-cell ferroelectric polarization / cation off-centering map.
 
     For a two-sublattice (ABO3-type / interpenetrating) lattice where BOTH
@@ -1476,7 +1476,13 @@ def map_polarization(image, positions, displaced="auto", n_cage=4,
             if n_domains >= 2 and (
                 (coherence == coherence and coherence < domain_coherence_floor)      # globally incoherent => pure noise
                 or (wall_fraction == wall_fraction and wall_fraction > max_wall_fraction
-                    and coherence == coherence and coherence < 0.85)):               # speckle partition on a NOT-strongly-coherent field (a genuine multi-domain stays ~0.95+, so it is never collapsed regardless of grid size)
+                    and local_coherence == local_coherence and local_coherence < local_coherence_floor)):
+                # Collapse a fragmented partition (high wall_fraction) ONLY when it
+                # is ALSO locally incoherent (low within-neighbourhood agreement) =
+                # noise. A GENUINE multi-domain mosaic is fragmented but locally
+                # COHERENT, so it survives regardless of domain count/size or crop
+                # size — local_coherence is count/size-invariant, wall_fraction is
+                # not. (wall_fraction alone would over-collapse real fine mosaics.)
                 flags.append("field_noise_dominated_domains_unreliable")
                 domains = [{"label": 0, "n_cells": int(valid_c.sum()), "mean_angle_deg": None,
                             "fraction": 1.0, "disordered": True}]
@@ -1905,7 +1911,7 @@ TOOL_SPECS = [
             "map_polarization(image, positions, displaced='auto', n_cage=4, "
             "pixel_size_nm=None, edge_margin_px=None, max_offset_frac=0.45, "
             "magnitude_outlier_k=6.0, domain_coherence_floor=0.4, max_wall_fraction=0.15, "
-            "random_state=1) -> dict"
+            "local_coherence_floor=0.82, random_state=1) -> dict"
         ),
         agents=["image_analysis"],
         when_to_use=(
@@ -1943,7 +1949,8 @@ TOOL_SPECS = [
             "max_offset_frac": {"type": "float", "description": "Robustness to extra/spurious columns: a displaced cation is accepted only within this fraction of the reference-cage NN spacing from the cage centre (default 0.45). RAISE (~0.6) if large genuine displacements are dropped; LOWER (~0.3) if extra columns inflate the field. Scale is the reference sublattice NN, robust to over-detection."},
             "magnitude_outlier_k": {"type": "float", "description": "Robust per-cell |P| outlier clip, in MADs above the field median (default 6.0): a cell beyond this is a position-fit / A-B-pairing failure with unphysical |P| (e.g. >>80 pm) and is dropped (flag clipped_N_unphysical_magnitude_outliers). LOWER (~4) if stray huge vectors still corrupt the figure/stats; RAISE (~8) if genuine large displacements get clipped. Median/MAD are robust, so a uniformly large real field is NOT clipped."},
             "domain_coherence_floor": {"type": "float", "description": "Global-coherence floor for the noise guard (default 0.4): if direction_coherence is below this the field is treated as pure noise and a multi-domain partition is collapsed to ONE 'disordered' domain (flag field_noise_dominated_domains_unreliable). RAISE (~0.5) to be stricter; LOWER (~0.3) if real low-contrast domains get suppressed."},
-            "max_wall_fraction": {"type": "float", "description": "Spatial-incoherence gate on domains (default 0.15): a genuine multi-domain field has contiguous domains separated by a THIN wall (small wall_fraction, ~0.05); a noise-dominated weak field fragments into interspersed speckle (high wall_fraction, ~0.25+). If n_domains>=2 and wall_fraction exceeds this, the partition is judged spurious and collapsed to one 'disordered' domain. LOWER (~0.1) to reject more weak-field speckle; RAISE (~0.25) if real finely-twinned domains (legitimately higher wall_fraction) are being collapsed."},
+            "max_wall_fraction": {"type": "float", "description": "Fragmentation half of the noise guard (default 0.15): a fragmented partition (wall_fraction above this) is collapsed to one 'disordered' domain ONLY when it is ALSO locally incoherent (see local_coherence_floor). A genuine multi-domain field has contiguous domains separated by a THIN wall (~0.05); noise speckle is ~0.25+. RAISE (~0.25) if real finely-twinned mosaics are collapsed; LOWER (~0.1) to reject more weak-field speckle. NOTE wall_fraction grows with domain count/fineness and with smaller crops, which is why it is gated by local_coherence (count/size-invariant) rather than used alone."},
+            "local_coherence_floor": {"type": "float", "description": "Coherence half of the noise guard (default 0.82): the median within-neighbourhood direction agreement. A fragmented partition collapses only if local_coherence is BELOW this (= noise). A real multi-domain mosaic stays locally coherent (~0.95+) regardless of how many/small its domains are, so it is preserved. RAISE (~0.88) to treat more borderline fields as noise; LOWER (~0.75) if real low-contrast/imperfect domains are wrongly collapsed."},
             "random_state": {"type": "int", "description": "Seed for the intensity-split GMM (default 1)."},
         },
         required=["image", "positions"],
