@@ -683,8 +683,13 @@ once detection has resolved BOTH cation sublattices (see the ferroic planning
 bullet). It refines positions to sub-pixel, splits the two sublattices by
 intensity, and for each off-centering cation measures the offset from the
 centrosymmetric centroid of its reference-cage neighbours; `figure_bytes` is
-the polarization quiver + direction-domain map + magnitude map, save it as the
-visualization. Set `displaced='bright'` if the off-centering cation is the
+the polarization quiver + direction-domain map + magnitude map. **This 3-panel
+figure IS the headline deliverable — write `figure_bytes` directly to disk as
+`visualization.png` (the one figure embedded in the report and inspected by the
+verifier). Do NOT save it only to a side file (e.g. `polarization.png`) and leave
+a "see other file" placeholder panel inside `visualization.png`; detection QC
+panels belong in their own file (`detection_qc.png`), never in place of the result
+figure.** Set `displaced='bright'` if the off-centering cation is the
 heavier/brighter column; `n_cage` to the projected cage coordination (4 for
 [100] perovskite). **The direction-domain map is the deliverable; |P| MAGNITUDE
 is a secondary, soft output — do NOT make it a hard accept/reject gate.** Real

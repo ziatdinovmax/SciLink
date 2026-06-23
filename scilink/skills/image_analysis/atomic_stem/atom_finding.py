@@ -1369,14 +1369,23 @@ def map_polarization(image, positions, displaced="auto", n_cage=4,
     rgba = cm.hsv(hue.reshape(G, G)); rgba[..., 3] = coh_local.reshape(G, G)
 
     fig, ax = plt.subplots(1, 3, figsize=(18, 6))
+    # Show the dark HAADF image only FAINTLY as context, so the coloured
+    # overlays (arrows / magnitude scatter) stay clearly visible on top of it.
     for a in ax:
-        a.imshow(img, cmap="gray"); a.axis("off"); a.set_aspect("equal")
-    ax[0].quiver(XY[strong, 0], XY[strong, 1], P[strong, 0], P[strong, 1], mag[strong],
-                 cmap="viridis", scale=max(1e-6, np.median(mag)) * 40, width=0.003)
-    ax[0].set_title("polarization vectors (|P|>0.5·median)")
+        a.imshow(img, cmap="gray", alpha=0.5); a.axis("off"); a.set_aspect("equal")
+    # Panel 0: arrows coloured by DIRECTION (hsv = always saturated, so they are
+    # visible regardless of |P|, and the hue matches the direction-domain map in
+    # panel 1); length ∝ |P|; thin dark edge for contrast on any background.
+    if strong.sum() > 0:
+        ang = (np.degrees(np.arctan2(P[strong, 1], P[strong, 0])) % 360) / 360.0
+        ax[0].quiver(XY[strong, 0], XY[strong, 1], P[strong, 0], P[strong, 1], ang,
+                     cmap="hsv", clim=(0.0, 1.0), scale=max(1e-6, np.median(mag)) * 40,
+                     width=0.005, headwidth=4.0, edgecolor="k", linewidth=0.3)
+    ax[0].set_title("polarization vectors (colour = direction, |P|>0.5·median)")
     ax[1].imshow(rgba, extent=[0, W, H, 0])
     ax[1].set_title(f"DIRECTION domains (smoothed; coherence={coherence:.2f})")
-    s2 = ax[2].scatter(XY[:, 0], XY[:, 1], c=mag * (pixel_size_nm or 1), cmap="magma", s=6,
+    s2 = ax[2].scatter(XY[:, 0], XY[:, 1], c=mag * (pixel_size_nm or 1), cmap="plasma", s=14,
+                       edgecolors="white", linewidths=0.3,
                        vmax=np.percentile(mag, 98) * (pixel_size_nm or 1))
     ax[2].set_title("|P| magnitude" + (" (nm)" if pixel_size_nm else " (px)")); plt.colorbar(s2, ax=ax[2], fraction=0.046)
     buf = BytesIO(); fig.tight_layout(); fig.savefig(buf, format="png", dpi=110); plt.close(fig)
