@@ -2891,6 +2891,9 @@ Return JSON:
                     + skill_sections["validation"]
                 )
 
+        from ....skills._shared._registry import VERIFIER_TOOL_SCRUTINY_PRINCIPLE
+        prompt_parts.append("\n\n" + VERIFIER_TOOL_SCRUTINY_PRINCIPLE)
+
         state["_last_verify_error"] = None
         try:
             response = self.model.generate_content(

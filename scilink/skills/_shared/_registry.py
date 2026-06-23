@@ -64,6 +64,24 @@ TOOL_USE_PRINCIPLE = (
 )
 
 
+# The verifier-facing counterpart of TOOL_USE_PRINCIPLE (shared across the image
+# and curve verifiers). Deliberately NOT "defer to the tool": it preserves the
+# verifier's independent-scrutiny role (a tool can be wrong) while forbidding the
+# specific failure mode — reimplementing a tool's computation to second-guess it,
+# or instructing the agent to re-derive what the tool already returns.
+VERIFIER_TOOL_SCRUTINY_PRINCIPLE = (
+    "SCRUTINIZE TOOL RESULTS — DON'T REIMPLEMENT THEM. When a registered tool "
+    "produced the result, judge it by the tool's OWN quality fields (coherence, "
+    "flags, SNR, sanity outputs), by domain physics, and by independent "
+    "cross-checks (a second tool, a physical bound) — NOT by reimplementing the "
+    "tool's computation to second-guess it, and do NOT instruct the agent to "
+    "recompute or re-derive a quantity the tool already returns (point it at the "
+    "returned field instead). Apply your own numeric thresholds only to "
+    "quantities no tool vouches for. A tool can still be wrong, so keep "
+    "scrutinizing — just via its QC + physics + cross-checks, not by re-deriving."
+)
+
+
 def format_tool_inventory(
     agent: str = "image_analysis",
     active_skills: list[str] | None = None,
