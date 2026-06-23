@@ -71,14 +71,15 @@ TOOL_USE_PRINCIPLE = (
 # or instructing the agent to re-derive what the tool already returns.
 VERIFIER_TOOL_SCRUTINY_PRINCIPLE = (
     "SCRUTINIZE TOOL RESULTS — DON'T REIMPLEMENT THEM. When a registered tool "
-    "produced the result, judge it by the tool's OWN quality fields (coherence, "
-    "flags, SNR, sanity outputs), by domain physics, and by independent "
-    "cross-checks (a second tool, a physical bound) — NOT by reimplementing the "
-    "tool's computation to second-guess it, and do NOT instruct the agent to "
-    "recompute or re-derive a quantity the tool already returns (point it at the "
-    "returned field instead). Apply your own numeric thresholds only to "
-    "quantities no tool vouches for. A tool can still be wrong, so keep "
-    "scrutinizing — just via its QC + physics + cross-checks, not by re-deriving."
+    "produced or anchored the result, judge it by the tool's OWN quality fields "
+    "(e.g. fit metrics, coherence, SNR, uncertainties, sanity flags), by domain "
+    "knowledge/physics, and by independent cross-checks (a second tool, a known "
+    "or physical bound) — NOT by reimplementing the tool's computation to "
+    "second-guess it, and do NOT instruct the agent to recompute or re-derive a "
+    "quantity the tool already returns (point it at the returned field instead). "
+    "Apply your own numeric thresholds only to quantities no tool vouches for. A "
+    "tool can still be wrong, so keep scrutinizing — just via its QC + domain "
+    "knowledge + cross-checks, not by re-deriving."
 )
 
 

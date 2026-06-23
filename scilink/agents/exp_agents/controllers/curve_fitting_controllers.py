@@ -3713,7 +3713,12 @@ Remember: Rejecting a good fit ({metric_label} {accept_cmp} {accept_threshold:.2
             prompt_parts.append("\n\n**ORIGINAL (RAW) DATA for reference:**")
             prompt_parts.append({"mime_type": "image/png", "data": state["original_plot_bytes"]})
 
-        
+        # Scrutinize-don't-reimplement: when a registered curve-fitting tool
+        # (e.g. fit_pattern, fit_sideband_manifold) produced the fit, judge it by
+        # the tool's QC + domain knowledge + cross-checks, not by re-deriving.
+        from ....skills._shared._registry import VERIFIER_TOOL_SCRUTINY_PRINCIPLE
+        prompt_parts.append("\n\n" + VERIFIER_TOOL_SCRUTINY_PRINCIPLE)
+
         try:
             response = self.model.generate_content(
                 contents=prompt_parts,
