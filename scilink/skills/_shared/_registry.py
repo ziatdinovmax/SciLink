@@ -70,6 +70,18 @@ def format_tool_inventory(
             "code for post-processing. A tool call anchoring the hard step followed "
             "by custom code is usually more reliable than an all-custom pipeline."
         )
+        parts.append(
+            "USE WHAT A TOOL RETURNS — DO NOT RE-DERIVE IT. Each tool returns its "
+            "computed results in the result dict (see its **Returns**) and often a "
+            "finished figure. Read those returned fields, and save the tool's figure "
+            "as the visualization when it has one. Do NOT recompute, re-segment, "
+            "re-render, rescale, or re-bin a quantity a tool you called already "
+            "returns: re-deriving a tool's own output is the most common source of "
+            "units / scaling / normalization bugs (e.g. recomputing a distance the "
+            "tool already reports in nm, or re-clustering domains the tool already "
+            "labelled). Post-process ONLY what no tool provides, and operate on the "
+            "tool's returned values rather than reimplementing the tool."
+        )
         for spec in specs:
             parts.append(spec.to_prompt())
 
