@@ -243,10 +243,17 @@ goal you picked above:
   `gamma_deg`), `lattice_constant_nm`, and `nn_distance_nm` with `nn_basis`
   stating the projection relation (NN = a, or a/√2 for a centered/perovskite
   sublattice). Crop to a single crystalline domain first (exclude
-  substrate/vacuum) and pass the true square-pixel size. ALWAYS check the
-  returned `multi_lattice` / `low_confidence` flags: if set, the field of
-  view holds more than one lattice or is under-sampled — crop to one domain
-  (ROI) and re-run rather than trusting the number. Do NOT hand-roll this
+  substrate/vacuum) and pass the true square-pixel size. Here "domain" means a
+  single CRYSTALLOGRAPHIC lattice (a grain / phase / orientation) — **ferroelectric
+  POLARIZATION domains do NOT count: they share one lattice (differing only by a
+  ~pm B-site off-centering), so the cell and inter-sublattice NN are identical
+  across them.** So when measuring the NN as a detection-tuning target for ferroic
+  mapping, run on the FULL field (it returns `multi_lattice=False`); do not hunt
+  for a "single-domain ROI" (the polarization domains aren't even known until
+  after the mapping the NN feeds into). ALWAYS check the returned `multi_lattice`
+  / `low_confidence` flags: if set, the field of view holds more than one
+  *lattice* or is under-sampled — crop to one crystallographic domain (ROI) and
+  re-run rather than trusting the number. Do NOT hand-roll this
   from `fourier_reflection_map` + manual fundamental-picking (that is the
   exact failure mode — choosing the strongest σ reflection, often a harmonic);
   `measure_lattice_constant` exists to remove it. Use `find_zone_axes` (real
