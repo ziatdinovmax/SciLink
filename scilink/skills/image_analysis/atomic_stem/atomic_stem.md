@@ -313,20 +313,28 @@ goal you picked above:
   from the centrosymmetric centroid of its reference-cage neighbours, and returns
   the per-cell polarization field (direction → domains, discontinuities → walls).
   Tetragonality/shear come from `gpa_strain` on the reference sublattice.
-- *If goal is vacancy / missing-column search:* two complementary
-  routes — pick by data quality, or run both as a cross-check.
-  **Real-space route** (defect typing, needs reliable columns): requires
-  an ideal lattice — use detected positions plus zone vectors from a
-  prior step (load via `prior_analysis_paths`). Compare ideal sites to
-  detected positions; restrict to image interior; verify candidates with
-  forced Gaussian fits. **Reciprocal-space route** (no atom finding):
-  the registered tool `fft_defect_map` (see `analysis`) reconstructs the
-  perfect lattice from its significant reflections and maps localized
-  deviations against a noise null — prefer it when columns are too noisy
-  / low-dose to detect reliably, when the field of view is large, or as
-  an independent confirmation of real-space candidates. It returns typed
-  signatures (deficit vs excess, lattice-coherence dip) but candidates
-  still need real-space confirmation crops for chemical interpretation.
+- *If goal is vacancy / missing-column / dopant TYPING:* two complementary
+  routes — run BOTH (real-space primary, reciprocal-space corroboration); they
+  are NOT substitutes for each other.
+  **Real-space route — the PRIMARY route for per-column vacancy/dopant typing.**
+  Detect the target sublattice(s) (DCNN), then call the registered tool
+  `type_sublattice_defects` (documented below): it compares each sublattice
+  against its own ideal lattice and types vacancies vs intensity-outlier dopants
+  per column. This is the MOST SENSITIVE route for SUBTLE single-column vacancies
+  — prefer it whenever columns are detectable. (Do not hand-roll an ideal-vs-
+  detected comparison when this tool fits.)
+  **Reciprocal-space route** (no atom finding): the registered tool
+  `fft_defect_map` (see `analysis`) reconstructs the perfect lattice from its
+  significant reflections and maps localized deviations against a noise null —
+  use it when columns are too noisy / low-dose to detect reliably, when the
+  field of view is large, for vacancy-ORDERING / superstructure, or as
+  independent confirmation. It returns typed signatures (deficit vs excess,
+  lattice-coherence dip) and catches STRONG anomalies (dopants, pronounced
+  vacancies) well, but it UNDER-recovers subtle single-column vacancies on its
+  own — so a `periodic=True` / few-or-zero-defect result from `fft_defect_map`
+  is NOT grounds to conclude "defect-free" when the goal is point-defect typing;
+  cross-check with `type_sublattice_defects`. Either route's candidates still
+  need real-space confirmation crops for chemical interpretation.
 - *If goal is planar-defect detection (stacking fault, intergrowth, anti-
   phase / twin boundary):* the defect is a *localized break in periodicity* —
   a fringe-spacing jump, inserted/missing plane, or lateral phase shift across
