@@ -686,11 +686,19 @@ centrosymmetric centroid of its reference-cage neighbours; `figure_bytes` is
 the polarization quiver + direction-domain map + magnitude map, save it as the
 visualization. Set `displaced='bright'` if the off-centering cation is the
 heavier/brighter column; `n_cage` to the projected cage coordination (4 for
-[100] perovskite). Direction/domains are the robust output; MAGNITUDE is
-trustworthy only on clean detection — over-detection inflates it and extreme
-over-detection makes the tool return `{'error':'no valid cells'}`, so get the
-detection clean (NN at the inter-sublattice spacing, low nn_cv) before trusting
-|P|; also treat very small |P| (near the position-fit noise floor) cautiously.
+[100] perovskite). **The direction-domain map is the deliverable; |P| MAGNITUDE
+is a secondary, soft output — do NOT make it a hard accept/reject gate.** Real
+ferroelectric off-centering commonly reaches ~40–80 pm (PbTiO3/BiFeO3-class), so
+do not impose a tight ceiling (e.g. 30 pm) the true field exceeds — most cells
+landing above such a ceiling means the ceiling is wrong, not the field. Judge the
+result by `direction_coherence` (high) and `net_to_local_ratio` (small = a
+genuine field, not an offset): if both are good, the domains are real even when
+|P| sits above a naive ceiling — report them. A genuinely suspect magnitude
+(`net_to_local_ratio`≫1, or extreme over-detection → `{'error':'no valid
+cells'}`) is a cue to re-check detection / offset, NOT to HALT and discard the
+direction result. Get detection clean (NN at the inter-sublattice spacing, low
+nn_cv) before quoting absolute |P|, and treat very small |P| (near the
+position-fit noise floor) cautiously.
 The tool assumes a displacive perovskite-type cage (off-centering cation at the
 cage centre, the two cation sublattices being the intensity extremes). When the
 two cations are NOT intensity-distinguishable (near-identical Z, weak HAADF
@@ -852,6 +860,16 @@ intensities between clusters.
 displacement from ideal lattice should be small (<0.3× lattice
 spacing). Large systematic displacements indicate fitting errors, not
 real strain.
+
+**Ferroelectric polarization** (when the step runs `map_polarization`): judge
+the result by `direction_coherence` (high), `net_to_local_ratio` (small = a
+genuine multi-domain field, not a registration offset), and a spatially coherent
+domain structure — NOT by a hard |P|-magnitude ceiling. Ferroelectric
+off-centering commonly reaches ~40–80 pm, so a large fraction of cells above a
+naive ceiling (e.g. 30 pm) is the ceiling being too strict, not an invalid field:
+do not reject or HALT a high-coherence, low-`net_to_local_ratio` result on
+magnitude alone (`|P|` magnitude is the secondary output; direction/domains are
+the deliverable).
 
 **Point-defect mapping** (when the step targets vacancies / point
 defects): if both routes ran, every `fft_defect_map` deficit candidate
