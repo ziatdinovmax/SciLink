@@ -3425,6 +3425,11 @@ bytes directly to `visualization.png` (or embed them as panels in it). NEVER sav
 a separate file and leave a placeholder panel in its place (e.g. a subplot titled "see \
 other_file.png") — only `visualization.png` is embedded in the report and shown to the verifier; \
 a placeholder there means the result is lost. \
+**To give the verifier SEVERAL full-resolution views** (multiple candidate settings to compare, \
+several regions, or before/after panels), save each as its own `verifier_panel_<name>.png` in the \
+working directory — the verifier receives each `verifier_panel_*.png` as a SEPARATE full-resolution \
+image. Do NOT stitch many views into one figure for the verifier: a single multi-panel montage is \
+downsized by the model's per-image cap until each panel loses judgeable detail. \
 All visualizations must be saved to the current working directory. Use `dpi=100`.
 4. Save key output arrays to the current working directory as `.npy` files. \
 At minimum save the primary detection/segmentation result (label map, binary \
@@ -3520,6 +3525,11 @@ bytes directly to `visualization.png` (or embed them as panels in it). NEVER sav
 a separate file and leave a placeholder panel in its place (e.g. a subplot titled "see \
 other_file.png") — only `visualization.png` is embedded in the report and shown to the verifier; \
 a placeholder there means the result is lost. \
+**To give the verifier SEVERAL full-resolution views** (multiple candidate settings to compare, \
+several regions, or before/after panels), save each as its own `verifier_panel_<name>.png` in the \
+working directory — the verifier receives each `verifier_panel_*.png` as a SEPARATE full-resolution \
+image. Do NOT stitch many views into one figure for the verifier: a single multi-panel montage is \
+downsized by the model's per-image cap until each panel loses judgeable detail. \
 All visualizations must be saved \
 to the current working directory. Use `dpi=100`.
 4. Save key output arrays to the current working directory as `.npy` files. \

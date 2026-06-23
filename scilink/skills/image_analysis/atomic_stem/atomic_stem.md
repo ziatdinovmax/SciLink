@@ -144,9 +144,13 @@ when `fov_nm` is unknown or the DCNN result looks poor.
   sufficient arbiter — a lattice can read a plausible NN yet still resolve only
   one of two sublattices — so select visually: sweep the few NN-bracketed
   candidates, run `detection_quality_panels` (full-frame overlay + zoom crops +
-  NN/heatmap metrics) for each, assemble them into ONE comparison figure, and
-  **save that as the step visualization** so the verification step makes (or
-  confirms) the choice. Pick the value whose zoom crops show BOTH sublattices
+  NN/heatmap metrics) for each, and **save each candidate's `figure_bytes` as its
+  own `verifier_panel_tps<NN>.png`** (do NOT stitch them into one comparison
+  figure — the verifier receives each `verifier_panel_*.png` as a SEPARATE
+  full-resolution image, whereas a single stitched montage is downsized by the
+  model's per-image cap until the per-candidate zoom crops lose the column-level
+  detail this choice depends on). Save the chosen candidate's panel as
+  `visualization.png` (the headline). Pick the value whose zoom crops show BOTH sublattices
   resolved with no split/duplicate columns and no coverage gaps — not merely the
   largest column count. Do NOT run `type_sublattice_defects` until detection
   visually resolves the target sublattices; spending the verification step on

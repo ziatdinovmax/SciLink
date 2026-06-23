@@ -2473,6 +2473,7 @@ Your guidance: '''
         if candidate_subdir:
             working_dir = working_dir / candidate_subdir
         working_dir.mkdir(parents=True, exist_ok=True)
+        state["_verify_working_dir"] = str(working_dir)
         output_prefix = f"image_{image_idx:04d}"
 
         script = None
@@ -2873,6 +2874,36 @@ Return JSON:
                 "mime_type": "image/jpeg",
                 "data": state["original_image_bytes"]
             })
+
+        # Per-candidate / multi-view QC panels at FULL resolution. A generated
+        # script can save extra verifier views as `verifier_panel_*.png` in the
+        # working dir (e.g. one detection_quality_panels figure per
+        # target_pixel_size candidate). Passing them as SEPARATE images gives each
+        # the model's full per-image resolution budget — stitching many candidate
+        # figures into ONE comparison image (the previous convention) downsizes
+        # every panel below the column-level detail needed to judge detection.
+        # Capped so a wide sweep can't flood the context.
+        try:
+            import glob as _glob
+            _wd = state.get("_verify_working_dir")
+            if _wd:
+                _panels = sorted(_glob.glob(os.path.join(_wd, "verifier_panel_*.png")))
+                _PANEL_CAP = 6
+                if _panels:
+                    if len(_panels) > _PANEL_CAP:
+                        self.logger.info(
+                            f"      {len(_panels)} verifier panels found; passing first {_PANEL_CAP}")
+                        _panels = _panels[:_PANEL_CAP]
+                    prompt_parts.append(
+                        f"\n\n**CANDIDATE QC PANELS ({len(_panels)}, each FULL-resolution — "
+                        f"compare them to judge detection quality):**")
+                    for _pth in _panels:
+                        with open(_pth, "rb") as _pf:
+                            _pb, _pm = _fit_image_under_api_cap(_pf.read())
+                        prompt_parts.append(f"\n_{os.path.basename(_pth)}_")
+                        prompt_parts.append({"mime_type": _pm, "data": _pb})
+        except Exception as _e:
+            self.logger.debug(f"      verifier-panel collection skipped: {_e}")
 
         # Include domain context from the skill. The verifier judges physical
         # plausibility, so it needs the same domain PHYSICS the analysis stage
@@ -4746,6 +4777,7 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
                     # Execute the patched script VERBATIM in the per-image dir
                     working_dir = self.output_dir / f"image_{image_idx:04d}"
                     canonical_viz = working_dir / VIZ_NAME
+                    state["_verify_working_dir"] = str(working_dir)
                     patched_script = self._sanitize_script(patched_script)
                     run = stage_and_run(self.executor, patched_script, image_data, working_dir,
                                         metadata=state.get("system_info"))
