@@ -325,3 +325,21 @@ class TestMapPolarization:
         m = res["metrics"]
         # honest failure: either no valid cells, or a flagged incoherent field
         assert ("error" in m) or (m.get("direction_coherence", 0.0) < 0.5)
+
+    def test_domain_segmentation_two_domains(self):
+        # two opposite domains (sign flip across the midline) -> tool should
+        # report >=2 domains, a wall, and a SMALL net (domains cancel)
+        img, pos, _ = _two_sublattice(contrast=0.5, P_px=(2.6, 0.0),
+                                      domains=True, seed=4)
+        m = map_polarization(img, pos, pixel_size_nm=0.1)["metrics"]
+        assert m["n_domains"] >= 2
+        assert m["wall_fraction"] > 0.02
+        assert m["net_to_local_ratio"] < 0.6        # opposite domains cancel
+
+    def test_uniform_field_single_domain_offset_indicator(self):
+        # one uniform direction -> one domain, and net ~ per-cell magnitude
+        img, pos, _ = _two_sublattice(contrast=0.5, P_px=(2.6, 0.0),
+                                      domains=False, seed=5)
+        m = map_polarization(img, pos, pixel_size_nm=0.1)["metrics"]
+        assert m["n_domains"] == 1
+        assert m["net_to_local_ratio"] > 0.7        # uniform: net ~ |P|

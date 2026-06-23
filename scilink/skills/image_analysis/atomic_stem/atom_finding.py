@@ -1381,6 +1381,65 @@ def map_polarization(image, positions, displaced="auto", n_cage=4,
     ax[2].set_title("|P| magnitude" + (" (nm)" if pixel_size_nm else " (px)")); plt.colorbar(s2, ax=ax[2], fraction=0.046)
     buf = BytesIO(); fig.tight_layout(); fig.savefig(buf, format="png", dpi=110); plt.close(fig)
 
+    # --- domain segmentation + wall localization (returned as DATA) -----------
+    # The smoothed direction-domain map above is the gold-standard domain view;
+    # return its structure as data too, so a caller reads domains/walls from the
+    # tool instead of re-deriving them (e.g. quantizing per-cell angles into
+    # fixed cardinal bins, which fragments the field). Domain directions are the
+    # PEAKS of the smoothed-direction histogram (adaptive — NOT fixed 0/90/180/270
+    # bins), so non-cardinal ferroelectric domains are captured.
+    domains = []; n_domains = 0; domain_labels = None; wall_fraction = float("nan")
+    try:
+        smv = np.full((len(XY), 2), np.nan)
+        if strong.sum() >= 5:
+            stree = cKDTree(XY[strong]); su_s = unit[strong]
+            for i, nb in enumerate(stree.query_ball_point(XY, 2.5 * nn_ref)):
+                if len(nb) >= 3:
+                    smv[i] = su_s[nb].mean(0)            # per-cell smoothed direction
+        valid_c = ~np.isnan(smv[:, 0]) & (np.hypot(smv[:, 0], smv[:, 1]) > 0.2)
+        if valid_c.sum() >= 10:
+            th = np.degrees(np.arctan2(smv[valid_c, 1], smv[valid_c, 0])) % 360
+            hist, edges = np.histogram(th, bins=36, range=(0, 360))
+            hsm = np.convolve(np.r_[hist[-3:], hist, hist[:3]], np.ones(3) / 3, "same")[3:-3]
+            centers = (edges[:-1] + edges[1:]) / 2
+            peaks = [k for k in range(36)
+                     if hsm[k] >= 0.25 * hsm.max()
+                     and hsm[k] >= hsm[(k - 1) % 36] and hsm[k] >= hsm[(k + 1) % 36]]
+            dirs = []
+            for k in sorted(peaks, key=lambda k: -hsm[k]):       # merge peaks <30 deg apart
+                a = float(centers[k])
+                if all(min(abs(a - d), 360 - abs(a - d)) > 30 for d in dirs):
+                    dirs.append(a)
+            dirs = dirs[:6] or [float(np.median(th))]
+            lab = np.full(len(XY), -1, int); idxv = np.where(valid_c)[0]
+            da = np.array(dirs); diff = np.abs(th[:, None] - da[None, :])
+            lab[idxv] = np.argmin(np.minimum(diff, 360 - diff), axis=1)
+            domain_labels = lab
+            for di, d in enumerate(dirs):
+                m = lab == di
+                if m.sum() >= 5:
+                    domains.append({"label": int(di), "n_cells": int(m.sum()),
+                                    "mean_angle_deg": round(d, 1),
+                                    "fraction": round(float(m.sum()) / max(1, valid_c.sum()), 3)})
+            n_domains = len(domains)
+            if n_domains >= 2:                               # wall cells = label change among spatial NN
+                labv = lab[idxv]; kk = min(7, len(idxv))
+                nn_i = cKDTree(XY[idxv]).query(XY[idxv], k=kk)[1]
+                wall = np.array([np.any(labv[nn_i[i, 1:]] != labv[i]) for i in range(len(idxv))])
+                wall_fraction = round(float(wall.mean()), 3)
+    except Exception:
+        flags.append("domain_segmentation_failed")
+
+    # Net (mean) displacement vs the per-cell magnitude: a registration / scan-
+    # offset indicator. net_to_local_ratio « 1 → genuine multi-domain field (the
+    # net cancels); » 1 → a uniform offset dominates (registration/scan drift),
+    # so the absolute magnitude/direction is suspect even if the field looks
+    # coherent. Lets a caller judge the offset instead of hedging about it.
+    meanP = P.mean(0)
+    net_to_local_ratio = float(np.hypot(meanP[0], meanP[1]) / (np.median(mag) + 1e-9))
+    if net_to_local_ratio > 1.5:
+        flags.append("offset_dominated_field_check_registration")
+
     return {
         "figure_bytes": buf.getvalue(),
         "metrics": {
@@ -1388,9 +1447,17 @@ def map_polarization(image, positions, displaced="auto", n_cage=4,
             "median_magnitude_px": float(np.median(mag)),
             "median_magnitude_nm": float(np.median(mag) * pixel_size_nm) if pixel_size_nm else None,
             "direction_coherence": coherence,   # ~1 coherent/domains, ~0 noise
+            "n_domains": int(n_domains),
+            "domains": domains,                 # adaptive (peak-clustered) directions, NOT cardinal bins
+            "wall_fraction": wall_fraction,
+            "net_polarization_px": [float(meanP[0]), float(meanP[1])],
+            "net_polarization_nm": ([float(meanP[0] * pixel_size_nm), float(meanP[1] * pixel_size_nm)]
+                                    if pixel_size_nm else None),
+            "net_to_local_ratio": net_to_local_ratio,
             "displaced_sublattice": displaced,
             "polarization": P.tolist(), "xy": XY.tolist(),
             "magnitude": mag.tolist(), "angle": ang.tolist(),
+            "domain_label": domain_labels.tolist() if domain_labels is not None else None,
         },
         "flags": flags,
     }
@@ -1820,15 +1887,21 @@ TOOL_SPECS = [
         },
         required=["image", "positions"],
         returns=(
-            "dict with 'figure_bytes' (PNG: polarization quiver + direction-domain map + "
-            "magnitude map; the DIRECTION panel is a SMOOTHED domain map, opacity=local "
-            "coherence, so domains/walls show solid and noise washes out), 'metrics' (n_cells, "
-            "median_magnitude_px/nm, direction_coherence ~1=coherent/domains ~0=noise OR "
-            "domains finer than ~3 cells [check fourier_reflection_map for a satellite before "
-            "calling low coherence noise], and "
-            "per-cell polarization/xy/magnitude/angle lists), and "
-            "'flags' (e.g. weak_sublattice_intensity_separation). Sign follows the "
-            "displaced->reference convention; flip via 'displaced' to match a specific reference."
+            "dict with 'figure_bytes' (PNG: polarization quiver + SMOOTHED direction-domain map "
+            "+ magnitude map — SAVE THIS as the visualization; do NOT re-render your own quiver "
+            "[a wrong scale makes pm-displacements huge/unreadable] or re-segment the domains). "
+            "'metrics': n_cells, median_magnitude_px/nm, direction_coherence (~1=coherent/domains "
+            "~0=noise OR domains finer than ~3 cells [check fourier_reflection_map for a satellite "
+            "first]); the DOMAIN SEGMENTATION as data — n_domains, domains (list of {label, "
+            "n_cells, mean_angle_deg, fraction}; directions are PEAK-CLUSTERED, adaptive — NOT "
+            "fixed 0/90/180/270 bins), wall_fraction, and per-cell domain_label; net_polarization_"
+            "px/nm and net_to_local_ratio (mean/median|P|: «1 = genuine multi-domain field [net "
+            "cancels]; »1 = a uniform offset / scan-registration drift dominates, so absolute "
+            "magnitude is suspect — flag offset_dominated_field_check_registration); and per-cell "
+            "polarization/xy/magnitude/angle lists. READ domains/walls from these fields rather "
+            "than quantizing per-cell angles yourself. 'flags' (e.g. "
+            "weak_sublattice_intensity_separation). Sign follows the displaced->reference "
+            "convention; flip via 'displaced' to match a specific reference."
         ),
     ),
 ]
