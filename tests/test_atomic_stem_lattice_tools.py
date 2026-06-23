@@ -244,6 +244,27 @@ class TestSublatticeDefects:
         assert m["n_vacancies"] <= 2          # clean -> ~no false vacancies
         assert m["n_dopants"] <= 2            # clean -> ~no false dopants
 
+    def test_dopant_z_capped_and_intensity_ratio(self):
+        # On a near-uniform sublattice (tiny MAD) the robust z inflates to absurd
+        # values (~25) and real substitutions get dismissed downstream as
+        # "physically impossible". Invariants: reported z is sanity-capped at +-10,
+        # every dopant carries a physical intensity_ratio, and the ratio is
+        # consistent with the lighter/heavier label (independent of over-detection).
+        img, pos, _ = _two_sublattice(
+            n=18, a=self._A, contrast=0.5,
+            dop_B={130: 1.9, 175: 0.45}, noise=0.005, seed=2)
+        r = type_sublattice_defects(img, pos, n_sublattices=2, pixel_size_nm=0.1,
+                                    edge_margin_px=2.0 * self._A)
+        dops = r["metrics"]["dopants"]
+        assert dops, "planted dopants should be detected"
+        for d in dops:
+            assert -10.0 <= d["z"] <= 10.0
+            assert d.get("intensity_ratio", 0) > 0
+            if d["kind"] == "lighter-substitution":
+                assert d["intensity_ratio"] < 1.0
+            else:
+                assert d["intensity_ratio"] > 1.0
+
 
 # --------------------------------------------------------------------------- #
 # lattice_discontinuity_map                                                   #
