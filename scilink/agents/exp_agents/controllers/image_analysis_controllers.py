@@ -271,6 +271,7 @@ def _append_tool_inventory(
     from ....skills._shared._registry import (
         format_library_inventory,
         get_tools_for,
+        TOOL_USE_PRINCIPLE,
     )
 
     specs = get_tools_for(agent, active_skills=active_skills)
@@ -282,6 +283,7 @@ def _append_tool_inventory(
             "code for post-processing. A tool call anchoring the hard step followed "
             "by custom code is usually more reliable than an all-custom pipeline."
         )
+        prompt.append(TOOL_USE_PRINCIPLE)
         for spec in specs:
             prompt.append(spec.to_prompt())
 
