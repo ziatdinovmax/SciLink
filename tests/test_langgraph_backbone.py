@@ -366,7 +366,7 @@ def test_verification_subgraph_max_iterations():
 
 def test_analysis_graph_message_format_helpers():
     """_langchain_to_openai_dict and reverse helpers round-trip correctly."""
-    from scilink.graphs.analysis import (
+    from scilink.graphs._react import (
         _openai_message_to_langchain,
         _langchain_to_openai_dict,
     )

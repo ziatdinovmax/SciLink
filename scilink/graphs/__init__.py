@@ -14,6 +14,12 @@ loops have been replaced by compiled graphs backed by ``MemorySaver``.
 Modules
 -------
 
+_react.py
+    Shared ReAct backbone — all LLM routing, tool dispatch, context
+    compression, and step-limit logic in one deep module.
+    Entry point: ``build_react_graph(orch, state_type, checkpointer)``
+    Not exported from this package; use the mode-specific builders below.
+
 state.py
     TypedDict state schemas for all three orchestrators and the verification
     subgraph.  Three-level hierarchy::
@@ -63,7 +69,7 @@ from scilink.graphs.state import (
 from scilink.graphs.analysis import build_analysis_graph
 from scilink.graphs.planning import build_planning_graph
 from scilink.graphs.simulation import build_simulation_graph
-from scilink.graphs.verification import build_verification_subgraph
+from scilink.graphs.verification import build_verification_subgraph, build_curve_fitting_verification_subgraph
 
 __all__ = [
     # State schemas
@@ -77,4 +83,5 @@ __all__ = [
     "build_planning_graph",
     "build_simulation_graph",
     "build_verification_subgraph",
+    "build_curve_fitting_verification_subgraph",
 ]

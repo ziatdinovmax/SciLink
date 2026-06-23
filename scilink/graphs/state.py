@@ -228,10 +228,17 @@ class VerificationRecord(Dict[str, Any]):
     Each record contains at minimum:
         iteration        int
         score            float
-        issues           list[str]
+        issues_found     list[str]
+        overall_assessment  str
+        recommended_action  str
         annealing_level  int
         approved         bool
         config_snapshot  dict
+
+    Curve-fitting records additionally contain:
+        r_squared                  float
+        physically_better_than_best bool
+        comparison_note            str
     """
 
 
@@ -261,6 +268,27 @@ class VerificationState(MessagesState):
     best_score
         Quality score of ``best_result`` (0.0–1.0 scale used by verifiers).
 
+    prev_best_score
+        Best score recorded at the end of the previous iteration.
+        Used by the annealing node for the correct high-water-mark comparison
+        (mirrors ``_prev_best_score`` in the imperative loop).
+
+    last_verification
+        Raw dict returned by the most recent ``verify_fn`` call.
+        Passed through state so ``apply_feedback`` and history nodes can read
+        all verifier fields (``issues_found``, ``recommended_action``, etc.)
+        without extra arguments.
+
+    verification_failed
+        Set to ``True`` by ``verify_quality`` when ``verify_fn`` returns ``None``
+        or raises.  Triggers the break-on-failure route (mirrors
+        ``if verification is None: break`` in the imperative loop).
+
+    config_unchanged
+        Set to ``True`` by ``apply_feedback`` when the refined config equals
+        the current locked config.  Triggers immediate annealing escalation
+        (or break at max level) rather than a new run.
+
     verification_history
         Ordered list of ``VerificationRecord`` entries — one per round.
         Uses ``Annotated[list, operator.add]`` so sub-branches can append
@@ -285,6 +313,24 @@ class VerificationState(MessagesState):
     human_feedback_requested
         ``True`` if the current state is waiting for human input (used by
         CO_PILOT / SUPERVISED modes to surface the interrupt).
+
+    --- Curve-fitting-specific fields ---
+
+    best_r2
+        R² value of ``best_result`` (curve fitting only; 0.0 for image analysis).
+
+    r2_floor
+        Minimum R² for in-band physics-based promotion (curve fitting only).
+
+    r2_threshold
+        R² threshold for numeric approval (curve fitting only).
+
+    best_ever_rejected
+        ``True`` if the verifier has ever rejected ``best_result``.
+        Gates the verifier-approval bypass of the R² threshold check.
+
+    best_verification
+        Most recent verifier verdict on ``best_result``, or ``None``.
     """
 
     # --- Analysis configuration ---
@@ -294,6 +340,12 @@ class VerificationState(MessagesState):
     current_result: Optional[Dict[str, Any]]
     best_result: Optional[Dict[str, Any]]
     best_score: float
+    prev_best_score: float
+
+    # --- Verification output passthrough ---
+    last_verification: Optional[Dict[str, Any]]
+    verification_failed: bool
+    config_unchanged: bool
 
     # --- History ---
     verification_history: Annotated[List[Dict[str, Any]], operator.add]
@@ -307,3 +359,14 @@ class VerificationState(MessagesState):
     # --- Terminal flags ---
     approved: bool
     human_feedback_requested: bool
+
+    # --- Internal loop-control flags ---
+    _force_anneal_was_noop: bool
+    _last_refinement_error: str
+
+    # --- Curve-fitting-specific ---
+    best_r2: float
+    r2_floor: float
+    r2_threshold: float
+    best_ever_rejected: bool
+    best_verification: Optional[Dict[str, Any]]

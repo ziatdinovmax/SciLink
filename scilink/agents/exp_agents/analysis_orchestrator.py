@@ -36,6 +36,7 @@ from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .analysis_orchestrator_tools import AnalysisOrchestratorTools
 from ._deprecation import normalize_params
+from ...graphs.analysis import build_analysis_graph
 
 
 # Built-in agent registry seed — classes are lazy-loaded on first use.
@@ -738,7 +739,6 @@ class AnalysisOrchestratorAgent:
         # Build the ReAct graph.  A fixed thread_id per session lets MemorySaver
         # accumulate message history across chat() calls so the graph is always
         # up to date without replaying the full history on every turn.
-        from ...graphs.analysis import build_analysis_graph
         self._graph_thread_id = f"analysis-{self.base_dir.name}"
         self._graph = build_analysis_graph(self)
         self._graph_config = {"configurable": {"thread_id": self._graph_thread_id}}
@@ -1736,8 +1736,6 @@ class AnalysisOrchestratorAgent:
         invoke so the graph thread accumulates all prior messages without
         making any LLM calls.
         """
-        from langchain_core.messages import HumanMessage as HM, ToolMessage as TM
-
         # Repair/close before converting: a session file saved mid-interruption
         # can end on an unanswered tool_call or a dangling tool result, which
         # `update_state` would otherwise seed verbatim into the checkpoint.
@@ -1748,7 +1746,7 @@ class AnalysisOrchestratorAgent:
             role = m.get("role", "")
             content = m.get("content") or ""
             if role == "user":
-                lc_messages.append(HM(content=content))
+                lc_messages.append(HumanMessage(content=content))
             elif role == "assistant":
                 tool_calls_raw = m.get("tool_calls", [])
                 lc_tc = [
@@ -1765,7 +1763,7 @@ class AnalysisOrchestratorAgent:
                 lc_messages.append(AIMessage(content=content, tool_calls=lc_tc))
             elif role == "tool":
                 lc_messages.append(
-                    TM(
+                    ToolMessage(
                         content=content,
                         tool_call_id=m.get("tool_call_id", ""),
                     )
@@ -1778,7 +1776,6 @@ class AnalysisOrchestratorAgent:
         # Directly update the MemorySaver state rather than re-running the graph,
         # to avoid making LLM calls during init.
         try:
-            from langgraph.checkpoint.memory import MemorySaver as MS
             # Use the put() API to write the accumulated messages into the checkpoint.
             checkpoint = self._graph.get_state(self._graph_config)
             if not checkpoint or not checkpoint.values:

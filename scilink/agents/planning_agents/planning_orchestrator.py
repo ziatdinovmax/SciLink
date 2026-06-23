@@ -23,6 +23,7 @@ from .scalarizer_agent import ScalarizerAgent
 from .bo_agent import BOAgent
 from .orchestrator_tools import OrchestratorTools
 from ._deprecation import normalize_params
+from ...graphs.planning import build_planning_graph
 
 
 class AutonomyLevel(Enum):
@@ -872,7 +873,6 @@ class PlanningOrchestratorAgent:
                 self.messages.extend(recent_history)
 
         # ── LangGraph backbone ─────────────────────────────────────────────
-        from ...graphs.planning import build_planning_graph
         self._graph_thread_id = f"planning-{self.base_dir.name}"
         self._graph = build_planning_graph(self)
         self._graph_config = {"configurable": {"thread_id": self._graph_thread_id}}
@@ -1665,8 +1665,6 @@ class PlanningOrchestratorAgent:
 
     def _seed_graph_history(self, history: List[Dict]) -> None:
         """Replay persisted history into the graph's MemorySaver at init."""
-        from langchain_core.messages import HumanMessage as HM, ToolMessage as TM
-
         history = close_interrupted_turn(repair_dangling_tool_calls(list(history)))
 
         lc_messages = []
@@ -1674,7 +1672,7 @@ class PlanningOrchestratorAgent:
             role = m.get("role", "")
             content = m.get("content") or ""
             if role == "user":
-                lc_messages.append(HM(content=content))
+                lc_messages.append(HumanMessage(content=content))
             elif role == "assistant":
                 tool_calls_raw = m.get("tool_calls", [])
                 lc_tc = [
@@ -1690,7 +1688,7 @@ class PlanningOrchestratorAgent:
                 ]
                 lc_messages.append(AIMessage(content=content, tool_calls=lc_tc))
             elif role == "tool":
-                lc_messages.append(TM(content=content, tool_call_id=m.get("tool_call_id", "")))
+                lc_messages.append(ToolMessage(content=content, tool_call_id=m.get("tool_call_id", "")))
 
         if not lc_messages:
             return
