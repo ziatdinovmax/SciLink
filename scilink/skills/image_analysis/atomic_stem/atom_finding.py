@@ -1564,7 +1564,10 @@ TOOL_SPECS = [
         name="detect_atoms",
         description=(
             "Classical atom-column detection: peak detection plus optional 2D Gaussian "
-            "refinement. Returns sub-pixel positions and per-atom Gaussian parameters."
+            "refinement. Returns sub-pixel positions and per-atom Gaussian parameters. "
+            "SPECIES-BLIND: positions are column LOCATIONS, not chemical identities or "
+            "sublattice labels, and the Gaussian amplitude is intensity, not species — "
+            "type columns downstream (intensity, local_env_gmm, type_sublattice_defects)."
         ),
         import_line="from scilink.skills.image_analysis.atomic_stem.atom_finding import detect_atoms",
         signature=(
@@ -1616,7 +1619,9 @@ TOOL_SPECS = [
         name="detect_atoms_dcnn",
         description=(
             "AtomNet3 deep-CNN ensemble detection. Produces atom positions and a "
-            "probability heatmap."
+            "probability heatmap. SPECIES-BLIND: it returns column LOCATIONS, not "
+            "chemical identities or sublattice labels — species/sublattice typing "
+            "is a downstream step (intensity, local_env_gmm, type_sublattice_defects)."
         ),
         import_line="from scilink.skills.image_analysis.atomic_stem.atom_finding import detect_atoms_dcnn",
         signature=(
