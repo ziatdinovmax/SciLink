@@ -4302,6 +4302,7 @@ Return JSON with:
                             "metric_value": _cur_metric,
                             "best_metric_value": _best_metric,
                             "metric_label": _metric_label,
+                            "tools_used": state.get("_last_tools_used", []),
                             "config_used": state.get("locked_fitting_config", {}),
                             "issues_found": verification.get("issues_found", []),
                             "overall_assessment": verification.get("overall_assessment", ""),
@@ -6069,6 +6070,7 @@ Return JSON with:
                 {
                     "r_squared": entry.get("r_squared"),
                     "annealing_level": entry.get("annealing_level", 0),
+                    "tools_used": entry.get("tools_used", []),
                     # The model in force at this iteration — lets a consumer
                     # (e.g. the self-evolution figure) show the per-attempt
                     # model alongside its R² and issues.
