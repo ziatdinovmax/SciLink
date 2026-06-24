@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scilink"
-version = "0.0.45"
+version = "0.0.55"
 authors = [
   { name="SciLink Team", email="maxim.ziatdinov@gmail.com" },
 ]
