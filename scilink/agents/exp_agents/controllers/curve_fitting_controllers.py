@@ -3138,6 +3138,7 @@ Your guidance: '''
                     script, diagnosis = self._correct_script(state, script, last_error)
                     script_errors.append({"error": last_error, "diagnosis": diagnosis})
 
+                state["_verify_working_dir"] = str(item_dir)
                 run = stage_and_run(self.executor, script, curve_data, item_dir,
                                     aux=extra_operands)
                 exec_result = run["exec"]
@@ -3722,13 +3723,38 @@ Remember: Rejecting a good fit ({metric_label} {accept_cmp} {accept_threshold:.2
         # Scrutinize-don't-reimplement: when a registered curve-fitting tool
         # (e.g. fit_pattern, fit_sideband_manifold) produced the fit, judge it by
         # the tool's QC + domain knowledge + cross-checks, not by re-deriving.
-        from ....skills._shared._registry import VERIFIER_TOOL_SCRUTINY_PRINCIPLE
+        from ....skills._shared._registry import (
+            VERIFIER_TOOL_SCRUTINY_PRINCIPLE, get_tools_for)
         _tool_inv = _tool_inventory_text(state)
         if _tool_inv:
             prompt_parts.append(
                 "\n\n**REGISTERED TOOLS AVAILABLE TO THIS FIT** — judge the result "
                 "against what each tool actually does and what its outputs mean; do not "
                 "re-derive a failure mode the tool already controls for:\n" + _tool_inv)
+            # Which of those tools THIS iteration's script actually called
+            # (authoritative — the prose pipeline description can deviate from the
+            # executed code). Parsed from the saved fitting script; only the name
+            # list is injected, never the script source.
+            try:
+                import glob as _g
+                _wd = state.get("_verify_working_dir")
+                _names = [t.name for t in get_tools_for(
+                    "curve_fitting", active_skills=_active_skill_names(state))]
+                _src = ""
+                if _wd:
+                    _hits = (_g.glob(os.path.join(_wd, "scripts", "*.py"))
+                             or _g.glob(os.path.join(_wd, "*.py")))
+                    if _hits:
+                        with open(_hits[0]) as _sf:
+                            _src = _sf.read()
+                _used = [n for n in _names if n in _src]
+                if _used:
+                    prompt_parts.append(
+                        "\n\n**Registered tools this iteration's script actually CALLED:** "
+                        + ", ".join(_used) + " — apply each one's documented behaviour "
+                        "(above) when judging the result.")
+            except Exception:
+                pass
         prompt_parts.append("\n\n" + VERIFIER_TOOL_SCRUTINY_PRINCIPLE)
 
         try:
