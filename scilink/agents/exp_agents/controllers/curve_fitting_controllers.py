@@ -3747,7 +3747,10 @@ Remember: Rejecting a good fit ({metric_label} {accept_cmp} {accept_threshold:.2
                     if _hits:
                         with open(_hits[0]) as _sf:
                             _src = _sf.read()
-                _used = [n for n in _names if n in _src]
+                import re as _re
+                _used = [n for n in _names
+                         if _re.search(rf"\b{_re.escape(n)}\b", _src)]
+                state["_last_tools_used"] = _used   # persisted into quality_history
                 if _used:
                     prompt_parts.append(
                         "\n\n**Registered tools this iteration's script actually CALLED:** "

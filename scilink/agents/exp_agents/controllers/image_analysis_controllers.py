@@ -2959,7 +2959,10 @@ Return JSON:
                     if _hits:
                         with open(_hits[0]) as _sf:
                             _src = _sf.read()
-                _used = [n for n in _names if n in _src]
+                import re as _re
+                _used = [n for n in _names
+                         if _re.search(rf"\b{_re.escape(n)}\b", _src)]
+                state["_last_tools_used"] = _used   # persisted into quality_history
                 if _used:
                     prompt_parts.append(
                         "\n\n**Registered tools this iteration's script actually CALLED:** "
@@ -3620,6 +3623,7 @@ Return JSON with:
                         verification_history.append({
                             "quality_score": v_score,
                             "result_type": verification.get("result_type"),
+                            "tools_used": state.get("_last_tools_used", []),
                             "config_used": state.get("locked_analysis_config", {}),
                             "issues_found": verification.get("issues_found", []),
                             "overall_assessment": verification.get(
@@ -4720,6 +4724,7 @@ Return JSON with:
                         }
                         for iss in entry.get("issues_found", [])
                     ],
+                    "tools_used": entry.get("tools_used", []),
                     "fix_applied": entry.get("recommended_action", ""),
                 }
                 for entry in verification_history
