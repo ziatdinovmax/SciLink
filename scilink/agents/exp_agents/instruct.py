@@ -2255,6 +2255,10 @@ plan as specified and let the retry pipeline handle actual runtime failures.
    level) alongside the raw residual, use a log or sqrt y-scale on the main panel,
    and/or add a zoomed sub-panel over each region where the residual is largest, so
    localized/systematic misfit is actually visible.
+   A zoomed sub-panel must NOT shrink the main Data-and-Fit panel — the primary panel
+   always shows the FULL fitted domain. (With `plt.subplots(..., sharex=True)` a
+   `set_xlim` on the zoom axis silently truncates EVERY panel; give the zoom panel its
+   own non-shared x-axis, or reset the main panel's xlim to the full domain afterwards.)
    If you applied any preprocessing, ALSO plot the raw data faintly (light grey,
    low alpha) so the reviewer can confirm preprocessing did not distort the
    fitted features.
