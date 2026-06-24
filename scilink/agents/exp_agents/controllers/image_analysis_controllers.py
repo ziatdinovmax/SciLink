@@ -219,6 +219,12 @@ def build_verification_prompt_with_history(
         "2. If a fix didn't work, suggest something DIFFERENT",
         "3. If a previous fix was NOT applied due to an API error, "
         "re-suggest it or propose an alternative",
+        "4. A previously-raised issue may have been MISTAKEN. RETRACT it (drop it; "
+        "stop demanding fixes) when STRONG evidence shows the concern was unfounded "
+        "— the images, a registered tool's documented behaviour/guarantees, clear "
+        "physics, or an independent cross-check. Absent strong evidence, keep "
+        "scrutinizing: 'persists' means still demonstrably real, not merely "
+        "un-disproven.",
     ])
 
     return "\n".join(lines)
@@ -2929,7 +2935,38 @@ Return JSON:
                     + skill_sections["validation"]
                 )
 
-        from ....skills._shared._registry import VERIFIER_TOOL_SCRUTINY_PRINCIPLE
+        from ....skills._shared._registry import (
+            VERIFIER_TOOL_SCRUTINY_PRINCIPLE, format_tool_inventory, get_tools_for)
+        _active = _active_skill_names(state)
+        _tool_inv = format_tool_inventory("image_analysis", active_skills=_active)
+        if _tool_inv:
+            prompt_parts.append(
+                "\n\n**REGISTERED TOOLS AVAILABLE TO THIS ANALYSIS** — judge the result "
+                "against what each tool actually does and what its outputs mean; do not "
+                "re-derive or hypothesize a failure mode the tool already controls for:\n"
+                + _tool_inv)
+            # Which of those tools THIS iteration's script actually called
+            # (authoritative — the prose pipeline description above can deviate from
+            # the executed code). Parsed from the saved script in the working dir.
+            try:
+                import glob as _g
+                _wd = state.get("_verify_working_dir")
+                _names = [t.name for t in get_tools_for("image_analysis", active_skills=_active)]
+                _src = ""
+                if _wd:
+                    _hits = (_g.glob(os.path.join(_wd, "scripts", "*.py"))
+                             or _g.glob(os.path.join(_wd, "*.py")))
+                    if _hits:
+                        with open(_hits[0]) as _sf:
+                            _src = _sf.read()
+                _used = [n for n in _names if n in _src]
+                if _used:
+                    prompt_parts.append(
+                        "\n\n**Registered tools this iteration's script actually CALLED:** "
+                        + ", ".join(_used) + " — apply each one's documented behaviour "
+                        "(above) when judging the result.")
+            except Exception:
+                pass
         prompt_parts.append("\n\n" + VERIFIER_TOOL_SCRUTINY_PRINCIPLE)
 
         state["_last_verify_error"] = None

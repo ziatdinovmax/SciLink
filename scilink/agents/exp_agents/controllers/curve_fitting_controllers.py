@@ -638,8 +638,14 @@ def build_verification_prompt_with_history(
         "caveat (the plateau/convergence rule takes precedence).",
         "3. If a previous fix was NOT applied due to an API error, "
         "re-suggest it or propose an alternative",
+        "4. A previously-raised issue may have been MISTAKEN. RETRACT it (drop it; "
+        "stop demanding fixes) when STRONG evidence shows the concern was unfounded "
+        "— the plot, a registered tool's documented behaviour/guarantees, clear "
+        "physics, or an independent cross-check. Absent strong evidence, keep "
+        "scrutinizing: 'persists' means still demonstrably real, not merely "
+        "un-disproven.",
     ])
-    
+
     return "\n".join(lines)
 
 
@@ -3717,6 +3723,12 @@ Remember: Rejecting a good fit ({metric_label} {accept_cmp} {accept_threshold:.2
         # (e.g. fit_pattern, fit_sideband_manifold) produced the fit, judge it by
         # the tool's QC + domain knowledge + cross-checks, not by re-deriving.
         from ....skills._shared._registry import VERIFIER_TOOL_SCRUTINY_PRINCIPLE
+        _tool_inv = _tool_inventory_text(state)
+        if _tool_inv:
+            prompt_parts.append(
+                "\n\n**REGISTERED TOOLS AVAILABLE TO THIS FIT** — judge the result "
+                "against what each tool actually does and what its outputs mean; do not "
+                "re-derive a failure mode the tool already controls for:\n" + _tool_inv)
         prompt_parts.append("\n\n" + VERIFIER_TOOL_SCRUTINY_PRINCIPLE)
 
         try:
