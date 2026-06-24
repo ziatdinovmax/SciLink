@@ -7,7 +7,7 @@ detrended, azimuthally-averaged radial power spectrum with a significance
 to the fundamental, (3) builds a matched annular band-pass at a chosen
 reflection and maps WHERE it lives (amplitude) plus a raw displacement-phase
 view (the Bragg phase — UNREFERENCED, an exploratory displacement view, NOT a
-quantitative strain tensor; use the ``gpa_strain`` tool for referenced strain),
+quantitative strain tensor; use the ``gpa_strain_map`` tool for referenced strain),
 (4) gates the map against a phase-randomized null, and
 (5) confirms a candidate domain with a local windowed-FFT spot SNR vs. bulk.
 
@@ -222,7 +222,7 @@ TOOL_SPEC = ToolSpec(
         "superstructure reflections, and maps where a chosen reflection lives "
         "(amplitude, null-gated) plus a raw displacement-phase view. For a "
         "QUANTITATIVE referenced strain tensor (exx/eyy/exy/wxy), use the "
-        "gpa_strain tool instead — this tool's phase is unreferenced."
+        "gpa_strain_map tool instead — this tool's phase is unreferenced."
     ),
     import_line="from scilink.skills._shared.fourier_reflection import fourier_reflection_map",
     signature="fourier_reflection_map(image_array, pixel_size_nm, d_nm=None, params=None) -> dict",
@@ -232,7 +232,7 @@ TOOL_SPEC = ToolSpec(
         "lattice image: localizing a superlattice / satellite reflection, an "
         "ordered domain (oxygen/cation-vacancy, charge/orbital ordering, "
         "antiphase), or a second phase with a distinct spacing. (For a "
-        "quantitative referenced strain field, use gpa_strain, not this tool's "
+        "quantitative referenced strain field, use gpa_strain_map, not this tool's "
         "raw phase.) This is the sharp, interpretable counterpart to the "
         "exploratory run_fft_nmf_analysis: reach for FFT-NMF when the "
         "heterogeneity is unknown ('what domains exist?'); reach for "
@@ -293,7 +293,7 @@ TOOL_SPEC = ToolSpec(
         "'mapped_is_satellite_candidate' (bool); "
         "'amplitude_map' (2D ndarray — where the mapped reflection lives); "
         "'phase_map' (2D ndarray — raw Bragg phase, an UNREFERENCED "
-        "displacement view; not a quantitative strain tensor — use gpa_strain); "
+        "displacement view; not a quantitative strain tensor — use gpa_strain_map); "
         "'domain_mask' (2D bool — null-gated ordered-domain segmentation); "
         "'domain_fraction' (float); 'null_threshold' (float); "
         "'spot_snr_domain' / 'spot_snr_bulk' (local-FFT spot SNR in the strongest "

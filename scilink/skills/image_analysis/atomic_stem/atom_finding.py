@@ -1959,7 +1959,7 @@ TOOL_SPECS = [
             "inter-sublattice spacing, NOT the intra-sublattice repeat. Lattice-agnostic and "
             "free of material constants. Assumes HAADF bright-column intensity. Reports the polar "
             "displacement field; for tetragonality/shear, characterise the reference sublattice "
-            "with gpa_strain. "
+            "with gpa_strain_map. "
             "LIMITS: (1) DIRECTION/domains are the robust output; MAGNITUDE is trustworthy only "
             "on CLEAN detection (NN at the inter-sublattice spacing, low nn_cv) — over-detected "
             "input inflates magnitude (~20% on real over-detection), and EXTREME over-detection "

@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 
 from scilink.skills._shared.fft_defect import fft_defect_map, make_defective_lattice
-from scilink.skills._shared.gpa_strain import make_strained_lattice
+from scilink.skills._shared.strain import make_strained_lattice
 
 
 def _matched(found, truth_pts, tol):

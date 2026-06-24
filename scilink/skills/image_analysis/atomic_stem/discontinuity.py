@@ -22,7 +22,7 @@ Relationship to the other tools:
     — this tool is the sharp LOCALIZER that returns the boundary line plus a
     physical readout (delta-orientation in deg, delta-spacing in %). Same
     explore-vs-localize split as FFT-NMF vs fourier_reflection_map.
-  * gpa_strain measures the continuous strain tensor against ONE reference
+  * gpa_strain_map measures the continuous strain tensor against ONE reference
     lattice — ideal for small distortions and coherent interfaces, but it
     breaks at large misorientation (two grains = two reciprocal lattices). This
     tool handles large misorientation (each window finds its own orientation).
@@ -399,7 +399,7 @@ TOOL_SPEC = ToolSpec(
         "Pick among the reciprocal-space tools: `run_fft_nmf_analysis` is the "
         "EXPLORATORY decomposer (unknown heterogeneity, 'how many domains') — "
         "this tool is the sharp LOCALIZER that returns the boundary line + a "
-        "physical readout. `gpa_strain` measures the continuous strain tensor "
+        "physical readout. `gpa_strain_map` measures the continuous strain tensor "
         "against one reference lattice (small distortions, coherent interfaces, "
         "fine same-orientation faults) but breaks at large misorientation; this "
         "tool handles large misorientation, so use GPA for strain MAGNITUDE and "

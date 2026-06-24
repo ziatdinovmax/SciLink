@@ -30,6 +30,8 @@ from __future__ import annotations
 import numpy as np
 from scipy import ndimage as ndi
 
+from ._spec import ToolSpec
+
 __all__ = ["gpa_strain_map", "find_bragg_peaks", "make_strained_lattice"]
 
 
@@ -473,3 +475,86 @@ def make_strained_lattice(shape, a_px=10.0, displacement=None, kind="hex",
         rng = np.random.default_rng(seed)
         img = img + rng.normal(0, noise, img.shape)
     return img, glist
+
+
+TOOL_SPEC = ToolSpec(
+    name="gpa_strain_map",
+    description=(
+        "Geometric Phase Analysis (GPA): quantitative in-plane strain tensor "
+        "(exx, eyy, exy) and rigid lattice rotation (wxy) of an atomic-"
+        "resolution / lattice-fringe image, measured RELATIVE TO an undistorted "
+        "reference region from two non-collinear Bragg reflections. This is the "
+        "tool for a QUANTITATIVE referenced strain field — the sharp counterpart "
+        "to fourier_reflection_map (which gives an UNREFERENCED Bragg-phase view, "
+        "not a strain tensor)."
+    ),
+    import_line="from scilink.skills._shared.strain import gpa_strain_map",
+    signature=(
+        "gpa_strain_map(image, reflections=None, reference_roi='auto', "
+        "mask_frac=0.25, amp_percentile=25.0, smooth=None, pixel_size_nm=None, "
+        "target_valid_fraction=0.5, detrend=False) -> dict"),
+    agents=["image_analysis"],
+    when_to_use=(
+        "Use for a QUANTITATIVE strain / lattice-rotation map on a single "
+        "crystalline domain of an atomic-resolution (S)TEM / HRTEM lattice-"
+        "fringe image: misfit strain at a film/substrate or hetero-interface, "
+        "strain around a dislocation/defect, tetragonality or shear of a "
+        "ferroic/perovskite cell. Pairs with map_polarization (which gives the "
+        "polar displacement field) for the strain half of the same cell.\n"
+        "\n"
+        "ASSUMPTIONS / when NOT to trust it (read 'flags' and 'answerable'): "
+        "(1) SMALL-DISTORTION, COHERENT lattice: GPA linearizes the phase, so it "
+        "is valid for the smooth strain of a continuous lattice; it is NOT valid "
+        "across a true discontinuity (a grain boundary / large-angle twin / phase "
+        "boundary unwraps the phase and gives garbage there) — for a "
+        "discontinuity use lattice_discontinuity_map, not GPA. (2) Needs a "
+        "genuinely UNDISTORTED reference region in view (auto-selected, or pass "
+        "reference_roi); strain is meaningless without one and is reported "
+        "relative to it. (3) Needs two well-conditioned non-collinear reflections "
+        "(condition_number < 50). (4) Do NOT run on an already Fourier-filtered "
+        "micrograph (flagged 'prefiltered') — derived strain is then untrustworthy. "
+        "(5) HAADF illumination/thickness envelope can masquerade as a strain "
+        "gradient: the 'amplitude_tracks_intensity' flag and a withheld "
+        "'answerable' mean the field is envelope-driven, not lattice strain. "
+        "(6) A whole-field linear ramp (res['affine']['dominated_by_ramp']) is "
+        "often STEM scan distortion but can be real long-range physics — inspect "
+        "before setting detrend=True, and report when a ramp was removed."
+    ),
+    parameters={
+        "image": {"type": "ndarray", "description": "2D grayscale atomic-resolution / lattice-fringe image (bright lattice). Pass RAW; do NOT Fourier-filter first."},
+        "reflections": {"type": "list | None", "description": "Optional two (gx, gy) reflections in pixels-from-FFT-centre. Default None auto-selects a well-conditioned near-orthogonal, similar-|g| pair."},
+        "reference_roi": {"type": "str | tuple", "description": "'auto' (default — picks a high-amplitude, low-wavevector-variance undistorted patch) or an explicit (x, y, w, h) box whose strain is defined as zero. Set explicitly when the auto reference lands on a distorted region."},
+        "mask_frac": {"type": "float", "description": "Bragg mask sigma as a fraction of |g| — the spatial-resolution knob (default 0.25). LOWER for sharper localization of a small feature; RAISE if the phase is noisy / valid_fraction is low (the repair ladder also lowers it automatically)."},
+        "amp_percentile": {"type": "float", "description": "Pixels below this percentile of the min Bragg amplitude are marked invalid (cores/vacuum/edges) (default 25). LOWER to keep more (dimmer) lattice when valid_fraction is too low; RAISE to restrict to the strongest lattice."},
+        "smooth": {"type": "float | None", "description": "Gaussian sigma (px) on the phase-gradient fields (default None = ~1.5 lattice spacings). RAISE to suppress phase noise (coarser strain map); LOWER for finer detail at the cost of noise."},
+        "pixel_size_nm": {"type": "float", "description": "nm/px; used only to annotate physical extent (strain is dimensionless)."},
+        "target_valid_fraction": {"type": "float", "description": "If valid_fraction is below this, the repair ladder re-tries with a smaller mask then auto reference (default 0.5). LOWER to accept a sparser map without repair."},
+        "detrend": {"type": "bool", "description": "Subtract the fitted whole-field affine ramp from each component to reveal LOCAL strain under a global gradient (default False). The ramp is ALWAYS detected/reported in res['affine'] regardless. WARNING: a ramp can be real long-range physics (continuous bend, misfit gradient, twin offset) — check res['affine']['dominated_by_ramp'] first; only enable to test whether a localized feature survives, and report that the ramp was removed."},
+    },
+    required=["image"],
+    returns=(
+        "dict with: 'exx','eyy','exy','wxy' (2D float arrays — in-plane normal/"
+        "shear strain, dimensionless; wxy is rigid rotation in radians; all "
+        "referenced so the reference region is ~0); 'valid_mask' (2D bool — "
+        "where the lattice is well-resolved; strain is meaningless outside it) "
+        "and 'valid_fraction'; 'g1','g2' (the reflections used) and "
+        "'condition_number' (<50 = well-conditioned); 'reference_box' (the (x,y,"
+        "w,h) reference used); 'answerable' (bool — FALSE = do NOT report strain "
+        "numbers: too few valid pixels, ill-conditioned, prefiltered input, or "
+        "envelope-driven [amplitude_tracks_intensity]); 'flags' ('prefiltered', "
+        "'amplitude_tracks_intensity', peak/background diagnostics); 'affine' "
+        "(whole-field linear-ramp fractions per component + 'dominated_by_ramp' + "
+        "'removed'); 'stats'/'stats_raw' (robust per-component median/mean/std/"
+        "percentiles over valid pixels, after/before detrend); 'amp_intensity_"
+        "corr'. Report the strain magnitude from 'stats' (e.g. p99_abs) over the "
+        "valid mask, never a raw whole-array mean."
+    ),
+    example=(
+        "res = gpa_strain_map(img, reference_roi='auto')\n"
+        "if res['answerable']:\n"
+        "    print('exx p99_abs =', res['stats']['exx']['p99_abs'])\n"
+        "    print('ramp-dominated?', res['affine']['dominated_by_ramp'])\n"
+        "else:\n"
+        "    print('not quantifiable:', res['flags'])"
+    ),
+)

@@ -316,7 +316,7 @@ goal you picked above:
   the rest: it splits the sublattices, takes each off-centering cation's offset
   from the centrosymmetric centroid of its reference-cage neighbours, and returns
   the per-cell polarization field (direction → domains, discontinuities → walls).
-  Tetragonality/shear come from `gpa_strain` on the reference sublattice.
+  Tetragonality/shear come from `gpa_strain_map` on the reference sublattice.
 - *If goal is vacancy / missing-column / dopant TYPING:* two complementary
   routes — run BOTH (real-space primary, reciprocal-space corroboration); they
   are NOT substitutes for each other.
@@ -385,7 +385,7 @@ goal you picked above:
   in the banding). Pick among the reciprocal-space tools by question:
   `run_fft_nmf_analysis` is the EXPLORATORY decomposer (unknown
   heterogeneity, "how many domains"); `lattice_discontinuity_map` is the
-  sharp LOCALIZER (where is the boundary + what type); `gpa_strain` gives
+  sharp LOCALIZER (where is the boundary + what type); `gpa_strain_map` gives
   the strain MAGNITUDE near it; `fourier_reflection_map` maps a specific
   superstructure reflection's domain. NOTE the scope: a COHERENT
   lattice-matched chemical interface (same orientation+spacing+coherence
