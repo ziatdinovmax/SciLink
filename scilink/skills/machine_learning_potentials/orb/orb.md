@@ -44,8 +44,7 @@ from orb_models.forcefield import pretrained
 model_name_dict = pretrained.ORB_PRETRAINED_MODELS
 ```
 
-Orb supports the Python/ASE calculator path. LAMMPS integration is available
-via the `orb-lammps` plugin but is less mature than the ASE path.
+Orb supports the Python/ASE calculator path.
 
 ## planning
 
@@ -65,7 +64,6 @@ When to prefer another backend:
 
 Deployment path:
 - Python/ASE workflow → `ORBCalculator` (primary, well-tested)
-- LAMMPS production run → `orb-lammps` plugin (check version compatibility)
 
 ## implementation
 
