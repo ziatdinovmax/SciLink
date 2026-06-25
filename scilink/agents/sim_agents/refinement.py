@@ -550,6 +550,7 @@ def _refine_phase(
             research_goal=ctx.research_goal,
             skill=ctx.skill,
             domain=ctx.domain,
+            input_files=inputs,
         )
         last_verdict = verdict
         ctx.record(phase, result, verdict)
@@ -606,6 +607,7 @@ def _run_once_phase(
         research_goal=ctx.research_goal,
         skill=ctx.skill,
         domain=ctx.domain,
+        input_files=phase.input_files,
     )
     ctx.record(phase, result, verdict)
     return {
@@ -713,17 +715,40 @@ def _run_dry_run_gate(phase, executor, run_critic, ctx, prepare, entry,
         verdict = run_critic.assess(
             output_dir=out_dir, research_goal=ctx.research_goal,
             skill=ctx.skill, domain=ctx.domain,
+            input_files={entry: real_deck},
         )
         run_status = verdict.get("run_status")
         history.append({"cycle": cycle, "run_status": run_status})
         if run_status == "succeeded":
             return {"status": "passed", "cycles": cycle + 1, "history": history}
-        fixes = verdict.get("suggested_fixes")
-        deck_fix = fixes.get(entry) if isinstance(fixes, dict) else None
+        deck_fix = _select_deck_fix(verdict.get("suggested_fixes"), entry, real_deck)
         if not deck_fix:
             return {"status": "unfixed", "cycles": cycle + 1, "history": history}
         phase.input_files[entry] = deck_fix
     return {"status": "exhausted", "cycles": max_cycles, "history": history}
+
+
+def _select_deck_fix(fixes, entry: str, real_deck: str):
+    """Pick the corrected entry deck from a critic's ``suggested_fixes``.
+
+    Prefers a fix keyed by the entry filename. As a backstop for a critic
+    that keyed a full rewrite under a near-miss name (e.g. ``run.lammps`` ->
+    ``run.lammps_header_patch``), accepts a mis-keyed fix only when it is a
+    COMPLETE file — at least as long as the current deck. A short header or
+    patch fragment is rejected (applying it would drop the run commands),
+    leaving the gate to report ``unfixed``. Length is the only engine-neutral
+    signal available at this layer.
+    """
+    if not isinstance(fixes, dict):
+        return None
+    direct = fixes.get(entry)
+    if direct:
+        return direct
+    candidates = [
+        v for k, v in fixes.items()
+        if k != entry and isinstance(v, str) and len(v) >= len(real_deck)
+    ]
+    return max(candidates, key=len) if candidates else None
 
 
 def run_campaign(

@@ -691,6 +691,8 @@ and a successful run (give a verdict and sanity-check the physics).
 === Output snapshot (parsed from the run directory) ===
 {output_snapshot}
 
+{input_files_block}
+
 === Research goal (what the user was trying to compute) ===
 {research_goal}
 
@@ -705,10 +707,16 @@ Return a JSON object with these fields:
                       poor        — converged but result is suspect or wrong
                       needs_fixes — did not converge or failed to run
   reasoning           prose summary (3-6 sentences)
-  suggested_fixes     {{ "filename": "patched_content", ... }} | null
+  suggested_fixes     {{ "filename": "complete_corrected_file", ... }} | null
                       Provide a non-null dict only when the verdict is
                       "poor" or "needs_fixes" OR run_status is "failed".
                       Otherwise return null.
+                      Each key MUST be the exact name of one of the input
+                      files shown above — do not invent a new file, a
+                      ".patch", or a "header to insert after read_data".
+                      Each value MUST be the COMPLETE corrected file (the
+                      whole input, ready to run as-is), never a diff,
+                      snippet, or fragment to splice in.
   recommendations     list of short strings — next steps the user should
                       consider (rerun with X, gather more data, etc.)
   diagnostic_notes    optional prose — specific log lines, energies,
@@ -751,6 +759,7 @@ class RunCritic(_CriticBase):
         skill: Optional[str] = None,
         domain: Optional[str] = None,
         fixes_mode: str = "auto",
+        input_files: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """Assess a finished run and return a verdict report.
 
@@ -784,6 +793,11 @@ class RunCritic(_CriticBase):
                     ``"skip"``
                         Never propose fixes; ``suggested_fixes`` is
                         forced to ``None`` regardless of verdict.
+            input_files: Optional mapping of input filename to contents.
+                When provided, the files are shown to the critic so a
+                proposed fix patches the real inputs by their real names
+                with complete contents, rather than the critic guessing a
+                filename and emitting a fragment.
 
         Returns:
             A report dict with fields:
@@ -823,6 +837,22 @@ class RunCritic(_CriticBase):
         snapshot = _snapshot_run_outputs(str(out_path), skill)
         skill_context = self._load_skill_section(skill, domain or "")
 
+        # When the caller supplies the input files, show them so a proposed
+        # fix patches the real files by their real names with full contents —
+        # rather than the critic guessing a filename and emitting a fragment.
+        if input_files:
+            input_files_block = (
+                "=== Current input files (patch THESE — reuse the exact "
+                "filenames, return the whole file) ===\n"
+                + _format_input_files(input_files)
+            )
+        else:
+            input_files_block = (
+                "=== Current input files ===\n(not provided to this critic — "
+                "if you must propose a fix, key it by the exact input filename "
+                "referenced in the snapshot above and return the COMPLETE file)"
+            )
+
         fixes_directive = {
             "auto": (
                 "Propose fixes only when run_status is 'failed' or verdict "
@@ -845,6 +875,7 @@ class RunCritic(_CriticBase):
             skill_context=skill_context or "(no engine skill loaded)",
             output_dir=str(out_path),
             output_snapshot=json.dumps(snapshot, indent=2, default=str)[:12000],
+            input_files_block=input_files_block,
             research_goal=research_goal,
             fixes_directive=fixes_directive,
         )

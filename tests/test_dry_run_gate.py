@@ -15,6 +15,7 @@ from scilink.agents.sim_agents.refinement import (
     Phase,
     _dry_run_gate,
     _resolve_skill_callable,
+    _select_deck_fix,
 )
 
 REAL_DECK = (
@@ -54,7 +55,8 @@ class StubCritic:
         self.seen_decks = []
 
     def assess(self, output_dir, research_goal, skill=None, domain=None,
-               fixes_mode="auto"):
+               fixes_mode="auto", input_files=None):
+        self.seen_input_files = input_files
         deck_path = os.path.join(output_dir, "run.lammps")
         if os.path.isfile(deck_path):
             with open(deck_path) as fh:
@@ -158,3 +160,59 @@ def test_gate_fails_open_on_executor_error(tmp_path):
                         StubCritic([]), _ctx())
     assert rec["status"] == "skipped"          # fail-open, did not raise
     assert ph.input_files["run.lammps"] == before
+
+
+# ── critic sees the real deck ──
+
+def test_critic_receives_the_real_deck_as_input(tmp_path):
+    ph = _phase(tmp_path)
+    critic = StubCritic([{"run_status": "succeeded"}])
+    _dry_run_gate(ph, StubExecutor(), critic, _ctx())
+    # the gate hands the critic the full deck to patch, keyed by entry name
+    assert critic.seen_input_files == {"run.lammps": REAL_DECK}
+
+
+# ── mis-keyed fix backstop (the S2 run.lammps_header_patch failure) ──
+
+def test_gate_remaps_miskeyed_full_deck_fix(tmp_path):
+    # The critic keys a COMPLETE corrected deck under a near-miss filename
+    # instead of the entry; the length-gated backstop still applies it.
+    ph = _phase(tmp_path)
+    critic = StubCritic([
+        {"run_status": "failed",
+         "suggested_fixes": {"run.lammps_header_patch": FIXED_DECK}},
+        {"run_status": "succeeded"},
+    ])
+    rec = _dry_run_gate(ph, StubExecutor(), critic, _ctx())
+    assert rec["status"] == "passed"
+    assert ph.input_files["run.lammps"] == FIXED_DECK
+
+
+def test_gate_rejects_miskeyed_fragment_fix(tmp_path):
+    # A mis-keyed *fragment* (shorter than the deck) is rejected — applying it
+    # would drop the run commands — so the gate reports unfixed, deck untouched.
+    ph = _phase(tmp_path)
+    before = ph.input_files["run.lammps"]
+    fragment = "pair_style lj/cut/coul/long 9.0\nread_data system.data\n"
+    assert len(fragment) < len(before)
+    critic = StubCritic([
+        {"run_status": "failed",
+         "suggested_fixes": {"run.lammps_header_patch": fragment}},
+    ])
+    rec = _dry_run_gate(ph, StubExecutor(), critic, _ctx())
+    assert rec["status"] == "unfixed"
+    assert ph.input_files["run.lammps"] == before
+
+
+def test_select_deck_fix_prefers_direct_key():
+    fixes = {"run.lammps": FIXED_DECK, "run.lammps_header_patch": "x" * 9999}
+    assert _select_deck_fix(fixes, "run.lammps", REAL_DECK) == FIXED_DECK
+
+
+def test_select_deck_fix_remaps_full_and_rejects_fragment():
+    full = {"other_name": FIXED_DECK}
+    assert _select_deck_fix(full, "run.lammps", REAL_DECK) == FIXED_DECK
+    frag = {"other_name": "short\n"}
+    assert _select_deck_fix(frag, "run.lammps", REAL_DECK) is None
+    assert _select_deck_fix(None, "run.lammps", REAL_DECK) is None
+    assert _select_deck_fix({}, "run.lammps", REAL_DECK) is None

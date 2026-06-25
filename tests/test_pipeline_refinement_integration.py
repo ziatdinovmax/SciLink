@@ -51,7 +51,7 @@ class TestWorkflowComposition:
                 pass
 
             def assess(self, output_dir, research_goal, skill=None, domain=None,
-                       fixes_mode="auto"):
+                       fixes_mode="auto", input_files=None):
                 FakeRunCritic.calls += 1
                 if FakeRunCritic.calls == 1:
                     return {"status": "success", "run_status": "failed",
