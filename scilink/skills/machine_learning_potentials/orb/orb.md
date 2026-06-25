@@ -1,5 +1,5 @@
 ---
-description: Orb (Orbital Materials) — fast universal ML interatomic potential with ASE and LAMMPS support, optimized for high-throughput screening and production MD.
+description: Orb (Orbital Materials) — fast universal ML interatomic potential with ASE support, optimized for high-throughput screening and production MD.
 detect:
   binaries: []
   env_vars: []
@@ -8,8 +8,7 @@ detect:
     Orb is distributed via the `orb-models` package
     (`pip install orb-models`). Model weights are downloaded on first use.
     A successful `from orb_models.forcefield import pretrained` confirms the
-    backend is usable. LAMMPS support is available via the `orb-lammps`
-    plugin; check `lmp -help | grep orb` after installing.
+    backend is usable.
 ---
 # Orb (Orbital Materials)
 
