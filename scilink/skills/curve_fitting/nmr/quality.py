@@ -60,6 +60,8 @@ def peak_region_r2(
     dilate: int = 5,
     model_frac: float = 0.02,
     min_points: int = 15,
+    struct_apex_frac: float = 0.15,
+    struct_autocorr: float = 0.9,
 ) -> dict[str, Any]:
     """R² over the signal region only (see module docstring).
 
@@ -99,11 +101,50 @@ def peak_region_r2(
     global_r2 = _r2(np.ones_like(y, dtype=bool))
     fell_back = int(sig.sum()) < min_points
     region_r2 = global_r2 if fell_back else _r2(sig)
+
+    # --- residual-structure diagnostics (over the signal region) -------------
+    # A high R² can still hide a fit that misses where the signal actually is:
+    # on a tall, finely-sampled peak the variance is dominated by the apex, so a
+    # systematic apex/shoulder miss barely moves R² yet leaves large, correlated
+    # residuals. These quantities expose that — judge a fit by them, not R² alone.
+    rmask = sig if not fell_back else np.ones_like(y, dtype=bool)
+    resid = (y - y_fit)[rmask]
+    peak_height = float(np.max(np.abs(y[rmask] - base[rmask]))) or 1.0
+    if resid.size >= 4 and np.std(resid) > 0:
+        apex_over_noise = float(np.max(np.abs(resid)) / noise)
+        apex_frac = float(np.max(np.abs(resid)) / peak_height)
+        autocorr = float(np.corrcoef(resid[:-1], resid[1:])[0, 1])
+        frac_gt_3 = float(np.mean(np.abs(resid) > 3.0 * noise))
+        # SNR-ROBUST overall-misfit size: RMS residual as a fraction of the peak
+        # height. Unlike apex_resid_over_noise / frac_resid_gt_3sigma (both
+        # noise-relative, so they are large even for a PERFECT fit of a very
+        # high-SNR peak — e.g. ~0.8 of points exceed 3σ on a clean ¹⁹F line),
+        # this is normalized to the signal, so it measures how far the fit is
+        # from the data in physically meaningful (fraction-of-peak) terms.
+        resid_rms_frac = float(np.sqrt(np.mean(resid ** 2)) / peak_height)
+    else:
+        apex_over_noise = apex_frac = autocorr = frac_gt_3 = resid_rms_frac = 0.0
+    # "Structured" = the residual is SYSTEMATIC (high lag-1 autocorrelation, i.e.
+    # not random noise) AND SEVERE at the apex (a large miss relative to the peak
+    # height — judging on the fraction, not σ, so ultra-high-SNR peaks aren't
+    # false-flagged and a localized cusp miss is still caught). frac_resid_gt_3sigma
+    # is returned for context but deliberately NOT an AND-gate: a finely-sampled
+    # good fit can have many sub-percent residuals (high frac_gt_3, tiny apex) and
+    # must not be flagged. Thresholds are tunable knobs; raw values always returned.
+    structured = bool(autocorr > struct_autocorr and apex_frac > struct_apex_frac)
+
     return {
         "peak_region_r2": float(region_r2),
         "r_squared": float(global_r2),
         "n_signal_points": int(sig.sum()),
         "fell_back_to_global": bool(fell_back),
+        # Residual-structure diagnostics (added; do not replace peak_region_r2):
+        "apex_resid_over_noise": apex_over_noise,
+        "apex_resid_frac": apex_frac,
+        "resid_autocorr_lag1": autocorr,
+        "frac_resid_gt_3sigma": frac_gt_3,
+        "resid_rms_frac": resid_rms_frac,
+        "residual_structured": structured,
     }
 
 
@@ -131,12 +172,25 @@ TOOL_SPEC = ToolSpec(
         "dilate": {"type": "int", "description": "Points to grow the signal mask on each side, to include peak wings (default 5). Increase for broad lines so the wings are scored; decrease for very sharp lines."},
         "model_frac": {"type": "float", "description": "Also count points where the fitted model exceeds this fraction of its own max as signal (default 0.02) — so the metric scores where the model claims peaks even if data there is weak."},
         "min_points": {"type": "int", "description": "If fewer than this many signal points are found, fall back to the global R² (default 15) — guards the metric when there is essentially no signal."},
+        "struct_apex_frac": {"type": "float", "description": "Threshold on apex_resid_frac (largest residual as a fraction of peak height) for the residual_structured flag (default 0.15 = a ≥15% apex miss). The raw value is always returned; raise it to flag only gross misfits, lower it to be stricter."},
+        "struct_autocorr": {"type": "float", "description": "Threshold on lag-1 residual autocorrelation for residual_structured (default 0.9) — near 1 means a systematic (non-random) residual rather than noise."},
     },
     required=["x", "y", "y_fit"],
     returns=(
         "dict with 'peak_region_r2', global 'r_squared', 'n_signal_points', "
-        "and 'fell_back_to_global'. Put 'peak_region_r2' (and 'r_squared') into "
-        "the fit_quality block of FIT_RESULTS_JSON."
+        "'fell_back_to_global', and residual-structure diagnostics over the "
+        "signal region. Judge fit adequacy by the SIGNAL-RELATIVE quantities — "
+        "'apex_resid_frac' (largest residual / peak height) and 'resid_rms_frac' "
+        "(RMS residual / peak height) — together with 'resid_autocorr_lag1'. "
+        "NOTE: 'apex_resid_over_noise' and 'frac_resid_gt_3sigma' are "
+        "NOISE-relative and are therefore large even for a PERFECT fit of a "
+        "high-SNR peak (e.g. ~0.8 of points exceed 3σ on a clean line) — do not "
+        "read them as misfit on their own. 'residual_structured' (boolean) = "
+        "systematic (autocorr high) AND severe at the apex (apex_resid_frac "
+        "above threshold). Put 'peak_region_r2' and 'r_squared' into the "
+        "fit_quality block; if 'residual_structured' is True the fit has the "
+        "wrong MODEL where the signal is — escalate (see the skill), don't accept "
+        "it on R² alone."
     ),
     when_to_use=(
         "Always, as the final quality step of an NMR fit — the skill's quality "
