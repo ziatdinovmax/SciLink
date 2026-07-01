@@ -698,6 +698,7 @@ and a successful run (give a verdict and sanity-check the physics).
 
 {fixes_directive}
 
+{observable_coverage}
 Return a JSON object with these fields:
   status              "success" | "error"
   run_status          "succeeded" | "failed" | "incomplete"
@@ -709,14 +710,21 @@ Return a JSON object with these fields:
   reasoning           prose summary (3-6 sentences)
   suggested_fixes     {{ "filename": "complete_corrected_file", ... }} | null
                       Provide a non-null dict only when the verdict is
-                      "poor" or "needs_fixes" OR run_status is "failed".
-                      Otherwise return null.
+                      "poor" or "needs_fixes", run_status is "failed", OR
+                      `missing_observables` is non-empty. Otherwise return null.
                       Each key MUST be the exact name of one of the input
                       files shown above — do not invent a new file, a
                       ".patch", or a "header to insert after read_data".
                       Each value MUST be the COMPLETE corrected file (the
                       whole input, ready to run as-is), never a diff,
                       snippet, or fragment to splice in.
+  missing_observables list of {{ "property": ..., "required_output": ...,
+                      "reason": ... }} | null
+                      Populated ONLY when an observable-coverage check is
+                      requested above. Each entry is a property the research
+                      goal needs to validate whose required output the input
+                      deck does NOT emit. null/empty when all are covered or
+                      no coverage check was requested.
   recommendations     list of short strings — next steps the user should
                       consider (rerun with X, gather more data, etc.)
   diagnostic_notes    optional prose — specific log lines, energies,
@@ -760,6 +768,7 @@ class RunCritic(_CriticBase):
         domain: Optional[str] = None,
         fixes_mode: str = "auto",
         input_files: Optional[Dict[str, str]] = None,
+        check_observables: bool = False,
     ) -> Dict[str, Any]:
         """Assess a finished run and return a verdict report.
 
@@ -798,6 +807,13 @@ class RunCritic(_CriticBase):
                 proposed fix patches the real inputs by their real names
                 with complete contents, rather than the critic guessing a
                 filename and emitting a fragment.
+            check_observables: When True, the critic additionally verifies
+                that the input deck emits the outputs needed to compute the
+                properties the research goal calls for, reporting any gaps in
+                ``missing_observables`` and, when input_files are provided,
+                a corrected deck in ``suggested_fixes``. Intended for the
+                pre-run gate; a post-run call cannot recover an observable
+                that was never logged, so it defaults to False.
 
         Returns:
             A report dict with fields:
@@ -871,6 +887,24 @@ class RunCritic(_CriticBase):
             "is 'poor' or 'needs_fixes'.",
         )
 
+        if check_observables:
+            observable_coverage = (
+                "=== Observable-coverage check (pre-run) ===\n"
+                "Before judging setup, determine which physical properties the "
+                "research goal needs for validation. For each, identify the "
+                "output the input deck must WRITE for that property to be "
+                "computable from the run. Inspect the input files above and "
+                "list in `missing_observables` every required property whose "
+                "output the deck does NOT emit. If any are missing, you MUST "
+                "also return `suggested_fixes`: the COMPLETE corrected deck(s) "
+                "that add the missing output(s), keyed by the exact input "
+                "filename — even if the run otherwise starts cleanly. Judge "
+                "only what the goal actually requires; do not invent "
+                "observables it does not call for."
+            )
+        else:
+            observable_coverage = ""
+
         prompt = self.BASELINE_PROMPT_TEMPLATE.format(
             skill_context=skill_context or "(no engine skill loaded)",
             output_dir=str(out_path),
@@ -878,6 +912,7 @@ class RunCritic(_CriticBase):
             input_files_block=input_files_block,
             research_goal=research_goal,
             fixes_directive=fixes_directive,
+            observable_coverage=observable_coverage,
         )
         report = self._generate_json(prompt)
         report.setdefault("status", "success")

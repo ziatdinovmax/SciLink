@@ -55,8 +55,9 @@ class StubCritic:
         self.seen_decks = []
 
     def assess(self, output_dir, research_goal, skill=None, domain=None,
-               fixes_mode="auto", input_files=None):
+               fixes_mode="auto", input_files=None, check_observables=False):
         self.seen_input_files = input_files
+        self.seen_check_observables = check_observables
         deck_path = os.path.join(output_dir, "run.lammps")
         if os.path.isfile(deck_path):
             with open(deck_path) as fh:
@@ -215,4 +216,64 @@ def test_select_deck_fix_remaps_full_and_rejects_fragment():
     frag = {"other_name": "short\n"}
     assert _select_deck_fix(frag, "run.lammps", REAL_DECK) is None
     assert _select_deck_fix(None, "run.lammps", REAL_DECK) is None
+
+
+# ── observable-coverage check (deck starts clean but omits a required output) ──
+
+# The real deck plus a required observable output; longer than REAL_DECK, so it
+# survives the length-gated fix backstop. The observable is intentionally
+# generic (a placeholder "compute/fix" pair) so the fixture does not encode any
+# particular property recipe.
+COVERAGE_DECK = REAL_DECK + (
+    "compute obs all property/atom foo\n"
+    "fix obs_out all ave/time 100 1 100 c_obs file obs.dat\n"
+)
+
+
+def test_gate_requests_observable_coverage(tmp_path):
+    # The gate must ask the critic to run the coverage check (not just setup).
+    ph = _phase(tmp_path)
+    critic = StubCritic([{"run_status": "succeeded"}])
+    _dry_run_gate(ph, StubExecutor(), critic, _ctx())
+    assert critic.seen_check_observables is True
+
+
+def test_gate_fixes_missing_observable_when_setup_starts_clean(tmp_path):
+    # Setup succeeds (twin runs), but a required output is absent. The gate must
+    # NOT pass on that cycle — it applies the coverage fix and re-validates.
+    ph = _phase(tmp_path)
+    critic = StubCritic([
+        {"run_status": "succeeded",
+         "missing_observables": [{"property": "p", "required_output": "obs.dat",
+                                  "reason": "not emitted"}],
+         "suggested_fixes": {"run.lammps": COVERAGE_DECK}},
+        {"run_status": "succeeded", "missing_observables": []},
+    ])
+    rec = _dry_run_gate(ph, StubExecutor(), critic, _ctx())
+    assert rec["status"] == "passed"
+    assert rec["cycles"] == 2
+    assert ph.input_files["run.lammps"] == COVERAGE_DECK
+
+
+def test_gate_passes_when_setup_ok_and_no_missing_observables(tmp_path):
+    # Regression: a clean deck with full coverage still passes on the first cycle.
+    ph = _phase(tmp_path)
+    critic = StubCritic([{"run_status": "succeeded", "missing_observables": []}])
+    rec = _dry_run_gate(ph, StubExecutor(), critic, _ctx())
+    assert rec["status"] == "passed"
+    assert rec["cycles"] == 1
+
+
+def test_gate_unfixed_when_missing_observable_and_no_fix(tmp_path):
+    # Coverage gap flagged but no corrected deck offered -> unfixed, deck untouched.
+    ph = _phase(tmp_path)
+    before = ph.input_files["run.lammps"]
+    critic = StubCritic([
+        {"run_status": "succeeded",
+         "missing_observables": [{"property": "p", "required_output": "obs.dat"}],
+         "suggested_fixes": None},
+    ])
+    rec = _dry_run_gate(ph, StubExecutor(), critic, _ctx())
+    assert rec["status"] == "unfixed"
+    assert ph.input_files["run.lammps"] == before
     assert _select_deck_fix({}, "run.lammps", REAL_DECK) is None

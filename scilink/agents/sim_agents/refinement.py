@@ -158,6 +158,8 @@ class _RunCriticLike(Protocol):
         skill: Optional[str] = ...,
         domain: Optional[str] = ...,
         fixes_mode: str = ...,
+        input_files: Optional[Dict[str, str]] = ...,
+        check_observables: bool = ...,
     ) -> Dict[str, Any]:
         ...
 
@@ -716,10 +718,16 @@ def _run_dry_run_gate(phase, executor, run_critic, ctx, prepare, entry,
             output_dir=out_dir, research_goal=ctx.research_goal,
             skill=ctx.skill, domain=ctx.domain,
             input_files={entry: real_deck},
+            check_observables=True,
         )
         run_status = verdict.get("run_status")
-        history.append({"cycle": cycle, "run_status": run_status})
-        if run_status == "succeeded":
+        # Coverage is a static (goal, deck) check independent of setup success:
+        # the trimmed twin never exercises observables, so a deck that starts
+        # cleanly but omits a required output still fails the gate and is fixed.
+        missing = verdict.get("missing_observables") or []
+        history.append({"cycle": cycle, "run_status": run_status,
+                        "missing_observables": missing})
+        if run_status == "succeeded" and not missing:
             return {"status": "passed", "cycles": cycle + 1, "history": history}
         deck_fix = _select_deck_fix(verdict.get("suggested_fixes"), entry, real_deck)
         if not deck_fix:
