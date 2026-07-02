@@ -301,6 +301,8 @@ class RefinementContext:
             ``"autonomous"``).
         max_cycles: Maximum refine cycles per phase.
         cycle: Refine cycles spent on the current phase (loop-managed).
+        coverage_votes: Independent coverage checks to majority-vote in the
+            pre-run gate (1 = single check; >1 damps the stochastic decision).
         history: Per-cycle records appended by :meth:`record`.
         interact: Optional human-feedback handle; ``None`` for headless runs.
     """
@@ -313,6 +315,7 @@ class RefinementContext:
     autonomy: str = "autonomous"
     max_cycles: int = 3
     cycle: int = 0
+    coverage_votes: int = 1
     history: List[Dict[str, Any]] = field(default_factory=list)
     interact: Optional[InteractFn] = None
 
@@ -714,19 +717,22 @@ def _run_dry_run_gate(phase, executor, run_critic, ctx, prepare, entry,
         # deck (run lengths preserved), not the run-0 twin.
         with open(os.path.join(out_dir, entry), "w") as fh:
             fh.write(real_deck)
-        verdict = run_critic.assess(
-            output_dir=out_dir, research_goal=ctx.research_goal,
-            skill=ctx.skill, domain=ctx.domain,
-            input_files={entry: real_deck},
-            check_observables=True,
-        )
-        run_status = verdict.get("run_status")
         # Coverage is a static (goal, deck) check independent of setup success:
         # the trimmed twin never exercises observables, so a deck that starts
         # cleanly but omits a required output still fails the gate and is fixed.
+        # The coverage decision is stochastic; ctx.coverage_votes>1 majority-votes
+        # it to damp the sampling variance (single call when <=1).
+        verdict = majority_coverage(
+            run_critic, getattr(ctx, "coverage_votes", 1),
+            output_dir=out_dir, research_goal=ctx.research_goal,
+            skill=ctx.skill, domain=ctx.domain,
+            input_files={entry: real_deck},
+        )
+        run_status = verdict.get("run_status")
         missing = verdict.get("missing_observables") or []
         history.append({"cycle": cycle, "run_status": run_status,
-                        "missing_observables": missing})
+                        "missing_observables": missing,
+                        "coverage_vote": verdict.get("coverage_vote")})
         if run_status == "succeeded" and not missing:
             return {"status": "passed", "cycles": cycle + 1, "history": history}
         deck_fix = _select_deck_fix(verdict.get("suggested_fixes"), entry, real_deck)
@@ -734,6 +740,41 @@ def _run_dry_run_gate(phase, executor, run_critic, ctx, prepare, entry,
             return {"status": "unfixed", "cycles": cycle + 1, "history": history}
         phase.input_files[entry] = deck_fix
     return {"status": "exhausted", "cycles": max_cycles, "history": history}
+
+
+def majority_coverage(run_critic, n_votes: int, **assess_kwargs):
+    """Aggregate the observable-coverage BLOCKING decision over repeated calls.
+
+    The coverage judgment is stochastic — a single call catches the clear cases
+    reliably but waffles on borderline ones. This runs
+    ``run_critic.assess(check_observables=True, **assess_kwargs)`` ``n_votes``
+    times and blocks only on a strict majority, damping the sampling variance
+    (it cannot correct a systematic bias — a wrongly-confident majority stays
+    wrong). ``n_votes <= 1`` is a single pass-through (no behavior change).
+
+    Returns one verdict dict: a representative blocking vote when the majority
+    blocks (``missing_observables`` / ``suggested_fixes`` intact), else a
+    non-blocking vote with ``missing_observables`` cleared. A ``coverage_vote``
+    summary ``{n_votes, n_blocked, agreement, split}`` is added — ``split`` marks
+    disagreement, the case a human-in-the-loop policy should escalate.
+    """
+    assess_kwargs.setdefault("check_observables", True)
+    n = max(1, int(n_votes))
+    verdicts = [run_critic.assess(**assess_kwargs) for _ in range(n)]
+    blocked = [bool(v.get("missing_observables")) for v in verdicts]
+    n_blocked = sum(blocked)
+    if n_blocked * 2 > n:                       # strict majority blocks
+        rep = dict(next(v for v, b in zip(verdicts, blocked) if b))
+    else:
+        rep = dict(next((v for v, b in zip(verdicts, blocked) if not b),
+                        verdicts[0]))
+        rep["missing_observables"] = []
+    rep["coverage_vote"] = {
+        "n_votes": n, "n_blocked": n_blocked,
+        "agreement": max(n_blocked, n - n_blocked) / n,
+        "split": 0 < n_blocked < n,
+    }
+    return rep
 
 
 def _select_deck_fix(fixes, entry: str, real_deck: str):
