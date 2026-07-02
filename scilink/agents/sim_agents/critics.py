@@ -721,10 +721,15 @@ Return a JSON object with these fields:
   missing_observables list of {{ "property": ..., "required_output": ...,
                       "reason": ... }} | null
                       Populated ONLY when an observable-coverage check is
-                      requested above. Each entry is a property the research
-                      goal needs to validate whose required output the input
-                      deck does NOT emit. null/empty when all are covered or
-                      no coverage check was requested.
+                      requested above. BLOCKING gaps only: a property the goal
+                      requires whose data the run would not capture and could
+                      not be reconstructed post-hoc from what the deck saves
+                      (permanently lost). null/empty otherwise.
+  advisory_observables same shape | null
+                      NON-BLOCKING: goal-relevant properties that are absent
+                      but recoverable in post-processing from what the deck
+                      already saves, or optional/secondary. Informational —
+                      do not gate on these. null/empty when none.
   recommendations     list of short strings — next steps the user should
                       consider (rerun with X, gather more data, etc.)
   diagnostic_notes    optional prose — specific log lines, energies,
@@ -808,12 +813,14 @@ class RunCritic(_CriticBase):
                 with complete contents, rather than the critic guessing a
                 filename and emitting a fragment.
             check_observables: When True, the critic additionally verifies
-                that the input deck emits the outputs needed to compute the
-                properties the research goal calls for, reporting any gaps in
-                ``missing_observables`` and, when input_files are provided,
-                a corrected deck in ``suggested_fixes``. Intended for the
-                pre-run gate; a post-run call cannot recover an observable
-                that was never logged, so it defaults to False.
+                that the run captures the data needed for the properties the
+                research goal calls for. It separates BLOCKING gaps —
+                required data that would be permanently lost (reported in
+                ``missing_observables``, with a corrected deck in
+                ``suggested_fixes`` when input_files are provided) — from
+                recoverable-in-post-processing or optional ones (reported in
+                ``advisory_observables``, non-blocking). Intended for the
+                pre-run gate; defaults to False.
 
         Returns:
             A report dict with fields:
@@ -890,17 +897,34 @@ class RunCritic(_CriticBase):
         if check_observables:
             observable_coverage = (
                 "=== Observable-coverage check (pre-run) ===\n"
-                "Before judging setup, determine which physical properties the "
-                "research goal needs for validation. For each, identify the "
-                "output the input deck must WRITE for that property to be "
-                "computable from the run. Inspect the input files above and "
-                "list in `missing_observables` every required property whose "
-                "output the deck does NOT emit. If any are missing, you MUST "
-                "also return `suggested_fixes`: the COMPLETE corrected deck(s) "
-                "that add the missing output(s), keyed by the exact input "
-                "filename — even if the run otherwise starts cleanly. Judge "
-                "only what the goal actually requires; do not invent "
-                "observables it does not call for."
+                "Determine which physical properties the research goal requires. "
+                "A gap is BLOCKING only when the raw data needed to compute the "
+                "property is not being written at all and cannot be reconstructed "
+                "after the run. Apply this test:\n"
+                "- A saved trajectory of coordinates/velocities lets you recompute "
+                "geometry- and motion-based properties in post-processing "
+                "(structural, dynamical, correlation functions). Whenever any "
+                "trajectory is dumped, these are NON-blocking — no matter how "
+                "coarsely it is sampled.\n"
+                "- A quantity that must be accumulated DURING the run from "
+                "per-step forces, virial, or energy is NOT contained in a "
+                "coordinate/velocity trajectory and cannot be rebuilt afterward. "
+                "If the goal requires such a quantity and its log is absent, that "
+                "is BLOCKING.\n"
+                "- If no trajectory is saved at all, geometry/motion properties "
+                "become blocking too (nothing to post-process).\n"
+                "Resolution / sampling frequency is NEVER blocking.\n"
+                "- `missing_observables` (BLOCKING): required properties whose "
+                "raw data the run does not write at all. Only these justify "
+                "regenerating the deck before submission.\n"
+                "- `advisory_observables` (NON-BLOCKING): properties derivable in "
+                "post-processing from what the deck saves (including if "
+                "under-resolved), or optional/secondary. Report for awareness; do "
+                "NOT block.\n"
+                "Judge only what the goal actually requires; do not invent "
+                "observables. When `missing_observables` is non-empty, also return "
+                "`suggested_fixes`: the COMPLETE corrected deck(s) that add the "
+                "missing output(s), keyed by the exact input filename."
             )
         else:
             observable_coverage = ""
