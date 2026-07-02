@@ -61,6 +61,14 @@ Three reasons this is more reliable than the current inference-at-the-gate:
   `required_observables` list, it verifies each is captured — deterministic
   presence-checking against a known list, with the recoverability rule reserved
   for the "no list supplied" fallback. The gate stays fail-open.
+- **Which cases to escalate is measurable.** `majority_coverage`'s vote
+  agreement is a validated confidence signal: in the variability study the votes
+  split on the borderline transport case (7/8 trials) and were unanimous on the
+  clear cases (0/24). So the gate can *tell* which decisions it can auto-make and
+  which to defer to this upstream contract or a human — auto-decide on unanimous
+  votes, escalate on a split. (Majority voting cannot *fix* the borderline case —
+  its base rate drifts around 0.5, so voting amplifies whichever side a run lands
+  on — but agreement-as-confidence works.)
 
 ## What it needs (not available today)
 
