@@ -179,55 +179,17 @@ def build_verification_prompt_with_history(
     current_result: dict,
     previous_iterations: List[dict],
 ) -> str:
-    """Build history context string for verification prompt."""
-    if not previous_iterations:
-        return ""
+    """Build history context string for verification prompt.
 
-    lines = [
-        "\n\n## PREVIOUS VERIFICATION ATTEMPTS",
-        "Review what was tried before. Don't suggest fixes that already failed.\n"
-    ]
-
-    for i, prev in enumerate(previous_iterations, 1):
-        lines.append(f"\n### Attempt {i}")
-        score = prev.get('quality_score')
-        lines.append(f"- Quality score = {score:.2f}" if score is not None else "- Quality score = N/A")
-        lines.append(f"- Pipeline: {prev.get('config_used', {}).get('processing_pipeline', 'N/A')}")
-        lines.append(f"- Assessment: {prev.get('overall_assessment', 'N/A')}")
-
-        issues = prev.get('issues_found', [])
-        if issues:
-            lines.append(f"- Issues ({len(issues)}):")
-            for issue in issues:
-                lines.append(f"  - {issue.get('location', '?')}: {issue.get('problem', '?')}")
-
-        if prev.get('recommended_action'):
-            lines.append(f"- Action taken: {prev['recommended_action']}")
-
-        if prev.get('refinement_error'):
-            lines.append(
-                f"- **NOTE: The recommended fix was NOT applied** because "
-                f"the refinement LLM call failed ({prev['refinement_error']}). "
-                f"The results below are UNCHANGED from this attempt — "
-                f"do not penalize for identical output. Re-evaluate the "
-                f"recommended action and suggest concrete fixes."
-            )
-
-    lines.extend([
-        "\n\n## IMPORTANT",
-        "1. Check if previous issues were RESOLVED or still PERSIST",
-        "2. If a fix didn't work, suggest something DIFFERENT",
-        "3. If a previous fix was NOT applied due to an API error, "
-        "re-suggest it or propose an alternative",
-        "4. A previously-raised issue may have been MISTAKEN. RETRACT it (drop it; "
-        "stop demanding fixes) when STRONG evidence shows the concern was unfounded "
-        "— the images, a registered tool's documented behaviour/guarantees, clear "
-        "physics, or an independent cross-check. Absent strong evidence, keep "
-        "scrutinizing: 'persists' means still demonstrably real, not merely "
-        "un-disproven.",
-    ])
-
-    return "\n".join(lines)
+    Delegates to the shared builder (``_verification_record``) with the
+    image keymap — output is byte-identical to the historical inline version
+    (golden-pinned).
+    """
+    from .._verification_record import (
+        IMAGE_PROMPT_KEYMAP,
+        build_verification_prompt_history,
+    )
+    return build_verification_prompt_history(previous_iterations, IMAGE_PROMPT_KEYMAP)
 
 
 def _sanitize_aux_name(label: str, idx: int) -> str:
@@ -2114,6 +2076,17 @@ Your guidance: '''
         # instances (e.g. adaptive refit) -> candidates share the locked plan.
         self.replanner = replanner
 
+    def _accept_gate(self):
+        """The driver's quality-score accept criterion as a :class:`QualityGate`.
+
+        Built from the live ``self.quality_threshold`` at call time. The
+        verifier's ``quality_score`` is the metric (``value_source="verdict"``)
+        and the empty soft band reproduces the plain-threshold semantics this
+        controller has always had. See analysis_qc_unification_plan.md §2.1.
+        """
+        from ..quality_gate import IMAGE_SCORE_DEFAULT
+        return IMAGE_SCORE_DEFAULT.with_accept_threshold(float(self.quality_threshold))
+
     def _generate_analysis_script(
         self,
         state: dict,
@@ -3358,6 +3331,10 @@ Return JSON with:
         best_score = -1.0
         best_config = state.get("locked_analysis_config", {}).copy()
         quality_threshold = self.quality_threshold
+        # Accept decisions route through the gate; captured alongside the
+        # local threshold so both reflect the same snapshot (image has no
+        # mid-run threshold mutation, unlike curve's adjust_threshold).
+        accept_gate = self._accept_gate()
 
         # Anchor = first image overall OR first in a regime; gets full QC
         _is_anchor = image_idx == 0 or is_regime_anchor
@@ -3394,7 +3371,7 @@ Return JSON with:
                     verification.get("quality_score"), (int, float)
                 ):
                     v_score = verification["quality_score"]
-                verdict = "good" if v_score >= quality_threshold else "poor"
+                verdict = "good" if accept_gate.is_accept(v_score) else "poor"
                 reuse_result["_quality_score"] = v_score
                 if verdict == "good":
                     self.logger.info(
@@ -3645,7 +3622,7 @@ Return JSON with:
                                 f"correctness={cr}, relevance={r}"
                             )
 
-                        if best_score >= quality_threshold:
+                        if accept_gate.is_accept(best_score):
                             self.logger.info(
                                 f"   Analysis approved (score = {best_score:.2f})"
                             )
@@ -3796,7 +3773,7 @@ Return JSON with:
                                 "score": v_score,
                             })
 
-                            if best_score >= quality_threshold:
+                            if accept_gate.is_accept(best_score):
                                 self.logger.info(
                                     f"   Final analysis approved "
                                     f"(score = {best_score:.2f})"
@@ -3813,7 +3790,7 @@ Return JSON with:
                     state["locked_analysis_config"] = best_config
 
             # --- Check if quality is acceptable ---
-            if best_score >= quality_threshold:
+            if accept_gate.is_accept(best_score):
                 self.logger.info(
                     f"Quality score = {best_score:.2f} (meets threshold "
                     f"{quality_threshold})"
@@ -4705,38 +4682,23 @@ Return JSON with:
     ) -> dict:
         """Build a compact quality history dict for the best result.
 
-        Captures problem→solution pairs at every level: script errors,
-        verification iterations, alternative approaches, and judge reasoning.
+        Delegates to the shared builder (``_verification_record``) with the
+        image keymap — output is byte-identical to the historical inline
+        version (golden-pinned).
         """
-        return {
-            "final_score": best_score,
-            "threshold": quality_threshold,
-            "approved": best_score >= quality_threshold,
-            "verification_iterations": [
-                {
-                    "score": entry["quality_score"],
-                    "result_type": entry.get("result_type"),
-                    "annealing_level": entry.get("annealing_level", 0),
-                    "issues": [
-                        {
-                            "location": iss.get("location", ""),
-                            "problem": iss.get("problem", ""),
-                        }
-                        for iss in entry.get("issues_found", [])
-                    ],
-                    "tools_used": entry.get("tools_used", []),
-                    "fix_applied": entry.get("recommended_action", ""),
-                }
-                for entry in verification_history
-            ],
-            "script_errors": script_errors or [],
-            "judge_reasoning": (
-                (judge_result or {}).get("reasoning")
-            ),
-            "score_explanation": (
-                (judge_result or {}).get("score_explanation")
-            ),
-        }
+        from .._verification_record import (
+            IMAGE_HISTORY_KEYMAP,
+            build_quality_history,
+        )
+        return build_quality_history(
+            best_value=best_score,
+            threshold=quality_threshold,
+            all_attempts=all_attempts,
+            verification_history=verification_history,
+            judge_result=judge_result,
+            script_errors=script_errors,
+            keymap=IMAGE_HISTORY_KEYMAP,
+        )
 
     USER_FEEDBACK_SCRIPT_PROMPT = '''You have a working image analysis script and user feedback requesting changes.
 

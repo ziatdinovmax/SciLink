@@ -589,64 +589,17 @@ def build_verification_prompt_with_history(
     current_fit: dict,
     previous_iterations: List[dict],
 ) -> str:
-    """Build history context string for verification prompt."""
-    if not previous_iterations:
-        return ""
-    
-    lines = [
-        "\n\n## PREVIOUS VERIFICATION ATTEMPTS",
-        "Review what was tried before. Don't suggest fixes that already failed.\n"
-    ]
-    
-    for i, prev in enumerate(previous_iterations, 1):
-        lines.append(f"\n### Attempt {i}")
-        label = prev.get('metric_label', 'R²')
-        mv = prev.get('metric_value', prev.get('r_squared'))
-        bm = prev.get('best_metric_value', prev.get('best_so_far'))
-        parts = [f"{label} = {mv:.4f}" if mv is not None else f"{label} = N/A"]
-        if bm is not None:
-            parts.append(f"best-so-far = {bm:.4f}")
-        lines.append("- " + " | ".join(parts))
-        lines.append(f"- Config: {prev.get('config_used', {}).get('physical_model', 'N/A')}")
-        lines.append(f"- Assessment: {prev.get('overall_assessment', 'N/A')}")
-        
-        issues = prev.get('issues_found', [])
-        if issues:
-            lines.append(f"- Issues ({len(issues)}):")
-            for issue in issues:
-                lines.append(f"  • {issue.get('location', '?')}: {issue.get('problem', '?')}")
-        
-        if prev.get('recommended_action'):
-            lines.append(f"- Action taken: {prev['recommended_action']}")
+    """Build history context string for verification prompt.
 
-        if prev.get('refinement_error'):
-            lines.append(
-                f"- **NOTE: The recommended fix was NOT applied** because "
-                f"the refinement LLM call failed ({prev['refinement_error']}). "
-                f"The results below are UNCHANGED from this attempt — "
-                f"do not penalize for identical output. Re-evaluate the "
-                f"recommended action and suggest concrete fixes."
-            )
-
-    lines.extend([
-        "\n\n## IMPORTANT",
-        "1. Check if previous issues were RESOLVED or still PERSIST",
-        "2. If a fix didn't work AND the best metric is still below the accept "
-        "threshold, suggest something DIFFERENT. But if the best is already above "
-        "the accept threshold and has not improved for the last 2 iterations, do "
-        "NOT propose another change — accept and record any remaining concern as a "
-        "caveat (the plateau/convergence rule takes precedence).",
-        "3. If a previous fix was NOT applied due to an API error, "
-        "re-suggest it or propose an alternative",
-        "4. A previously-raised issue may have been MISTAKEN. RETRACT it (drop it; "
-        "stop demanding fixes) when STRONG evidence shows the concern was unfounded "
-        "— the plot, a registered tool's documented behaviour/guarantees, clear "
-        "physics, or an independent cross-check. Absent strong evidence, keep "
-        "scrutinizing: 'persists' means still demonstrably real, not merely "
-        "un-disproven.",
-    ])
-
-    return "\n".join(lines)
+    Delegates to the shared builder (``_verification_record``) with the
+    curve keymap — output is byte-identical to the historical inline version
+    (golden-pinned).
+    """
+    from .._verification_record import (
+        CURVE_PROMPT_KEYMAP,
+        build_verification_prompt_history,
+    )
+    return build_verification_prompt_history(previous_iterations, CURVE_PROMPT_KEYMAP)
 
 
 def _append_deviation_note(prompt: list, fit_results: dict) -> None:
@@ -2582,6 +2535,19 @@ class UnifiedSeriesProcessingController:
         """
         return max(min(cls.SOFT_BAND_MAX_WIDTH, 1.0 - r2_threshold), 0.0)
 
+    def _accept_gate(self):
+        """The driver's R² accept criterion as a :class:`QualityGate`.
+
+        Built from the LIVE ``self.r2_threshold`` at check time — not from the
+        gate snapshot in state — so the human-feedback ``adjust_threshold``
+        action is observed, and so behavior is unchanged when a skill declares
+        a non-R² gate (these driver checks have always compared R² against
+        ``r2_threshold`` regardless; unifying them with the skill gate is
+        engine-phase work, see analysis_qc_unification_plan.md §2.1).
+        """
+        from ..quality_gate import R_SQUARED_DEFAULT
+        return R_SQUARED_DEFAULT.with_accept_threshold(float(self.r2_threshold))
+
     JUDGE_PROMPT = '''You are a scientific data fitting expert acting as a judge.
 
 Multiple fitting attempts were made but none passed automated verification. 
@@ -4127,7 +4093,7 @@ Return JSON with:
                     reuse_result.get("fit_quality", {}).get("r_squared") or 0
                     or 0.0
                 )
-                verdict = "good" if reuse_r2 >= self.r2_threshold else "poor"
+                verdict = "good" if self._accept_gate().is_accept(reuse_r2) else "poor"
                 if verdict == "good":
                     self.logger.info(
                         f"   ✅ Reused script fits well (R² = {reuse_r2:.4f} ≥ "
@@ -4653,7 +4619,7 @@ Return JSON with:
             # even if R² meets the numerical threshold.  This catches the
             # "high-R² but wrong-physics" trap where the verifier kept
             # complaining about best on physics grounds.
-            if best_r2 >= self.r2_threshold and not best_ever_rejected:
+            if self._accept_gate().is_accept(best_r2) and not best_ever_rejected:
                 self.logger.info(f"✅ R² = {best_r2:.4f} (meets threshold {self.r2_threshold})")
                 best_result["quality_history"] = self._build_quality_history(
                     best_r2, self.r2_threshold, all_attempts,
@@ -4662,7 +4628,7 @@ Return JSON with:
                 )
                 self._stamp_hot_deviation(best_result)
                 return best_result
-            elif best_r2 >= self.r2_threshold:
+            elif self._accept_gate().is_accept(best_r2):
                 self.logger.info(
                     f"⚠️ R² = {best_r2:.4f} meets threshold {self.r2_threshold}, "
                     f"but verifier rejected best — deferring to judge"
@@ -4696,7 +4662,8 @@ Return JSON with:
             if feedback_result:
                 if feedback_result.get("action") == "adjust_threshold":
                     self.r2_threshold = feedback_result["new_threshold"]
-                    if best_r2 >= self.r2_threshold:
+                    # _accept_gate() rebuilds from the just-mutated threshold.
+                    if self._accept_gate().is_accept(best_r2):
                         self.logger.info(f"✅ Best fit now meets adjusted threshold")
                         best_result["quality_history"] = self._build_quality_history(
                             best_r2, self.r2_threshold, all_attempts,
@@ -4774,7 +4741,7 @@ Return JSON with:
             # below threshold, or (b) R² meets threshold but the verifier kept
             # rejecting on PHYSICS grounds. Word the warning to match reality —
             # never claim "below threshold" when the number is at/above it.
-            if best_r2 >= self.r2_threshold:
+            if self._accept_gate().is_accept(best_r2):
                 best_result["quality_warning"] = (
                     f"R² = {best_r2:.4f} meets the threshold {self.r2_threshold} but the "
                     f"fit was not accepted on physical grounds (see verifier notes)"
@@ -4789,7 +4756,7 @@ Return JSON with:
                 verification_history, judge_result,
                 best_result.get("script_errors"),
             )
-            if best_r2 >= self.r2_threshold:
+            if self._accept_gate().is_accept(best_r2):
                 self.logger.info(
                     f"✅ Accepting best available fit (R² = {best_r2:.4f} meets threshold {self.r2_threshold})"
                 )
@@ -6124,45 +6091,23 @@ Return JSON with:
     ) -> dict:
         """Build a compact quality history dict for the best result.
 
-        Captures problem-solution pairs at every level: script errors,
-        verification iterations, alternative approaches, and judge reasoning.
+        Delegates to the shared builder (``_verification_record``) with the
+        curve keymap — output is byte-identical to the historical inline
+        version (golden-pinned).
         """
-        return {
-            "final_r2": best_r2,
-            "threshold": r2_threshold,
-            "approved": best_r2 >= r2_threshold,
-            "verification_iterations": [
-                {
-                    "r_squared": entry.get("r_squared"),
-                    "annealing_level": entry.get("annealing_level", 0),
-                    "tools_used": entry.get("tools_used", []),
-                    # The model in force at this iteration — lets a consumer
-                    # (e.g. the self-evolution figure) show the per-attempt
-                    # model alongside its R² and issues.
-                    "model": (entry.get("config_used") or {}).get("physical_model", ""),
-                    "issues": [
-                        {
-                            "location": iss.get("location", ""),
-                            "problem": iss.get("problem", ""),
-                        }
-                        for iss in entry.get("issues_found", [])
-                    ],
-                    "fix_applied": entry.get("recommended_action", ""),
-                }
-                for entry in verification_history
-            ],
-            "alternative_models": [
-                {
-                    "model": a.get("model", ""),
-                    "r2": a.get("r2", 0),
-                    "diagnosis": a.get("diagnosis", ""),
-                }
-                for a in all_attempts[1:]
-                if not str(a.get("model", "")).startswith("Verification")
-            ],
-            "script_errors": script_errors or [],
-            "judge_reasoning": (judge_result or {}).get("reasoning"),
-        }
+        from .._verification_record import (
+            CURVE_HISTORY_KEYMAP,
+            build_quality_history,
+        )
+        return build_quality_history(
+            best_value=best_r2,
+            threshold=r2_threshold,
+            all_attempts=all_attempts,
+            verification_history=verification_history,
+            judge_result=judge_result,
+            script_errors=script_errors,
+            keymap=CURVE_HISTORY_KEYMAP,
+        )
 
     def _judge_select_best_fit(self, attempts: List[dict]) -> dict:
         """

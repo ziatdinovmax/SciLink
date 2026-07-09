@@ -29,6 +29,9 @@ from typing import Any, Optional
 #   lower_is_better  → accept if value <= accept_threshold; hard-reject if value > hard_reject_threshold
 _DIRECTIONS = {"higher_is_better", "lower_is_better"}
 
+# Where a gate reads its metric value from (see QualityGate.value_source).
+_VALUE_SOURCES = {"result", "verdict"}
+
 
 @dataclass(frozen=True)
 class QualityGate:
@@ -44,6 +47,12 @@ class QualityGate:
     accept_threshold: float = 0.95
     hard_reject_threshold: float = 0.90
     direction: str = "higher_is_better"
+    # Where the metric value comes from:
+    #   "result"  → the script's own numbers: fit_result["fit_quality"][metric]
+    #               (curve fitting — deterministic, computed by the executed code)
+    #   "verdict" → the LLM verifier's returned JSON: verdict[metric]
+    #               (image analysis — the verifier IS the score source)
+    value_source: str = "result"
     # Whether the LLM physics verifier runs on top of the numeric gate.
     # True for goodness-of-fit metrics (r_squared, peak_region_r2, BIC, …) — the
     # verifier inspects the plot/residuals/parameters for physics problems a
@@ -73,6 +82,11 @@ class QualityGate:
         return "<" if self.direction == "higher_is_better" else ">"
 
     def __post_init__(self) -> None:
+        if self.value_source not in _VALUE_SOURCES:
+            raise ValueError(
+                f"QualityGate.value_source must be one of {sorted(_VALUE_SOURCES)}; "
+                f"got {self.value_source!r}"
+            )
         if self.direction not in _DIRECTIONS:
             raise ValueError(
                 f"QualityGate.direction must be one of {sorted(_DIRECTIONS)}; "
@@ -95,15 +109,22 @@ class QualityGate:
 
     # -- evaluation -------------------------------------------------------
 
-    def extract(self, fit_quality: Optional[dict]) -> Optional[float]:
-        """Read this gate's metric value from a ``fit_quality`` dict.
+    def extract(self, fit_quality: Optional[dict],
+                verdict: Optional[dict] = None) -> Optional[float]:
+        """Read this gate's metric value.
+
+        ``value_source == "result"`` reads ``fit_quality[metric]`` (the
+        executed script's own numbers). ``value_source == "verdict"`` reads
+        ``verdict[metric]`` (the LLM verifier's returned JSON) — pass the
+        verifier verdict via the ``verdict`` keyword.
 
         Returns ``None`` when missing, non-numeric, or NaN — callers
         treat ``None`` as a hard reject.
         """
-        if not isinstance(fit_quality, dict):
+        source = verdict if self.value_source == "verdict" else fit_quality
+        if not isinstance(source, dict):
             return None
-        v = fit_quality.get(self.metric)
+        v = source.get(self.metric)
         try:
             f = float(v)
         except (TypeError, ValueError):
@@ -205,9 +226,23 @@ R_SQUARED_DEFAULT = QualityGate(
     best_value=1.0,
 )
 
+# The image-analysis accept criterion as a gate object: the LLM verifier's
+# quality_score against the classic 0.7 threshold. hard_reject == accept ⇒
+# an empty soft band, which is exactly the plain-threshold semantics the
+# image controller has always had (no verifier-arbitrated in-between zone).
+IMAGE_SCORE_DEFAULT = QualityGate(
+    metric="quality_score",
+    accept_threshold=0.7,
+    hard_reject_threshold=0.7,
+    direction="higher_is_better",
+    physical_review=True,
+    best_value=1.0,
+    value_source="verdict",
+)
+
 # Metrics with a known optimum on their "better" side, used to default
 # ``best_value`` when a skill's frontmatter gate omits it.
-_KNOWN_BEST_VALUE = {"r_squared": 1.0, "peak_region_r2": 1.0}
+_KNOWN_BEST_VALUE = {"r_squared": 1.0, "peak_region_r2": 1.0, "quality_score": 1.0}
 
 
 def resolve_gate(
@@ -294,6 +329,7 @@ def from_mapping(data: dict) -> QualityGate:
         direction=str(data.get("direction", R_SQUARED_DEFAULT.direction)),
         physical_review=bool(data.get("physical_review", R_SQUARED_DEFAULT.physical_review)),
         best_value=(float(bv) if bv is not None else None),
+        value_source=str(data.get("value_source", R_SQUARED_DEFAULT.value_source)),
     )
 
 
