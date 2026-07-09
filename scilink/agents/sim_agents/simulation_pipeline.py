@@ -190,6 +190,7 @@ def run_complete_workflow(
     run_command: Optional[str] = None,
     autonomy: str = "autonomous",
     max_run_cycles: int = 3,
+    coverage_votes: int = 1,
     structure_file: Optional[str] = None,
     force_field_files: Optional[Dict[str, str]] = None,
     staged: bool = False,
@@ -231,6 +232,11 @@ def run_complete_workflow(
         autonomy: Autonomy level for the refinement loop (``"co-pilot"`` /
             ``"autopilot"`` / ``"autonomous"``); selects the built-in policy.
         max_run_cycles: Maximum run → assess → fix cycles per phase.
+        coverage_votes: Number of independent observable-coverage checks the
+            pre-run gate majority-votes before blocking a deck that omits a
+            required output (e.g. the stress log a viscosity goal needs). ``1``
+            is a single check; larger values damp the stochastic coverage
+            decision on borderline transport-property cases.
         structure_file: Optional path to an already-built structure. When
             provided, structure generation is skipped and this file is used
             directly — for callers that already have a structure and only want
@@ -393,7 +399,7 @@ def run_complete_workflow(
     ctx = RefinementContext(
         research_goal=user_request, scale=scale, engine=software,
         skill=software, domain=scale, autonomy=autonomy,
-        max_cycles=max_run_cycles,
+        max_cycles=max_run_cycles, coverage_votes=coverage_votes,
     )
     run_critic = RunCritic(
         api_key=api_key, base_url=base_url, model_name=model_name,
