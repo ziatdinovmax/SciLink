@@ -104,3 +104,76 @@ Three reasons this is more reliable than the current inference-at-the-gate:
 - Does the deterministic transport check belong here as a per-skill declaration
   ("this property needs a live virial accumulator"), which would also fix the
   0.67 case as a side effect?
+
+## Who checks what, where — detection is distributed, the contract is owned
+
+The contract above says *what* must hold; it does not yet say *who checks it and
+where*. The tempting answer — a meta-agent pass that reads every agent output and
+every input file and hunts for discrepancies — is the wrong shape, for the same
+reason the gate's single-shot inference sits at ~0.67 on the transport case:
+open-ended "find any contradiction across everything" is maximal-context,
+unbounded reasoning, exactly where the model is least reliable. Scaling it to all
+artifacts makes it worse. The vote-agreement data is the tell — unanimous on
+scoped/clear questions, split only on the one fuzzy judgment.
+
+The reliable shape is the inverse: **turn "find contradictions" into "verify a
+declared requirement," and run each verification at the boundary where it first
+becomes decidable, with minimal context.** A contradiction is a requirement some
+stage cannot satisfy; the stage that produces the deciding artifact is the one
+positioned to check it.
+
+| Contradiction (instances seen) | Decidable at | Checked by | Check kind |
+|---|---|---|---|
+| Goal names an observable the deck never logs (viscosity → no stress) | deck-gen / pre-run | dry-run coverage gate | signal present |
+| Observable needs finer sampling than the deck provides (T1 → sub-ps dump) | run-config (pre-run) | gate, vs tool-declared cadence | cadence / duration |
+| Required species distinction not realizable (Zn–O_triflate vs Zn–O_sulfone share one atom type) | deck-gen | deck-gen, via type→molecule resolution | selection realizable |
+| Property under-converged given the actual dynamics | post-run | refinement assess (per-phase quality) | empirical adequacy |
+| Independent runs of one series use inconsistent definitions | across runs | orchestrator / meta | cross-run consistency |
+
+Two roles fall out, and they are *not* the same role:
+
+- **Within a run, checking is local and distributed.** Each boundary verifies its
+  own artifact against the carried contract, reasoning about *one* question with
+  concrete inputs. No stage re-derives global intent.
+- **The meta / orchestrator owns exactly two things:** *carrying* the contract
+  across mode boundaries (it is the one place that sees cross-mode intent —
+  "validate T1 *and* viscosity" — its existing context-bridge role), and the
+  *reconciliation no single stage can see* (the cross-run/series row). It is
+  **not** the within-run discrepancy inspector.
+
+This is why series-consistency belongs to the meta agent but the oxygen
+resolution belongs to the deck stage: same principle, different boundary. Only the
+orchestrator sees the *set* of runs; only deck-gen sees the type map.
+
+### Why this is general and extensible — and where it stops
+
+General: every contradiction we have hit is "a declared requirement a stage
+cannot meet," and each lands on one of a *small, fixed set of check kinds* —
+signal-present, cadence/duration, selection-realizable, empirical-adequacy,
+cross-run-consistency. A new *property* declares its needs in those terms
+(Green-Kubo viscosity → "signal present: virial/stress series"; species-RDF →
+"selection realizable: these molecule-resolved groups") and touches only its own
+consumer tool — no central table, mirroring the `DeployedPotential` neutral-
+descriptor pattern. The requirement is engine-neutral; the skill realizes it to
+engine outputs, so a new engine is one skill bundle, not N new checks.
+
+Where it stops, stated plainly so the claim stays honest:
+
+- **It only catches contradictions against *declared* requirements.** An
+  observable no one put in the contract is checked by no one. Contract
+  completeness is the residual burden — but that is a more tractable, auditable
+  place to put it (a planning decision with a human seam) than "detect arbitrary
+  contradictions," and it is the same limit any approach has.
+- **Some adequacy contradictions are only decidable after running** (a property
+  under-converges because the system moved slower than expected). Those cannot be
+  a pre-run gate; they route to the existing post-run assess stage. The contract
+  still defines "good"; the boundary that can decide it is simply later.
+- **The check-kind set must stay small.** Extensibility holds because new
+  properties *reuse* kinds; a genuinely novel kind is a real (and rare) addition,
+  not a free one. If properties routinely needed bespoke kinds, this would
+  collapse back toward the holistic inspector — worth watching, not assumed.
+
+This answers two of the open questions above: the list author is a **merge**
+(planner intent + consumer-tool-declared inputs), and *who checks* is **the
+boundary, not the meta agent** — the meta agent owns the contract and the
+cross-run row only.
