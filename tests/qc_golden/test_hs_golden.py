@@ -43,6 +43,13 @@ _CODEGEN_MARKER = "analyze_feature"
 
 _TS_RE = re.compile(r"\d{8}_\d{6}")
 
+# Retry-feedback prompts embed traceback.format_exc(), whose frame names and
+# line numbers shift with ANY edit to the controller file — volatile by
+# nature, so goldens mask them (flagged per plan §8.1: the masked span is
+# exactly `File "...", line N, in <frame>`; the exception text itself stays
+# pinned).
+_TB_FRAME_RE = re.compile(r'File "[^"]+", line \d+, in \S+')
+
 GOOD_CODE = """\
 def analyze_feature(data, energy_axis):
     import numpy as np
@@ -102,6 +109,7 @@ def _run(tmp_path, target, rules):
     base_norm = make_normalizer({str(tmp_path): "<OUTDIR>"})
 
     def norm(text):
+        text = _TB_FRAME_RE.sub('File "<SRC>", line <N>, in <FRAME>', text)
         return _TS_RE.sub("<TS>", base_norm(text))
 
     model = ScriptedModel(rules, normalizer=norm)

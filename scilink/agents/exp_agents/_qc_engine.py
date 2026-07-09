@@ -44,15 +44,21 @@ class QCEngineSpec:
 
     config_key      -- the state key holding the locked plan/config
                        ("locked_fitting_config" / "locked_analysis_config").
+                       None = the modality has no locked-config plumbing
+                       (hyperspectral): the shell skips the unchanged-config
+                       escalation, the state config/annealing-level writes,
+                       and the post-loop config restore.
     refine_anchor   -- which result's script anchors a (non-hot) refit
-                       prompt: "best" (curve refines the high-water script)
-                       or "current" (image refines the latest script).
+                       prompt: "best" (curve refines the high-water script),
+                       "current" (image refines the latest script), or
+                       "none" (hyperspectral regenerates from the prompt;
+                       structural freedom lives in the retry-feedback text).
                        Deliberate asymmetry, preserved.
     refit_fail_msg  -- log line when a refit attempt fails.
     """
 
-    config_key: str
-    refine_anchor: str  # "best" | "current"
+    config_key: Optional[str]
+    refine_anchor: str  # "best" | "current" | "none"
     refit_fail_msg: str
 
 
@@ -127,7 +133,8 @@ class CodegenQCEngine:
         # stages a prior run already found inadequate. Default 0 = unchanged.
         ctx.start_level = max(0, min(int(ctx.state.get("_starting_annealing_level") or 0),
                                      ctx.n_levels - 1))
-        ctx.state["_annealing_level"] = ctx.start_level
+        if self.spec.config_key is not None:
+            ctx.state["_annealing_level"] = ctx.start_level
 
         result = host.qc_run_initial(ctx)
         ctx.initial_result = result
@@ -146,7 +153,8 @@ class CodegenQCEngine:
                 else:
                     self._verification_loop(ctx)
                     # Restore config to match best result after verification loop
-                    ctx.state[self.spec.config_key] = ctx.best_config
+                    if self.spec.config_key is not None:
+                        ctx.state[self.spec.config_key] = ctx.best_config
 
             post = host.qc_post_verification(ctx)
             if post is not None:
@@ -208,7 +216,8 @@ class CodegenQCEngine:
             if refinement_error:
                 ctx.verification_history[-1]["refinement_error"] = refinement_error
 
-            if refined_config == ctx.state.get(spec.config_key, {}):
+            if (spec.config_key is not None
+                    and refined_config == ctx.state.get(spec.config_key, {})):
                 # No changes at current temperature — escalate to give the
                 # LLM more freedom before giving up.
                 _cur_level = ctx.annealing_level
@@ -231,10 +240,11 @@ class CodegenQCEngine:
                 except Exception:
                     pass
 
-            ctx.state[spec.config_key] = refined_config
+            if spec.config_key is not None:
+                ctx.state[spec.config_key] = refined_config
 
-            # Sync skill strictness with adaptive annealing level
-            ctx.state["_annealing_level"] = ctx.annealing_level
+                # Sync skill strictness with adaptive annealing level
+                ctx.state["_annealing_level"] = ctx.annealing_level
 
             # Drop the script anchor on the single iteration where the
             # annealing level escalates INTO the hot level, so the code
@@ -245,8 +255,12 @@ class CodegenQCEngine:
                 ctx.annealing_level >= _hot
                 and ctx.previous_annealing_level < _hot
             )
-            _anchor_result = (ctx.best_result if spec.refine_anchor == "best"
-                              else ctx.current_result)
+            if spec.refine_anchor == "best":
+                _anchor_result = ctx.best_result
+            elif spec.refine_anchor == "current":
+                _anchor_result = ctx.current_result
+            else:  # "none"
+                _anchor_result = None
             refine_from = (
                 None if just_escalated_to_hot
                 else (_anchor_result or {}).get("script")
