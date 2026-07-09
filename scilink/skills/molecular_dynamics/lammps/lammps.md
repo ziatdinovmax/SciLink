@@ -119,7 +119,6 @@ ReaxFF:
 - C+H+N+O with bonds → organic or biomolecular
 - Na+Cl or similar halides → ionic crystal or salt solution
 
-
 ## Interpretation
 
 ### Key diagnostic checks
@@ -281,3 +280,25 @@ pair_coeff * * {reaxff_potential} {element_list}
 fix QEQ all qeq/reaxff 1 0.0 10.0 1.0e-6 reaxff
 (dynamics with timestep 0.25-1.0, Tdamp 100.0)
 ```
+
+### Selecting atoms by chemical species (multi-component systems)
+When a `group` or `compute` must target a specific chemical species — not just
+an element — resolve atom types to their parent molecule first. Atom type
+numbers are assigned per system and are NOT stable across runs, so never
+hardcode a type integer or assume the same number means the same species in
+another data file; re-derive the mapping for every system.
+
+The same element often belongs to several distinct species (e.g. oxygen in a
+solvent, in a hydroxyl group, and in a carbonyl), so selecting by element or
+mass alone conflates them:
+- The components manifest (`components.json`) lists each molecular species
+  (name, SMILES, count) in the order they were packed into the box.
+- In the typed data file (OpenFF/Interchange, `atom_style full`) the Atoms
+  section carries a molecule-ID per atom, and molecules appear in that packing
+  order — so each molecule-ID maps to one species. A force field that types by
+  chemical environment (OpenFF) gives the same element *different* types in
+  different species, so each atom type usually resolves to exactly one species.
+- Resolve type → parent molecule from the manifest plus the data file, then
+  build the `group`/`compute` from the resolved type(s). A pair analysis
+  targeting one species' atom (say a specific solvent's oxygen) must select that
+  species' type, which is distinct from the same element in another molecule.
