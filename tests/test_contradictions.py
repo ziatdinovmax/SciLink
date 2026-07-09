@@ -149,3 +149,53 @@ def test_no_false_positive_when_distinct(system):
                       params={"selections": ["metal", "anion:O"]})
     arts = {"data_file": data, "components_json": comps, "engine_tools": lt}
     assert check_requirements([req], arts, active_skills=["lammps"]) == []
+
+
+# ── The MD-agent boundary hook (LLM calls stubbed; real check→split→regen) ──
+
+import logging  # noqa: E402
+
+from scilink.agents.sim_agents.md_simulation_agent import MDSimulationAgent  # noqa: E402
+
+
+class _Stub:
+    """Minimal MDSimulationAgent stand-in for the deterministic hook path."""
+    skill_name = "lammps"
+    tools_module = lt
+    logger = logging.getLogger("stub")
+
+    def __init__(self, declared):
+        self._declared = declared
+        self.captured = "unset"
+
+    def _declare_analysis_selections(self, goal, structure_file):
+        return self._declared
+
+    def analyze_system(self, structure_file):
+        return {"reanalyzed": True}
+
+    def _generate_md_input(self, sf, goal, desc, info, plan, resolved_selections=None):
+        self.captured = resolved_selections
+        return "REGENERATED DECK"
+
+
+def test_hook_splits_and_regenerates_on_collision(system):
+    data, _ = system  # components.json is a sibling of data (as the hook expects)
+    stub = _Stub(declared=["metal", "anion:O", "solvent:O"])
+    script, info = MDSimulationAgent._enforce_analysis_realizability(
+        stub, "ORIG DECK", data, "goal", "desc", {}, {})
+    # collision resolved → deck regenerated against the now-distinct types
+    assert script == "REGENERATED DECK"
+    assert stub.captured["solvent:O"] == [4]
+    # the data file was rewritten in place with the new atom type
+    assert lt.parse_data_file(data)["atom_types"] == 4
+
+
+def test_hook_is_noop_when_no_collision(system):
+    data, _ = system
+    stub = _Stub(declared=["metal", "anion:O"])   # no two selections collide
+    script, info = MDSimulationAgent._enforce_analysis_realizability(
+        stub, "ORIG DECK", data, "goal", "desc", {"orig": True}, {})
+    assert script == "ORIG DECK"                    # unchanged
+    assert stub.captured == "unset"                 # regeneration never called
+    assert lt.parse_data_file(data)["atom_types"] == 3
