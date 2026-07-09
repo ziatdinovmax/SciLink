@@ -491,6 +491,255 @@ def parse_data_file(data_file: str) -> Dict[str, Any]:
     return info
 
 
+def _atoms_section_rows(data_file: str) -> List[str]:
+    """Return the atom rows of a data file's ``Atoms`` section.
+
+    Strips the ``Atoms`` header (and any ``# comment`` on it), the blank line
+    that follows, and stops at the next section header or trailing blank.
+    """
+    with open(data_file) as f:
+        lines = f.readlines()
+    rows: List[str] = []
+    in_atoms = False
+    for line in lines:
+        s = line.strip()
+        if not in_atoms:
+            if s.split("#", 1)[0].strip() == "Atoms":
+                in_atoms = True
+            continue
+        if not s:
+            if rows:            # blank after rows collected → section ended
+                break
+            continue            # blank right after the "Atoms" header
+        first = s[0]
+        if not (first.isdigit() or first == "-"):   # a new section header
+            break
+        rows.append(s)
+    return rows
+
+
+def map_selections_to_types(
+    data_file: str,
+    components_json: str,
+    selections: List[str],
+) -> Dict[str, List[int]]:
+    """Map engine-neutral atom selections to the LAMMPS atom types satisfying them.
+
+    A selection is ``"<species>"`` (all atoms of that molecular species) or
+    ``"<species>:<Element>"`` (that element within that species). Species resolve
+    to molecule-ID ranges from the components manifest (molecules are packed in
+    manifest order); elements from each type's mass. Two selections that return
+    the *same* type list are indistinguishable to a type-based analysis such as
+    ``compute rdf`` — the signal the contradiction framework's
+    ``selection_realizable`` check reads.
+
+    Args:
+        data_file: LAMMPS data file (``atom_style full``/``molecular`` carry
+            molecule-IDs; ``atomic``/``charge`` do not, so species selections
+            cannot be resolved and return empty).
+        components_json: The run's components manifest (species names + counts).
+        selections: Selection strings to resolve.
+
+    Returns:
+        ``{selection: sorted list of matching atom-type ids}``; an empty list for
+        a selection matching no type (unknown species/element, or a molecule-less
+        atom style).
+    """
+    import json
+
+    info = parse_data_file(data_file)
+    atom_style = info.get("atom_style", "full")
+    # parse_data_file's mass_map maps type -> (mass, element); tolerate a bare
+    # mass too (fall back to mass→element lookup).
+    mass_map = info.get("mass_map", {}) or {}
+    type_element: Dict[int, Optional[str]] = {}
+    for t, m in mass_map.items():
+        try:
+            if isinstance(m, (tuple, list)) and len(m) >= 2:
+                type_element[int(t)] = m[1]
+            else:
+                type_element[int(t)] = element_from_mass(float(m))
+        except (TypeError, ValueError):
+            continue
+
+    with open(components_json) as fh:
+        comps = json.load(fh).get("components", [])
+    mol_species: Dict[int, str] = {}
+    mid = 1
+    for c in comps:
+        for _ in range(int(c.get("count", 0))):
+            mol_species[mid] = c.get("name")
+            mid += 1
+
+    type_col = _type_column_index(atom_style)
+    mol_col = 1 if atom_style in ("full", "molecular") else None
+    type_species: Dict[int, set] = {}
+    if mol_col is not None:
+        for row in _atoms_section_rows(data_file):
+            toks = row.split()
+            if len(toks) <= max(type_col, mol_col):
+                continue
+            try:
+                t, m = int(toks[type_col]), int(toks[mol_col])
+            except ValueError:
+                continue
+            sp = mol_species.get(m)
+            if sp is not None:
+                type_species.setdefault(t, set()).add(sp)
+
+    result: Dict[str, List[int]] = {}
+    for sel in selections:
+        if ":" in sel:
+            species, element = sel.split(":", 1)
+        else:
+            species, element = sel, None
+        matched = [
+            t for t in sorted(type_element)
+            if (element is None or type_element.get(t) == element)
+            and species in type_species.get(t, ())
+        ]
+        result[sel] = matched
+    return result
+
+
+_DATA_SECTIONS = (
+    "Masses", "Pair Coeffs", "PairIJ Coeffs", "Bond Coeffs", "Angle Coeffs",
+    "Dihedral Coeffs", "Improper Coeffs", "Atoms", "Velocities", "Bonds",
+    "Angles", "Dihedrals", "Impropers",
+)
+
+
+def split_shared_types(
+    data_file: str,
+    components_json: str,
+    collisions: List[List[str]],
+) -> Dict[str, Any]:
+    """Give colliding species distinct atom types so a type-based analysis can
+    separate them, without changing the physics.
+
+    For each collision group (selections that ``map_selections_to_types`` found
+    share an atom type), the first selection keeps its type; each other selection
+    gets a fresh atom type per shared type, with **identical** mass and Pair
+    Coeffs (so the force field is unchanged), and its atoms (that type, within
+    that species' molecules) are reassigned to the new type. Bonds/angles/etc.
+    reference atom and bond-type IDs, not atom types, so they are untouched.
+
+    Args:
+        data_file: LAMMPS data file to transform.
+        components_json: Components manifest (for species → molecule-ID ranges).
+        collisions: Groups of selections sharing a type, as reported by the
+            ``selection_realizable`` check.
+
+    Returns:
+        ``{"data_file_text": <new data file>, "type_map": {selection: [types]},
+        "new_types": {new_type: source_type}}``. ``type_map`` gives each
+        collided selection its now-distinct type list.
+    """
+    import json
+
+    all_sels = [s for grp in collisions for s in grp]
+    sel_types = map_selections_to_types(data_file, components_json, all_sels)
+
+    comps = json.load(open(components_json)).get("components", [])
+    species_mols: Dict[str, set] = {}
+    mid = 1
+    for c in comps:
+        cnt = int(c.get("count", 0))
+        species_mols.setdefault(c.get("name"), set()).update(range(mid, mid + cnt))
+        mid += cnt
+
+    info = parse_data_file(data_file)
+    atom_style = info.get("atom_style", "full")
+    type_col = _type_column_index(atom_style)
+    mol_col = 1 if atom_style in ("full", "molecular") else None
+    n_types = int(info.get("atom_types", 0))
+    mass_map = info.get("mass_map", {}) or {}
+
+    rules: List[Tuple[int, set, int]] = []   # (source_type, mol_set, new_type)
+    new_src: Dict[int, int] = {}             # new_type -> source_type
+    type_map: Dict[str, List[int]] = {}
+    next_type = n_types
+    for grp in collisions:
+        for i, sel in enumerate(grp):
+            src = sel_types.get(sel) or []
+            if i == 0:
+                type_map[sel] = list(src)     # first selection keeps its type(s)
+                continue
+            mols = species_mols.get(sel.split(":", 1)[0], set())
+            new_for_sel = []
+            for st in src:
+                next_type += 1
+                rules.append((st, mols, next_type))
+                new_src[next_type] = st
+                new_for_sel.append(next_type)
+            type_map[sel] = new_for_sel
+
+    if not new_src or mol_col is None:
+        return {"data_file_text": open(data_file).read(),
+                "type_map": type_map, "new_types": new_src}
+
+    # Grab each source type's raw Pair Coeffs row (tokens after the index).
+    lines = open(data_file).read().splitlines()
+    pair_rows: Dict[int, List[str]] = {}
+    sec = None
+    for ln in lines:
+        head = ln.split("#", 1)[0].strip()
+        if head in _DATA_SECTIONS:
+            sec = head
+            continue
+        s = ln.strip()
+        if sec == "Pair Coeffs" and s and s[0].isdigit():
+            toks = s.split()
+            pair_rows[int(toks[0])] = toks[1:]
+
+    out: List[str] = []
+    sec = None
+    seen_rows = False
+    for ln in lines:
+        s = ln.strip()
+        head = s.split("#", 1)[0].strip()
+        if head in _DATA_SECTIONS:
+            sec, seen_rows = head, False
+            out.append(ln)
+            continue
+        if s.endswith("atom types") and s.split()[0].isdigit():
+            out.append(f"{n_types + len(new_src)} atom types")
+            continue
+        # Append the duplicated rows at the END of Masses / Pair Coeffs.
+        if sec in ("Masses", "Pair Coeffs") and not s and seen_rows:
+            for nt in sorted(new_src):
+                if sec == "Masses":
+                    mass = mass_map.get(new_src[nt], (0, ""))
+                    mass = mass[0] if isinstance(mass, (tuple, list)) else mass
+                    out.append(f"{nt}\t{mass}")
+                else:
+                    out.append(f"{nt}\t" + "\t".join(pair_rows.get(new_src[nt], [])))
+            out.append(ln)
+            sec, seen_rows = None, False
+            continue
+        if sec in ("Masses", "Pair Coeffs") and s and s[0].isdigit():
+            seen_rows = True
+            out.append(ln)
+            continue
+        if sec == "Atoms" and s and (s[0].isdigit() or s[0] == "-"):
+            toks = s.split()
+            try:
+                t, m = int(toks[type_col]), int(toks[mol_col])
+            except (ValueError, IndexError):
+                out.append(ln)
+                continue
+            for st, mols, nt in rules:
+                if t == st and m in mols:
+                    toks[type_col] = str(nt)
+                    break
+            out.append("\t".join(toks))
+            continue
+        out.append(ln)
+
+    return {"data_file_text": "\n".join(out) + "\n",
+            "type_map": type_map, "new_types": new_src}
+
+
 def format_type_info(data_file: str) -> str:
     """Format data file contents for LLM prompts."""
     info = parse_data_file(data_file)
