@@ -3792,7 +3792,7 @@ class AnalysisOrchestratorTools:
                 "Return ONLY the query text."
             )
             try:
-                q_resp = self.orch.model.generate_content(contents=[builder_prompt])
+                q_resp = self._internal_model().generate_content(contents=[builder_prompt])
                 query = (q_resp.text or "").strip().strip('"')
                 assert 10 < len(query) < 400
             except Exception:
@@ -3839,7 +3839,7 @@ class AnalysisOrchestratorTools:
                 "the revised interpretation text."
             )
             try:
-                r_resp = self.orch.model.generate_content(contents=[refine_prompt])
+                r_resp = self._internal_model().generate_content(contents=[refine_prompt])
                 revised = (r_resp.text or "").strip()
                 if not revised:
                     raise ValueError("empty refinement")
@@ -3915,7 +3915,7 @@ class AnalysisOrchestratorTools:
                     "(claim, has_anyone_question, keywords, scientific_impact)."
                 )
                 try:
-                    c_resp = self.orch.model.generate_content(contents=[claims_prompt])
+                    c_resp = self._internal_model().generate_content(contents=[claims_prompt])
                     raw = (c_resp.text or "").strip()
                     m = re.search(r"\[.*\]", raw, re.DOTALL)
                     parsed = json.loads(m.group(0)) if m else None
@@ -4050,7 +4050,7 @@ class AnalysisOrchestratorTools:
                     self.logger = logging.getLogger("reenter_interpretation")
 
             controller = SynthesisReEntryController(
-                model=self.orch.model,
+                model=self._internal_model(),
                 logger=logging.getLogger("reenter_interpretation"),
                 generation_config=None,
                 safety_settings=None,
@@ -5423,6 +5423,46 @@ class AnalysisOrchestratorTools:
             },
             required=["paths"]
         )
+
+    def _internal_model(self):
+        """Tool-free sibling of the orchestrator's model for INTERNAL LLM calls.
+
+        The orchestrator's chat wrapper binds its system prompt and the full
+        tool schemas at construction (LiteLLM path,
+        analysis_orchestrator.py:701-706). An internal call made from inside a
+        tool function therefore behaves like the chat agent — the model may
+        answer with a *tool call*, leaving ``.text`` empty and failing the
+        parse ("Empty response from LLM"). Discovered live via the
+        reenter_interpretation routing test; refine_interpretation's three
+        internal calls had the same latent failure on the LiteLLM path (the
+        proxy path constructs its wrapper without bound tools, masking it).
+
+        Returns a plain generator with the same model/key/base_url and no
+        tools or system instruction. Cached; degrades to the bound model if
+        construction fails (better a maybe-empty response than a crashed tool).
+        """
+        cached = getattr(self, "_internal_model_cache", None)
+        if cached is not None:
+            return cached
+        base = self.orch.model
+        try:
+            if getattr(self.orch, "use_openai", False):
+                from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+                m = OpenAIAsGenerativeModel(
+                    model=base.model, api_key=base.api_key,
+                    base_url=getattr(base, "base_url", None),
+                )
+            else:
+                from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
+                m = LiteLLMGenerativeModel(
+                    model=base.model, api_key=getattr(base, "api_key", None),
+                    base_url=getattr(base, "base_url", None),
+                )
+        except Exception as e:  # noqa: BLE001 - degrade, don't crash the tool
+            logging.warning(f"_internal_model fallback to bound model: {e}")
+            m = base
+        self._internal_model_cache = m
+        return m
 
     def _register_tool(
         self,
