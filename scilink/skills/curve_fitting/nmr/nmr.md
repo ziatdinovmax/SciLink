@@ -101,9 +101,13 @@ Default to **Voigt over pure Lorentzian** — real NMR lines carry a Gaussian
 by exactly the **MAS rate** (ν_r in Hz → ν_r/ν_L ppm) flanking each centreband
 is spinning sidebands, *not* distinct chemical sites. Two valid strategies: (a)
 crop to the centreband and fit only that, or (b) fit the centreband plus the
-sidebands as satellites at ±k·ν_r sharing the centreband's shape. **Either way,
-any integrated-intensity / quantification claim must include sideband intensity**
-— excluding it undercounts. Verify the spacing equals the known MAS rate.
+sidebands as satellites at ±k·ν_r sharing the centreband's shape — for (b),
+use the registered `fit_sideband_manifold` tool (one call per sideband-bearing
+site): it locks the comb positions to the MAS rate and returns the
+sideband-inclusive total intensity and centreband fraction directly. **Either
+way, any integrated-intensity / quantification claim must include sideband
+intensity** — excluding it undercounts. Verify the spacing equals the known
+MAS rate.
 
 **Step 5 — Let the tool, not the eye, decide whether C_Q is determined.** For a
 solid half-integer quadrupolar line, *run* `fit_quad_ct` rather than pre-judging
