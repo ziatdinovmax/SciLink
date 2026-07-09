@@ -1362,6 +1362,14 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             results["analysis_approach"] = state.get(
                 "locked_analysis_config", {}
             ).get("analysis_approach")
+            # Hoist the executed script's features to top level. This also
+            # fixes a dead consumer: the Tier-2 decision and tier merging
+            # already read results["extracted_features"], which was never
+            # set — the Tier-2 decision prompt saw "{}" regardless of what
+            # the analysis extracted. (#323 prereq; issue #327 phase 2.)
+            results["extracted_features"] = analysis_result.get(
+                "extracted_features", {}
+            )
             results["literature_files"] = state.get("literature_files")
 
             if series_results and series_results[0].get("quality_warning"):

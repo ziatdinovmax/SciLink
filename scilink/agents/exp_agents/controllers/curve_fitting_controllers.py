@@ -1312,86 +1312,9 @@ class SeriesScoutController:
         return state
 
 
-class LiteratureSearchController:
-    """Search literature if enabled and query provided.
-
-    DEPRECATED: prefer the orchestrator-level `search_literature` tool, which
-    fetches lit context BEFORE planning so the planner can produce a
-    literature-informed plan. This in-pipeline controller is retained as a
-    fallback for direct-Python-API callers using `use_literature=True`.
-    """
-
-    def __init__(
-        self,
-        logger: logging.Logger,
-        literature_agent: Any | None,
-        output_dir: str,
-    ):
-        self.logger = logger
-        self.literature_agent = literature_agent
-        self.output_dir = output_dir
-
-    def _save_results(self, query: str, report: str) -> dict:
-        saved_files = {}
-        try:
-            lit_dir = os.path.join(self.output_dir, "literature")
-            os.makedirs(lit_dir, exist_ok=True)
-
-            query_path = os.path.join(lit_dir, "search_query.txt")
-            with open(query_path, "w") as f:
-                f.write(query)
-            saved_files["query_file"] = query_path
-
-            report_path = os.path.join(lit_dir, "literature_report.md")
-            with open(report_path, "w") as f:
-                f.write(report)
-            saved_files["report_file"] = report_path
-        except Exception as e:
-            self.logger.warning(f"Failed to save literature: {e}")
-        return saved_files
-
-    def execute(self, state: dict) -> dict:
-        if state.get("error_dict"):
-            return state
-
-        if state.get("literature_context"):
-            self.logger.info("\n📚 --- Skipping Literature (pre-fetched via search_literature tool) ---\n")
-            return state
-
-        if self.literature_agent is None:
-            self.logger.info("\n📚 --- Skipping Literature (disabled) ---\n")
-            state["literature_context"] = None
-            state["literature_files"] = None
-            return state
-
-        query = state.get("literature_query")
-        if not query:
-            self.logger.info("\n📚 --- Skipping Literature (no query needed) ---\n")
-            state["literature_context"] = None
-            state["literature_files"] = None
-            return state
-
-        self.logger.info("\n📚 --- Searching Literature ---\n")
-        self.logger.info(f"  Query: {query}")
-
-        try:
-            result = self.literature_agent.query_for_models(query)
-            if result.get("status") == "success":
-                state["literature_context"] = result["formatted_answer"]
-                self.logger.info("  ✅ Success")
-            else:
-                state["literature_context"] = None
-                self.logger.warning("  ⚠️ No results")
-
-            state["literature_files"] = self._save_results(
-                query, state["literature_context"] or f"No results: {result.get('message')}"
-            )
-        except Exception as e:
-            self.logger.error(f"  ❌ Failed: {e}")
-            state["literature_context"] = None
-            state["literature_files"] = self._save_results(query, f"Error: {e}")
-
-        return state
+# Shared implementation (one copy for all modalities) — re-exported under the
+# historical name so pipeline imports are unchanged.
+from .base_controllers import LiteratureSearchController  # noqa: E402,F401
 
 
 class GenerateCurveFittingReportController:

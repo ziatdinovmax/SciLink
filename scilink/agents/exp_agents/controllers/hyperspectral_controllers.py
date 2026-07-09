@@ -310,6 +310,73 @@ def _codegen_retry_feedback(failures: int, critique: str) -> str:
     return "\n".join(block)
 
 
+def _retry_annealing_level(failures: int) -> int:
+    """Map the codegen retry ladder onto the shared 0/1/2 annealing scale.
+
+    0 = first attempt (no retry feedback); 1 = warm (patch the math /
+    question the method); 2 = hot (abandon the method family) — see
+    ``_codegen_retry_feedback``. Used for the per-attempt verification
+    record so hyperspectral participates in the same hot-success staging
+    gate as the other modalities.
+    """
+    if failures <= 0:
+        return 0
+    if failures <= 2:
+        return 1
+    return 2
+
+
+def _retry_stage_label(failures: int) -> str:
+    """Human label of the retry-feedback stage applied after this failure."""
+    if failures <= 0:
+        return ""
+    if failures == 1:
+        return "patch the logic/math"
+    if failures == 2:
+        return "question the method"
+    return "abandon the method family"
+
+
+def _hs_attempt_entry(level: int, passed_fraction, qc_failures: list,
+                      recommended_action: str, error: str | None = None) -> dict:
+    """One dynamic-analysis attempt as a verification-record entry.
+
+    ``qc_failures`` strings are "feature: critique" — split into the shared
+    issues shape; a hard execution error becomes a single issue.
+    """
+    issues = []
+    for f in qc_failures or []:
+        loc, _, prob = str(f).partition(":")
+        issues.append({"location": loc.strip(), "problem": prob.strip() or loc.strip()})
+    if error:
+        issues.append({"location": "execution", "problem": str(error)[:500]})
+    return {
+        "passed_fraction": passed_fraction,
+        "annealing_level": level,
+        "issues_found": issues,
+        "recommended_action": recommended_action,
+    }
+
+
+def _append_literature_context(prompt: list, state: dict) -> None:
+    """Append pre-fetched literature context (Channel A passthrough).
+
+    Populated when the caller supplies ``literature_file`` (typically the
+    orchestrator's ``search_literature`` tool). Framed as advisory context —
+    it must not override what the data actually shows.
+    """
+    lit = state.get("literature_context")
+    if not lit:
+        return
+    prompt.append(
+        "\n\n--- Literature Context ---\n"
+        "Relevant literature findings were provided for this analysis. Use "
+        "them to inform interpretation and target selection, but do not let "
+        "them override what the data actually shows.\n"
+        f"{str(lit)}"
+    )
+
+
 def _append_auxiliary_context(prompt: list, state: dict) -> None:
     """Append auxiliary reference dataset(s) to an LLM prompt if available."""
     items = _auxiliary_display_items(state)
@@ -1412,6 +1479,7 @@ Overlays showing where components are concentrated on the structural image.
         _append_skill_context(prompt_parts, state, "interpretation")
         _append_prior_knowledge_context(prompt_parts, state)
         _append_auxiliary_context(prompt_parts, state)
+        _append_literature_context(prompt_parts, state)
 
         # 8. Final instructions
         prompt_parts.append("\n\nProvide your analysis in the requested JSON format.")
@@ -1511,6 +1579,7 @@ refinement targets are meaningful here — do not request `spatial` or
         _append_skill_context(prompt_parts, state, "planning")
         _append_prior_knowledge_context(prompt_parts, state)
         _append_auxiliary_context(prompt_parts, state)
+        _append_literature_context(prompt_parts, state)
 
         prompt_parts.append("\n\nBased on these results, decide if a focused refinement is needed.")
 
@@ -1686,6 +1755,7 @@ class BuildHolisticSynthesisPromptController:
         _append_skill_context(prompt_parts, state, "interpretation")
         _append_prior_knowledge_context(prompt_parts, state)
         _append_auxiliary_context(prompt_parts, state)
+        _append_literature_context(prompt_parts, state)
 
         # 4. EXPLICIT REPORTING INSTRUCTIONS
         prompt_parts.append("\n\n### 📝 CRITICAL REPORTING INSTRUCTIONS")
@@ -2182,6 +2252,9 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             task_success = False
             best_attempt = {"req_passed": -1, "valid_count": -1,
                             "images": [], "maps": [], "meta": []}
+            # HS-1: per-attempt verification-record entries (additive).
+            attempt_entries = []
+            last_code = ""
 
             while retries < self.MAX_RETRIES:
                 try:
@@ -2191,12 +2264,18 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     current_run_valid_maps = []
                     current_run_valid_meta = []
                     qc_failures = []
+                    # Level of THIS attempt = the retry-feedback stage it was
+                    # generated under; total defaults to 0 until stage E runs
+                    # so the except-path record never hits an unbound name.
+                    attempt_level = _retry_annealing_level(retries)
+                    total_maps_expected = 0
 
                     # --- B. GENERATE CODE ---
                     self.logger.info(f"    (Attempt {retries+1}) Asking LLM to write code...")
                     response = self.model.generate_content(current_prompt, generation_config=self.generation_config)
                     result_json, _ = parse_codegen_response(response, field="code", logger=self.logger)
                     code_str = (result_json or {}).get("code", "")
+                    last_code = code_str
                     
                     # --- C. SANDBOX SETUP ---
                     local_scope = {}
@@ -2418,6 +2497,10 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                         all_valid_meta.extend(current_run_valid_meta)
 
                         task_success = True
+                        # HS-1: record the successful attempt (any residual
+                        # qc_failures are the maps a partial success dropped).
+                        attempt_entries.append(_hs_attempt_entry(
+                            attempt_level, success_rate, qc_failures, ""))
                         break # Exit Retry Loop
                     else:
                         raise ValueError(f"Too many QC failures ({len(qc_failures)}/{total_maps_expected}). Critiques: {qc_failures}")
@@ -2425,8 +2508,18 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 except Exception as e:
                     error_msg = traceback.format_exc()
                     if "QC failures" in str(e): error_msg = str(e) # Clean message for LLM
-                    
+
                     self.logger.warning(f"    ❌ Attempt {retries+1} failed: {error_msg}")
+                    # HS-1: record the failed attempt with the escalation
+                    # stage that will be applied to the next one.
+                    attempt_entries.append(_hs_attempt_entry(
+                        attempt_level,
+                        (len(current_run_valid_maps) / total_maps_expected
+                         if total_maps_expected else None),
+                        qc_failures,
+                        _retry_stage_label(retries + 1),
+                        error=str(e),
+                    ))
                     retries += 1
                     # Annealed retry: escalate from "patch the math" to "abandon
                     # the method" as failures accumulate, so retries can leave a
@@ -2506,6 +2599,45 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                             m["salvage_caveat"] = caveat
                         all_valid_maps.extend(best_attempt["maps"])
                         all_valid_meta.extend(best_attempt["meta"])
+
+            # --- HS-1: per-target verification record (additive) ---
+            # Same shape family as the curve/image quality_history so the
+            # T=2 staging gate and downstream consumers read all three
+            # modalities uniformly. Failure-isolated: never affects results.
+            try:
+                from .._verification_record import (
+                    HS_HISTORY_KEYMAP,
+                    build_quality_history,
+                )
+                _final_frac = (
+                    attempt_entries[-1].get("passed_fraction")
+                    if attempt_entries else None
+                )
+                _hist = build_quality_history(
+                    best_value=(_final_frac if _final_frac is not None else 0.0),
+                    threshold=self.SUCCESS_THRESHOLD,
+                    all_attempts=None,
+                    verification_history=attempt_entries,
+                    judge_result=None,
+                    script_errors=None,
+                    keymap=HS_HISTORY_KEYMAP,
+                )
+                # The task verdict also encodes the required-outputs gate,
+                # which the numeric fraction alone cannot — overwrite
+                # (curve's verifier-approved path does the same).
+                _hist["approved"] = bool(task_success)
+                state.setdefault("dynamic_analysis_records", []).append({
+                    "target": target_desc,
+                    "required_outputs": required_outputs,
+                    "task_success": bool(task_success),
+                    "salvaged": (not task_success) and best_attempt["valid_count"] > 0,
+                    "script": last_code or None,
+                    "quality_history": _hist,
+                })
+            except Exception as _rec_err:  # noqa: BLE001 - record is additive
+                self.logger.warning(
+                    f"    dynamic-analysis record skipped: {_rec_err}"
+                )
 
         # --- FINAL AGGREGATION ---
         if not all_valid_maps:

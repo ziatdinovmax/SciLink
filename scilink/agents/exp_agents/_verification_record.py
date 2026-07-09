@@ -57,6 +57,24 @@ CURVE_HISTORY_KEYMAP: Dict[str, Any] = {
     "include_score_explanation": False,
 }
 
+# Hyperspectral dynamic-analysis (per-target codegen retry loop). The metric
+# is the fraction of output maps that passed QC on an attempt; the annealing
+# level maps the 3-stage retry ladder (patch → question method → abandon
+# method family) onto the shared 0/1/2 scale. ``approved`` is overwritten by
+# the caller with the task-success verdict (fraction + required-outputs gate),
+# mirroring curve's verifier-approved overwrite.
+HS_HISTORY_KEYMAP: Dict[str, Any] = {
+    "final_key": "final_passed_fraction",
+    "iteration_fields": [
+        ("passed_fraction", lambda e: e.get("passed_fraction")),
+        ("annealing_level", lambda e: e.get("annealing_level", 0)),
+        ("issues", _issues),
+        ("fix_applied", lambda e: e.get("recommended_action", "")),
+    ],
+    "include_alternative_models": False,
+    "include_score_explanation": False,
+}
+
 IMAGE_HISTORY_KEYMAP: Dict[str, Any] = {
     "final_key": "final_score",
     "iteration_fields": [
