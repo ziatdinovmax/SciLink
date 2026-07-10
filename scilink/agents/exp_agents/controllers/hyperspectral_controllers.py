@@ -173,6 +173,10 @@ def _planning_tool_awareness(state: dict) -> str | None:
         "or parameters that a tool below already handles — name the method (e.g. "
         "'measure the K-edge step', 'obtain mu from tables') and leave the exact "
         "windows / coefficients to the tool.",
+        "When a tool below matches a required deliverable, NAME that tool in the "
+        "target description as the method of record (e.g. 'quantify the edge jump "
+        "with `measure_edge_step`') — the implementation must call it rather than "
+        "hand-roll its own estimator.",
     ]
     for s in specs:
         wtu = getattr(s, "when_to_use", "") or getattr(s, "description", "")
@@ -307,6 +311,14 @@ def _codegen_retry_feedback(failures: int, critique: str) -> str:
             "or outlier channels. Negative / NaN / mostly-masked outputs are "
             "strong evidence the global model is biased — change families, do not "
             "re-fit the same way."
+        )
+    if failures >= 2:
+        block.append(
+            "Note: 'method' and 'method family' refer to YOUR estimator "
+            "structure, never to the vetted REGISTERED TOOLS — a registered "
+            "tool that fits the task remains the preferred implementation; "
+            "change how you drive it (windows, parameters, fallback "
+            "edge/feature) rather than replacing it with hand-rolled code."
         )
     return "\n".join(block)
 
