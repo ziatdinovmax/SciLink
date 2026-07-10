@@ -25,6 +25,7 @@ from scilink.agents.exp_agents.controllers.hyperspectral_controllers import (  #
     RunDynamicAnalysisController,
     SelectRefinementTargetController,
     _hs_attempt_entry,
+    _render_attempt_history,
     _retry_annealing_level,
     _retry_stage_label,
 )
@@ -154,6 +155,24 @@ def test_retry_helpers():
         {"location": "mean_map", "problem": "looks like noise"},
         {"location": "execution", "problem": "boom"},
     ]
+
+
+def test_attempt_history_block():
+    """First attempt gets no block; later reviews see the trajectory."""
+    assert _render_attempt_history([]) == ""
+    entries = [
+        _hs_attempt_entry(0, None,
+                          ["Au_Thickness: 40 um implausible for sputtered film"],
+                          "patch the logic/math", error="Required outputs failed"),
+        _hs_attempt_entry(1, 0.5, [], "question the method",
+                          error="Required outputs failed: ['Au_Thickness']"),
+    ]
+    block = _render_attempt_history(entries)
+    assert "### PRIOR ATTEMPTS ON THIS TASK" in block
+    assert "Attempt 1 (level 0, maps passed n/a)" in block
+    assert "Attempt 2 (level 1, maps passed 0.50)" in block
+    assert "implausible for sputtered film" in block
+    assert "converging on the same measured magnitude" in block
 
 
 def test_staging_gate_on_records(monkeypatch, tmp_path):

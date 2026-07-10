@@ -359,6 +359,42 @@ def _hs_attempt_entry(level: int, passed_fraction, qc_failures: list,
     }
 
 
+def _render_attempt_history(entries: list) -> str:
+    """Compact prior-attempt block for the combined result review.
+
+    Gives the reviewer the trajectory (what each earlier attempt was allowed
+    to change, what fraction of its maps passed, and why it was rejected) so
+    its stance can move under mounting evidence — the hyperspectral analogue
+    of the verification history the curve/image verifiers receive. Returns
+    ``""`` on the first attempt, leaving that prompt unchanged.
+    """
+    if not entries:
+        return ""
+    lines = [
+        "### PRIOR ATTEMPTS ON THIS TASK",
+        "Earlier attempts and their review outcomes (constraint level 0 = "
+        "plan-constrained; 1 = method questioned; 2 = method family "
+        "abandoned):",
+    ]
+    for k, e in enumerate(entries, 1):
+        frac = e.get("passed_fraction")
+        frac_s = f"{frac:.2f}" if isinstance(frac, (int, float)) else "n/a"
+        issues = "; ".join(
+            f"{i.get('location')}: {str(i.get('problem'))[:220]}"
+            for i in (e.get("issues_found") or [])[:3]
+        ) or "none recorded"
+        lines.append(
+            f"- Attempt {k} (level {e.get('annealing_level')}, maps passed "
+            f"{frac_s}): {issues}"
+        )
+    lines.append(
+        "If methodologically DIFFERENT attempts keep converging on the same "
+        "measured magnitude, weigh that agreement as evidence in its own "
+        "right when judging the current result."
+    )
+    return "\n".join(lines)
+
+
 def _append_literature_context(prompt: list, state: dict) -> None:
     """Append pre-fetched literature context (Channel A passthrough).
 
@@ -2694,7 +2730,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                             dashboard_bytes, code_str, ctx.mean_spec_bytes or None,
                             state.get("system_info"),
                             state.get("analysis_objective"),
-                            feature_name, summary, tool_descriptions)
+                            feature_name, summary, tool_descriptions,
+                            attempt_history=_render_attempt_history(ctx.attempt_entries))
                         if not is_valid:
                             self.logger.warning(
                                 f"    🔎 Combined review rejected "
@@ -2907,7 +2944,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
 
     def _review_required_output_one(self, dashboard_bytes, code_str, mean_spec_bytes,
                                     system_info, objective, feature_desc,
-                                    result_summary, tool_descriptions):
+                                    result_summary, tool_descriptions,
+                                    attempt_history: str = ""):
         meta_str = (json.dumps(system_info, default=str)[:1500]
                     if system_info else "(none)")
         prompt = [SPECTROSCOPY_RESULT_REVIEW_INSTRUCTIONS.format(
@@ -2917,6 +2955,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             result_summary=f"Output '{feature_desc}': {result_summary}",
             tool_descriptions=tool_descriptions or "(no registered tool was called)",
             tool_scrutiny=VERIFIER_TOOL_SCRUTINY_PRINCIPLE,
+            attempt_history=attempt_history,
         )]
         prompt.append("Result dashboard (map + histogram):")
         prompt.append({"mime_type": "image/jpeg", "data": dashboard_bytes})
@@ -2931,7 +2970,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
 
     def _review_required_output(self, dashboard_bytes, code_str, mean_spec_bytes,
                                 system_info, objective, feature_desc,
-                                result_summary, tool_descriptions) -> tuple[bool, str]:
+                                result_summary, tool_descriptions,
+                                attempt_history: str = "") -> tuple[bool, str]:
         """Combined visual + physical review for a REQUIRED output, in ONE voted
         pass. Replaces the separate visual-QC then physics-sanity gates for
         required deliverables: a single reviewer weighs the dashboard, the
@@ -2948,7 +2988,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 ok, crit = self._review_required_output_one(
                     dashboard_bytes, code_str, mean_spec_bytes,
                     system_info, objective, feature_desc,
-                    result_summary, tool_descriptions)
+                    result_summary, tool_descriptions,
+                    attempt_history=attempt_history)
             except Exception as e:
                 self.logger.warning(f"Combined result review crashed: {e}")
                 return True, ""  # fail-open

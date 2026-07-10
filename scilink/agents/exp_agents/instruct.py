@@ -1596,6 +1596,8 @@ measurability, …):
 
 {tool_scrutiny}
 
+{attempt_history}
+
 ### KEY PRINCIPLES
 - Trust the DATA over the objective's geometric framing. A uniform or
   full-field result is VALID when the signal genuinely fills the field: if the
@@ -1616,6 +1618,11 @@ measurability, …):
   either way; the number is evidence, not a verdict.
 - A merely SURPRISING value is not a flaw if the method is sound and the data
   and tool evidence support it. Do not suppress genuine findings.
+- A sample-description prior (how the sample was supposedly prepared and what
+  magnitude that implies) is context, not evidence: when methodologically
+  independent attempts converge on the same measured value that the prior
+  calls implausible, accept the sound measurement and state the discrepancy
+  with the sample description, rather than rejecting on the prior alone.
 - Reject ONLY when you can name a SPECIFIC methodological/physical flaw AND the
   direction of the fix (which estimator / window / step to use instead).
 
