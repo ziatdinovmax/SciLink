@@ -113,9 +113,11 @@ def test_image_reuse_golden(tmp_path):
     assert result["status"] == "success", result.get("error")
     rv = result.get("reuse_validity")
     assert rv and rv["reused"] is True, rv
-    # Image asymmetry: reuse runs ONE soft verification pass and attaches
-    # a quality_history (ledger item pinned in the plan §2.2).
+    # Image asymmetry: reuse runs a soft VOTED verification (median of 3)
+    # and attaches a quality_history (ledger item pinned in the plan §2.2).
     assert result.get("quality_history") is not None
+    assert len(rv["score_votes"]) == 3
+    assert sum(1 for c in model.calls if c["rule"] == "verify") == 3
 
     payload = {
         "llm_calls": [c["rule"] for c in model.calls],
@@ -124,3 +126,49 @@ def test_image_reuse_golden(tmp_path):
         "reuse_validity": normalize_obj(rv, norm),
     }
     check_golden("image_reuse", payload)
+
+
+def test_image_reuse_vote_median_absorbs_outlier(tmp_path):
+    """One outlier-low vote must not flip the reuse verdict: votes
+    (0.85, 0.40, 0.75) -> median 0.75 >= 0.7 -> 'good'."""
+    from scilink.agents.exp_agents.image_analysis_agent import ImageAnalysisAgent
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    image = write_blob_image(data_dir / "blobs.npy")
+
+    prior_agent = ImageAnalysisAgent(
+        output_dir=str(tmp_path / "prior"), enable_human_feedback=False,
+        use_literature=False,
+    )
+    prior_agent.model = ScriptedModel(image_rules("happy"))
+    assert prior_agent.analyze(str(image))["status"] == "success"
+
+    def _vote(score):
+        return {"quality_score": score, "is_acceptable": score >= 0.7,
+                "result_type": "delivered", "issues_found": [],
+                "recommended_action": "none",
+                "overall_assessment": "vote fixture"}
+
+    rules = image_rules("happy")
+    for r in rules:
+        if r.name == "verify":
+            r.responses = [_vote(0.85), _vote(0.40), _vote(0.75)]
+            r.repeat_last = True
+
+    agent = ImageAnalysisAgent(
+        output_dir=str(tmp_path / "out"), enable_human_feedback=False,
+        use_literature=False,
+    )
+    agent.model = ScriptedModel(rules)
+    result = agent.analyze(
+        str(image),
+        prior_analysis_paths=[str(tmp_path / "prior")],
+        reuse_locked_script=True,
+    )
+
+    rv = result["reuse_validity"]
+    assert rv["score_votes"] == [0.40, 0.75, 0.85]
+    assert rv["quality_score"] == pytest.approx(0.75)
+    assert rv["verdict"] == "good"
+    assert "quality_warning" not in result
