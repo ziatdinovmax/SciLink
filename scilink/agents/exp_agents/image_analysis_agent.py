@@ -996,7 +996,10 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         ) or "No claims generated."
 
         prompt = IMAGE_ANALYSIS_TIER2_DECISION_INSTRUCTIONS.format(
-            tier1_summary=tier1_results.get("detailed_analysis", "")[:2000],
+            # `.get(k, "")` does not guard a present-but-None value (observed
+            # live: a synthesis pass returned detailed_analysis=None and
+            # None[:2000] crashed the whole analyze()).
+            tier1_summary=(tier1_results.get("detailed_analysis") or "")[:2000],
             tier1_features=features_str,
             tier1_claims=claims_str,
             objective=objective or "General image analysis",
