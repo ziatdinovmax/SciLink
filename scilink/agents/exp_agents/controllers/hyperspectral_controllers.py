@@ -315,10 +315,12 @@ def _codegen_retry_feedback(failures: int, critique: str) -> str:
     if failures >= 2:
         block.append(
             "Note: 'method' and 'method family' refer to YOUR estimator "
-            "structure, never to the vetted REGISTERED TOOLS — a registered "
-            "tool that fits the task remains the preferred implementation; "
-            "change how you drive it (windows, parameters, fallback "
-            "edge/feature) rather than replacing it with hand-rolled code."
+            "structure — a vetted REGISTERED TOOL that fits the task remains "
+            "the preferred implementation: first change how you drive it "
+            "(windows, parameters, fallback edge/feature). Replace a "
+            "registered tool with custom code only if you state which of its "
+            "parameters you already tried and why no setting of them can "
+            "address the failure."
         )
     return "\n".join(block)
 
