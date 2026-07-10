@@ -134,6 +134,17 @@ ReaxFF:
 - "Cannot open potential file": file not in working directory or wrong path
 - Temperature immediately 1e6+ K: unit mismatch between potential and script
 - Pressure ~1e6 at start: structure not minimized
+- "Out of range atoms - cannot compute PPPM": an atom/ion left the long-range
+  grid *mid-run* (a fast species, or after an NPT volume change) — a
+  deck-fixable dynamics problem, not a structure one. Reduce the timestep
+  (e.g. 2→1 fs for flexible molecular liquids), tighten `neigh_modify every 1
+  delay 0 check yes` with a larger neighbor skin, and soften an over-aggressive
+  barostat (longer Pdamp).
+- Non-finite (nan/inf) or huge-*negative* energy at step 0 that persists even
+  though the deck already minimizes: overlapping / near-zero-distance atoms from
+  a bad initial pack (often opposite charges on top of each other). Minimization
+  CANNOT fix this — it collapses the overlap further. The structure must be
+  regenerated / repacked; do not patch the deck.
 
 
 ## Validation

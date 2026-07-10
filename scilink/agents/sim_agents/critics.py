@@ -702,6 +702,18 @@ and a successful run (give a verdict and sanity-check the physics).
 Return a JSON object with these fields:
   status              "success" | "error"
   run_status          "succeeded" | "failed" | "incomplete"
+  failure_class       "deck" | "structure" | null
+                      Set ONLY when run_status is "failed" — the ROOT cause.
+                      "structure" — the failure is caused by the initial atomic
+                      configuration itself (a broken / overlapping pack), so NO
+                      change to the run inputs can fix it and it must be
+                      regenerated; a tell is a non-finite or absurd energy /
+                      pressure at the very first step that persists even though
+                      the deck already minimizes. "deck" — anything a corrected
+                      input file fixes (a setting, a style, an unstable timestep,
+                      an atom leaving the grid mid-run). When "structure", set
+                      suggested_fixes to null: the structure must be regenerated,
+                      not patched.
   verdict             "good" | "warning" | "poor" | "needs_fixes"
                       good        — converged, physically sensible
                       warning     — converged but with concerns

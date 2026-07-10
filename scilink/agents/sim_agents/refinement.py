@@ -586,6 +586,7 @@ def _refine_phase(
         "cycles": ctx.cycle + 1,
         "verdict": last_verdict.get("verdict"),
         "run_status": last_verdict.get("run_status"),
+        "failure_class": last_verdict.get("failure_class"),
     }
 
 
@@ -922,6 +923,12 @@ def run_campaign(
 
     result = {"status": overall, "stages": stage_records, "phases": flat,
               "history": ctx.history}
+    # Surface a structure-caused failure so the caller can regenerate the
+    # structure rather than re-editing a deck that cannot fix a broken pack.
+    if overall != "success" and any(
+        p.get("failure_class") == "structure" for p in flat
+    ):
+        result["failure_class"] = "structure"
     if dry_run_record is not None:
         result["dry_run"] = dry_run_record
     return result

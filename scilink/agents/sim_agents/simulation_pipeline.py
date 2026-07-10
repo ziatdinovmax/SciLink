@@ -170,7 +170,7 @@ def _load_components_manifest(structure_path: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def run_complete_workflow(
+def _run_workflow_once(
     user_request: str,
     *,
     scale: str = "periodic_dft",
@@ -414,6 +414,44 @@ def run_complete_workflow(
         "success" if refinement.get("status") == "success"
         else f"refinement_{refinement.get('status', 'failed')}"
     )
+    return result
+
+
+def run_complete_workflow(
+    user_request: str,
+    *,
+    max_structure_retries: int = 0,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Run the full pipeline, regenerating the structure on a structure-caused failure.
+
+    Thin wrapper over :func:`_run_workflow_once`. The refinement loop can only
+    rewrite the run inputs, so it cannot recover from a broken *initial
+    structure* (a bad packmol pack that blows up at step 0 — the critic marks it
+    ``failure_class="structure"``), nor from structure generation failing
+    outright. When either happens and ``max_structure_retries`` remain, the
+    structure is regenerated (a fresh stochastic pack) and the whole workflow is
+    retried, since no deck edit can fix a broken configuration. ``0`` (default)
+    preserves the single-attempt behavior. All other arguments are forwarded
+    unchanged — see :func:`_run_workflow_once`.
+    """
+    caller_supplied_structure = kwargs.get("structure_file") is not None
+    result: Dict[str, Any] = {}
+    for attempt in range(max(0, max_structure_retries) + 1):
+        result = _run_workflow_once(user_request, **kwargs)
+        structure_caused = (
+            result.get("final_status") == "failed_structure_generation"
+            or (result.get("refinement") or {}).get("failure_class") == "structure"
+        )
+        if (structure_caused and not caller_supplied_structure
+                and attempt < max_structure_retries):
+            logger.info(
+                "structure-caused failure (%s); regenerating structure and "
+                "retrying (%d/%d)",
+                result.get("final_status"), attempt + 1, max_structure_retries,
+            )
+            continue
+        return result
     return result
 
 
