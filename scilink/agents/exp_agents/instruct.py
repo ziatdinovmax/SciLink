@@ -1623,6 +1623,11 @@ measurability, …):
   independent attempts converge on the same measured value that the prior
   calls implausible, accept the sound measurement and state the discrepancy
   with the sample description, rather than rejecting on the prior alone.
+- Any flux / photon-statistics / SNR argument MUST cite the MEASURED FLUX BY
+  BAND numbers in the RESULT (deterministic, computed from the data) — never
+  a visual estimate from the plotted spectrum, whose linear scale makes
+  usable count levels look like zero. Disputing a vetted tool's
+  measurability/SNR gate requires showing those numbers contradict it.
 - Reject ONLY when you can name a SPECIFIC methodological/physical flaw AND the
   direction of the fix (which estimator / window / step to use instead).
 

@@ -359,6 +359,51 @@ def _hs_attempt_entry(level: int, passed_fraction, qc_failures: list,
     }
 
 
+def _render_band_flux_table(data, axis, axis_units: str, aux: dict | None = None,
+                            n_bands: int = 16) -> str:
+    """Deterministic field-mean counts per axis band, for the result review.
+
+    The review's flux/measurability arguments must rest on numbers, not on a
+    visual read of the mean-spectrum plot: on a linear-scale plot whose
+    y-range is set by low-energy spikes, a perfectly usable ~100-200
+    counts/channel region is rendered a few pixels above the zero line and
+    reviewers systematically misjudge it. Computed once per run from the
+    primary cube and every spectrum-aligned auxiliary operand (e.g. I0).
+    """
+    try:
+        axis = np.asarray(axis, dtype=float)
+        e = axis.size
+        series = {"sample": np.asarray(data).reshape(-1, e).mean(0)}
+        for label, arr in (aux or {}).items():
+            arr = np.asarray(arr)
+            if arr.ndim == 1 and arr.shape[0] == e:
+                series[label] = arr.astype(float)
+            elif arr.ndim >= 2 and arr.shape[-1] == e:
+                series[label] = arr.reshape(-1, e).mean(0)
+        edges = np.linspace(axis.min(), axis.max(), n_bands + 1)
+        idx = np.clip(np.digitize(axis, edges) - 1, 0, n_bands - 1)
+        header = "  ".join(f"{name:>14s}" for name in series)
+        lines = [
+            "### MEASURED FLUX BY BAND (deterministic — computed from the data)",
+            f"Field-mean counts per channel in equal {axis_units} bands:",
+            f"{'band':>19s}  {header}",
+        ]
+        for b in range(n_bands):
+            m = idx == b
+            if not m.any():
+                continue
+            vals = "  ".join(f"{float(v[m].mean()):>14.1f}" for v in series.values())
+            lines.append(f"{edges[b]:>8.1f}-{edges[b + 1]:<10.1f}{vals}")
+        lines.append(
+            "These numbers OVERRIDE any visual estimate from the spectrum plot. "
+            "Note analysis windows aggregate MANY channels, so usable SNR can be "
+            "high even where the plotted curve looks near zero."
+        )
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001 - advisory block, never break the run
+        return ""
+
+
 def _render_attempt_history(entries: list) -> str:
     """Compact prior-attempt block for the combined result review.
 
@@ -2238,6 +2283,12 @@ class RunDynamicAnalysisController:
                     f"{optimal_data.shape}; kept as context only (not an operand)."
                 )
 
+        # Deterministic flux-by-band table for the result reviews (computed
+        # once; same data for every target/attempt this run).
+        flux_table = _render_band_flux_table(
+            optimal_data, state["energy_axis"], axis_units, auxiliary_operands
+        )
+
         # --- MAIN LOOP: Process each target description separately ---
         for i, target in enumerate(custom_targets, 1):
             target_desc = target.get("description", "Analyze feature")
@@ -2339,6 +2390,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 "processing_note": processing_note,
                 "all_valid_maps": all_valid_maps,
                 "all_valid_meta": all_valid_meta,
+                "flux_table": flux_table,
             }
             engine = CodegenQCEngine(host=self, spec=self._QC_ENGINE_SPEC)
             out = engine.run_item(ctx) or {}
@@ -2481,6 +2533,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 f"outputs passed verification. Committed (passed QC): "
                 f"{passed_names or 'none'}. Never passed / withheld: "
                 f"{missing or 'none'}.")
+            if ctx.session.get("flux_table"):
+                result_summary += "\n\n" + ctx.session["flux_table"]
             rep_dash = (best_attempt["images"][0]["data"]
                         if best_attempt["images"] else None)
             present, conf, caveat = self._judge_salvage(
@@ -2724,6 +2778,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                             f"{float(np.nanmean(result_map)):.4g} {current_unit}; "
                             f"valid coverage {_cov:.1f}% "
                             f"({int(_real.sum())} of {result_map.size} pixels finite & non-zero)")
+                        if ctx.session.get("flux_table"):
+                            summary += "\n\n" + ctx.session["flux_table"]
                         tool_descriptions = _used_tool_descriptions(state, code_str)
                         self.logger.info(f"    🔎 Combined review on {feature_name}...")
                         is_valid, critique = self._review_required_output(

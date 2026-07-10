@@ -26,6 +26,7 @@ from scilink.agents.exp_agents.controllers.hyperspectral_controllers import (  #
     SelectRefinementTargetController,
     _hs_attempt_entry,
     _render_attempt_history,
+    _render_band_flux_table,
     _retry_annealing_level,
     _retry_stage_label,
 )
@@ -173,6 +174,27 @@ def test_attempt_history_block():
     assert "Attempt 2 (level 1, maps passed 0.50)" in block
     assert "implausible for sputtered film" in block
     assert "converging on the same measured magnitude" in block
+
+
+def test_band_flux_table():
+    """Table reports per-band field means for the cube and aligned operands."""
+    e = np.linspace(0.0, 100.0, 200)
+    cube = np.ones((4, 4, 200))
+    cube[..., e > 50] = 10.0          # low band ~1, high band ~10
+    i0 = np.full(200, 5.0)
+    table = _render_band_flux_table(cube, e, "keV", {"baseline_I0": i0},
+                                    n_bands=4)
+    assert "MEASURED FLUX BY BAND" in table
+    assert "baseline_I0" in table and "sample" in table
+    rows = [l for l in table.splitlines() if "-" in l and "band" not in l]
+    assert len(rows) == 4
+    first, last = rows[0].split(), rows[-1].split()
+    assert float(first[1]) == 1.0 and float(last[1]) == 10.0   # sample bands
+    assert float(first[2]) == 5.0 and float(last[2]) == 5.0    # I0 flat
+    assert "OVERRIDE any visual estimate" in table
+    # misaligned operand is skipped, not crashed on
+    t2 = _render_band_flux_table(cube, e, "keV", {"odd": np.ones(7)}, n_bands=4)
+    assert "odd" not in t2
 
 
 def test_staging_gate_on_records(monkeypatch, tmp_path):
