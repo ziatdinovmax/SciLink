@@ -3302,30 +3302,17 @@ Return JSON with:
             base_script=ctx.reuse_script,
         )
         if reuse_result.get("success"):
-            # Softer validity guard: a VOTED vision-verification pass, no
-            # iterative re-derivation. The verdict-assigned score is noisy
-            # (±0.15 observed on identical output — enough to flip the
-            # validity flag near the threshold), and this is the one accept
-            # decision with no other robustness mechanism: the reuse fast
-            # path deliberately bypasses best-of-N and the verification
-            # loop. Median of 3 independent passes stabilizes it; votes
-            # that fail (API error) are simply dropped, and zero valid
-            # votes fail soft to 0.0 exactly as the single pass did.
-            verdicts = []
-            for _vote in range(3):
-                v = self._verify_quality(
-                    ctx.state, reuse_result, history=[],
-                    verification_iter=0, annealing_level=0,
-                )
-                if v and isinstance(v.get("quality_score"), (int, float)):
-                    verdicts.append(v)
-            scores = sorted(v["quality_score"] for v in verdicts)
-            v_score = float(np.median(scores)) if scores else 0.0
-            if scores:
-                self.logger.info(
-                    f"   🗳️  Reuse validity votes: "
-                    f"{[round(s, 2) for s in scores]} → median {v_score:.2f}"
-                )
+            # Softer validity guard: a single vision-verification pass,
+            # no iterative re-derivation.
+            verification = self._verify_quality(
+                ctx.state, reuse_result, history=[],
+                verification_iter=0, annealing_level=0,
+            )
+            v_score = 0.0
+            if verification and isinstance(
+                verification.get("quality_score"), (int, float)
+            ):
+                v_score = verification["quality_score"]
             verdict = "good" if ctx.accept_gate.is_accept(v_score) else "poor"
             reuse_result["_quality_score"] = v_score
             if verdict == "good":
@@ -3360,14 +3347,13 @@ Return JSON with:
                 "reused": True,
                 "source": ctx.reuse_source,
                 "quality_score": v_score,
-                "score_votes": scores,
                 "threshold": ctx.quality_threshold,
                 "verdict": verdict,
                 "message": message,
             }
             reuse_result["quality_history"] = self._build_quality_history(
                 v_score, ctx.quality_threshold, [],
-                verdicts, None,
+                [verification] if verification else [], None,
             )
             if verdict == "poor":
                 reuse_result["quality_warning"] = message
