@@ -2686,6 +2686,14 @@ Your guidance: '''
         prior_runs = _prior_curve_fit_block(state)
         if prior_runs:
             context_parts.append(prior_runs)
+        # Script-bank exemplar (#346): first fresh generation only — never on
+        # refinements (prior_script) and never once annealing has escalated,
+        # so the hot script-drop's from-scratch regeneration stays exemplar-free.
+        exemplar = state.get("_bank_exemplar")
+        if (exemplar and prior_script is None
+                and state.get("_annealing_level", 0) == 0):
+            from scilink.skills._shared import _script_bank
+            context_parts.append(_script_bank.render_exemplar_block(exemplar))
 
         # Optional auxiliary operand(s) (#226): for each 1D auxiliary curve aligned
         # with the primary (same length), write it next to the spectrum and list
@@ -4102,10 +4110,50 @@ Return JSON with:
         ctx.initial_label = initial_model
         self.logger.info(f"   Attempt 1: {str(initial_model)[:80]}...")
 
+        self._offer_bank_exemplar(ctx)
         return self._fit_single_spectrum(
             state=ctx.state, curve_data=ctx.data, data_path=ctx.data_path,
             spectrum_name=ctx.item_name, spectrum_idx=ctx.item_idx, base_script=None
         )
+
+    def _offer_bank_exemplar(self, ctx: QCItemContext) -> None:
+        """Adapt-mode script-bank retrieval (#346 step 2).
+
+        Fingerprints the item's data and, when the bank holds a closely
+        matching proven script, stashes it in state for the FIRST codegen
+        attempt to adapt (consumed by ``_generate_fitting_script`` at
+        annealing level 0 only, so the hot script-drop is preserved).
+        Precedence: explicit ``prior_analysis_paths`` reference material wins
+        — the bank never competes with a user-supplied prior. Failure-isolated.
+        """
+        state = ctx.state
+        state.pop("_bank_exemplar", None)
+        try:
+            from scilink.skills._shared import _script_bank
+            if not _script_bank.bank_enabled() or state.get("prior_analysis_paths"):
+                return
+            xy = _extract_xy(ctx.data)
+            if xy is None:
+                return
+            fingerprint = _script_bank.curve_fingerprint(
+                xy[0], xy[1],
+                x_units=_script_bank.guess_x_units(state.get("system_info")),
+            )
+            matches = _script_bank.find_exemplar(
+                "curve_fitting", fingerprint,
+                _script_bank.measurement_context(state.get("system_info") or {}),
+            )
+            if matches:
+                match = matches[0]
+                state["_bank_exemplar"] = match
+                _script_bank.mark_retrieved("curve_fitting", match["record"]["id"])
+                self.logger.info(
+                    f"   🏦 Bank exemplar offered: id={match['record']['id']} "
+                    f"score={match['score']} "
+                    f"({str(match['record'].get('technique_signals', {}).get('model_type') or '')[:60]})"
+                )
+        except Exception as e:
+            self.logger.warning(f"Bank retrieval skipped: {e}")
 
     def qc_record_initial(self, ctx: QCItemContext, result: dict) -> None:
         r2 = result.get("fit_quality", {}).get("r_squared") or 0

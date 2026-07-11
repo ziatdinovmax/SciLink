@@ -176,6 +176,105 @@ class TestBankCRUD:
         assert sb.list_records("curve_fitting") == []
 
 
+class TestRetrieval:
+    def _raman(self, seed=0, shift=0.0, amp=1.0):
+        x = np.linspace(90, 1300, 2400)
+        y = (5 * amp * np.exp(-(x - (142 + shift)) ** 2 / 30)
+             + 3 * np.exp(-(x - (395 + shift)) ** 2 / 120)
+             + 2 * np.exp(-(x - (513 + shift)) ** 2 / 130)
+             + np.random.RandomState(seed).normal(0, 0.05, x.size))
+        return x, y
+
+    def _seed_bank(self):
+        x, y = self._raman(0)
+        sb.add_record("curve_fitting", {
+            "working_script": "# raman exemplar",
+            "data_fingerprint": sb.curve_fingerprint(x, y),
+            "measurement_context": {"technique": "Raman"},
+            "technique_signals": {"model_type": "pseudo-Voigt sum"},
+            "outcome": {"metric": {"name": "r_squared", "value": 0.99}},
+            "provenance": {"session": "s1"},
+        })
+
+    def test_same_family_hits_unrelated_misses(self):
+        self._seed_bank()
+        x, y = self._raman(seed=7, shift=3.0, amp=0.6)  # same bands, new run
+        hit = sb.find_exemplar("curve_fitting", sb.curve_fingerprint(x, y),
+                               {"technique": "Raman"})
+        assert hit and hit[0]["record"]["working_script"] == "# raman exemplar"
+        assert hit[0]["fingerprint_score"] > 0.9
+
+        xd = np.linspace(0, 100, 1500)  # unrelated decay curve
+        yd = 10 * np.exp(-xd / 20) + np.random.RandomState(6).normal(0, 0.02, xd.size)
+        assert sb.find_exemplar("curve_fitting", sb.curve_fingerprint(xd, yd),
+                                {"technique": "TRPL"}) == []
+
+    def test_units_hard_filter(self):
+        self._seed_bank()
+        rec = sb.list_records("curve_fitting")[0]
+        # Give the stored record explicit units; a query in DIFFERENT units
+        # must be filtered out even with a perfect fingerprint.
+        x, y = self._raman(0)
+        fp_ev = sb.curve_fingerprint(x, y, x_units="eV")
+        fp_cm = sb.curve_fingerprint(x, y, x_units="cm-1")
+        rec["data_fingerprint"]["x_units"] = "cm-1"
+        (sb._domain_dir("curve_fitting") / f"{rec['id']}.json").write_text(
+            __import__("json").dumps(rec))
+        assert sb.find_exemplar("curve_fitting", fp_ev) == []
+        assert sb.find_exemplar("curve_fitting", fp_cm)
+
+    def test_usage_stats_break_ties(self):
+        x, y = self._raman(0)
+        fp = sb.curve_fingerprint(x, y)
+        base = {"data_fingerprint": fp, "measurement_context": {"technique": "Raman"},
+                "outcome": {}, "provenance": {"session": "s1"}}
+        fresh = sb.add_record("curve_fitting", {**base, "working_script": "# once"})
+        vet = sb.add_record("curve_fitting", {**base, "working_script": "# veteran"})
+        for s in ("s2", "s3", "s4"):
+            sb.add_record("curve_fitting", {**base, "working_script": "# veteran",
+                                            "provenance": {"session": s}})
+        top = sb.find_exemplar("curve_fitting", fp)[0]
+        assert top["record"]["id"] == vet["id"]
+        assert fresh["id"] != vet["id"]
+
+    def test_mark_retrieved_and_no_fingerprint(self):
+        self._seed_bank()
+        rid = sb.list_records("curve_fitting")[0]["id"]
+        sb.mark_retrieved("curve_fitting", rid)
+        sb.mark_retrieved("curve_fitting", rid)
+        assert sb.get_record("curve_fitting", rid)["stats"]["n_retrievals"] == 2
+        assert sb.find_exemplar("curve_fitting", None) == []
+        assert sb.find_exemplar("curve_fitting", {"kind": "unknown"}) == []
+
+    def test_render_exemplar_block(self):
+        self._seed_bank()
+        match = sb.find_exemplar("curve_fitting",
+                                 sb.curve_fingerprint(*self._raman(3)))[0]
+        block = sb.render_exemplar_block(match)
+        assert "# raman exemplar" in block
+        assert "STARTING POINT" in block
+        assert "r_squared = 0.99" in block
+
+    def test_hs_similarity_routes_by_band_profile(self):
+        axis = np.linspace(400, 600, 256)
+        edge = 1 / (1 + np.exp(-(axis - 500) / 3))
+        cube_a = edge[None, None, :] * np.ones((4, 4, 256))
+        fp_a = sb.hyperspectral_fingerprint(cube_a, axis, "eV")
+        sb.add_record("hyperspectral", {
+            "working_script": "# edge script", "data_fingerprint": fp_a,
+            "measurement_context": {}, "outcome": {},
+            "provenance": {"session": "h1"}})
+        # Same edge cube, slightly noisy → hit
+        noisy = cube_a * (1 + np.random.RandomState(0).normal(0, 0.05, cube_a.shape))
+        assert sb.find_exemplar(
+            "hyperspectral", sb.hyperspectral_fingerprint(noisy, axis, "eV"))
+        # Different axis window entirely → miss
+        axis2 = np.linspace(1000, 2000, 256)
+        assert sb.find_exemplar(
+            "hyperspectral",
+            sb.hyperspectral_fingerprint(cube_a, axis2, "eV")) == []
+
+
 class TestBankEnabled:
     def test_follows_memory_switch(self, monkeypatch):
         assert sb.bank_enabled() is True          # SCILINK_MEMORY=1 (fixture)

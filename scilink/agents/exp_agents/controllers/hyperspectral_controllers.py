@@ -2226,6 +2226,20 @@ class RunDynamicAnalysisController:
         optimal_data, processing_note = tools.get_optimal_analysis_data(state["original_hspy_data"])
         self.logger.info(f"📊 Dynamic Analysis Prep: {processing_note}")
 
+        # Script-bank retrieval inputs (#346 step 2): fingerprint the cube once
+        # per run; the per-target lookup below adds the target text to the
+        # context query. Failure-isolated; None disables retrieval entirely.
+        _bank_cube_fp = None
+        _bank_ctx = None
+        try:
+            from scilink.skills._shared import _script_bank
+            if _script_bank.bank_enabled() and not state.get("prior_analysis_paths"):
+                _bank_cube_fp = _script_bank.hyperspectral_fingerprint(
+                    optimal_data, state.get("energy_axis"), axis_units)
+                _bank_ctx = _script_bank.measurement_context(sys_info)
+        except Exception as e:
+            self.logger.warning(f"Bank fingerprint skipped: {e}")
+
         # Offer the rank-k decomposition reconstruction as an OPTIONAL, denoised
         # fit target alongside the raw cube (issue #219). The generated code may
         # use it for shape-based features on noisy data, but raw stays the base
@@ -2387,6 +2401,32 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             ctx.required_outputs = required_outputs
             ctx.base_prompt = base_prompt
             ctx.current_prompt = base_prompt
+            # Script-bank exemplar (#346): appended to the FIRST attempt's
+            # prompt only — retries rebuild from the clean base_prompt, so
+            # the escalation ladder (up to "abandon the method family")
+            # stays exemplar-free. Failure-isolated.
+            if _bank_cube_fp is not None:
+                try:
+                    from scilink.skills._shared import _script_bank
+                    matches = _script_bank.find_exemplar(
+                        "hyperspectral", _bank_cube_fp,
+                        {**(_bank_ctx or {}), "analysis_target": target_desc},
+                    )
+                    if matches:
+                        match = matches[0]
+                        ctx.current_prompt = (
+                            base_prompt + "\n\n"
+                            + _script_bank.render_exemplar_block(match)
+                        )
+                        _script_bank.mark_retrieved(
+                            "hyperspectral", match["record"]["id"])
+                        self.logger.info(
+                            f"   🏦 Bank exemplar offered: "
+                            f"id={match['record']['id']} score={match['score']} "
+                            f"({str(match['record'].get('technique_signals', {}).get('analysis_target') or '')[:60]})"
+                        )
+                except Exception as e:
+                    self.logger.warning(f"Bank retrieval skipped: {e}")
             ctx.retries = 0
             ctx.best_attempt = {"req_passed": -1, "valid_count": -1,
                                 "images": [], "maps": [], "meta": []}

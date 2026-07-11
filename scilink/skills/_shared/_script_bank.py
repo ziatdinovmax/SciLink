@@ -419,6 +419,252 @@ def image_fingerprint(image: Any, pixel_size_nm: Optional[float] = None) -> Dict
     return fp
 
 
+# ──────────────────────────────────────────────────────────────
+# Retrieval — adapt-mode exemplar lookup (deterministic v1)
+#
+# Ranking = fingerprint similarity (dominant) + context token overlap +
+# a small cross-session usage bonus. A single best match above the score
+# floor is offered to the FIRST codegen attempt as an exemplar to adapt;
+# the verification loop backstops a wrong pick and the annealing hot
+# script-drop keeps a bad exemplar from trapping the loop.
+# ──────────────────────────────────────────────────────────────
+
+_MIN_EXEMPLAR_SCORE = 0.45
+
+
+def _interval_overlap(a: Any, b: Any) -> float:
+    """Jaccard overlap of two [lo, hi] intervals (0 when unknown)."""
+    try:
+        a0, a1 = sorted(float(v) for v in a)
+        b0, b1 = sorted(float(v) for v in b)
+    except (TypeError, ValueError):
+        return 0.0
+    inter = max(0.0, min(a1, b1) - max(a0, b0))
+    union = max(a1, b1) - min(a0, b0)
+    if union <= 0:
+        return 1.0 if a0 == b0 else 0.0
+    return inter / union
+
+
+def _peak_positions(fp: Dict[str, Any]):
+    return [(p.get("position"), p.get("fwhm"))
+            for p in (fp.get("peaks") or {}).get("top", [])
+            if p.get("position") is not None]
+
+
+def _peak_match(fp_a: Dict[str, Any], fp_b: Dict[str, Any]) -> float:
+    """Symmetric fraction of top peaks matched within a width-aware tolerance."""
+    pa, pb = _peak_positions(fp_a), _peak_positions(fp_b)
+    ca = (fp_a.get("peaks") or {}).get("count", len(pa)) or 0
+    cb = (fp_b.get("peaks") or {}).get("count", len(pb)) or 0
+    if ca == 0 and cb == 0:
+        return 1.0  # two featureless signals match
+    if not pa or not pb:
+        return 0.0
+    try:
+        span = abs(float(fp_a["x_range"][1]) - float(fp_a["x_range"][0]))
+    except (TypeError, ValueError, KeyError, IndexError):
+        span = abs(max(p for p, _ in pa) - min(p for p, _ in pa)) or 1.0
+
+    def _frac(src, dst):
+        hit = 0
+        for pos, fwhm in src:
+            tol = max(fwhm or 0.0, 0.01 * span)
+            if any(abs(pos - q) <= max(tol, qw or 0.0) for q, qw in dst):
+                hit += 1
+        return hit / len(src)
+
+    return 0.5 * (_frac(pa, pb) + _frac(pb, pa))
+
+
+def _count_similarity(na: Any, nb: Any) -> float:
+    try:
+        na, nb = int(na), int(nb)
+    except (TypeError, ValueError):
+        return 0.0
+    if na == 0 and nb == 0:
+        return 1.0
+    if na == 0 or nb == 0:
+        return 0.0
+    return min(na, nb) / max(na, nb)
+
+
+def _curve_similarity(a: Dict[str, Any], b: Dict[str, Any]) -> float:
+    r = _interval_overlap(a.get("x_range"), b.get("x_range"))
+    pk = _peak_match(a, b)
+    cs = _count_similarity((a.get("peaks") or {}).get("count"),
+                           (b.get("peaks") or {}).get("count"))
+    return 0.35 * r + 0.45 * pk + 0.20 * cs
+
+
+def _log_ratio_sim(a: Any, b: Any, scale: float = 1.0) -> Optional[float]:
+    try:
+        a, b = float(a), float(b)
+    except (TypeError, ValueError):
+        return None
+    if a <= 0 or b <= 0:
+        return 1.0 if a == b else 0.0
+    return float(np.exp(-abs(np.log(a / b)) / scale))
+
+
+def _image_similarity(a: Dict[str, Any], b: Dict[str, Any]) -> float:
+    sims = []
+    ia, ib = a.get("intensity") or {}, b.get("intensity") or {}
+    if ia.get("contrast") is not None and ib.get("contrast") is not None:
+        sims.append(max(0.0, 1.0 - abs(ia["contrast"] - ib["contrast"]) / 0.5))
+    if a.get("edge_density") is not None and b.get("edge_density") is not None:
+        sims.append(max(0.0, 1.0 - abs(a["edge_density"] - b["edge_density"]) / 0.2))
+    s = _log_ratio_sim(a.get("fft_periodicity"), b.get("fft_periodicity"), scale=2.0)
+    if s is not None:
+        sims.append(s)
+    s = _log_ratio_sim(a.get("pixel_size_nm"), b.get("pixel_size_nm"), scale=1.0)
+    if s is not None:
+        sims.append(s)
+    return float(np.mean(sims)) if sims else 0.0
+
+
+def _hs_similarity(a: Dict[str, Any], b: Dict[str, Any]) -> float:
+    ax_a, ax_b = a.get("axis") or {}, b.get("axis") or {}
+    r = _interval_overlap((ax_a.get("start"), ax_a.get("end")),
+                          (ax_b.get("start"), ax_b.get("end")))
+    cos = 0.0
+    ba = [v if v is not None else 0.0 for v in (a.get("band_means") or [])]
+    bb = [v if v is not None else 0.0 for v in (b.get("band_means") or [])]
+    if ba and bb and len(ba) == len(bb):
+        va, vb = np.asarray(ba, float), np.asarray(bb, float)
+        denom = float(np.linalg.norm(va) * np.linalg.norm(vb))
+        if denom > 0:
+            cos = float(np.dot(va, vb) / denom)
+    # Reuse the curve peak matcher over the mean-spectrum census; it reads
+    # x_range for its tolerance span, so alias the axis range.
+    pk = _peak_match({**a, "x_range": [ax_a.get("start"), ax_a.get("end")]}, b)
+    # Damp by range agreement: band_means are range-relative, so an identical
+    # profile in a DISJOINT axis window (a different measurement) would
+    # otherwise score high on cosine alone.
+    return (0.30 * r + 0.40 * cos + 0.30 * pk) * (0.4 + 0.6 * r)
+
+
+_SIMILARITY_FNS = {
+    "curve": _curve_similarity,
+    "image": _image_similarity,
+    "hyperspectral": _hs_similarity,
+}
+
+
+def _context_tokens(*sources: Any) -> set:
+    import re
+    words = set()
+    for src in sources:
+        if isinstance(src, dict):
+            text = " ".join(str(v) for v in src.values())
+        else:
+            text = str(src or "")
+        words.update(w for w in re.findall(r"[a-z0-9]+", text.lower())
+                     if len(w) >= 3)
+    return words
+
+
+def _context_similarity(query: set, rec: Dict[str, Any]) -> float:
+    tokens = _context_tokens(rec.get("measurement_context"),
+                             rec.get("technique_signals"))
+    if not query or not tokens:
+        return 0.0
+    return len(query & tokens) / len(query | tokens)
+
+
+def _units_of(fp: Dict[str, Any]) -> Optional[str]:
+    u = fp.get("x_units") or (fp.get("axis") or {}).get("units")
+    return u.strip().lower() if isinstance(u, str) and u.strip() else None
+
+
+def find_exemplar(domain: str, fingerprint: Optional[Dict[str, Any]],
+                  context: Any = None, *, k: int = 1,
+                  min_score: float = _MIN_EXEMPLAR_SCORE,
+                  root: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """Rank bank records against a new dataset; return the top match(es).
+
+    Hard filters: fingerprint kind must match; axis units must agree when
+    both sides declare them. Score = 0.8 × fingerprint similarity + 0.2 ×
+    context token overlap + a small usage bonus (capped at 0.05) for scripts
+    that keep succeeding across sessions. Returns ``[{"record", "score",
+    "fingerprint_score"}, ...]`` above ``min_score`` — empty when nothing in
+    the bank resembles this data (offering a poor exemplar is worse than
+    generating from scratch).
+    """
+    if not fingerprint or not fingerprint.get("kind"):
+        return []
+    kind = fingerprint["kind"]
+    simfn = _SIMILARITY_FNS.get(kind)
+    if simfn is None:
+        return []
+    query_units = _units_of(fingerprint)
+    query_tokens = _context_tokens(context)
+
+    scored = []
+    for rec in list_records(domain, root=root):
+        fp = rec.get("data_fingerprint") or {}
+        if fp.get("kind") != kind or not (rec.get("working_script") or "").strip():
+            continue
+        rec_units = _units_of(fp)
+        if query_units and rec_units and query_units != rec_units:
+            continue
+        s_fp = simfn(fingerprint, fp)
+        s_ctx = _context_similarity(query_tokens, rec)
+        n_succ = (rec.get("stats") or {}).get("n_successes", 1) or 1
+        usage = min(0.05, 0.01 * (int(n_succ) - 1))
+        score = 0.8 * s_fp + 0.2 * s_ctx + usage
+        if score >= min_score:
+            scored.append((score, s_fp, rec))
+    scored.sort(key=lambda t: (-t[0], t[2].get("id", "")))
+    return [{"record": rec, "score": round(sc, 3), "fingerprint_score": round(sfp, 3)}
+            for sc, sfp, rec in scored[:k]]
+
+
+def mark_retrieved(domain: str, rid: str, *, root: Optional[Path] = None) -> None:
+    """Increment a record's retrieval counter (usage stat; never raises)."""
+    try:
+        f = _domain_dir(domain, root=root) / f"{rid}.json"
+        rec = json.loads(f.read_text())
+        stats = rec.setdefault("stats", {})
+        stats["n_retrievals"] = int(stats.get("n_retrievals", 0)) + 1
+        f.write_text(json.dumps(rec, indent=2, default=str))
+    except Exception:
+        pass
+
+
+def render_exemplar_block(match: Dict[str, Any]) -> str:
+    """LLM-facing prompt block offering a retrieved script as an exemplar.
+
+    Shared framing across the agents: the exemplar is a starting point to
+    adapt, dataset-specific values must be re-derived, and the locked plan
+    stays authoritative.
+    """
+    rec = match["record"]
+    outcome = rec.get("outcome") or {}
+    signals = rec.get("technique_signals") or {}
+    what = (signals.get("model_type") or signals.get("analysis_type")
+            or signals.get("analysis_target") or "previous analysis")
+    metric = outcome.get("best_metric") or outcome.get("metric")
+    metric_txt = (f"{metric.get('name')} = {metric.get('value')}"
+                  if isinstance(metric, dict) else "quality gate passed")
+    n_succ = (rec.get("stats") or {}).get("n_successes", 1)
+    return f"""## Reference: proven script from a previous successful analysis (script bank)
+A previous run solved data closely matching this dataset (match score {match['score']}).
+What it did: {str(what)[:300]}
+Result: {metric_txt}; succeeded in {n_succ} session(s).
+
+Use it as a STARTING POINT to adapt: keep its overall structure and vetted
+approach where they fit THIS data, and change whatever does not. Dataset-specific
+values (peak positions/counts, ranges, thresholds) must be re-derived from the
+data at hand — do not copy them. The analysis plan above remains authoritative;
+where the exemplar conflicts with the plan, follow the plan.
+
+```python
+{(rec.get("working_script") or "").strip()}
+```
+"""
+
+
 def hyperspectral_fingerprint(cube: Any, axis: Any = None,
                               axis_units: Optional[str] = None,
                               n_bands: int = 16) -> Dict[str, Any]:
