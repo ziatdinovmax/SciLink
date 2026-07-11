@@ -9,6 +9,8 @@ on any call (ScriptedModel with no rules), so a regression that reintroduces
 an LLM call fails here immediately. Regenerate with QC_GOLDEN_UPDATE=1.
 """
 
+import json
+
 import numpy as np
 
 from .fixtures import write_gaussian_spectrum
@@ -223,6 +225,73 @@ def test_realtime_cold_start_broken_candidate_skipped(tmp_path, monkeypatch):
     assert cs.get("n_auditioned") == 2, cs
     assert (result.get("reuse_validity") or {}).get("source") == \
         f"script_bank:{good_id}"
+
+
+def test_degenerate_data_check_unit():
+    """The pre-flight gate is conservative: glitch shapes fail, real and
+    partially-corrupted spectra pass (the correction path salvages those)."""
+    from scilink.agents.exp_agents.controllers.curve_fitting_controllers import (
+        _degenerate_data_check,
+    )
+    x = np.linspace(0, 100, 500)
+    y = 5 * np.exp(-(x - 50) ** 2 / 9) + np.random.RandomState(0).normal(0, 0.05, 500)
+
+    assert _degenerate_data_check(np.vstack([x, y])) is None  # real spectrum
+    y_nan = y.copy()
+    y_nan[::3] = np.nan  # a third corrupted — recoverable, must pass
+    assert _degenerate_data_check(np.vstack([x, y_nan])) is None
+
+    assert "dynamic range" in _degenerate_data_check(
+        np.vstack([x, np.zeros_like(x)]))          # all-zero
+    assert "finite" in _degenerate_data_check(
+        np.vstack([x[:10], y[:10]]))                # runt
+    assert "finite" in _degenerate_data_check(
+        np.vstack([x, np.full_like(x, np.nan)]))    # all-NaN
+    assert "dynamic range" in _degenerate_data_check(
+        np.vstack([x, np.full_like(x, 7.3)]))       # constant
+
+
+def test_realtime_glitch_frame_gated_zero_llm(tmp_path):
+    """An all-zeros frame under realtime fails in the pre-flight gate:
+    zero LLM calls, no script execution attempts, honest error."""
+    from scilink.agents.exp_agents.curve_fitting_agent import CurveFittingAgent
+
+    data_dir = tmp_path / "data"
+    prior_dir = tmp_path / "prior"
+    data_dir.mkdir()
+    spectrum = write_gaussian_spectrum(data_dir / "gaussian_peak.csv")
+
+    prior_agent = CurveFittingAgent(
+        output_dir=str(prior_dir), enable_human_feedback=False,
+        use_literature=False,
+    )
+    prior_agent.model = ScriptedModel(curve_rules("happy"))
+    assert prior_agent.analyze(str(spectrum))["status"] == "success"
+
+    x = np.linspace(0, 100, 500)
+    glitch = data_dir / "glitch_zeros.csv"
+    np.savetxt(glitch, np.column_stack([x, np.zeros_like(x)]),
+               delimiter=",", header="x,y", comments="")
+
+    agent = CurveFittingAgent(
+        output_dir=str(tmp_path / "out"), enable_human_feedback=False,
+        use_literature=False,
+    )
+    model = ScriptedModel([])  # fail-loud: ANY LLM call raises
+    agent.model = model
+    result = agent.analyze(
+        str(glitch),
+        profile="realtime",
+        prior_analysis_paths=[str(prior_dir)],
+        reuse_locked_script=True,
+    )
+    assert model.calls == [], f"gated frame made LLM calls: {model.calls}"
+    sr = json.loads(
+        (tmp_path / "out" / "series_fit_results.json").read_text())
+    frame = sr["results"][0]
+    assert frame["success"] is False
+    assert "Pre-flight degenerate-data gate" in frame["error"]
+    assert frame.get("script") is None  # nothing was executed or corrected
 
 
 def test_realtime_drift_flags_changed_data(tmp_path):

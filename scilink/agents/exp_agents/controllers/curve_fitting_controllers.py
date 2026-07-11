@@ -944,6 +944,31 @@ def _load_prior_curve_fit_state(raw_path):
     return anchor_dir, summary, script_text, script_label
 
 
+def _degenerate_data_check(curve_data):
+    """Reason string when the data cannot support ANY fit, else ``None``.
+
+    The realtime pre-flight gate (#346): a detector-glitch frame (all-zero,
+    flat, runt, all-NaN) fails in milliseconds with an honest flag instead of
+    burning bounded LLM correction calls trying to rescue the unfittable
+    (measured: ~8 calls / ~4 min per glitch frame without this). Deliberately
+    conservative — partial corruption (e.g. a NaN-laced but otherwise real
+    spectrum) passes, because the correction path demonstrably salvages it.
+    Applied only under the realtime profile; thorough runs are untouched.
+    """
+    xy = _extract_xy(curve_data)
+    if xy is None:
+        return "unrecognizable data shape"
+    y = np.asarray(xy[1], dtype=float)
+    finite = y[np.isfinite(y)]
+    if finite.size < 32:
+        return (f"only {finite.size} finite data points "
+                f"(need ≥ 32 to support any fit)")
+    lo, hi = np.percentile(finite, [0.5, 99.5])
+    if not np.isfinite(hi - lo) or (hi - lo) <= 0:
+        return "zero dynamic range (flat or constant signal)"
+    return None
+
+
 def _load_anchor_fingerprint(anchor_dir):
     """Data fingerprint of the anchor run's first successful spectrum.
 
@@ -3033,6 +3058,31 @@ Your guidance: '''
         refine_from_r2: float = 0.0,
         refine_from_issues: Optional[list] = None,
     ) -> dict:
+        # Realtime pre-flight gate (#346): fail a glitch frame instantly —
+        # this single choke point covers reuse, non-anchor locked-script
+        # execution, AND the fallback codegen, so a degenerate frame costs
+        # milliseconds and zero LLM calls instead of the attempt ladders.
+        if state.get("_qc_profile") == "realtime":
+            _degenerate = _degenerate_data_check(curve_data)
+            if _degenerate:
+                self.logger.warning(
+                    f"   🚫 Pre-flight gate [{spectrum_name}]: {_degenerate} "
+                    f"— frame not analyzed (detector glitch?). Flagged for "
+                    f"the post-experiment sweep."
+                )
+                return {
+                    "index": spectrum_idx,
+                    "name": spectrum_name,
+                    "data_path": data_path,
+                    "success": False,
+                    "error": (f"Pre-flight degenerate-data gate: {_degenerate}. "
+                              f"The frame was not analyzed."),
+                    "parameters": {},
+                    "fit_quality": {},
+                    "script": None,
+                    "script_errors": [],
+                }
+
         stats = self._compute_statistics(curve_data)
         # Per-spectrum working dir: the locked script runs VERBATIM here with data
         # staged as the canonical DATA_NAME and viz written canonically — no
@@ -4761,9 +4811,18 @@ Return JSON with:
 
             return ctx.best_result
         else:
+            # Surface the last attempt's own error (e.g. the realtime
+            # pre-flight gate's reason) instead of only the generic summary.
+            last_err = next(
+                (e for e in ((a.get("result") or {}).get("error")
+                             for a in reversed(ctx.all_attempts)) if e),
+                None,
+            )
             return {
                 "index": ctx.item_idx, "name": ctx.item_name, "success": False,
-                "error": "All fitting attempts failed", "attempts": len(ctx.all_attempts),
+                "error": ("All fitting attempts failed"
+                          + (f": {last_err}" if last_err else "")),
+                "attempts": len(ctx.all_attempts),
                 "parameters": {}, "fit_quality": {},
             }
 

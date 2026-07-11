@@ -744,11 +744,23 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # thorough anchor run (which later frames can go realtime against).
         cold_start_info = None
         if realtime_cold_start:
-            cold_start_info = self._bank_cold_start_audition(
-                processed_first_spectrum, handled_system_info,
-                effective_r2_threshold,
-            )
-            if cold_start_info is None:
+            from .controllers.curve_fitting_controllers import _degenerate_data_check
+            _degenerate = _degenerate_data_check(processed_first_spectrum)
+            if _degenerate:
+                # Glitch frame: do NOT demote to thorough (that would burn
+                # LLM calls on unfittable data) — stay realtime and let the
+                # per-item pre-flight gate fail the frame instantly.
+                self.logger.warning(
+                    f"🚫 REALTIME cold start skipped: {_degenerate} — the "
+                    f"frame will be flagged by the pre-flight gate, not "
+                    f"analyzed."
+                )
+            else:
+                cold_start_info = self._bank_cold_start_audition(
+                    processed_first_spectrum, handled_system_info,
+                    effective_r2_threshold,
+                )
+            if cold_start_info is None and not _degenerate:
                 self.logger.warning(
                     "⚡→🐢 REALTIME cold start: no banked recipe fits this "
                     "data — running a THOROUGH anchor instead; subsequent "
