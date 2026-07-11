@@ -320,6 +320,11 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Escalation mode: attempt 0 runs alone and is fast-accepted when
         # strong; the remaining n_candidates-1 launch only when it is weak.
         candidate_escalation: bool = False,
+        # Operating profile (#346): None/"thorough" = today's behavior;
+        # "realtime" = zero-LLM per-frame execution of a locked recipe
+        # (requires prior_analysis_paths + reuse_locked_script). Accepts a
+        # preset name or a QCProfile instance.
+        profile: Optional[Any] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -469,6 +474,31 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         except (TypeError, ValueError):
             n_candidates = 1
         candidate_escalation = bool(candidate_escalation) and n_candidates > 1
+
+        # Operating profile (#346 step 3). "realtime" is the per-frame in-situ
+        # mode: the prior run's locked script executes with the arithmetic
+        # gate + fingerprint drift check and ZERO LLM calls on the happy path
+        # — every LLM stage around it is skipped. Requires a locked recipe;
+        # the anchor frame runs under the default (thorough) profile first.
+        from ._qc_profile import resolve_profile
+        qc_profile = resolve_profile(profile)
+        realtime = qc_profile.name == "realtime"
+        if realtime:
+            if not (prior_analysis_paths and reuse_locked_script):
+                raise ValueError(
+                    "profile='realtime' executes a locked recipe: pass "
+                    "prior_analysis_paths=[<anchor run dir>] and "
+                    "reuse_locked_script=True (run the anchor under the "
+                    "default thorough profile first)."
+                )
+            effective_max_verification = 0
+            n_candidates, candidate_escalation = 1, False
+            self.logger.info(
+                "⚡ REALTIME profile: skill suggestion, planning, literature, "
+                "verification, refit, trend and synthesis are skipped; the "
+                "prior locked script executes under the arithmetic gate with "
+                "a fingerprint drift check."
+            )
 
         # Resolve task_mode — caller sets this explicitly (standalone user or
         # orchestrator). Defaults to "fitting" when unset.
@@ -723,6 +753,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "analysis_hints": hints,
             "analysis_objective": objective,
             "task_mode": effective_task_mode,
+            # Operating profile name ("thorough" | "realtime") — controllers
+            # gate realtime-only behavior (drift check, bank suppression) on it.
+            "_qc_profile": qc_profile.name,
             # Annealing schedule start level (None/0 = start frozen at T=0).
             "_starting_annealing_level": starting_annealing_level,
 
@@ -792,6 +825,33 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             else:
                 self.logger.warning(f"literature_file not found: {literature_file}")
 
+        # REALTIME: planning is skipped, so seed the locked config (and the
+        # anchor fingerprint for the drift check) from the prior run's saved
+        # summary before the pipeline starts. Zero LLM calls.
+        if realtime:
+            from .controllers.curve_fitting_controllers import (
+                _load_anchor_fingerprint,
+                _load_prior_curve_fit_state,
+            )
+            anchor_dir, prior_summary, _ps, _pl = _load_prior_curve_fit_state(
+                prior_analysis_paths[0]
+            )
+            if anchor_dir is None:
+                raise ValueError(
+                    f"profile='realtime': no reusable prior run found at "
+                    f"{prior_analysis_paths[0]!r} (expected series_fit_results.json "
+                    f"from the anchor run)."
+                )
+            if (prior_summary or {}).get("locked_config"):
+                state["locked_fitting_config"] = prior_summary["locked_config"]
+            state["_anchor_fingerprint"] = _load_anchor_fingerprint(anchor_dir)
+            if state["_anchor_fingerprint"] is None:
+                self.logger.warning(
+                    "   Realtime drift check unavailable: the anchor run has no "
+                    "persisted data fingerprint and its data file could not be "
+                    "re-read."
+                )
+
         # Create unified pipeline with quality settings
         pipeline = create_unified_curve_fitting_pipeline(
             model=self.model,
@@ -804,13 +864,14 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             executor=self.executor,
             output_dir=str(self.output_dir),
             literature_agent=self.literature_agent,
-            enable_human_feedback=self.enable_human_feedback,
+            enable_human_feedback=self.enable_human_feedback and not realtime,
             r2_threshold=effective_r2_threshold,
             max_model_retries=effective_max_retries,
             outlier_sigma=effective_outlier_sigma,
             max_verification_iterations=effective_max_verification,
             parallel_workers=self.parallel_workers,
             load_skills_fn=self._load_skills_to_state,
+            profile=qc_profile.name,
         )
         
         # Execute pipeline
@@ -1270,6 +1331,12 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         Fully failure-isolated; gated by ``SCILINK_SCRIPT_BANK`` /
         persistent-memory setting.
         """
+        # Realtime frames never bank: a verbatim re-execution learns nothing
+        # new, and per-frame updates would inflate the anchor record's
+        # cross-session success stats (a 500-frame campaign is one success,
+        # not 500 — the graduation signal must stay honest).
+        if state.get("_qc_profile") == "realtime":
+            return []
         from scilink.skills._shared import _script_bank
         if not _script_bank.bank_enabled():
             return []
@@ -1409,6 +1476,34 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "output_directory": str(self.output_dir),
             "task_mode": state.get("task_mode", "fitting"),
         }
+
+        # Realtime provenance (#346 / plan §7.3): stamp the profile on the
+        # top-level result AND each per-item quality_history so a post-hoc
+        # sweep can select realtime frames for thorough re-analysis. Also
+        # synthesize a deterministic one-line summary — the synthesis stage
+        # (an LLM call) is skipped under this profile.
+        if state.get("_qc_profile") == "realtime":
+            results["profile"] = "realtime"
+            for r in series_results:
+                if isinstance(r, dict):
+                    r.setdefault("quality_history", {})[
+                        "produced_under_profile"] = "realtime"
+            if not synthesis.get("detailed_analysis") and series_results:
+                r0 = series_results[0]
+                rv = r0.get("reuse_validity") or {}
+                r2 = (r0.get("fit_quality") or {}).get("r_squared")
+                synthesis = dict(synthesis)
+                synthesis["detailed_analysis"] = (
+                    f"Realtime frame: locked script from "
+                    f"'{rv.get('source') or 'prior run'}' "
+                    f"{'reused' if rv.get('reused') else 'fallback-regenerated'}; "
+                    f"R² = {r2 if r2 is not None else 'n/a'}; "
+                    f"gate verdict: {rv.get('verdict', 'n/a')}; "
+                    f"drift: {rv.get('drift', 'n/a')} "
+                    f"(fingerprint similarity "
+                    f"{rv.get('fingerprint_similarity', 'n/a')}). "
+                    f"Interpretation is deferred to the post-experiment sweep."
+                )
 
         # In identification mode, surface the ranked candidate list if the
         # synthesis produced one. Additive/optional field — callers that don't

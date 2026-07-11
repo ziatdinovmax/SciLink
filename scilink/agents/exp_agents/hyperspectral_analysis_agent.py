@@ -187,6 +187,10 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         auxiliary_data: str | list[str] | None = None,
         auxiliary_label: str | list[str] | None = None,
         literature_file: str | None = None,
+        # Operating profile (#346): plumbed for parity with the curve agent;
+        # realtime toggles are wired for curve only in v1 (hyperspectral
+        # per-frame cost is numerics-dominated). Thorough is unaffected.
+        profile: Any = None,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -249,6 +253,16 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 structure_image_path="stem_image.png"
             )
         """
+        # Operating profile (#346): accepted for surface parity; see the
+        # parameter note — realtime is curve-only in v1.
+        from ._qc_profile import resolve_profile
+        if resolve_profile(profile).name == "realtime":
+            self.logger.warning(
+                "profile='realtime' is not wired for hyperspectral analysis "
+                "yet (per-frame cost is numerics-dominated); running under "
+                "the thorough profile."
+            )
+
         # Parse input
         data_path, data_paths, data_array, error = self._parse_data_input(data)
         

@@ -260,6 +260,9 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # start higher (e.g. hot) so it does not re-obey early constraint stages
         # a prior run already found inadequate.
         starting_annealing_level: Optional[int] = None,
+        # Operating profile (#346): plumbed for parity with the curve agent;
+        # the realtime toggles are wired for curve only in v1 — see below.
+        profile: Optional[Any] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -447,6 +450,19 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 self.logger.info(
                     f"   🏷️  Recovered embedded metadata from {Path(image_paths[0]).name}"
                 )
+
+        # Operating profile (#346): accepted for surface parity; realtime
+        # toggles are wired for the curve agent only in v1 (image lacks a
+        # deterministic per-frame gate metric — a design decision to make
+        # before a zero-LLM image frame is honest). Thorough is unaffected.
+        from ._qc_profile import resolve_profile
+        qc_profile = resolve_profile(profile)
+        if qc_profile.name == "realtime":
+            self.logger.warning(
+                "profile='realtime' is not wired for image analysis yet "
+                "(no deterministic per-frame gate metric); running under "
+                "the thorough profile."
+            )
 
         # Build initial state
         state = {

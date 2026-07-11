@@ -944,6 +944,43 @@ def _load_prior_curve_fit_state(raw_path):
     return anchor_dir, summary, script_text, script_label
 
 
+def _load_anchor_fingerprint(anchor_dir):
+    """Data fingerprint of the anchor run's first successful spectrum.
+
+    Feeds the realtime drift check (#346 step 3): a per-frame fingerprint is
+    compared against this to detect that the DATA changed even when the
+    reused script still fits well (the R² gate is blind to phase transitions
+    under auto-adaptive scripts). Prefers the fingerprint persisted in
+    ``series_fit_results.json`` (stamped when the script bank is enabled);
+    falls back to re-reading the anchor's data file. Returns ``None`` when
+    neither is possible — drift is then reported as unavailable, never
+    guessed.
+    """
+    try:
+        data = json.loads(
+            (Path(anchor_dir) / "series_fit_results.json").read_text())
+    except Exception:  # noqa: BLE001
+        return None
+    for r in data.get("results") or []:
+        if not (isinstance(r, dict) and r.get("success")):
+            continue
+        fp = r.get("_bank_fingerprint")
+        if isinstance(fp, dict) and fp.get("kind") == "curve":
+            return fp
+        dp = r.get("data_path")
+        if dp and Path(str(dp)).is_file():
+            try:
+                from scilink.skills._shared import _script_bank
+                from scilink.skills._shared.curve_fitting_tools import load_curve_data
+                xy = _extract_xy(load_curve_data(str(dp)))
+                if xy is not None:
+                    return _script_bank.curve_fingerprint(xy[0], xy[1])
+            except Exception:  # noqa: BLE001
+                return None
+        return None  # anchor = first successful result only
+    return None
+
+
 def _prior_curve_fit_block(state: dict) -> str:
     """A reference-context block for prior curve-fit runs named in
     ``state['prior_analysis_paths']`` — a compact fit summary plus each
@@ -4096,6 +4133,14 @@ Return JSON with:
             }
             if verdict == "poor":
                 reuse_result["quality_warning"] = message
+            # Realtime drift channel (#346 step 3): the gate metric measures
+            # fit quality, not data identity — an auto-adaptive locked script
+            # fits a NEW phase with a high R² (live-proven on the dehydration
+            # series). The fingerprint distance to the anchor frame sees the
+            # data change; both signals are reported, escalation stays the
+            # caller's move.
+            if ctx.state.get("_qc_profile") == "realtime":
+                self._attach_drift_signal(ctx, reuse_result["reuse_validity"])
             return reuse_result
         self.logger.warning(
             f"   ⚠️  Prior fitting script could not execute on this data "
@@ -4104,6 +4149,47 @@ Return JSON with:
             f"from the prior run."
         )
         return None
+
+    # Below this similarity to the anchor frame's fingerprint, a realtime
+    # frame is flagged drift="suspected". Calibrated on the in-situ
+    # dehydration series: same-phase frames score 1.000, transition-onset
+    # frames 0.900, post-transition frames 0.787 — 0.92 flags from onset.
+    DRIFT_SIMILARITY_THRESHOLD = 0.92
+
+    def _attach_drift_signal(self, ctx: QCItemContext, reuse_validity: dict) -> None:
+        """Fingerprint-distance drift check against the anchor frame (#346).
+
+        Deterministic and LLM-free: fingerprints this frame's data and scores
+        it against ``state['_anchor_fingerprint']`` with the script bank's
+        curve similarity. Adds ``fingerprint_similarity`` and ``drift``
+        ("none" | "suspected" | "unavailable") to ``reuse_validity``.
+        Failure-isolated — a drift-check error never affects the fit result.
+        """
+        try:
+            from scilink.skills._shared import _script_bank
+
+            anchor_fp = ctx.state.get("_anchor_fingerprint")
+            xy = _extract_xy(ctx.data)
+            if not anchor_fp or xy is None:
+                reuse_validity["drift"] = "unavailable"
+                return
+            frame_fp = _script_bank.curve_fingerprint(xy[0], xy[1])
+            sim = _script_bank._curve_similarity(frame_fp, anchor_fp)
+            reuse_validity["fingerprint_similarity"] = round(float(sim), 3)
+            drifted = sim < self.DRIFT_SIMILARITY_THRESHOLD
+            reuse_validity["drift"] = "suspected" if drifted else "none"
+            if drifted:
+                self.logger.warning(
+                    f"   🌡️ Drift suspected: fingerprint similarity to the "
+                    f"anchor frame is {sim:.3f} (< "
+                    f"{self.DRIFT_SIMILARITY_THRESHOLD}) — the data appears "
+                    f"to have changed even though the fit gate "
+                    f"{'passed' if reuse_validity.get('verdict') == 'good' else 'failed'}. "
+                    f"Consider re-anchoring or a thorough re-analysis of this frame."
+                )
+        except Exception as e:  # noqa: BLE001 - drift check never breaks the fit
+            reuse_validity.setdefault("drift", "unavailable")
+            self.logger.warning(f"Drift check skipped: {e}")
 
     def qc_run_initial(self, ctx: QCItemContext) -> dict:
         initial_model = ctx.state.get('locked_fitting_config', {}).get('physical_model') or 'Initial model'
