@@ -5690,6 +5690,15 @@ Return JSON with:
             reuse_script, reuse_source = _first_prior_curve_fit_script(state)
         else:
             reuse_script, reuse_source = None, None
+        # Verbatim cold start (#346 step 4): a realtime run with no explicit
+        # prior locked its recipe by auditioning bank candidates against the
+        # first frame (agent-side, pre-pipeline). The winner flows through the
+        # SAME reuse path as a prior-run script — validity gate, drift check,
+        # correction retry all apply unchanged.
+        if not reuse_script and state.get("_cold_start_reuse"):
+            cs = state["_cold_start_reuse"]
+            reuse_script = cs.get("script")
+            reuse_source = f"script_bank:{cs.get('id')}"
         if reuse_script and regime_configs:
             self.logger.info(
                 "   ♻️  Locked-script reuse requested, but this run is "

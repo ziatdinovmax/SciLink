@@ -632,6 +632,32 @@ def mark_retrieved(domain: str, rid: str, *, root: Optional[Path] = None) -> Non
         pass
 
 
+def record_success(domain: str, rid: str, session: Optional[str] = None,
+                   *, root: Optional[Path] = None) -> None:
+    """Bump a record's cross-session success stats without re-banking.
+
+    For verbatim cold-start wins (#346 step 4): the banked script passed the
+    arithmetic gate on NEW data — exactly the "keeps passing on new data"
+    evidence the graduation signal counts — but the run itself is a realtime
+    frame and does not go through the write hook. One call per campaign.
+    Never raises.
+    """
+    try:
+        f = _domain_dir(domain, root=root) / f"{rid}.json"
+        rec = json.loads(f.read_text())
+        stats = rec.setdefault("stats", {})
+        stats["n_successes"] = int(stats.get("n_successes", 1)) + 1
+        if session:
+            sessions = rec.setdefault("sessions", [])
+            if session not in sessions:
+                sessions.append(session)
+                del sessions[:-_MAX_SESSIONS]
+        rec["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        f.write_text(json.dumps(rec, indent=2, default=str))
+    except Exception:
+        pass
+
+
 def render_exemplar_block(match: Dict[str, Any]) -> str:
     """LLM-facing prompt block offering a retrieved script as an exemplar.
 
