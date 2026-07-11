@@ -416,6 +416,15 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         if staged:
             response["staged_solutions"] = staged
 
+        # Bank every approved working script as episodic memory (script bank,
+        # #346) — deterministic, no LLM, failure-isolated.
+        banked = self._maybe_bank_scripts(
+            response.get("dynamic_analysis_records") or [], skill_state,
+            data_path, system_info,
+        )
+        if banked:
+            response["banked_scripts"] = banked
+
         self._log_action(
             action="analyze",
             input_ctx={"data": data_path},
@@ -515,6 +524,89 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 f"`scilink memory staged`."
             )
         return staged
+
+    def _maybe_bank_scripts(self, records: list, skill_state: dict,
+                            data_path: str, system_info) -> list:
+        """Bank every approved working script in the script bank (#346).
+
+        Hyperspectral mirror of the curve/image hooks, reading the per-target
+        ``dynamic_analysis_records`` — episodic complement to T=2 staging,
+        no hot gate, no LLM. The cube is reloaded lazily (only when there is
+        something to bank) and fingerprinted once for all records. Fully
+        failure-isolated; gated by ``SCILINK_SCRIPT_BANK`` /
+        persistent-memory setting.
+        """
+        from scilink.skills._shared import _script_bank
+        if not _script_bank.bank_enabled():
+            return []
+
+        banked: list = []
+        try:
+            bankable = [
+                rec for rec in records
+                if rec.get("script") and (rec.get("quality_history") or {}).get("approved")
+            ]
+            if not bankable:
+                return []
+
+            from .metadata_converter import resolve_axis_spec
+
+            si = self._handle_system_info(system_info)
+            active_skills = [
+                s.get("name") for s in (skill_state or {}).get("skills_loaded", [])
+                if isinstance(s, dict)
+            ]
+
+            fingerprint = None
+            try:
+                cube = self._load_hyperspectral_data(data_path)
+                axis_2 = resolve_axis_spec(si)["axis_2"]
+                e = cube.shape[-1]
+                if "start" in axis_2 and "end" in axis_2:
+                    axis = np.linspace(axis_2["start"], axis_2["end"], e)
+                    axis_units = axis_2.get("units", "arbitrary units")
+                else:
+                    axis, axis_units = np.arange(e), "channels"
+                fingerprint = _script_bank.hyperspectral_fingerprint(
+                    cube, axis, axis_units
+                )
+            except Exception as e:  # noqa: BLE001 - fingerprint is best-effort
+                self.logger.warning(f"Bank fingerprint skipped: {e}")
+
+            context = _script_bank.measurement_context(si)
+            seen_hashes = set()
+            for rec in bankable:
+                h = _script_bank.script_hash(rec["script"])
+                if h in seen_hashes:
+                    continue
+                seen_hashes.add(h)
+                qh = rec.get("quality_history") or {}
+                frac = qh.get("final_passed_fraction")
+                res = _script_bank.add_record("hyperspectral", {
+                    "technique_signals": {
+                        "active_skills": active_skills,
+                        "analysis_target": rec.get("target"),
+                    },
+                    "measurement_context": context,
+                    "data_fingerprint": fingerprint,
+                    "outcome": {
+                        "analysis_target": rec.get("target"),
+                        "required_outputs": rec.get("required_outputs"),
+                        "metric": ({"name": "passed_fraction", "value": round(float(frac), 4)}
+                                   if isinstance(frac, (int, float)) else None),
+                    },
+                    "provenance": {"session": self.output_dir.name,
+                                   "data_file": os.path.basename(str(data_path))},
+                    "working_script": rec["script"],
+                })
+                if res.get("id"):
+                    banked.append(res["id"])
+                    self.logger.info(
+                        f"   🏦 Banked script [{res['action']}] id={res['id']}"
+                    )
+        except Exception as e:  # noqa: BLE001 - banking never affects results
+            self.logger.warning(f"Script banking skipped: {e}")
+        return banked
 
     def _auto_select_skills(self, system_info, hint=None, custom_skills=None) -> list:
         """Pick relevant hyperspectral skill(s) from the metadata.

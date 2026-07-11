@@ -865,6 +865,12 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         if fb_staged:
             final_results.setdefault("staged_solutions", []).extend(fb_staged)
 
+        # Bank every approved working script as episodic memory (script bank,
+        # #346) — deterministic, no LLM, failure-isolated.
+        banked = self._maybe_bank_scripts(state)
+        if banked:
+            final_results["banked_scripts"] = banked
+
         self.logger.info("")
         self.logger.info("✅ ANALYSIS COMPLETE")
         self.logger.info(f"   Results: {results_path}")
@@ -1252,6 +1258,85 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 f"`scilink memory staged` (upgrade an existing skill or consolidate)."
             )
         return staged
+
+    def _maybe_bank_scripts(self, state: dict) -> List[str]:
+        """Bank every approved working script in the script bank (#346).
+
+        Episodic complement to T=2 staging: no hot/novelty gate, no LLM —
+        each distinct approved script is stored once per run with the
+        measurement context, a fingerprint of the spectrum it solved, and
+        the outcome, so later runs can retrieve and adapt it. Re-banking an
+        identical script updates its usage stats instead of duplicating.
+        Fully failure-isolated; gated by ``SCILINK_SCRIPT_BANK`` /
+        persistent-memory setting.
+        """
+        from scilink.skills._shared import _script_bank
+        if not _script_bank.bank_enabled():
+            return []
+
+        banked: List[str] = []
+        try:
+            from .controllers.curve_fitting_controllers import _active_skill_names
+
+            locked = state.get("locked_fitting_config") or {}
+            active_skills = _active_skill_names(state)
+            system_info = state.get("system_info") or {}
+            x_units = _script_bank.guess_x_units(system_info)
+            stack = state.get("spectrum_stack")
+            seen_hashes = set()
+
+            for r in state.get("series_results", []) or []:
+                if not r.get("success"):
+                    continue
+                script = r.get("script")
+                if not script or not (r.get("quality_history") or {}).get("approved"):
+                    continue
+                h = _script_bank.script_hash(script)
+                if h in seen_hashes:  # locked-recipe series: bank once per run
+                    continue
+                seen_hashes.add(h)
+
+                fingerprint = None
+                xy = None
+                idx = r.get("index")
+                if stack is not None and idx is not None and 0 <= idx < len(stack):
+                    xy = np.asarray(stack[idx])
+                elif state.get("curve_data") is not None:
+                    xy = np.asarray(state["curve_data"])
+                if xy is not None and xy.ndim == 2 and xy.shape[0] == 2:
+                    fingerprint = _script_bank.curve_fingerprint(
+                        xy[0], xy[1], x_units=x_units
+                    )
+
+                r2 = (r.get("fit_quality") or {}).get("r_squared")
+                res = _script_bank.add_record("curve_fitting", {
+                    "technique_signals": {
+                        "active_skills": active_skills,
+                        "model_type": r.get("model_type") or locked.get("physical_model"),
+                    },
+                    "measurement_context": _script_bank.measurement_context(system_info),
+                    "data_fingerprint": fingerprint,
+                    "outcome": {
+                        "model_type": r.get("model_type"),
+                        "metric": ({"name": "r_squared", "value": round(float(r2), 4)}
+                                   if r2 is not None else None),
+                        "plan_summary": locked.get("analysis_approach"),
+                        "parameters_extracted": locked.get("parameters_to_extract"),
+                    },
+                    "provenance": {"session": self.output_dir.name,
+                                   "item": r.get("name"),
+                                   "data_file": os.path.basename(str(state.get("data_path") or ""))
+                                   or None},
+                    "working_script": script,
+                })
+                if res.get("id"):
+                    banked.append(res["id"])
+                    self.logger.info(
+                        f"   🏦 Banked script [{res['action']}] id={res['id']}"
+                    )
+        except Exception as e:
+            self.logger.warning(f"Script banking skipped: {e}")
+        return banked
 
     def _maybe_stage_feedback_errors(self, state: dict, final_results: dict) -> List[str]:
         """Stage human-feedback + resolved-error knowledge for later distillation.
