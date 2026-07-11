@@ -109,6 +109,10 @@ def add_record(domain: str, record: Dict[str, Any], *, root: Optional[Path] = No
 
     if existing is not None:
         rec, path = existing
+        # Backfill matching tiers an earlier write couldn't compute.
+        for key in ("data_fingerprint", "measurement_context", "technique_signals"):
+            if not rec.get(key) and record.get(key):
+                rec[key] = record[key]
         stats = rec.setdefault("stats", {"n_successes": 1, "n_retrievals": 0})
         stats["n_successes"] = int(stats.get("n_successes", 1)) + 1
         sessions = rec.setdefault("sessions", [])

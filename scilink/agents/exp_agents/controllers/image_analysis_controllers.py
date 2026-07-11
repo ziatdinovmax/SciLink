@@ -2515,7 +2515,7 @@ Your guidance: '''
                     pass
                 break
 
-        return {
+        result = {
             "index": image_idx,
             "name": image_name,
             "data_path": data_path,
@@ -2532,6 +2532,22 @@ Your guidance: '''
             "script": script,
             "script_errors": script_errors,
         }
+        # Fingerprint of the image this script solved (script bank, #346) —
+        # stamped here because per-image arrays for file inputs never reach
+        # the outer state the bank write hook reads. No-op unless the bank is
+        # enabled; never affects the analysis.
+        try:
+            from scilink.skills._shared import _script_bank
+            from scilink.skills._shared.image_analysis_tools import resolve_pixel_size_nm
+            if _script_bank.bank_enabled() and isinstance(image_data, np.ndarray):
+                result["_bank_fingerprint"] = _script_bank.image_fingerprint(
+                    image_data,
+                    pixel_size_nm=resolve_pixel_size_nm(
+                        state.get("system_info"), image_data.shape),
+                )
+        except Exception:
+            pass
+        return result
 
     QUALITY_VERIFICATION_PROMPT = '''You are a scientific image analysis expert reviewing an analysis result.
 

@@ -969,22 +969,31 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     continue
                 script = r.get("script")
                 qh = r.get("quality_history") or {}
-                if not script or not qh.get("approved"):
+                # Quality gate: QC approval, or the reuse fast path's own
+                # gate — a reused script passing on NEW data is exactly the
+                # cross-session success signal the bank counts.
+                passed = (qh.get("approved")
+                          or (r.get("reuse_validity") or {}).get("verdict") == "good")
+                if not script or not passed:
                     continue
                 h = _script_bank.script_hash(script)
                 if h in seen_hashes:  # locked-recipe series: bank once per run
                     continue
                 seen_hashes.add(h)
 
-                fingerprint = None
-                img = None
-                idx = r.get("index")
-                if stack is not None and idx is not None and 0 <= idx < len(stack):
-                    img = np.asarray(stack[idx])
-                if img is not None and img.ndim >= 2:
-                    fingerprint = _script_bank.image_fingerprint(
-                        img, pixel_size_nm=resolve_pixel_size_nm(system_info, img.shape)
-                    )
+                # Prefer the fingerprint stamped where the image was in scope
+                # (file inputs load per image inside the controller); the
+                # stack fallback covers array inputs.
+                fingerprint = r.get("_bank_fingerprint")
+                if fingerprint is None:
+                    img = None
+                    idx = r.get("index")
+                    if stack is not None and idx is not None and 0 <= idx < len(stack):
+                        img = np.asarray(stack[idx])
+                    if img is not None and img.ndim >= 2:
+                        fingerprint = _script_bank.image_fingerprint(
+                            img, pixel_size_nm=resolve_pixel_size_nm(system_info, img.shape)
+                        )
 
                 score = qh.get("final_score")
                 res = _script_bank.add_record("image_analysis", {

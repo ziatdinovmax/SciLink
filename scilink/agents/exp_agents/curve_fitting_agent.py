@@ -1289,24 +1289,33 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 if not r.get("success"):
                     continue
                 script = r.get("script")
-                if not script or not (r.get("quality_history") or {}).get("approved"):
+                # Quality gate: QC approval, or the reuse fast path's own
+                # arithmetic gate — a reused script passing on NEW data is
+                # exactly the cross-session success signal the bank counts.
+                passed = ((r.get("quality_history") or {}).get("approved")
+                          or (r.get("reuse_validity") or {}).get("verdict") == "good")
+                if not script or not passed:
                     continue
                 h = _script_bank.script_hash(script)
                 if h in seen_hashes:  # locked-recipe series: bank once per run
                     continue
                 seen_hashes.add(h)
 
-                fingerprint = None
-                xy = None
-                idx = r.get("index")
-                if stack is not None and idx is not None and 0 <= idx < len(stack):
-                    xy = np.asarray(stack[idx])
-                elif state.get("curve_data") is not None:
-                    xy = np.asarray(state["curve_data"])
-                if xy is not None and xy.ndim == 2 and xy.shape[0] == 2:
-                    fingerprint = _script_bank.curve_fingerprint(
-                        xy[0], xy[1], x_units=x_units
-                    )
+                # Prefer the fingerprint stamped where the data was in scope
+                # (file inputs load per spectrum inside the controller); the
+                # stack fallback covers array inputs.
+                fingerprint = r.get("_bank_fingerprint")
+                if fingerprint is None:
+                    xy = None
+                    idx = r.get("index")
+                    if stack is not None and idx is not None and 0 <= idx < len(stack):
+                        xy = np.asarray(stack[idx])
+                    elif state.get("curve_data") is not None:
+                        xy = np.asarray(state["curve_data"])
+                    if xy is not None and xy.ndim == 2 and xy.shape[0] == 2:
+                        fingerprint = _script_bank.curve_fingerprint(
+                            xy[0], xy[1], x_units=x_units
+                        )
 
                 r2 = (r.get("fit_quality") or {}).get("r_squared")
                 res = _script_bank.add_record("curve_fitting", {

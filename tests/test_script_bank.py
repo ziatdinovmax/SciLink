@@ -250,6 +250,33 @@ class TestCurveBankHook:
         banked = self._run(tmp_path, _curve_state(n_results=2, shared_script=False))
         assert len(banked) == 2
 
+    def test_reuse_verdict_good_banks_without_quality_history(self, tmp_path):
+        # The #172 reuse fast path carries reuse_validity instead of
+        # quality_history.approved — its gate pass must count as a success.
+        state = _curve_state(n_results=1)
+        r = state["series_results"][0]
+        del r["quality_history"]
+        r["reuse_validity"] = {"reused": True, "verdict": "good"}
+        assert len(self._run(tmp_path, state)) == 1
+
+    def test_reuse_verdict_poor_not_banked(self, tmp_path):
+        state = _curve_state(n_results=1)
+        r = state["series_results"][0]
+        del r["quality_history"]
+        r["reuse_validity"] = {"reused": True, "verdict": "poor"}
+        assert self._run(tmp_path, state) == []
+
+    def test_stamped_fingerprint_preferred(self, tmp_path):
+        # File inputs never put per-spectrum arrays in the outer state; the
+        # controller stamps _bank_fingerprint on the result instead.
+        state = _curve_state(n_results=1)
+        state["spectrum_stack"] = None
+        state["series_results"][0]["_bank_fingerprint"] = {
+            "kind": "curve", "n_points": 777}
+        self._run(tmp_path, state)
+        rec = sb.list_records("curve_fitting")[0]
+        assert rec["data_fingerprint"]["n_points"] == 777
+
     def test_second_run_updates_stats(self, tmp_path):
         self._run(tmp_path, _curve_state())
         agent2 = _fake_agent(tmp_path)

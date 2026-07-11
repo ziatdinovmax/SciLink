@@ -3178,7 +3178,7 @@ Your guidance: '''
         except Exception:
             residual_diag = None
 
-        return {
+        result = {
             "index": spectrum_idx,
             "name": spectrum_name,
             "data_path": data_path,
@@ -3196,6 +3196,22 @@ Your guidance: '''
             "script": script,
             "script_errors": script_errors,
         }
+        # Fingerprint of the data this script solved (script bank, #346) —
+        # stamped here because per-spectrum arrays for file inputs never reach
+        # the outer state the bank write hook reads. No-op unless the bank is
+        # enabled; never affects the fit.
+        try:
+            from scilink.skills._shared import _script_bank
+            if _script_bank.bank_enabled():
+                xy = _extract_xy(curve_data)
+                if xy is not None:
+                    result["_bank_fingerprint"] = _script_bank.curve_fingerprint(
+                        xy[0], xy[1],
+                        x_units=_script_bank.guess_x_units(state.get("system_info")),
+                    )
+        except Exception:
+            pass
+        return result
 
     FIT_VERIFICATION_PROMPT = '''You are a scientific data analysis expert reviewing a curve/spectral fit.
 
