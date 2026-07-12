@@ -1407,6 +1407,101 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
         return pixel_size, fov
 
     # =========================================================================
+    # SYNTHESIS RE-ENTRY (issue #322, Tier A)
+    # =========================================================================
+
+    @staticmethod
+    def surface_features_for_reentry(analysis_result: Dict[str, Any]) -> Dict[str, Any]:
+        """Collect the quantitative features of a completed analysis result.
+
+        Modality-agnostic: picks up whichever of the known feature fields are
+        present (curve: model/fit params/trends; image & hyperspectral:
+        ``extracted_features``). Used to ground Tier-A interpretation
+        re-entry in what was actually measured.
+        """
+        features: Dict[str, Any] = {}
+        for key in ("model_type", "fit_quality"):
+            if analysis_result.get(key):
+                features[key] = analysis_result[key]
+        trends = analysis_result.get("parameter_trends")
+        if trends:
+            features["parameter_trends"] = trends
+        elif analysis_result.get("fitting_parameters"):
+            features["fitting_parameters"] = analysis_result["fitting_parameters"]
+        if analysis_result.get("extracted_features"):
+            features["extracted_features"] = analysis_result["extracted_features"]
+        return features
+
+    def reenter_interpretation(
+        self,
+        analysis_result: Dict[str, Any],
+        critique,
+        system_info: Dict[str, Any] | str | None = None,
+        include_stored_images: bool = True,
+    ) -> Dict[str, Any]:
+        """Tier-A synthesis re-entry (issue #322): revise ONLY the
+        interpretation of a completed analysis with an injected critique.
+
+        ``critique`` is a :class:`~scilink.agents.exp_agents._critique.CritiquePayload`
+        or a plain string (wrapped as a human critique). The revision is
+        APPENDED to ``analysis_result["interpretation_revisions"]`` — the
+        original ``detailed_analysis`` / ``scientific_claims`` are never
+        overwritten. No per-unit re-analysis happens (the expensive upstream
+        results are reused as-is).
+
+        Returns ``{"status": "success", "revision": {...}}`` or
+        ``{"status": "error", "error": {...}}``.
+        """
+        from datetime import datetime as _dt
+
+        from ._critique import CritiquePayload
+        from .controllers.base_controllers import SynthesisReEntryController
+
+        if isinstance(critique, str):
+            payload = CritiquePayload(source="human", critique=critique)
+        else:
+            payload = critique
+
+        features = self.surface_features_for_reentry(analysis_result)
+        features_block = json.dumps(features, indent=2, default=str)[:4000] if features else ""
+
+        images = self._get_stored_analysis_images() if include_stored_images else []
+
+        controller = SynthesisReEntryController(
+            model=self.model,
+            logger=self.logger,
+            generation_config=self.generation_config,
+            safety_settings=self.safety_settings,
+            parse_fn=self._parse_llm_response,
+        )
+        revision, error = controller.revise(
+            analysis_result, payload,
+            features_block=features_block,
+            images=images,
+            system_info=self._handle_system_info(system_info) or None,
+        )
+        if error:
+            return {"status": "error", "error": error}
+
+        entry = {
+            "timestamp": _dt.now().isoformat(),
+            "source": payload.source,
+            "critique": payload.critique,
+            # Key name matches the orchestrator's refine_interpretation
+            # revisions so _effective_full_result-style consumers overlay
+            # both kinds uniformly.
+            "revised_analysis": revision["detailed_analysis"],
+            "revision_summary": revision.get("revision_summary", ""),
+        }
+        revised_claims = self._validate_scientific_claims(
+            revision.get("scientific_claims", [])
+        )
+        if revised_claims:
+            entry["revised_claims"] = revised_claims
+        analysis_result.setdefault("interpretation_revisions", []).append(entry)
+        return {"status": "success", "revision": entry}
+
+    # =========================================================================
     # REFINEMENT WITH FEEDBACK
     # =========================================================================
     

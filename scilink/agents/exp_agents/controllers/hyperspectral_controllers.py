@@ -35,6 +35,7 @@ from ....skills._shared._registry import (
     get_tools_for, get_tool_function, VERIFIER_TOOL_SCRUTINY_PRINCIPLE,
 )
 from ....executors import ExecutionTimeout
+from .._qc_engine import CodegenQCEngine, QCEngineSpec, QCItemContext
 from ....utils.codegen_parse import parse_codegen_response
 
 
@@ -172,6 +173,10 @@ def _planning_tool_awareness(state: dict) -> str | None:
         "or parameters that a tool below already handles — name the method (e.g. "
         "'measure the K-edge step', 'obtain mu from tables') and leave the exact "
         "windows / coefficients to the tool.",
+        "When a tool below matches a required deliverable, NAME that tool in the "
+        "target description as the method of record (e.g. 'quantify the edge jump "
+        "with `measure_edge_step`') — the implementation must call it rather than "
+        "hand-roll its own estimator.",
     ]
     for s in specs:
         wtu = getattr(s, "when_to_use", "") or getattr(s, "description", "")
@@ -307,7 +312,165 @@ def _codegen_retry_feedback(failures: int, critique: str) -> str:
             "strong evidence the global model is biased — change families, do not "
             "re-fit the same way."
         )
+    if failures >= 2:
+        block.append(
+            "Note: 'method' and 'method family' refer to YOUR estimator "
+            "structure — a vetted REGISTERED TOOL that fits the task remains "
+            "the preferred implementation: first change how you drive it "
+            "(windows, parameters, fallback edge/feature). Replace a "
+            "registered tool with custom code only if you state which of its "
+            "parameters you already tried and why no setting of them can "
+            "address the failure."
+        )
     return "\n".join(block)
+
+
+def _retry_annealing_level(failures: int) -> int:
+    """Map the codegen retry ladder onto the shared 0/1/2 annealing scale.
+
+    0 = first attempt (no retry feedback); 1 = warm (patch the math /
+    question the method); 2 = hot (abandon the method family) — see
+    ``_codegen_retry_feedback``. Used for the per-attempt verification
+    record so hyperspectral participates in the same hot-success staging
+    gate as the other modalities.
+    """
+    if failures <= 0:
+        return 0
+    if failures <= 2:
+        return 1
+    return 2
+
+
+def _retry_stage_label(failures: int) -> str:
+    """Human label of the retry-feedback stage applied after this failure."""
+    if failures <= 0:
+        return ""
+    if failures == 1:
+        return "patch the logic/math"
+    if failures == 2:
+        return "question the method"
+    return "abandon the method family"
+
+
+def _hs_attempt_entry(level: int, passed_fraction, qc_failures: list,
+                      recommended_action: str, error: str | None = None) -> dict:
+    """One dynamic-analysis attempt as a verification-record entry.
+
+    ``qc_failures`` strings are "feature: critique" — split into the shared
+    issues shape; a hard execution error becomes a single issue.
+    """
+    issues = []
+    for f in qc_failures or []:
+        loc, _, prob = str(f).partition(":")
+        issues.append({"location": loc.strip(), "problem": prob.strip() or loc.strip()})
+    if error:
+        issues.append({"location": "execution", "problem": str(error)[:500]})
+    return {
+        "passed_fraction": passed_fraction,
+        "annealing_level": level,
+        "issues_found": issues,
+        "recommended_action": recommended_action,
+    }
+
+
+def _render_band_flux_table(data, axis, axis_units: str, aux: dict | None = None,
+                            n_bands: int = 16) -> str:
+    """Deterministic field-mean counts per axis band, for the result review.
+
+    The review's flux/measurability arguments must rest on numbers, not on a
+    visual read of the mean-spectrum plot: on a linear-scale plot whose
+    y-range is set by low-energy spikes, a perfectly usable ~100-200
+    counts/channel region is rendered a few pixels above the zero line and
+    reviewers systematically misjudge it. Computed once per run from the
+    primary cube and every spectrum-aligned auxiliary operand (e.g. I0).
+    """
+    try:
+        axis = np.asarray(axis, dtype=float)
+        e = axis.size
+        series = {"sample": np.asarray(data).reshape(-1, e).mean(0)}
+        for label, arr in (aux or {}).items():
+            arr = np.asarray(arr)
+            if arr.ndim == 1 and arr.shape[0] == e:
+                series[label] = arr.astype(float)
+            elif arr.ndim >= 2 and arr.shape[-1] == e:
+                series[label] = arr.reshape(-1, e).mean(0)
+        edges = np.linspace(axis.min(), axis.max(), n_bands + 1)
+        idx = np.clip(np.digitize(axis, edges) - 1, 0, n_bands - 1)
+        header = "  ".join(f"{name:>14s}" for name in series)
+        lines = [
+            "### MEASURED FLUX BY BAND (deterministic — computed from the data)",
+            f"Field-mean counts per channel in equal {axis_units} bands:",
+            f"{'band':>19s}  {header}",
+        ]
+        for b in range(n_bands):
+            m = idx == b
+            if not m.any():
+                continue
+            vals = "  ".join(f"{float(v[m].mean()):>14.1f}" for v in series.values())
+            lines.append(f"{edges[b]:>8.1f}-{edges[b + 1]:<10.1f}{vals}")
+        lines.append(
+            "These numbers OVERRIDE any visual estimate from the spectrum plot. "
+            "Note analysis windows aggregate MANY channels, so usable SNR can be "
+            "high even where the plotted curve looks near zero."
+        )
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001 - advisory block, never break the run
+        return ""
+
+
+def _render_attempt_history(entries: list) -> str:
+    """Compact prior-attempt block for the combined result review.
+
+    Gives the reviewer the trajectory (what each earlier attempt was allowed
+    to change, what fraction of its maps passed, and why it was rejected) so
+    its stance can move under mounting evidence — the hyperspectral analogue
+    of the verification history the curve/image verifiers receive. Returns
+    ``""`` on the first attempt, leaving that prompt unchanged.
+    """
+    if not entries:
+        return ""
+    lines = [
+        "### PRIOR ATTEMPTS ON THIS TASK",
+        "Earlier attempts and their review outcomes (constraint level 0 = "
+        "plan-constrained; 1 = method questioned; 2 = method family "
+        "abandoned):",
+    ]
+    for k, e in enumerate(entries, 1):
+        frac = e.get("passed_fraction")
+        frac_s = f"{frac:.2f}" if isinstance(frac, (int, float)) else "n/a"
+        issues = "; ".join(
+            f"{i.get('location')}: {str(i.get('problem'))[:220]}"
+            for i in (e.get("issues_found") or [])[:3]
+        ) or "none recorded"
+        lines.append(
+            f"- Attempt {k} (level {e.get('annealing_level')}, maps passed "
+            f"{frac_s}): {issues}"
+        )
+    lines.append(
+        "If methodologically DIFFERENT attempts keep converging on the same "
+        "measured magnitude, weigh that agreement as evidence in its own "
+        "right when judging the current result."
+    )
+    return "\n".join(lines)
+
+
+def _append_literature_context(prompt: list, state: dict) -> None:
+    """Append pre-fetched literature context (Channel A passthrough).
+
+    Populated when the caller supplies ``literature_file`` (typically the
+    orchestrator's ``search_literature`` tool). Framed as advisory context —
+    it must not override what the data actually shows.
+    """
+    lit = state.get("literature_context")
+    if not lit:
+        return
+    prompt.append(
+        "\n\n--- Literature Context ---\n"
+        "Relevant literature findings were provided for this analysis. Use "
+        "them to inform interpretation and target selection, but do not let "
+        "them override what the data actually shows.\n"
+        f"{str(lit)}"
+    )
 
 
 def _append_auxiliary_context(prompt: list, state: dict) -> None:
@@ -1412,6 +1575,7 @@ Overlays showing where components are concentrated on the structural image.
         _append_skill_context(prompt_parts, state, "interpretation")
         _append_prior_knowledge_context(prompt_parts, state)
         _append_auxiliary_context(prompt_parts, state)
+        _append_literature_context(prompt_parts, state)
 
         # 8. Final instructions
         prompt_parts.append("\n\nProvide your analysis in the requested JSON format.")
@@ -1511,6 +1675,7 @@ refinement targets are meaningful here — do not request `spatial` or
         _append_skill_context(prompt_parts, state, "planning")
         _append_prior_knowledge_context(prompt_parts, state)
         _append_auxiliary_context(prompt_parts, state)
+        _append_literature_context(prompt_parts, state)
 
         prompt_parts.append("\n\nBased on these results, decide if a focused refinement is needed.")
 
@@ -1686,6 +1851,7 @@ class BuildHolisticSynthesisPromptController:
         _append_skill_context(prompt_parts, state, "interpretation")
         _append_prior_knowledge_context(prompt_parts, state)
         _append_auxiliary_context(prompt_parts, state)
+        _append_literature_context(prompt_parts, state)
 
         # 4. EXPLICIT REPORTING INSTRUCTIONS
         prompt_parts.append("\n\n### 📝 CRITICAL REPORTING INSTRUCTIONS")
@@ -1974,6 +2140,27 @@ class RunDynamicAnalysisController:
     MAX_RETRIES = 5
     SUCCESS_THRESHOLD = 0.5  # If >50% of maps in a script pass QC, accept the run.
 
+    # Engine plumbing (#327 phase 5). The retry ladder has 3 structural
+    # rungs — first try / patch-or-question / abandon-family, expressed in
+    # _codegen_retry_feedback — the engine reads only the ladder LENGTH.
+    _CONSTRAINT_ANNEALING_SCHEDULE = (
+        "first attempt (no retry feedback)",
+        "warm — patch the logic / question the method",
+        "hot — abandon the method family",
+    )
+    _QC_ENGINE_SPEC = QCEngineSpec(
+        config_key=None,       # no locked-config plumbing in dynamic analysis
+        refine_anchor="none",  # regenerate from prompt; freedom lives in the feedback text
+        refit_fail_msg="    \u274c Attempt could not run",  # unreachable (attempts never fail at engine level)
+    )
+
+    @property
+    def max_verification_iterations(self) -> int:
+        """Engine loop budget: initial attempt + N refits, the last verdict
+        checked by the for/else final pass == ``MAX_RETRIES`` total attempts,
+        exactly the pre-port while-loop budget."""
+        return self.MAX_RETRIES - 1
+
     def __init__(self, model, logger, generation_config, safety_settings, parse_fn,
                  executor_timeout: int = 600):
         self.model = model
@@ -2110,6 +2297,12 @@ class RunDynamicAnalysisController:
                     f"{optimal_data.shape}; kept as context only (not an operand)."
                 )
 
+        # Deterministic flux-by-band table for the result reviews (computed
+        # once; same data for every target/attempt this run).
+        flux_table = _render_band_flux_table(
+            optimal_data, state["energy_axis"], axis_units, auxiliary_operands
+        )
+
         # --- MAIN LOOP: Process each target description separately ---
         for i, target in enumerate(custom_targets, 1):
             target_desc = target.get("description", "Analyze feature")
@@ -2177,335 +2370,47 @@ into the analysis function — operate on the raw spectra and, if your output
 maps should mark excluded samples, set them to np.nan in your returned maps.
 """
 
-            current_prompt = base_prompt
-            retries = 0
-            task_success = False
-            best_attempt = {"req_passed": -1, "valid_count": -1,
-                            "images": [], "maps": [], "meta": []}
-
-            while retries < self.MAX_RETRIES:
-                try:
-                    # --- A. CLEAN SLATE FOR THIS ATTEMPT ---
-                    # Prevents "Ghost Data" from failed previous attempts accumulating
-                    current_run_valid_images = []
-                    current_run_valid_maps = []
-                    current_run_valid_meta = []
-                    qc_failures = []
-
-                    # --- B. GENERATE CODE ---
-                    self.logger.info(f"    (Attempt {retries+1}) Asking LLM to write code...")
-                    response = self.model.generate_content(current_prompt, generation_config=self.generation_config)
-                    result_json, _ = parse_codegen_response(response, field="code", logger=self.logger)
-                    code_str = (result_json or {}).get("code", "")
-                    
-                    # --- C. SANDBOX SETUP ---
-                    local_scope = {}
-                    global_scope = {
-                        "np": np,
-                        "scipy": __import__("scipy"),
-                        "sklearn": __import__("sklearn"),
-                        "lmfit": __import__("lmfit"),
-                        "curve_fit": __import__("scipy.optimize", fromlist=["curve_fit"]).curve_fit,
-                        "nnls": __import__("scipy.optimize", fromlist=["nnls"]).nnls,
-                        "linregress": __import__("scipy.stats", fromlist=["linregress"]).linregress,
-                        "find_peaks": __import__("scipy.signal", fromlist=["find_peaks"]).find_peaks,
-                        "gaussian_filter": __import__("scipy.ndimage", fromlist=["gaussian_filter"]).gaussian_filter,
-                    }
-                    # Inject registered tools (from the _shared registry) for the
-                    # hyperspectral agent + active skills, so generated code can
-                    # optionally call them by name — same mechanism the image /
-                    # curve agents use, not domain code hardcoded in this generic
-                    # controller.
-                    global_scope.update(_registry_tool_callables(state))
-                    
-                    # Execute Code
-                    with ExecutionTimeout(seconds=self.executor_timeout):
-                        exec(code_str, global_scope, local_scope)
-                    
-                        if "analyze_feature" not in local_scope:
-                            raise ValueError("Function 'analyze_feature' was not found in generated code.")
-                        
-                        # --- D. RUN ON DATA ---
-                        self.logger.info(f"    Executing generated code (timeout: {self.executor_timeout}s)...")
-                        func = local_scope["analyze_feature"]
-                        result_dict = _invoke_analyze_feature(
-                            func, optimal_data, state["energy_axis"], reconstruction,
-                            auxiliary=auxiliary_operands,
-                        )
-                    
-                    # Validation
-                    if not isinstance(result_dict, dict): raise ValueError("Function return must be a dict.")
-                    maps_dict = result_dict.get("maps")
-                    if not maps_dict or not isinstance(maps_dict, dict):
-                        raise ValueError("Return dict must contain a 'maps' key.")
-
-                    # Save Script (for debugging)
-                    safe_task_name = _sanitize_filename(target_desc)[:30]
-                    script_filename = f"{iter_title}_T{i}_{safe_task_name}_{timestamp}.py"
-                    try:
-                        with open(os.path.join(output_dir, script_filename), "w", encoding="utf-8") as f:
-                            f.write(f"# Auto-generated Script\n# Task: {target_desc}\n\n{code_str}")
-                    except: pass
-
-                    # --- E. PROCESS MAPS (Dashboard + QC) ---
-                    total_maps_expected = len(maps_dict)
-                    raw_units = result_dict.get("units", "a.u.")
-                    desc = result_dict.get("description", "")
-                    mean_spec_bytes = None  # rendered lazily for the sanity check
-
-                    for feature_name, result_map in maps_dict.items():
-                        # Shape/NaN Check
-                        if result_map.shape != (h, w): 
-                            self.logger.warning(f"    Skipping {feature_name}: Shape mismatch.")
-                            continue
-                        if np.all(np.isnan(result_map)):
-                            self.logger.warning(f"    Skipping {feature_name}: Map contains only NaNs.")
-                            continue
-
-                        # 1. Determine Units (Fixes UnboundLocalError)
-                        current_unit = "a.u."
-                        if isinstance(raw_units, dict):
-                            current_unit = raw_units.get(feature_name, "a.u.")
-                        elif isinstance(raw_units, str):
-                            current_unit = raw_units
-
-                        safe_feat = _sanitize_filename(feature_name)
-
-                        # 2. Generate Dashboard (Map + Histogram). Pass
-                        # axis_spec so non-spatial leading axes get axis-
-                        # name-driven labels ("Voltage-Time Map" / "Sample
-                        # Count") instead of "Spatial Map" / "Pixel Count".
-                        dashboard_bytes = tools.create_feature_dashboard(
-                            result_map, feature_name, current_unit,
-                            axis_spec=resolve_axis_spec(state.get("system_info")),
-                        )
-
-                        if dashboard_bytes:
-                            if feature_name in required_outputs:
-                                # Combined review (visual + physical + tool
-                                # evidence) in ONE voted pass for the user-asked-
-                                # for deliverables. Merges what were two gates so a
-                                # single reviewer weighs the dashboard, the method,
-                                # the spectrum AND the deterministic tool evidence
-                                # together — preventing the split-brain false
-                                # reject (visual 'noise' vs physical 'saturation',
-                                # each blind to the tool's measurability proof).
-                                if mean_spec_bytes is None:
-                                    try:
-                                        _ms = np.asarray(optimal_data).reshape(
-                                            -1, optimal_data.shape[-1]).mean(0)
-                                        mean_spec_bytes = plot_curve_to_bytes(
-                                            np.column_stack(
-                                                [np.asarray(state["energy_axis"]), _ms]),
-                                            {"title": "Representative mean spectrum"})
-                                    except Exception:
-                                        mean_spec_bytes = b""  # tolerate; runs without it
-                                # Coverage: fraction of pixels carrying a real
-                                # (finite, non-zero) value. A tiny coverage for a
-                                # feature expected to fill a coherent region is a
-                                # masking/segmentation COLLAPSE the value stats
-                                # alone don't reveal (a few dozen plausible-valued
-                                # pixels look fine by range/mean).
-                                _finite = np.isfinite(result_map)
-                                _real = _finite & (np.abs(result_map) > 1e-9)
-                                _cov = 100.0 * float(_real.sum()) / max(result_map.size, 1)
-                                summary = (
-                                    f"value range [{float(np.nanmin(result_map)):.4g}, "
-                                    f"{float(np.nanmax(result_map)):.4g}], mean "
-                                    f"{float(np.nanmean(result_map)):.4g} {current_unit}; "
-                                    f"valid coverage {_cov:.1f}% "
-                                    f"({int(_real.sum())} of {result_map.size} pixels finite & non-zero)")
-                                tool_descriptions = _used_tool_descriptions(state, code_str)
-                                self.logger.info(f"    🔎 Combined review on {feature_name}...")
-                                is_valid, critique = self._review_required_output(
-                                    dashboard_bytes, code_str, mean_spec_bytes or None,
-                                    state.get("system_info"),
-                                    state.get("analysis_objective"),
-                                    feature_name, summary, tool_descriptions)
-                                if not is_valid:
-                                    self.logger.warning(
-                                        f"    🔎 Combined review rejected "
-                                        f"{feature_name}: {critique}")
-                            else:
-                                # Diagnostic (non-required) map: lighter single
-                                # visual QC — no method/physics gate needed.
-                                self.logger.info(f"    👀 Performing Visual QC on {feature_name}...")
-                                is_valid, critique = self._check_result_visually(
-                                    dashboard_bytes, f"{target_desc} ({feature_name})")
-
-                            if is_valid:
-                                # STAGE DATA (Do not commit to state yet)
-                                current_run_valid_images.append({
-                                    "label": f"Custom Analysis: {feature_name}", 
-                                    "data": dashboard_bytes,
-                                    "filename": f"{iter_title}_T{i}_{safe_feat}_Dashboard_{timestamp}.jpeg"
-                                })
-                                current_run_valid_maps.append(result_map)
-                                current_run_valid_meta.append({
-                                    "name": feature_name,
-                                    "units": current_unit,
-                                    "description": f"{desc}. [Data Source: {processing_note}]",
-                                    "stats": {
-                                        "min": float(np.nanmin(result_map)), 
-                                        "max": float(np.nanmax(result_map)),
-                                        "mean": float(np.nanmean(result_map))
-                                    }
-                                })
-                            else:
-                                self.logger.warning(f"    ❌ Visual QC rejected {feature_name}: {critique}")
-                                qc_failures.append(f"{feature_name}: {critique}")
-
-                    # --- F. SUCCESS DECISION (Threshold + Required-Outputs Logic) ---
-                    valid_count = len(current_run_valid_maps)
-                    success_rate = valid_count / total_maps_expected if total_maps_expected > 0 else 0
-
-                    # Required-outputs gate: every named output must be
-                    # present AND QC-pass. Failure here forces a retry, so
-                    # the partial-success threshold never silently drops the
-                    # user-asked-for quantity.
-                    valid_names = {m['name'] for m in current_run_valid_meta}
-
-                    # Track the strongest attempt so an UNSATISFIABLE required
-                    # output (e.g. a QC criterion a valid result can never meet)
-                    # doesn't discard the recoverable maps this attempt produced.
-                    # Ranked by (#required passed, #maps passed); committed as a
-                    # self-consistent partial result only if every attempt fails.
-                    n_req_passed = sum(1 for n in required_outputs if n in valid_names)
-                    if (n_req_passed, valid_count) > (best_attempt["req_passed"], best_attempt["valid_count"]):
-                        best_attempt = {
-                            "req_passed": n_req_passed,
-                            "valid_count": valid_count,
-                            "images": list(current_run_valid_images),
-                            "maps": list(current_run_valid_maps),
-                            "meta": list(current_run_valid_meta),
-                        }
-
-                    missing_required = [n for n in required_outputs if n not in valid_names]
-                    if missing_required:
-                        relevant_critiques = [
-                            c for c in qc_failures
-                            if any(req in c for req in missing_required)
-                        ]
-                        absent_from_output = [
-                            n for n in missing_required if n not in maps_dict
-                        ]
-                        detail_parts = []
-                        if absent_from_output:
-                            detail_parts.append(
-                                f"keys absent from your `maps` dict: {absent_from_output}"
-                            )
-                        if relevant_critiques:
-                            detail_parts.append(
-                                f"QC critiques on required outputs: {relevant_critiques}"
-                            )
-                        detail = "; ".join(detail_parts) or "no further detail"
-                        raise ValueError(
-                            f"Required outputs failed: {missing_required}. {detail}"
-                        )
-
-                    if valid_count > 0 and success_rate >= self.SUCCESS_THRESHOLD:
-                        status_msg = "✅ Success" if valid_count == total_maps_expected else "⚠️ Partial Success"
-                        self.logger.info(f"    {status_msg} ({valid_count}/{total_maps_expected} passed). Committing valid maps.")
-
-                        # 1. COMMIT Valid Images
-                        for img_item in current_run_valid_images:
-                            tools.save_image_bytes(img_item['data'], output_dir, img_item['filename'], self.logger)
-                            if "analysis_images" not in state: state["analysis_images"] = []
-                            state["analysis_images"].append(img_item)
-
-                        # 2. COMMIT Data
-                        all_valid_maps.extend(current_run_valid_maps)
-                        all_valid_meta.extend(current_run_valid_meta)
-
-                        task_success = True
-                        break # Exit Retry Loop
-                    else:
-                        raise ValueError(f"Too many QC failures ({len(qc_failures)}/{total_maps_expected}). Critiques: {qc_failures}")
-
-                except Exception as e:
-                    error_msg = traceback.format_exc()
-                    if "QC failures" in str(e): error_msg = str(e) # Clean message for LLM
-                    
-                    self.logger.warning(f"    ❌ Attempt {retries+1} failed: {error_msg}")
-                    retries += 1
-                    # Annealed retry: escalate from "patch the math" to "abandon
-                    # the method" as failures accumulate, so retries can leave a
-                    # wrong-but-self-consistent method basin instead of resampling
-                    # it. See _codegen_retry_feedback.
-                    current_prompt = base_prompt + _codegen_retry_feedback(retries, error_msg)
-                    if retries >= 2:
-                        self.logger.info(
-                            f"    ↻ Retry annealing engaged (failure {retries}): "
-                            "escalating from parameter-patch toward method-change."
-                        )
-
-            if not task_success:
-                self.logger.error(f"    ⚠️ Task {i} failed after {self.MAX_RETRIES} attempts.")
-                # Salvage the strongest attempt rather than discarding all work:
-                # commit its passing maps so a recoverable output survives an
-                # unsatisfiable required one. The required-output failure is still
-                # surfaced (the task did not cleanly succeed).
-                if best_attempt["valid_count"] > 0:
-                    # Physics-aware salvage Judge: decide (from physics, not just
-                    # QC-pass count) whether the best partial is a defensible
-                    # APPROXIMATE result to present with honest caveats, or is
-                    # meaningless and should be withheld. Simple: one call.
-                    if mean_spec_bytes is None:
-                        try:
-                            _ms = np.asarray(optimal_data).reshape(
-                                -1, optimal_data.shape[-1]).mean(0)
-                            mean_spec_bytes = plot_curve_to_bytes(
-                                np.column_stack(
-                                    [np.asarray(state["energy_axis"]), _ms]),
-                                {"title": "Representative mean spectrum"})
-                        except Exception:
-                            mean_spec_bytes = b""
-                    passed_names = [m["name"] for m in best_attempt["meta"]]
-                    missing = [n for n in required_outputs if n not in passed_names]
-                    result_summary = (
-                        f"{best_attempt['req_passed']}/{len(required_outputs)} required "
-                        f"outputs passed verification. Committed (passed QC): "
-                        f"{passed_names or 'none'}. Never passed / withheld: "
-                        f"{missing or 'none'}.")
-                    rep_dash = (best_attempt["images"][0]["data"]
-                                if best_attempt["images"] else None)
-                    present, conf, caveat = self._judge_salvage(
-                        rep_dash, code_str, mean_spec_bytes or None,
-                        state.get("system_info"), state.get("analysis_objective"),
-                        _used_tool_descriptions(state, code_str), result_summary)
-
-                    # Record the degradation so the top-level status reflects it
-                    # (a salvage is NOT a clean success). Threaded up to analyze().
-                    state.setdefault("degradation_notes", []).append({
-                        "kind": "withheld" if not present else "approximate",
-                        "confidence": "none" if not present else conf,
-                        "missing_required": missing,
-                        "caveat": caveat,
-                    })
-
-                    if not present:
-                        self.logger.warning(
-                            f"    ⚖️  Salvage judge WITHHELD the partial result "
-                            f"(no physically defensible signal): {caveat}")
-                    else:
-                        self.logger.warning(
-                            f"    ⚖️  Salvage judge: presenting APPROXIMATE result "
-                            f"({conf} confidence) — {caveat}")
-                        self.logger.warning(
-                            f"    ⛑️  Committing best partial attempt "
-                            f"({best_attempt['req_passed']}/{len(required_outputs)} "
-                            f"required outputs, {best_attempt['valid_count']} map(s) "
-                            f"passed QC); some required output(s) never passed.")
-                        marker = f"[APPROXIMATE — {conf} confidence: {caveat}] "
-                        for img_item in best_attempt["images"]:
-                            tools.save_image_bytes(img_item['data'], output_dir, img_item['filename'], self.logger)
-                            state.setdefault("analysis_images", []).append(img_item)
-                        for m in best_attempt["meta"]:
-                            m["description"] = marker + m.get("description", "")
-                            m["confidence"] = conf
-                            m["salvage_caveat"] = caveat
-                        all_valid_maps.extend(best_attempt["maps"])
-                        all_valid_meta.extend(best_attempt["meta"])
+            # --- Run the per-target attempt ladder on the shared engine ---
+            # (#327 phase 5). The engine drives the outer loop: initial
+            # attempt -> verdict check -> annealed retry-feedback refits ->
+            # salvage fallback. One "attempt" (generate -> in-process exec ->
+            # per-map QC -> success decision) moved verbatim into
+            # _run_attempt; the per-map inner loop (voted combined review /
+            # visual QC + SUCCESS_THRESHOLD/required-outputs gate) and the
+            # salvage judge stay native, per the plan's HS-3 scoping.
+            ctx = QCItemContext(
+                state=state, data=optimal_data, data_path="",
+                item_name=target_desc, item_idx=i - 1,
+                is_regime_anchor=True,  # every target gets the full ladder
+            )
+            ctx.target_index = i
+            ctx.required_outputs = required_outputs
+            ctx.base_prompt = base_prompt
+            ctx.current_prompt = base_prompt
+            ctx.retries = 0
+            ctx.best_attempt = {"req_passed": -1, "valid_count": -1,
+                                "images": [], "maps": [], "meta": []}
+            ctx.attempt_entries = []
+            ctx.last_code = ""
+            ctx.mean_spec_bytes = None
+            ctx.session = {
+                "h": h, "w": w,
+                "output_dir": output_dir,
+                "iter_title": iter_title,
+                "timestamp": timestamp,
+                "optimal_data": optimal_data,
+                "reconstruction": reconstruction,
+                "auxiliary_operands": auxiliary_operands,
+                "processing_note": processing_note,
+                "all_valid_maps": all_valid_maps,
+                "all_valid_meta": all_valid_meta,
+                "flux_table": flux_table,
+            }
+            engine = CodegenQCEngine(host=self, spec=self._QC_ENGINE_SPEC)
+            out = engine.run_item(ctx) or {}
+            record = out.get("record")
+            if record is not None:
+                state.setdefault("dynamic_analysis_records", []).append(record)
 
         # --- FINAL AGGREGATION ---
         if not all_valid_maps:
@@ -2524,6 +2429,501 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
 
         self.logger.info(f"✅ Dynamic Analysis Complete. Total unique maps generated: {len(all_valid_maps)}")
         return state
+
+    # --- CodegenQCEngine hooks (#327 phase 5) -----------------------------
+    # The attempt bodies below moved verbatim from the pre-port while-loop.
+    # An "attempt" never fails at the ENGINE level (exceptions become the
+    # outcome's failure verdict — the retry trigger), so the engine's
+    # refit-failure break is unreachable; the task verdict lives in the
+    # outcome's `task_success` and is what qc_check_accept keys on.
+
+    def qc_setup(self, ctx: QCItemContext) -> None:
+        pass  # per-target context is prepared in execute() before run_item
+
+    def qc_try_reuse(self, ctx: QCItemContext):
+        return None  # no locked-script reuse path for dynamic analysis
+
+    def qc_run_initial(self, ctx: QCItemContext) -> dict:
+        return self._run_attempt(ctx)
+
+    def qc_record_initial(self, ctx: QCItemContext, result: dict) -> None:
+        ctx.best_result = result
+
+    def qc_record_initial_failure(self, ctx: QCItemContext, result: dict) -> None:
+        pass  # unreachable: attempts always succeed at the engine level
+
+    def qc_verification_bypass(self, ctx: QCItemContext) -> bool:
+        return False
+
+    def qc_log_skip_verification(self, ctx: QCItemContext) -> None:
+        pass  # unreachable: attempts always succeed at the engine level
+
+    def qc_loop_setup(self, ctx: QCItemContext) -> None:
+        pass
+
+    def qc_verify(self, ctx: QCItemContext) -> dict:
+        # The attempt already carries its own verdict (per-map QC + the
+        # required-outputs/threshold decision ran inside it) — no extra
+        # verification call.
+        return ctx.current_result
+
+    def qc_assess(self, ctx: QCItemContext, verification: dict) -> None:
+        pass  # attempt entries are recorded at attempt time (_run_attempt)
+
+    def qc_check_accept(self, ctx: QCItemContext, verification: dict) -> bool:
+        return bool(verification.get("task_success"))
+
+    def qc_refine(self, ctx: QCItemContext, verification: dict) -> dict:
+        # Annealed retry: escalate from "patch the math" to "abandon the
+        # method" as failures accumulate, so retries can leave a wrong-but-
+        # self-consistent method basin instead of resampling it. See
+        # _codegen_retry_feedback.
+        ctx.current_prompt = ctx.base_prompt + _codegen_retry_feedback(
+            ctx.retries, verification.get("error_msg") or "")
+        if ctx.retries >= 2:
+            self.logger.info(
+                f"    ↻ Retry annealing engaged (failure {ctx.retries}): "
+                "escalating from parameter-patch toward method-change."
+            )
+        # Level of the NEXT attempt, for the engine's _produced_at_level stamp.
+        ctx.annealing_level = _retry_annealing_level(ctx.retries)
+        return {"prompt": ctx.current_prompt}
+
+    def qc_refit(self, ctx: QCItemContext, verification: dict,
+                 refine_from, just_escalated_to_hot: bool) -> dict:
+        # refine_from is always None (spec.refine_anchor="none"): structural
+        # freedom is granted through the retry-feedback text, not a script
+        # anchor drop.
+        return self._run_attempt(ctx)
+
+    def qc_after_refit(self, ctx: QCItemContext, refit_result: dict,
+                       verification: dict) -> None:
+        ctx.current_result = refit_result
+
+    def qc_final_verify(self, ctx: QCItemContext) -> None:
+        # Loop budget exhausted — the last attempt's verdict was not yet
+        # checked by qc_check_accept; accept it here if the task succeeded.
+        if ctx.current_result and ctx.current_result.get("task_success"):
+            ctx.approved = True
+
+    def qc_post_verification(self, ctx: QCItemContext):
+        if ctx.approved:
+            return {"record": self._build_target_record(ctx, task_success=True)}
+        return None
+
+    def qc_fallback(self, ctx: QCItemContext) -> dict:
+        state = ctx.state
+        required_outputs = ctx.required_outputs
+        best_attempt = ctx.best_attempt
+        optimal_data = ctx.session["optimal_data"]
+        output_dir = ctx.session["output_dir"]
+        code_str = ctx.last_code
+        mean_spec_bytes = ctx.mean_spec_bytes
+
+        self.logger.error(f"    ⚠️ Task {ctx.target_index} failed after {self.MAX_RETRIES} attempts.")
+        # Salvage the strongest attempt rather than discarding all work:
+        # commit its passing maps so a recoverable output survives an
+        # unsatisfiable required one. The required-output failure is still
+        # surfaced (the task did not cleanly succeed).
+        if best_attempt["valid_count"] > 0:
+            # Physics-aware salvage Judge: decide (from physics, not just
+            # QC-pass count) whether the best partial is a defensible
+            # APPROXIMATE result to present with honest caveats, or is
+            # meaningless and should be withheld. Simple: one call.
+            if mean_spec_bytes is None:
+                try:
+                    _ms = np.asarray(optimal_data).reshape(
+                        -1, optimal_data.shape[-1]).mean(0)
+                    mean_spec_bytes = plot_curve_to_bytes(
+                        np.column_stack(
+                            [np.asarray(state["energy_axis"]), _ms]),
+                        {"title": "Representative mean spectrum"})
+                except Exception:
+                    mean_spec_bytes = b""
+            passed_names = [m["name"] for m in best_attempt["meta"]]
+            missing = [n for n in required_outputs if n not in passed_names]
+            result_summary = (
+                f"{best_attempt['req_passed']}/{len(required_outputs)} required "
+                f"outputs passed verification. Committed (passed QC): "
+                f"{passed_names or 'none'}. Never passed / withheld: "
+                f"{missing or 'none'}.")
+            if ctx.session.get("flux_table"):
+                result_summary += "\n\n" + ctx.session["flux_table"]
+            rep_dash = (best_attempt["images"][0]["data"]
+                        if best_attempt["images"] else None)
+            present, conf, caveat = self._judge_salvage(
+                rep_dash, code_str, mean_spec_bytes or None,
+                state.get("system_info"), state.get("analysis_objective"),
+                _used_tool_descriptions(state, code_str), result_summary)
+
+            # Record the degradation so the top-level status reflects it
+            # (a salvage is NOT a clean success). Threaded up to analyze().
+            state.setdefault("degradation_notes", []).append({
+                "kind": "withheld" if not present else "approximate",
+                "confidence": "none" if not present else conf,
+                "missing_required": missing,
+                "caveat": caveat,
+            })
+
+            if not present:
+                self.logger.warning(
+                    f"    ⚖️  Salvage judge WITHHELD the partial result "
+                    f"(no physically defensible signal): {caveat}")
+            else:
+                self.logger.warning(
+                    f"    ⚖️  Salvage judge: presenting APPROXIMATE result "
+                    f"({conf} confidence) — {caveat}")
+                self.logger.warning(
+                    f"    ⛑️  Committing best partial attempt "
+                    f"({best_attempt['req_passed']}/{len(required_outputs)} "
+                    f"required outputs, {best_attempt['valid_count']} map(s) "
+                    f"passed QC); some required output(s) never passed.")
+                marker = f"[APPROXIMATE — {conf} confidence: {caveat}] "
+                for img_item in best_attempt["images"]:
+                    tools.save_image_bytes(img_item['data'], output_dir, img_item['filename'], self.logger)
+                    state.setdefault("analysis_images", []).append(img_item)
+                for m in best_attempt["meta"]:
+                    m["description"] = marker + m.get("description", "")
+                    m["confidence"] = conf
+                    m["salvage_caveat"] = caveat
+                ctx.session["all_valid_maps"].extend(best_attempt["maps"])
+                ctx.session["all_valid_meta"].extend(best_attempt["meta"])
+
+        return {"record": self._build_target_record(ctx, task_success=False)}
+
+    def _build_target_record(self, ctx: QCItemContext, task_success: bool):
+        # --- HS-1: per-target verification record (additive) ---
+        # Same shape family as the curve/image quality_history so the
+        # T=2 staging gate and downstream consumers read all three
+        # modalities uniformly. Failure-isolated: never affects results.
+        try:
+            from .._verification_record import (
+                HS_HISTORY_KEYMAP,
+                build_quality_history,
+            )
+            _final_frac = (
+                ctx.attempt_entries[-1].get("passed_fraction")
+                if ctx.attempt_entries else None
+            )
+            _hist = build_quality_history(
+                best_value=(_final_frac if _final_frac is not None else 0.0),
+                threshold=self.SUCCESS_THRESHOLD,
+                all_attempts=None,
+                verification_history=ctx.attempt_entries,
+                judge_result=None,
+                script_errors=None,
+                keymap=HS_HISTORY_KEYMAP,
+            )
+            # The task verdict also encodes the required-outputs gate,
+            # which the numeric fraction alone cannot — overwrite
+            # (curve's verifier-approved path does the same).
+            _hist["approved"] = bool(task_success)
+            return {
+                "target": ctx.item_name,
+                "required_outputs": ctx.required_outputs,
+                "task_success": bool(task_success),
+                "salvaged": (not task_success) and ctx.best_attempt["valid_count"] > 0,
+                "script": ctx.last_code or None,
+                "quality_history": _hist,
+            }
+        except Exception as _rec_err:  # noqa: BLE001 - record is additive
+            self.logger.warning(
+                f"    dynamic-analysis record skipped: {_rec_err}"
+            )
+            return None
+
+    def _run_attempt(self, ctx: QCItemContext) -> dict:
+        """One generate → exec → per-map-QC → success-decision attempt.
+
+        Body moved verbatim from the pre-port retry loop. Exceptions become
+        the returned outcome's failure verdict (the retry trigger), so the
+        engine-level ``success`` is always True. Attempt entries and the
+        retry counter are updated here, at attempt time, exactly as before.
+        """
+        state = ctx.state
+        target_desc = ctx.item_name
+        required_outputs = ctx.required_outputs
+        h = ctx.session["h"]
+        w = ctx.session["w"]
+        output_dir = ctx.session["output_dir"]
+        iter_title = ctx.session["iter_title"]
+        timestamp = ctx.session["timestamp"]
+        i = ctx.target_index
+        optimal_data = ctx.session["optimal_data"]
+        reconstruction = ctx.session["reconstruction"]
+        auxiliary_operands = ctx.session["auxiliary_operands"]
+        processing_note = ctx.session["processing_note"]
+        retries = ctx.retries
+
+        try:
+            # --- A. CLEAN SLATE FOR THIS ATTEMPT ---
+            # Prevents "Ghost Data" from failed previous attempts accumulating
+            current_run_valid_images = []
+            current_run_valid_maps = []
+            current_run_valid_meta = []
+            qc_failures = []
+            # Level of THIS attempt = the retry-feedback stage it was
+            # generated under; total defaults to 0 until stage E runs
+            # so the except-path record never hits an unbound name.
+            attempt_level = _retry_annealing_level(retries)
+            total_maps_expected = 0
+            ctx.mean_spec_bytes = None  # rendered lazily for the sanity check
+
+            # --- B. GENERATE CODE ---
+            self.logger.info(f"    (Attempt {retries+1}) Asking LLM to write code...")
+            response = self.model.generate_content(ctx.current_prompt, generation_config=self.generation_config)
+            result_json, _ = parse_codegen_response(response, field="code", logger=self.logger)
+            code_str = (result_json or {}).get("code", "")
+            ctx.last_code = code_str
+
+            # --- C. SANDBOX SETUP ---
+            local_scope = {}
+            global_scope = {
+                "np": np,
+                "scipy": __import__("scipy"),
+                "sklearn": __import__("sklearn"),
+                "lmfit": __import__("lmfit"),
+                "curve_fit": __import__("scipy.optimize", fromlist=["curve_fit"]).curve_fit,
+                "nnls": __import__("scipy.optimize", fromlist=["nnls"]).nnls,
+                "linregress": __import__("scipy.stats", fromlist=["linregress"]).linregress,
+                "find_peaks": __import__("scipy.signal", fromlist=["find_peaks"]).find_peaks,
+                "gaussian_filter": __import__("scipy.ndimage", fromlist=["gaussian_filter"]).gaussian_filter,
+            }
+            # Inject registered tools (from the _shared registry) for the
+            # hyperspectral agent + active skills, so generated code can
+            # optionally call them by name — same mechanism the image /
+            # curve agents use, not domain code hardcoded in this generic
+            # controller.
+            global_scope.update(_registry_tool_callables(state))
+
+            # Execute Code
+            with ExecutionTimeout(seconds=self.executor_timeout):
+                exec(code_str, global_scope, local_scope)
+
+                if "analyze_feature" not in local_scope:
+                    raise ValueError("Function 'analyze_feature' was not found in generated code.")
+
+                # --- D. RUN ON DATA ---
+                self.logger.info(f"    Executing generated code (timeout: {self.executor_timeout}s)...")
+                func = local_scope["analyze_feature"]
+                result_dict = _invoke_analyze_feature(
+                    func, optimal_data, state["energy_axis"], reconstruction,
+                    auxiliary=auxiliary_operands,
+                )
+
+            # Validation
+            if not isinstance(result_dict, dict): raise ValueError("Function return must be a dict.")
+            maps_dict = result_dict.get("maps")
+            if not maps_dict or not isinstance(maps_dict, dict):
+                raise ValueError("Return dict must contain a 'maps' key.")
+
+            # Save Script (for debugging)
+            safe_task_name = _sanitize_filename(target_desc)[:30]
+            script_filename = f"{iter_title}_T{i}_{safe_task_name}_{timestamp}.py"
+            try:
+                with open(os.path.join(output_dir, script_filename), "w", encoding="utf-8") as f:
+                    f.write(f"# Auto-generated Script\n# Task: {target_desc}\n\n{code_str}")
+            except: pass
+
+            # --- E. PROCESS MAPS (Dashboard + QC) ---
+            total_maps_expected = len(maps_dict)
+            raw_units = result_dict.get("units", "a.u.")
+            desc = result_dict.get("description", "")
+
+            for feature_name, result_map in maps_dict.items():
+                # Shape/NaN Check
+                if result_map.shape != (h, w):
+                    self.logger.warning(f"    Skipping {feature_name}: Shape mismatch.")
+                    continue
+                if np.all(np.isnan(result_map)):
+                    self.logger.warning(f"    Skipping {feature_name}: Map contains only NaNs.")
+                    continue
+
+                # 1. Determine Units (Fixes UnboundLocalError)
+                current_unit = "a.u."
+                if isinstance(raw_units, dict):
+                    current_unit = raw_units.get(feature_name, "a.u.")
+                elif isinstance(raw_units, str):
+                    current_unit = raw_units
+
+                safe_feat = _sanitize_filename(feature_name)
+
+                # 2. Generate Dashboard (Map + Histogram). Pass
+                # axis_spec so non-spatial leading axes get axis-
+                # name-driven labels ("Voltage-Time Map" / "Sample
+                # Count") instead of "Spatial Map" / "Pixel Count".
+                dashboard_bytes = tools.create_feature_dashboard(
+                    result_map, feature_name, current_unit,
+                    axis_spec=resolve_axis_spec(state.get("system_info")),
+                )
+
+                if dashboard_bytes:
+                    if feature_name in required_outputs:
+                        # Combined review (visual + physical + tool
+                        # evidence) in ONE voted pass for the user-asked-
+                        # for deliverables. Merges what were two gates so a
+                        # single reviewer weighs the dashboard, the method,
+                        # the spectrum AND the deterministic tool evidence
+                        # together — preventing the split-brain false
+                        # reject (visual 'noise' vs physical 'saturation',
+                        # each blind to the tool's measurability proof).
+                        if ctx.mean_spec_bytes is None:
+                            try:
+                                _ms = np.asarray(optimal_data).reshape(
+                                    -1, optimal_data.shape[-1]).mean(0)
+                                ctx.mean_spec_bytes = plot_curve_to_bytes(
+                                    np.column_stack(
+                                        [np.asarray(state["energy_axis"]), _ms]),
+                                    {"title": "Representative mean spectrum"})
+                            except Exception:
+                                ctx.mean_spec_bytes = b""  # tolerate; runs without it
+                        # Coverage: fraction of pixels carrying a real
+                        # (finite, non-zero) value. A tiny coverage for a
+                        # feature expected to fill a coherent region is a
+                        # masking/segmentation COLLAPSE the value stats
+                        # alone don't reveal (a few dozen plausible-valued
+                        # pixels look fine by range/mean).
+                        _finite = np.isfinite(result_map)
+                        _real = _finite & (np.abs(result_map) > 1e-9)
+                        _cov = 100.0 * float(_real.sum()) / max(result_map.size, 1)
+                        summary = (
+                            f"value range [{float(np.nanmin(result_map)):.4g}, "
+                            f"{float(np.nanmax(result_map)):.4g}], mean "
+                            f"{float(np.nanmean(result_map)):.4g} {current_unit}; "
+                            f"valid coverage {_cov:.1f}% "
+                            f"({int(_real.sum())} of {result_map.size} pixels finite & non-zero)")
+                        if ctx.session.get("flux_table"):
+                            summary += "\n\n" + ctx.session["flux_table"]
+                        tool_descriptions = _used_tool_descriptions(state, code_str)
+                        self.logger.info(f"    🔎 Combined review on {feature_name}...")
+                        is_valid, critique = self._review_required_output(
+                            dashboard_bytes, code_str, ctx.mean_spec_bytes or None,
+                            state.get("system_info"),
+                            state.get("analysis_objective"),
+                            feature_name, summary, tool_descriptions,
+                            attempt_history=_render_attempt_history(ctx.attempt_entries))
+                        if not is_valid:
+                            self.logger.warning(
+                                f"    🔎 Combined review rejected "
+                                f"{feature_name}: {critique}")
+                    else:
+                        # Diagnostic (non-required) map: lighter single
+                        # visual QC — no method/physics gate needed.
+                        self.logger.info(f"    👀 Performing Visual QC on {feature_name}...")
+                        is_valid, critique = self._check_result_visually(
+                            dashboard_bytes, f"{target_desc} ({feature_name})")
+
+                    if is_valid:
+                        # STAGE DATA (Do not commit to state yet)
+                        current_run_valid_images.append({
+                            "label": f"Custom Analysis: {feature_name}",
+                            "data": dashboard_bytes,
+                            "filename": f"{iter_title}_T{i}_{safe_feat}_Dashboard_{timestamp}.jpeg"
+                        })
+                        current_run_valid_maps.append(result_map)
+                        current_run_valid_meta.append({
+                            "name": feature_name,
+                            "units": current_unit,
+                            "description": f"{desc}. [Data Source: {processing_note}]",
+                            "stats": {
+                                "min": float(np.nanmin(result_map)),
+                                "max": float(np.nanmax(result_map)),
+                                "mean": float(np.nanmean(result_map))
+                            }
+                        })
+                    else:
+                        self.logger.warning(f"    ❌ Visual QC rejected {feature_name}: {critique}")
+                        qc_failures.append(f"{feature_name}: {critique}")
+
+            # --- F. SUCCESS DECISION (Threshold + Required-Outputs Logic) ---
+            valid_count = len(current_run_valid_maps)
+            success_rate = valid_count / total_maps_expected if total_maps_expected > 0 else 0
+
+            # Required-outputs gate: every named output must be
+            # present AND QC-pass. Failure here forces a retry, so
+            # the partial-success threshold never silently drops the
+            # user-asked-for quantity.
+            valid_names = {m['name'] for m in current_run_valid_meta}
+
+            # Track the strongest attempt so an UNSATISFIABLE required
+            # output (e.g. a QC criterion a valid result can never meet)
+            # doesn't discard the recoverable maps this attempt produced.
+            # Ranked by (#required passed, #maps passed); committed as a
+            # self-consistent partial result only if every attempt fails.
+            n_req_passed = sum(1 for n in required_outputs if n in valid_names)
+            if (n_req_passed, valid_count) > (ctx.best_attempt["req_passed"], ctx.best_attempt["valid_count"]):
+                ctx.best_attempt = {
+                    "req_passed": n_req_passed,
+                    "valid_count": valid_count,
+                    "images": list(current_run_valid_images),
+                    "maps": list(current_run_valid_maps),
+                    "meta": list(current_run_valid_meta),
+                }
+
+            missing_required = [n for n in required_outputs if n not in valid_names]
+            if missing_required:
+                relevant_critiques = [
+                    c for c in qc_failures
+                    if any(req in c for req in missing_required)
+                ]
+                absent_from_output = [
+                    n for n in missing_required if n not in maps_dict
+                ]
+                detail_parts = []
+                if absent_from_output:
+                    detail_parts.append(
+                        f"keys absent from your `maps` dict: {absent_from_output}"
+                    )
+                if relevant_critiques:
+                    detail_parts.append(
+                        f"QC critiques on required outputs: {relevant_critiques}"
+                    )
+                detail = "; ".join(detail_parts) or "no further detail"
+                raise ValueError(
+                    f"Required outputs failed: {missing_required}. {detail}"
+                )
+
+            if valid_count > 0 and success_rate >= self.SUCCESS_THRESHOLD:
+                status_msg = "✅ Success" if valid_count == total_maps_expected else "⚠️ Partial Success"
+                self.logger.info(f"    {status_msg} ({valid_count}/{total_maps_expected} passed). Committing valid maps.")
+
+                # 1. COMMIT Valid Images
+                for img_item in current_run_valid_images:
+                    tools.save_image_bytes(img_item['data'], output_dir, img_item['filename'], self.logger)
+                    if "analysis_images" not in state: state["analysis_images"] = []
+                    state["analysis_images"].append(img_item)
+
+                # 2. COMMIT Data
+                ctx.session["all_valid_maps"].extend(current_run_valid_maps)
+                ctx.session["all_valid_meta"].extend(current_run_valid_meta)
+
+                # HS-1: record the successful attempt (any residual
+                # qc_failures are the maps a partial success dropped).
+                ctx.attempt_entries.append(_hs_attempt_entry(
+                    attempt_level, success_rate, qc_failures, ""))
+                return {"success": True, "task_success": True,
+                        "error_msg": None}
+            else:
+                raise ValueError(f"Too many QC failures ({len(qc_failures)}/{total_maps_expected}). Critiques: {qc_failures}")
+
+        except Exception as e:
+            error_msg = traceback.format_exc()
+            if "QC failures" in str(e): error_msg = str(e) # Clean message for LLM
+
+            self.logger.warning(f"    ❌ Attempt {retries+1} failed: {error_msg}")
+            # HS-1: record the failed attempt with the escalation
+            # stage that will be applied to the next one.
+            ctx.attempt_entries.append(_hs_attempt_entry(
+                attempt_level,
+                (len(current_run_valid_maps) / total_maps_expected
+                 if total_maps_expected else None),
+                qc_failures,
+                _retry_stage_label(retries + 1),
+                error=str(e),
+            ))
+            ctx.retries = retries + 1
+            return {"success": True, "task_success": False,
+                    "error_msg": error_msg}
 
     def _check_result_visually(self, dashboard_bytes: bytes, feature_desc: str) -> tuple[bool, str]:
         """
@@ -2614,7 +3014,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
 
     def _review_required_output_one(self, dashboard_bytes, code_str, mean_spec_bytes,
                                     system_info, objective, feature_desc,
-                                    result_summary, tool_descriptions):
+                                    result_summary, tool_descriptions,
+                                    attempt_history: str = ""):
         meta_str = (json.dumps(system_info, default=str)[:1500]
                     if system_info else "(none)")
         prompt = [SPECTROSCOPY_RESULT_REVIEW_INSTRUCTIONS.format(
@@ -2624,6 +3025,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             result_summary=f"Output '{feature_desc}': {result_summary}",
             tool_descriptions=tool_descriptions or "(no registered tool was called)",
             tool_scrutiny=VERIFIER_TOOL_SCRUTINY_PRINCIPLE,
+            attempt_history=attempt_history,
         )]
         prompt.append("Result dashboard (map + histogram):")
         prompt.append({"mime_type": "image/jpeg", "data": dashboard_bytes})
@@ -2638,7 +3040,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
 
     def _review_required_output(self, dashboard_bytes, code_str, mean_spec_bytes,
                                 system_info, objective, feature_desc,
-                                result_summary, tool_descriptions) -> tuple[bool, str]:
+                                result_summary, tool_descriptions,
+                                attempt_history: str = "") -> tuple[bool, str]:
         """Combined visual + physical review for a REQUIRED output, in ONE voted
         pass. Replaces the separate visual-QC then physics-sanity gates for
         required deliverables: a single reviewer weighs the dashboard, the
@@ -2655,7 +3058,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 ok, crit = self._review_required_output_one(
                     dashboard_bytes, code_str, mean_spec_bytes,
                     system_info, objective, feature_desc,
-                    result_summary, tool_descriptions)
+                    result_summary, tool_descriptions,
+                    attempt_history=attempt_history)
             except Exception as e:
                 self.logger.warning(f"Combined result review crashed: {e}")
                 return True, ""  # fail-open
@@ -2709,138 +3113,9 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             return True, "low", "Result did not pass full verification; treat as approximate."
 
 
-class RunSelfReflectionController:
-    """
-    [🧠 CRITIC Step]
-    Reviews the Draft 1 analysis against the images to catch hallucinations.
-    """
-    def __init__(self, model, logger, generation_config, safety_settings, parse_fn):
-        self.model = model
-        self.logger = logger
-        self.generation_config = generation_config
-        self.safety_settings = safety_settings
-        self._parse_llm_response = parse_fn
-        self.instructions = SPECTROSCOPY_REFLECTION_INSTRUCTIONS
-
-    def execute(self, state: dict) -> dict:
-        if state.get("error_dict"): return state
-        self.logger.info("\n\n🧠 --- SELF-REFLECTION: REVIEWING ANALYSIS --- 🧠\n")
-
-        # 1. Get the Draft 1 Analysis
-        current_result = state.get("result_json")
-        if not current_result:
-            self.logger.warning("No analysis found to review.")
-            return state
-            
-        draft_text = current_result.get("detailed_analysis", "")
-        claims = current_result.get("scientific_claims", [])
-
-        # 2. Build the Review Prompt
-        prompt_parts = [self.instructions]
-        prompt_parts.append("\n\n### DRAFT ANALYSIS TO REVIEW:")
-        prompt_parts.append(f"{draft_text}")
-        prompt_parts.append(f"\n\n### GENERATED CLAIMS:\n{json.dumps(claims, indent=2)}")
-
-        # 3. Add Evidence (Images)
-        # The critic needs to see the data to know if the text is lying.
-        prompt_parts.append("\n\n### VISUAL EVIDENCE:")
-        analysis_images = state.get("analysis_images", [])
-        if not analysis_images:
-            prompt_parts.append("(No images available for verification)")
-        
-        for img in analysis_images:
-            image_bytes = img.get('data') or img.get('bytes')
-            label = img.get('label', 'Unknown Plot')
-            if image_bytes:
-                prompt_parts.append(f"\n**{label}**")
-                prompt_parts.append({"mime_type": "image/jpeg", "data": image_bytes})
-
-        # 4. Run Model
-        try:
-            param_gen_config = None#GenerationConfig(response_mime_type="application/json")
-            response = self.model.generate_content(
-                contents=prompt_parts,
-                generation_config=param_gen_config,
-                safety_settings=self.safety_settings,
-            )
-            review_json, error = self._parse_llm_response(response)
-            
-            if error:
-                self.logger.warning("Reflection failed to parse. Assuming approval.")
-                state["reflection_result"] = {"status": "approved"}
-            else:
-                state["reflection_result"] = review_json
-                self.logger.info(f"✅ Reflection Complete. Status: {review_json.get('status')}")
-                if review_json.get('status') != 'approved':
-                    self.logger.info(f"   Critique: {review_json.get('critique')}")
-
-        except Exception as e:
-            self.logger.error(f"Reflection step crashed: {e}")
-            state["reflection_result"] = {"status": "approved"} # Fail open
-
-        return state
-
-
-class ApplyReflectionUpdatesController:
-    """
-    [🧠 EDITOR Step]
-    Applies the changes suggested by the critic, if any.
-    """
-    def __init__(self, model, logger, generation_config, safety_settings, parse_fn):
-        self.model = model
-        self.logger = logger
-        self.generation_config = generation_config
-        self.safety_settings = safety_settings
-        self._parse_llm_response = parse_fn
-        self.instructions = SPECTROSCOPY_REFLECTION_UPDATE_INSTRUCTIONS
-
-    def execute(self, state: dict) -> dict:
-        if state.get("error_dict"): return state
-        
-        review = state.get("reflection_result", {})
-        if review.get("status") == "approved":
-            self.logger.info("⏩ No revisions needed. Proceeding to report generation.")
-            return state
-
-        self.logger.info("\n\n🧠 --- REFINEMENT: APPLYING CRITICAL UPDATES --- 🧠\n")
-
-        # 1. Setup Context
-        original_result = state.get("result_json")
-        critique_text = review.get("critique", "No critique provided.")
-        
-        prompt_parts = [self.instructions]
-        prompt_parts.append(f"\n\n### CRITICAL REVIEW:\n{critique_text}")
-        prompt_parts.append(f"\n\n### ORIGINAL DRAFT:\n{json.dumps(original_result, indent=2)}")
-        
-        # We re-attach images so the editor can verify what needs to be changed
-        # (e.g., "Remove discussion of Component 3")
-        prompt_parts.append("\n\n### VISUAL CONTEXT (For Reference):")
-        for img in state.get("analysis_images", []):
-            image_bytes = img.get('data') or img.get('bytes')
-            label = img.get('label', 'Unknown Plot')
-            if image_bytes:
-                prompt_parts.append(f"\n**{label}**")
-                prompt_parts.append({"mime_type": "image/jpeg", "data": image_bytes})
-
-        # 2. Run Model
-        try:
-            param_gen_config = None#GenerationConfig(response_mime_type="application/json")
-            response = self.model.generate_content(
-                contents=prompt_parts,
-                generation_config=param_gen_config,
-                safety_settings=self.safety_settings,
-            )
-            updated_json, error = self._parse_llm_response(response)
-            
-            if not error and updated_json:
-                # OVERWRITE the result
-                state["result_json"] = updated_json
-                self.logger.info("✅ Analysis updated based on self-reflection.")
-            else:
-                self.logger.warning("Failed to parse updated analysis. Keeping original draft.")
-
-        except Exception as e:
-            self.logger.error(f"Refinement step crashed: {e}")
-            # Do not overwrite state['result_json'], just keep the old one
-
-        return state
+# Moved to base_controllers (modality-agnostic critic/editor pair) —
+# re-exported under the historical names so existing imports keep working.
+from .base_controllers import (  # noqa: E402,F401
+    RunSelfReflectionController,
+    ApplyReflectionUpdatesController,
+)

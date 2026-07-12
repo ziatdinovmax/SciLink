@@ -37,6 +37,7 @@ from .._locked_exec import (
     stage_and_run, script_uses_canonical_input, DATA_NAME, CANDIDATES_DIR_NAME,
     atomic_np_save,
 )
+from .._qc_engine import CodegenQCEngine, QCEngineSpec, QCItemContext
 from ....utils.codegen_parse import parse_codegen_response
 from ....utils.synthesis_parse import salvage_synthesis_from_response
 
@@ -589,64 +590,17 @@ def build_verification_prompt_with_history(
     current_fit: dict,
     previous_iterations: List[dict],
 ) -> str:
-    """Build history context string for verification prompt."""
-    if not previous_iterations:
-        return ""
-    
-    lines = [
-        "\n\n## PREVIOUS VERIFICATION ATTEMPTS",
-        "Review what was tried before. Don't suggest fixes that already failed.\n"
-    ]
-    
-    for i, prev in enumerate(previous_iterations, 1):
-        lines.append(f"\n### Attempt {i}")
-        label = prev.get('metric_label', 'R²')
-        mv = prev.get('metric_value', prev.get('r_squared'))
-        bm = prev.get('best_metric_value', prev.get('best_so_far'))
-        parts = [f"{label} = {mv:.4f}" if mv is not None else f"{label} = N/A"]
-        if bm is not None:
-            parts.append(f"best-so-far = {bm:.4f}")
-        lines.append("- " + " | ".join(parts))
-        lines.append(f"- Config: {prev.get('config_used', {}).get('physical_model', 'N/A')}")
-        lines.append(f"- Assessment: {prev.get('overall_assessment', 'N/A')}")
-        
-        issues = prev.get('issues_found', [])
-        if issues:
-            lines.append(f"- Issues ({len(issues)}):")
-            for issue in issues:
-                lines.append(f"  • {issue.get('location', '?')}: {issue.get('problem', '?')}")
-        
-        if prev.get('recommended_action'):
-            lines.append(f"- Action taken: {prev['recommended_action']}")
+    """Build history context string for verification prompt.
 
-        if prev.get('refinement_error'):
-            lines.append(
-                f"- **NOTE: The recommended fix was NOT applied** because "
-                f"the refinement LLM call failed ({prev['refinement_error']}). "
-                f"The results below are UNCHANGED from this attempt — "
-                f"do not penalize for identical output. Re-evaluate the "
-                f"recommended action and suggest concrete fixes."
-            )
-
-    lines.extend([
-        "\n\n## IMPORTANT",
-        "1. Check if previous issues were RESOLVED or still PERSIST",
-        "2. If a fix didn't work AND the best metric is still below the accept "
-        "threshold, suggest something DIFFERENT. But if the best is already above "
-        "the accept threshold and has not improved for the last 2 iterations, do "
-        "NOT propose another change — accept and record any remaining concern as a "
-        "caveat (the plateau/convergence rule takes precedence).",
-        "3. If a previous fix was NOT applied due to an API error, "
-        "re-suggest it or propose an alternative",
-        "4. A previously-raised issue may have been MISTAKEN. RETRACT it (drop it; "
-        "stop demanding fixes) when STRONG evidence shows the concern was unfounded "
-        "— the plot, a registered tool's documented behaviour/guarantees, clear "
-        "physics, or an independent cross-check. Absent strong evidence, keep "
-        "scrutinizing: 'persists' means still demonstrably real, not merely "
-        "un-disproven.",
-    ])
-
-    return "\n".join(lines)
+    Delegates to the shared builder (``_verification_record``) with the
+    curve keymap — output is byte-identical to the historical inline version
+    (golden-pinned).
+    """
+    from .._verification_record import (
+        CURVE_PROMPT_KEYMAP,
+        build_verification_prompt_history,
+    )
+    return build_verification_prompt_history(previous_iterations, CURVE_PROMPT_KEYMAP)
 
 
 def _append_deviation_note(prompt: list, fit_results: dict) -> None:
@@ -1359,86 +1313,9 @@ class SeriesScoutController:
         return state
 
 
-class LiteratureSearchController:
-    """Search literature if enabled and query provided.
-
-    DEPRECATED: prefer the orchestrator-level `search_literature` tool, which
-    fetches lit context BEFORE planning so the planner can produce a
-    literature-informed plan. This in-pipeline controller is retained as a
-    fallback for direct-Python-API callers using `use_literature=True`.
-    """
-
-    def __init__(
-        self,
-        logger: logging.Logger,
-        literature_agent: Any | None,
-        output_dir: str,
-    ):
-        self.logger = logger
-        self.literature_agent = literature_agent
-        self.output_dir = output_dir
-
-    def _save_results(self, query: str, report: str) -> dict:
-        saved_files = {}
-        try:
-            lit_dir = os.path.join(self.output_dir, "literature")
-            os.makedirs(lit_dir, exist_ok=True)
-
-            query_path = os.path.join(lit_dir, "search_query.txt")
-            with open(query_path, "w") as f:
-                f.write(query)
-            saved_files["query_file"] = query_path
-
-            report_path = os.path.join(lit_dir, "literature_report.md")
-            with open(report_path, "w") as f:
-                f.write(report)
-            saved_files["report_file"] = report_path
-        except Exception as e:
-            self.logger.warning(f"Failed to save literature: {e}")
-        return saved_files
-
-    def execute(self, state: dict) -> dict:
-        if state.get("error_dict"):
-            return state
-
-        if state.get("literature_context"):
-            self.logger.info("\n📚 --- Skipping Literature (pre-fetched via search_literature tool) ---\n")
-            return state
-
-        if self.literature_agent is None:
-            self.logger.info("\n📚 --- Skipping Literature (disabled) ---\n")
-            state["literature_context"] = None
-            state["literature_files"] = None
-            return state
-
-        query = state.get("literature_query")
-        if not query:
-            self.logger.info("\n📚 --- Skipping Literature (no query needed) ---\n")
-            state["literature_context"] = None
-            state["literature_files"] = None
-            return state
-
-        self.logger.info("\n📚 --- Searching Literature ---\n")
-        self.logger.info(f"  Query: {query}")
-
-        try:
-            result = self.literature_agent.query_for_models(query)
-            if result.get("status") == "success":
-                state["literature_context"] = result["formatted_answer"]
-                self.logger.info("  ✅ Success")
-            else:
-                state["literature_context"] = None
-                self.logger.warning("  ⚠️ No results")
-
-            state["literature_files"] = self._save_results(
-                query, state["literature_context"] or f"No results: {result.get('message')}"
-            )
-        except Exception as e:
-            self.logger.error(f"  ❌ Failed: {e}")
-            state["literature_context"] = None
-            state["literature_files"] = self._save_results(query, f"Error: {e}")
-
-        return state
+# Shared implementation (one copy for all modalities) — re-exported under the
+# historical name so pipeline imports are unchanged.
+from .base_controllers import LiteratureSearchController  # noqa: E402,F401
 
 
 class GenerateCurveFittingReportController:
@@ -2581,6 +2458,19 @@ class UnifiedSeriesProcessingController:
         XRD).  Always non-negative.
         """
         return max(min(cls.SOFT_BAND_MAX_WIDTH, 1.0 - r2_threshold), 0.0)
+
+    def _accept_gate(self):
+        """The driver's R² accept criterion as a :class:`QualityGate`.
+
+        Built from the LIVE ``self.r2_threshold`` at check time — not from the
+        gate snapshot in state — so the human-feedback ``adjust_threshold``
+        action is observed, and so behavior is unchanged when a skill declares
+        a non-R² gate (these driver checks have always compared R² against
+        ``r2_threshold`` regardless; unifying them with the skill gate is
+        engine-phase work, see analysis_qc_unification_plan.md §2.1).
+        """
+        from ..quality_gate import R_SQUARED_DEFAULT
+        return R_SQUARED_DEFAULT.with_accept_threshold(float(self.r2_threshold))
 
     JUDGE_PROMPT = '''You are a scientific data fitting expert acting as a judge.
 
@@ -4064,6 +3954,13 @@ Return JSON with:
                 pass
         return f"R² = {fallback_r2:.4f}"
 
+    # Modality constants for the shared per-item QC engine (#327 phase 4).
+    _QC_ENGINE_SPEC = QCEngineSpec(
+        config_key="locked_fitting_config",
+        refine_anchor="best",
+        refit_fail_msg="   Refit failed, stopping verification",
+    )
+
     def _fit_with_quality_control(self, state: dict, curve_data: np.ndarray, data_path: str, spectrum_name: str, spectrum_idx: int, is_regime_anchor: bool = False, reuse_script: Optional[str] = None, reuse_source: Optional[str] = None) -> dict:
         """
         Fit a single spectrum with quality control, verification, and optional judge selection.
@@ -4089,20 +3986,30 @@ Return JSON with:
         4. Unified judge evaluates ALL attempts when verifier kept rejecting
            the high-water best (Option B threshold gating).
         5. Attach quality_history to result for downstream synthesis.
+
+        The flow runs on the shared ``CodegenQCEngine`` (#327 phase 4); every
+        curve-specific stage is a ``qc_*`` hook below whose body moved
+        verbatim from the pre-extraction driver.
         """
-        all_attempts = []
-        verification_history = []
-        best_result = None
-        best_r2 = -1.0
-        best_config = (state.get("locked_fitting_config") or {}).copy()
+        engine = CodegenQCEngine(host=self, spec=self._QC_ENGINE_SPEC)
+        ctx = QCItemContext(
+            state=state, data=curve_data, data_path=data_path,
+            item_name=spectrum_name, item_idx=spectrum_idx,
+            is_regime_anchor=is_regime_anchor,
+            reuse_script=reuse_script, reuse_source=reuse_source,
+        )
+        return engine.run_item(ctx)
+
+    # --- CodegenQCEngine hooks (bodies moved verbatim from the old driver) ---
+
+    def qc_setup(self, ctx: QCItemContext) -> None:
+        ctx.best_config = (ctx.state.get("locked_fitting_config") or {}).copy()
         # Option B gate: set to True if the verifier ever rejects best_result
         # without later approving it.  Drives the threshold short-circuit
         # at the post-loop checkpoint.
-        best_ever_rejected = False
+        ctx.best_ever_rejected = False
 
-        # Anchor = first spectrum overall OR first in a regime; gets full QC
-        _is_anchor = spectrum_idx == 0 or is_regime_anchor
-
+    def qc_try_reuse(self, ctx: QCItemContext) -> Optional[dict]:
         # --- #172: locked-script reuse fast path ---
         # A prior curve-fit run supplied via prior_analysis_paths means the new
         # data is point N+1 of that series: reuse the prior run's locked fitting
@@ -4112,572 +4019,472 @@ Return JSON with:
         # for the orchestrator), never a gate that re-derives the model — a
         # re-derived model could change the feature columns. The only fallback
         # to full QC is a prior script that cannot execute at all.
-        if reuse_script and _is_anchor:
-            self.logger.info(
-                f"   ♻️  Reusing locked fitting script from prior run "
-                f"'{reuse_source or 'prior'}'..."
-            )
-            reuse_result = self._fit_single_spectrum(
-                state=state, curve_data=curve_data, data_path=data_path,
-                spectrum_name=spectrum_name, spectrum_idx=spectrum_idx,
-                base_script=reuse_script,
-            )
-            if reuse_result.get("success"):
-                reuse_r2 = (
-                    reuse_result.get("fit_quality", {}).get("r_squared") or 0
-                    or 0.0
-                )
-                verdict = "good" if reuse_r2 >= self.r2_threshold else "poor"
-                if verdict == "good":
-                    self.logger.info(
-                        f"   ✅ Reused script fits well (R² = {reuse_r2:.4f} ≥ "
-                        f"{self.r2_threshold:.3f}) — model re-derivation skipped"
-                    )
-                    message = (
-                        f"Reused the locked fitting script from prior run "
-                        f"'{reuse_source or 'prior'}'; R² = {reuse_r2:.4f} "
-                        f"meets the acceptance threshold "
-                        f"{self.r2_threshold:.3f}."
-                    )
-                else:
-                    self.logger.warning(
-                        f"   ⚠️  Reused script fits poorly (R² = "
-                        f"{reuse_r2:.4f} < {self.r2_threshold:.3f}). Keeping "
-                        f"the result to preserve feature-schema consistency; "
-                        f"flagging it as low-confidence."
-                    )
-                    message = (
-                        f"Reused the locked fitting script from prior run "
-                        f"'{reuse_source or 'prior'}', but R² = "
-                        f"{reuse_r2:.4f} is below the acceptance threshold "
-                        f"{self.r2_threshold:.3f}. The new measurement may "
-                        f"not belong to this series, or measurement "
-                        f"conditions shifted. Extracted parameters are "
-                        f"schema-consistent but should be treated as "
-                        f"low-confidence."
-                    )
-                reuse_result["reuse_validity"] = {
-                    "reused": True,
-                    "source": reuse_source,
-                    "r_squared": reuse_r2,
-                    "threshold": self.r2_threshold,
-                    "verdict": verdict,
-                    "message": message,
-                }
-                if verdict == "poor":
-                    reuse_result["quality_warning"] = message
-                return reuse_result
-            self.logger.warning(
-                f"   ⚠️  Prior fitting script could not execute on this data "
-                f"(even after correction). Falling back to full model "
-                f"re-derivation — the extracted-feature schema may differ "
-                f"from the prior run."
-            )
-
-        # --- Initial fit (annealing schedule starts here; default T=0) ---
-        # A re-run may start the schedule HIGHER (e.g. hot) via
-        # `_starting_annealing_level`, so it does not repeat early constraint
-        # stages a prior run already found inadequate. Default 0 = unchanged.
-        _start_level = max(0, min(int(state.get("_starting_annealing_level") or 0),
-                                  len(self._CONSTRAINT_ANNEALING_SCHEDULE) - 1))
-        state["_annealing_level"] = _start_level
-        initial_model = state.get('locked_fitting_config', {}).get('physical_model') or 'Initial model'
-        self.logger.info(f"   Attempt 1: {str(initial_model)[:80]}...")
-
-        result = self._fit_single_spectrum(
-            state=state, curve_data=curve_data, data_path=data_path,
-            spectrum_name=spectrum_name, spectrum_idx=spectrum_idx, base_script=None
+        self.logger.info(
+            f"   ♻️  Reusing locked fitting script from prior run "
+            f"'{ctx.reuse_source or 'prior'}'..."
         )
-
-        if result["success"]:
-            r2 = result.get("fit_quality", {}).get("r_squared") or 0
-            all_attempts.append({
-                "model": initial_model, "r2": r2, "result": result,
-                "config": (state.get("locked_fitting_config") or {}).copy(),
-            })
-
-            # A successful result must never be discarded by the R² ranking: a
-            # matching-type skill (gate metric figure_of_merit) reports no R²,
-            # and the residual-diagnostics backfill can then attach a deeply
-            # negative recomputed R² (a stick overlay is not a curve fit) that
-            # loses to the -1.0 sentinel — the run's ONLY successful result was
-            # dropped and the pipeline claimed "no successful result" (observed
-            # live: plan-CONFORMANT XRD search-match scripts failed while
-            # nonconformant ones, whose self-reported R² beat the sentinel,
-            # passed). Also fixes the latent curve-fit case of a successful
-            # first fit with R² <= -1, which must enter the verification /
-            # recovery loop per the #245 rationale below instead of being
-            # treated as nonexistent.
-            if best_result is None or r2 > best_r2:
-                best_r2 = r2
-                best_result = result
-                best_config = (state.get("locked_fitting_config") or {}).copy()
-
-            # --- Verification loop (for anchor spectra: first overall or first in regime) ---
-            fit_was_approved = False
-            if (_is_anchor and self.max_verification_iterations <= 0
-                    and best_result and best_result.get("success")):
-                # Explicit verification bypass (max_verification_iterations=0):
-                # the caller asked for a fast / in-situ turnaround. Accept the
-                # initial successful fit as-is, with no LLM verification or
-                # refit loop. Only triggers at <= 0, so the default thorough
-                # path (>= 1) is unaffected. A failed/degenerate initial fit
-                # (no success) still falls through to the loop below for the
-                # recovery path rather than locking garbage.
+        reuse_result = self._fit_single_spectrum(
+            state=ctx.state, curve_data=ctx.data, data_path=ctx.data_path,
+            spectrum_name=ctx.item_name, spectrum_idx=ctx.item_idx,
+            base_script=ctx.reuse_script,
+        )
+        if reuse_result.get("success"):
+            reuse_r2 = (
+                reuse_result.get("fit_quality", {}).get("r_squared") or 0
+                or 0.0
+            )
+            verdict = "good" if self._accept_gate().is_accept(reuse_r2) else "poor"
+            if verdict == "good":
                 self.logger.info(
-                    f"   ⏩ Verification bypassed (max_verification_iterations=0); "
-                    f"accepting initial fit (R² = {best_r2:.4f})")
-                fit_was_approved = True
-            elif _is_anchor:
-                # Skip verification ONLY when there is no successful fit to work
-                # with. A fit that executed but is degenerate (low/zero R²) must
-                # still enter the loop: the verifier + adaptive annealing (which
-                # reaches hot/fresh-generation) + residual diagnostics are the
-                # recovery path for a "ran-but-garbage" fit. Previously a
-                # `best_r2 < 0.1` clause skipped these cases, locking a degenerate
-                # script with no recovery (and, in a series, reusing it for every
-                # spectrum). Matches image-analysis, which gates on success only. (#245)
-                if not best_result or not best_result.get("success"):
-                    self.logger.warning(f"   Initial fit failed (no successful result, R²={best_r2:.4f}), skipping verification")
-                else:
-                    # Adaptive annealing state: start frozen, escalate via
-                    # three complementary mechanisms so hot annealing
-                    # (level n-1) is reliably reached when refits stall:
-                    #   (a) rate-based escalation: improvement too slow to
-                    #       reach threshold within the remaining iterations
-                    #   (b) patience counter: N consecutive iterations with
-                    #       best stuck → escalate (mirrors image-analysis
-                    #       _PATIENCE = 2 at image_analysis_controllers.py:3001)
-                    #   (c) iteration floor: floor(iter / floor_divisor) is
-                    #       the minimum allowed level — guarantees we hit the
-                    #       hot level by the end of the budget regardless of
-                    #       what the rate/patience say.
-                    _annealing_level = _start_level
-                    # Annealing level at which the PREVIOUS refit actually ran.
-                    # Used to detect the escalation INTO the hot level (see the
-                    # fresh-generation trigger below). Must track the prior
-                    # refit's level — not a same-iteration snapshot of
-                    # _annealing_level — because escalation happens at the end of
-                    # an iteration, so a start-of-iteration snapshot already
-                    # equals the (escalated) current level and never registers a
-                    # transition. Mirrors image_analysis's _previous_annealing_level.
-                    # max(start-1,0): starting AT hot still registers the
-                    # transition into hot (fires fresh generation); start at 0
-                    # restores the original `= 0`.
-                    _previous_annealing_level = max(_start_level - 1, 0)
-                    _prev_best_r2 = best_r2
-                    _n_anneal_levels = len(self._CONSTRAINT_ANNEALING_SCHEDULE)
-                    _PATIENCE = 2
-                    _stall_count = 0
-                    # Floor divisor chosen so the loop reaches level n-1 by
-                    # roughly the last third of the iteration budget.
-                    _floor_divisor = max(self.max_verification_iterations // _n_anneal_levels, 1)
-
-                    # current_result tracks the latest refit (what the verifier
-                    # diagnoses next); best_result is the high-water mark used
-                    # as the refinement anchor and final return value.
-                    current_result = best_result
-                    current_r2 = best_r2
-
-                    # best_ever_rejected is initialized at function scope.
-                    # Reset on promotion (new best hasn't been verified yet).
-                    # Used to gate the threshold short-circuit so a high-R²
-                    # but verifier-rejected best falls through to the
-                    # end-of-loop judge.
-                    best_verification = None  # last verifier verdict on best
-
-                    # R² floor for "in-band" promotion on physics grounds.
-                    # Catastrophic regressions (script bugs, complete failure)
-                    # are always rejected; small dips are admissible if the
-                    # verifier signals physical improvement.
-                    R2_FLOOR = max(self.r2_threshold - self._r2_soft_margin(self.r2_threshold), 0.0)
-
-                    for verification_iter in range(self.max_verification_iterations):
-                        self.logger.info(f"   Verification {verification_iter + 1}/{self.max_verification_iterations} (annealing level {_annealing_level})...")
-
-                        # Pass best_result for comparative assessment.  The
-                        # verifier emits physically_better_than_best only when
-                        # current and best are different objects.
-                        verification = self._verify_fit_with_llm(
-                            state, current_result,
-                            history=verification_history,
-                            verification_iter=verification_iter,
-                            annealing_level=_annealing_level,
-                            best_result=best_result,
-                            best_verification=best_verification,
-                        )
-
-                        if verification is None:
-                            self.logger.warning(f"   Verification failed, skipping")
-                            break
-
-                        _cur_level = _annealing_level
-                        _was_rejected = not verification.get("fit_acceptable", True)
-
-                        # Retroactive physics-based promotion: if a previous
-                        # iteration deferred current_result (in-band lower R²,
-                        # awaiting a verifier verdict), this verification just
-                        # rated it.  Promote if physics improved over best.
-                        if (current_result is not best_result
-                                and current_r2 >= R2_FLOOR
-                                and verification.get("physically_better_than_best", False)):
-                            note = (verification.get("comparison_note") or "physics improvement")[:90]
-                            best_r2 = current_r2
-                            best_result = current_result
-                            best_config = (state.get("locked_fitting_config") or {}).copy()
-                            state["locked_fitting_config"] = best_config
-                            self.logger.info(
-                                f"   Retroactively promoted current (R² = {current_r2:.4f}) on physics — {note}"
-                            )
-
-                        # If the verifier just inspected best_result itself
-                        # (either was already best or just promoted above),
-                        # record its verdict so the next iteration's prompt
-                        # can include best's complaint summary and the
-                        # post-loop threshold gate can know whether best is
-                        # under suspicion.
-                        if current_result is best_result:
-                            best_verification = verification
-                            best_ever_rejected = best_ever_rejected or _was_rejected
-
-                        # Surface the GATE's driving metric (not always R²) per
-                        # iteration, so the verifier judges the plateau on the
-                        # actual acceptance metric — its value this step and the
-                        # best-so-far. For the r_squared gate these are just R².
-                        _g = _gate(state)
-                        if _g is not None and getattr(_g, "metric", "r_squared") != "r_squared":
-                            try:
-                                _cur_metric = _g.extract(current_result.get("fit_quality"))
-                                _best_metric = _g.extract(best_result.get("fit_quality"))
-                                _metric_label = _g.label
-                            except Exception:
-                                _cur_metric, _best_metric, _metric_label = current_r2, best_r2, "R²"
-                        else:
-                            _cur_metric, _best_metric, _metric_label = current_r2, best_r2, "R²"
-
-                        # Store in history for next iteration's context
-                        verification_history.append({
-                            "r_squared": current_r2,
-                            "best_so_far": best_r2,
-                            "metric_value": _cur_metric,
-                            "best_metric_value": _best_metric,
-                            "metric_label": _metric_label,
-                            "tools_used": state.get("_last_tools_used", []),
-                            "config_used": state.get("locked_fitting_config", {}),
-                            "issues_found": verification.get("issues_found", []),
-                            "overall_assessment": verification.get("overall_assessment", ""),
-                            "recommended_action": verification.get("recommended_action", ""),
-                            "physically_better_than_best": verification.get("physically_better_than_best", False),
-                            "comparison_note": verification.get("comparison_note", ""),
-                            "annealing_level": _cur_level,
-                        })
-
-                        if not _was_rejected:
-                            # Verifier approval trumps the R² high-water mark —
-                            # the verifier may accept a lower-R² fit on physics
-                            # grounds (e.g. better peak shape).  Promote.
-                            best_r2 = current_r2
-                            best_result = current_result
-                            best_config = (state.get("locked_fitting_config") or {}).copy()
-                            best_verification = verification
-                            best_ever_rejected = False
-                            state["locked_fitting_config"] = best_config
-                            self.logger.info(f"   ✅ Fit approved ({self._gate_metric_str(state, best_result, best_r2)})")
-                            fit_was_approved = True
-                            break
-
-                        # Log issues
-                        self._log_verification_issues(verification)
-
-                        # Apply LLM's recommended fixes
-                        refined_config = self._apply_llm_verification_feedback(state, verification)
-
-                        # If the refinement LLM call failed (transient
-                        # API error), tag the history so the next verifier
-                        # knows the fix was never applied.
-                        refinement_error = refined_config.pop(
-                            "_refinement_error", None
-                        )
-                        if refinement_error:
-                            verification_history[-1]["refinement_error"] = (
-                                refinement_error
-                            )
-
-                        if refined_config == state.get("locked_fitting_config", {}):
-                            # No changes at current temperature — escalate to
-                            # give the LLM more freedom before giving up.
-                            _annealing_level = min(_annealing_level + 1, _n_anneal_levels - 1)
-                            if _annealing_level == _cur_level:
-                                self.logger.info(f"   No config changes at max annealing level, stopping verification")
-                                break
-                            self.logger.info(f"   No config changes suggested, escalating to annealing level {_annealing_level}")
-                            continue
-
-                        # Clean up old visualization (but not the best result's
-                        # viz — best_result and current_result share the same
-                        # path when current was just promoted).
-                        old_viz_path = current_result.get("visualization_path")
-                        if (old_viz_path
-                                and Path(old_viz_path).exists()
-                                and current_result is not best_result):
-                            try:
-                                os.remove(old_viz_path)
-                            except:
-                                pass
-
-                        state["locked_fitting_config"] = refined_config
-
-                        # Sync skill strictness with adaptive annealing level
-                        state["_annealing_level"] = _annealing_level
-
-                        # Anchor the refinement on best_result.script (the
-                        # working version) so the LLM adapts known-good code
-                        # rather than regenerating from scratch.  Drop the
-                        # script when escalating to the hot annealing level
-                        # so the LLM can restructure freely.
-                        _just_escalated_to_hot = (
-                            _annealing_level >= _n_anneal_levels - 1
-                            and _previous_annealing_level < _n_anneal_levels - 1
-                        )
-                        _refine_from = (
-                            None if _just_escalated_to_hot
-                            else (best_result or {}).get("script")
-                        )
-
-                        if _just_escalated_to_hot:
-                            self.logger.info(f"   Refitting with verification feedback (fresh generation — hot annealing)...")
-                        elif _refine_from:
-                            self.logger.info(f"   Refitting with verification feedback (refining prior script)...")
-                        else:
-                            self.logger.info(f"   Refitting with verification feedback...")
-
-                        verified_result = self._fit_single_spectrum(
-                            state=state, curve_data=curve_data, data_path=data_path,
-                            spectrum_name=spectrum_name, spectrum_idx=spectrum_idx,
-                            base_script=None,
-                            refine_from_script=_refine_from,
-                            refine_from_r2=best_r2,
-                            refine_from_issues=verification.get("issues_found", []),
-                        )
-                        # Stamp the annealing level this refit was generated at,
-                        # so a downstream consumer can tell whether the WINNING
-                        # result came from a hot (fresh-generation) regeneration
-                        # vs. the original plan — used by T=2 auto-distillation
-                        # to decide a fit is a "novel pipeline". Travels with the
-                        # result dict through every promotion / judge path.
-                        if isinstance(verified_result, dict):
-                            verified_result["_produced_at_level"] = _annealing_level
-                        # Record the level this refit ran at, so the next
-                        # iteration can detect the escalation into hot. Updated
-                        # only on an actual refit (not the no-config-change
-                        # escalate-and-continue branch above).
-                        _previous_annealing_level = _annealing_level
-
-                        if verified_result["success"]:
-                            verified_r2 = verified_result.get("fit_quality", {}).get("r_squared") or 0
-
-                            all_attempts.append({
-                                "model": f"Verification-{verification_iter + 1}",
-                                "r2": verified_r2,
-                                "result": verified_result,
-                                "config": (state.get("locked_fitting_config") or {}).copy(),
-                                "verification": verification,
-                            })
-
-                            # Latest is always what the next verifier judges.
-                            current_result = verified_result
-                            current_r2 = verified_r2
-
-                            # Promotion rule (post-refit, no LLM call here):
-                            # 1. Strict R² improvement → promote immediately.
-                            # 2. Catastrophic regression (R² < floor) →
-                            #    reject; roll back the locked config so the
-                            #    next refit anchors on best.
-                            # 3. In-band lower R² → DEFER promotion to the
-                            #    next iteration's verifier, which will rate
-                            #    physically_better_than_best with the new
-                            #    fit's visualization.  Keep refined_config
-                            #    as the locked one so it matches current.
-                            if verified_r2 > best_r2:
-                                best_r2 = verified_r2
-                                best_result = verified_result
-                                best_config = (state.get("locked_fitting_config") or {}).copy()
-                                state["locked_fitting_config"] = best_config
-                                best_ever_rejected = False
-                                best_verification = None
-                                self.logger.info(
-                                    f"   Refit R² = {verified_r2:.4f} promoted (best now {best_r2:.4f})"
-                                )
-                            elif verified_r2 < R2_FLOOR:
-                                state["locked_fitting_config"] = best_config
-                                self.logger.info(
-                                    f"   Refit R² = {verified_r2:.4f} below R² floor "
-                                    f"{R2_FLOOR:.2f} → rejected (best stays {best_r2:.4f})"
-                                )
-                            else:
-                                self.logger.info(
-                                    f"   Refit R² = {verified_r2:.4f} "
-                                    f"(best stays {best_r2:.4f}; deferred to next verifier for physics check)"
-                                )
-
-                            # Adaptive annealing — three escalation
-                            # triggers, applied in order; each can lift
-                            # _annealing_level (capped at n-1).
-                            improvement = best_r2 - _prev_best_r2
-                            remaining = max(self.max_verification_iterations - verification_iter - 1, 1)
-                            required_rate = max(self.r2_threshold - best_r2, 0.0) / remaining
-
-                            # (a) Rate-based: improvement too slow to reach
-                            #     threshold in remaining budget.
-                            rate_escalated = False
-                            if improvement < required_rate:
-                                _annealing_level = min(
-                                    _annealing_level + 1, _n_anneal_levels - 1
-                                )
-                                rate_escalated = True
-                                self.logger.info(
-                                    f"   Annealing: improvement {improvement:.4f} < required rate {required_rate:.4f}, "
-                                    f"escalating to level {_annealing_level}"
-                                )
-
-                            # (b) Patience-based: best stalled for _PATIENCE
-                            #     consecutive iterations.  Resets on any
-                            #     forward movement of best.
-                            if best_r2 > _prev_best_r2:
-                                _stall_count = 0
-                            else:
-                                _stall_count += 1
-                                if _stall_count >= _PATIENCE and not rate_escalated:
-                                    new_level = min(
-                                        _annealing_level + 1, _n_anneal_levels - 1
-                                    )
-                                    if new_level > _annealing_level:
-                                        _annealing_level = new_level
-                                        self.logger.info(
-                                            f"   Annealing: best stalled for {_stall_count} iterations, "
-                                            f"escalating to level {_annealing_level}"
-                                        )
-                                    _stall_count = 0
-
-                            # (c) Iteration floor: guarantees the hot level
-                            #     is reached even when rate/patience say
-                            #     otherwise (e.g., best ≥ threshold so
-                            #     required_rate degenerates to 0).
-                            _floor = min(
-                                (verification_iter + 1) // _floor_divisor,
-                                _n_anneal_levels - 1,
-                            )
-                            if _floor > _annealing_level:
-                                self.logger.info(
-                                    f"   Annealing: iteration floor lifting "
-                                    f"level {_annealing_level} → {_floor}"
-                                )
-                                _annealing_level = _floor
-                                _stall_count = 0
-
-                            if not rate_escalated and _stall_count == 0 and _floor <= _annealing_level:
-                                # No escalation this iteration; log the
-                                # rate decision for diagnostic continuity.
-                                pass  # already implicit; suppress duplicate logs
-
-                            _prev_best_r2 = best_r2
-                        else:
-                            self.logger.warning(f"   Refit failed, stopping verification")
-                            break
-
-                    else:
-                        # Loop exhausted without approval - one final pass to
-                        # rate the latest state.  If current was deferred
-                        # (in-band, awaiting physics verdict), this is its
-                        # last chance to be promoted.
-                        self.logger.info(f"   Verifying final refit...")
-                        final_verification = self._verify_fit_with_llm(
-                            state, current_result,
-                            verification_iter=self.max_verification_iterations,
-                            annealing_level=_annealing_level,
-                            best_result=best_result,
-                            best_verification=best_verification,
-                        )
-
-                        if final_verification:
-                            _final_rejected = not final_verification.get("fit_acceptable", True)
-
-                            # Retroactive promotion of deferred current
-                            if (current_result is not best_result
-                                    and current_r2 >= R2_FLOOR
-                                    and final_verification.get("physically_better_than_best", False)):
-                                note = (final_verification.get("comparison_note") or "physics improvement")[:90]
-                                best_r2 = current_r2
-                                best_result = current_result
-                                best_config = (state.get("locked_fitting_config") or {}).copy()
-                                self.logger.info(
-                                    f"   Post-loop promoted current (R² = {current_r2:.4f}) on physics — {note}"
-                                )
-
-                            # Update best's verdict tracking
-                            if current_result is best_result:
-                                best_verification = final_verification
-                                if not _final_rejected:
-                                    self.logger.info(f"   ✅ Final fit approved ({self._gate_metric_str(state, best_result, best_r2)})")
-                                    fit_was_approved = True
-                                    best_ever_rejected = False
-                                else:
-                                    best_ever_rejected = True
-                                    self._log_verification_issues(final_verification)
-                            else:
-                                # current still differs from best (no physics
-                                # promotion).  best's last verdict stands.
-                                if _final_rejected:
-                                    self._log_verification_issues(final_verification)
-
-                    # Restore config to match best result after verification loop
-                    state["locked_fitting_config"] = best_config
-
-            # --- Verifier-approved fits bypass the R² threshold check ---
-            if fit_was_approved:
-                self.logger.info(f"✅ Verifier approved fit ({self._gate_metric_str(state, best_result, best_r2)})")
-                quality_history = self._build_quality_history(
-                    best_r2, self.r2_threshold, all_attempts,
-                    verification_history, None,
-                    best_result.get("script_errors"),
+                    f"   ✅ Reused script fits well (R² = {reuse_r2:.4f} ≥ "
+                    f"{self.r2_threshold:.3f}) — model re-derivation skipped"
                 )
-                quality_history["approved"] = True
-                quality_history["approved_by"] = "verifier"
-                best_result["quality_history"] = quality_history
-                self._stamp_hot_deviation(best_result)
-                return best_result
-
-            # --- Check if we meet threshold ---
-            # Option B: when the verifier explicitly rejected best at some
-            # point and never approved it later, fall through to the judge
-            # even if R² meets the numerical threshold.  This catches the
-            # "high-R² but wrong-physics" trap where the verifier kept
-            # complaining about best on physics grounds.
-            if best_r2 >= self.r2_threshold and not best_ever_rejected:
-                self.logger.info(f"✅ R² = {best_r2:.4f} (meets threshold {self.r2_threshold})")
-                best_result["quality_history"] = self._build_quality_history(
-                    best_r2, self.r2_threshold, all_attempts,
-                    verification_history, None,
-                    best_result.get("script_errors"),
-                )
-                self._stamp_hot_deviation(best_result)
-                return best_result
-            elif best_r2 >= self.r2_threshold:
-                self.logger.info(
-                    f"⚠️ R² = {best_r2:.4f} meets threshold {self.r2_threshold}, "
-                    f"but verifier rejected best — deferring to judge"
+                message = (
+                    f"Reused the locked fitting script from prior run "
+                    f"'{ctx.reuse_source or 'prior'}'; R² = {reuse_r2:.4f} "
+                    f"meets the acceptance threshold "
+                    f"{self.r2_threshold:.3f}."
                 )
             else:
-                self.logger.warning(f"⚠️ R² = {best_r2:.4f} (below threshold {self.r2_threshold})")
-        else:
-            self.logger.error(f"   Initial fit failed: {result.get('error', 'Unknown')[:50]}")
-            all_attempts.append({"model": initial_model, "r2": 0, "result": result})
+                self.logger.warning(
+                    f"   ⚠️  Reused script fits poorly (R² = "
+                    f"{reuse_r2:.4f} < {self.r2_threshold:.3f}). Keeping "
+                    f"the result to preserve feature-schema consistency; "
+                    f"flagging it as low-confidence."
+                )
+                message = (
+                    f"Reused the locked fitting script from prior run "
+                    f"'{ctx.reuse_source or 'prior'}', but R² = "
+                    f"{reuse_r2:.4f} is below the acceptance threshold "
+                    f"{self.r2_threshold:.3f}. The new measurement may "
+                    f"not belong to this series, or measurement "
+                    f"conditions shifted. Extracted parameters are "
+                    f"schema-consistent but should be treated as "
+                    f"low-confidence."
+                )
+            reuse_result["reuse_validity"] = {
+                "reused": True,
+                "source": ctx.reuse_source,
+                "r_squared": reuse_r2,
+                "threshold": self.r2_threshold,
+                "verdict": verdict,
+                "message": message,
+            }
+            if verdict == "poor":
+                reuse_result["quality_warning"] = message
+            return reuse_result
+        self.logger.warning(
+            f"   ⚠️  Prior fitting script could not execute on this data "
+            f"(even after correction). Falling back to full model "
+            f"re-derivation — the extracted-feature schema may differ "
+            f"from the prior run."
+        )
+        return None
 
+    def qc_run_initial(self, ctx: QCItemContext) -> dict:
+        initial_model = ctx.state.get('locked_fitting_config', {}).get('physical_model') or 'Initial model'
+        ctx.initial_label = initial_model
+        self.logger.info(f"   Attempt 1: {str(initial_model)[:80]}...")
+
+        return self._fit_single_spectrum(
+            state=ctx.state, curve_data=ctx.data, data_path=ctx.data_path,
+            spectrum_name=ctx.item_name, spectrum_idx=ctx.item_idx, base_script=None
+        )
+
+    def qc_record_initial(self, ctx: QCItemContext, result: dict) -> None:
+        r2 = result.get("fit_quality", {}).get("r_squared") or 0
+        ctx.all_attempts.append({
+            "model": ctx.initial_label, "r2": r2, "result": result,
+            "config": (ctx.state.get("locked_fitting_config") or {}).copy(),
+        })
+
+        # A successful result must never be discarded by the R² ranking: a
+        # matching-type skill (gate metric figure_of_merit) reports no R²,
+        # and the residual-diagnostics backfill can then attach a deeply
+        # negative recomputed R² (a stick overlay is not a curve fit) that
+        # loses to the -1.0 sentinel — the run's ONLY successful result was
+        # dropped and the pipeline claimed "no successful result" (observed
+        # live: plan-CONFORMANT XRD search-match scripts failed while
+        # nonconformant ones, whose self-reported R² beat the sentinel,
+        # passed). Also fixes the latent curve-fit case of a successful
+        # first fit with R² <= -1, which must enter the verification /
+        # recovery loop per the #245 rationale below instead of being
+        # treated as nonexistent.
+        if ctx.best_result is None or r2 > ctx.best_score:
+            ctx.best_score = r2
+            ctx.best_result = result
+            ctx.best_config = (ctx.state.get("locked_fitting_config") or {}).copy()
+
+    def qc_verification_bypass(self, ctx: QCItemContext) -> bool:
+        if (ctx.is_anchor and self.max_verification_iterations <= 0
+                and ctx.best_result and ctx.best_result.get("success")):
+            # Explicit verification bypass (max_verification_iterations=0):
+            # the caller asked for a fast / in-situ turnaround. Accept the
+            # initial successful fit as-is, with no LLM verification or
+            # refit loop. Only triggers at <= 0, so the default thorough
+            # path (>= 1) is unaffected. A failed/degenerate initial fit
+            # (no success) still falls through to the loop below for the
+            # recovery path rather than locking garbage.
+            self.logger.info(
+                f"   ⏩ Verification bypassed (max_verification_iterations=0); "
+                f"accepting initial fit (R² = {ctx.best_score:.4f})")
+            ctx.approved = True
+            return True
+        return False
+
+    def qc_log_skip_verification(self, ctx: QCItemContext) -> None:
+        # Skip verification ONLY when there is no successful fit to work
+        # with. A fit that executed but is degenerate (low/zero R²) must
+        # still enter the loop: the verifier + adaptive annealing (which
+        # reaches hot/fresh-generation) + residual diagnostics are the
+        # recovery path for a "ran-but-garbage" fit. Previously a
+        # `best_r2 < 0.1` clause skipped these cases, locking a degenerate
+        # script with no recovery (and, in a series, reusing it for every
+        # spectrum). Matches image-analysis, which gates on success only. (#245)
+        self.logger.warning(f"   Initial fit failed (no successful result, R²={ctx.best_score:.4f}), skipping verification")
+
+    def qc_loop_setup(self, ctx: QCItemContext) -> None:
+        # best_ever_rejected is initialized in qc_setup.
+        # Reset on promotion (new best hasn't been verified yet).
+        # Used to gate the threshold short-circuit so a high-R²
+        # but verifier-rejected best falls through to the
+        # end-of-loop judge.
+        ctx.best_verification = None  # last verifier verdict on best
+
+        # R² floor for "in-band" promotion on physics grounds.
+        # Catastrophic regressions (script bugs, complete failure)
+        # are always rejected; small dips are admissible if the
+        # verifier signals physical improvement.
+        ctx.r2_floor = max(self.r2_threshold - self._r2_soft_margin(self.r2_threshold), 0.0)
+
+        # Floor divisor chosen so the loop reaches level n-1 by
+        # roughly the last third of the iteration budget.
+        ctx.floor_divisor = max(self.max_verification_iterations // ctx.n_levels, 1)
+
+    def qc_verify(self, ctx: QCItemContext) -> Optional[dict]:
+        # Pass best_result for comparative assessment.  The
+        # verifier emits physically_better_than_best only when
+        # current and best are different objects.
+        return self._verify_fit_with_llm(
+            ctx.state, ctx.current_result,
+            history=ctx.verification_history,
+            verification_iter=ctx.iteration,
+            annealing_level=ctx.annealing_level,
+            best_result=ctx.best_result,
+            best_verification=ctx.best_verification,
+        )
+
+    def qc_on_verify_none(self, ctx: QCItemContext) -> None:
+        self.logger.warning(f"   Verification failed, skipping")
+
+    def qc_assess(self, ctx: QCItemContext, verification: dict) -> None:
+        _cur_level = ctx.annealing_level
+        ctx.was_rejected = not verification.get("fit_acceptable", True)
+
+        # Retroactive physics-based promotion: if a previous
+        # iteration deferred current_result (in-band lower R²,
+        # awaiting a verifier verdict), this verification just
+        # rated it.  Promote if physics improved over best.
+        if (ctx.current_result is not ctx.best_result
+                and ctx.current_score >= ctx.r2_floor
+                and verification.get("physically_better_than_best", False)):
+            note = (verification.get("comparison_note") or "physics improvement")[:90]
+            ctx.best_score = ctx.current_score
+            ctx.best_result = ctx.current_result
+            ctx.best_config = (ctx.state.get("locked_fitting_config") or {}).copy()
+            ctx.state["locked_fitting_config"] = ctx.best_config
+            self.logger.info(
+                f"   Retroactively promoted current (R² = {ctx.current_score:.4f}) on physics — {note}"
+            )
+
+        # If the verifier just inspected best_result itself
+        # (either was already best or just promoted above),
+        # record its verdict so the next iteration's prompt
+        # can include best's complaint summary and the
+        # post-loop threshold gate can know whether best is
+        # under suspicion.
+        if ctx.current_result is ctx.best_result:
+            ctx.best_verification = verification
+            ctx.best_ever_rejected = ctx.best_ever_rejected or ctx.was_rejected
+
+        # Surface the GATE's driving metric (not always R²) per
+        # iteration, so the verifier judges the plateau on the
+        # actual acceptance metric — its value this step and the
+        # best-so-far. For the r_squared gate these are just R².
+        _g = _gate(ctx.state)
+        if _g is not None and getattr(_g, "metric", "r_squared") != "r_squared":
+            try:
+                _cur_metric = _g.extract(ctx.current_result.get("fit_quality"))
+                _best_metric = _g.extract(ctx.best_result.get("fit_quality"))
+                _metric_label = _g.label
+            except Exception:
+                _cur_metric, _best_metric, _metric_label = ctx.current_score, ctx.best_score, "R²"
+        else:
+            _cur_metric, _best_metric, _metric_label = ctx.current_score, ctx.best_score, "R²"
+
+        # Store in history for next iteration's context
+        ctx.verification_history.append({
+            "r_squared": ctx.current_score,
+            "best_so_far": ctx.best_score,
+            "metric_value": _cur_metric,
+            "best_metric_value": _best_metric,
+            "metric_label": _metric_label,
+            "tools_used": ctx.state.get("_last_tools_used", []),
+            "config_used": ctx.state.get("locked_fitting_config", {}),
+            "issues_found": verification.get("issues_found", []),
+            "overall_assessment": verification.get("overall_assessment", ""),
+            "recommended_action": verification.get("recommended_action", ""),
+            "physically_better_than_best": verification.get("physically_better_than_best", False),
+            "comparison_note": verification.get("comparison_note", ""),
+            "annealing_level": _cur_level,
+        })
+
+    def qc_check_accept(self, ctx: QCItemContext, verification: dict) -> bool:
+        if not ctx.was_rejected:
+            # Verifier approval trumps the R² high-water mark —
+            # the verifier may accept a lower-R² fit on physics
+            # grounds (e.g. better peak shape).  Promote.
+            ctx.best_score = ctx.current_score
+            ctx.best_result = ctx.current_result
+            ctx.best_config = (ctx.state.get("locked_fitting_config") or {}).copy()
+            ctx.best_verification = verification
+            ctx.best_ever_rejected = False
+            ctx.state["locked_fitting_config"] = ctx.best_config
+            self.logger.info(f"   ✅ Fit approved ({self._gate_metric_str(ctx.state, ctx.best_result, ctx.best_score)})")
+            return True
+        return False
+
+    def qc_refine(self, ctx: QCItemContext, verification: dict) -> dict:
+        # Log issues
+        self._log_verification_issues(verification)
+
+        # Apply LLM's recommended fixes
+        return self._apply_llm_verification_feedback(ctx.state, verification)
+
+    def qc_refit(self, ctx: QCItemContext, verification: dict,
+                 refine_from: Optional[str], just_escalated_to_hot: bool) -> dict:
+        # Anchor the refinement on best_result.script (the
+        # working version) so the LLM adapts known-good code
+        # rather than regenerating from scratch.  The engine drops
+        # the script when escalating to the hot annealing level
+        # so the LLM can restructure freely.
+        if just_escalated_to_hot:
+            self.logger.info(f"   Refitting with verification feedback (fresh generation — hot annealing)...")
+        elif refine_from:
+            self.logger.info(f"   Refitting with verification feedback (refining prior script)...")
+        else:
+            self.logger.info(f"   Refitting with verification feedback...")
+
+        return self._fit_single_spectrum(
+            state=ctx.state, curve_data=ctx.data, data_path=ctx.data_path,
+            spectrum_name=ctx.item_name, spectrum_idx=ctx.item_idx,
+            base_script=None,
+            refine_from_script=refine_from,
+            refine_from_r2=ctx.best_score,
+            refine_from_issues=verification.get("issues_found", []),
+        )
+
+    def qc_after_refit(self, ctx: QCItemContext, verified_result: dict,
+                       verification: dict) -> None:
+        verified_r2 = verified_result.get("fit_quality", {}).get("r_squared") or 0
+
+        ctx.all_attempts.append({
+            "model": f"Verification-{ctx.iteration + 1}",
+            "r2": verified_r2,
+            "result": verified_result,
+            "config": (ctx.state.get("locked_fitting_config") or {}).copy(),
+            "verification": verification,
+        })
+
+        # Latest is always what the next verifier judges.
+        ctx.current_result = verified_result
+        ctx.current_score = verified_r2
+
+        # Promotion rule (post-refit, no LLM call here):
+        # 1. Strict R² improvement → promote immediately.
+        # 2. Catastrophic regression (R² < floor) →
+        #    reject; roll back the locked config so the
+        #    next refit anchors on best.
+        # 3. In-band lower R² → DEFER promotion to the
+        #    next iteration's verifier, which will rate
+        #    physically_better_than_best with the new
+        #    fit's visualization.  Keep refined_config
+        #    as the locked one so it matches current.
+        if verified_r2 > ctx.best_score:
+            ctx.best_score = verified_r2
+            ctx.best_result = verified_result
+            ctx.best_config = (ctx.state.get("locked_fitting_config") or {}).copy()
+            ctx.state["locked_fitting_config"] = ctx.best_config
+            ctx.best_ever_rejected = False
+            ctx.best_verification = None
+            self.logger.info(
+                f"   Refit R² = {verified_r2:.4f} promoted (best now {ctx.best_score:.4f})"
+            )
+        elif verified_r2 < ctx.r2_floor:
+            ctx.state["locked_fitting_config"] = ctx.best_config
+            self.logger.info(
+                f"   Refit R² = {verified_r2:.4f} below R² floor "
+                f"{ctx.r2_floor:.2f} → rejected (best stays {ctx.best_score:.4f})"
+            )
+        else:
+            self.logger.info(
+                f"   Refit R² = {verified_r2:.4f} "
+                f"(best stays {ctx.best_score:.4f}; deferred to next verifier for physics check)"
+            )
+
+        # Adaptive annealing — three escalation
+        # triggers, applied in order; each can lift
+        # the annealing level (capped at n-1).
+        _PATIENCE = 2
+        improvement = ctx.best_score - ctx.prev_best_score
+        remaining = max(self.max_verification_iterations - ctx.iteration - 1, 1)
+        required_rate = max(self.r2_threshold - ctx.best_score, 0.0) / remaining
+
+        # (a) Rate-based: improvement too slow to reach
+        #     threshold in remaining budget.
+        rate_escalated = False
+        if improvement < required_rate:
+            ctx.annealing_level = min(
+                ctx.annealing_level + 1, ctx.n_levels - 1
+            )
+            rate_escalated = True
+            self.logger.info(
+                f"   Annealing: improvement {improvement:.4f} < required rate {required_rate:.4f}, "
+                f"escalating to level {ctx.annealing_level}"
+            )
+
+        # (b) Patience-based: best stalled for _PATIENCE
+        #     consecutive iterations.  Resets on any
+        #     forward movement of best.
+        if ctx.best_score > ctx.prev_best_score:
+            ctx.stall_count = 0
+        else:
+            ctx.stall_count += 1
+            if ctx.stall_count >= _PATIENCE and not rate_escalated:
+                new_level = min(
+                    ctx.annealing_level + 1, ctx.n_levels - 1
+                )
+                if new_level > ctx.annealing_level:
+                    ctx.annealing_level = new_level
+                    self.logger.info(
+                        f"   Annealing: best stalled for {ctx.stall_count} iterations, "
+                        f"escalating to level {ctx.annealing_level}"
+                    )
+                ctx.stall_count = 0
+
+        # (c) Iteration floor: guarantees the hot level
+        #     is reached even when rate/patience say
+        #     otherwise (e.g., best ≥ threshold so
+        #     required_rate degenerates to 0).
+        _floor = min(
+            (ctx.iteration + 1) // ctx.floor_divisor,
+            ctx.n_levels - 1,
+        )
+        if _floor > ctx.annealing_level:
+            self.logger.info(
+                f"   Annealing: iteration floor lifting "
+                f"level {ctx.annealing_level} → {_floor}"
+            )
+            ctx.annealing_level = _floor
+            ctx.stall_count = 0
+
+        ctx.prev_best_score = ctx.best_score
+
+    def qc_final_verify(self, ctx: QCItemContext) -> None:
+        # Loop exhausted without approval - one final pass to
+        # rate the latest state.  If current was deferred
+        # (in-band, awaiting physics verdict), this is its
+        # last chance to be promoted.
+        self.logger.info(f"   Verifying final refit...")
+        final_verification = self._verify_fit_with_llm(
+            ctx.state, ctx.current_result,
+            verification_iter=self.max_verification_iterations,
+            annealing_level=ctx.annealing_level,
+            best_result=ctx.best_result,
+            best_verification=ctx.best_verification,
+        )
+
+        if final_verification:
+            _final_rejected = not final_verification.get("fit_acceptable", True)
+
+            # Retroactive promotion of deferred current
+            if (ctx.current_result is not ctx.best_result
+                    and ctx.current_score >= ctx.r2_floor
+                    and final_verification.get("physically_better_than_best", False)):
+                note = (final_verification.get("comparison_note") or "physics improvement")[:90]
+                ctx.best_score = ctx.current_score
+                ctx.best_result = ctx.current_result
+                ctx.best_config = (ctx.state.get("locked_fitting_config") or {}).copy()
+                self.logger.info(
+                    f"   Post-loop promoted current (R² = {ctx.current_score:.4f}) on physics — {note}"
+                )
+
+            # Update best's verdict tracking
+            if ctx.current_result is ctx.best_result:
+                ctx.best_verification = final_verification
+                if not _final_rejected:
+                    self.logger.info(f"   ✅ Final fit approved ({self._gate_metric_str(ctx.state, ctx.best_result, ctx.best_score)})")
+                    ctx.approved = True
+                    ctx.best_ever_rejected = False
+                else:
+                    ctx.best_ever_rejected = True
+                    self._log_verification_issues(final_verification)
+            else:
+                # current still differs from best (no physics
+                # promotion).  best's last verdict stands.
+                if _final_rejected:
+                    self._log_verification_issues(final_verification)
+
+    def qc_post_verification(self, ctx: QCItemContext) -> Optional[dict]:
+        # --- Verifier-approved fits bypass the R² threshold check ---
+        if ctx.approved:
+            self.logger.info(f"✅ Verifier approved fit ({self._gate_metric_str(ctx.state, ctx.best_result, ctx.best_score)})")
+            quality_history = self._build_quality_history(
+                ctx.best_score, self.r2_threshold, ctx.all_attempts,
+                ctx.verification_history, None,
+                ctx.best_result.get("script_errors"),
+            )
+            quality_history["approved"] = True
+            quality_history["approved_by"] = "verifier"
+            ctx.best_result["quality_history"] = quality_history
+            self._stamp_hot_deviation(ctx.best_result)
+            return ctx.best_result
+
+        # --- Check if we meet threshold ---
+        # Option B: when the verifier explicitly rejected best at some
+        # point and never approved it later, fall through to the judge
+        # even if R² meets the numerical threshold.  This catches the
+        # "high-R² but wrong-physics" trap where the verifier kept
+        # complaining about best on physics grounds.
+        if self._accept_gate().is_accept(ctx.best_score) and not ctx.best_ever_rejected:
+            self.logger.info(f"✅ R² = {ctx.best_score:.4f} (meets threshold {self.r2_threshold})")
+            ctx.best_result["quality_history"] = self._build_quality_history(
+                ctx.best_score, self.r2_threshold, ctx.all_attempts,
+                ctx.verification_history, None,
+                ctx.best_result.get("script_errors"),
+            )
+            self._stamp_hot_deviation(ctx.best_result)
+            return ctx.best_result
+        elif self._accept_gate().is_accept(ctx.best_score):
+            self.logger.info(
+                f"⚠️ R² = {ctx.best_score:.4f} meets threshold {self.r2_threshold}, "
+                f"but verifier rejected best — deferring to judge"
+            )
+        else:
+            self.logger.warning(f"⚠️ R² = {ctx.best_score:.4f} (below threshold {self.r2_threshold})")
+        return None
+
+    def qc_record_initial_failure(self, ctx: QCItemContext, result: dict) -> None:
+        self.logger.error(f"   Initial fit failed: {result.get('error', 'Unknown')[:50]}")
+        ctx.all_attempts.append({"model": ctx.initial_label, "r2": 0, "result": result})
+
+    def qc_fallback(self, ctx: QCItemContext) -> dict:
         # NOTE: the alternative-model loop was removed.  Hot annealing
         # (level n-1) inside the verification loop now drops the script
         # anchor and grants the LLM the same freedom to restructure the
         # model.  Patience counter and iteration floor guarantee the hot
         # level is reached when refits stall.
+        state = ctx.state
 
         # --- Human feedback for poor fit (if enabled) ---
         # Guard `best_result`: when every fitting attempt failed it is None, and
@@ -4687,23 +4494,24 @@ Return JSON with:
         # below mutates shared self.r2_threshold).
         if (
             self.enable_human_feedback
-            and _is_anchor
-            and best_result
+            and ctx.is_anchor
+            and ctx.best_result
             and not state.get("_suppress_human_feedback")
         ):
-            feedback_result = self._get_human_feedback_for_poor_fit(state, best_result, all_attempts)
+            feedback_result = self._get_human_feedback_for_poor_fit(state, ctx.best_result, ctx.all_attempts)
 
             if feedback_result:
                 if feedback_result.get("action") == "adjust_threshold":
                     self.r2_threshold = feedback_result["new_threshold"]
-                    if best_r2 >= self.r2_threshold:
+                    # _accept_gate() rebuilds from the just-mutated threshold.
+                    if self._accept_gate().is_accept(ctx.best_score):
                         self.logger.info(f"✅ Best fit now meets adjusted threshold")
-                        best_result["quality_history"] = self._build_quality_history(
-                            best_r2, self.r2_threshold, all_attempts,
-                            verification_history, None,
-                            best_result.get("script_errors"),
+                        ctx.best_result["quality_history"] = self._build_quality_history(
+                            ctx.best_score, self.r2_threshold, ctx.all_attempts,
+                            ctx.verification_history, None,
+                            ctx.best_result.get("script_errors"),
                         )
-                        return best_result
+                        return ctx.best_result
 
                 elif feedback_result.get("action") == "retry":
                     refined_config = self._refine_model_from_feedback(state, feedback_result["feedback"])
@@ -4711,19 +4519,19 @@ Return JSON with:
                     state["locked_fitting_config"] = refined_config
 
                     human_guided_result = self._fit_single_spectrum(
-                        state=state, curve_data=curve_data, data_path=data_path,
-                        spectrum_name=spectrum_name, spectrum_idx=spectrum_idx, base_script=None
+                        state=state, curve_data=ctx.data, data_path=ctx.data_path,
+                        spectrum_name=ctx.item_name, spectrum_idx=ctx.item_idx, base_script=None
                     )
 
                     if human_guided_result["success"]:
                         human_r2 = human_guided_result.get("fit_quality", {}).get("r_squared") or 0
                         self.logger.info(f"   Human-guided fit: R² = {human_r2:.4f}")
 
-                        if human_r2 > best_r2:
-                            best_r2 = human_r2
-                            best_result = human_guided_result
-                            best_config = refined_config.copy()
-                            if _is_anchor:
+                        if human_r2 > ctx.best_score:
+                            ctx.best_score = human_r2
+                            ctx.best_result = human_guided_result
+                            ctx.best_config = refined_config.copy()
+                            if ctx.is_anchor:
                                 state["locked_fitting_config"] = refined_config
                         else:
                             state["locked_fitting_config"] = original_config
@@ -4732,8 +4540,8 @@ Return JSON with:
 
         # --- Unified judge: evaluate ALL attempts (verification + alternatives) ---
         judge_result = None
-        successful_attempts = [a for a in all_attempts if a.get("r2", 0) > 0]
-        if _is_anchor and len(successful_attempts) > 1:
+        successful_attempts = [a for a in ctx.all_attempts if a.get("r2", 0) > 0]
+        if ctx.is_anchor and len(successful_attempts) > 1:
             judge_result = self._judge_select_best_fit(successful_attempts)
 
             selected_index = judge_result.get("selected_index")
@@ -4741,71 +4549,71 @@ Return JSON with:
 
             if selected_index is not None:
                 selected_attempt = successful_attempts[selected_index]
-                best_result = selected_attempt["result"]
-                best_r2 = selected_attempt["r2"]
+                ctx.best_result = selected_attempt["result"]
+                ctx.best_score = selected_attempt["r2"]
                 if selected_attempt.get("config"):
                     state["locked_fitting_config"] = selected_attempt["config"]
 
                 if is_acceptable:
                     if judge_result.get("issues_with_selected"):
-                        best_result["judge_note"] = judge_result["issues_with_selected"]
-                    self.logger.info(f"   ✅ Using judge-selected fit (R² = {best_r2:.4f})")
+                        ctx.best_result["judge_note"] = judge_result["issues_with_selected"]
+                    self.logger.info(f"   ✅ Using judge-selected fit (R² = {ctx.best_score:.4f})")
                 else:
-                    best_result["judge_warning"] = (
-                        f"Judge selected this as best available (R² = {best_r2:.4f}) "
+                    ctx.best_result["judge_warning"] = (
+                        f"Judge selected this as best available (R² = {ctx.best_score:.4f}) "
                         f"but noted it does not meet acceptance criteria. "
                         f"Reason: {judge_result.get('reasoning', 'No reason provided')[:200]}"
                     )
                     self.logger.warning(
-                        f"   ⚠️ Using judge-selected fit (R² = {best_r2:.4f}) "
+                        f"   ⚠️ Using judge-selected fit (R² = {ctx.best_score:.4f}) "
                         f"despite not meeting acceptance criteria"
                     )
             else:
-                best_result["judge_warning"] = (
+                ctx.best_result["judge_warning"] = (
                     f"Judge could not select any acceptable fit. "
                     f"Reason: {judge_result.get('reasoning', 'No reason provided')[:200]}"
                 )
-                self.logger.warning(f"   ⚠️ Judge could not select any fit - keeping current best (R² = {best_r2:.4f})")
+                self.logger.warning(f"   ⚠️ Judge could not select any fit - keeping current best (R² = {ctx.best_score:.4f})")
 
         # --- Return best available result ---
-        if best_result:
+        if ctx.best_result:
             # This is the "best available" fallback (the accept/threshold paths
             # return earlier). A fit can land here two ways: (a) R² genuinely
             # below threshold, or (b) R² meets threshold but the verifier kept
             # rejecting on PHYSICS grounds. Word the warning to match reality —
             # never claim "below threshold" when the number is at/above it.
-            if best_r2 >= self.r2_threshold:
-                best_result["quality_warning"] = (
-                    f"R² = {best_r2:.4f} meets the threshold {self.r2_threshold} but the "
+            if self._accept_gate().is_accept(ctx.best_score):
+                ctx.best_result["quality_warning"] = (
+                    f"R² = {ctx.best_score:.4f} meets the threshold {self.r2_threshold} but the "
                     f"fit was not accepted on physical grounds (see verifier notes)"
                 )
             else:
-                best_result["quality_warning"] = (
-                    f"R² = {best_r2:.4f} below threshold {self.r2_threshold}"
+                ctx.best_result["quality_warning"] = (
+                    f"R² = {ctx.best_score:.4f} below threshold {self.r2_threshold}"
                 )
-            best_result["attempted_models"] = [a["model"] for a in all_attempts]
-            best_result["quality_history"] = self._build_quality_history(
-                best_r2, self.r2_threshold, all_attempts,
-                verification_history, judge_result,
-                best_result.get("script_errors"),
+            ctx.best_result["attempted_models"] = [a["model"] for a in ctx.all_attempts]
+            ctx.best_result["quality_history"] = self._build_quality_history(
+                ctx.best_score, self.r2_threshold, ctx.all_attempts,
+                ctx.verification_history, judge_result,
+                ctx.best_result.get("script_errors"),
             )
-            if best_r2 >= self.r2_threshold:
+            if self._accept_gate().is_accept(ctx.best_score):
                 self.logger.info(
-                    f"✅ Accepting best available fit (R² = {best_r2:.4f} meets threshold {self.r2_threshold})"
+                    f"✅ Accepting best available fit (R² = {ctx.best_score:.4f} meets threshold {self.r2_threshold})"
                 )
             else:
                 self.logger.warning(
-                    f"⚠️ Proceeding with best available fit (R² = {best_r2:.4f}, below threshold {self.r2_threshold})"
+                    f"⚠️ Proceeding with best available fit (R² = {ctx.best_score:.4f}, below threshold {self.r2_threshold})"
                 )
 
-            if _is_anchor:
-                state["locked_fitting_config"] = best_config
+            if ctx.is_anchor:
+                state["locked_fitting_config"] = ctx.best_config
 
-            return best_result
+            return ctx.best_result
         else:
             return {
-                "index": spectrum_idx, "name": spectrum_name, "success": False,
-                "error": "All fitting attempts failed", "attempts": len(all_attempts),
+                "index": ctx.item_idx, "name": ctx.item_name, "success": False,
+                "error": "All fitting attempts failed", "attempts": len(ctx.all_attempts),
                 "parameters": {}, "fit_quality": {},
             }
 
@@ -6124,45 +5932,23 @@ Return JSON with:
     ) -> dict:
         """Build a compact quality history dict for the best result.
 
-        Captures problem-solution pairs at every level: script errors,
-        verification iterations, alternative approaches, and judge reasoning.
+        Delegates to the shared builder (``_verification_record``) with the
+        curve keymap — output is byte-identical to the historical inline
+        version (golden-pinned).
         """
-        return {
-            "final_r2": best_r2,
-            "threshold": r2_threshold,
-            "approved": best_r2 >= r2_threshold,
-            "verification_iterations": [
-                {
-                    "r_squared": entry.get("r_squared"),
-                    "annealing_level": entry.get("annealing_level", 0),
-                    "tools_used": entry.get("tools_used", []),
-                    # The model in force at this iteration — lets a consumer
-                    # (e.g. the self-evolution figure) show the per-attempt
-                    # model alongside its R² and issues.
-                    "model": (entry.get("config_used") or {}).get("physical_model", ""),
-                    "issues": [
-                        {
-                            "location": iss.get("location", ""),
-                            "problem": iss.get("problem", ""),
-                        }
-                        for iss in entry.get("issues_found", [])
-                    ],
-                    "fix_applied": entry.get("recommended_action", ""),
-                }
-                for entry in verification_history
-            ],
-            "alternative_models": [
-                {
-                    "model": a.get("model", ""),
-                    "r2": a.get("r2", 0),
-                    "diagnosis": a.get("diagnosis", ""),
-                }
-                for a in all_attempts[1:]
-                if not str(a.get("model", "")).startswith("Verification")
-            ],
-            "script_errors": script_errors or [],
-            "judge_reasoning": (judge_result or {}).get("reasoning"),
-        }
+        from .._verification_record import (
+            CURVE_HISTORY_KEYMAP,
+            build_quality_history,
+        )
+        return build_quality_history(
+            best_value=best_r2,
+            threshold=r2_threshold,
+            all_attempts=all_attempts,
+            verification_history=verification_history,
+            judge_result=judge_result,
+            script_errors=script_errors,
+            keymap=CURVE_HISTORY_KEYMAP,
+        )
 
     def _judge_select_best_fit(self, attempts: List[dict]) -> dict:
         """

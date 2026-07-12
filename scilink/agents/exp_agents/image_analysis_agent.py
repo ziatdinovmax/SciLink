@@ -996,7 +996,10 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         ) or "No claims generated."
 
         prompt = IMAGE_ANALYSIS_TIER2_DECISION_INSTRUCTIONS.format(
-            tier1_summary=tier1_results.get("detailed_analysis", "")[:2000],
+            # `.get(k, "")` does not guard a present-but-None value (observed
+            # live: a synthesis pass returned detailed_analysis=None and
+            # None[:2000] crashed the whole analyze()).
+            tier1_summary=(tier1_results.get("detailed_analysis") or "")[:2000],
             tier1_features=features_str,
             tier1_claims=claims_str,
             objective=objective or "General image analysis",
@@ -1362,6 +1365,14 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             results["analysis_approach"] = state.get(
                 "locked_analysis_config", {}
             ).get("analysis_approach")
+            # Hoist the executed script's features to top level. This also
+            # fixes a dead consumer: the Tier-2 decision and tier merging
+            # already read results["extracted_features"], which was never
+            # set — the Tier-2 decision prompt saw "{}" regardless of what
+            # the analysis extracted. (#323 prereq; issue #327 phase 2.)
+            results["extracted_features"] = analysis_result.get(
+                "extracted_features", {}
+            )
             results["literature_files"] = state.get("literature_files")
 
             if series_results and series_results[0].get("quality_warning"):

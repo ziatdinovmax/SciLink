@@ -186,6 +186,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         prior_knowledge: list | None = None,
         auxiliary_data: str | list[str] | None = None,
         auxiliary_label: str | list[str] | None = None,
+        literature_file: str | None = None,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -221,6 +222,12 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 will not attempt to unmix or quantitatively analyze it.
             auxiliary_label: Optional human-readable label for the auxiliary
                 data (e.g., "TGA curve collected simultaneously").
+            literature_file: Optional path to a pre-fetched literature report
+                (typically written by the orchestrator's ``search_literature``
+                tool). Its text is injected as advisory context into the
+                target-planning, interpretation, and synthesis prompts.
+                Previously this argument was silently swallowed by
+                ``**kwargs`` — hyperspectral had no literature integration.
             **kwargs: Additional options
 
         Returns:
@@ -307,6 +314,19 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 names = ", ".join(it["label"] for it in auxiliary_state["auxiliary_items"])
                 self.logger.info(f"   Auxiliary data loaded ({n}): {names}")
 
+        # Pre-fetched literature (Channel A passthrough — mirrors the curve /
+        # image agents' literature_file handling).
+        literature_context = None
+        literature_files = None
+        if literature_file:
+            lit_p = Path(literature_file)
+            if lit_p.is_file():
+                literature_context = lit_p.read_text()
+                literature_files = {"provided_file": str(lit_p)}
+                self.logger.info(f"📚 Loaded literature context from {lit_p.name}")
+            else:
+                self.logger.warning(f"literature_file not found: {literature_file}")
+
         self.logger.info(f"\n{'='*80}")
         self.logger.info(f"🔬 HYPERSPECTRAL ANALYSIS")
         self.logger.info(f"   Data: {data_path}")
@@ -323,7 +343,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             objective=objective,
             skill_state=skill_state,
             prior_knowledge=prior_knowledge or [],
-            auxiliary_state=auxiliary_state
+            auxiliary_state=auxiliary_state,
+            literature_context=literature_context,
         )
         
         # Handle Errors
@@ -358,6 +379,18 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "output_directory": str(self.output_dir)
         }
 
+        # Surface the dynamic-analysis features at top level (additive) —
+        # previously trapped in custom_analysis_metadata_list, which blocked
+        # feature-conditioned literature (#323) and cross-mode consumers.
+        if result_json.get("extracted_features"):
+            response["extracted_features"] = result_json["extracted_features"]
+        # Per-target verification records (HS-1) — the hyperspectral
+        # counterpart of curve/image quality_history.
+        if result_json.get("dynamic_analysis_records"):
+            response["dynamic_analysis_records"] = result_json["dynamic_analysis_records"]
+        if literature_files:
+            response["literature_files"] = literature_files
+
         # A salvage / approximate / withheld outcome is NOT a clean success:
         # downgrade the status and surface the honest caveats so a programmatic
         # caller (or the meta agent) sees the uncertainty instead of a bare
@@ -373,6 +406,16 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             response["degraded_outputs"] = degradation
 
 
+        # Stage novel hot-annealing successes (method-family abandoned and a
+        # later attempt approved) for review-gated skill distillation —
+        # brings hyperspectral into the same T=2 flywheel as curve/image.
+        # Failure-isolated; SCILINK_T2_AUTODISTILL=0 disables.
+        staged = self._maybe_stage_t2_solutions(
+            response.get("dynamic_analysis_records") or [], skill_state
+        )
+        if staged:
+            response["staged_solutions"] = staged
+
         self._log_action(
             action="analyze",
             input_ctx={"data": data_path},
@@ -386,6 +429,92 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         self.logger.info(f"{'='*80}\n")
         
         return response
+
+    def _maybe_stage_t2_solutions(self, records: list, skill_state: dict) -> list:
+        """Stage novel hot-retry successes for later, review-gated distillation.
+
+        Hyperspectral mirror of the curve/image T=2 hooks, reading the
+        per-target ``dynamic_analysis_records`` (HS-1). Gate (all must hold):
+        the task succeeded (``approved`` — fraction + required-outputs); its
+        winning attempt came AFTER the retry ladder reached the hot stage
+        ("abandon the method family"), i.e. the model discarded its first
+        method family and found one that works — the novelty signal.
+
+        Returns staged solution ids. Fully failure-isolated;
+        ``SCILINK_T2_AUTODISTILL=0`` disables staging.
+        """
+        from scilink.skills.loader import memory_enabled
+        if not memory_enabled():
+            return []
+        flag = os.environ.get("SCILINK_T2_AUTODISTILL", "").strip().lower()
+        if flag in ("0", "false", "off", "no"):
+            return []
+
+        staged: list = []
+        try:
+            from .instruct import T2_TECHNIQUE_LABEL_INSTRUCTIONS
+            from scilink.skills._shared import _staging
+
+            active_skills = [
+                s.get("name") for s in (skill_state or {}).get("skills_loaded", [])
+                if isinstance(s, dict)
+            ]
+
+            def _llm_call(prompt: str) -> str:
+                response = self.model.generate_content(
+                    contents=[prompt],
+                    generation_config=self.generation_config,
+                    safety_settings=self.safety_settings,
+                )
+                return response.text if hasattr(response, "text") else str(response)
+
+            for rec in records:
+                qh = rec.get("quality_history") or {}
+                if not qh.get("approved") or not rec.get("script"):
+                    continue
+                levels = [
+                    it.get("annealing_level", 0)
+                    for it in qh.get("verification_iterations", [])
+                ]
+                reached_hot = (max(levels) if levels else 0) >= 2
+                if not reached_hot:
+                    continue
+
+                target = rec.get("target") or "dynamic analysis"
+                deviation = (
+                    "Initial method family failed repeatedly; the retry ladder "
+                    "escalated to 'abandon the method family' and a structurally "
+                    "different estimator succeeded."
+                )
+                technique = _staging.assign_technique_label(
+                    "hyperspectral", target, deviation, _llm_call,
+                    T2_TECHNIQUE_LABEL_INSTRUCTIONS,
+                )
+                record = {
+                    "analysis_target": target,
+                    "required_outputs": rec.get("required_outputs"),
+                    "deviation_from_plan": deviation,
+                    "final_passed_fraction": qh.get("final_passed_fraction"),
+                    "active_skills": active_skills,
+                    "working_script": rec["script"],
+                    "session": self.output_dir.name,
+                }
+                sid = _staging.stage_solution("hyperspectral", technique, record)
+                staged.append(sid)
+                self.logger.info(
+                    f"   🧠 Staged hot-retry hyperspectral solution "
+                    f"[{technique}] id={sid}"
+                )
+        except Exception as e:  # noqa: BLE001 - staging never affects results
+            self.logger.warning(f"T=2 staging skipped: {e}")
+            return staged
+
+        if staged:
+            self.logger.info(
+                f"   🧠 {len(staged)} solution(s) staged; review with "
+                f"`scilink memory staged`."
+            )
+        return staged
 
     def _auto_select_skills(self, system_info, hint=None, custom_skills=None) -> list:
         """Pick relevant hyperspectral skill(s) from the metadata.
@@ -753,7 +882,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         hints: str | None = None,
         skill_state: Dict[str, Any] | None = None,
         prior_knowledge: list | None = None,
-        auxiliary_state: Dict[str, Any] | None = None
+        auxiliary_state: Dict[str, Any] | None = None,
+        literature_context: str | None = None,
     ) -> tuple[Dict[str, Any] | None, Dict[str, Any] | None]:
         """
         Main execution engine using Queue-Based Branching architecture.
@@ -808,6 +938,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "analysis_hints": hints,
                 "analysis_objective": objective,
                 "prior_knowledge": prior_knowledge or [],
+                "literature_context": literature_context,
                 "analysis_images": [],
                 "error_dict": None,
                 **skill_state,
@@ -840,6 +971,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "analysis_hints": hints,
                 "analysis_objective": objective,
                 "prior_knowledge": prior_knowledge or [],
+                "literature_context": literature_context,
                 "result_json": None,
                 "error_dict": None,
                 **skill_state,
@@ -861,6 +993,15 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             _notes = iteration_state.get("degradation_notes", [])
             if _rj is not None and _notes:
                 _rj["degradation_notes"] = _notes
+            if _rj is not None:
+                # Surface dynamic-analysis features + per-target verification
+                # records (HS-1 / #323 prereq) — both additive.
+                _feat = iteration_state.get("custom_analysis_metadata_list")
+                if _feat:
+                    _rj["extracted_features"] = _feat
+                _recs = iteration_state.get("dynamic_analysis_records")
+                if _recs:
+                    _rj["dynamic_analysis_records"] = _recs
             return _rj, synthesis_state.get("error_dict")
 
         except FileNotFoundError:

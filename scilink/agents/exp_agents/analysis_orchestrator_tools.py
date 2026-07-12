@@ -3701,7 +3701,9 @@ class AnalysisOrchestratorTools:
 
 
         # =====================================================================
-        # REFINE INTERPRETATION (issue #323 — Channel B, curve fitting v1)
+        # REFINE INTERPRETATION (issue #323 — Channel B; feature-conditioned
+        # literature. Curve + image + hyperspectral — feature surfacing per
+        # issue #327 phase 2.)
         # =====================================================================
         def refine_interpretation(analysis_id: str = None, analysis_index: int = -1,
                                   focus: str = None) -> str:
@@ -3746,9 +3748,9 @@ class AnalysisOrchestratorTools:
                 return json.dumps({"status": "error",
                                    "message": "Analysis record has no interpretation text to refine."})
 
-            # 2. Surface the measured features (curve modality).
-            # Series runs are trend-conditioned: once a parameter trend exists,
-            # static per-spectrum peaks barely matter (issue #323 §5.2).
+            # 2. Surface the measured features.
+            # Curve: series runs are trend-conditioned — once a parameter trend
+            # exists, static per-spectrum peaks barely matter (issue #323 §5.2).
             features = {}
             for key in ("model_type", "fit_quality"):
                 if full_result.get(key):
@@ -3763,6 +3765,11 @@ class AnalysisOrchestratorTools:
                     features["locked_model"] = locked
             elif full_result.get("fitting_parameters"):
                 features["fitting_parameters"] = full_result["fitting_parameters"]
+            # Image + hyperspectral: both now surface extracted_features at the
+            # top level of the result (issue #327 phase 2) — this is what lifts
+            # the tool from "curve fitting v1" to all three modalities.
+            if full_result.get("extracted_features"):
+                features["extracted_features"] = full_result["extracted_features"]
             if not features:
                 return json.dumps({"status": "error",
                                    "message": "No fitted features surfaced on this record — nothing to condition the search on."})
@@ -3785,7 +3792,7 @@ class AnalysisOrchestratorTools:
                 "Return ONLY the query text."
             )
             try:
-                q_resp = self.orch.model.generate_content(contents=[builder_prompt])
+                q_resp = self._internal_model().generate_content(contents=[builder_prompt])
                 query = (q_resp.text or "").strip().strip('"')
                 assert 10 < len(query) < 400
             except Exception:
@@ -3832,7 +3839,7 @@ class AnalysisOrchestratorTools:
                 "the revised interpretation text."
             )
             try:
-                r_resp = self.orch.model.generate_content(contents=[refine_prompt])
+                r_resp = self._internal_model().generate_content(contents=[refine_prompt])
                 revised = (r_resp.text or "").strip()
                 if not revised:
                     raise ValueError("empty refinement")
@@ -3908,7 +3915,7 @@ class AnalysisOrchestratorTools:
                     "(claim, has_anyone_question, keywords, scientific_impact)."
                 )
                 try:
-                    c_resp = self.orch.model.generate_content(contents=[claims_prompt])
+                    c_resp = self._internal_model().generate_content(contents=[claims_prompt])
                     raw = (c_resp.text or "").strip()
                     m = re.search(r"\[.*\]", raw, re.DOTALL)
                     parsed = json.loads(m.group(0)) if m else None
@@ -3978,6 +3985,156 @@ class AnalysisOrchestratorTools:
                           "description": "Optional steer for the literature query (e.g., 'candidate phases for the 742 cm-1 band')."},
             },
             required=[]
+        )
+
+        # =====================================================================
+        # RE-ENTER INTERPRETATION (issue #322 — synthesis re-entry with a
+        # human/orchestrator critique; the non-literature sibling of
+        # refine_interpretation, built on SynthesisReEntryController.)
+        # =====================================================================
+        def reenter_interpretation(critique: str, analysis_id: str = None,
+                                   analysis_index: int = -1) -> str:
+            """
+            Re-run ONLY the interpretation of a completed analysis with an
+            injected critique — no per-unit re-analysis, no literature search.
+            Append-only: the original interpretation is preserved; revisions
+            accumulate on the analysis record.
+            """
+            print(f"  ⚡ Tool: Re-entering interpretation with critique...")
+
+            if not critique or not str(critique).strip():
+                return json.dumps({"status": "error",
+                                   "message": "A non-empty critique is required."})
+
+            # 1. Retrieve the analysis record (same contract as assess_novelty /
+            # refine_interpretation).
+            record = None
+            record_index = None
+            if analysis_id:
+                for i, r in enumerate(self.orch.analysis_results):
+                    if r.get("analysis_id") == analysis_id:
+                        record, record_index = r, i
+                        break
+                if record is None:
+                    return json.dumps({"status": "error",
+                                       "message": f"Analysis ID not found: {analysis_id}"})
+            else:
+                if not self.orch.analysis_results:
+                    return json.dumps({"status": "error",
+                                       "message": "No analysis history available."})
+                record_index = (analysis_index if analysis_index >= 0
+                                else len(self.orch.analysis_results) + analysis_index)
+                record = self.orch.analysis_results[record_index]
+
+            full_result = record.get("full_result") or {}
+            detailed = (full_result.get("detailed_analysis")
+                        or full_result.get("full_analysis") or "")
+            if not detailed.strip():
+                return json.dumps({"status": "error",
+                                   "message": "Analysis record has no interpretation text to revise."})
+
+            # 2. Build the payload + surfaced features, and revise via the
+            # shared Tier-A re-entry controller (one mechanism for all
+            # critique producers — see analysis_qc_unification_plan.md §4).
+            from ._critique import CritiquePayload
+            from .base_agent import BaseAnalysisAgent, LLMAgentMixin
+            from .controllers.base_controllers import SynthesisReEntryController
+
+            payload = CritiquePayload(source="human", critique=str(critique))
+            features = BaseAnalysisAgent.surface_features_for_reentry(full_result)
+            features_block = (json.dumps(features, indent=2, default=str)[:4000]
+                              if features else "")
+
+            class _Parse(LLMAgentMixin):
+                def __init__(self):
+                    self.logger = logging.getLogger("reenter_interpretation")
+
+            controller = SynthesisReEntryController(
+                model=self._internal_model(),
+                logger=logging.getLogger("reenter_interpretation"),
+                generation_config=None,
+                safety_settings=None,
+                parse_fn=_Parse()._parse_llm_response,
+            )
+            # Use the CURRENT effective interpretation (latest revision if one
+            # exists) so successive critiques compose instead of each starting
+            # from the original text.
+            effective = dict(full_result)
+            prior_revs = record.get("interpretation_revisions") or []
+            if prior_revs and prior_revs[-1].get("revised_analysis"):
+                effective["detailed_analysis"] = prior_revs[-1]["revised_analysis"]
+                if prior_revs[-1].get("revised_claims"):
+                    effective["scientific_claims"] = prior_revs[-1]["revised_claims"]
+
+            revision, error = controller.revise(
+                effective, payload, features_block=features_block,
+                system_info=self.orch.current_metadata
+                if isinstance(getattr(self.orch, "current_metadata", None), dict)
+                else None,
+            )
+            if error:
+                return json.dumps({"status": "error",
+                                   "message": f"Re-entry failed: {error}"})
+
+            # 3. Append-only storage (same shape as refine_interpretation so
+            # _effective_full_result overlays both kinds uniformly) + novelty
+            # staleness ripple.
+            entry = {
+                "timestamp": datetime.now().isoformat(),
+                "source": payload.source,
+                "critique": payload.critique,
+                "revised_analysis": revision["detailed_analysis"],
+                "revision_summary": revision.get("revision_summary", ""),
+            }
+            claims = revision.get("scientific_claims") or []
+            if (isinstance(claims, list) and claims
+                    and all(isinstance(c, dict) and c.get("claim") for c in claims)):
+                entry["revised_claims"] = claims
+            self.orch.analysis_results[record_index].setdefault(
+                "interpretation_revisions", []).append(entry)
+
+            novelty_stale = False
+            prior_novelty = self.orch.analysis_results[record_index].get("novelty_assessment")
+            if prior_novelty:
+                prior_novelty["stale"] = True
+                prior_novelty["staled_by_revision"] = entry["timestamp"]
+                novelty_stale = True
+
+            print(f"  ✅ Interpretation revised ({len(entry['revised_analysis'])} chars).")
+            return json.dumps({
+                "status": "success",
+                "analysis_id": record.get("analysis_id"),
+                "revision_summary": entry["revision_summary"],
+                "revised_interpretation_preview": entry["revised_analysis"][:600],
+                "claims_revised": "revised_claims" in entry,
+                "prior_novelty_assessment_stale": novelty_stale,
+                "note": "Original interpretation preserved; revision appended to the record."
+                        + (" A prior novelty assessment predates this revision — "
+                           "re-run assess_novelty to update it." if novelty_stale else "")
+            })
+
+        self._register_tool(
+            func=reenter_interpretation,
+            name="reenter_interpretation",
+            description=(
+                "Revise a completed analysis's interpretation using a critique or extra "
+                "context (from the user or your own review) WITHOUT re-running the "
+                "analysis and WITHOUT a literature search — the cheap way to fix or "
+                "sharpen conclusions when the fits/segmentations are fine but the "
+                "reading of them should change. Successive calls compose (each revises "
+                "the latest revision). Append-only: the original interpretation is "
+                "preserved. For literature-driven revision use refine_interpretation "
+                "instead."
+            ),
+            parameters={
+                "critique": {"type": "string",
+                             "description": "The critique/context to revise against (e.g., 'the trend has a break at 270 K — treat it as two regimes', or the user's correction)."},
+                "analysis_id": {"type": "string",
+                                "description": "ID of the completed analysis (default: most recent)."},
+                "analysis_index": {"type": "integer",
+                                   "description": "Alternative: index into the analysis history (default -1, most recent)."},
+            },
+            required=["critique"]
         )
 
         # =====================================================================
@@ -5266,6 +5423,46 @@ class AnalysisOrchestratorTools:
             },
             required=["paths"]
         )
+
+    def _internal_model(self):
+        """Tool-free sibling of the orchestrator's model for INTERNAL LLM calls.
+
+        The orchestrator's chat wrapper binds its system prompt and the full
+        tool schemas at construction (LiteLLM path,
+        analysis_orchestrator.py:701-706). An internal call made from inside a
+        tool function therefore behaves like the chat agent — the model may
+        answer with a *tool call*, leaving ``.text`` empty and failing the
+        parse ("Empty response from LLM"). Discovered live via the
+        reenter_interpretation routing test; refine_interpretation's three
+        internal calls had the same latent failure on the LiteLLM path (the
+        proxy path constructs its wrapper without bound tools, masking it).
+
+        Returns a plain generator with the same model/key/base_url and no
+        tools or system instruction. Cached; degrades to the bound model if
+        construction fails (better a maybe-empty response than a crashed tool).
+        """
+        cached = getattr(self, "_internal_model_cache", None)
+        if cached is not None:
+            return cached
+        base = self.orch.model
+        try:
+            if getattr(self.orch, "use_openai", False):
+                from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+                m = OpenAIAsGenerativeModel(
+                    model=base.model, api_key=base.api_key,
+                    base_url=getattr(base, "base_url", None),
+                )
+            else:
+                from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
+                m = LiteLLMGenerativeModel(
+                    model=base.model, api_key=getattr(base, "api_key", None),
+                    base_url=getattr(base, "base_url", None),
+                )
+        except Exception as e:  # noqa: BLE001 - degrade, don't crash the tool
+            logging.warning(f"_internal_model fallback to bound model: {e}")
+            m = base
+        self._internal_model_cache = m
+        return m
 
     def _register_tool(
         self,
