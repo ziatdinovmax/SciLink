@@ -11,14 +11,14 @@ these byte-identically. Regenerate: ``QC_GOLDEN_UPDATE=1 pytest tests/qc_golden`
 
 import json
 import logging
-import os
 import re
 import sys
 from pathlib import Path
 
 import numpy as np
 
-os.environ["UNSAFE_EXECUTION_OK"] = "true"
+# UNSAFE_EXECUTION_OK is set per-test by the package conftest's _golden_env
+# fixture (monkeypatch) — no module-level env writes that leak process-wide.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from qc_golden.harness import (  # noqa: E402

@@ -15,9 +15,15 @@ from pathlib import Path
 
 import pytest
 
-os.environ["UNSAFE_EXECUTION_OK"] = "true"
-
 sys.path.insert(0, str(Path(__file__).parent))
+
+
+@pytest.fixture(autouse=True)
+def _sandbox_env(monkeypatch):
+    # Per-test (auto-restored) instead of a module-level os.environ write
+    # that would leak the sandbox bypass into other test modules sharing
+    # the pytest process.
+    monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
 
 from qc_golden.fixtures import write_blob_image, write_gaussian_spectrum  # noqa: E402
 from qc_golden.harness import Rule, ScriptedModel  # noqa: E402
