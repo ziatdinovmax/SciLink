@@ -697,13 +697,24 @@ def record_label(rec: Dict[str, Any]) -> str:
 
 def bank_summary(domain: Optional[str] = None, *,
                  root: Optional[Path] = None) -> List[Dict[str, Any]]:
-    """Compact display rows for the management surfaces, proven-first."""
+    """Compact display rows for the management surfaces, proven-first.
+
+    ``promoted_to_staging`` is reported only while the staged copy still
+    exists (awaiting review) — once it was consumed by upgrade/consolidate
+    or pruned, the record shows as promotable again, matching
+    :func:`promote_to_staging`'s refusal rule.
+    """
+    from . import _staging
+
     threshold = proven_n()
     rows = []
     for rec in list_records(domain, root=root):
         stats = rec.get("stats") or {}
         metric = (rec.get("outcome") or {}).get("best_metric") \
             or (rec.get("outcome") or {}).get("metric")
+        sid = rec.get("promoted_to_staging")
+        if sid and _staging.get_staged(rec.get("domain") or "", sid) is None:
+            sid = None  # dangling — the staged copy was consumed or pruned
         rows.append({
             "domain": rec.get("domain"),
             "id": rec.get("id"),
@@ -714,7 +725,7 @@ def bank_summary(domain: Optional[str] = None, *,
             "metric": metric,
             "created_at": rec.get("created_at"),
             "proven": int(stats.get("n_successes", 1) or 1) >= threshold,
-            "promoted_to_staging": rec.get("promoted_to_staging"),
+            "promoted_to_staging": sid,
         })
     rows.sort(key=lambda r: (-r["n_successes"], -r["n_retrievals"], r["id"] or ""))
     return rows
@@ -745,11 +756,16 @@ def promote_to_staging(domain: str, rid: str, technique: Optional[str] = None,
     rec = get_record(domain, rid, root=root)
     if rec is None:
         return {"status": "error", "message": f"No bank record {domain}/{rid}."}
-    if rec.get("promoted_to_staging"):
-        return {"status": "error",
-                "message": (f"Record {rid} was already promoted "
-                            f"(staged id {rec['promoted_to_staging']}). "
-                            f"Review it with `scilink memory staged`.")}
+    prior_sid = rec.get("promoted_to_staging")
+    if prior_sid:
+        # Refuse only while the staged copy is still awaiting review. Once it
+        # was consumed (upgrade/consolidate remove staged records) or pruned,
+        # the mark is dangling and re-promotion is legitimate.
+        if _staging.get_staged(domain, prior_sid, root=staging_root) is not None:
+            return {"status": "error",
+                    "message": (f"Record {rid} is already staged for review "
+                                f"(staged id {prior_sid}). Review it with "
+                                f"`scilink memory staged`.")}
     script = (rec.get("working_script") or "").strip()
     if not script:
         return {"status": "error", "message": f"Record {rid} has no script."}

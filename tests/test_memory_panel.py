@@ -63,6 +63,62 @@ def test_lazy_tick_loads_one_record(heavy_store):
     assert len(at.code) == 1  # exactly the ticked record's script
 
 
+def test_panel_survives_hostile_and_degenerate_records(tmp_path, monkeypatch):
+    """Markdown/HTML in labels, missing tiers, plain-float metrics, and a
+    corrupt JSON file alongside must not break the panel."""
+    monkeypatch.setenv("SCILINK_HOME", str(tmp_path))
+    monkeypatch.setenv("SCILINK_MEMORY", "1")
+    from scilink.skills._shared import _script_bank as sb
+
+    sb.add_record("curve_fitting", {
+        "working_script": "# s", "data_fingerprint": {"kind": "curve"},
+        "measurement_context": {},
+        "technique_signals": {"model_type": "**bold** <script>x</script> `tick`"},
+        "outcome": {"metric": 0.97}, "provenance": {"session": "s"}})
+    sb.add_record("curve_fitting", {
+        "working_script": "# s2", "data_fingerprint": None,
+        "measurement_context": None, "technique_signals": None,
+        "outcome": None, "provenance": {"session": "s"}})
+    (sb._domain_dir("curve_fitting") / "corrupt.json").write_text("{broken")
+
+    at = AppTest.from_string(PANEL_SCRIPT, default_timeout=60)
+    at.run()
+    assert not at.exception, at.exception
+
+
+def test_promote_button_flow_and_dangling_reenable(tmp_path, monkeypatch):
+    """Clicking Promote stages the record and disables the button; once the
+    staged copy is consumed/pruned, the button re-enables."""
+    monkeypatch.setenv("SCILINK_HOME", str(tmp_path))
+    monkeypatch.setenv("SCILINK_MEMORY", "1")
+    from scilink.skills._shared import _script_bank as sb, _staging
+
+    rid = sb.add_record("curve_fitting", {
+        "working_script": "# promoteme", "data_fingerprint": {"kind": "curve"},
+        "measurement_context": {}, "technique_signals": {"model_type": "voigt sum"},
+        "outcome": {"metric": {"name": "r_squared", "value": 0.99}},
+        "provenance": {"session": "s"}})["id"]
+    for s in ("s2", "s3"):
+        sb.record_success("curve_fitting", rid, session=s)
+    key = f"bankprom::curve_fitting/{rid}"
+
+    at = AppTest.from_string(PANEL_SCRIPT, default_timeout=60)
+    at.run()
+    btn = next(b for b in at.button if b.key == key)
+    assert not btn.disabled
+    btn.click().run()
+    assert not at.exception, at.exception
+    staged = _staging.list_staged("curve_fitting")
+    assert len(staged) == 1 and staged[0]["bank_id"] == rid
+
+    at.run()  # fresh render: button now disabled
+    assert next(b for b in at.button if b.key == key).disabled
+
+    _staging.remove_staged("curve_fitting", [staged[0]["id"]])
+    at.run()  # staged copy gone: promotable again
+    assert not next(b for b in at.button if b.key == key).disabled
+
+
 def test_long_lists_paginate(heavy_store):
     at = AppTest.from_string(PANEL_SCRIPT, default_timeout=60)
     at.run()

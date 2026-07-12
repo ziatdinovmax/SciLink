@@ -324,7 +324,25 @@ class TestManagementSurface:
         rec = sb.get_record("curve_fitting", rid)
         assert rec["promoted_to_staging"] == out["staged_id"]
         again = sb.promote_to_staging("curve_fitting", rid)
-        assert again["status"] == "error" and "already promoted" in again["message"]
+        assert again["status"] == "error" and "already staged" in again["message"]
+
+    def test_repromotion_allowed_after_staged_copy_gone(self):
+        """upgrade/consolidate CONSUME staged records (and a user may prune
+        one) — a dangling promotion mark must not block re-promotion, and
+        the summary must stop showing the promoted badge."""
+        from scilink.skills._shared import _staging
+        rid = self._seed(n_sessions=3)
+        first = sb.promote_to_staging("curve_fitting", rid)
+        # Blocked while the staged copy awaits review...
+        assert sb.promote_to_staging("curve_fitting", rid)["status"] == "error"
+        assert sb.bank_summary("curve_fitting")[0]["promoted_to_staging"] == \
+            first["staged_id"]
+        # ...but free again once it was consumed/pruned.
+        _staging.remove_staged("curve_fitting", [first["staged_id"]])
+        assert sb.bank_summary("curve_fitting")[0]["promoted_to_staging"] is None
+        second = sb.promote_to_staging("curve_fitting", rid)
+        assert second["status"] == "success"
+        assert second["staged_id"] != first["staged_id"]
 
     def test_promote_explicit_technique_and_missing(self):
         rid = self._seed()
