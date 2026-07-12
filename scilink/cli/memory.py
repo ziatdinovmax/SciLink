@@ -378,19 +378,73 @@ def _cmd_bank_show(args) -> int:
 
 
 def _cmd_bank_promote(args) -> int:
-    """Send a bank record into distill staging (the graduation path)."""
+    """Send bank record(s) into distill staging (the graduation path).
+
+    Several refs promote as a GROUP under one shared technique label, so
+    `consolidate` later reviews the variants together."""
     _warn_memory_off()
     from scilink.skills._shared import _script_bank
-    domain, rid = _split_ref(args.ref)
-    out = _script_bank.promote_to_staging(domain, rid, technique=args.technique)
-    if out.get("status") != "success":
-        print(f"❌ {out.get('message')}")
+    refs = [_split_ref(r) for r in args.refs]
+    domain = refs[0][0]
+    if any(d != domain for d, _ in refs):
+        print("❌ Group promotion takes records from ONE domain.")
         return 1
-    print(f"🧠 Promoted bank record {rid} → staged {out['staged_id']} "
-          f"[{out['technique']}].")
-    print("   Review with `scilink memory staged`, then `upgrade` it into an "
-          "existing skill or `consolidate` once enough of the technique "
-          "accumulates. The bank record is kept (marked ✓ promoted).")
+    if len(refs) == 1:
+        out = _script_bank.promote_to_staging(domain, refs[0][1],
+                                              technique=args.technique)
+        if out.get("status") != "success":
+            print(f"❌ {out.get('message')}")
+            return 1
+        print(f"🧠 Promoted bank record {refs[0][1]} → staged {out['staged_id']} "
+              f"[{out['technique']}].")
+    else:
+        out = _script_bank.promote_group_to_staging(
+            domain, [rid for _, rid in refs], technique=args.technique)
+        if out.get("status") != "success":
+            print(f"❌ {out.get('message')}")
+            return 1
+        print(f"🧠 Promoted {len(out['staged_ids'])} record(s) as one technique "
+              f"[{out['technique']}] → staged {', '.join(out['staged_ids'])}.")
+        for s in out.get("skipped", []):
+            print(f"   (skipped {s['id']}: {s['reason']})")
+        if out.get("ready_to_consolidate"):
+            print(f"   ✅ {out['n_staged_total']} staged for this technique — "
+                  f"ready: `scilink memory consolidate {domain}/{out['technique']}`")
+        else:
+            print(f"   Accumulating {out['n_staged_total']}/"
+                  f"{_staging.consolidate_min_n()} for consolidation "
+                  f"(`consolidate` can force it now).")
+    print("   Review with `scilink memory staged`; bank records are kept "
+          "(marked ✓ promoted).")
+    return 0
+
+
+def _cmd_bank_groups(args) -> int:
+    """`scilink memory bank-groups` — same-system variant clusters."""
+    from scilink.skills._shared import _script_bank
+    domains = ([args.domain] if args.domain else
+               sorted({r["domain"] for r in _script_bank.bank_summary()}))
+    total = 0
+    for dom in domains:
+        thr = (args.threshold if args.threshold is not None
+               else _script_bank.VARIANT_GROUP_THRESHOLD)
+        for g in _script_bank.find_variant_groups(dom, threshold=thr):
+            total += 1
+            print(f"{dom}: {len(g['ids'])} variants of one system "
+                  f"(min pairwise similarity {g['min_similarity']})")
+            for r in g["records"]:
+                m = r["metric"]
+                mtxt = (f"  {m['name']}={m['value']}"
+                        if isinstance(m, dict) and m.get("value") is not None else "")
+                mark = " ✓ promoted" if r["promoted_to_staging"] else ""
+                print(f"    · {r['id']}  successes={r['n_successes']}{mtxt}{mark}")
+                print(f"      {r['label'][:90]}")
+            refs = " ".join(f"{dom}/{i}" for i in g["ids"])
+            print(f"    → promote together: `scilink memory bank-promote {refs} "
+                  f"--technique {g['suggested_technique']}`")
+    if not total:
+        print("No variant groups found (need ≥2 records of the same system "
+              "in a domain).")
     return 0
 
 
@@ -488,11 +542,24 @@ def main():
 
     p_bp = sub.add_parser(
         "bank-promote",
-        help="Send a proven bank record into distill staging (review-gated skill path)")
-    p_bp.add_argument("ref", help="Bank record ref '<domain>/<id>'")
+        help="Send bank record(s) into distill staging; several refs promote "
+             "as a group under one shared technique label")
+    p_bp.add_argument("refs", nargs="+",
+                      help="Bank record ref(s) '<domain>/<id>' (same domain)")
     p_bp.add_argument("--technique", default=None,
-                      help="Staging technique label (default: derived from the record)")
+                      help="Staging technique label (default: derived from the "
+                           "best record)")
     p_bp.set_defaults(func=_cmd_bank_promote)
+
+    p_bg = sub.add_parser(
+        "bank-groups",
+        help="Show same-system variant clusters (candidates for group "
+             "promotion + consolidation)")
+    p_bg.add_argument("--domain", help="Restrict to one domain")
+    p_bg.add_argument("--threshold", type=float, default=None,
+                      help="Fingerprint-similarity grouping threshold "
+                           "(default 0.85)")
+    p_bg.set_defaults(func=_cmd_bank_groups)
 
     p_br = sub.add_parser("bank-prune", help="Delete a bank record")
     p_br.add_argument("ref", help="Bank record ref '<domain>/<id>'")

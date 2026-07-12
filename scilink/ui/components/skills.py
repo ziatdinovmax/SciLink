@@ -406,6 +406,7 @@ def _render_bank_section() -> None:
         n_proven = sum(1 for r in recs if r["proven"])
         star = f", ★ {n_proven} proven" if n_proven else ""
         with st.expander(f"`{domain}` — {len(recs)} banked{star}", expanded=False):
+            _render_variant_group_suggestions(domain)
             for r in _paged(recs, f"bankpage::{domain}"):
                 metric = r["metric"]
                 mtxt = (f" · {metric['name']}={metric['value']}"
@@ -449,6 +450,62 @@ def _render_bank_section() -> None:
                                  key=f"bankdel::{domain}/{r['id']}"):
                         _script_bank.remove_records(domain, [r["id"]])
                         st.rerun()
+
+
+def _render_variant_group_suggestions(domain: str) -> None:
+    """Surface same-system variant clusters as one-click group promotions.
+
+    N different successful treatments of one system are exactly what skill
+    consolidation needs to generalize from — but only if they reach the
+    staging buffer under ONE technique label. This suggestion does the
+    grouping (by fingerprint similarity) and the shared label for the user.
+    """
+    from scilink.skills._shared import _script_bank
+
+    try:
+        groups = [g for g in _script_bank.find_variant_groups(domain)
+                  if g["n_unpromoted"] > 0]
+    except Exception:  # noqa: BLE001 - suggestions must never break the panel
+        return
+    for g in groups:
+        ids = g["ids"]
+        with st.container(border=True):
+            st.markdown(
+                f"💡 **{len(ids)} records look like the same system** "
+                f"(min pairwise similarity {g['min_similarity']}): "
+                + ", ".join(f"`{i}`" for i in ids)
+            )
+            st.caption(
+                "Promote them together under one technique label so the "
+                "review-gated consolidation can distill a general skill "
+                "from all variants at once."
+            )
+            gkey = "::".join([domain] + ids)
+            label = st.text_input(
+                "Technique label", value=g["suggested_technique"],
+                key=f"bankgrouplabel::{gkey}")
+            if st.button(f"Promote {len(ids)} as one technique",
+                         key=f"bankgroup::{gkey}"):
+                out = _script_bank.promote_group_to_staging(
+                    domain, ids, technique=label or None)
+                if out.get("status") == "success":
+                    msg = (f"Staged {len(out['staged_ids'])} under "
+                           f"[{out['technique']}].")
+                    if out.get("ready_to_consolidate"):
+                        msg += " Ready to consolidate in Staged knowledge above."
+                    else:
+                        msg += (f" {out['n_staged_total']} staged so far — "
+                                f"consolidation is suggested at "
+                                f"{_consolidate_min_n_ui()}.")
+                    st.success(msg)
+                else:
+                    st.error(out.get("message", "Group promotion failed."))
+                st.rerun()
+
+
+def _consolidate_min_n_ui() -> int:
+    from scilink.skills._shared import _staging
+    return _staging.consolidate_min_n()
 
 
 # Bank bookkeeping keys not worth echoing in the per-record viewer.

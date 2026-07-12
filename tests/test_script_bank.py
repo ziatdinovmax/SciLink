@@ -559,3 +559,102 @@ class TestHyperspectralBankHook:
             agent, records, {}, "/gone.npy", {})
         assert len(banked) == 1
         assert sb.list_records("hyperspectral")[0]["data_fingerprint"] is None
+
+
+class TestMetricTieBreaker:
+    def _rec(self, script, r2, sessions=1):
+        rid = sb.add_record("curve_fitting", {
+            "working_script": script,
+            "data_fingerprint": {"kind": "curve", "n_points": 500,
+                                 "x_range": [0.0, 100.0],
+                                 "peaks": {"count": 2, "top": [
+                                     {"position": 30.0, "fwhm": 5.0, "prominence": 1.0},
+                                     {"position": 70.0, "fwhm": 5.0, "prominence": 0.5}]}},
+            "measurement_context": {"technique": "Raman"},
+            "technique_signals": {"model_type": "two peaks"},
+            "outcome": {"metric": {"name": "r_squared", "value": r2}},
+            "provenance": {"session": "s1"}})["id"]
+        for i in range(1, sessions):
+            sb.record_success("curve_fitting", rid, session=f"s{i+1}")
+        return rid
+
+    def _query_fp(self):
+        return {"kind": "curve", "n_points": 500, "x_range": [0.0, 100.0],
+                "peaks": {"count": 2, "top": [
+                    {"position": 30.0, "fwhm": 5.0, "prominence": 1.0},
+                    {"position": 70.0, "fwhm": 5.0, "prominence": 0.5}]}}
+
+    def test_metric_breaks_exact_tie(self):
+        low = self._rec("# low", 0.9838)   # lower id would win the old sort
+        high = self._rec("# high", 0.9905)
+        top = sb.find_exemplar("curve_fitting", self._query_fp())[0]
+        assert top["record"]["id"] == high
+        assert low != high
+
+    def test_proven_still_beats_better_metric(self):
+        veteran = self._rec("# vet", 0.9838, sessions=3)   # +0.02 usage
+        self._rec("# newcomer", 0.9999)                     # metric edge ~0.0003
+        top = sb.find_exemplar("curve_fitting", self._query_fp())[0]
+        assert top["record"]["id"] == veteran
+
+
+class TestVariantGroups:
+    def _seed_pair_plus_outlier(self):
+        fp_same = {"kind": "curve", "n_points": 500, "x_range": [0.0, 100.0],
+                   "peaks": {"count": 2, "top": [
+                       {"position": 30.0, "fwhm": 5.0, "prominence": 1.0},
+                       {"position": 70.0, "fwhm": 5.0, "prominence": 0.5}]}}
+        fp_far = {"kind": "curve", "n_points": 800, "x_range": [1000.0, 2000.0],
+                  "peaks": {"count": 5, "top": [
+                      {"position": 1500.0, "fwhm": 20.0, "prominence": 1.0}]}}
+        ids = []
+        for i, (fp, r2) in enumerate([(fp_same, 0.9905), (fp_same, 0.9838),
+                                      (fp_far, 0.99)]):
+            ids.append(sb.add_record("curve_fitting", {
+                "working_script": f"# variant {i}",
+                "data_fingerprint": fp,
+                "measurement_context": {"technique": "Raman"},
+                "technique_signals": {"model_type": "Two Voigt D G carbon"},
+                "outcome": {"metric": {"name": "r_squared", "value": r2}},
+                "provenance": {"session": f"s{i}"}})["id"])
+        return ids
+
+    def test_groups_cluster_same_system_only(self):
+        a, b, far = self._seed_pair_plus_outlier()
+        groups = sb.find_variant_groups("curve_fitting")
+        assert len(groups) == 1
+        g = groups[0]
+        assert sorted(g["ids"]) == sorted([a, b])
+        assert far not in g["ids"]
+        assert g["min_similarity"] >= sb.VARIANT_GROUP_THRESHOLD
+        assert g["ids"][0] == a  # higher metric ranks first inside the group
+        assert g["n_unpromoted"] == 2
+        assert g["suggested_technique"].startswith("two_voigt")
+
+    def test_group_promotion_shared_label_and_consolidate_flow(self, monkeypatch):
+        from scilink.skills._shared import _staging
+        a, b, _ = self._seed_pair_plus_outlier()
+        out = sb.promote_group_to_staging("curve_fitting", [a, b])
+        assert out["status"] == "success"
+        assert len(out["staged_ids"]) == 2 and not out["skipped"]
+        groups = _staging.group_by_technique("curve_fitting")
+        assert set(groups.keys()) == {out["technique"]}  # ONE shared label
+        assert len(groups[out["technique"]]) == 2
+        # readiness reflects consolidate_min_n
+        assert out["ready_to_consolidate"] is False
+        monkeypatch.setenv("SCILINK_CONSOLIDATE_N", "2")
+        out2 = sb.promote_group_to_staging("curve_fitting", [a, b])
+        assert out2["status"] == "error"  # both already staged -> nothing new
+        # suggestion disappears once everyone is promoted
+        assert sb.find_variant_groups("curve_fitting")[0]["n_unpromoted"] == 0
+
+    def test_group_promotion_skips_staged_member(self):
+        a, b, _ = self._seed_pair_plus_outlier()
+        sb.promote_to_staging("curve_fitting", a, technique="early")
+        out = sb.promote_group_to_staging("curve_fitting", [a, b],
+                                          technique="carbon_dg")
+        assert out["status"] == "success"
+        assert len(out["staged_ids"]) == 1
+        assert out["skipped"][0]["id"] == a
+        assert sb.promote_group_to_staging(
+            "curve_fitting", ["nope0000"])["status"] == "error"

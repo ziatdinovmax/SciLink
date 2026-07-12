@@ -612,7 +612,16 @@ def find_exemplar(domain: str, fingerprint: Optional[Dict[str, Any]],
         s_ctx = _context_similarity(query_tokens, rec)
         n_succ = (rec.get("stats") or {}).get("n_successes", 1) or 1
         usage = min(0.05, 0.01 * (int(n_succ) - 1))
-        score = 0.8 * s_fp + 0.2 * s_ctx + usage
+        # Quality tie-breaker: a small term from the record's gate metric so
+        # near-ties (same-system variants with equal fingerprints and usage)
+        # resolve toward the better-quality script instead of record-id order.
+        # Deliberately subordinate: one cross-session success (+0.01 usage)
+        # outweighs any realistic metric gap (max term 0.02) — "proven
+        # repeatedly" still beats "better once".
+        outcome = rec.get("outcome") or {}
+        mv = _metric_value(outcome.get("best_metric") or outcome.get("metric"))
+        quality = 0.02 * min(max(mv, 0.0), 1.0) if mv is not None else 0.0
+        score = 0.8 * s_fp + 0.2 * s_ctx + usage + quality
         if score >= min_score:
             scored.append((score, s_fp, rec))
     scored.sort(key=lambda t: (-t[0], t[2].get("id", "")))
@@ -727,7 +736,8 @@ def bank_summary(domain: Optional[str] = None, *,
             "proven": int(stats.get("n_successes", 1) or 1) >= threshold,
             "promoted_to_staging": sid,
         })
-    rows.sort(key=lambda r: (-r["n_successes"], -r["n_retrievals"], r["id"] or ""))
+    rows.sort(key=lambda r: (-r["n_successes"], -r["n_retrievals"],
+                             -(_metric_value(r["metric"]) or 0.0), r["id"] or ""))
     return rows
 
 
@@ -803,6 +813,131 @@ def promote_to_staging(domain: str, rid: str, technique: Optional[str] = None,
         json.dumps(rec, indent=2, default=str))
     return {"status": "success", "staged_id": sid, "technique": label,
             "domain": domain, "bank_id": rid}
+
+
+#: Minimum pairwise fingerprint similarity for two records to count as
+#: variants of the same system. Calibrated on real data: same-system pairs
+#: score ~1.0, a phase transition drops to ~0.79 (in-situ XRD), transition
+#: onset ~0.90 — 0.85 groups true variants without merging changed systems.
+VARIANT_GROUP_THRESHOLD = 0.85
+
+
+def find_variant_groups(domain: str, *, min_size: int = 2,
+                        threshold: float = VARIANT_GROUP_THRESHOLD,
+                        root: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """Cluster a domain's records into same-system variant groups.
+
+    Single-linkage over pairwise fingerprint similarity (same kind only).
+    These groups are the natural units for skill consolidation: N different
+    successful treatments of one system are exactly what the distillation
+    LLM needs to generalize from. Returns, per group of >= ``min_size``:
+    ``ids`` (proven-first), ``min_similarity`` (worst pair inside the
+    group), ``suggested_technique`` (derived from the best member), and
+    ``n_unpromoted`` (members whose staged copy does not currently exist).
+    """
+    recs = [r for r in list_records(domain, root=root)
+            if (r.get("data_fingerprint") or {}).get("kind")
+            and (r.get("working_script") or "").strip()]
+    if len(recs) < min_size:
+        return []
+    sims: Dict[tuple, float] = {}
+    parent = list(range(len(recs)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(len(recs)):
+        fp_i = recs[i]["data_fingerprint"]
+        simfn = _SIMILARITY_FNS.get(fp_i.get("kind"))
+        if simfn is None:
+            continue
+        for j in range(i + 1, len(recs)):
+            fp_j = recs[j]["data_fingerprint"]
+            if fp_j.get("kind") != fp_i.get("kind"):
+                continue
+            s = simfn(fp_i, fp_j)
+            sims[(i, j)] = s
+            if s >= threshold:
+                parent[find(i)] = find(j)
+
+    clusters: Dict[int, list] = {}
+    for i in range(len(recs)):
+        clusters.setdefault(find(i), []).append(i)
+
+    summary_by_id = {r["id"]: r for r in bank_summary(domain, root=root)}
+    groups = []
+    for members in clusters.values():
+        if len(members) < min_size:
+            continue
+        rows = sorted(
+            (summary_by_id[recs[i]["id"]] for i in members
+             if recs[i]["id"] in summary_by_id),
+            key=lambda r: (-r["n_successes"],
+                           -(_metric_value(r["metric"]) or 0.0), r["id"] or ""))
+        if len(rows) < min_size:
+            continue
+        pair_sims = [sims.get((min(i, j), max(i, j)), 1.0)
+                     for a, i in enumerate(members) for j in members[a + 1:]]
+        best = get_record(domain, rows[0]["id"], root=root) or {}
+        groups.append({
+            "domain": domain,
+            "ids": [r["id"] for r in rows],
+            "records": rows,
+            "min_similarity": round(min(pair_sims), 3) if pair_sims else 1.0,
+            "suggested_technique": _derive_technique_label(best),
+            "n_unpromoted": sum(1 for r in rows if not r["promoted_to_staging"]),
+        })
+    groups.sort(key=lambda g: (-len(g["ids"]), g["ids"][0]))
+    return groups
+
+
+def promote_group_to_staging(domain: str, ids: List[str],
+                             technique: Optional[str] = None, *,
+                             root: Optional[Path] = None,
+                             staging_root: Optional[Path] = None) -> Dict[str, Any]:
+    """Promote several same-system records under ONE shared technique label.
+
+    The shared label is what lets ``consolidate`` receive the variants
+    together — per-record derived labels would scatter them across
+    techniques and they would never be reviewed jointly. Records whose
+    staged copy already exists are skipped (not an error). Label defaults
+    to the best member's derived label.
+    """
+    from . import _staging
+
+    recs = [(rid, get_record(domain, rid, root=root)) for rid in ids]
+    missing = [rid for rid, rec in recs if rec is None]
+    if missing:
+        return {"status": "error",
+                "message": f"No bank record(s): {', '.join(missing)}."}
+    if technique is None:
+        best = max((rec for _, rec in recs),
+                   key=lambda r: ((r.get("stats") or {}).get("n_successes", 1),
+                                  _metric_value((r.get("outcome") or {}).get("best_metric")
+                                                or (r.get("outcome") or {}).get("metric")) or 0.0))
+        technique = _derive_technique_label(best)
+
+    staged_ids, skipped = [], []
+    for rid, _rec in recs:
+        out = promote_to_staging(domain, rid, technique=technique,
+                                 root=root, staging_root=staging_root)
+        if out.get("status") == "success":
+            staged_ids.append(out["staged_id"])
+        else:
+            skipped.append({"id": rid, "reason": out.get("message")})
+    if not staged_ids and skipped:
+        return {"status": "error", "technique": technique, "skipped": skipped,
+                "message": "Nothing promoted: " + skipped[0]["reason"]}
+
+    n_staged_total = len(_staging.group_by_technique(
+        domain, root=staging_root).get(technique, []))
+    return {"status": "success", "technique": technique,
+            "staged_ids": staged_ids, "skipped": skipped,
+            "n_staged_total": n_staged_total,
+            "ready_to_consolidate": n_staged_total >= _staging.consolidate_min_n()}
 
 
 def render_exemplar_block(match: Dict[str, Any]) -> str:
