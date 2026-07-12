@@ -2998,14 +2998,19 @@ Update an existing skill with new knowledge while preserving what is already cor
    (`error_lessons` error→fix pairs) → validation pitfalls/sanity-checks and analysis cautions; \
    `user_correction` (`user_feedback`) → planning constraints/preferences and validation \
    acceptance criteria (treat human corrections as high-priority ground truth).
-4. Do NOT remove existing content unless the new knowledge explicitly contradicts it.
+4. Be ADDITIVE: the existing skill already routes real analyses, and every existing rule, \
+   constraint, and section is load-bearing — removing or weakening one regresses working \
+   behavior. Remove or weaken existing guidance ONLY when the new knowledge explicitly \
+   contradicts it.
 5. When there is a conflict, prefer the newer knowledge but note the discrepancy briefly.
 6. If the new knowledge materially changes the skill's purpose, update the description; \
    otherwise leave it intact.
 7. Keep prose tight. The skill is read into LLM context every time.
 
-Return a JSON object with the SAME keys as the existing skill (description, overview, planning, \
-analysis, interpretation, validation) reflecting the merged skill content.
+Return a JSON object with the SAME keys as the existing skill — description plus EVERY section \
+key the existing skill has (any of: overview, planning, analysis, implementation, interpretation, \
+validation) — reflecting the merged skill content. Omitting a key the existing skill has would \
+DELETE that section.
 
 Output ONLY the JSON object. Do not wrap in code blocks. Do not include any prose outside the JSON."""
 

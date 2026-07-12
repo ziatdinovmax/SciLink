@@ -16,6 +16,10 @@ Skills (graduated_skills) subcommands:
   promote   Clear a skill's provisional flag so it routes normally
   demote    Set a promoted skill back to provisional (out of auto-routing)
   prune     Delete a skill bundle
+  fork      Copy a BUILT-IN skill into the persistent store (shadows it;
+            makes it upgradable) — copy-on-write for shipped skills
+  diff-builtin  Diff a forked skill against its shipped original (for
+            contributing improvements back as a package PR)
 
 Staged T=2 solutions (distill_staging) subcommands:
   staged       List staged raw T=2 solutions, grouped by technique
@@ -165,6 +169,47 @@ def _cmd_demote(args) -> int:
     return 0
 
 
+def _cmd_fork(args) -> int:
+    """`scilink memory fork` — copy a built-in skill into the persistent store."""
+    _warn_memory_off()  # a fork only SHADOWS while persistent memory is on
+    from scilink.skills._shared._memory import fork_builtin
+    domain, name = _split_ref(args.ref)
+    try:
+        out = fork_builtin(domain, name)
+    except FileNotFoundError as e:
+        print(f"❌ {e}")
+        return 1
+    if out.get("status") != "success":
+        print(f"❌ {out.get('message')}")
+        return 1
+    print(f"🍴 Forked built-in {domain}/{name} → {out['path']}")
+    print("   The fork SHADOWS the shipped skill immediately (loader precedence)"
+          " and is now a valid `upgrade --into` target.")
+    if out.get("has_sibling_tools"):
+        print(f"   Note: the built-in bundle also ships tools "
+              f"({', '.join(out['sibling_tools'])}) — those stay with the "
+              f"package and keep registering for this skill; only the "
+              f"markdown was forked.")
+    print(f"   Contribute back later: `scilink memory diff-builtin {domain}/{name}`; "
+          f"prune the fork once merged upstream.")
+    return 0
+
+
+def _cmd_diff_builtin(args) -> int:
+    from scilink.skills._shared._memory import diff_builtin
+    domain, name = _split_ref(args.ref)
+    try:
+        out = diff_builtin(domain, name)
+    except FileNotFoundError as e:
+        print(f"❌ {e}")
+        return 1
+    if out["identical"]:
+        print(f"Fork of {domain}/{name} is identical to the built-in.")
+    else:
+        print(out["diff"])
+    return 0
+
+
 def _cmd_prune(args) -> int:
     domain, name = _split_ref(args.ref)
     if not args.yes:
@@ -252,6 +297,9 @@ def _cmd_upgrade(args) -> int:
     if prop.get("status") != "success":
         print(f"❌ {prop.get('message', prop)}")
         return 1
+
+    for w in prop.get("regression_warnings") or []:
+        print(f"⚠️  ADDITIVITY: {w}")
 
     # 2) show the diff for review (upgrade mutates an existing skill in place)
     if not args.yes:
@@ -444,6 +492,17 @@ def main():
         "demote", help="Set a skill back to provisional (out of auto-routing)")
     p_demote.add_argument("ref", help="Skill reference '<domain>/<name>'")
     p_demote.set_defaults(func=_cmd_demote)
+
+    p_fork = sub.add_parser(
+        "fork", help="Copy a built-in skill into the persistent store "
+                     "(shadows it; enables upgrade)")
+    p_fork.add_argument("ref", help="Built-in skill ref '<domain>/<name>'")
+    p_fork.set_defaults(func=_cmd_fork)
+
+    p_db = sub.add_parser(
+        "diff-builtin", help="Diff a forked skill against the shipped built-in")
+    p_db.add_argument("ref", help="Skill ref '<domain>/<name>'")
+    p_db.set_defaults(func=_cmd_diff_builtin)
 
     p_prune = sub.add_parser("prune", help="Delete a skill bundle")
     p_prune.add_argument("ref", help="Skill reference '<domain>/<name>'")

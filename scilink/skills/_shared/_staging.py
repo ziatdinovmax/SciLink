@@ -339,6 +339,104 @@ def _missing_target_error(target_domain: str, target_name: str) -> Dict[str, Any
                         f"consolidate to create a new skill.")}
 
 
+_FM_RE = __import__("re").compile(r"\A---\n(.*?)\n---\n", __import__("re").DOTALL)
+
+
+def _preserve_structure(existing: str, proposed: str) -> str:
+    """Structural additivity: reinstate what the JSON round-trip loses.
+
+    The upgrade LLM works on a fixed-vocabulary JSON view of the skill, so
+    its re-rendered markdown drops everything outside that vocabulary —
+    observed live on a forked built-in: the ``technique:`` routing
+    frontmatter (breaks skill auto-selection), the H1 title, the original
+    heading casing, and an injected empty section. This deterministic pass
+    restores the original frontmatter (the LLM may refresh only
+    ``description``), the title, and heading case, and drops empty sections
+    the original didn't have. Prose merging stays the LLM's job; structure
+    is not up for negotiation.
+    """
+    import re
+    import yaml
+
+    m_old, m_new = _FM_RE.match(existing), _FM_RE.match(proposed)
+    old_meta = yaml.safe_load(m_old.group(1)) if m_old else {}
+    new_meta = yaml.safe_load(m_new.group(1)) if m_new else {}
+    old_meta = old_meta if isinstance(old_meta, dict) else {}
+    new_meta = new_meta if isinstance(new_meta, dict) else {}
+    merged = dict(old_meta)
+    if new_meta.get("description"):
+        merged["description"] = new_meta["description"]
+
+    body = proposed[m_new.end():] if m_new else proposed
+    old_body = existing[m_old.end():] if m_old else existing
+
+    # Restore original heading casing (case-insensitive match).
+    old_heads = {h.lower(): h
+                 for h in re.findall(r"^##\s+(.+?)\s*$", old_body, re.M)}
+    body = re.sub(
+        r"^(##\s+)(.+?)\s*$",
+        lambda m: m.group(1) + old_heads.get(m.group(2).lower(), m.group(2)),
+        body, flags=re.M)
+
+    # Drop EMPTY sections the original didn't have (round-trip artifacts).
+    parts = re.split(r"(?m)^(##\s+.+)$", body)
+    rebuilt = [parts[0]]
+    for i in range(1, len(parts), 2):
+        head, section_body = parts[i], (parts[i + 1] if i + 1 < len(parts) else "")
+        name = head.lstrip("# ").strip().lower()
+        if not section_body.strip() and name not in old_heads:
+            continue
+        rebuilt.append(head + section_body)
+    body = "".join(rebuilt) if len(rebuilt) > 1 else body
+
+    # Reinstate whole sections the proposal dropped — additivity by
+    # construction: an omitted section reappears verbatim from the original
+    # (appended in original order), so an LLM omission can no longer delete
+    # curated content. The reviewer still sees it via the diff.
+    new_heads = {h.lower()
+                 for h in re.findall(r"^##\s+(.+?)\s*$", body, re.M)}
+    old_parts = re.split(r"(?m)^(##\s+.+)$", old_body)
+    for i in range(1, len(old_parts), 2):
+        head = old_parts[i]
+        name = head.lstrip("# ").strip().lower()
+        if name not in new_heads:
+            section_body = old_parts[i + 1] if i + 1 < len(old_parts) else ""
+            body = body.rstrip("\n") + "\n\n" + head + section_body
+
+    # Restore a lost H1 title.
+    m_title = re.match(r"\s*(#\s+[^#\n][^\n]*)", old_body)
+    if m_title and not re.search(r"^#\s+[^#]", body, re.M):
+        body = m_title.group(1) + "\n\n" + body.lstrip("\n")
+
+    if merged:
+        fm = yaml.safe_dump(merged, default_flow_style=False, sort_keys=False,
+                            allow_unicode=True, width=10_000).strip()
+        return f"---\n{fm}\n---\n{body}"
+    return body
+
+
+def _regression_warnings(existing: str, proposed: str) -> List[str]:
+    """Deterministic additivity check on an upgrade proposal.
+
+    Upgrades must not regress a skill that already routes real analyses:
+    flag dropped ``##`` sections and large content shrinkage so the human
+    reviewer sees structural loss before approving. Advisory — the reviewer
+    decides; a deliberate trim can still be applied.
+    """
+    import re
+    old_secs = re.findall(r"^##\s+(.+?)\s*$", existing, re.M)
+    new_secs = {s.lower() for s in re.findall(r"^##\s+(.+?)\s*$", proposed, re.M)}
+    warns = [f"existing section '## {s}' is missing from the proposal"
+             for s in old_secs if s.lower() not in new_secs]
+    n_old, n_new = len(existing.split()), len(proposed.split())
+    if n_old and n_new < 0.8 * n_old:
+        warns.append(
+            f"proposal is {100 - round(100 * n_new / n_old)}% shorter than the "
+            f"current skill ({n_new} vs {n_old} words) — check that existing "
+            f"guidance was not dropped")
+    return warns
+
+
 def propose_skill_upgrade(
     domain: str,
     staged_ids: List[str],
@@ -378,11 +476,15 @@ def propose_skill_upgrade(
     )
     if result.get("status") != "success":
         return result
+    existing_content = target_md.read_text()
+    proposed_content = _preserve_structure(existing_content, result["content"])
     return {
         "status": "success",
         "action": "proposed",
-        "proposed_content": result["content"],
-        "existing_content": target_md.read_text(),
+        "proposed_content": proposed_content,
+        "existing_content": existing_content,
+        "regression_warnings": _regression_warnings(
+            existing_content, proposed_content),
         "skill_path": str(target_md),
         "target_domain": target_domain,
         "target_name": target_name,
