@@ -126,6 +126,10 @@ def test_realtime_cold_start_zero_llm(tmp_path, monkeypatch):
     assert seed_result["status"] == "success"
     assert seed_result.get("banked_scripts"), "seed run must bank its script"
     rid = seed_result["banked_scripts"][0]
+    # The persisted results file must carry the hook fields too (it used to
+    # be written BEFORE the staging/banking hooks and silently lacked them).
+    saved = json.loads((tmp_path / "seed" / "analysis_results.json").read_text())
+    assert saved.get("banked_scripts") == seed_result["banked_scripts"]
     assert sb.get_record("curve_fitting", rid)["stats"]["n_successes"] == 1
 
     # Cold start — no prior, fail-loud model.
