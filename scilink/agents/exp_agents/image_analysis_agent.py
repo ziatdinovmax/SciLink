@@ -260,6 +260,9 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # start higher (e.g. hot) so it does not re-obey early constraint stages
         # a prior run already found inadequate.
         starting_annealing_level: Optional[int] = None,
+        # Operating profile (#346): plumbed for parity with the curve agent;
+        # the realtime toggles are wired for curve only in v1 — see below.
+        profile: Optional[Any] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -447,6 +450,19 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 self.logger.info(
                     f"   🏷️  Recovered embedded metadata from {Path(image_paths[0]).name}"
                 )
+
+        # Operating profile (#346): accepted for surface parity; realtime
+        # toggles are wired for the curve agent only in v1 (image lacks a
+        # deterministic per-frame gate metric — a design decision to make
+        # before a zero-LLM image frame is honest). Thorough is unaffected.
+        from ._qc_profile import resolve_profile
+        qc_profile = resolve_profile(profile)
+        if qc_profile.name == "realtime":
+            self.logger.warning(
+                "profile='realtime' is not wired for image analysis yet "
+                "(no deterministic per-frame gate metric); running under "
+                "the thorough profile."
+            )
 
         # Build initial state
         state = {
@@ -656,6 +672,12 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         fb_staged = self._maybe_stage_feedback_errors(tier1_state, final_results)
         if fb_staged:
             final_results.setdefault("staged_solutions", []).extend(fb_staged)
+
+        # Bank every approved working script as episodic memory (script bank,
+        # #346) — deterministic, no LLM, failure-isolated.
+        banked = self._maybe_bank_scripts(tier1_state)
+        if banked:
+            final_results["banked_scripts"] = banked
 
         # Save final merged results
         results_path = self.output_dir / "analysis_results.json"
@@ -932,6 +954,92 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 f"`scilink memory staged`."
             )
         return staged
+
+    def _maybe_bank_scripts(self, state: dict) -> List[str]:
+        """Bank every approved working script in the script bank (#346).
+
+        Image-side mirror of ``CurveFittingAgent._maybe_bank_scripts``:
+        episodic complement to T=2 staging — no hot/novelty gate, no LLM.
+        Each distinct approved script is stored once per run with the
+        measurement context, a fingerprint of the image it solved, and the
+        outcome. Fully failure-isolated; gated by ``SCILINK_SCRIPT_BANK`` /
+        persistent-memory setting.
+        """
+        from scilink.skills._shared import _script_bank
+        if not _script_bank.bank_enabled():
+            return []
+
+        banked: List[str] = []
+        try:
+            from .controllers.image_analysis_controllers import _active_skill_names
+            from scilink.skills._shared.image_analysis_tools import resolve_pixel_size_nm
+
+            approach = state.get("analysis_approach")
+            active_skills = _active_skill_names(state)
+            system_info = state.get("system_info") or {}
+            stack = state.get("image_stack")
+            seen_hashes = set()
+
+            for r in state.get("series_results", []) or []:
+                if not r.get("success"):
+                    continue
+                script = r.get("script")
+                qh = r.get("quality_history") or {}
+                # Quality gate: QC approval, or the reuse fast path's own
+                # gate — a reused script passing on NEW data is exactly the
+                # cross-session success signal the bank counts.
+                passed = (qh.get("approved")
+                          or (r.get("reuse_validity") or {}).get("verdict") == "good")
+                if not script or not passed:
+                    continue
+                h = _script_bank.script_hash(script)
+                if h in seen_hashes:  # locked-recipe series: bank once per run
+                    continue
+                seen_hashes.add(h)
+
+                # Prefer the fingerprint stamped where the image was in scope
+                # (file inputs load per image inside the controller); the
+                # stack fallback covers array inputs.
+                fingerprint = r.get("_bank_fingerprint")
+                if fingerprint is None:
+                    img = None
+                    idx = r.get("index")
+                    if stack is not None and idx is not None and 0 <= idx < len(stack):
+                        img = np.asarray(stack[idx])
+                    if img is not None and img.ndim >= 2:
+                        fingerprint = _script_bank.image_fingerprint(
+                            img, pixel_size_nm=resolve_pixel_size_nm(system_info, img.shape)
+                        )
+
+                score = qh.get("final_score")
+                res = _script_bank.add_record("image_analysis", {
+                    "technique_signals": {
+                        "active_skills": active_skills,
+                        "analysis_type": r.get("analysis_type") or approach,
+                    },
+                    "measurement_context": _script_bank.measurement_context(system_info),
+                    "data_fingerprint": fingerprint,
+                    "outcome": {
+                        "analysis_type": r.get("analysis_type"),
+                        "metric": ({"name": "quality_score", "value": round(float(score), 4)}
+                                   if isinstance(score, (int, float)) else None),
+                        "plan_summary": approach,
+                    },
+                    "provenance": {"session": self.output_dir.name,
+                                   "item": r.get("name"),
+                                   "data_file": os.path.basename(
+                                       str((state.get("image_paths") or [None])[0] or "")
+                                   ) or None},
+                    "working_script": script,
+                })
+                if res.get("id"):
+                    banked.append(res["id"])
+                    self.logger.info(
+                        f"   🏦 Banked script [{res['action']}] id={res['id']}"
+                    )
+        except Exception as e:
+            self.logger.warning(f"Script banking skipped: {e}")
+        return banked
 
     def _maybe_stage_feedback_errors(self, state: dict, final_results: dict) -> List[str]:
         """Image-side mirror of the feedback/error staging hook (see the curve-

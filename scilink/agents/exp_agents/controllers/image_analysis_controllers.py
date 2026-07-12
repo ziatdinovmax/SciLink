@@ -2066,6 +2066,15 @@ Your guidance: '''
             ].format(name=", ".join(n for n, _ in recipes))
             context_parts.append(preamble + _render_codegen_recipe(recipes))
 
+        # Script-bank exemplar (#346): first fresh generation only — never on
+        # refinements (base_script) and never once annealing has escalated,
+        # so the hot script-drop's from-scratch regeneration stays exemplar-free.
+        exemplar = state.get("_bank_exemplar")
+        if (exemplar and not base_script
+                and state.get("_annealing_level", 0) == 0):
+            from scilink.skills._shared import _script_bank
+            context_parts.append(_script_bank.render_exemplar_block(exemplar))
+
         # Add sub-agent preprocessing array paths
         for key in ("fft_preprocessing", "sam_preprocessing"):
             preproc = state.get(key)
@@ -2515,7 +2524,7 @@ Your guidance: '''
                     pass
                 break
 
-        return {
+        result = {
             "index": image_idx,
             "name": image_name,
             "data_path": data_path,
@@ -2532,6 +2541,22 @@ Your guidance: '''
             "script": script,
             "script_errors": script_errors,
         }
+        # Fingerprint of the image this script solved (script bank, #346) —
+        # stamped here because per-image arrays for file inputs never reach
+        # the outer state the bank write hook reads. No-op unless the bank is
+        # enabled; never affects the analysis.
+        try:
+            from scilink.skills._shared import _script_bank
+            from scilink.skills._shared.image_analysis_tools import resolve_pixel_size_nm
+            if _script_bank.bank_enabled() and isinstance(image_data, np.ndarray):
+                result["_bank_fingerprint"] = _script_bank.image_fingerprint(
+                    image_data,
+                    pixel_size_nm=resolve_pixel_size_nm(
+                        state.get("system_info"), image_data.shape),
+                )
+        except Exception:
+            pass
+        return result
 
     QUALITY_VERIFICATION_PROMPT = '''You are a scientific image analysis expert reviewing an analysis result.
 
@@ -3373,10 +3398,49 @@ Return JSON with:
         ctx.initial_label = initial_pipeline
         self.logger.info(f"   Attempt 1: {initial_pipeline[:80]}...")
 
+        self._offer_bank_exemplar(ctx)
         return self._process_single_image(
             state=ctx.state, image_data=ctx.data, data_path=ctx.data_path,
             image_name=ctx.item_name, image_idx=ctx.item_idx, base_script=None,
         )
+
+    def _offer_bank_exemplar(self, ctx: QCItemContext) -> None:
+        """Adapt-mode script-bank retrieval (#346 step 2) — image mirror of
+        the curve controller's hook: fingerprint the image, stash the best
+        bank match for the FIRST codegen attempt only (consumed by
+        ``_generate_analysis_script`` at annealing level 0, preserving the
+        hot script-drop). Explicit ``prior_analysis_paths`` wins over the
+        bank. Failure-isolated."""
+        state = ctx.state
+        state.pop("_bank_exemplar", None)
+        try:
+            from scilink.skills._shared import _script_bank
+            from scilink.skills._shared.image_analysis_tools import resolve_pixel_size_nm
+            if not _script_bank.bank_enabled() or state.get("prior_analysis_paths"):
+                return
+            img = np.asarray(ctx.data) if ctx.data is not None else None
+            if img is None or img.ndim < 2:
+                return
+            fingerprint = _script_bank.image_fingerprint(
+                img,
+                pixel_size_nm=resolve_pixel_size_nm(
+                    state.get("system_info"), img.shape),
+            )
+            matches = _script_bank.find_exemplar(
+                "image_analysis", fingerprint,
+                _script_bank.measurement_context(state.get("system_info") or {}),
+            )
+            if matches:
+                match = matches[0]
+                state["_bank_exemplar"] = match
+                _script_bank.mark_retrieved("image_analysis", match["record"]["id"])
+                self.logger.info(
+                    f"   🏦 Bank exemplar offered: id={match['record']['id']} "
+                    f"score={match['score']} "
+                    f"({str(match['record'].get('technique_signals', {}).get('analysis_type') or '')[:60]})"
+                )
+        except Exception as e:
+            self.logger.warning(f"Bank retrieval skipped: {e}")
 
     def qc_record_initial(self, ctx: QCItemContext, result: dict) -> None:
         # Initial score is provisional — LLM verification is authoritative

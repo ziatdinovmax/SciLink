@@ -2110,6 +2110,7 @@ class AnalysisOrchestratorTools:
             task_mode: str = None,
             prior_analysis_paths: List[str] = None,
             reuse_locked_script: bool = False,
+            profile: str = None,
             literature_file: str = None,
             r2_threshold: float = None,
             max_verification_iterations: int = None,
@@ -2630,6 +2631,13 @@ class AnalysisOrchestratorTools:
                     analyze_kwargs["prior_analysis_paths"] = prior_analysis_paths
                 if reuse_locked_script:
                     analyze_kwargs["reuse_locked_script"] = True
+                if profile:
+                    # Operating profile (#346): forward only to agents whose
+                    # analyze() accepts it (all three do; introspection keeps
+                    # this robust for custom agents).
+                    import inspect as _inspect
+                    if "profile" in _inspect.signature(agent.analyze).parameters:
+                        analyze_kwargs["profile"] = profile
                 if literature_file:
                     analyze_kwargs["literature_file"] = literature_file
                 if r2_threshold is not None:
@@ -2991,6 +2999,27 @@ class AnalysisOrchestratorTools:
                         "verification or deeper-analysis follow-ups, or for a "
                         "different kind of measurement — leave it false so the "
                         "agent decides how to use the prior run as reference."
+                    )
+                },
+                "profile": {
+                    "type": "string",
+                    "enum": ["thorough", "realtime"],
+                    "description": (
+                        "Operating profile. Omit (or 'thorough') for the normal "
+                        "full-quality analysis. 'realtime' is the per-frame "
+                        "in-situ mode for curve data: it executes the locked "
+                        "script from `prior_analysis_paths` with ZERO LLM calls "
+                        "— requires `prior_analysis_paths` + "
+                        "`reuse_locked_script=true`, and the anchor frame must "
+                        "have been analyzed thoroughly first. The result carries "
+                        "`reuse_validity` with the gate verdict plus a `drift` "
+                        "field ('none'/'suspected') from a fingerprint "
+                        "comparison against the anchor frame — 'suspected' "
+                        "means the DATA changed (e.g. a phase transition) even "
+                        "if the fit still passes; recommend a thorough "
+                        "re-analysis of such frames. Use for high-cadence "
+                        "measurement streams; interpretation is deferred to a "
+                        "post-experiment sweep."
                     )
                 },
                 "literature_file": {
