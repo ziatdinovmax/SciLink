@@ -14,6 +14,7 @@ Skills (graduated_skills) subcommands:
   list      List persisted skills (use --provisional-only to triage)
   show      Print a skill's markdown
   promote   Clear a skill's provisional flag so it routes normally
+  demote    Set a promoted skill back to provisional (out of auto-routing)
   prune     Delete a skill bundle
 
 Staged T=2 solutions (distill_staging) subcommands:
@@ -148,6 +149,19 @@ def _cmd_promote(args) -> int:
         return 1
     print(f"✅ Promoted {domain}/{name} → {res['domain']}/{name} (now auto-routable).")
     print(f"   {res['path']}")
+    return 0
+
+
+def _cmd_demote(args) -> int:
+    from scilink.skills._shared._memory import demote_memory
+    domain, name = _split_ref(args.ref)
+    try:
+        demote_memory(domain, name)
+    except FileNotFoundError as e:
+        print(f"❌ {e}")
+        return 1
+    print(f"🟡 Demoted {domain}/{name} back to provisional — out of the "
+          f"auto-routing menu (still explicitly loadable; re-`promote` after review).")
     return 0
 
 
@@ -425,6 +439,11 @@ def main():
     p_promote.add_argument("ref", help="Skill reference '<domain>/<name>'")
     p_promote.add_argument("--to-domain", help="Optionally move the bundle to a curated domain")
     p_promote.set_defaults(func=_cmd_promote)
+
+    p_demote = sub.add_parser(
+        "demote", help="Set a skill back to provisional (out of auto-routing)")
+    p_demote.add_argument("ref", help="Skill reference '<domain>/<name>'")
+    p_demote.set_defaults(func=_cmd_demote)
 
     p_prune = sub.add_parser("prune", help="Delete a skill bundle")
     p_prune.add_argument("ref", help="Skill reference '<domain>/<name>'")

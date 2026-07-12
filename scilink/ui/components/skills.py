@@ -218,6 +218,13 @@ def _render_staged_section() -> None:
                 with view_col.popover("View", width="stretch"):
                     _lazy_content(f"stagedlazy::{r['id']}",
                                   lambda r=r: _render_staged_record(r))
+                    if st.button("Delete staged record",
+                                 key=f"destage::{domain}/{r['id']}",
+                                 help="Remove from the staging buffer without "
+                                      "distilling it (de-stage)."):
+                        _staging.remove_staged(domain, [r["id"]])
+                        st.warning(f"De-staged {r['id']}.")
+                        st.rerun()
             if model is None:
                 st.info("Start a session to enable upgrade/consolidate (needs a model).")
                 continue
@@ -505,6 +512,14 @@ def _render_memory_row(_memory, r, *, provisional: bool) -> None:
                                "until you turn it on.")):
                 _memory.promote_memory(r["domain"], r["name"])
                 st.success(f"Promoted {ref} — now auto-routable.")
+                st.rerun()
+        else:
+            if c1.button("Demote", key=f"demote::{ref}",
+                         help=("Set back to provisional — taken out of the "
+                               "auto-routing menu (still explicitly loadable) "
+                               "until you re-promote it.")):
+                _memory.demote_memory(r["domain"], r["name"])
+                st.warning(f"Demoted {ref} to provisional.")
                 st.rerun()
         if c2.button("Prune", key=f"prune::{ref}"):
             _memory.prune_memory(r["domain"], r["name"])

@@ -125,3 +125,35 @@ def test_long_lists_paginate(heavy_store):
     # 40 bank records in one domain -> a 'Show all' button caps the page.
     labels = " ".join(b.label for b in at.button)
     assert "Show all 40" in labels
+
+
+def test_demote_and_destage_buttons(tmp_path, monkeypatch):
+    """A promoted skill shows a working Demote button; a staged record's
+    viewer offers de-stage (delete without distilling)."""
+    monkeypatch.setenv("SCILINK_HOME", str(tmp_path))
+    monkeypatch.setenv("SCILINK_MEMORY", "1")
+    from scilink.skills._shared import _memory, _staging
+    from scilink.skills.loader import graduated_skills_dir
+
+    d = graduated_skills_dir() / "curve_fitting" / "myskill"
+    d.mkdir(parents=True)
+    (d / "myskill.md").write_text("## overview\npromoted skill body\n")
+    sid = _staging.stage_solution("curve_fitting", "voigt", {
+        "provenance": "t2_solution", "model": "m", "working_script": "# s",
+        "session": "s1", "r_squared": 0.99})
+
+    at = AppTest.from_string(PANEL_SCRIPT, default_timeout=60)
+    at.run()
+    demote = next(b for b in at.button if b.key == "demote::curve_fitting/myskill")
+    demote.click().run()
+    assert not at.exception, at.exception
+    assert [r["provisional"] for r in _memory.list_memory()] == [True]
+    # After demotion the row is provisional: Promote replaces Demote.
+    at.run()
+    assert any(b.key == "promote::curve_fitting/myskill" for b in at.button)
+
+    destage = next(b for b in at.button
+                   if b.key == f"destage::curve_fitting/{sid}")
+    destage.click().run()
+    assert not at.exception, at.exception
+    assert _staging.list_staged("curve_fitting") == []
