@@ -944,6 +944,68 @@ def _load_prior_curve_fit_state(raw_path):
     return anchor_dir, summary, script_text, script_label
 
 
+def _degenerate_data_check(curve_data):
+    """Reason string when the data cannot support ANY fit, else ``None``.
+
+    The realtime pre-flight gate (#346): a detector-glitch frame (all-zero,
+    flat, runt, all-NaN) fails in milliseconds with an honest flag instead of
+    burning bounded LLM correction calls trying to rescue the unfittable
+    (measured: ~8 calls / ~4 min per glitch frame without this). Deliberately
+    conservative — partial corruption (e.g. a NaN-laced but otherwise real
+    spectrum) passes, because the correction path demonstrably salvages it.
+    Applied only under the realtime profile; thorough runs are untouched.
+    """
+    xy = _extract_xy(curve_data)
+    if xy is None:
+        return "unrecognizable data shape"
+    y = np.asarray(xy[1], dtype=float)
+    finite = y[np.isfinite(y)]
+    if finite.size < 32:
+        return (f"only {finite.size} finite data points "
+                f"(need ≥ 32 to support any fit)")
+    lo, hi = np.percentile(finite, [0.5, 99.5])
+    if not np.isfinite(hi - lo) or (hi - lo) <= 0:
+        return "zero dynamic range (flat or constant signal)"
+    return None
+
+
+def _load_anchor_fingerprint(anchor_dir):
+    """Data fingerprint of the anchor run's first successful spectrum.
+
+    Feeds the realtime drift check (#346 step 3): a per-frame fingerprint is
+    compared against this to detect that the DATA changed even when the
+    reused script still fits well (the R² gate is blind to phase transitions
+    under auto-adaptive scripts). Prefers the fingerprint persisted in
+    ``series_fit_results.json`` (stamped when the script bank is enabled);
+    falls back to re-reading the anchor's data file. Returns ``None`` when
+    neither is possible — drift is then reported as unavailable, never
+    guessed.
+    """
+    try:
+        data = json.loads(
+            (Path(anchor_dir) / "series_fit_results.json").read_text())
+    except Exception:  # noqa: BLE001
+        return None
+    for r in data.get("results") or []:
+        if not (isinstance(r, dict) and r.get("success")):
+            continue
+        fp = r.get("_bank_fingerprint")
+        if isinstance(fp, dict) and fp.get("kind") == "curve":
+            return fp
+        dp = r.get("data_path")
+        if dp and Path(str(dp)).is_file():
+            try:
+                from scilink.skills._shared import _script_bank
+                from scilink.skills._shared.curve_fitting_tools import load_curve_data
+                xy = _extract_xy(load_curve_data(str(dp)))
+                if xy is not None:
+                    return _script_bank.curve_fingerprint(xy[0], xy[1])
+            except Exception:  # noqa: BLE001
+                return None
+        return None  # anchor = first successful result only
+    return None
+
+
 def _prior_curve_fit_block(state: dict) -> str:
     """A reference-context block for prior curve-fit runs named in
     ``state['prior_analysis_paths']`` — a compact fit summary plus each
@@ -2686,6 +2748,14 @@ Your guidance: '''
         prior_runs = _prior_curve_fit_block(state)
         if prior_runs:
             context_parts.append(prior_runs)
+        # Script-bank exemplar (#346): first fresh generation only — never on
+        # refinements (prior_script) and never once annealing has escalated,
+        # so the hot script-drop's from-scratch regeneration stays exemplar-free.
+        exemplar = state.get("_bank_exemplar")
+        if (exemplar and prior_script is None
+                and state.get("_annealing_level", 0) == 0):
+            from scilink.skills._shared import _script_bank
+            context_parts.append(_script_bank.render_exemplar_block(exemplar))
 
         # Optional auxiliary operand(s) (#226): for each 1D auxiliary curve aligned
         # with the primary (same length), write it next to the spectrum and list
@@ -2988,6 +3058,31 @@ Your guidance: '''
         refine_from_r2: float = 0.0,
         refine_from_issues: Optional[list] = None,
     ) -> dict:
+        # Realtime pre-flight gate (#346): fail a glitch frame instantly —
+        # this single choke point covers reuse, non-anchor locked-script
+        # execution, AND the fallback codegen, so a degenerate frame costs
+        # milliseconds and zero LLM calls instead of the attempt ladders.
+        if state.get("_qc_profile") == "realtime":
+            _degenerate = _degenerate_data_check(curve_data)
+            if _degenerate:
+                self.logger.warning(
+                    f"   🚫 Pre-flight gate [{spectrum_name}]: {_degenerate} "
+                    f"— frame not analyzed (detector glitch?). Flagged for "
+                    f"the post-experiment sweep."
+                )
+                return {
+                    "index": spectrum_idx,
+                    "name": spectrum_name,
+                    "data_path": data_path,
+                    "success": False,
+                    "error": (f"Pre-flight degenerate-data gate: {_degenerate}. "
+                              f"The frame was not analyzed."),
+                    "parameters": {},
+                    "fit_quality": {},
+                    "script": None,
+                    "script_errors": [],
+                }
+
         stats = self._compute_statistics(curve_data)
         # Per-spectrum working dir: the locked script runs VERBATIM here with data
         # staged as the canonical DATA_NAME and viz written canonically — no
@@ -3178,7 +3273,7 @@ Your guidance: '''
         except Exception:
             residual_diag = None
 
-        return {
+        result = {
             "index": spectrum_idx,
             "name": spectrum_name,
             "data_path": data_path,
@@ -3196,6 +3291,22 @@ Your guidance: '''
             "script": script,
             "script_errors": script_errors,
         }
+        # Fingerprint of the data this script solved (script bank, #346) —
+        # stamped here because per-spectrum arrays for file inputs never reach
+        # the outer state the bank write hook reads. No-op unless the bank is
+        # enabled; never affects the fit.
+        try:
+            from scilink.skills._shared import _script_bank
+            if _script_bank.bank_enabled():
+                xy = _extract_xy(curve_data)
+                if xy is not None:
+                    result["_bank_fingerprint"] = _script_bank.curve_fingerprint(
+                        xy[0], xy[1],
+                        x_units=_script_bank.guess_x_units(state.get("system_info")),
+                    )
+        except Exception:
+            pass
+        return result
 
     FIT_VERIFICATION_PROMPT = '''You are a scientific data analysis expert reviewing a curve/spectral fit.
 
@@ -4072,6 +4183,14 @@ Return JSON with:
             }
             if verdict == "poor":
                 reuse_result["quality_warning"] = message
+            # Realtime drift channel (#346 step 3): the gate metric measures
+            # fit quality, not data identity — an auto-adaptive locked script
+            # fits a NEW phase with a high R² (live-proven on the dehydration
+            # series). The fingerprint distance to the anchor frame sees the
+            # data change; both signals are reported, escalation stays the
+            # caller's move.
+            if ctx.state.get("_qc_profile") == "realtime":
+                self._attach_drift_signal(ctx, reuse_result["reuse_validity"])
             return reuse_result
         self.logger.warning(
             f"   ⚠️  Prior fitting script could not execute on this data "
@@ -4081,15 +4200,96 @@ Return JSON with:
         )
         return None
 
+    # Below this similarity to the anchor frame's fingerprint, a realtime
+    # frame is flagged drift="suspected". Calibrated on the in-situ
+    # dehydration series: same-phase frames score 1.000, transition-onset
+    # frames 0.900, post-transition frames 0.787 — 0.92 flags from onset.
+    DRIFT_SIMILARITY_THRESHOLD = 0.92
+
+    def _attach_drift_signal(self, ctx: QCItemContext, reuse_validity: dict) -> None:
+        """Fingerprint-distance drift check against the anchor frame (#346).
+
+        Deterministic and LLM-free: fingerprints this frame's data and scores
+        it against ``state['_anchor_fingerprint']`` with the script bank's
+        curve similarity. Adds ``fingerprint_similarity`` and ``drift``
+        ("none" | "suspected" | "unavailable") to ``reuse_validity``.
+        Failure-isolated — a drift-check error never affects the fit result.
+        """
+        try:
+            from scilink.skills._shared import _script_bank
+
+            anchor_fp = ctx.state.get("_anchor_fingerprint")
+            xy = _extract_xy(ctx.data)
+            if not anchor_fp or xy is None:
+                reuse_validity["drift"] = "unavailable"
+                return
+            frame_fp = _script_bank.curve_fingerprint(xy[0], xy[1])
+            sim = _script_bank._curve_similarity(frame_fp, anchor_fp)
+            reuse_validity["fingerprint_similarity"] = round(float(sim), 3)
+            drifted = sim < self.DRIFT_SIMILARITY_THRESHOLD
+            reuse_validity["drift"] = "suspected" if drifted else "none"
+            if drifted:
+                self.logger.warning(
+                    f"   🌡️ Drift suspected: fingerprint similarity to the "
+                    f"anchor frame is {sim:.3f} (< "
+                    f"{self.DRIFT_SIMILARITY_THRESHOLD}) — the data appears "
+                    f"to have changed even though the fit gate "
+                    f"{'passed' if reuse_validity.get('verdict') == 'good' else 'failed'}. "
+                    f"Consider re-anchoring or a thorough re-analysis of this frame."
+                )
+        except Exception as e:  # noqa: BLE001 - drift check never breaks the fit
+            reuse_validity.setdefault("drift", "unavailable")
+            self.logger.warning(f"Drift check skipped: {e}")
+
     def qc_run_initial(self, ctx: QCItemContext) -> dict:
         initial_model = ctx.state.get('locked_fitting_config', {}).get('physical_model') or 'Initial model'
         ctx.initial_label = initial_model
         self.logger.info(f"   Attempt 1: {str(initial_model)[:80]}...")
 
+        self._offer_bank_exemplar(ctx)
         return self._fit_single_spectrum(
             state=ctx.state, curve_data=ctx.data, data_path=ctx.data_path,
             spectrum_name=ctx.item_name, spectrum_idx=ctx.item_idx, base_script=None
         )
+
+    def _offer_bank_exemplar(self, ctx: QCItemContext) -> None:
+        """Adapt-mode script-bank retrieval (#346 step 2).
+
+        Fingerprints the item's data and, when the bank holds a closely
+        matching proven script, stashes it in state for the FIRST codegen
+        attempt to adapt (consumed by ``_generate_fitting_script`` at
+        annealing level 0 only, so the hot script-drop is preserved).
+        Precedence: explicit ``prior_analysis_paths`` reference material wins
+        — the bank never competes with a user-supplied prior. Failure-isolated.
+        """
+        state = ctx.state
+        state.pop("_bank_exemplar", None)
+        try:
+            from scilink.skills._shared import _script_bank
+            if not _script_bank.bank_enabled() or state.get("prior_analysis_paths"):
+                return
+            xy = _extract_xy(ctx.data)
+            if xy is None:
+                return
+            fingerprint = _script_bank.curve_fingerprint(
+                xy[0], xy[1],
+                x_units=_script_bank.guess_x_units(state.get("system_info")),
+            )
+            matches = _script_bank.find_exemplar(
+                "curve_fitting", fingerprint,
+                _script_bank.measurement_context(state.get("system_info") or {}),
+            )
+            if matches:
+                match = matches[0]
+                state["_bank_exemplar"] = match
+                _script_bank.mark_retrieved("curve_fitting", match["record"]["id"])
+                self.logger.info(
+                    f"   🏦 Bank exemplar offered: id={match['record']['id']} "
+                    f"score={match['score']} "
+                    f"({str(match['record'].get('technique_signals', {}).get('model_type') or '')[:60]})"
+                )
+        except Exception as e:
+            self.logger.warning(f"Bank retrieval skipped: {e}")
 
     def qc_record_initial(self, ctx: QCItemContext, result: dict) -> None:
         r2 = result.get("fit_quality", {}).get("r_squared") or 0
@@ -4611,9 +4811,18 @@ Return JSON with:
 
             return ctx.best_result
         else:
+            # Surface the last attempt's own error (e.g. the realtime
+            # pre-flight gate's reason) instead of only the generic summary.
+            last_err = next(
+                (e for e in ((a.get("result") or {}).get("error")
+                             for a in reversed(ctx.all_attempts)) if e),
+                None,
+            )
             return {
                 "index": ctx.item_idx, "name": ctx.item_name, "success": False,
-                "error": "All fitting attempts failed", "attempts": len(ctx.all_attempts),
+                "error": ("All fitting attempts failed"
+                          + (f": {last_err}" if last_err else "")),
+                "attempts": len(ctx.all_attempts),
                 "parameters": {}, "fit_quality": {},
             }
 
@@ -5540,6 +5749,15 @@ Return JSON with:
             reuse_script, reuse_source = _first_prior_curve_fit_script(state)
         else:
             reuse_script, reuse_source = None, None
+        # Verbatim cold start (#346 step 4): a realtime run with no explicit
+        # prior locked its recipe by auditioning bank candidates against the
+        # first frame (agent-side, pre-pipeline). The winner flows through the
+        # SAME reuse path as a prior-run script — validity gate, drift check,
+        # correction retry all apply unchanged.
+        if not reuse_script and state.get("_cold_start_reuse"):
+            cs = state["_cold_start_reuse"]
+            reuse_script = cs.get("script")
+            reuse_source = f"script_bank:{cs.get('id')}"
         if reuse_script and regime_configs:
             self.logger.info(
                 "   ♻️  Locked-script reuse requested, but this run is "

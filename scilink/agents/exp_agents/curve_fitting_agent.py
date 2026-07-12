@@ -320,6 +320,11 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Escalation mode: attempt 0 runs alone and is fast-accepted when
         # strong; the remaining n_candidates-1 launch only when it is weak.
         candidate_escalation: bool = False,
+        # Operating profile (#346): None/"thorough" = today's behavior;
+        # "realtime" = zero-LLM per-frame execution of a locked recipe
+        # (requires prior_analysis_paths + reuse_locked_script). Accepts a
+        # preset name or a QCProfile instance.
+        profile: Optional[Any] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -469,6 +474,32 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         except (TypeError, ValueError):
             n_candidates = 1
         candidate_escalation = bool(candidate_escalation) and n_candidates > 1
+
+        # Operating profile (#346 steps 3-4). "realtime" is the per-frame
+        # in-situ mode: a locked script executes with the arithmetic gate +
+        # fingerprint drift check and ZERO LLM calls on the happy path —
+        # every LLM stage around it is skipped. The locked recipe comes from
+        # an explicit prior run (prior_analysis_paths + reuse_locked_script)
+        # or, without one, from a verbatim COLD START: top bank candidates
+        # are auditioned against this frame after the data loads, and the
+        # first to clear the gate becomes the recipe. No candidate passing
+        # demotes the run to a thorough anchor (loudly).
+        from ._qc_profile import resolve_profile
+        qc_profile = resolve_profile(profile)
+        realtime = qc_profile.name == "realtime"
+        realtime_cold_start = False
+        if realtime and not (prior_analysis_paths and reuse_locked_script):
+            from scilink.skills._shared import _script_bank as _sb
+            if not _sb.bank_enabled():
+                raise ValueError(
+                    "profile='realtime' executes a locked recipe. Either pass "
+                    "prior_analysis_paths=[<anchor run dir>] with "
+                    "reuse_locked_script=True (run the anchor under the "
+                    "default thorough profile first), or enable the script "
+                    "bank (SCILINK_SCRIPT_BANK=1) so a matching banked script "
+                    "can be cold-started."
+                )
+            realtime_cold_start = True
 
         # Resolve task_mode — caller sets this explicitly (standalone user or
         # orchestrator). Defaults to "fitting" when unset.
@@ -708,6 +739,46 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             series_metadata, spectrum_paths
         )
 
+        # Verbatim cold start (#346 step 4): audition banked scripts against
+        # this frame — numerics only, zero LLM. No winner → demote to a
+        # thorough anchor run (which later frames can go realtime against).
+        cold_start_info = None
+        if realtime_cold_start:
+            from .controllers.curve_fitting_controllers import _degenerate_data_check
+            _degenerate = _degenerate_data_check(processed_first_spectrum)
+            if _degenerate:
+                # Glitch frame: do NOT demote to thorough (that would burn
+                # LLM calls on unfittable data) — stay realtime and let the
+                # per-item pre-flight gate fail the frame instantly.
+                self.logger.warning(
+                    f"🚫 REALTIME cold start skipped: {_degenerate} — the "
+                    f"frame will be flagged by the pre-flight gate, not "
+                    f"analyzed."
+                )
+            else:
+                cold_start_info = self._bank_cold_start_audition(
+                    processed_first_spectrum, handled_system_info,
+                    effective_r2_threshold,
+                )
+            if cold_start_info is None and not _degenerate:
+                self.logger.warning(
+                    "⚡→🐢 REALTIME cold start: no banked recipe fits this "
+                    "data — running a THOROUGH anchor instead; subsequent "
+                    "frames can run realtime against this run's directory."
+                )
+                realtime = False
+                from ._qc_profile import THOROUGH
+                qc_profile = THOROUGH
+        if realtime:
+            effective_max_verification = 0
+            n_candidates, candidate_escalation = 1, False
+            self.logger.info(
+                "⚡ REALTIME profile: skill suggestion, planning, literature, "
+                "verification, refit, trend and synthesis are skipped; the "
+                "locked script executes under the arithmetic gate with a "
+                "fingerprint drift check."
+            )
+
         # Build initial state
         state = {
             # Input data
@@ -723,6 +794,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "analysis_hints": hints,
             "analysis_objective": objective,
             "task_mode": effective_task_mode,
+            # Operating profile name ("thorough" | "realtime") — controllers
+            # gate realtime-only behavior (drift check, bank suppression) on it.
+            "_qc_profile": qc_profile.name,
             # Annealing schedule start level (None/0 = start frozen at T=0).
             "_starting_annealing_level": starting_annealing_level,
 
@@ -745,6 +819,15 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # Opt-in: force verbatim reuse of the prior locked script (#172).
             # Default False — prior runs are agent-judged reference material.
             "reuse_locked_script": bool(reuse_locked_script),
+            # Verbatim cold start (#346 step 4): the audition winner, threaded
+            # into the series controller's reuse path (None when not used).
+            "_cold_start_reuse": ({
+                "id": cold_start_info["id"],
+                "script": cold_start_info["script"],
+                "score": cold_start_info["score"],
+                "audition_r2": cold_start_info["r2"],
+                "n_auditioned": cold_start_info["n_auditioned"],
+            } if cold_start_info else None),
             # Best-of-N: independent parallel anchor fits; LLM judge selects
             # the winner (1 = no fan-out). Escalation runs attempt 0 alone
             # and fans out only when it is weak.
@@ -792,6 +875,50 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             else:
                 self.logger.warning(f"literature_file not found: {literature_file}")
 
+        # REALTIME: planning is skipped, so seed the locked config (and the
+        # anchor fingerprint for the drift check) before the pipeline starts.
+        # Zero LLM calls. Two anchor sources: the explicit prior run's saved
+        # summary, or — cold start — the winning bank record (its fingerprint
+        # is the data the script originally solved, so the drift check reads
+        # "how far is this frame from the script's proven territory").
+        if realtime and cold_start_info is not None:
+            rec = cold_start_info["record"]
+            outcome = rec.get("outcome") or {}
+            state["locked_fitting_config"] = {
+                "physical_model": ((rec.get("technique_signals") or {}).get("model_type")
+                                   or outcome.get("model_type")),
+                "analysis_approach": outcome.get("plan_summary"),
+                "fitting_strategy": (
+                    f"Verbatim reuse of banked script {rec.get('id')} "
+                    f"(cold start, audition R²={cold_start_info['r2']})"
+                ),
+                "parameters_to_extract": outcome.get("parameters_extracted"),
+            }
+            state["_anchor_fingerprint"] = rec.get("data_fingerprint")
+        elif realtime:
+            from .controllers.curve_fitting_controllers import (
+                _load_anchor_fingerprint,
+                _load_prior_curve_fit_state,
+            )
+            anchor_dir, prior_summary, _ps, _pl = _load_prior_curve_fit_state(
+                prior_analysis_paths[0]
+            )
+            if anchor_dir is None:
+                raise ValueError(
+                    f"profile='realtime': no reusable prior run found at "
+                    f"{prior_analysis_paths[0]!r} (expected series_fit_results.json "
+                    f"from the anchor run)."
+                )
+            if (prior_summary or {}).get("locked_config"):
+                state["locked_fitting_config"] = prior_summary["locked_config"]
+            state["_anchor_fingerprint"] = _load_anchor_fingerprint(anchor_dir)
+            if state["_anchor_fingerprint"] is None:
+                self.logger.warning(
+                    "   Realtime drift check unavailable: the anchor run has no "
+                    "persisted data fingerprint and its data file could not be "
+                    "re-read."
+                )
+
         # Create unified pipeline with quality settings
         pipeline = create_unified_curve_fitting_pipeline(
             model=self.model,
@@ -804,13 +931,14 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             executor=self.executor,
             output_dir=str(self.output_dir),
             literature_agent=self.literature_agent,
-            enable_human_feedback=self.enable_human_feedback,
+            enable_human_feedback=self.enable_human_feedback and not realtime,
             r2_threshold=effective_r2_threshold,
             max_model_retries=effective_max_retries,
             outlier_sigma=effective_outlier_sigma,
             max_verification_iterations=effective_max_verification,
             parallel_workers=self.parallel_workers,
             load_skills_fn=self._load_skills_to_state,
+            profile=qc_profile.name,
         )
         
         # Execute pipeline
@@ -864,6 +992,12 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         fb_staged = self._maybe_stage_feedback_errors(state, final_results)
         if fb_staged:
             final_results.setdefault("staged_solutions", []).extend(fb_staged)
+
+        # Bank every approved working script as episodic memory (script bank,
+        # #346) — deterministic, no LLM, failure-isolated.
+        banked = self._maybe_bank_scripts(state)
+        if banked:
+            final_results["banked_scripts"] = banked
 
         self.logger.info("")
         self.logger.info("✅ ANALYSIS COMPLETE")
@@ -1253,6 +1387,206 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             )
         return staged
 
+    # Verbatim cold-start audition (#346 step 4): how many bank candidates to
+    # execute against the first frame, and the retrieval-score floor they must
+    # clear to be auditioned at all. The floor is HIGHER than adapt mode's
+    # (0.45): a verbatim script runs as-is with no verification loop and no
+    # adapt framing, so candidate selection stays conservative — the
+    # arithmetic gate is the final arbiter but not a physics-identity check.
+    VERBATIM_AUDITION_K = 3
+    VERBATIM_MIN_SCORE = 0.55
+
+    def _bank_cold_start_audition(
+        self, curve_data, system_info, gate_threshold: float
+    ) -> Optional[Dict[str, Any]]:
+        """Execute top bank candidates against the first frame; first past
+        the arithmetic gate becomes the locked recipe.
+
+        Numerics only — zero LLM calls: candidates are ranked by the
+        deterministic retrieval scorer, each script is staged and run
+        verbatim (same mechanics as #172 reuse), and the parsed R² is checked
+        against the gate. The winner's bank stats record the cross-session
+        success (once per campaign — the realtime frames themselves never
+        bank). Returns ``{"id", "script", "record", "score", "r2",
+        "n_auditioned"}`` or ``None`` when nothing matches or passes; the
+        caller then demotes the run to a thorough anchor. The gate check is
+        R²-based in v1 (custom gate metrics fall back to the legacy
+        threshold). Failure-isolated.
+        """
+        try:
+            from scilink.skills._shared import _script_bank
+            from .controllers.curve_fitting_controllers import _extract_xy
+            from ._locked_exec import stage_and_run
+
+            xy = _extract_xy(curve_data)
+            if xy is None:
+                return None
+            fingerprint = _script_bank.curve_fingerprint(
+                xy[0], xy[1], x_units=_script_bank.guess_x_units(system_info))
+            candidates = _script_bank.find_exemplar(
+                "curve_fitting", fingerprint,
+                _script_bank.measurement_context(system_info or {}),
+                k=self.VERBATIM_AUDITION_K, min_score=self.VERBATIM_MIN_SCORE,
+            )
+            if not candidates:
+                self.logger.info(
+                    f"   🏦 Cold start: no banked recipe scores ≥ "
+                    f"{self.VERBATIM_MIN_SCORE} against this data."
+                )
+                return None
+
+            for i, cand in enumerate(candidates):
+                rec = cand["record"]
+                work = self.output_dir / "_cold_start" / f"cand_{i:02d}_{rec['id']}"
+                self.logger.info(
+                    f"   🏦 Cold-start audition {i + 1}/{len(candidates)}: "
+                    f"bank record {rec['id']} (score {cand['score']})..."
+                )
+                try:
+                    run = stage_and_run(
+                        self.executor, rec["working_script"], curve_data, work)
+                except Exception as e:  # noqa: BLE001
+                    self.logger.info(f"      ✗ execution error: {e}")
+                    continue
+                if (run["status"] != "success"
+                        or run["visualization_path"] is None
+                        or "FIT_RESULTS_JSON:" not in run["stdout"]):
+                    self.logger.info("      ✗ script did not complete cleanly")
+                    continue
+                r2 = self._parse_audition_r2(run["stdout"])
+                if r2 is None or r2 < gate_threshold:
+                    self.logger.info(
+                        f"      ✗ gate failed (R²={r2} < {gate_threshold})")
+                    continue
+                _script_bank.mark_retrieved("curve_fitting", rec["id"])
+                _script_bank.record_success(
+                    "curve_fitting", rec["id"], session=self.output_dir.name)
+                self.logger.info(
+                    f"   🏦 ✅ Cold start locked: bank record {rec['id']} "
+                    f"passes the gate on this frame (R²={r2:.4f})."
+                )
+                return {"id": rec["id"], "script": rec["working_script"],
+                        "record": rec, "score": cand["score"],
+                        "r2": round(float(r2), 4),
+                        "n_auditioned": i + 1}
+            self.logger.info(
+                f"   🏦 Cold start: {len(candidates)} candidate(s) auditioned, "
+                f"none passed the gate."
+            )
+        except Exception as e:  # noqa: BLE001 - cold start never breaks analyze
+            self.logger.warning(f"Cold-start audition skipped: {e}")
+        return None
+
+    @staticmethod
+    def _parse_audition_r2(stdout: str) -> Optional[float]:
+        for line in stdout.splitlines():
+            if line.startswith("FIT_RESULTS_JSON:"):
+                try:
+                    d = json.loads(line.split(":", 1)[1].strip())
+                    r2 = ((d.get("fit_quality") or {}).get("r_squared")
+                          if isinstance(d.get("fit_quality"), dict)
+                          else None)
+                    if r2 is None:
+                        r2 = d.get("r_squared")
+                    return float(r2) if r2 is not None else None
+                except (ValueError, TypeError, json.JSONDecodeError):
+                    return None
+        return None
+
+    def _maybe_bank_scripts(self, state: dict) -> List[str]:
+        """Bank every approved working script in the script bank (#346).
+
+        Episodic complement to T=2 staging: no hot/novelty gate, no LLM —
+        each distinct approved script is stored once per run with the
+        measurement context, a fingerprint of the spectrum it solved, and
+        the outcome, so later runs can retrieve and adapt it. Re-banking an
+        identical script updates its usage stats instead of duplicating.
+        Fully failure-isolated; gated by ``SCILINK_SCRIPT_BANK`` /
+        persistent-memory setting.
+        """
+        # Realtime frames never bank: a verbatim re-execution learns nothing
+        # new, and per-frame updates would inflate the anchor record's
+        # cross-session success stats (a 500-frame campaign is one success,
+        # not 500 — the graduation signal must stay honest).
+        if state.get("_qc_profile") == "realtime":
+            return []
+        from scilink.skills._shared import _script_bank
+        if not _script_bank.bank_enabled():
+            return []
+
+        banked: List[str] = []
+        try:
+            from .controllers.curve_fitting_controllers import _active_skill_names
+
+            locked = state.get("locked_fitting_config") or {}
+            active_skills = _active_skill_names(state)
+            system_info = state.get("system_info") or {}
+            x_units = _script_bank.guess_x_units(system_info)
+            stack = state.get("spectrum_stack")
+            seen_hashes = set()
+
+            for r in state.get("series_results", []) or []:
+                if not r.get("success"):
+                    continue
+                script = r.get("script")
+                # Quality gate: QC approval, or the reuse fast path's own
+                # arithmetic gate — a reused script passing on NEW data is
+                # exactly the cross-session success signal the bank counts.
+                passed = ((r.get("quality_history") or {}).get("approved")
+                          or (r.get("reuse_validity") or {}).get("verdict") == "good")
+                if not script or not passed:
+                    continue
+                h = _script_bank.script_hash(script)
+                if h in seen_hashes:  # locked-recipe series: bank once per run
+                    continue
+                seen_hashes.add(h)
+
+                # Prefer the fingerprint stamped where the data was in scope
+                # (file inputs load per spectrum inside the controller); the
+                # stack fallback covers array inputs.
+                fingerprint = r.get("_bank_fingerprint")
+                if fingerprint is None:
+                    xy = None
+                    idx = r.get("index")
+                    if stack is not None and idx is not None and 0 <= idx < len(stack):
+                        xy = np.asarray(stack[idx])
+                    elif state.get("curve_data") is not None:
+                        xy = np.asarray(state["curve_data"])
+                    if xy is not None and xy.ndim == 2 and xy.shape[0] == 2:
+                        fingerprint = _script_bank.curve_fingerprint(
+                            xy[0], xy[1], x_units=x_units
+                        )
+
+                r2 = (r.get("fit_quality") or {}).get("r_squared")
+                res = _script_bank.add_record("curve_fitting", {
+                    "technique_signals": {
+                        "active_skills": active_skills,
+                        "model_type": r.get("model_type") or locked.get("physical_model"),
+                    },
+                    "measurement_context": _script_bank.measurement_context(system_info),
+                    "data_fingerprint": fingerprint,
+                    "outcome": {
+                        "model_type": r.get("model_type"),
+                        "metric": ({"name": "r_squared", "value": round(float(r2), 4)}
+                                   if r2 is not None else None),
+                        "plan_summary": locked.get("analysis_approach"),
+                        "parameters_extracted": locked.get("parameters_to_extract"),
+                    },
+                    "provenance": {"session": self.output_dir.name,
+                                   "item": r.get("name"),
+                                   "data_file": os.path.basename(str(state.get("data_path") or ""))
+                                   or None},
+                    "working_script": script,
+                })
+                if res.get("id"):
+                    banked.append(res["id"])
+                    self.logger.info(
+                        f"   🏦 Banked script [{res['action']}] id={res['id']}"
+                    )
+        except Exception as e:
+            self.logger.warning(f"Script banking skipped: {e}")
+        return banked
+
     def _maybe_stage_feedback_errors(self, state: dict, final_results: dict) -> List[str]:
         """Stage human-feedback + resolved-error knowledge for later distillation.
 
@@ -1315,6 +1649,39 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "output_directory": str(self.output_dir),
             "task_mode": state.get("task_mode", "fitting"),
         }
+
+        # Realtime provenance (#346 / plan §7.3): stamp the profile on the
+        # top-level result AND each per-item quality_history so a post-hoc
+        # sweep can select realtime frames for thorough re-analysis. Also
+        # synthesize a deterministic one-line summary — the synthesis stage
+        # (an LLM call) is skipped under this profile.
+        if state.get("_qc_profile") == "realtime":
+            results["profile"] = "realtime"
+            if state.get("_cold_start_reuse"):
+                cs = state["_cold_start_reuse"]
+                results["cold_start"] = {k: cs.get(k) for k in
+                                         ("id", "score", "audition_r2",
+                                          "n_auditioned")}
+            for r in series_results:
+                if isinstance(r, dict):
+                    r.setdefault("quality_history", {})[
+                        "produced_under_profile"] = "realtime"
+            if not synthesis.get("detailed_analysis") and series_results:
+                r0 = series_results[0]
+                rv = r0.get("reuse_validity") or {}
+                r2 = (r0.get("fit_quality") or {}).get("r_squared")
+                synthesis = dict(synthesis)
+                synthesis["detailed_analysis"] = (
+                    f"Realtime frame: locked script from "
+                    f"'{rv.get('source') or 'prior run'}' "
+                    f"{'reused' if rv.get('reused') else 'fallback-regenerated'}; "
+                    f"R² = {r2 if r2 is not None else 'n/a'}; "
+                    f"gate verdict: {rv.get('verdict', 'n/a')}; "
+                    f"drift: {rv.get('drift', 'n/a')} "
+                    f"(fingerprint similarity "
+                    f"{rv.get('fingerprint_similarity', 'n/a')}). "
+                    f"Interpretation is deferred to the post-experiment sweep."
+                )
 
         # In identification mode, surface the ranked candidate list if the
         # synthesis produced one. Additive/optional field — callers that don't

@@ -14,6 +14,7 @@ Skills (graduated_skills) subcommands:
   list      List persisted skills (use --provisional-only to triage)
   show      Print a skill's markdown
   promote   Clear a skill's provisional flag so it routes normally
+  demote    Set a promoted skill back to provisional (out of auto-routing)
   prune     Delete a skill bundle
 
 Staged T=2 solutions (distill_staging) subcommands:
@@ -21,6 +22,14 @@ Staged T=2 solutions (distill_staging) subcommands:
   upgrade      Merge a staged solution INTO an existing skill (--into <domain>/<name>)
   consolidate  Distill all staged solutions of a technique into a NEW skill
   prune-staged Delete staged solution(s)
+
+Script bank (script_bank — episodic memory of successful scripts) subcommands:
+  bank         List banked scripts with cross-session usage stats
+               (★ proven = graduation candidates)
+  bank-show    Print a bank record including its script
+  bank-promote Send a proven record into distill staging — it then flows
+               through the same review-gated upgrade/consolidate path
+  bank-prune   Delete a bank record
 
 `upgrade`/`consolidate` call an LLM; configure with --model / --base-url / --api-key.
 """
@@ -140,6 +149,19 @@ def _cmd_promote(args) -> int:
         return 1
     print(f"✅ Promoted {domain}/{name} → {res['domain']}/{name} (now auto-routable).")
     print(f"   {res['path']}")
+    return 0
+
+
+def _cmd_demote(args) -> int:
+    from scilink.skills._shared._memory import demote_memory
+    domain, name = _split_ref(args.ref)
+    try:
+        demote_memory(domain, name)
+    except FileNotFoundError as e:
+        print(f"❌ {e}")
+        return 1
+    print(f"🟡 Demoted {domain}/{name} back to provisional — out of the "
+          f"auto-routing menu (still explicitly loadable; re-`promote` after review).")
     return 0
 
 
@@ -302,6 +324,89 @@ def _cmd_prune_staged(args) -> int:
     return 0 if n else 1
 
 
+def _cmd_bank(args) -> int:
+    """`scilink memory bank` — list script-bank records (episodic memory)."""
+    from scilink.skills._shared import _script_bank
+    rows = _script_bank.bank_summary(args.domain)
+    if args.proven_only:
+        rows = [r for r in rows if r["proven"]]
+    if not rows:
+        print("No banked scripts." + (" (proven-only filter)" if args.proven_only else ""))
+        return 0
+    threshold = _script_bank.proven_n()
+    by_domain = {}
+    for r in rows:
+        by_domain.setdefault(r["domain"], []).append(r)
+    n_proven = 0
+    for dom, recs in sorted(by_domain.items()):
+        print(f"{dom}: {len(recs)} banked script(s)")
+        for r in recs:
+            metric = r["metric"]
+            mtxt = (f"  {metric['name']}={metric['value']}"
+                    if isinstance(metric, dict) and metric.get("value") is not None else "")
+            marks = ""
+            if r["proven"]:
+                marks += "  ★ proven"
+                n_proven += 1
+            if r["promoted_to_staging"]:
+                marks += f"  ✓ promoted (staged {r['promoted_to_staging']})"
+            print(f"    · id={r['id']}  successes={r['n_successes']} "
+                  f"retrievals={r['n_retrievals']}{mtxt}{marks}")
+            print(f"      {r['label'][:100]}")
+    print(f"\n{len(rows)} record(s); ★ = succeeded in ≥{threshold} sessions "
+          f"(a graduation candidate). Inspect with `bank-show <domain>/<id>`; "
+          f"send a proven one into the review-gated skill path with "
+          f"`bank-promote <domain>/<id>`.")
+    if n_proven and not args.proven_only:
+        print(f"{n_proven} proven record(s) — see them alone with `bank --proven-only`.")
+    return 0
+
+
+def _cmd_bank_show(args) -> int:
+    from scilink.skills._shared import _script_bank
+    domain, rid = _split_ref(args.ref)
+    rec = _script_bank.get_record(domain, rid)
+    if rec is None:
+        print(f"❌ No bank record {domain}/{rid}.")
+        return 1
+    import json as _json
+    script = rec.pop("working_script", "")
+    print(_json.dumps(rec, indent=2, default=str))
+    print("\n--- working_script " + "-" * 50)
+    print(script)
+    return 0
+
+
+def _cmd_bank_promote(args) -> int:
+    """Send a bank record into distill staging (the graduation path)."""
+    _warn_memory_off()
+    from scilink.skills._shared import _script_bank
+    domain, rid = _split_ref(args.ref)
+    out = _script_bank.promote_to_staging(domain, rid, technique=args.technique)
+    if out.get("status") != "success":
+        print(f"❌ {out.get('message')}")
+        return 1
+    print(f"🧠 Promoted bank record {rid} → staged {out['staged_id']} "
+          f"[{out['technique']}].")
+    print("   Review with `scilink memory staged`, then `upgrade` it into an "
+          "existing skill or `consolidate` once enough of the technique "
+          "accumulates. The bank record is kept (marked ✓ promoted).")
+    return 0
+
+
+def _cmd_bank_prune(args) -> int:
+    from scilink.skills._shared import _script_bank
+    domain, rid = _split_ref(args.ref)
+    if not args.yes:
+        resp = input(f"Delete bank record {domain}/{rid}? [y/N] ").strip().lower()
+        if resp not in ("y", "yes"):
+            print("Aborted.")
+            return 1
+    n = _script_bank.remove_records(domain, [rid])
+    print(f"🗑️  Removed {n} bank record(s).")
+    return 0 if n else 1
+
+
 def main():
     """Entry point for 'scilink memory'."""
     parser = argparse.ArgumentParser(
@@ -335,6 +440,11 @@ def main():
     p_promote.add_argument("--to-domain", help="Optionally move the bundle to a curated domain")
     p_promote.set_defaults(func=_cmd_promote)
 
+    p_demote = sub.add_parser(
+        "demote", help="Set a skill back to provisional (out of auto-routing)")
+    p_demote.add_argument("ref", help="Skill reference '<domain>/<name>'")
+    p_demote.set_defaults(func=_cmd_demote)
+
     p_prune = sub.add_parser("prune", help="Delete a skill bundle")
     p_prune.add_argument("ref", help="Skill reference '<domain>/<name>'")
     p_prune.add_argument("--yes", action="store_true", help="Skip the confirmation prompt")
@@ -362,6 +472,32 @@ def main():
     p_ps.add_argument("ref", help="Staged solution ref '<domain>/<id>'")
     p_ps.add_argument("--yes", action="store_true", help="Skip the confirmation prompt")
     p_ps.set_defaults(func=_cmd_prune_staged)
+
+    # --- script bank (episodic memory of successful scripts) ---
+    p_bank = sub.add_parser(
+        "bank", help="List banked scripts (episodic memory) with usage stats")
+    p_bank.add_argument("--domain", help="Restrict to one domain")
+    p_bank.add_argument("--proven-only", action="store_true",
+                        help="Show only records proven across sessions "
+                             "(graduation candidates)")
+    p_bank.set_defaults(func=_cmd_bank)
+
+    p_bs = sub.add_parser("bank-show", help="Print a bank record incl. its script")
+    p_bs.add_argument("ref", help="Bank record ref '<domain>/<id>'")
+    p_bs.set_defaults(func=_cmd_bank_show)
+
+    p_bp = sub.add_parser(
+        "bank-promote",
+        help="Send a proven bank record into distill staging (review-gated skill path)")
+    p_bp.add_argument("ref", help="Bank record ref '<domain>/<id>'")
+    p_bp.add_argument("--technique", default=None,
+                      help="Staging technique label (default: derived from the record)")
+    p_bp.set_defaults(func=_cmd_bank_promote)
+
+    p_br = sub.add_parser("bank-prune", help="Delete a bank record")
+    p_br.add_argument("ref", help="Bank record ref '<domain>/<id>'")
+    p_br.add_argument("--yes", action="store_true", help="Skip the confirmation prompt")
+    p_br.set_defaults(func=_cmd_bank_prune)
 
     args = parser.parse_args()
     if not getattr(args, "func", None):

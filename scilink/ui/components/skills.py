@@ -162,16 +162,17 @@ def _render_memory_section() -> None:
 
     if provisional:
         st.markdown(f"**Provisional — awaiting review ({len(provisional)})**")
-        for r in provisional:
+        for r in _paged(provisional, "provpage"):
             _render_memory_row(_memory, r, provisional=True)
     if promoted:
         st.markdown(f"**Promoted ({len(promoted)})**")
-        for r in promoted:
+        for r in _paged(promoted, "prompage"):
             _render_memory_row(_memory, r, provisional=False)
     if not rows:
         st.caption("No persisted skills yet.")
 
     _render_staged_section()
+    _render_bank_section()
 
 
 def _render_staged_section() -> None:
@@ -206,7 +207,7 @@ def _render_staged_section() -> None:
 
     for (domain, technique), recs in sorted(groups.items()):
         with st.expander(f"`{domain}/{technique}` — {len(recs)} staged", expanded=False):
-            for r in recs:
+            for r in _paged(recs, f"stagedpage::{domain}/{technique}"):
                 metric = r.get("r_squared") or r.get("quality_score")
                 prov = _staging.PROVENANCE_LABELS.get(r.get("provenance", "t2_solution"), r.get("provenance", ""))
                 meta_col, view_col = st.columns([3, 1])
@@ -215,7 +216,15 @@ def _render_staged_section() -> None:
                     + (f" · {_staging.metric_label(r)}" if _staging.metric_label(r) else "")
                 )
                 with view_col.popover("View", width="stretch"):
-                    _render_staged_record(r)
+                    _lazy_content(f"stagedlazy::{r['id']}",
+                                  lambda r=r: _render_staged_record(r))
+                    if st.button("Delete staged record",
+                                 key=f"destage::{domain}/{r['id']}",
+                                 help="Remove from the staging buffer without "
+                                      "distilling it (de-stage)."):
+                        _staging.remove_staged(domain, [r["id"]])
+                        st.warning(f"De-staged {r['id']}.")
+                        st.rerun()
             if model is None:
                 st.info("Start a session to enable upgrade/consolidate (needs a model).")
                 continue
@@ -316,6 +325,146 @@ def _render_staged_section() -> None:
                     st.caption(f"Accumulating {len(recs)}/{need} examples before a new skill.")
 
 
+# Streamlit renders popover/expander CONTENT eagerly on every rerun, open or
+# not — with many memory records that meant re-reading every file and
+# re-highlighting every script per chat interaction (the observed panel
+# slowdown). Heavy content therefore loads only behind an explicit tick, and
+# long lists paginate.
+_PANEL_PAGE = 15
+_SCRIPT_PREVIEW_CHARS = 8000
+
+
+def _lazy_content(key: str, render_fn) -> None:
+    """Render heavy content only when the user asks for it."""
+    if st.checkbox("Load full content", key=key):
+        render_fn()
+    else:
+        st.caption("Tick to load — kept lazy so a large store doesn't slow the panel.")
+
+
+def _paged(items: list, key: str) -> list:
+    """First page of a long list, with a 'Show all' toggle."""
+    if len(items) <= _PANEL_PAGE:
+        return items
+    if st.session_state.get(key):
+        return items
+    if st.button(f"Show all {len(items)} (first {_PANEL_PAGE} shown)", key=f"btn::{key}"):
+        st.session_state[key] = True
+        st.rerun()
+    return items[:_PANEL_PAGE]
+
+
+def _script_block(script: str, full_hint: str) -> None:
+    script = (script or "").strip()
+    if not script:
+        return
+    st.markdown("**working script:**")
+    if len(script) > _SCRIPT_PREVIEW_CHARS:
+        st.code(script[:_SCRIPT_PREVIEW_CHARS]
+                + f"\n# … truncated — full script via {full_hint}",
+                language="python")
+    else:
+        st.code(script, language="python")
+
+
+def _render_bank_section() -> None:
+    """Script bank — episodic memory of successful analysis scripts.
+
+    Lists banked scripts with their cross-session usage stats; a record
+    proven across sessions (★) can be promoted into distill staging, where
+    the existing review-gated upgrade/consolidate ceremony turns it into a
+    skill. Inspection and pruning are always available.
+    """
+    from scilink.skills._shared import _script_bank
+
+    st.markdown("---")
+    st.markdown("**Script bank** — proven analysis scripts, retrieved & adapted on new data")
+    st.caption(
+        "Every approved analysis banks its working script with a fingerprint "
+        "of the data it solved; later runs retrieve the closest match as a "
+        "starting point, and real-time mode can cold-start a campaign from "
+        "one. Records that keep succeeding across sessions (★) are "
+        "evidence-backed skill candidates — promote one to send it into the "
+        "staged-knowledge review path above."
+    )
+
+    try:
+        rows = _script_bank.bank_summary()
+    except Exception as e:  # noqa: BLE001
+        st.error(f"Could not read the script bank: {e}")
+        return
+    if not rows:
+        st.caption("No banked scripts yet — they accumulate as analyses succeed.")
+        return
+
+    threshold = _script_bank.proven_n()
+    by_domain: dict = {}
+    for r in rows:
+        by_domain.setdefault(r["domain"], []).append(r)
+
+    for domain, recs in sorted(by_domain.items()):
+        n_proven = sum(1 for r in recs if r["proven"])
+        star = f", ★ {n_proven} proven" if n_proven else ""
+        with st.expander(f"`{domain}` — {len(recs)} banked{star}", expanded=False):
+            for r in _paged(recs, f"bankpage::{domain}"):
+                metric = r["metric"]
+                mtxt = (f" · {metric['name']}={metric['value']}"
+                        if isinstance(metric, dict) and metric.get("value") is not None
+                        else "")
+                badge = "★ proven" if r["proven"] else \
+                    f"{r['n_successes']}/{threshold} sessions"
+                if r["promoted_to_staging"]:
+                    badge += " · ✓ promoted"
+                meta_col, view_col, act_col = st.columns([4, 1, 1])
+                meta_col.caption(
+                    f"id={r['id']} · {badge} · retrieved {r['n_retrievals']}×{mtxt}\n\n"
+                    f"{r['label'][:110]}"
+                )
+                with view_col.popover("View", width="stretch"):
+                    def _load(domain=domain, rid=r["id"]):
+                        rec = _script_bank.get_record(domain, rid)
+                        if rec:
+                            _render_bank_record(rec)
+                        else:
+                            st.error("Record unreadable.")
+                    _lazy_content(f"banklazy::{domain}/{r['id']}", _load)
+                with act_col.popover("···", width="stretch"):
+                    if st.button(
+                        "Promote → staged knowledge",
+                        key=f"bankprom::{domain}/{r['id']}",
+                        disabled=bool(r["promoted_to_staging"]),
+                        help=("Already promoted." if r["promoted_to_staging"] else
+                              "Copies this script into the staged-knowledge "
+                              "buffer above for the review-gated skill path. "
+                              "The bank record is kept."),
+                    ):
+                        out = _script_bank.promote_to_staging(domain, r["id"])
+                        if out.get("status") == "success":
+                            st.success(f"Staged as {out['staged_id']} "
+                                       f"[{out['technique']}] — review above.")
+                        else:
+                            st.error(out.get("message", "Promotion failed."))
+                        st.rerun()
+                    if st.button("Delete record",
+                                 key=f"bankdel::{domain}/{r['id']}"):
+                        _script_bank.remove_records(domain, [r["id"]])
+                        st.rerun()
+
+
+# Bank bookkeeping keys not worth echoing in the per-record viewer.
+_BANK_HIDDEN_KEYS = {"id", "domain", "script_hash", "working_script"}
+
+
+def _render_bank_record(rec: dict) -> None:
+    """Show one bank record's matching tiers, stats, and script."""
+    for k, v in rec.items():
+        if k in _BANK_HIDDEN_KEYS or v in (None, "", [], {}):
+            continue
+        st.markdown(f"**{k.replace('_', ' ')}:** {v}")
+    _script_block(rec.get("working_script"),
+                  f"`scilink memory bank-show {rec.get('domain')}/{rec.get('id')}`")
+
+
 # Bookkeeping keys not worth showing in the per-record viewer.
 _STAGED_HIDDEN_KEYS = {"id", "domain", "technique", "session", "working_script", "script"}
 
@@ -328,10 +477,8 @@ def _render_staged_record(r: dict) -> None:
         if k in _STAGED_HIDDEN_KEYS or v in (None, "", [], {}):
             continue
         st.markdown(f"**{k.replace('_', ' ')}:** {v}")
-    script = (r.get("working_script") or r.get("script") or "").strip()
-    if script:
-        st.markdown("**working script:**")
-        st.code(script, language="python")
+    _script_block(r.get("working_script") or r.get("script"),
+                  "the staging record file")
 
 
 def _render_memory_row(_memory, r, *, provisional: bool) -> None:
@@ -346,10 +493,13 @@ def _render_memory_row(_memory, r, *, provisional: bool) -> None:
         if r.get("provenance"):
             st.caption(f"provenance: {r['provenance']}"
                        + (f" · session: {r['session']}" if r.get("session") else ""))
-        try:
-            st.markdown(_memory.show_memory(r["domain"], r["name"]))
-        except Exception as e:
-            st.warning(f"Could not render skill: {e}")
+
+        def _load_md(domain=r["domain"], name=r["name"]):
+            try:
+                st.markdown(_memory.show_memory(domain, name))
+            except Exception as e:  # noqa: BLE001
+                st.warning(f"Could not render skill: {e}")
+        _lazy_content(f"skilllazy::{ref}", _load_md)
 
         from scilink.skills import loader
         mem_on = loader.memory_enabled()
@@ -362,6 +512,14 @@ def _render_memory_row(_memory, r, *, provisional: bool) -> None:
                                "until you turn it on.")):
                 _memory.promote_memory(r["domain"], r["name"])
                 st.success(f"Promoted {ref} — now auto-routable.")
+                st.rerun()
+        else:
+            if c1.button("Demote", key=f"demote::{ref}",
+                         help=("Set back to provisional — taken out of the "
+                               "auto-routing menu (still explicitly loadable) "
+                               "until you re-promote it.")):
+                _memory.demote_memory(r["domain"], r["name"])
+                st.warning(f"Demoted {ref} to provisional.")
                 st.rerun()
         if c2.button("Prune", key=f"prune::{ref}"):
             _memory.prune_memory(r["domain"], r["name"])

@@ -64,6 +64,7 @@ def create_unified_curve_fitting_pipeline(
     max_verification_iterations: int = 7,
     parallel_workers: int | None = None,
     load_skills_fn: Callable | None = None,
+    profile: str | None = None,
 ) -> List:
     """
     Factory function to create the unified curve fitting pipeline.
@@ -133,6 +134,49 @@ def create_unified_curve_fitting_pipeline(
     Returns:
         List of controller instances to execute in sequence
     """
+    # REALTIME profile (#346 step 3): the per-frame in-situ pipeline. Every
+    # LLM stage is omitted — no skill suggestion, planning, plan validation,
+    # literature, adaptive refit, trend, or synthesis. The locked config is
+    # seeded from the anchor run by the agent before the pipeline starts, and
+    # the series controller's reuse path executes the locked script under the
+    # arithmetic gate (verification is bypassed via
+    # max_verification_iterations=0). Zero LLM calls on the happy path; the
+    # fallback (prior script cannot execute) costs a single generation.
+    if profile == "realtime":
+        realtime_pipeline = [
+            AnalyzeDataController(logger, plot_fn),
+            UnifiedSeriesProcessingController(
+                model=model,
+                logger=logger,
+                generation_config=generation_config,
+                safety_settings=safety_settings,
+                parse_fn=parse_fn,
+                executor=executor,
+                script_instructions=FITTING_SCRIPT_INSTRUCTIONS,
+                correction_instructions=FITTING_SCRIPT_CORRECTION_INSTRUCTIONS,
+                quality_instructions=FIT_QUALITY_ASSESSMENT_INSTRUCTIONS,
+                output_dir=output_dir,
+                plot_fn=plot_fn,
+                r2_threshold=r2_threshold,
+                max_model_retries=max_model_retries,
+                enable_human_feedback=False,
+                outlier_sigma=outlier_sigma,
+                max_verification_iterations=0,
+                conformance_instructions=None,
+                parallel_workers=parallel_workers,
+                replanner=None,
+            ),
+            StoreAnalysisResultsController(logger, store_fn),
+            GenerateCurveFittingReportController(
+                logger, output_dir, r2_threshold=r2_threshold),
+            UnifiedCurveReportController(logger, output_dir),
+        ]
+        logger.info(
+            f"Realtime curve pipeline created: {len(realtime_pipeline)} steps "
+            f"(zero-LLM happy path)"
+        )
+        return realtime_pipeline
+
     pipeline = []
 
     # Step 1: Analyze first spectrum data (compute stats, initial plot)

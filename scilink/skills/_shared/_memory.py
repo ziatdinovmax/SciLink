@@ -176,6 +176,51 @@ def promote_memory(
     }
 
 
+def demote_memory(domain: str, name: str, *, root: Optional[Path] = None) -> Dict[str, Any]:
+    """Demote a skill back to provisional — the reverse of ``promote_memory``.
+
+    Sets ``provisional: true`` in the YAML frontmatter (section bodies stay
+    byte-for-byte unchanged), taking the skill OUT of the auto-routing menu
+    while keeping it explicitly loadable and reviewable. For a skill that
+    turned out to mis-route or needs another look before it keeps
+    auto-applying.
+    """
+    root = root or graduated_skills_dir()
+    md = _bundle_path(domain, name, root=root)
+    if not md.exists():
+        raise FileNotFoundError(f"No skill bundle: {domain}/{name}")
+
+    import yaml
+
+    text = md.read_text()
+    match = _FRONTMATTER_BLOCK_RE.match(text)
+    if match:
+        meta = yaml.safe_load(match.group(1)) or {}
+        if not isinstance(meta, dict):
+            meta = {}
+        meta = dict(meta)
+        body = text[match.end():]
+    else:
+        meta = {}
+        body = text
+    meta["provisional"] = True
+    frontmatter = yaml.safe_dump(
+        meta,
+        default_flow_style=False,
+        sort_keys=False,
+        allow_unicode=True,
+        width=10_000,
+    ).strip()
+    md.write_text(f"---\n{frontmatter}\n---\n{body}")
+    return {
+        "status": "success",
+        "name": name,
+        "domain": domain,
+        "path": str(md),
+        "provisional": True,
+    }
+
+
 def prune_memory(domain: str, name: str, *, root: Optional[Path] = None) -> Dict[str, Any]:
     """Delete a persisted skill bundle directory."""
     root = root or graduated_skills_dir()
