@@ -969,13 +969,6 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Compile results
         final_results = self._compile_results(state)
 
-        # Save final results
-        results_path = self.output_dir / "analysis_results.json"
-        with open(results_path, 'w') as f:
-            # Make serializable
-            serializable = self._make_serializable(final_results)
-            json.dump(serializable, f, indent=2, default=str)
-
         # Save fitting scripts for reproducibility
         self._save_fitting_scripts(state)
 
@@ -998,6 +991,15 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         banked = self._maybe_bank_scripts(state)
         if banked:
             final_results["banked_scripts"] = banked
+
+        # Save final results AFTER the memory hooks so the persisted JSON
+        # carries staged_solutions / banked_scripts, matching the returned
+        # dict (they were previously written before the hooks and silently
+        # missing from the file).
+        results_path = self.output_dir / "analysis_results.json"
+        with open(results_path, 'w') as f:
+            serializable = self._make_serializable(final_results)
+            json.dump(serializable, f, indent=2, default=str)
 
         self.logger.info("")
         self.logger.info("✅ ANALYSIS COMPLETE")
