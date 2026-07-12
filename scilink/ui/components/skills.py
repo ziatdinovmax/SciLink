@@ -172,6 +172,7 @@ def _render_memory_section() -> None:
         st.caption("No persisted skills yet.")
 
     _render_staged_section()
+    _render_bank_section()
 
 
 def _render_staged_section() -> None:
@@ -314,6 +315,104 @@ def _render_staged_section() -> None:
                     st.rerun()
                 if not ready:
                     st.caption(f"Accumulating {len(recs)}/{need} examples before a new skill.")
+
+
+def _render_bank_section() -> None:
+    """Script bank — episodic memory of successful analysis scripts.
+
+    Lists banked scripts with their cross-session usage stats; a record
+    proven across sessions (★) can be promoted into distill staging, where
+    the existing review-gated upgrade/consolidate ceremony turns it into a
+    skill. Inspection and pruning are always available.
+    """
+    from scilink.skills._shared import _script_bank
+
+    st.markdown("---")
+    st.markdown("**Script bank** — proven analysis scripts, retrieved & adapted on new data")
+    st.caption(
+        "Every approved analysis banks its working script with a fingerprint "
+        "of the data it solved; later runs retrieve the closest match as a "
+        "starting point, and real-time mode can cold-start a campaign from "
+        "one. Records that keep succeeding across sessions (★) are "
+        "evidence-backed skill candidates — promote one to send it into the "
+        "staged-knowledge review path above."
+    )
+
+    try:
+        rows = _script_bank.bank_summary()
+    except Exception as e:  # noqa: BLE001
+        st.error(f"Could not read the script bank: {e}")
+        return
+    if not rows:
+        st.caption("No banked scripts yet — they accumulate as analyses succeed.")
+        return
+
+    threshold = _script_bank.proven_n()
+    by_domain: dict = {}
+    for r in rows:
+        by_domain.setdefault(r["domain"], []).append(r)
+
+    for domain, recs in sorted(by_domain.items()):
+        n_proven = sum(1 for r in recs if r["proven"])
+        star = f", ★ {n_proven} proven" if n_proven else ""
+        with st.expander(f"`{domain}` — {len(recs)} banked{star}", expanded=False):
+            for r in recs:
+                metric = r["metric"]
+                mtxt = (f" · {metric['name']}={metric['value']}"
+                        if isinstance(metric, dict) and metric.get("value") is not None
+                        else "")
+                badge = "★ proven" if r["proven"] else \
+                    f"{r['n_successes']}/{threshold} sessions"
+                if r["promoted_to_staging"]:
+                    badge += " · ✓ promoted"
+                meta_col, view_col, act_col = st.columns([4, 1, 1])
+                meta_col.caption(
+                    f"id={r['id']} · {badge} · retrieved {r['n_retrievals']}×{mtxt}\n\n"
+                    f"{r['label'][:110]}"
+                )
+                with view_col.popover("View", width="stretch"):
+                    rec = _script_bank.get_record(domain, r["id"])
+                    if rec:
+                        _render_bank_record(rec)
+                    else:
+                        st.error("Record unreadable.")
+                with act_col.popover("···", width="stretch"):
+                    if st.button(
+                        "Promote → staged knowledge",
+                        key=f"bankprom::{domain}/{r['id']}",
+                        disabled=bool(r["promoted_to_staging"]),
+                        help=("Already promoted." if r["promoted_to_staging"] else
+                              "Copies this script into the staged-knowledge "
+                              "buffer above for the review-gated skill path. "
+                              "The bank record is kept."),
+                    ):
+                        out = _script_bank.promote_to_staging(domain, r["id"])
+                        if out.get("status") == "success":
+                            st.success(f"Staged as {out['staged_id']} "
+                                       f"[{out['technique']}] — review above.")
+                        else:
+                            st.error(out.get("message", "Promotion failed."))
+                        st.rerun()
+                    if st.button("Delete record",
+                                 key=f"bankdel::{domain}/{r['id']}"):
+                        _script_bank.remove_records(domain, [r["id"]])
+                        st.rerun()
+
+
+# Bank bookkeeping keys not worth echoing in the per-record viewer.
+_BANK_HIDDEN_KEYS = {"id", "domain", "script_hash", "working_script"}
+
+
+def _render_bank_record(rec: dict) -> None:
+    """Show one bank record's matching tiers, stats, and script."""
+    for k, v in rec.items():
+        if k in _BANK_HIDDEN_KEYS or v in (None, "", [], {}):
+            continue
+        st.markdown(f"**{k.replace('_', ' ')}:** {v}")
+    script = (rec.get("working_script") or "").strip()
+    if script:
+        st.markdown("**working script:**")
+        st.code(script, language="python")
 
 
 # Bookkeeping keys not worth showing in the per-record viewer.

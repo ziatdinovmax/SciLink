@@ -658,6 +658,137 @@ def record_success(domain: str, rid: str, session: Optional[str] = None,
         pass
 
 
+# ──────────────────────────────────────────────────────────────
+# Management surface + graduation signal
+#
+# The bank is episodic memory; skill graduation is semantic memory. The
+# bridge: records that keep succeeding across sessions ("proven") are the
+# evidence-based graduation candidates — promotion copies one into the
+# distill-staging buffer, where the EXISTING review-gated upgrade /
+# consolidate ceremony applies. The bank record itself is kept (episodic
+# history is not consumed by distillation).
+# ──────────────────────────────────────────────────────────────
+
+#: Cross-session successes at which a record counts as "proven" — the
+#: evidence-based replacement for "climbed to hot once" as a graduation
+#: signal. Overridable via $SCILINK_BANK_PROVEN_N.
+_DEFAULT_PROVEN_N = 3
+
+
+def proven_n() -> int:
+    raw = os.environ.get("SCILINK_BANK_PROVEN_N", "").strip()
+    if raw:
+        try:
+            return max(2, int(raw))
+        except ValueError:
+            pass
+    return _DEFAULT_PROVEN_N
+
+
+def record_label(rec: Dict[str, Any]) -> str:
+    """One-line 'what this script does' for lists (CLI / UI)."""
+    signals = rec.get("technique_signals") or {}
+    outcome = rec.get("outcome") or {}
+    what = (signals.get("model_type") or signals.get("analysis_type")
+            or signals.get("analysis_target") or outcome.get("model_type")
+            or outcome.get("analysis_type") or "(unlabeled script)")
+    return str(what)
+
+
+def bank_summary(domain: Optional[str] = None, *,
+                 root: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """Compact display rows for the management surfaces, proven-first."""
+    threshold = proven_n()
+    rows = []
+    for rec in list_records(domain, root=root):
+        stats = rec.get("stats") or {}
+        metric = (rec.get("outcome") or {}).get("best_metric") \
+            or (rec.get("outcome") or {}).get("metric")
+        rows.append({
+            "domain": rec.get("domain"),
+            "id": rec.get("id"),
+            "label": record_label(rec)[:120],
+            "n_successes": int(stats.get("n_successes", 1) or 1),
+            "n_retrievals": int(stats.get("n_retrievals", 0) or 0),
+            "sessions": rec.get("sessions") or [],
+            "metric": metric,
+            "created_at": rec.get("created_at"),
+            "proven": int(stats.get("n_successes", 1) or 1) >= threshold,
+            "promoted_to_staging": rec.get("promoted_to_staging"),
+        })
+    rows.sort(key=lambda r: (-r["n_successes"], -r["n_retrievals"], r["id"] or ""))
+    return rows
+
+
+def _derive_technique_label(rec: Dict[str, Any]) -> str:
+    import re
+    label = re.sub(r"[^a-z0-9]+", "_", record_label(rec).lower()).strip("_")
+    if len(label) > 48:  # cut at a word boundary, not mid-word
+        label = label[:48].rsplit("_", 1)[0]
+    return label or "uncategorized"
+
+
+def promote_to_staging(domain: str, rid: str, technique: Optional[str] = None,
+                       *, root: Optional[Path] = None,
+                       staging_root: Optional[Path] = None) -> Dict[str, Any]:
+    """Copy a bank record into the distill-staging buffer (graduation path).
+
+    The staged record enters the existing review-gated ceremony (upgrade an
+    existing skill, or consolidate N of a technique into a new one) with
+    provenance ``bank_proven`` and the cross-session evidence attached. The
+    bank record is kept and marked ``promoted_to_staging`` so surfaces show
+    it and repeat promotions are flagged. ``technique`` defaults to a
+    deterministic label derived from the record (no LLM).
+    """
+    from . import _staging
+
+    rec = get_record(domain, rid, root=root)
+    if rec is None:
+        return {"status": "error", "message": f"No bank record {domain}/{rid}."}
+    if rec.get("promoted_to_staging"):
+        return {"status": "error",
+                "message": (f"Record {rid} was already promoted "
+                            f"(staged id {rec['promoted_to_staging']}). "
+                            f"Review it with `scilink memory staged`.")}
+    script = (rec.get("working_script") or "").strip()
+    if not script:
+        return {"status": "error", "message": f"Record {rid} has no script."}
+
+    stats = rec.get("stats") or {}
+    outcome = rec.get("outcome") or {}
+    metric = outcome.get("best_metric") or outcome.get("metric")
+    staged_record: Dict[str, Any] = {
+        "provenance": "bank_proven",
+        "model": record_label(rec),
+        "deviation_from_plan": (
+            f"Proven in the script bank: succeeded in "
+            f"{stats.get('n_successes', 1)} session(s), retrieved "
+            f"{stats.get('n_retrievals', 0)} time(s) "
+            f"(sessions: {', '.join(rec.get('sessions') or [])[:200]})."
+        ),
+        "plan_summary": outcome.get("plan_summary"),
+        "measurement_context": rec.get("measurement_context"),
+        "working_script": script,
+        "session": (rec.get("sessions") or ["?"])[-1],
+        "bank_id": rid,
+    }
+    if isinstance(metric, dict) and metric.get("name") == "r_squared":
+        staged_record["r_squared"] = metric.get("value")
+    elif isinstance(metric, dict) and metric.get("value") is not None:
+        staged_record["quality_score"] = metric.get("value")
+
+    label = technique or _derive_technique_label(rec)
+    sid = _staging.stage_solution(domain, label, staged_record,
+                                  root=staging_root)
+
+    rec["promoted_to_staging"] = sid
+    rec["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    (_domain_dir(domain, root=root) / f"{rid}.json").write_text(
+        json.dumps(rec, indent=2, default=str))
+    return {"status": "success", "staged_id": sid, "technique": label,
+            "domain": domain, "bank_id": rid}
+
+
 def render_exemplar_block(match: Dict[str, Any]) -> str:
     """LLM-facing prompt block offering a retrieved script as an exemplar.
 

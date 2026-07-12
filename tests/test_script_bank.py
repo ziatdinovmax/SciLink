@@ -275,6 +275,64 @@ class TestRetrieval:
             sb.hyperspectral_fingerprint(cube_a, axis2, "eV")) == []
 
 
+class TestManagementSurface:
+    def _seed(self, n_sessions=1, script="import numpy as np\n# proven\n"):
+        rid = sb.add_record("curve_fitting", {
+            "working_script": script,
+            "data_fingerprint": {"kind": "curve", "n_points": 100},
+            "measurement_context": {"technique": "Raman"},
+            "technique_signals": {"model_type": "Sum of 3 pseudo-Voigt peaks"},
+            "outcome": {"metric": {"name": "r_squared", "value": 0.99},
+                        "plan_summary": "fit three bands"},
+            "provenance": {"session": "s1"},
+        })["id"]
+        for i in range(1, n_sessions):
+            sb.record_success("curve_fitting", rid, session=f"s{i + 1}")
+        return rid
+
+    def test_bank_summary_shape_and_proven(self):
+        vet = self._seed(n_sessions=3)
+        fresh = self._seed(n_sessions=1, script="# other\n")
+        rows = sb.bank_summary("curve_fitting")
+        assert [r["id"] for r in rows][0] == vet  # proven-first ordering
+        top = rows[0]
+        assert top["proven"] is True and top["n_successes"] == 3
+        assert top["label"].startswith("Sum of 3 pseudo-Voigt")
+        assert top["metric"]["value"] == 0.99
+        assert rows[1]["id"] == fresh and rows[1]["proven"] is False
+
+    def test_proven_n_env_override(self, monkeypatch):
+        rid = self._seed(n_sessions=2)
+        assert sb.bank_summary("curve_fitting")[0]["proven"] is False
+        monkeypatch.setenv("SCILINK_BANK_PROVEN_N", "2")
+        assert sb.bank_summary("curve_fitting")[0]["proven"] is True
+        assert sb.get_record("curve_fitting", rid) is not None
+
+    def test_promote_to_staging_round_trip(self):
+        from scilink.skills._shared import _staging
+        rid = self._seed(n_sessions=3)
+        out = sb.promote_to_staging("curve_fitting", rid)
+        assert out["status"] == "success"
+        assert out["technique"] == "sum_of_3_pseudo_voigt_peaks"
+        staged = _staging.get_staged("curve_fitting", out["staged_id"])
+        assert staged["provenance"] == "bank_proven"
+        assert staged["r_squared"] == 0.99
+        assert "# proven" in staged["working_script"]
+        assert "3 session(s)" in staged["deviation_from_plan"]
+        assert staged["bank_id"] == rid
+        # Bank record kept and marked; repeat promotion refuses.
+        rec = sb.get_record("curve_fitting", rid)
+        assert rec["promoted_to_staging"] == out["staged_id"]
+        again = sb.promote_to_staging("curve_fitting", rid)
+        assert again["status"] == "error" and "already promoted" in again["message"]
+
+    def test_promote_explicit_technique_and_missing(self):
+        rid = self._seed()
+        out = sb.promote_to_staging("curve_fitting", rid, technique="raman_bands")
+        assert out["technique"] == "raman_bands"
+        assert sb.promote_to_staging("curve_fitting", "nope1234")["status"] == "error"
+
+
 class TestBankEnabled:
     def test_follows_memory_switch(self, monkeypatch):
         assert sb.bank_enabled() is True          # SCILINK_MEMORY=1 (fixture)
