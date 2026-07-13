@@ -138,6 +138,44 @@ class TestExtraMeta:
         assert parsed["meta"].get("provenance") == "t2_autodistill"
         assert "print(1)" in parsed["implementation"]
 
+    def test_prose_response_gets_one_corrective_retry(self, tmp_path):
+        """A prose (no-JSON) LLM reply must trigger exactly one retry with
+        the JSON-only contract restated, not crash the caller (seen live:
+        the model narrated the lesson instead of emitting the object)."""
+        prompts = []
+
+        def llm(prompt):
+            prompts.append(prompt)
+            if len(prompts) == 1:
+                return "The recurring lesson across all these records: prose."
+            return VALID_JSON
+
+        result = graduate_to_skill_file(
+            knowledge_entry={"summary": "x"},
+            skill_name="auto_retry",
+            domain="curve_fitting",
+            llm_call=llm,
+            fresh_template="{skill_name} {domain} {knowledge_text}",
+            update_template="{skill_name} {existing_skill} {new_knowledge}",
+            skills_root=tmp_path,
+        )
+        assert result["status"] == "success"
+        assert len(prompts) == 2
+        assert prompts[1].startswith("Respond with ONLY a single JSON object")
+        assert prompts[0] in prompts[1]  # original prompt is preserved
+
+    def test_prose_twice_raises_cleanly(self, tmp_path):
+        with pytest.raises(ValueError, match="No JSON object"):
+            graduate_to_skill_file(
+                knowledge_entry={"summary": "x"},
+                skill_name="auto_retry2",
+                domain="curve_fitting",
+                llm_call=_fake_llm("still prose, no object"),
+                fresh_template="{skill_name} {domain} {knowledge_text}",
+                update_template="{skill_name} {existing_skill} {new_knowledge}",
+                skills_root=tmp_path,
+            )
+
 
 # ──────────────────────────────────────────────────────────────
 # ase-free import + shim back-compat

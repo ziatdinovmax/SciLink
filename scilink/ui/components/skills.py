@@ -366,18 +366,24 @@ def _render_staged_section() -> None:
                         T2_CONSOLIDATION_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS)
                     for rid in sids:
                         _staging.relabel_staged(domain, rid, norm_label)
-                    with st.spinner(
-                            f"Distilling {len(selected)} records into "
-                            f"`auto_{norm_label}` — typically 1–3 min. "
-                            f"Leave this tab open..."):
-                        res = _staging.consolidate_technique(
-                            domain, norm_label, llm_call=_llm_call,
-                            consolidation_template=T2_CONSOLIDATION_INSTRUCTIONS,
-                            update_template=SKILL_UPDATE_INSTRUCTIONS)
-                    st.success(f"Consolidated {res.get('n_examples')} → "
-                               f"auto_{norm_label} (provisional — approve it "
-                               f"in Skills below).")
-                    st.rerun()
+                    try:
+                        with st.spinner(
+                                f"Distilling {len(selected)} records into "
+                                f"`auto_{norm_label}` — typically 1–3 min. "
+                                f"Leave this tab open..."):
+                            res = _staging.consolidate_technique(
+                                domain, norm_label, llm_call=_llm_call,
+                                consolidation_template=T2_CONSOLIDATION_INSTRUCTIONS,
+                                update_template=SKILL_UPDATE_INSTRUCTIONS)
+                    except Exception as e:  # noqa: BLE001 — LLM output is untrusted
+                        st.error(f"Consolidation failed — no skill was "
+                                 f"written; the records are unchanged. "
+                                 f"Try again. ({e})")
+                    else:
+                        st.success(f"Consolidated {res.get('n_examples')} → "
+                                   f"auto_{norm_label} (provisional — approve "
+                                   f"it in Skills below).")
+                        st.rerun()
             else:
                 persistent = {s["name"] for s in _memory.list_memory(domain=domain)}
                 targets = [f"{domain}/{n}" for n in sorted(persistent)]
@@ -437,17 +443,22 @@ def _render_staged_section() -> None:
                             shutil.copy(_SKILLS_DIR / td / tn / f"{tn}.md",
                                         tmp_root / td / tn / f"{tn}.md")
                             skills_root = tmp_root
-                        with st.spinner(
-                                f"Building the merged `{td}/{tn}` for review "
-                                f"— typically 1–3 min. Nothing is written "
-                                f"until you Apply..."):
-                            prop = _staging.propose_skill_upgrade(
-                                domain, sids, target_domain=td, target_name=tn,
-                                llm_call=_llm_call,
-                                fresh_template=KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
-                                update_template=SKILL_UPDATE_INSTRUCTIONS,
-                                skills_root=skills_root)
-                        if prop.get("status") == "success":
+                        try:
+                            with st.spinner(
+                                    f"Building the merged `{td}/{tn}` for review "
+                                    f"— typically 1–3 min. Nothing is written "
+                                    f"until you Apply..."):
+                                prop = _staging.propose_skill_upgrade(
+                                    domain, sids, target_domain=td, target_name=tn,
+                                    llm_call=_llm_call,
+                                    fresh_template=KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
+                                    update_template=SKILL_UPDATE_INSTRUCTIONS,
+                                    skills_root=skills_root)
+                        except Exception as e:  # noqa: BLE001 — LLM output is untrusted
+                            st.error(f"Could not build the upgrade — nothing "
+                                     f"was written. Try again. ({e})")
+                            prop = None
+                        if prop and prop.get("status") == "success":
                             prop["builtin_target"] = builtin_target
                             if matches.get(tgt) is False:
                                 prop.setdefault("regression_warnings", []).append(
@@ -455,9 +466,9 @@ def _render_staged_section() -> None:
                                     "context does not match this skill's "
                                     "routing — confirm this upgrade belongs here")
                             st.session_state[prop_key] = prop
-                        else:
+                            st.rerun()
+                        elif prop:
                             st.error(prop.get("message", "Could not build upgrade."))
-                        st.rerun()
 
             # ── review block (upgrade proposal) ──
             prop = st.session_state.get(prop_key)
