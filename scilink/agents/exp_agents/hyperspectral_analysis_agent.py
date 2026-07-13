@@ -424,20 +424,21 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # later attempt approved) for review-gated skill distillation —
         # brings hyperspectral into the same T=2 flywheel as curve/image.
         # Failure-isolated; SCILINK_T2_AUTODISTILL=0 disables.
-        staged = self._maybe_stage_t2_solutions(
-            response.get("dynamic_analysis_records") or [], skill_state
-        )
-        if staged:
-            response["staged_solutions"] = staged
-
         # Bank every approved working script as episodic memory (script bank,
-        # #346) — deterministic, no LLM, failure-isolated.
+        # #346) — deterministic, no LLM, failure-isolated. Runs BEFORE T=2
+        # staging so a hot win is nominated by promoting its bank record.
         banked = self._maybe_bank_scripts(
             response.get("dynamic_analysis_records") or [], skill_state,
             data_path, system_info,
         )
         if banked:
             response["banked_scripts"] = banked
+
+        staged = self._maybe_stage_t2_solutions(
+            response.get("dynamic_analysis_records") or [], skill_state
+        )
+        if staged:
+            response["staged_solutions"] = staged
 
         self._log_action(
             action="analyze",
@@ -522,7 +523,23 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "working_script": rec["script"],
                     "session": self.output_dir.name,
                 }
-                sid = _staging.stage_solution("hyperspectral", technique, record)
+                # Unified path (see curve agent): promote the fresh bank
+                # record; legacy direct staging when the bank is disabled.
+                from scilink.skills._shared import _script_bank
+                sid = None
+                bank_rec = (_script_bank.find_by_script("hyperspectral", rec["script"])
+                            if _script_bank.bank_enabled() else None)
+                if bank_rec is not None:
+                    out = _script_bank.promote_to_staging(
+                        "hyperspectral", bank_rec["id"], technique=technique,
+                        provenance="t2_hot_win",
+                        extra={k: v for k, v in record.items()
+                               if k not in ("working_script", "session")},
+                    )
+                    if out.get("status") == "success":
+                        sid = out["staged_id"]
+                if sid is None:
+                    sid = _staging.stage_solution("hyperspectral", technique, record)
                 staged.append(sid)
                 self.logger.info(
                     f"   🧠 Staged hot-retry hyperspectral solution "
