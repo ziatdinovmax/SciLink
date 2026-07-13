@@ -30,6 +30,8 @@ from ._graduation import graduate_to_skill_file, safe_path_component, warn_if_ep
 # t2_solution/error_fix/user_correction; these are for user-facing display only).
 PROVENANCE_LABELS = {
     "t2_solution": "solved from scratch",
+    "t2_hot_win": "solved from scratch (banked)",
+    "bank_proven": "proven across sessions",
     "error_fix": "error fix",
     "user_correction": "your feedback",
 }

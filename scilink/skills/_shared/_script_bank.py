@@ -739,9 +739,18 @@ def _derive_technique_label(rec: Dict[str, Any]) -> str:
     return label or "uncategorized"
 
 
+def find_by_script(domain: str, script: str, *,
+                   root: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+    """The bank record holding this exact script (whitespace-insensitive)."""
+    hit = _find_by_hash(domain, script_hash(script or ""), root=root)
+    return hit[0] if hit else None
+
+
 def promote_to_staging(domain: str, rid: str, technique: Optional[str] = None,
                        *, root: Optional[Path] = None,
-                       staging_root: Optional[Path] = None) -> Dict[str, Any]:
+                       staging_root: Optional[Path] = None,
+                       provenance: str = "bank_proven",
+                       extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Copy a bank record into the distill-staging buffer (graduation path).
 
     The staged record enters the existing review-gated ceremony (upgrade an
@@ -774,7 +783,7 @@ def promote_to_staging(domain: str, rid: str, technique: Optional[str] = None,
     outcome = rec.get("outcome") or {}
     metric = outcome.get("best_metric") or outcome.get("metric")
     staged_record: Dict[str, Any] = {
-        "provenance": "bank_proven",
+        "provenance": provenance,
         "model": record_label(rec),
         "deviation_from_plan": (
             f"Proven in the script bank: succeeded in "
@@ -788,6 +797,11 @@ def promote_to_staging(domain: str, rid: str, technique: Optional[str] = None,
         "session": (rec.get("sessions") or ["?"])[-1],
         "bank_id": rid,
     }
+    # Nomination-specific fields (e.g. a T=2 hot win's contrastive
+    # planned-vs-final story) ride along into the staged record.
+    for k, v in (extra or {}).items():
+        if v is not None:
+            staged_record[k] = v
     if isinstance(metric, dict) and metric.get("name") == "r_squared":
         staged_record["r_squared"] = metric.get("value")
     elif isinstance(metric, dict) and metric.get("value") is not None:
@@ -798,6 +812,7 @@ def promote_to_staging(domain: str, rid: str, technique: Optional[str] = None,
                                   root=staging_root)
 
     rec["promoted_to_staging"] = sid
+    rec["promoted_reason"] = provenance
     rec["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     (_domain_dir(domain, root=root) / f"{rid}.json").write_text(
         json.dumps(rec, indent=2, default=str))
