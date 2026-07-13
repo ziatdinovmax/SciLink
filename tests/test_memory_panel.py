@@ -248,11 +248,13 @@ def test_panel_badges_verbs_and_crosslinks(tmp_path, monkeypatch):
     at = AppTest.from_string(PANEL_SCRIPT, default_timeout=60)
     at.run()
     captions = "\n".join(c.value for c in at.caption)
+    row_labels = "\n".join(c.label for c in at.checkbox)  # selection rows
+    text = captions + "\n" + row_labels
     # three knowledge-type badges in the inbox
-    assert "📜" in captions and "🐛" in captions and "💬" in captions
+    assert "📜" in text and "🐛" in text and "💬" in text
     # cross-links both ways
-    assert f"from bank `{rid}`" in captions and "succeeded in 3 sessions" in captions
-    assert f"in review inbox (`{sid}`)" in captions
+    assert f"from bank `{rid}`" in text and "succeeded in 3 sessions" in text
+    assert f"in review inbox (`{sid}`)" in text
     # one verb per pipeline stage
     labels = [b.label for b in at.button]
     assert any("Nominate for review" in l for l in labels)

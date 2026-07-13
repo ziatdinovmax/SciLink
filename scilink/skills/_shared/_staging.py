@@ -143,6 +143,29 @@ def get_staged(domain: str, sid: str, *, root: Optional[Path] = None) -> Optiona
         return None
 
 
+def relabel_staged(domain: str, sid: str, technique: str, *,
+                   root: Optional[Path] = None) -> Dict[str, Any]:
+    """Move a staged record to a different technique group.
+
+    Technique labels are assigned at staging time (LLM or user), but the
+    grouping they produce is what consolidation/upgrade operate on — so the
+    user must be able to reassemble groups (e.g. pull a session's error
+    lesson into the technique group its script was nominated under).
+    The label is normalized the same way as assigned labels.
+    """
+    import re
+    rec = get_staged(domain, sid, root=root)
+    if rec is None:
+        return {"status": "error", "message": f"No staged record {domain}/{sid}."}
+    label = re.sub(r"[^a-z0-9]+", "_", str(technique).lower()).strip("_")[:48]
+    if not label:
+        return {"status": "error", "message": "Empty technique label."}
+    rec["technique"] = label
+    (_domain_dir(domain, root=root) / f"{sid}.json").write_text(
+        json.dumps(rec, indent=2, default=str))
+    return {"status": "success", "technique": label, "id": sid}
+
+
 def remove_staged(domain: str, ids: List[str], *, root: Optional[Path] = None) -> int:
     """Delete staged records by id; return count removed."""
     d = _domain_dir(domain, root=root)

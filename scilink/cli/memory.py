@@ -368,6 +368,16 @@ def _cmd_consolidate(args) -> int:
     return 0
 
 
+def _cmd_move_staged(args) -> int:
+    domain, sid = _split_ref(args.ref)
+    out = _staging.relabel_staged(domain, sid, args.to_technique)
+    if out.get("status") != "success":
+        print(f"❌ {out.get('message')}")
+        return 1
+    print(f"📦 Moved staged {sid} → technique [{out['technique']}].")
+    return 0
+
+
 def _cmd_prune_staged(args) -> int:
     domain, sid = _split_ref(args.ref)
     if not args.yes:
@@ -591,6 +601,14 @@ def main():
     p_con.add_argument("ref", help="Technique ref '<domain>/<technique>'")
     _add_model_args(p_con)
     p_con.set_defaults(func=_cmd_consolidate)
+
+    p_mv = sub.add_parser(
+        "move-staged", help="Move a staged record to a different technique "
+                            "group (regroup before consolidate/upgrade)")
+    p_mv.add_argument("ref", help="Staged record ref '<domain>/<id>'")
+    p_mv.add_argument("--to", required=True, dest="to_technique",
+                      help="Target technique label")
+    p_mv.set_defaults(func=_cmd_move_staged)
 
     p_ps = sub.add_parser("prune-staged", help="Delete a staged solution")
     p_ps.add_argument("ref", help="Staged solution ref '<domain>/<id>'")
