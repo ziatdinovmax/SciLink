@@ -536,14 +536,6 @@ _PANEL_PAGE = 15
 _SCRIPT_HARD_CAP = 120_000
 
 
-def _lazy_content(key: str, render_fn) -> None:
-    """Render heavy content only when the user asks for it."""
-    if st.checkbox("Load full content", key=key):
-        render_fn()
-    else:
-        st.caption("Tick to load — kept lazy so a large store doesn't slow the panel.")
-
-
 def _paged(items: list, key: str) -> list:
     """First page of a long list, with a 'Show all' toggle."""
     if len(items) <= _PANEL_PAGE:
@@ -821,12 +813,13 @@ def _render_memory_row(_memory, r, *, provisional: bool) -> None:
             st.caption(f"provenance: {r['provenance']}"
                        + (f" · session: {r['session']}" if r.get("session") else ""))
 
-        def _load_md(domain=r["domain"], name=r["name"]):
+        # One click shows the whole skill (same pattern as the bank's View
+        # toggle); still lazy — nothing renders while off.
+        if st.toggle("View", key=f"skilllazy::{ref}"):
             try:
-                st.markdown(_memory.show_memory(domain, name))
+                st.markdown(_memory.show_memory(r["domain"], r["name"]))
             except Exception as e:  # noqa: BLE001
                 st.warning(f"Could not render skill: {e}")
-        _lazy_content(f"skilllazy::{ref}", _load_md)
 
         # Manual curation: persistent skills are the user's own store, so a
         # direct edit (validated, with a .bak backup) is fair game. Built-ins

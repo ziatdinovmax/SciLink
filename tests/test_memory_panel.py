@@ -3,8 +3,9 @@
 Guards the panel's performance contract: Streamlit renders popover/expander
 content eagerly on every rerun, so with many memory records the panel used to
 re-read every file and re-highlight every script per chat interaction (the
-observed slowdown). Heavy content must load only behind the explicit
-'Load full content' tick, and long lists must paginate.
+observed slowdown). Heavy content must load only behind an explicit
+one-click viewer (View toggle / record inspector), and long lists must
+paginate.
 
 Uses streamlit.testing.v1.AppTest (no browser); skipped when streamlit is
 not installed.
