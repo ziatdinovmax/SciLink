@@ -284,12 +284,19 @@ def _cmd_upgrade(args) -> int:
     from scilink.agents.exp_agents.instruct import (
         KNOWLEDGE_TO_SKILL_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS,
     )
-    domain, sid = _split_ref(args.ref)  # staged ref = <domain>/<id>
+    refs = [_split_ref(r) for r in args.refs]  # staged refs = <domain>/<id>
+    domain = refs[0][0]
+    if any(d != domain for d, _ in refs):
+        print("❌ All staged refs must be from ONE domain.")
+        return 1
+    sids = [sid for _, sid in refs]
+    sid = sids[0]  # display shorthand
     tdomain, tname = _split_ref(args.into)
 
-    # 1) propose (build the merged skill without writing it)
+    # 1) propose (build the merged skill without writing it) — several refs
+    # merge in one pass, like consolidation but into an EXISTING skill.
     prop = _staging.propose_skill_upgrade(
-        domain, [sid], target_domain=tdomain, target_name=tname,
+        domain, sids, target_domain=tdomain, target_name=tname,
         llm_call=_make_llm_call(args),
         fresh_template=KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
         update_template=SKILL_UPDATE_INSTRUCTIONS,
@@ -308,7 +315,8 @@ def _cmd_upgrade(args) -> int:
             prop["proposed_content"].splitlines(),
             fromfile=f"{tdomain}/{tname} (current)",
             tofile=f"{tdomain}/{tname} (after upgrade)", lineterm="")
-        print(f"\nProposed upgrade of {tdomain}/{tname} from staged {sid}:\n")
+        print(f"\nProposed upgrade of {tdomain}/{tname} from staged "
+              f"{', '.join(sids)}:\n")
         printed = False
         for line in diff:
             printed = True
@@ -333,7 +341,7 @@ def _cmd_upgrade(args) -> int:
     if res.get("status") != "success":
         print(f"❌ {res.get('message', res)}")
         return 1
-    print(f"✅ Upgraded {tdomain}/{tname} from staged {sid}.")
+    print(f"✅ Upgraded {tdomain}/{tname} from staged {', '.join(sids)}.")
     print(f"   {res.get('skill_path')}")
     print(f"   backup: {res.get('backup_path')}")
     return 0
@@ -568,8 +576,11 @@ def main():
     p_staged.add_argument("--domain", help="Restrict to one domain")
     p_staged.set_defaults(func=_cmd_staged)
 
-    p_up = sub.add_parser("upgrade", help="Merge a staged solution INTO an existing skill")
-    p_up.add_argument("ref", help="Staged solution ref '<domain>/<id>'")
+    p_up = sub.add_parser(
+        "upgrade", help="Merge staged solution(s) INTO an existing skill "
+                        "(several refs merge in one pass)")
+    p_up.add_argument("refs", nargs="+",
+                      help="Staged solution ref(s) '<domain>/<id>' (same domain)")
     p_up.add_argument("--into", required=True, help="Target skill '<domain>/<name>'")
     p_up.add_argument("--yes", action="store_true",
                       help="Apply without showing the diff / prompting")

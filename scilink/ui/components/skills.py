@@ -339,10 +339,11 @@ def _render_staged_section() -> None:
                     "Advanced — upgrade an EXISTING skill with one record",
                     expanded=False):
                 st.caption(
-                    "Instead of a new skill, fold a single record's lesson "
-                    "into a skill that already exists (e.g. an error fix "
-                    "into the technique's main skill). Additive — you "
-                    "review the diff before anything is written."
+                    "Instead of a new skill, fold these records' lessons "
+                    "into a skill that already exists (e.g. this group into "
+                    "the technique's main skill) — merged in ONE pass, so "
+                    "the model sees all selected records together. Additive; "
+                    "you review the diff before anything is written."
                 )
                 if not targets:
                     st.caption("No skills in this domain to upgrade.")
@@ -357,18 +358,30 @@ def _render_staged_section() -> None:
                         return (f"{_icon.get(prov, '📜')} {i} · "
                                 f"{_staging.PROVENANCE_LABELS.get(prov, prov or '?')}")
 
-                    sid = st.selectbox(
-                        "Record to merge (the ONE lesson to fold in)",
+                    # Any number of records merge in ONE pass — the model
+                    # sees them together (like consolidation) instead of N
+                    # blind sequential upgrades. Default: the whole group.
+                    sids = st.multiselect(
+                        "Records to merge (their lessons fold in together)",
                         [r["id"] for r in recs],
+                        default=[r["id"] for r in recs],
                         format_func=_fmt_rec,
                         key=f"upsrc::{domain}/{technique}")
-                    sel_rec = next(r for r in recs if r["id"] == sid)
+                    sel_recs = [r for r in recs if r["id"] in sids]
                     # Order targets by technique relevance to the selected
-                    # record so an unrelated skill can't be the silent default.
+                    # records so an unrelated skill can't be the silent default.
                     def _tname(t):
                         return t.split("/", 1)[1].split(" (built-in", 1)[0]
-                    matches = {t: _target_matches_record(sel_rec, domain, _tname(t))
-                               for t in targets}
+
+                    def _group_match(t):
+                        votes = [_target_matches_record(r, domain, _tname(t))
+                                 for r in (sel_recs or recs)]
+                        if any(v is True for v in votes):
+                            return True
+                        if all(v is False for v in votes):
+                            return False
+                        return None
+                    matches = {t: _group_match(t) for t in targets}
                     ordered = sorted(targets, key=lambda t: {True: 0, None: 1,
                                                              False: 2}[matches[t]])
                     tgt = st.selectbox("Into skill", ordered,
@@ -380,8 +393,11 @@ def _render_staged_section() -> None:
                             f"routing — upgrading would pollute an unrelated "
                             f"skill. Double-check before previewing."
                         )
-                    if st.button("Preview upgrade", key=f"up::{domain}/{technique}",
-                                 disabled=not mem_on,
+                    if st.button(
+                            f"Preview upgrade ({len(sids)} record"
+                            f"{'s' if len(sids) != 1 else ''} → {_tname(tgt)})",
+                            key=f"up::{domain}/{technique}",
+                            disabled=(not mem_on) or not sids,
                                  help=("Builds the merged skill for review — "
                                        "one large model call, typically 1–3 "
                                        "min. Writes nothing." if mem_on else
@@ -410,7 +426,7 @@ def _render_staged_section() -> None:
                                 f"— one large model call, typically 1–3 min. "
                                 f"Nothing is written until you Apply..."):
                             prop = _staging.propose_skill_upgrade(
-                                domain, [sid], target_domain=td, target_name=tn,
+                                domain, sids, target_domain=td, target_name=tn,
                                 llm_call=_llm_call,
                                 fresh_template=KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
                                 update_template=SKILL_UPDATE_INSTRUCTIONS,
