@@ -25,6 +25,8 @@ from typing import Dict, Any, List, Optional, Tuple
 
 import ase.data
 
+from ..._shared._spec import ToolSpec
+
 logger = logging.getLogger(__name__)
 
 
@@ -126,6 +128,25 @@ def check_lammps() -> Dict[str, Any]:
         except Exception:
             pass
     return result
+
+
+def default_run_command(script: str = "{script}") -> Optional[str]:
+    """Conventional local LAMMPS run-command template for the on-PATH binary.
+
+    Resolves the first available LAMMPS binary (lmp / lmp_serial / lmp_mpi) and
+    returns ``"<binary> -in {script}"`` — the invocation the refinement loop
+    fills with each phase's deck filename. The engine's own knowledge of how it
+    is launched, so a one-shot workflow can execute LAMMPS without any engine
+    name or command hardcoded in shared code.
+
+    Returns:
+        The run-command template, or ``None`` if no LAMMPS binary is on PATH —
+        the caller should then fall back to a user-supplied ``run_command``.
+    """
+    info = check_lammps()
+    if not info.get("available") or not info.get("path"):
+        return None
+    return f"{info['path']} -in {script}"
 
 
 # ─── Data File Parsing ───────────────────────────────────────────────
@@ -1469,3 +1490,18 @@ def run_with_potential(
     with open(path, "w") as f:
         f.write(head + body)
     return path
+
+
+# ─── Tool specs (resolved via get_tool_function) ─────────────────────
+
+TOOL_SPEC = ToolSpec(
+    name="default_run_command",
+    description=(
+        "Return the conventional local LAMMPS run-command template "
+        "('<lmp> -in {script}') for the first LAMMPS binary on PATH, or None if "
+        "none is found. Lets a one-shot workflow execute LAMMPS with no engine "
+        "name or launch command hardcoded in shared code."
+    ),
+    parameters={},
+    agents=["simulation"],
+)
