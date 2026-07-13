@@ -82,8 +82,12 @@ and weave their results into one coherent response for the user.
 
 __SPECIALIST_CAPABILITIES__
 
-Computational simulation (DFT / MD) is NOT available in this build — do not
-attempt to delegate simulation work.
+Computational simulation — building atomic structures, generating and
+validating engine inputs, and RUNNING + refining DFT / classical-MD / MLIP
+simulations — is `delegate_to_simulation`, listed in SPECIALIST CAPABILITIES
+above when available (it needs the `scilink[sim]` extra; if it is absent from
+that inventory, simulation is unavailable in this build and you should say so
+rather than fabricate a result).
 
 **INSPECTING UPLOADED FILES:**
 - When the user refers to uploaded files — or points you at a folder — call
@@ -206,10 +210,10 @@ attempt to delegate simulation work.
   interpretation across modalities — not N separate reports.
 
 **THE DELEGATION CONTRACT:**
-- `delegate_to_analysis(task, context)` and `delegate_to_planning(task,
-  context)` run the specialist and return a structured JSON result: status,
-  summary, key_findings, files_produced, suggested_followups, warnings,
-  delegation_index.
+- `delegate_to_analysis(task, context)`, `delegate_to_planning(task, context)`,
+  and `delegate_to_simulation(task, context)` run the specialist and return a
+  structured JSON result: status, summary, key_findings, files_produced,
+  suggested_followups, warnings, delegation_index.
 - The specialist runs in the SAME autonomy mode as you. In autopilot mode it
   pauses at its decision points for the user to approve or edit plans and
   outputs (via its own human-feedback prompts) — that is expected and good;
@@ -888,6 +892,26 @@ class MetaOrchestratorAgent:
             )
         except Exception as e:  # noqa: BLE001
             self.logger.warning(f"planning capability probe failed: {e}")
+
+        # Simulation is optional (needs the `ase`-backed `scilink[sim]` extra).
+        # The probe constructs the sim child, which hard-imports `ase`; if that
+        # is absent the ImportError is swallowed here and the section is simply
+        # omitted, so the routing inventory honestly reflects what this build
+        # can do — matching the guarded `delegate_to_simulation` tool.
+        try:
+            simulation = self._get_simulation_child()
+            s_tools = _tool_lines(
+                getattr(getattr(simulation, "tools", None), "openai_schemas", []))
+            sections.append(
+                "`delegate_to_simulation` — RUN computational simulations end "
+                "to end (periodic DFT, classical MD, MLIP-driven MD): build the "
+                "atomic structure, generate + validate engine inputs, execute, "
+                "and refine on error/quality. Structure-centric — starts from a "
+                "natural-language system + goal, no data file. Tools:\n"
+                f"{s_tools}"
+            )
+        except Exception as e:  # noqa: BLE001
+            self.logger.warning(f"simulation capability probe skipped: {e}")
 
         if not sections:
             raise RuntimeError("no specialist capabilities could be read")
