@@ -32,6 +32,7 @@ PROVENANCE_LABELS = {
     "t2_solution": "solved from scratch",
     "t2_hot_win": "solved from scratch (banked)",
     "bank_proven": "proven across sessions",
+    "bank_nominated": "nominated from the bank",
     "error_fix": "error fix",
     "user_correction": "your feedback",
 }

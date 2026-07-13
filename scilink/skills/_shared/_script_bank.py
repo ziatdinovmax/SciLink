@@ -792,11 +792,17 @@ def promote_to_staging(domain: str, rid: str, technique: Optional[str] = None,
     stats = rec.get("stats") or {}
     outcome = rec.get("outcome") or {}
     metric = outcome.get("best_metric") or outcome.get("metric")
+    # The default provenance must not overstate the evidence: "proven"
+    # is reserved for records that actually earned the star (>= proven_n
+    # cross-session successes); an ordinary nomination is just that.
+    if provenance == "bank_proven" and             int(stats.get("n_successes", 1) or 1) < proven_n():
+        provenance = "bank_nominated"
     staged_record: Dict[str, Any] = {
         "provenance": provenance,
         "model": record_label(rec),
         "deviation_from_plan": (
-            f"Proven in the script bank: succeeded in "
+            f"{'Proven in' if provenance == 'bank_proven' else 'Nominated from'} "
+            f"the script bank: succeeded in "
             f"{stats.get('n_successes', 1)} session(s), retrieved "
             f"{stats.get('n_retrievals', 0)} time(s) "
             f"(sessions: {', '.join(rec.get('sessions') or [])[:200]})."

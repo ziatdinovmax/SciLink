@@ -344,6 +344,22 @@ class TestManagementSurface:
         assert second["status"] == "success"
         assert second["staged_id"] != first["staged_id"]
 
+    def test_single_session_nomination_not_labeled_proven(self):
+        """'proven across sessions' is earned (>= proven_n successes) — an
+        ordinary nomination of a once-run record must not claim it."""
+        from scilink.skills._shared import _staging
+        rid = self._seed(n_sessions=1)
+        out = sb.promote_to_staging("curve_fitting", rid)
+        staged = _staging.get_staged("curve_fitting", out["staged_id"])
+        assert staged["provenance"] == "bank_nominated"
+        assert staged["deviation_from_plan"].startswith("Nominated from")
+        # A genuinely proven record keeps the earned label.
+        rid2 = self._seed(n_sessions=3, script="# veteran script")
+        out2 = sb.promote_to_staging("curve_fitting", rid2)
+        staged2 = _staging.get_staged("curve_fitting", out2["staged_id"])
+        assert staged2["provenance"] == "bank_proven"
+        assert staged2["deviation_from_plan"].startswith("Proven in")
+
     def test_promote_explicit_technique_and_missing(self):
         rid = self._seed()
         out = sb.promote_to_staging("curve_fitting", rid, technique="raman_bands")
