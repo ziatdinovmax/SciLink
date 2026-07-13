@@ -435,11 +435,26 @@ def _render_staged_section() -> None:
                     f"**Review upgrade → `{prop['target_domain']}/{prop['target_name']}`** "
                     "— applies in place; the current version is backed up to `.md.bak`."
                 )
-                for w in prop.get("regression_warnings") or []:
+                # Optional hand-tuning of the proposal before applying — when
+                # the merge is 95% right, editing beats another multi-minute
+                # regeneration. The diff and additivity warnings below track
+                # the edited text live.
+                final_content = prop["proposed_content"]
+                if st.toggle("Edit proposal before applying",
+                             key=f"upediton::{domain}/{technique}"):
+                    final_content = st.text_area(
+                        "Proposed skill (editable)", value=prop["proposed_content"],
+                        height=400, key=f"upedit::{domain}/{technique}")
+                from scilink.skills._shared._staging import _regression_warnings
+                for w in _regression_warnings(prop["existing_content"],
+                                              final_content):
                     st.warning(f"Additivity check: {w}")
+                for w in prop.get("regression_warnings") or []:
+                    if "technique mismatch" in w:
+                        st.warning(f"Additivity check: {w}")
                 diff = "\n".join(difflib.unified_diff(
                     prop["existing_content"].splitlines(),
-                    prop["proposed_content"].splitlines(),
+                    final_content.splitlines(),
                     fromfile="current", tofile="after upgrade", lineterm=""))
                 st.code(diff or "(no textual change)", language="diff")
                 a1, a2, _ = st.columns([2, 2, 4])
@@ -459,7 +474,7 @@ def _render_staged_section() -> None:
                         domain, prop["staged_ids"],
                         target_domain=prop["target_domain"],
                         target_name=prop["target_name"],
-                        proposed_content=prop["proposed_content"])
+                        proposed_content=final_content)
                     st.session_state.pop(prop_key, None)
                     if res.get("status") == "success":
                         st.success(f"Upgraded {prop['target_domain']}/{prop['target_name']} "
@@ -775,6 +790,32 @@ def _render_memory_row(_memory, r, *, provisional: bool) -> None:
             except Exception as e:  # noqa: BLE001
                 st.warning(f"Could not render skill: {e}")
         _lazy_content(f"skilllazy::{ref}", _load_md)
+
+        # Manual curation: persistent skills are the user's own store, so a
+        # direct edit (validated, with a .bak backup) is fair game. Built-ins
+        # never appear here — improving one goes through fork + upgrade.
+        if st.toggle("Edit skill", key=f"editon::{ref}"):
+            from scilink.skills.loader import graduated_skills_dir
+            md_path = (graduated_skills_dir() / r["domain"] / r["name"]
+                       / f"{r['name']}.md")
+            try:
+                current = md_path.read_text()
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Could not read skill file: {e}")
+                current = None
+            if current is not None:
+                edited = st.text_area("Skill markdown", value=current,
+                                      height=400, key=f"edit::{ref}")
+                if st.button("Save changes", key=f"editsave::{ref}",
+                             disabled=(edited == current),
+                             help="Validates frontmatter/sections; the "
+                                  "previous version is backed up to .md.bak."):
+                    out = _memory.edit_memory(r["domain"], r["name"], edited)
+                    if out.get("status") == "success":
+                        st.success(f"Saved {ref} (backup: .md.bak).")
+                        st.rerun()
+                    else:
+                        st.error(out.get("message", "Save failed."))
 
         from scilink.skills import loader
         mem_on = loader.memory_enabled()

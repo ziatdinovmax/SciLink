@@ -870,6 +870,44 @@ class TestDemote:
 
 
 # ──────────────────────────────────────────────────────────────
+# Manual skill editing (validated, backed up)
+# ──────────────────────────────────────────────────────────────
+
+class TestEditMemory:
+    def _seed(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCILINK_HOME", str(tmp_path))
+        from scilink.skills.loader import graduated_skills_dir
+        d = graduated_skills_dir() / "curve_fitting" / "sk"
+        d.mkdir(parents=True)
+        md = d / "sk.md"
+        md.write_text("---\ndescription: d\n---\n## overview\noriginal body\n")
+        return md
+
+    def test_edit_round_trip_with_backup(self, tmp_path, monkeypatch):
+        from scilink.skills._shared import _memory
+        md = self._seed(tmp_path, monkeypatch)
+        out = _memory.edit_memory("curve_fitting", "sk",
+                                  "---\ndescription: d2\n---\n## overview\nedited body\n")
+        assert out["status"] == "success"
+        assert "edited body" in md.read_text()
+        assert "original body" in md.with_name("sk.md.bak").read_text()
+
+    def test_edit_rejects_broken_content(self, tmp_path, monkeypatch):
+        from scilink.skills._shared import _memory
+        md = self._seed(tmp_path, monkeypatch)
+        bad_yaml = _memory.edit_memory("curve_fitting", "sk",
+                                       "---\ndescription: [unclosed\n---\n## overview\nx\n")
+        assert bad_yaml["status"] == "error" and "YAML" in bad_yaml["message"]
+        no_section = _memory.edit_memory("curve_fitting", "sk",
+                                         "---\ndescription: d\n---\njust prose\n")
+        assert no_section["status"] == "error" and "section" in no_section["message"]
+        assert "original body" in md.read_text()  # untouched on rejection
+        import pytest as _pytest
+        with _pytest.raises(FileNotFoundError):
+            _memory.edit_memory("curve_fitting", "nope", "## overview\nx\n")
+
+
+# ──────────────────────────────────────────────────────────────
 # Fork built-in skills (copy-on-write) + additivity guard
 # (ships in the feature-skill-fork PR; these activate on its merge)
 # ──────────────────────────────────────────────────────────────

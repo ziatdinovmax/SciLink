@@ -221,6 +221,47 @@ def demote_memory(domain: str, name: str, *, root: Optional[Path] = None) -> Dic
     }
 
 
+def edit_memory(domain: str, name: str, content: str, *,
+                root: Optional[Path] = None) -> Dict[str, Any]:
+    """Overwrite a persistent skill's markdown with user-edited content.
+
+    The manual-curation counterpart of the LLM upgrade: same backup
+    discipline (previous version copied to ``.md.bak``), plus a sanity
+    validation so a hand edit cannot silently break loading — the YAML
+    frontmatter (if present) must parse and at least one ``## section``
+    must remain.
+    """
+    root = root or graduated_skills_dir()
+    md = _bundle_path(domain, name, root=root)
+    if not md.exists():
+        raise FileNotFoundError(f"No skill bundle: {domain}/{name}")
+
+    import re
+    content = content if content.endswith("\n") else content + "\n"
+    match = _FRONTMATTER_BLOCK_RE.match(content)
+    if content.startswith("---") and not match:
+        return {"status": "error",
+                "message": "Frontmatter fence is malformed (--- ... ---)."}
+    if match:
+        import yaml
+        try:
+            meta = yaml.safe_load(match.group(1))
+        except yaml.YAMLError as e:
+            return {"status": "error",
+                    "message": f"Frontmatter is not valid YAML: {e}"}
+        if meta is not None and not isinstance(meta, dict):
+            return {"status": "error",
+                    "message": "Frontmatter must be a YAML mapping."}
+    if not re.search(r"^##\s+\S", content, re.M):
+        return {"status": "error",
+                "message": "The skill needs at least one '## section' heading."}
+
+    backup = md.with_name(md.name + ".bak")
+    backup.write_text(md.read_text())
+    md.write_text(content)
+    return {"status": "success", "path": str(md), "backup_path": str(backup)}
+
+
 def fork_builtin(domain: str, name: str, *, root: Optional[Path] = None) -> Dict[str, Any]:
     """Copy a built-in (package) skill into the persistent store.
 
