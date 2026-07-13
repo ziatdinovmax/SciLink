@@ -259,8 +259,6 @@ def _render_staged_section() -> None:
     for (domain, technique), recs in sorted(groups.items()):
         with st.expander(f"`{domain}/{technique}` — {len(recs)} staged",
                          expanded=False):
-            # ── ONE distill flow ──
-            st.markdown("**Distill**")
             # Selectable records: this group + same-session records filed
             # under other labels (the lessons these very analyses produced).
             sessions = {r.get("session") for r in recs if r.get("session")}
@@ -287,18 +285,10 @@ def _render_staged_section() -> None:
                     label += f" · {r['session']}"
                 return label
 
-            sids = st.multiselect(
-                "Records", [r["id"] for r in pool],
-                default=[r["id"] for r in recs],
-                format_func=_fmt_rec,
-                key=f"upsrc::{domain}/{technique}",
-                help=("Same-session records from other groups are offered "
-                      "too — select them to distill the lessons together."))
-            selected = [by_id[i] for i in sids if i in by_id]
-
-            # Inspector: pick a record to see everything it carries — the
+            # Inspector first — review what a record actually carries (the
             # working script, an error lesson's traceback + fix, or your
-            # feedback text. Lazy: nothing renders until one is picked.
+            # feedback text) before deciding what to distill. Lazy: nothing
+            # renders until one is picked.
             inspect_id = st.selectbox(
                 "Inspect", [r["id"] for r in pool], index=None,
                 format_func=_fmt_rec, label_visibility="collapsed",
@@ -328,6 +318,17 @@ def _render_staged_section() -> None:
             if model is None:
                 st.info("Start a session to enable distillation (needs a model).")
                 continue
+
+            # ── ONE distill flow ──
+            st.markdown("**Distill**")
+            sids = st.multiselect(
+                "Records", [r["id"] for r in pool],
+                default=[r["id"] for r in recs],
+                format_func=_fmt_rec,
+                key=f"upsrc::{domain}/{technique}",
+                help=("Same-session records from other groups are offered "
+                      "too — select them to distill the lessons together."))
+            selected = [by_id[i] for i in sids if i in by_id]
 
             dest = st.radio(
                 "Into", ["a new skill", "an existing skill"],
