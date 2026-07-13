@@ -259,35 +259,42 @@ def _render_staged_section() -> None:
     for (domain, technique), recs in sorted(groups.items()):
         with st.expander(f"`{domain}/{technique}` — {len(recs)} staged",
                          expanded=False):
-            # ── the records ──
-            for r in _paged(recs, f"stagedpage::{domain}/{technique}"):
-                prov_key = r.get("provenance", "t2_solution")
-                prov = _staging.PROVENANCE_LABELS.get(prov_key, prov_key)
-                bank_link = ""
-                if r.get("bank_id"):
-                    from scilink.skills._shared import _script_bank
-                    brec = _script_bank.get_record(domain, r["bank_id"])
-                    n_succ = ((brec or {}).get("stats") or {}).get("n_successes")
-                    bank_link = (f" · from bank `{r['bank_id']}`"
-                                 + (f" (succeeded in {n_succ} sessions)"
-                                    if n_succ and n_succ > 1 else ""))
-                metric = _staging.metric_label(r)
-                meta_col, view_col = st.columns([4, 1])
-                meta_col.caption(
-                    f"{_icon.get(prov_key, '📜')} id=`{r['id']}` · {prov} · "
-                    f"session={r.get('session', '?')}"
-                    + (f" · {metric}" if metric else "") + bank_link)
-                with view_col.popover("View", width="stretch"):
-                    _lazy_content(f"stagedlazy::{r['id']}",
-                                  lambda r=r: _render_staged_record(r))
-                    if st.button("Discard",
-                                 key=f"destage::{domain}/{r['id']}",
-                                 help="Remove from the review inbox without "
-                                      "distilling it. A nominated bank record "
-                                      "becomes nominatable again."):
-                        _staging.remove_staged(domain, [r["id"]])
-                        st.warning(f"De-staged {r['id']}.")
-                        st.rerun()
+            # ── the records, as compact chips: hover = summary tooltip,
+            # click = details + full content + Discard ──
+            paged = _paged(recs, f"stagedpage::{domain}/{technique}")
+            per_row = 4
+            for start in range(0, len(paged), per_row):
+                cols = st.columns(per_row)
+                for col, r in zip(cols, paged[start:start + per_row]):
+                    prov_key = r.get("provenance", "t2_solution")
+                    prov = _staging.PROVENANCE_LABELS.get(prov_key, prov_key)
+                    metric = _staging.metric_label(r)
+                    bank_link = ""
+                    if r.get("bank_id"):
+                        from scilink.skills._shared import _script_bank
+                        brec = _script_bank.get_record(domain, r["bank_id"])
+                        n_succ = ((brec or {}).get("stats") or {}).get("n_successes")
+                        bank_link = (f" · from bank `{r['bank_id']}`"
+                                     + (f" (succeeded in {n_succ} sessions)"
+                                        if n_succ and n_succ > 1 else ""))
+                    summary = (f"{prov} · session={r.get('session', '?')}"
+                               + (f" · {metric}" if metric else ""))
+                    with col:
+                        with st.popover(f"{_icon.get(prov_key, '📜')} {r['id']}",
+                                        help=summary, width="stretch"):
+                            st.caption(f"{_icon.get(prov_key, '📜')} {summary}"
+                                       + bank_link)
+                            _lazy_content(f"stagedlazy::{r['id']}",
+                                          lambda r=r: _render_staged_record(r))
+                            if st.button("Discard",
+                                         key=f"destage::{domain}/{r['id']}",
+                                         help="Remove from the review inbox "
+                                              "without distilling it. A "
+                                              "nominated bank record becomes "
+                                              "nominatable again."):
+                                _staging.remove_staged(domain, [r["id"]])
+                                st.warning(f"De-staged {r['id']}.")
+                                st.rerun()
 
             if model is None:
                 st.info("Start a session to enable distillation (needs a model).")
