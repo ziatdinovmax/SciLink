@@ -972,9 +972,18 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Save fitting scripts for reproducibility
         self._save_fitting_scripts(state)
 
-        # Stage novel T=2 (hot-annealing) successes for later, review-gated
-        # distillation (upgrade an existing skill, or consolidate N into a new
-        # one). Failure-isolated: never affects the returned fit.
+        # Bank every approved working script as episodic memory (script bank,
+        # #346) — deterministic, no LLM, failure-isolated. Runs BEFORE T=2
+        # staging so a hot win is nominated by PROMOTING its fresh bank
+        # record (one identity, linked lifecycles) instead of storing an
+        # unrelated second copy.
+        banked = self._maybe_bank_scripts(state)
+        if banked:
+            final_results["banked_scripts"] = banked
+
+        # Nominate novel T=2 (hot-annealing) successes for review-gated
+        # distillation (upgrade an existing skill, or consolidate N into a
+        # new one). Failure-isolated: never affects the returned fit.
         staged = self._maybe_stage_t2_solutions(state)
         if staged:
             final_results["staged_solutions"] = staged
@@ -985,12 +994,6 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         fb_staged = self._maybe_stage_feedback_errors(state, final_results)
         if fb_staged:
             final_results.setdefault("staged_solutions", []).extend(fb_staged)
-
-        # Bank every approved working script as episodic memory (script bank,
-        # #346) — deterministic, no LLM, failure-isolated.
-        banked = self._maybe_bank_scripts(state)
-        if banked:
-            final_results["banked_scripts"] = banked
 
         # Save final results AFTER the memory hooks so the persisted JSON
         # carries staged_solutions / banked_scripts, matching the returned
@@ -1373,7 +1376,27 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "working_script": script,
                     "session": self.output_dir.name,
                 }
-                sid = _staging.stage_solution("curve_fitting", technique, record)
+                # Unified path: a hot win is a bank record with a nomination —
+                # promote the record banked moments ago (provenance
+                # t2_hot_win, contrastive planned-vs-final fields attached)
+                # so identity, usage stats, and review status stay linked.
+                # Legacy direct staging remains the fallback when the bank
+                # is disabled (T=2 must survive SCILINK_SCRIPT_BANK=0).
+                from scilink.skills._shared import _script_bank
+                sid = None
+                bank_rec = (_script_bank.find_by_script("curve_fitting", script)
+                            if _script_bank.bank_enabled() else None)
+                if bank_rec is not None:
+                    out = _script_bank.promote_to_staging(
+                        "curve_fitting", bank_rec["id"], technique=technique,
+                        provenance="t2_hot_win",
+                        extra={k: v for k, v in record.items()
+                               if k not in ("working_script", "session")},
+                    )
+                    if out.get("status") == "success":
+                        sid = out["staged_id"]
+                if sid is None:
+                    sid = _staging.stage_solution("curve_fitting", technique, record)
                 staged.append(sid)
                 self.logger.info(
                     f"   🧠 Staged T=2 solution [{technique}] id={sid} (R²={r2:.4f})"

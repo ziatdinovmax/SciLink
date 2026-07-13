@@ -660,7 +660,14 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         else:
             final_results = tier1_results
 
-        # Stage novel T=2 (hot-annealing) successes for later, review-gated
+        # Bank every approved working script as episodic memory (script bank,
+        # #346) — deterministic, no LLM, failure-isolated. Runs BEFORE T=2
+        # staging so a hot win is nominated by promoting its bank record.
+        banked = self._maybe_bank_scripts(tier1_state)
+        if banked:
+            final_results["banked_scripts"] = banked
+
+        # Nominate novel T=2 (hot-annealing) successes for review-gated
         # distillation. Failure-isolated; keys off Tier-1 state (which ran the
         # verification/annealing loop). Surfaces staged ids on the result.
         staged = self._maybe_stage_t2_solutions(tier1_state)
@@ -672,12 +679,6 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         fb_staged = self._maybe_stage_feedback_errors(tier1_state, final_results)
         if fb_staged:
             final_results.setdefault("staged_solutions", []).extend(fb_staged)
-
-        # Bank every approved working script as episodic memory (script bank,
-        # #346) — deterministic, no LLM, failure-isolated.
-        banked = self._maybe_bank_scripts(tier1_state)
-        if banked:
-            final_results["banked_scripts"] = banked
 
         # Save final merged results
         results_path = self.output_dir / "analysis_results.json"
@@ -939,7 +940,23 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "working_script": script,
                     "session": self.output_dir.name,
                 }
-                sid = _staging.stage_solution("image_analysis", technique, record)
+                # Unified path (see curve agent): promote the fresh bank
+                # record; legacy direct staging when the bank is disabled.
+                from scilink.skills._shared import _script_bank
+                sid = None
+                bank_rec = (_script_bank.find_by_script("image_analysis", script)
+                            if _script_bank.bank_enabled() else None)
+                if bank_rec is not None:
+                    out = _script_bank.promote_to_staging(
+                        "image_analysis", bank_rec["id"], technique=technique,
+                        provenance="t2_hot_win",
+                        extra={k: v for k, v in record.items()
+                               if k not in ("working_script", "session")},
+                    )
+                    if out.get("status") == "success":
+                        sid = out["staged_id"]
+                if sid is None:
+                    sid = _staging.stage_solution("image_analysis", technique, record)
                 staged.append(sid)
                 self.logger.info(
                     f"   🧠 Staged T=2 image solution [{technique}] id={sid}"
