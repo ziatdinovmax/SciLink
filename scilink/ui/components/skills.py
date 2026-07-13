@@ -303,7 +303,6 @@ def _render_staged_section() -> None:
             if st.button(
                 f"Consolidate all {len(recs)} → new skill  (`auto_{technique}`)",
                 key=f"con::{domain}/{technique}",
-                type="primary" if (ready and mem_on) else "secondary",
                 disabled=(not ready) or (not mem_on), help=con_help,
             ):
                 from scilink.agents.exp_agents.instruct import (
@@ -474,8 +473,7 @@ def _render_staged_section() -> None:
                     fromfile="current", tofile="after upgrade", lineterm=""))
                 st.code(diff or "(no textual change)", language="diff")
                 a1, a2, _ = st.columns([2, 2, 4])
-                if a1.button("Apply upgrade", key=f"upapply::{domain}/{technique}",
-                             type="primary"):
+                if a1.button("Apply upgrade", key=f"upapply::{domain}/{technique}"):
                     if prop.get("builtin_target"):
                         # The preview ran against a temp copy; the real fork
                         # (which shadows the shipped skill) is created only
@@ -837,7 +835,7 @@ def _render_memory_row(_memory, r, *, provisional: bool) -> None:
         mem_on = loader.memory_enabled()
         c1, c2, _ = st.columns([2, 2, 4])
         if provisional:
-            if c1.button("Approve for routing", key=f"promote::{ref}", type="primary",
+            if c1.button("Approve for routing", key=f"promote::{ref}",
                          disabled=not mem_on,
                          help=(None if mem_on else
                                "Persistent memory is off — approved skills won't load "
