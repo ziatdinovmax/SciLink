@@ -303,10 +303,24 @@ def _render_staged_section() -> None:
             prop_key = f"upgprop::{domain}/{technique}"
             with c1:
                 if targets:
-                    tgt = st.selectbox("Upgrade into", targets, key=f"tgt::{domain}/{technique}")
-                    sid = recs[0]["id"]
-                    # Upgrade mutates an existing skill in place, so preview first:
-                    # build the merged skill, show a diff, and apply only on confirm.
+                    st.caption("**Upgrade** — merge **one** record into an "
+                               "**existing** skill (additive; you review the "
+                               "diff before anything is written)")
+                    if len(recs) > 1:
+                        _icon = {"error_fix": "🐛", "user_correction": "💬"}
+                        sid = st.selectbox(
+                            "Record to merge", [r["id"] for r in recs],
+                            format_func=lambda i: next(
+                                f"{_icon.get(r.get('provenance'), '📜')} {i} · "
+                                f"{_staging.PROVENANCE_LABELS.get(r.get('provenance', ''), r.get('provenance', '?'))}"
+                                for r in recs if r["id"] == i),
+                            key=f"upsrc::{domain}/{technique}")
+                    else:
+                        sid = recs[0]["id"]
+                    tgt = st.selectbox("Into skill", targets, key=f"tgt::{domain}/{technique}")
+                    # Preview never writes anything: for a built-in target the
+                    # proposal is built against a TEMP copy, and the real fork
+                    # is created only on Apply — cancelling leaves no trace.
                     if st.button("Preview upgrade", key=f"up::{domain}/{technique}",
                                  disabled=not mem_on,
                                  help=(None if mem_on else
@@ -315,21 +329,28 @@ def _render_staged_section() -> None:
                         from scilink.agents.exp_agents.instruct import (
                             KNOWLEDGE_TO_SKILL_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS)
                         td, tn = tgt.split("/", 1)
+                        skills_root = None
+                        builtin_target = None
                         if tn.endswith(" (built-in — forks on upgrade)"):
+                            import shutil
+                            import tempfile
+                            from pathlib import Path as _P
+                            from scilink.skills.loader import _SKILLS_DIR
                             tn = tn.split(" (built-in", 1)[0]
-                            fout = _memory.fork_builtin(td, tn)
-                            if fout.get("status") != "success":
-                                st.error(fout.get("message", "Fork failed."))
-                                st.rerun()
-                            st.info(f"Forked built-in {td}/{tn} — the fork now "
-                                    f"shadows the shipped skill and receives "
-                                    f"this upgrade.")
+                            builtin_target = (td, tn)
+                            tmp_root = _P(tempfile.mkdtemp(prefix="scilink_preview_"))
+                            (tmp_root / td / tn).mkdir(parents=True)
+                            shutil.copy(_SKILLS_DIR / td / tn / f"{tn}.md",
+                                        tmp_root / td / tn / f"{tn}.md")
+                            skills_root = tmp_root
                         prop = _staging.propose_skill_upgrade(
                             domain, [sid], target_domain=td, target_name=tn,
                             llm_call=_llm_call,
                             fresh_template=KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
-                            update_template=SKILL_UPDATE_INSTRUCTIONS)
+                            update_template=SKILL_UPDATE_INSTRUCTIONS,
+                            skills_root=skills_root)
                         if prop.get("status") == "success":
+                            prop["builtin_target"] = builtin_target
                             st.session_state[prop_key] = prop
                         else:
                             st.error(prop.get("message", "Could not build upgrade."))
@@ -354,6 +375,9 @@ def _render_staged_section() -> None:
                                 f"`scilink memory consolidate` can force it).")
                 else:
                     con_help = None
+                st.caption(f"**Consolidate** — distill **all {len(recs)}** "
+                           f"records into a **new** skill "
+                           f"(`auto_{technique}`)")
                 if st.button("Consolidate → new skill", key=f"con::{domain}/{technique}",
                              disabled=(not ready) or (not mem_on), help=con_help):
                     from scilink.agents.exp_agents.instruct import (
@@ -383,6 +407,16 @@ def _render_staged_section() -> None:
                 a1, a2, _ = st.columns([2, 2, 4])
                 if a1.button("Apply upgrade", key=f"upapply::{domain}/{technique}",
                              type="primary"):
+                    if prop.get("builtin_target"):
+                        # The preview ran against a temp copy; the real fork
+                        # (which shadows the shipped skill) is created only
+                        # now that the change is confirmed.
+                        td, tn = prop["builtin_target"]
+                        fout = _memory.fork_builtin(td, tn)
+                        if fout.get("status") != "success" and \
+                                "already forked" not in str(fout.get("message")):
+                            st.error(fout.get("message", "Fork failed."))
+                            st.rerun()
                     res = _staging.apply_skill_upgrade(
                         domain, prop["staged_ids"],
                         target_domain=prop["target_domain"],
