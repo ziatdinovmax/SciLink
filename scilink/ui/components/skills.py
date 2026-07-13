@@ -232,7 +232,16 @@ def _render_staged_section() -> None:
             # Keep the action buttons in narrow columns + a trailing spacer so
             # they land at a modest size (like the sidebar's Reset/Quit) rather
             # than stretching across the full-width memory panel.
-            targets = [f"{s['domain']}/{s['name']}" for s in _memory.list_memory(domain=domain)]
+            persistent = {s["name"] for s in _memory.list_memory(domain=domain)}
+            targets = [f"{domain}/{n}" for n in sorted(persistent)]
+            # Built-ins are valid targets via copy-on-write: selecting one
+            # forks it into the persistent store first (shadowing the shipped
+            # copy), then the normal review-gated upgrade applies to the fork.
+            from scilink.skills import loader as _loader
+            builtin_only = [n for n in _loader.list_skills(domain)
+                            if n not in persistent]
+            targets += [f"{domain}/{n} (built-in — forks on upgrade)"
+                        for n in sorted(builtin_only)]
             c1, c2, _ = st.columns([2, 2, 4])
             prop_key = f"upgprop::{domain}/{technique}"
             with c1:
@@ -249,6 +258,15 @@ def _render_staged_section() -> None:
                         from scilink.agents.exp_agents.instruct import (
                             KNOWLEDGE_TO_SKILL_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS)
                         td, tn = tgt.split("/", 1)
+                        if tn.endswith(" (built-in — forks on upgrade)"):
+                            tn = tn.split(" (built-in", 1)[0]
+                            fout = _memory.fork_builtin(td, tn)
+                            if fout.get("status") != "success":
+                                st.error(fout.get("message", "Fork failed."))
+                                st.rerun()
+                            st.info(f"Forked built-in {td}/{tn} — the fork now "
+                                    f"shadows the shipped skill and receives "
+                                    f"this upgrade.")
                         prop = _staging.propose_skill_upgrade(
                             domain, [sid], target_domain=td, target_name=tn,
                             llm_call=_llm_call,
@@ -298,6 +316,8 @@ def _render_staged_section() -> None:
                     f"**Review upgrade → `{prop['target_domain']}/{prop['target_name']}`** "
                     "— applies in place; the current version is backed up to `.md.bak`."
                 )
+                for w in prop.get("regression_warnings") or []:
+                    st.warning(f"Additivity check: {w}")
                 diff = "\n".join(difflib.unified_diff(
                     prop["existing_content"].splitlines(),
                     prop["proposed_content"].splitlines(),

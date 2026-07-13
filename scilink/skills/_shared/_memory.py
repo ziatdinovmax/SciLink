@@ -221,6 +221,69 @@ def demote_memory(domain: str, name: str, *, root: Optional[Path] = None) -> Dic
     }
 
 
+def fork_builtin(domain: str, name: str, *, root: Optional[Path] = None) -> Dict[str, Any]:
+    """Copy a built-in (package) skill into the persistent store.
+
+    The copy-on-write path for improving a shipped skill: package skills are
+    immutable to the runtime machinery, but the loader's precedence (user
+    roots > persistent store > built-in) means the forked copy SHADOWS the
+    shipped one immediately — and the review-gated upgrade machinery can
+    then evolve it. Contribute the divergence back with a package PR (see
+    ``scilink memory diff-builtin``) and prune the fork afterwards.
+
+    The markdown is copied byte-identical (so diff-builtin starts clean).
+    Sibling ``.py`` tool files are NOT copied: TOOL_SPEC discovery walks the
+    installed package by skill name, so the shipped tools keep registering
+    for the forked skill unchanged.
+    """
+    from ..loader import _SKILLS_DIR
+
+    src_md = _SKILLS_DIR / domain / name / f"{name}.md"
+    if not src_md.is_file():
+        raise FileNotFoundError(f"No built-in skill: {domain}/{name}")
+    root = root or graduated_skills_dir()
+    dest_dir = root / domain / name
+    dest_md = dest_dir / f"{name}.md"
+    if dest_md.exists():
+        return {"status": "error",
+                "message": (f"{domain}/{name} is already forked "
+                            f"({dest_md}); upgrade or prune that copy.")}
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    (dest_dir / "__init__.py").touch()
+    dest_md.write_text(src_md.read_text())
+    sibling_tools = sorted(
+        f.name for f in src_md.parent.glob("*.py") if f.name != "__init__.py")
+    return {
+        "status": "success",
+        "domain": domain,
+        "name": name,
+        "path": str(dest_md),
+        "builtin_path": str(src_md),
+        "has_sibling_tools": bool(sibling_tools),
+        "sibling_tools": sibling_tools,
+    }
+
+
+def diff_builtin(domain: str, name: str, *, root: Optional[Path] = None) -> Dict[str, Any]:
+    """Unified diff of a forked skill against its shipped built-in original."""
+    import difflib
+    from ..loader import _SKILLS_DIR
+
+    src_md = _SKILLS_DIR / domain / name / f"{name}.md"
+    fork_md = (root or graduated_skills_dir()) / domain / name / f"{name}.md"
+    if not src_md.is_file():
+        raise FileNotFoundError(f"No built-in skill: {domain}/{name}")
+    if not fork_md.is_file():
+        raise FileNotFoundError(f"No forked copy of {domain}/{name} "
+                                f"(run `scilink memory fork {domain}/{name}`).")
+    diff = "\n".join(difflib.unified_diff(
+        src_md.read_text().splitlines(), fork_md.read_text().splitlines(),
+        fromfile=f"built-in/{name}.md", tofile=f"fork/{name}.md", lineterm=""))
+    return {"status": "success", "diff": diff,
+            "identical": not diff, "builtin_path": str(src_md),
+            "fork_path": str(fork_md)}
+
+
 def prune_memory(domain: str, name: str, *, root: Optional[Path] = None) -> Dict[str, Any]:
     """Delete a persisted skill bundle directory."""
     root = root or graduated_skills_dir()
