@@ -285,47 +285,109 @@ def _render_staged_section() -> None:
             if model is None:
                 st.info("Start a session to enable upgrade/consolidate (needs a model).")
                 continue
-            # candidate existing skills to upgrade into (same domain).
-            # Keep the action buttons in narrow columns + a trailing spacer so
-            # they land at a modest size (like the sidebar's Reset/Quit) rather
-            # than stretching across the full-width memory panel.
+            # ── PRIMARY: consolidate the whole group into a NEW skill ──
+            need = _staging.consolidate_min_n()
+            ready = len(recs) >= need
+            if not mem_on:
+                con_help = ("Persistent memory is off — turn it on to distill "
+                            "staged solutions into skills.")
+            elif not ready:
+                con_help = (f"Accumulating {len(recs)}/{need} — consolidation "
+                            f"unlocks once {need} records of this technique are "
+                            f"staged (SCILINK_CONSOLIDATE_N to change; the CLI "
+                            f"can force it).")
+            else:
+                con_help = ("Distills ALL records of this technique into one "
+                            "new skill. One large model call — typically "
+                            "1–3 minutes.")
+            if st.button(
+                f"Consolidate all {len(recs)} → new skill  (`auto_{technique}`)",
+                key=f"con::{domain}/{technique}",
+                type="primary" if (ready and mem_on) else "secondary",
+                disabled=(not ready) or (not mem_on), help=con_help,
+            ):
+                from scilink.agents.exp_agents.instruct import (
+                    T2_CONSOLIDATION_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS)
+                with st.spinner(
+                        f"Distilling {len(recs)} records into "
+                        f"`auto_{technique}` — one large model call, "
+                        f"typically 1–3 min. Leave this tab open..."):
+                    res = _staging.consolidate_technique(
+                        domain, technique, llm_call=_llm_call,
+                        consolidation_template=T2_CONSOLIDATION_INSTRUCTIONS,
+                        update_template=SKILL_UPDATE_INSTRUCTIONS)
+                st.success(f"Consolidated {res.get('n_examples')} → "
+                           f"auto_{technique} (provisional — approve it in "
+                           f"Skills below).")
+                st.rerun()
+            if not ready:
+                st.caption(f"Accumulating {len(recs)}/{need} for consolidation.")
+
+            # ── ADVANCED: merge ONE record into an EXISTING skill ──
             persistent = {s["name"] for s in _memory.list_memory(domain=domain)}
             targets = [f"{domain}/{n}" for n in sorted(persistent)]
-            # Built-ins are valid targets via copy-on-write: selecting one
-            # forks it into the persistent store first (shadowing the shipped
-            # copy), then the normal review-gated upgrade applies to the fork.
+            # Built-ins are valid targets via copy-on-write: the fork is
+            # created only when an upgrade is APPLIED (preview uses a temp
+            # copy and writes nothing).
             from scilink.skills import loader as _loader
             builtin_only = [n for n in _loader.list_skills(domain)
                             if n not in persistent]
             targets += [f"{domain}/{n} (built-in — forks on upgrade)"
                         for n in sorted(builtin_only)]
-            c1, c2, _ = st.columns([2, 2, 4])
             prop_key = f"upgprop::{domain}/{technique}"
-            with c1:
-                if targets:
-                    st.caption("**Upgrade** — merge **one** record into an "
-                               "**existing** skill (additive; you review the "
-                               "diff before anything is written)")
-                    if len(recs) > 1:
-                        _icon = {"error_fix": "🐛", "user_correction": "💬"}
-                        sid = st.selectbox(
-                            "Record to merge", [r["id"] for r in recs],
-                            format_func=lambda i: next(
-                                f"{_icon.get(r.get('provenance'), '📜')} {i} · "
-                                f"{_staging.PROVENANCE_LABELS.get(r.get('provenance', ''), r.get('provenance', '?'))}"
-                                for r in recs if r["id"] == i),
-                            key=f"upsrc::{domain}/{technique}")
-                    else:
-                        sid = recs[0]["id"]
-                    tgt = st.selectbox("Into skill", targets, key=f"tgt::{domain}/{technique}")
-                    # Preview never writes anything: for a built-in target the
-                    # proposal is built against a TEMP copy, and the real fork
-                    # is created only on Apply — cancelling leaves no trace.
+            with st.expander(
+                    "Advanced — upgrade an EXISTING skill with one record",
+                    expanded=False):
+                st.caption(
+                    "Instead of a new skill, fold a single record's lesson "
+                    "into a skill that already exists (e.g. an error fix "
+                    "into the technique's main skill). Additive — you "
+                    "review the diff before anything is written."
+                )
+                if not targets:
+                    st.caption("No skills in this domain to upgrade.")
+                else:
+                    _icon = {"error_fix": "🐛", "user_correction": "💬"}
+
+                    def _fmt_rec(i, recs=recs, _icon=_icon):
+                        r = next((r for r in recs if r["id"] == i), None)
+                        if r is None:   # tolerate pre-formatted rerun values
+                            return str(i)
+                        prov = r.get("provenance", "")
+                        return (f"{_icon.get(prov, '📜')} {i} · "
+                                f"{_staging.PROVENANCE_LABELS.get(prov, prov or '?')}")
+
+                    sid = st.selectbox(
+                        "Record to merge (the ONE lesson to fold in)",
+                        [r["id"] for r in recs],
+                        format_func=_fmt_rec,
+                        key=f"upsrc::{domain}/{technique}")
+                    sel_rec = next(r for r in recs if r["id"] == sid)
+                    # Order targets by technique relevance to the selected
+                    # record so an unrelated skill can't be the silent default.
+                    def _tname(t):
+                        return t.split("/", 1)[1].split(" (built-in", 1)[0]
+                    matches = {t: _target_matches_record(sel_rec, domain, _tname(t))
+                               for t in targets}
+                    ordered = sorted(targets, key=lambda t: {True: 0, None: 1,
+                                                             False: 2}[matches[t]])
+                    tgt = st.selectbox("Into skill", ordered,
+                                       key=f"tgt::{domain}/{technique}")
+                    if matches.get(tgt) is False:
+                        st.warning(
+                            f"⚠️ Technique mismatch: this record's context "
+                            f"doesn't match `{_tname(tgt)}`'s technique "
+                            f"routing — upgrading would pollute an unrelated "
+                            f"skill. Double-check before previewing."
+                        )
                     if st.button("Preview upgrade", key=f"up::{domain}/{technique}",
                                  disabled=not mem_on,
-                                 help=(None if mem_on else
-                                       "Persistent memory is off — turn it on to distill "
-                                       "staged solutions into skills.")):
+                                 help=("Builds the merged skill for review — "
+                                       "one large model call, typically 1–3 "
+                                       "min. Writes nothing." if mem_on else
+                                       "Persistent memory is off — turn it on "
+                                       "to distill staged solutions into "
+                                       "skills.")):
                         from scilink.agents.exp_agents.instruct import (
                             KNOWLEDGE_TO_SKILL_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS)
                         td, tn = tgt.split("/", 1)
@@ -343,51 +405,27 @@ def _render_staged_section() -> None:
                             shutil.copy(_SKILLS_DIR / td / tn / f"{tn}.md",
                                         tmp_root / td / tn / f"{tn}.md")
                             skills_root = tmp_root
-                        prop = _staging.propose_skill_upgrade(
-                            domain, [sid], target_domain=td, target_name=tn,
-                            llm_call=_llm_call,
-                            fresh_template=KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
-                            update_template=SKILL_UPDATE_INSTRUCTIONS,
-                            skills_root=skills_root)
+                        with st.spinner(
+                                f"Building the merged `{td}/{tn}` for review "
+                                f"— one large model call, typically 1–3 min. "
+                                f"Nothing is written until you Apply..."):
+                            prop = _staging.propose_skill_upgrade(
+                                domain, [sid], target_domain=td, target_name=tn,
+                                llm_call=_llm_call,
+                                fresh_template=KNOWLEDGE_TO_SKILL_INSTRUCTIONS,
+                                update_template=SKILL_UPDATE_INSTRUCTIONS,
+                                skills_root=skills_root)
                         if prop.get("status") == "success":
                             prop["builtin_target"] = builtin_target
+                            if matches.get(tgt) is False:
+                                prop.setdefault("regression_warnings", []).append(
+                                    "technique mismatch: the record's context "
+                                    "does not match this skill's routing — "
+                                    "confirm this upgrade belongs here")
                             st.session_state[prop_key] = prop
                         else:
                             st.error(prop.get("message", "Could not build upgrade."))
                         st.rerun()
-                else:
-                    st.caption("No existing skills in this domain to upgrade into.")
-            with c2:
-                # New-skill consolidation accumulates first: only suggest it once
-                # enough examples of this technique are staged. Below the threshold
-                # the agent is still gathering evidence (one fit is too idiosyncratic
-                # to generalize into a standalone skill). Upgrading an existing skill
-                # is exempt — that's the upgrade@1 path on the left.
-                need = _staging.consolidate_min_n()
-                ready = len(recs) >= need
-                if not mem_on:
-                    con_help = ("Persistent memory is off — turn it on to distill "
-                                "staged solutions into skills.")
-                elif not ready:
-                    con_help = (f"Accumulating {len(recs)}/{need} — consolidation into a "
-                                f"new skill unlocks once {need} solutions of this technique "
-                                f"are staged (set SCILINK_CONSOLIDATE_N to change; "
-                                f"`scilink memory consolidate` can force it).")
-                else:
-                    con_help = None
-                st.caption(f"**Consolidate** — distill **all {len(recs)}** "
-                           f"records into a **new** skill "
-                           f"(`auto_{technique}`)")
-                if st.button("Consolidate → new skill", key=f"con::{domain}/{technique}",
-                             disabled=(not ready) or (not mem_on), help=con_help):
-                    from scilink.agents.exp_agents.instruct import (
-                        T2_CONSOLIDATION_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS)
-                    res = _staging.consolidate_technique(
-                        domain, technique, llm_call=_llm_call,
-                        consolidation_template=T2_CONSOLIDATION_INSTRUCTIONS,
-                        update_template=SKILL_UPDATE_INSTRUCTIONS)
-                    st.success(f"Consolidated {res.get('n_examples')} → auto_{technique} (provisional).")
-                    st.rerun()
 
             # Pending upgrade preview — review the merged content before applying.
             prop = st.session_state.get(prop_key)
@@ -640,6 +678,70 @@ def _render_bank_record(rec: dict) -> None:
 
 # Bookkeeping keys not worth showing in the per-record viewer.
 _STAGED_HIDDEN_KEYS = {"id", "domain", "technique", "session", "working_script", "script"}
+
+
+_SKILL_TOKEN_CACHE: dict = {}
+
+# Family words shared by many techniques — useless for telling a Raman
+# record from an IR skill, and they drown the distinctive tokens.
+_GENERIC_TECH_TOKENS = {"spectroscopy", "spectrometry", "spectrum", "spectra",
+                        "microscopy", "micro", "imaging", "absorption",
+                        "emission", "analysis", "scattering"}
+
+
+def _skill_tokens(domain: str, name: str):
+    """Technique/name/description tokens of a skill (cached per session)."""
+    import re
+    key = (domain, name)
+    if key in _SKILL_TOKEN_CACHE:
+        return _SKILL_TOKEN_CACHE[key]
+    tech_tokens, all_tokens = set(), set()
+    try:
+        from scilink.skills import loader
+        parsed = loader.load_skill(name, domain=domain)
+        meta = parsed.get("meta") or {}
+        tech = meta.get("technique") or []
+        if isinstance(tech, str):
+            tech = [tech]
+        for t in tech:
+            tech_tokens |= {w for w in re.findall(r"[a-z0-9]+", str(t).lower())
+                            if len(w) >= 3 and w not in _GENERIC_TECH_TOKENS}
+        for s in [name, meta.get("description") or ""]:
+            all_tokens |= {w for w in re.findall(r"[a-z0-9]+", str(s).lower())
+                           if len(w) >= 3}
+    except Exception:  # noqa: BLE001
+        pass
+    _SKILL_TOKEN_CACHE[key] = (tech_tokens, all_tokens | tech_tokens)
+    return _SKILL_TOKEN_CACHE[key]
+
+
+def _record_tokens(rec: dict):
+    import re
+    toks = set()
+    ctx = rec.get("measurement_context") or {}
+    fields = list(ctx.values()) + [
+        rec.get("model"), rec.get("technique"), rec.get("planned_model"),
+        rec.get("final_model_type"), rec.get("analysis_target")]
+    for v in fields:
+        toks |= {w for w in re.findall(r"[a-z0-9]+", str(v or "").lower())
+                 if len(w) >= 3}
+    return toks
+
+
+def _target_matches_record(rec: dict, domain: str, skill_name: str):
+    """True / False / None(unknown): does this record's technique plausibly
+    belong to this skill? Judged on the skill's `technique:` routing tokens
+    when present (e.g. a Raman-context record vs the epr skill → False), so
+    a mismatched upgrade is flagged BEFORE the expensive preview call."""
+    tech_tokens, all_tokens = _skill_tokens(domain, skill_name)
+    rec_toks = _record_tokens(rec)
+    if not rec_toks:
+        return None
+    if tech_tokens:
+        return bool(rec_toks & tech_tokens)
+    if all_tokens:
+        return bool(rec_toks & all_tokens) or None
+    return None
 
 
 def _render_staged_record(r: dict) -> None:
