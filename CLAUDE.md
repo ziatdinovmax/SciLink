@@ -244,11 +244,15 @@ fourth mode**; it's an orchestrator-of-orchestrators with a different role
 (`MetaOrchestratorAgent` + `MetaOrchestratorTools`), copying the
 `AnalysisOrchestratorAgent` chat-loop shape.
 
-**v1 scope: analysis + planning.** Simulation delegation is deferred —
-`scilink.agents.sim_agents` hard-imports `ase` (an optional dependency), so
-the meta module must stay importable without it. `delegate_to_simulation`
-is a documented lazy seam: when added, its body does a guarded import
-*inside the function*, never at module scope.
+**Scope: analysis + planning + simulation.** Simulation delegation is now
+wired (`delegate_to_simulation`). Because `scilink.agents.sim_agents`
+hard-imports `ase` (an optional dependency), the meta module must stay
+importable without it: the tool's body and the orchestrator's
+`_get_simulation_child` / `_delegate` "simulation" branch all do the
+`simulation_orchestrator` import *inside the function*, never at module scope,
+and the tool returns a clean "install scilink[sim]" error if `ase` is absent.
+The simulation child is structure-centric, so — unlike the planning child — it
+needs no `data_dir` at construction; it lives in `<meta_session>/simulation/`.
 
 ### Pattern: agent-as-tool
 
@@ -256,9 +260,9 @@ is a documented lazy seam: when added, its body does a guarded import
 Meta tool registry
   delegate_to_analysis(task, context)   → AnalysisOrchestratorAgent.run_task
   delegate_to_planning(task, context)   → PlanningOrchestratorAgent.run_task
+  delegate_to_simulation(task, context) → SimulationOrchestratorAgent.run_task
   summarize_session_state()             → cross-specialist status
   get_delegation_history(limit)         → the delegation ledger
-  delegate_to_simulation(...)           → deferred lazy seam (not built)
 ```
 
 There is **no `bridge_context` tool**. `run_task` already accepts a

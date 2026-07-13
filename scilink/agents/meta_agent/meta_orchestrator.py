@@ -389,6 +389,7 @@ class MetaOrchestratorAgent:
         self.checkpoint_path = self.base_dir / "checkpoint.json"
         self.analysis_dir = self.base_dir / "analysis"
         self.planning_dir = self.base_dir / "planning"
+        self.simulation_dir = self.base_dir / "simulation"
         # Fan-out workers (ephemeral, one isolated analysis session per branch)
         # and fused cross-dataset reports live in their own sub-trees, distinct
         # from the persistent analysis/ and planning/ children. See fanout.py.
@@ -580,6 +581,43 @@ class MetaOrchestratorAgent:
             # Share skills / custom tools / MCP servers registered on the meta.
             self._propagate_extensions_to_child(self._children["planning"])
         return self._children["planning"]
+
+    def _get_simulation_child(self):
+        """Lazily create (or restore) the persistent simulation child.
+
+        Structure-centric, so unlike planning it needs no data_dir at
+        construction — a simulate session starts from a natural-language goal,
+        not a data file. Built in the CO_PILOT resting mode; each delegation's
+        run_task sets the autonomy for that call to match the meta's. The
+        ``simulation_orchestrator`` import is done HERE (inside the method),
+        not at module scope, because ``scilink.agents.sim_agents`` hard-imports
+        the optional ``ase`` dependency and the meta module must stay importable
+        without it; ``delegate_to_simulation`` guards the ImportError.
+        """
+        if "simulation" not in self._children:
+            from ..sim_agents.simulation_orchestrator import (
+                SimulationOrchestratorAgent, SimulationMode,
+            )
+            restore = (self.simulation_dir / "checkpoint.json").exists()
+            self.logger.info(
+                f"🧩 {'Restoring' if restore else 'Creating'} simulation child "
+                f"at {self.simulation_dir}"
+            )
+            self._children["simulation"] = SimulationOrchestratorAgent(
+                base_dir=str(self.simulation_dir),
+                api_key=self.api_key,
+                model_name=self.model_name,
+                base_url=self.base_url,
+                futurehouse_api_key=self.futurehouse_api_key,
+                restore_checkpoint=restore,
+                simulation_mode=SimulationMode.CO_PILOT,
+                # mp_api_key not threaded from the meta (its constructor has
+                # none); MPRester falls back to the MP_API_KEY env var when a
+                # crystal-from-Materials-Project structure is requested.
+            )
+            self._children["simulation"]._agent_label = "Simulation specialist"
+            self._propagate_extensions_to_child(self._children["simulation"])
+        return self._children["simulation"]
 
     # =========================================================================
     # Shared extensions: skills, custom tools, MCP servers
@@ -904,6 +942,12 @@ class MetaOrchestratorAgent:
         elif mode == "planning":
             from ..planning_agents.planning_orchestrator import AutonomyLevel
             get_child, autonomy_enum = self._get_planning_child, AutonomyLevel
+        elif mode == "simulation":
+            # Guarded import (optional `ase`): the delegate_to_simulation tool
+            # already returned a clean error if the [sim] extra is missing, so
+            # reaching here means the import succeeds.
+            from ..sim_agents.simulation_orchestrator import SimulationMode
+            get_child, autonomy_enum = self._get_simulation_child, SimulationMode
         else:
             return json.dumps({
                 "status": "error",
