@@ -408,7 +408,10 @@ def _render_staged_section() -> None:
 # slowdown). Heavy content therefore loads only behind an explicit tick, and
 # long lists paginate.
 _PANEL_PAGE = 15
-_SCRIPT_PREVIEW_CHARS = 8000
+# Scripts render ONLY when a viewer is explicitly opened (lazy tick), so the
+# full text is shown — the old 8k preview cap predates lazy loading and cut
+# real ~10-15 KB scripts mid-file. Only a pathological-size guard remains.
+_SCRIPT_HARD_CAP = 120_000
 
 
 def _lazy_content(key: str, render_fn) -> None:
@@ -436,9 +439,10 @@ def _script_block(script: str, full_hint: str) -> None:
     if not script:
         return
     st.markdown("**working script:**")
-    if len(script) > _SCRIPT_PREVIEW_CHARS:
-        st.code(script[:_SCRIPT_PREVIEW_CHARS]
-                + f"\n# … truncated — full script via {full_hint}",
+    if len(script) > _SCRIPT_HARD_CAP:
+        st.code(script[:_SCRIPT_HARD_CAP]
+                + f"\n# … truncated at {_SCRIPT_HARD_CAP // 1000} KB — "
+                f"full script via {full_hint}",
                 language="python")
     else:
         st.code(script, language="python")
