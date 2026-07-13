@@ -232,7 +232,16 @@ def _render_staged_section() -> None:
             # Keep the action buttons in narrow columns + a trailing spacer so
             # they land at a modest size (like the sidebar's Reset/Quit) rather
             # than stretching across the full-width memory panel.
-            targets = [f"{s['domain']}/{s['name']}" for s in _memory.list_memory(domain=domain)]
+            persistent = {s["name"] for s in _memory.list_memory(domain=domain)}
+            targets = [f"{domain}/{n}" for n in sorted(persistent)]
+            # Built-ins are valid targets via copy-on-write: selecting one
+            # forks it into the persistent store first (shadowing the shipped
+            # copy), then the normal review-gated upgrade applies to the fork.
+            from scilink.skills import loader as _loader
+            builtin_only = [n for n in _loader.list_skills(domain)
+                            if n not in persistent]
+            targets += [f"{domain}/{n} (built-in — forks on upgrade)"
+                        for n in sorted(builtin_only)]
             c1, c2, _ = st.columns([2, 2, 4])
             prop_key = f"upgprop::{domain}/{technique}"
             with c1:
@@ -249,6 +258,15 @@ def _render_staged_section() -> None:
                         from scilink.agents.exp_agents.instruct import (
                             KNOWLEDGE_TO_SKILL_INSTRUCTIONS, SKILL_UPDATE_INSTRUCTIONS)
                         td, tn = tgt.split("/", 1)
+                        if tn.endswith(" (built-in — forks on upgrade)"):
+                            tn = tn.split(" (built-in", 1)[0]
+                            fout = _memory.fork_builtin(td, tn)
+                            if fout.get("status") != "success":
+                                st.error(fout.get("message", "Fork failed."))
+                                st.rerun()
+                            st.info(f"Forked built-in {td}/{tn} — the fork now "
+                                    f"shadows the shipped skill and receives "
+                                    f"this upgrade.")
                         prop = _staging.propose_skill_upgrade(
                             domain, [sid], target_domain=td, target_name=tn,
                             llm_call=_llm_call,
@@ -298,6 +316,8 @@ def _render_staged_section() -> None:
                     f"**Review upgrade → `{prop['target_domain']}/{prop['target_name']}`** "
                     "— applies in place; the current version is backed up to `.md.bak`."
                 )
+                for w in prop.get("regression_warnings") or []:
+                    st.warning(f"Additivity check: {w}")
                 diff = "\n".join(difflib.unified_diff(
                     prop["existing_content"].splitlines(),
                     prop["proposed_content"].splitlines(),
@@ -406,6 +426,7 @@ def _render_bank_section() -> None:
         n_proven = sum(1 for r in recs if r["proven"])
         star = f", ★ {n_proven} proven" if n_proven else ""
         with st.expander(f"`{domain}` — {len(recs)} banked{star}", expanded=False):
+            _render_variant_group_suggestions(domain)
             for r in _paged(recs, f"bankpage::{domain}"):
                 metric = r["metric"]
                 mtxt = (f" · {metric['name']}={metric['value']}"
@@ -449,6 +470,62 @@ def _render_bank_section() -> None:
                                  key=f"bankdel::{domain}/{r['id']}"):
                         _script_bank.remove_records(domain, [r["id"]])
                         st.rerun()
+
+
+def _render_variant_group_suggestions(domain: str) -> None:
+    """Surface same-system variant clusters as one-click group promotions.
+
+    N different successful treatments of one system are exactly what skill
+    consolidation needs to generalize from — but only if they reach the
+    staging buffer under ONE technique label. This suggestion does the
+    grouping (by fingerprint similarity) and the shared label for the user.
+    """
+    from scilink.skills._shared import _script_bank
+
+    try:
+        groups = [g for g in _script_bank.find_variant_groups(domain)
+                  if g["n_unpromoted"] > 0]
+    except Exception:  # noqa: BLE001 - suggestions must never break the panel
+        return
+    for g in groups:
+        ids = g["ids"]
+        with st.container(border=True):
+            st.markdown(
+                f"💡 **{len(ids)} records look like the same system** "
+                f"(min pairwise similarity {g['min_similarity']}): "
+                + ", ".join(f"`{i}`" for i in ids)
+            )
+            st.caption(
+                "Promote them together under one technique label so the "
+                "review-gated consolidation can distill a general skill "
+                "from all variants at once."
+            )
+            gkey = "::".join([domain] + ids)
+            label = st.text_input(
+                "Technique label", value=g["suggested_technique"],
+                key=f"bankgrouplabel::{gkey}")
+            if st.button(f"Promote {len(ids)} as one technique",
+                         key=f"bankgroup::{gkey}"):
+                out = _script_bank.promote_group_to_staging(
+                    domain, ids, technique=label or None)
+                if out.get("status") == "success":
+                    msg = (f"Staged {len(out['staged_ids'])} under "
+                           f"[{out['technique']}].")
+                    if out.get("ready_to_consolidate"):
+                        msg += " Ready to consolidate in Staged knowledge above."
+                    else:
+                        msg += (f" {out['n_staged_total']} staged so far — "
+                                f"consolidation is suggested at "
+                                f"{_consolidate_min_n_ui()}.")
+                    st.success(msg)
+                else:
+                    st.error(out.get("message", "Group promotion failed."))
+                st.rerun()
+
+
+def _consolidate_min_n_ui() -> int:
+    from scilink.skills._shared import _staging
+    return _staging.consolidate_min_n()
 
 
 # Bank bookkeeping keys not worth echoing in the per-record viewer.

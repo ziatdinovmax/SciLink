@@ -16,6 +16,10 @@ Skills (graduated_skills) subcommands:
   promote   Clear a skill's provisional flag so it routes normally
   demote    Set a promoted skill back to provisional (out of auto-routing)
   prune     Delete a skill bundle
+  fork      Copy a BUILT-IN skill into the persistent store (shadows it;
+            makes it upgradable) — copy-on-write for shipped skills
+  diff-builtin  Diff a forked skill against its shipped original (for
+            contributing improvements back as a package PR)
 
 Staged T=2 solutions (distill_staging) subcommands:
   staged       List staged raw T=2 solutions, grouped by technique
@@ -165,6 +169,47 @@ def _cmd_demote(args) -> int:
     return 0
 
 
+def _cmd_fork(args) -> int:
+    """`scilink memory fork` — copy a built-in skill into the persistent store."""
+    _warn_memory_off()  # a fork only SHADOWS while persistent memory is on
+    from scilink.skills._shared._memory import fork_builtin
+    domain, name = _split_ref(args.ref)
+    try:
+        out = fork_builtin(domain, name)
+    except FileNotFoundError as e:
+        print(f"❌ {e}")
+        return 1
+    if out.get("status") != "success":
+        print(f"❌ {out.get('message')}")
+        return 1
+    print(f"🍴 Forked built-in {domain}/{name} → {out['path']}")
+    print("   The fork SHADOWS the shipped skill immediately (loader precedence)"
+          " and is now a valid `upgrade --into` target.")
+    if out.get("has_sibling_tools"):
+        print(f"   Note: the built-in bundle also ships tools "
+              f"({', '.join(out['sibling_tools'])}) — those stay with the "
+              f"package and keep registering for this skill; only the "
+              f"markdown was forked.")
+    print(f"   Contribute back later: `scilink memory diff-builtin {domain}/{name}`; "
+          f"prune the fork once merged upstream.")
+    return 0
+
+
+def _cmd_diff_builtin(args) -> int:
+    from scilink.skills._shared._memory import diff_builtin
+    domain, name = _split_ref(args.ref)
+    try:
+        out = diff_builtin(domain, name)
+    except FileNotFoundError as e:
+        print(f"❌ {e}")
+        return 1
+    if out["identical"]:
+        print(f"Fork of {domain}/{name} is identical to the built-in.")
+    else:
+        print(out["diff"])
+    return 0
+
+
 def _cmd_prune(args) -> int:
     domain, name = _split_ref(args.ref)
     if not args.yes:
@@ -252,6 +297,9 @@ def _cmd_upgrade(args) -> int:
     if prop.get("status") != "success":
         print(f"❌ {prop.get('message', prop)}")
         return 1
+
+    for w in prop.get("regression_warnings") or []:
+        print(f"⚠️  ADDITIVITY: {w}")
 
     # 2) show the diff for review (upgrade mutates an existing skill in place)
     if not args.yes:
@@ -378,19 +426,73 @@ def _cmd_bank_show(args) -> int:
 
 
 def _cmd_bank_promote(args) -> int:
-    """Send a bank record into distill staging (the graduation path)."""
+    """Send bank record(s) into distill staging (the graduation path).
+
+    Several refs promote as a GROUP under one shared technique label, so
+    `consolidate` later reviews the variants together."""
     _warn_memory_off()
     from scilink.skills._shared import _script_bank
-    domain, rid = _split_ref(args.ref)
-    out = _script_bank.promote_to_staging(domain, rid, technique=args.technique)
-    if out.get("status") != "success":
-        print(f"❌ {out.get('message')}")
+    refs = [_split_ref(r) for r in args.refs]
+    domain = refs[0][0]
+    if any(d != domain for d, _ in refs):
+        print("❌ Group promotion takes records from ONE domain.")
         return 1
-    print(f"🧠 Promoted bank record {rid} → staged {out['staged_id']} "
-          f"[{out['technique']}].")
-    print("   Review with `scilink memory staged`, then `upgrade` it into an "
-          "existing skill or `consolidate` once enough of the technique "
-          "accumulates. The bank record is kept (marked ✓ promoted).")
+    if len(refs) == 1:
+        out = _script_bank.promote_to_staging(domain, refs[0][1],
+                                              technique=args.technique)
+        if out.get("status") != "success":
+            print(f"❌ {out.get('message')}")
+            return 1
+        print(f"🧠 Promoted bank record {refs[0][1]} → staged {out['staged_id']} "
+              f"[{out['technique']}].")
+    else:
+        out = _script_bank.promote_group_to_staging(
+            domain, [rid for _, rid in refs], technique=args.technique)
+        if out.get("status") != "success":
+            print(f"❌ {out.get('message')}")
+            return 1
+        print(f"🧠 Promoted {len(out['staged_ids'])} record(s) as one technique "
+              f"[{out['technique']}] → staged {', '.join(out['staged_ids'])}.")
+        for s in out.get("skipped", []):
+            print(f"   (skipped {s['id']}: {s['reason']})")
+        if out.get("ready_to_consolidate"):
+            print(f"   ✅ {out['n_staged_total']} staged for this technique — "
+                  f"ready: `scilink memory consolidate {domain}/{out['technique']}`")
+        else:
+            print(f"   Accumulating {out['n_staged_total']}/"
+                  f"{_staging.consolidate_min_n()} for consolidation "
+                  f"(`consolidate` can force it now).")
+    print("   Review with `scilink memory staged`; bank records are kept "
+          "(marked ✓ promoted).")
+    return 0
+
+
+def _cmd_bank_groups(args) -> int:
+    """`scilink memory bank-groups` — same-system variant clusters."""
+    from scilink.skills._shared import _script_bank
+    domains = ([args.domain] if args.domain else
+               sorted({r["domain"] for r in _script_bank.bank_summary()}))
+    total = 0
+    for dom in domains:
+        thr = (args.threshold if args.threshold is not None
+               else _script_bank.VARIANT_GROUP_THRESHOLD)
+        for g in _script_bank.find_variant_groups(dom, threshold=thr):
+            total += 1
+            print(f"{dom}: {len(g['ids'])} variants of one system "
+                  f"(min pairwise similarity {g['min_similarity']})")
+            for r in g["records"]:
+                m = r["metric"]
+                mtxt = (f"  {m['name']}={m['value']}"
+                        if isinstance(m, dict) and m.get("value") is not None else "")
+                mark = " ✓ promoted" if r["promoted_to_staging"] else ""
+                print(f"    · {r['id']}  successes={r['n_successes']}{mtxt}{mark}")
+                print(f"      {r['label'][:90]}")
+            refs = " ".join(f"{dom}/{i}" for i in g["ids"])
+            print(f"    → promote together: `scilink memory bank-promote {refs} "
+                  f"--technique {g['suggested_technique']}`")
+    if not total:
+        print("No variant groups found (need ≥2 records of the same system "
+              "in a domain).")
     return 0
 
 
@@ -445,6 +547,17 @@ def main():
     p_demote.add_argument("ref", help="Skill reference '<domain>/<name>'")
     p_demote.set_defaults(func=_cmd_demote)
 
+    p_fork = sub.add_parser(
+        "fork", help="Copy a built-in skill into the persistent store "
+                     "(shadows it; enables upgrade)")
+    p_fork.add_argument("ref", help="Built-in skill ref '<domain>/<name>'")
+    p_fork.set_defaults(func=_cmd_fork)
+
+    p_db = sub.add_parser(
+        "diff-builtin", help="Diff a forked skill against the shipped built-in")
+    p_db.add_argument("ref", help="Skill ref '<domain>/<name>'")
+    p_db.set_defaults(func=_cmd_diff_builtin)
+
     p_prune = sub.add_parser("prune", help="Delete a skill bundle")
     p_prune.add_argument("ref", help="Skill reference '<domain>/<name>'")
     p_prune.add_argument("--yes", action="store_true", help="Skip the confirmation prompt")
@@ -488,11 +601,24 @@ def main():
 
     p_bp = sub.add_parser(
         "bank-promote",
-        help="Send a proven bank record into distill staging (review-gated skill path)")
-    p_bp.add_argument("ref", help="Bank record ref '<domain>/<id>'")
+        help="Send bank record(s) into distill staging; several refs promote "
+             "as a group under one shared technique label")
+    p_bp.add_argument("refs", nargs="+",
+                      help="Bank record ref(s) '<domain>/<id>' (same domain)")
     p_bp.add_argument("--technique", default=None,
-                      help="Staging technique label (default: derived from the record)")
+                      help="Staging technique label (default: derived from the "
+                           "best record)")
     p_bp.set_defaults(func=_cmd_bank_promote)
+
+    p_bg = sub.add_parser(
+        "bank-groups",
+        help="Show same-system variant clusters (candidates for group "
+             "promotion + consolidation)")
+    p_bg.add_argument("--domain", help="Restrict to one domain")
+    p_bg.add_argument("--threshold", type=float, default=None,
+                      help="Fingerprint-similarity grouping threshold "
+                           "(default 0.85)")
+    p_bg.set_defaults(func=_cmd_bank_groups)
 
     p_br = sub.add_parser("bank-prune", help="Delete a bank record")
     p_br.add_argument("ref", help="Bank record ref '<domain>/<id>'")

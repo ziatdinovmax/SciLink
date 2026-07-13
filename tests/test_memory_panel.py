@@ -157,3 +157,35 @@ def test_demote_and_destage_buttons(tmp_path, monkeypatch):
     destage.click().run()
     assert not at.exception, at.exception
     assert _staging.list_staged("curve_fitting") == []
+
+
+def test_variant_group_suggestion_and_group_promote(tmp_path, monkeypatch):
+    """The bank panel suggests same-system variant groups and promotes them
+    under one shared technique label; the suggestion clears afterwards."""
+    monkeypatch.setenv("SCILINK_HOME", str(tmp_path))
+    monkeypatch.setenv("SCILINK_MEMORY", "1")
+    from scilink.skills._shared import _script_bank as sb, _staging
+
+    fp = {"kind": "curve", "n_points": 500, "x_range": [0.0, 100.0],
+          "peaks": {"count": 2, "top": [
+              {"position": 30.0, "fwhm": 5.0, "prominence": 1.0},
+              {"position": 70.0, "fwhm": 5.0, "prominence": 0.5}]}}
+    ids = [sb.add_record("curve_fitting", {
+        "working_script": f"# v{i}", "data_fingerprint": fp,
+        "measurement_context": {"technique": "Raman"},
+        "technique_signals": {"model_type": "two voigt carbon"},
+        "outcome": {"metric": {"name": "r_squared", "value": 0.99 - i * 0.01}},
+        "provenance": {"session": f"s{i}"}})["id"] for i in range(2)]
+
+    at = AppTest.from_string(PANEL_SCRIPT, default_timeout=60)
+    at.run()
+    gkey = "::".join(["curve_fitting"] + sorted(ids, key=lambda x: x))
+    btns = [b for b in at.button if b.key and b.key.startswith("bankgroup::")]
+    assert btns, "group-promote suggestion button missing"
+    btns[0].click().run()
+    assert not at.exception, at.exception
+    staged = _staging.group_by_technique("curve_fitting")
+    assert len(staged) == 1 and len(next(iter(staged.values()))) == 2
+
+    at.run()  # suggestion gone once all members are promoted
+    assert not [b for b in at.button if b.key and b.key.startswith("bankgroup::")]
