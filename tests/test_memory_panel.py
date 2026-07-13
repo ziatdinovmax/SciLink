@@ -189,3 +189,71 @@ def test_variant_group_suggestion_and_group_promote(tmp_path, monkeypatch):
 
     at.run()  # suggestion gone once all members are promoted
     assert not [b for b in at.button if b.key and b.key.startswith("bankgroup::")]
+
+
+def _seed_full_pipeline(tmp_path, monkeypatch):
+    """A store exercising all three knowledge streams + the linkage."""
+    monkeypatch.setenv("SCILINK_HOME", str(tmp_path))
+    monkeypatch.setenv("SCILINK_MEMORY", "1")
+    from scilink.skills._shared import _script_bank as sb, _staging
+    from scilink.skills.loader import graduated_skills_dir
+
+    rid = sb.add_record("curve_fitting", {
+        "working_script": "# hot win", "data_fingerprint": {"kind": "curve"},
+        "measurement_context": {"technique": "Raman"},
+        "technique_signals": {"model_type": "two voigt"},
+        "outcome": {"metric": {"name": "r_squared", "value": 0.99}},
+        "provenance": {"session": "s1"}})["id"]
+    for s in ("s2", "s3"):
+        sb.record_success("curve_fitting", rid, session=s)
+    out = sb.promote_to_staging("curve_fitting", rid, technique="raman_dg",
+                                provenance="t2_hot_win",
+                                extra={"deviation_from_plan": "switched model"})
+    _staging.stage_solution("curve_fitting", "raman_dg", {
+        "provenance": "error_fix", "model": "m",
+        "error_lessons": [{"error": "SNIP no converge", "fix": "fixed iter"}],
+        "session": "s1"})
+    _staging.stage_solution("curve_fitting", "raman_dg", {
+        "provenance": "user_correction", "model": "m",
+        "user_feedback": "always report baseline fraction", "session": "s1"})
+    d = graduated_skills_dir() / "curve_fitting" / "myskill"
+    d.mkdir(parents=True)
+    (d / "myskill.md").write_text(
+        "---\nprovisional: true\n---\n## overview\nskill body\n")
+    return rid, out["staged_id"]
+
+
+def test_panel_pipeline_order_and_summary(tmp_path, monkeypatch):
+    _seed_full_pipeline(tmp_path, monkeypatch)
+    at = AppTest.from_string(PANEL_SCRIPT, default_timeout=60)
+    at.run()
+    assert not at.exception, at.exception
+    texts = [m.value for m in at.markdown]
+    joined = "\n".join(texts)
+    # summary strip with counts
+    assert "1 · Script bank: 1" in joined and "★1 proven" in joined
+    assert "2 · Review inbox: 3" in joined and "ready to distill" in joined
+    assert "3 · Skills: 1" in joined
+    # pipeline order top-to-bottom
+    i_bank = next(i for i, t in enumerate(texts) if t.startswith("**1 · Script bank** —"))
+    i_inbox = next(i for i, t in enumerate(texts) if t.startswith("**2 · Review inbox**"))
+    i_skills = next(i for i, t in enumerate(texts) if t.startswith("**3 · Skills**"))
+    assert i_bank < i_inbox < i_skills
+
+
+def test_panel_badges_verbs_and_crosslinks(tmp_path, monkeypatch):
+    rid, sid = _seed_full_pipeline(tmp_path, monkeypatch)
+    at = AppTest.from_string(PANEL_SCRIPT, default_timeout=60)
+    at.run()
+    captions = "\n".join(c.value for c in at.caption)
+    # three knowledge-type badges in the inbox
+    assert "📜" in captions and "🐛" in captions and "💬" in captions
+    # cross-links both ways
+    assert f"from bank `{rid}`" in captions and "succeeded in 3 sessions" in captions
+    assert f"in review inbox (`{sid}`)" in captions
+    # one verb per pipeline stage
+    labels = [b.label for b in at.button]
+    assert any("Nominate for review" in l for l in labels)
+    assert any("Approve for routing" in l for l in labels)
+    assert any("Discard" in l for l in labels)
+    assert not any(l.strip() == "Promote" for l in labels)  # overload gone

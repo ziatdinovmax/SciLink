@@ -157,6 +157,51 @@ def _render_memory_section() -> None:
         st.error(f"Could not read persistent memory: {e}")
         return
 
+    # The memory pipeline reads top-to-bottom in the order knowledge flows:
+    # every success lands in the bank automatically; nominations and lessons
+    # wait in the review inbox; reviewed knowledge becomes skills that guide
+    # planning. One summary strip shows the whole state.
+    _render_pipeline_summary(rows)
+    _render_bank_section()
+    _render_staged_section()
+    _render_skills_section(_memory, rows)
+
+
+def _render_pipeline_summary(skill_rows) -> None:
+    """One-line state of the memory pipeline: bank → inbox → skills."""
+    from scilink.skills._shared import _script_bank, _staging
+
+    try:
+        bank = _script_bank.bank_summary()
+        n_proven = sum(1 for r in bank if r["proven"])
+        staged = _staging.list_staged()
+        need = _staging.consolidate_min_n()
+        by_tech = {}
+        for s in staged:
+            by_tech.setdefault((s.get("domain"), s.get("technique")), []).append(s)
+        n_ready = sum(1 for recs in by_tech.values() if len(recs) >= need)
+        n_prov = sum(1 for r in skill_rows if r["provisional"])
+        star = f" (★{n_proven} proven)" if n_proven else ""
+        ready = f" ({n_ready} ready to distill)" if n_ready else ""
+        prov = f" ({n_prov} provisional)" if n_prov else ""
+        st.markdown(
+            f"**1 · Script bank: {len(bank)}**{star} → "
+            f"**2 · Review inbox: {len(staged)}**{ready} → "
+            f"**3 · Skills: {len(skill_rows)}**{prov}"
+        )
+    except Exception:  # noqa: BLE001 - the strip must never break the panel
+        pass
+
+
+def _render_skills_section(_memory, rows) -> None:
+    """Stage 3 — curated skills (the end of the pipeline)."""
+    st.markdown("---")
+    st.markdown("**3 · Skills** — curated knowledge that guides planning")
+    st.caption(
+        "The end of the pipeline: reviewed knowledge with planning-layer "
+        "authority. Approved skills auto-route; provisional ones wait for "
+        "your call; a fork of a built-in shadows the shipped copy."
+    )
     provisional = [r for r in rows if r["provisional"]]
     promoted = [r for r in rows if not r["provisional"]]
 
@@ -165,14 +210,11 @@ def _render_memory_section() -> None:
         for r in _paged(provisional, "provpage"):
             _render_memory_row(_memory, r, provisional=True)
     if promoted:
-        st.markdown(f"**Promoted ({len(promoted)})**")
+        st.markdown(f"**Approved for routing ({len(promoted)})**")
         for r in _paged(promoted, "prompage"):
             _render_memory_row(_memory, r, provisional=False)
     if not rows:
-        st.caption("No persisted skills yet.")
-
-    _render_staged_section()
-    _render_bank_section()
+        st.caption("No skills yet — they are distilled from the review inbox above.")
 
 
 def _render_staged_section() -> None:
@@ -183,12 +225,14 @@ def _render_staged_section() -> None:
     mem_on = loader.memory_enabled()
 
     st.markdown("---")
-    st.markdown("**Staged knowledge** — solved-from-scratch solutions, your feedback & error fixes")
+    st.markdown("**2 · Review inbox** — nominations & lessons awaiting your call")
     st.caption(
-        "Hard problems the agent solved only after rebuilding its approach from "
-        "scratch — plus your feedback and recurring error fixes. Upgrade an "
-        "existing skill from one, or consolidate several of the same technique "
-        "into a new skill. Both use the active session's model."
+        "Where the three knowledge streams converge before becoming a skill: "
+        "📜 script nominations (solved from scratch, or proven across "
+        "sessions), 🐛 error lessons (what went wrong + the fix), and "
+        "💬 your feedback (treated as ground truth). Distilling merges them "
+        "into one skill: method + pitfalls + your constraints. Uses the "
+        "active session's model."
     )
 
     groups = {}
@@ -207,21 +251,34 @@ def _render_staged_section() -> None:
 
     for (domain, technique), recs in sorted(groups.items()):
         with st.expander(f"`{domain}/{technique}` — {len(recs)} staged", expanded=False):
+            st.caption("distills into: method 📜 + pitfalls 🐛 + your constraints 💬")
             for r in _paged(recs, f"stagedpage::{domain}/{technique}"):
                 metric = r.get("r_squared") or r.get("quality_score")
-                prov = _staging.PROVENANCE_LABELS.get(r.get("provenance", "t2_solution"), r.get("provenance", ""))
+                prov_key = r.get("provenance", "t2_solution")
+                icon = {"error_fix": "🐛", "user_correction": "💬"}.get(prov_key, "📜")
+                prov = _staging.PROVENANCE_LABELS.get(prov_key, prov_key)
+                bank_link = ""
+                if r.get("bank_id"):
+                    from scilink.skills._shared import _script_bank
+                    brec = _script_bank.get_record(domain, r["bank_id"])
+                    n_succ = ((brec or {}).get("stats") or {}).get("n_successes")
+                    bank_link = (f" · from bank `{r['bank_id']}`"
+                                 + (f" (succeeded in {n_succ} sessions)"
+                                    if n_succ and n_succ > 1 else ""))
                 meta_col, view_col = st.columns([3, 1])
                 meta_col.caption(
-                    f"id={r['id']} · {prov} · session={r.get('session','?')}"
+                    f"{icon} id={r['id']} · {prov} · session={r.get('session','?')}"
                     + (f" · {_staging.metric_label(r)}" if _staging.metric_label(r) else "")
+                    + bank_link
                 )
                 with view_col.popover("View", width="stretch"):
                     _lazy_content(f"stagedlazy::{r['id']}",
                                   lambda r=r: _render_staged_record(r))
-                    if st.button("Delete staged record",
+                    if st.button("Discard",
                                  key=f"destage::{domain}/{r['id']}",
-                                 help="Remove from the staging buffer without "
-                                      "distilling it (de-stage)."):
+                                 help="Remove from the review inbox without "
+                                      "distilling it. A nominated bank record "
+                                      "becomes nominatable again."):
                         _staging.remove_staged(domain, [r["id"]])
                         st.warning(f"De-staged {r['id']}.")
                         st.rerun()
@@ -398,14 +455,15 @@ def _render_bank_section() -> None:
     from scilink.skills._shared import _script_bank
 
     st.markdown("---")
-    st.markdown("**Script bank** — proven analysis scripts, retrieved & adapted on new data")
+    st.markdown("**1 · Script bank** — every success, recorded automatically")
     st.caption(
-        "Every approved analysis banks its working script with a fingerprint "
-        "of the data it solved; later runs retrieve the closest match as a "
-        "starting point, and real-time mode can cold-start a campaign from "
-        "one. Records that keep succeeding across sessions (★) are "
-        "evidence-backed skill candidates — promote one to send it into the "
-        "staged-knowledge review path above."
+        "The start of the pipeline: each approved analysis banks its working "
+        "script with a fingerprint of the data it solved. Later runs retrieve "
+        "the closest match as a starting point, and real-time mode can "
+        "cold-start a campaign from one. Records that keep succeeding across "
+        "sessions (★) are evidence-backed skill candidates — nominate one to "
+        "send it into the review inbox below (hard-won hot-annealing wins are "
+        "nominated automatically)."
     )
 
     try:
@@ -435,7 +493,7 @@ def _render_bank_section() -> None:
                 badge = "★ proven" if r["proven"] else \
                     f"{r['n_successes']}/{threshold} sessions"
                 if r["promoted_to_staging"]:
-                    badge += " · ✓ promoted"
+                    badge += f" · ✓ in review inbox (`{r['promoted_to_staging']}`)"
                 meta_col, view_col, act_col = st.columns([4, 1, 1])
                 meta_col.caption(
                     f"id={r['id']} · {badge} · retrieved {r['n_retrievals']}×{mtxt}\n\n"
@@ -451,13 +509,13 @@ def _render_bank_section() -> None:
                     _lazy_content(f"banklazy::{domain}/{r['id']}", _load)
                 with act_col.popover("···", width="stretch"):
                     if st.button(
-                        "Promote → staged knowledge",
+                        "Nominate for review",
                         key=f"bankprom::{domain}/{r['id']}",
                         disabled=bool(r["promoted_to_staging"]),
-                        help=("Already promoted." if r["promoted_to_staging"] else
-                              "Copies this script into the staged-knowledge "
-                              "buffer above for the review-gated skill path. "
-                              "The bank record is kept."),
+                        help=("Already in the review inbox." if r["promoted_to_staging"] else
+                              "Sends this script to the review inbox below, "
+                              "where it can be distilled into a skill. The "
+                              "bank record is kept."),
                     ):
                         out = _script_bank.promote_to_staging(domain, r["id"])
                         if out.get("status") == "success":
@@ -496,7 +554,7 @@ def _render_variant_group_suggestions(domain: str) -> None:
                 + ", ".join(f"`{i}`" for i in ids)
             )
             st.caption(
-                "Promote them together under one technique label so the "
+                "Nominate them together under one technique label so the "
                 "review-gated consolidation can distill a general skill "
                 "from all variants at once."
             )
@@ -504,7 +562,7 @@ def _render_variant_group_suggestions(domain: str) -> None:
             label = st.text_input(
                 "Technique label", value=g["suggested_technique"],
                 key=f"bankgrouplabel::{gkey}")
-            if st.button(f"Promote {len(ids)} as one technique",
+            if st.button(f"Nominate {len(ids)} as one technique",
                          key=f"bankgroup::{gkey}"):
                 out = _script_bank.promote_group_to_staging(
                     domain, ids, technique=label or None)
@@ -561,7 +619,7 @@ def _render_staged_record(r: dict) -> None:
 def _render_memory_row(_memory, r, *, provisional: bool) -> None:
     from scilink.skills._shared import _staging
     ref = f"{r['domain']}/{r['name']}"
-    badge = "🟡 provisional" if provisional else "✅ promoted"
+    badge = "🟡 provisional" if provisional else "✅ approved"
     _m = _staging.metric_label(r)
     r2 = f" · {_m}" if _m else ""
     with st.expander(f"{badge} · `{ref}`{r2}", expanded=False):
@@ -582,23 +640,23 @@ def _render_memory_row(_memory, r, *, provisional: bool) -> None:
         mem_on = loader.memory_enabled()
         c1, c2, _ = st.columns([2, 2, 4])
         if provisional:
-            if c1.button("Promote", key=f"promote::{ref}", type="primary",
+            if c1.button("Approve for routing", key=f"promote::{ref}", type="primary",
                          disabled=not mem_on,
                          help=(None if mem_on else
-                               "Persistent memory is off — promoted skills won't load "
+                               "Persistent memory is off — approved skills won't load "
                                "until you turn it on.")):
                 _memory.promote_memory(r["domain"], r["name"])
-                st.success(f"Promoted {ref} — now auto-routable.")
+                st.success(f"Approved {ref} — now auto-routable.")
                 st.rerun()
         else:
-            if c1.button("Demote", key=f"demote::{ref}",
+            if c1.button("Suspend (provisional)", key=f"demote::{ref}",
                          help=("Set back to provisional — taken out of the "
                                "auto-routing menu (still explicitly loadable) "
-                               "until you re-promote it.")):
+                               "until you approve it again.")):
                 _memory.demote_memory(r["domain"], r["name"])
-                st.warning(f"Demoted {ref} to provisional.")
+                st.warning(f"Suspended {ref} — provisional again.")
                 st.rerun()
-        if c2.button("Prune", key=f"prune::{ref}"):
+        if c2.button("Delete", key=f"prune::{ref}"):
             _memory.prune_memory(r["domain"], r["name"])
             st.warning(f"Pruned {ref}.")
             st.rerun()
