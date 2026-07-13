@@ -181,13 +181,13 @@ def _render_pipeline_summary(skill_rows) -> None:
             by_tech.setdefault((s.get("domain"), s.get("technique")), []).append(s)
         n_ready = sum(1 for recs in by_tech.values() if len(recs) >= need)
         n_prov = sum(1 for r in skill_rows if r["provisional"])
-        star = f" (★{n_proven} proven)" if n_proven else ""
-        ready = f" ({n_ready} ready to distill)" if n_ready else ""
-        prov = f" ({n_prov} provisional)" if n_prov else ""
+        star = f", ★{n_proven} proven" if n_proven else ""
+        ready = f", {n_ready} ready to distill" if n_ready else ""
+        prov = f", {n_prov} provisional" if n_prov else ""
         st.markdown(
-            f"Script bank **{len(bank)}**{star} → "
-            f"Review inbox **{len(staged)}**{ready} → "
-            f"Skills **{len(skill_rows)}**{prov}"
+            f"Script bank ({len(bank)}{star}) → "
+            f"Review inbox ({len(staged)}{ready}) → "
+            f"Skills ({len(skill_rows)}{prov})"
         )
     except Exception:  # noqa: BLE001 - the strip must never break the panel
         pass

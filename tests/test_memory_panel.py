@@ -233,9 +233,9 @@ def test_panel_pipeline_order_and_summary(tmp_path, monkeypatch):
     # summary strip with counts (plain labels + bold counts — the stage
     # numbers live on the section headers only, so the strip doesn't read
     # like arithmetic: "bank: 2 → 2 · Review…")
-    assert "Script bank **1**" in joined and "★1 proven" in joined
-    assert "Review inbox **3**" in joined and "ready to distill" in joined
-    assert "Skills **1**" in joined
+    assert "Script bank (1, ★1 proven)" in joined
+    assert "Review inbox (3, 1 ready to distill)" in joined
+    assert "Skills (1, 1 provisional)" in joined
     # pipeline order top-to-bottom
     i_bank = next(i for i, t in enumerate(texts) if t.startswith("**1 · Script bank** —"))
     i_inbox = next(i for i, t in enumerate(texts) if t.startswith("**2 · Review inbox**"))
