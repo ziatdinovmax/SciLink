@@ -51,16 +51,17 @@ def test_panel_renders_lazily(heavy_store):
     assert not at.exception, at.exception
     # NO script is syntax-highlighted until a viewer is explicitly loaded.
     assert len(at.code) == 0
-    # Lazy viewers exist for the paged rows.
-    assert len(at.checkbox) > 0
+    # One-click lazy viewers exist for the paged bank rows.
+    assert any((t.key or "").startswith("banklazy::") for t in at.toggle)
 
 
 def test_lazy_tick_loads_one_record(heavy_store):
     at = AppTest.from_string(PANEL_SCRIPT, default_timeout=60)
     at.run()
-    at.checkbox[0].check().run()
+    view = next(t for t in at.toggle if (t.key or "").startswith("banklazy::"))
+    view.set_value(True).run()
     assert not at.exception, at.exception
-    assert len(at.code) == 1  # exactly the ticked record's script
+    assert len(at.code) == 1  # exactly the viewed record's script
 
 
 def test_panel_survives_hostile_and_degenerate_records(tmp_path, monkeypatch):
@@ -152,6 +153,10 @@ def test_demote_and_destage_buttons(tmp_path, monkeypatch):
     at.run()
     assert any(b.key == "promote::curve_fitting/myskill" for b in at.button)
 
+    # Discard lives in the record inspector: pick the record first.
+    inspector = next(s for s in at.selectbox
+                     if (s.key or "").startswith("inspect::curve_fitting/"))
+    inspector.select(inspector.options[0]).run()
     destage = next(b for b in at.button
                    if b.key == f"destage::curve_fitting/{sid}")
     destage.click().run()
@@ -247,14 +252,20 @@ def test_panel_badges_verbs_and_crosslinks(tmp_path, monkeypatch):
     rid, sid = _seed_full_pipeline(tmp_path, monkeypatch)
     at = AppTest.from_string(PANEL_SCRIPT, default_timeout=60)
     at.run()
-    captions = "\n".join(c.value for c in at.caption)
-    row_labels = "\n".join(c.label for c in at.checkbox)  # selection rows
-    text = captions + "\n" + row_labels
+    # Record identities live on the Records pills / inspector options.
+    inspector = next(s for s in at.selectbox
+                     if (s.key or "").startswith("inspect::curve_fitting/"))
+    opts = "\n".join(inspector.options)
     # three knowledge-type badges in the inbox
-    assert "📜" in text and "🐛" in text and "💬" in text
-    # cross-links both ways
-    assert f"from bank `{rid}`" in text and "succeeded in 3 sessions" in text
-    assert f"in review inbox (`{sid}`)" in text
+    assert "📜" in opts and "🐛" in opts and "💬" in opts
+    # cross-links both ways: bank->inbox on the bank row caption; inbox->bank
+    # inside the inspector once the banked record is picked.
+    captions = "\n".join(c.value for c in at.caption)
+    assert f"in review inbox (`{sid}`)" in captions
+    inspector.select(next(o for o in inspector.options if "📜" in o)).run()
+    assert not at.exception, at.exception
+    captions = "\n".join(c.value for c in at.caption)
+    assert f"from bank `{rid}`" in captions and "succeeded in 3 sessions" in captions
     # one verb per pipeline stage
     labels = [b.label for b in at.button]
     assert any("Nominate for review" in l for l in labels)

@@ -259,47 +259,6 @@ def _render_staged_section() -> None:
     for (domain, technique), recs in sorted(groups.items()):
         with st.expander(f"`{domain}/{technique}` — {len(recs)} staged",
                          expanded=False):
-            # ── the records, as compact chips: hover = summary tooltip,
-            # click = details + full content + Discard ──
-            paged = _paged(recs, f"stagedpage::{domain}/{technique}")
-            per_row = 4
-            for start in range(0, len(paged), per_row):
-                cols = st.columns(per_row)
-                for col, r in zip(cols, paged[start:start + per_row]):
-                    prov_key = r.get("provenance", "t2_solution")
-                    prov = _staging.PROVENANCE_LABELS.get(prov_key, prov_key)
-                    metric = _staging.metric_label(r)
-                    bank_link = ""
-                    if r.get("bank_id"):
-                        from scilink.skills._shared import _script_bank
-                        brec = _script_bank.get_record(domain, r["bank_id"])
-                        n_succ = ((brec or {}).get("stats") or {}).get("n_successes")
-                        bank_link = (f" · from bank `{r['bank_id']}`"
-                                     + (f" (succeeded in {n_succ} sessions)"
-                                        if n_succ and n_succ > 1 else ""))
-                    summary = (f"{prov} · session={r.get('session', '?')}"
-                               + (f" · {metric}" if metric else ""))
-                    with col:
-                        with st.popover(f"{_icon.get(prov_key, '📜')} {r['id']}",
-                                        help=summary, width="stretch"):
-                            st.caption(f"{_icon.get(prov_key, '📜')} {summary}"
-                                       + bank_link)
-                            _lazy_content(f"stagedlazy::{r['id']}",
-                                          lambda r=r: _render_staged_record(r))
-                            if st.button("Discard",
-                                         key=f"destage::{domain}/{r['id']}",
-                                         help="Remove from the review inbox "
-                                              "without distilling it. A "
-                                              "nominated bank record becomes "
-                                              "nominatable again."):
-                                _staging.remove_staged(domain, [r["id"]])
-                                st.warning(f"De-staged {r['id']}.")
-                                st.rerun()
-
-            if model is None:
-                st.info("Start a session to enable distillation (needs a model).")
-                continue
-
             # ── ONE distill flow ──
             st.markdown("**Distill**")
             # Selectable records: this group + same-session records filed
@@ -319,8 +278,13 @@ def _render_staged_section() -> None:
                 prov = r.get("provenance", "")
                 label = (f"{_icon.get(prov, '📜')} {i} · "
                          f"{_staging.PROVENANCE_LABELS.get(prov, prov or '?')}")
+                metric = _staging.metric_label(r)
+                if metric:
+                    label += f" · {metric}"
                 if (r.get("technique") or "unlabeled") != technique:
                     label += f"  (from {r.get('technique')})"
+                if r.get("session"):
+                    label += f" · {r['session']}"
                 return label
 
             sids = st.multiselect(
@@ -331,6 +295,39 @@ def _render_staged_section() -> None:
                 help=("Same-session records from other groups are offered "
                       "too — select them to distill the lessons together."))
             selected = [by_id[i] for i in sids if i in by_id]
+
+            # Inspector: pick a record to see everything it carries — the
+            # working script, an error lesson's traceback + fix, or your
+            # feedback text. Lazy: nothing renders until one is picked.
+            inspect_id = st.selectbox(
+                "Inspect", [r["id"] for r in pool], index=None,
+                format_func=_fmt_rec, label_visibility="collapsed",
+                placeholder="Inspect a record — script / error / feedback…",
+                key=f"inspect::{domain}/{technique}")
+            if inspect_id and inspect_id in by_id:
+                r = by_id[inspect_id]
+                bank_link = ""
+                if r.get("bank_id"):
+                    from scilink.skills._shared import _script_bank
+                    brec = _script_bank.get_record(domain, r["bank_id"])
+                    n_succ = ((brec or {}).get("stats") or {}).get("n_successes")
+                    bank_link = (f" · from bank `{r['bank_id']}`"
+                                 + (f" (succeeded in {n_succ} sessions)"
+                                    if n_succ and n_succ > 1 else ""))
+                with st.container(border=True):
+                    st.caption(_fmt_rec(inspect_id) + bank_link)
+                    _render_staged_record(r)
+                    if st.button("Discard", key=f"destage::{domain}/{r['id']}",
+                                 help="Remove from the review inbox without "
+                                      "distilling it. A nominated bank record "
+                                      "becomes nominatable again."):
+                        _staging.remove_staged(domain, [r["id"]])
+                        st.warning(f"De-staged {r['id']}.")
+                        st.rerun()
+
+            if model is None:
+                st.info("Start a session to enable distillation (needs a model).")
+                continue
 
             dest = st.radio(
                 "Into", ["a new skill", "an existing skill"],
@@ -616,14 +613,9 @@ def _render_bank_section() -> None:
                     f"id={r['id']} · {badge} · retrieved {r['n_retrievals']}×{mtxt}\n\n"
                     f"{r['label'][:110]}"
                 )
-                with view_col.popover("View", width="stretch"):
-                    def _load(domain=domain, rid=r["id"]):
-                        rec = _script_bank.get_record(domain, rid)
-                        if rec:
-                            _render_bank_record(rec)
-                        else:
-                            st.error("Record unreadable.")
-                    _lazy_content(f"banklazy::{domain}/{r['id']}", _load)
+                # One click loads the whole record; nothing renders while
+                # off, so a large store still costs nothing per rerun.
+                show = view_col.toggle("View", key=f"banklazy::{domain}/{r['id']}")
                 with act_col.popover("···", width="stretch"):
                     if st.button(
                         "Nominate for review",
@@ -645,6 +637,13 @@ def _render_bank_section() -> None:
                                  key=f"bankdel::{domain}/{r['id']}"):
                         _script_bank.remove_records(domain, [r["id"]])
                         st.rerun()
+                if show:
+                    with st.container(border=True):
+                        rec = _script_bank.get_record(domain, r["id"])
+                        if rec:
+                            _render_bank_record(rec)
+                        else:
+                            st.error("Record unreadable.")
 
 
 def _render_variant_group_suggestions(domain: str) -> None:
