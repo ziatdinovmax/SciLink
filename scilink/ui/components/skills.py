@@ -185,9 +185,9 @@ def _render_pipeline_summary(skill_rows) -> None:
         ready = f" ({n_ready} ready to distill)" if n_ready else ""
         prov = f" ({n_prov} provisional)" if n_prov else ""
         st.markdown(
-            f"**1 · Script bank: {len(bank)}**{star} → "
-            f"**2 · Review inbox: {len(staged)}**{ready} → "
-            f"**3 · Skills: {len(skill_rows)}**{prov}"
+            f"Script bank **{len(bank)}**{star} → "
+            f"Review inbox **{len(staged)}**{ready} → "
+            f"Skills **{len(skill_rows)}**{prov}"
         )
     except Exception:  # noqa: BLE001 - the strip must never break the panel
         pass

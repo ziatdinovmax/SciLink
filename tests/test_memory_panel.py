@@ -230,10 +230,12 @@ def test_panel_pipeline_order_and_summary(tmp_path, monkeypatch):
     assert not at.exception, at.exception
     texts = [m.value for m in at.markdown]
     joined = "\n".join(texts)
-    # summary strip with counts
-    assert "1 · Script bank: 1" in joined and "★1 proven" in joined
-    assert "2 · Review inbox: 3" in joined and "ready to distill" in joined
-    assert "3 · Skills: 1" in joined
+    # summary strip with counts (plain labels + bold counts — the stage
+    # numbers live on the section headers only, so the strip doesn't read
+    # like arithmetic: "bank: 2 → 2 · Review…")
+    assert "Script bank **1**" in joined and "★1 proven" in joined
+    assert "Review inbox **3**" in joined and "ready to distill" in joined
+    assert "Skills **1**" in joined
     # pipeline order top-to-bottom
     i_bank = next(i for i, t in enumerate(texts) if t.startswith("**1 · Script bank** —"))
     i_inbox = next(i for i, t in enumerate(texts) if t.startswith("**2 · Review inbox**"))
