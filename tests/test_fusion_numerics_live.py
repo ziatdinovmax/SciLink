@@ -115,11 +115,18 @@ def main():
     print(f"\n### FAN-OUT: {n_expected} datasets over {up} ###")
     out = json.loads(ag._run_fanout(_branches(up, args)))
     print("FANOUT RESULT:", json.dumps(
-        {k: out.get(k) for k in ("status", "reason", "join_axis",
-                                 "branches_run", "branches_with_output")},
+        {k: out.get(k) for k in ("status", "reason", "join_axis", "join_type",
+                                 "mesh", "branches_run",
+                                 "branches_with_output")},
         indent=2))
     check("fan-out ran (status=success)", out.get("status") == "success")
     check(f"{n_expected} branches ran", out.get("branches_run") == n_expected)
+    # Mesh policy: a shared-temperature-axis study runs INDEPENDENT branches.
+    check("shared-axis set ran independent (no operand mesh)",
+          out.get("mesh") == "independent")
+    check("no informed_by on unsteered independent branches",
+          all(not e.get("informed_by") for e in ag._delegation_ledger
+              if e.get("fanout")))
 
     fan = [e for e in ag._delegation_ledger if e.get("fanout")]
     check("branch entries stamped with join_axis (#296)",

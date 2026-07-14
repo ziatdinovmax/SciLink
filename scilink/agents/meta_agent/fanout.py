@@ -772,13 +772,40 @@ def run_fanout(orch, branches: List[dict]) -> str:
     # --- mesh policy: the gate's join type decides the wiring ---
     mesh = _operand_mesh(verdict)
 
+    def _companions_for(i):
+        # A companion must be LOADABLE as an auxiliary operand. For a branch
+        # with a resolved file set, its shared directory is not (the aux
+        # loaders reject extension-less paths) — hand over a representative
+        # file of the series instead (Fix 3).
+        comps = []
+        for j in range(len(run_branches)):
+            if j == i:
+                continue
+            c = run_branches[j]
+            comp = {"label": f"companion_{_slug(c['label'])}"}
+            if c.get("files"):
+                comp["data_path"] = c["files"][0]
+                comp["note"] = (f"one representative file of a "
+                                f"{len(c['files'])}-file series "
+                                f"('{c.get('pattern')}' in {c['data_path']})")
+            else:
+                comp["data_path"] = c["data_path"]
+            comps.append(comp)
+        return comps
+
+    branch_companions = [_companions_for(i) if mesh else []
+                         for i in range(len(run_branches))]
+
     # --- preallocate ledger slots (sequential, under lock — no concurrent append) ---
     with orch._fanout_lock:
         entries = []
         group_id = f"fanout_{len(orch._delegation_ledger) + 1}"
-        for b in run_branches:
+        for i, b in enumerate(run_branches):
+            # The ledger records the ACTUAL task the branch receives —
+            # companions included — so the audit trail shows what informed it.
             entry = orch._open_delegation(
-                "analysis", _mesh_task(b, []), b.get("context"), None, b["label"])
+                "analysis", _mesh_task(b, branch_companions[i]),
+                b.get("context"), None, b["label"])
             entry["parallel_group"] = group_id
             entry["fanout"] = True
             # Independence provenance: ANY companion contact with a branch's
@@ -812,34 +839,13 @@ def run_fanout(orch, branches: List[dict]) -> str:
           f"(group {group_id}, "
           f"{'operand mesh — co-registered set' if mesh else 'independent branches'})...")
 
-    def _companions_for(i):
-        # A companion must be LOADABLE as an auxiliary operand. For a branch
-        # with a resolved file set, its shared directory is not (the aux
-        # loaders reject extension-less paths) — hand over a representative
-        # file of the series instead (Fix 3).
-        comps = []
-        for j in range(len(run_branches)):
-            if j == i:
-                continue
-            b = run_branches[j]
-            c = {"label": f"companion_{_slug(b['label'])}"}
-            if b.get("files"):
-                c["data_path"] = b["files"][0]
-                c["note"] = (f"one representative file of a "
-                             f"{len(b['files'])}-file series "
-                             f"('{b.get('pattern')}' in {b['data_path']})")
-            else:
-                c["data_path"] = b["data_path"]
-            comps.append(c)
-        return comps
-
     max_workers = min(len(run_branches), FANOUT_MAX_WORKERS)
     n_total = len(run_branches)
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         fut_label = {}
         for i in range(n_total):
             fut = pool.submit(_run_one_branch, orch, run_branches[i],
-                              _companions_for(i) if mesh else [], entries[i])
+                              branch_companions[i], entries[i])
             fut_label[fut] = run_branches[i]["label"]
         # Wait with a periodic heartbeat so the user can see the parallel run is
         # alive (a slow branch can otherwise look like a hang). Each branch is
@@ -1295,10 +1301,17 @@ def _fusion_codegen_inputs(ok: List[dict], branch_numerics: Dict[str, Any],
                  **num}
         if e.get("informed_by"):
             entry["informed_by"] = e["informed_by"]
-            entry["independence_note"] = (
-                "this branch was STEERED at launch by the listed "
-                "companion(s); agreement with them near the hinted value is "
-                "partly by construction")
+            via = e.get("informed_via") or "steering"
+            notes = []
+            if "steering" in via:
+                notes.append("steered at launch by the listed companion(s): "
+                             "agreement near the hinted value is partly by "
+                             "construction")
+            if "co_registered_operands" in via:
+                notes.append("received the listed companion(s) as "
+                             "co-registered operands: overlapping results "
+                             "may be jointly computed, not independent")
+            entry["independence_note"] = "; ".join(notes)
         per_branch.append(entry)
     return (f"\n\n--- JOIN AXIS (from the complementarity gate) ---\n"
             f"{join_axis or 'not stated'}\n"

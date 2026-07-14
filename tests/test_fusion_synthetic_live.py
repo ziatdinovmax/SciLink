@@ -340,8 +340,80 @@ def scenario_scalar():
           f"{(comp.get('results') or {}).get('sigma_available')}")
 
 
+def scenario_coreg():
+    """Co-registered pair (shared 2-D pixel grid): a microstructure image and
+    a chemical map acquired in the SAME scan. The gate must classify
+    co_registered -> the operand mesh fires (the one wiring that still passes
+    companions), informed_by is mutual, and fusion discounts accordingly.
+    Planted truth: phase fraction ~0.30; map intensity 3.0 inside the phase
+    vs 1.0 outside."""
+    ag, prompts = _make_agent("coreg")
+    d = tempfile.mkdtemp(prefix="synth_coreg_data_")
+    # Blobby two-phase mask on a 256x256 grid (~30% phase fraction).
+    yy, xx = np.mgrid[0:256, 0:256]
+    mask = np.zeros((256, 256), bool)
+    for cx, cy, r in ((60, 70, 34), (150, 90, 40), (100, 180, 38),
+                      (200, 200, 30), (210, 40, 24)):
+        mask |= (xx - cx) ** 2 + (yy - cy) ** 2 < r ** 2
+    frac = float(mask.mean())
+    image = (mask * 1.0 + 0.15 * RNG.normal(size=mask.shape) + 0.5)
+    chem = (1.0 + 2.0 * mask + 0.2 * RNG.normal(size=mask.shape))
+    ip = os.path.join(d, "haadf_image.npy"); np.save(ip, image.astype(np.float32))
+    cp = os.path.join(d, "chem_map.npy"); np.save(cp, chem.astype(np.float32))
+    for p, desc in ((ip, "HAADF-like structural image"),
+                    (cp, "chemical composition map")):
+        json.dump({"description": desc, "pixel_size_nm": 2.0,
+                   "note": "acquired in the SAME scan session as its "
+                           "companion, IDENTICAL 256x256 pixel grid, "
+                           "co-registered pixel-for-pixel"},
+                  open(p.replace(".npy", ".json"), "w"))
+    print(f"[coreg] planted phase fraction = {frac:.3f}")
+    out = json.loads(ag._run_fanout([
+        {"data_path": ip, "label": "structural image",
+         "metadata": "HAADF-like image; SAME scan and pixel grid as the "
+                     "chemical map (co-registered pixel-for-pixel).",
+         "task": f"Analyze the image at {ip}: segment the bright secondary "
+                 "phase and report its area fraction."},
+        {"data_path": cp, "label": "chemical map",
+         "metadata": "Chemical composition map; SAME scan and pixel grid as "
+                     "the structural image (co-registered pixel-for-pixel).",
+         "task": f"Analyze the map at {cp}: characterize the high-intensity "
+                 "regions and report their area fraction and mean "
+                 "intensities inside vs outside."},
+    ]))
+    check("coreg: 2 branches ran", out.get("branches_run") == 2)
+    check("coreg: gate classified co_registered",
+          out.get("join_type") == "co_registered")
+    check("coreg: operand mesh fired", out.get("mesh") == "operand")
+    fan = [e for e in ag._delegation_ledger if e.get("fanout")]
+    check("coreg: companions wired as operands",
+          all("COMPANION DATASETS" in (e.get("task") or "") for e in fan))
+    check("coreg: mutual informed_by (co-registered mode)",
+          all(e.get("informed_by") and "co_registered_operands"
+              in (e.get("informed_via") or "") for e in fan))
+    idxs = [r["delegation_index"] for r in out.get("results", [])
+            if r.get("produced_output")]
+    if len(idxs) < 2:
+        check("coreg: both branches productive", False); return
+    fout = _fuse_all(ag, out, "Does the chemical enrichment coincide with "
+                              "the secondary phase, pixel-for-pixel?")
+    check("coreg: fusion success", fout.get("status") == "success")
+    check("coreg: joint-computation caveat present",
+          any("co-registered numerical operand" in str(c)
+              for c in fout.get("caveats") or []))
+    comp = _report("coreg", fout)
+    # Branches may report the fraction as a ratio (0.27) or percent (27).
+    fracs = [v if v <= 1.0 else v / 100.0
+             for v in _numeric_quantities(comp).values()
+             if 0.15 <= v <= 0.45 or 15.0 <= v <= 45.0]
+    print(f"[coreg] fraction-like quantities: {sorted(fracs)[:6]} "
+          f"(planted {frac:.3f})")
+    check("coreg: planted phase fraction recovered (+-0.08)",
+          any(abs(v - frac) <= 0.08 for v in fracs))
+
+
 SCENARIOS = {"agreeing": scenario_agreeing, "null": scenario_null,
-             "scalar": scenario_scalar}
+             "scalar": scenario_scalar, "coreg": scenario_coreg}
 
 
 def main():
