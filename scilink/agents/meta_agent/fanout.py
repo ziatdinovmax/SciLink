@@ -991,6 +991,165 @@ def _numerics_prompt_block(num: dict) -> str:
     return "\n".join(lines)
 
 
+# ----------------------------------------------------------------------
+# Computed reconciliation (issue #296 phase b). Behind the complementarity
+# gate and the sandbox gate, the fusion stage generates ONE reconciliation
+# script over the branches' result tables, executes it, and persists the
+# script + its numerical output next to the report — so the fused numbers
+# trace to code, not to prose. Method selection lives in the baseline
+# prompt (no hardcoded estimator); a failure degrades to text+figure
+# fusion with a warning, never blocks.
+# ----------------------------------------------------------------------
+
+_FUSION_CODEGEN_ATTEMPTS = 3
+_FUSION_SCRIPT_TIMEOUT_S = 300
+
+FUSION_CODEGEN_INSTRUCTIONS = """You are a measurement scientist writing ONE Python script that COMPUTES the \
+quantitative reconciliation of several analysis branches' findings. Each \
+branch has already reduced its raw data to result tables on disk (paths and \
+schema previews below). Your script loads those tables and computes the \
+reconciliation, so the fused claims trace to computed numbers instead of \
+prose.
+
+Choose the method the data actually supports — inspect the previews first:
+- correspondence / axis alignment — for a shared 1-D join axis: load each \
+branch's physically meaningful trend (prefer the columns the branch's own \
+trend analysis names; derived scalars over raw per-peak parameters), align \
+on the join axis, locate each technique's transition (breakpoint / sigmoid \
+midpoint / peak / onset), and report the offsets between techniques.
+- derived quantity — compute a physical quantity that needs several branches.
+- cross-correlation — only where trends are dense and sampled on comparable grids.
+- weighted estimate / consistency test — ONLY where the tables carry real \
+per-parameter uncertainties (e.g. *_err columns). NEVER weight by, or \
+fabricate, an uncertainty that does not trace to a real branch value; when \
+sigma is unavailable, set "sigma_available": false and use unweighted methods.
+- qualitative consistency — the honest fallback when no computation is \
+supportable.
+
+Join topology: the join axis may be a table column (shared parameter axis), \
+a scalar-vs-scalar comparison (same sample, no axis), or a shared 2-D grid. \
+Compute a pixel-level join ONLY if the inputs establish co-registration; \
+otherwise degrade to region statistics or a scalar comparison and record \
+that in "notes". "No correlation found" is a valid, valuable computed result.
+
+SCRIPT CONTRACT (mandatory):
+- Standard scientific libraries only (numpy, pandas, scipy, matplotlib with \
+matplotlib.use('Agg')). No network access. Load inputs ONLY from the \
+absolute paths given below.
+- Write ./fusion_numerics.json (current working directory): {"method": ..., \
+"sigma_available": true|false, "quantities": {<computed values, keys named \
+with units>}, "notes": [<what was skipped or degraded, and why>]}. Every \
+number in it must be computed by this script. Plain floats only; write \
+NaN/inf as null.
+- Strongly preferred: write ./fusion_figure.png — the aligned overlay of \
+the branch trends on the shared axis, with the located transitions marked.
+- Print a short (<= 20 lines) plain-text summary to stdout.
+- Be robust: a missing column or unreadable file must degrade (recorded in \
+"notes"), not crash.
+
+Respond in valid JSON with EXACTLY these keys (no markdown fences inside \
+values):
+{
+  "method": "correspondence" | "derived_quantity" | "cross_correlation" | "weighted_estimate" | "qualitative",
+  "rationale": "<2-3 sentences: why this method fits these inputs>",
+  "script": "<the complete Python script, as a single JSON string>"
+}
+"""
+
+
+def _fusion_codegen_inputs(ok: List[dict], branch_numerics: Dict[str, Any],
+                           join_axis: Optional[str],
+                           focus: Optional[str]) -> str:
+    """Assemble the codegen prompt's input block: per-branch numerics (table
+    paths + schema previews + the branch's own trend analysis) plus the join
+    axis and any fusion focus."""
+    per_branch = []
+    for e in ok:
+        label = e.get("label") or f"delegation {e['index']}"
+        num = branch_numerics.get(label)
+        if not num:
+            continue
+        per_branch.append({"dataset": label,
+                           "branch_summary": (e.get("summary") or "")[:600],
+                           **num})
+    return (f"\n\n--- JOIN AXIS (from the complementarity gate) ---\n"
+            f"{join_axis or 'not stated'}\n"
+            + (f"\n--- FUSION FOCUS ---\n{focus}\n" if focus else "")
+            + "\n--- PER-BRANCH NUMERICS (tables on disk; load from these "
+              "paths) ---\n"
+            + json.dumps(per_branch, indent=2, default=str))
+
+
+def _run_fusion_codegen(orch, ok: List[dict], branch_numerics: Dict[str, Any],
+                        join_axis: Optional[str], focus: Optional[str],
+                        out_dir: Path) -> dict:
+    """Generate -> execute -> persist the reconciliation script (#296 phase b).
+
+    Returns a dict with ``status`` ('success' | 'skipped' | 'failed'),
+    the persisted artifact paths, the parsed fusion_numerics.json under
+    ``results``, and a ``warning`` on any non-success. Never raises."""
+    from ...executors import ScriptExecutor, require_sandbox_approval
+
+    if not require_sandbox_approval(
+            context="Cross-dataset fusion (computed reconciliation)"):
+        return {"status": "skipped", "attempts": 0,
+                "warning": ("sandbox approval unavailable — computed "
+                            "reconciliation skipped; fusion is text+figures "
+                            "only. Set UNSAFE_EXECUTION_OK=true or run in "
+                            "Docker/VM/Colab to enable it.")}
+
+    inputs = _fusion_codegen_inputs(ok, branch_numerics, join_axis, focus)
+    executor = ScriptExecutor(timeout=_FUSION_SCRIPT_TIMEOUT_S)
+    feedback = ""
+    err = "no usable script generated"
+    for attempt in range(1, _FUSION_CODEGEN_ATTEMPTS + 1):
+        parsed = _llm_json(orch, FUSION_CODEGEN_INSTRUCTIONS + inputs + feedback)
+        script = (parsed or {}).get("script")
+        if not script or not isinstance(script, str):
+            err = "reply carried no usable 'script' string"
+            feedback = ("\n\n--- PREVIOUS ATTEMPT FAILED ---\n" + err
+                        + ". Return the complete JSON again.")
+            continue
+        script_path = out_dir / "fusion_reconciliation.py"
+        try:
+            script_path.write_text(script, encoding="utf-8")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"fusion codegen: could not persist script: {e}")
+        res = executor.execute_script(script, working_dir=str(out_dir))
+        numerics_path = out_dir / "fusion_numerics.json"
+        if res.get("status") == "success" and numerics_path.exists():
+            try:
+                with open(numerics_path, "r", errors="replace") as fh:
+                    results = json.load(fh)
+            except Exception as e:  # noqa: BLE001
+                results = None
+                err = f"fusion_numerics.json is not valid JSON: {e}"
+            if results is not None:
+                fig = out_dir / "fusion_figure.png"
+                return {"status": "success",
+                        "method": parsed.get("method"),
+                        "rationale": parsed.get("rationale"),
+                        "script_path": str(script_path),
+                        "numerics_path": str(numerics_path),
+                        "figure_path": str(fig) if fig.exists() else None,
+                        "results": results,
+                        "stdout": (res.get("stdout") or "")[-2000:],
+                        "attempts": attempt, "warning": None}
+        elif res.get("status") == "success":
+            err = "the script ran but did not write ./fusion_numerics.json"
+        else:
+            err = res.get("message") or "execution failed"
+        logger.warning(f"fusion codegen attempt {attempt} failed: {err[:400]}")
+        feedback = ("\n\n--- PREVIOUS ATTEMPT FAILED ---\n" + err[:2000]
+                    + "\nFix the script and return the complete JSON again.")
+    return {"status": "failed", "attempts": _FUSION_CODEGEN_ATTEMPTS,
+            "script_path": str(out_dir / "fusion_reconciliation.py")
+            if (out_dir / "fusion_reconciliation.py").exists() else None,
+            "warning": (f"computed reconciliation failed after "
+                        f"{_FUSION_CODEGEN_ATTEMPTS} attempts "
+                        f"({err[:200]}); fusion degraded to text+figures.")}
+
+
 def _write_fusion_html(out_dir: Path, fused: dict, figures: list) -> Optional[Path]:
     """Write a self-contained HTML fusion report (narrative + claims + the
     per-dataset figures inline as base64). ``figures`` is a list of
@@ -1126,7 +1285,11 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
     anti-spurious-correlation guard so "no correlation found" is a valid
     outcome. Reads each branch's findings from its ledger entry (summary +
     key_findings), plus a compact schema preview of the branch's on-disk
-    numerical results (#296 phase a — see ``_branch_numerics``). Records
+    numerical results (#296 phase a — see ``_branch_numerics``). When the
+    fusion is gated and >= 2 branches carry numerics, also generates and
+    EXECUTES a reconciliation script over those tables (#296 phase b — see
+    ``_run_fusion_codegen``), grounding the synthesis in computed quantities;
+    the script and its outputs are persisted next to the report. Records
     itself as a ``mode="fusion"`` ledger entry.
     """
     from ..exp_agents.instruct import HOLISTIC_EXPERIMENTAL_SYNTHESIS_INSTRUCTIONS
@@ -1204,6 +1367,33 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
             block += "\n\n" + _numerics_prompt_block(num)
         blocks.append(block)
 
+    # Allocate the fusion output dir up front: the computed reconciliation
+    # (#296 phase b) persists its script + artifacts there before the
+    # synthesis call runs.
+    with orch._fanout_lock:
+        fusion_n = sum(1 for e in ledger if e.get("mode") == "fusion") + 1
+    out_dir = orch.fusion_dir / f"{fusion_n:02d}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Computed reconciliation (#296 phase b): generate + execute + persist a
+    # reconciliation script over the branch tables. Only behind the
+    # complementarity gate — an ungated fusion must not compute a correlation
+    # — and only when >= 2 branches actually carry numerics. Degrades to
+    # text+figure fusion (with a recorded warning) on any failure.
+    computed = None
+    if len(branch_numerics) >= 2:
+        if gated:
+            print("  🧮 Computing quantitative reconciliation "
+                  f"({len(branch_numerics)} branches with numerics)...")
+            computed = _run_fusion_codegen(orch, ok, branch_numerics,
+                                           join_axis, focus, out_dir)
+        else:
+            computed = {"status": "skipped", "attempts": 0,
+                        "warning": ("ungated fusion — computed reconciliation "
+                                    "not run (an unverified dataset pairing "
+                                    "must not have a correlation computed "
+                                    "over it).")}
+
     # One representative figure per branch — attached to the (multimodal) fusion
     # call so spatial correlations can be verified from the actual plots, not
     # only the text. Also embedded in the HTML report. Best-effort: a missing or
@@ -1217,6 +1407,12 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
             label = e.get("label") or f"delegation {e['index']}"
             figures.append((label, part["data"]))
             image_parts.append(f"\n[Figure — {label}]:")
+            image_parts.append(part)
+    if computed and computed.get("figure_path"):
+        part = _load_figure_part(computed["figure_path"])
+        if part:
+            figures.append(("computed reconciliation", part["data"]))
+            image_parts.append("\n[Figure — computed reconciliation overlay]:")
             image_parts.append(part)
 
     prompt = (
@@ -1241,6 +1437,23 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
             + (f" Shared join axis from the complementarity gate: {join_axis}."
                if join_axis else "")
             + "\n") if branch_numerics else "")
+        + ((f"\n\nCOMPUTED RECONCILIATION (method: {computed.get('method')}): "
+            "a reconciliation script was generated and EXECUTED over the "
+            "branch tables; its output follows. These quantities are "
+            "COMPUTED, not transcribed — ground the cross-dataset synthesis "
+            "in them first, and where they conflict with numbers recalled in "
+            "prose, prefer the computed values. If a computed value looks "
+            "physically implausible, say so rather than adopting it.\n"
+            + json.dumps(computed.get("results"), indent=2, default=str)[:6000]
+            + f"\n(script persisted at {computed.get('script_path')}; its "
+              "stdout summary:\n"
+            + (computed.get("stdout") or "")[:1500] + ")\n")
+           if computed and computed.get("status") == "success" else "")
+        + ((f"\n\n⚠️ COMPUTED RECONCILIATION UNAVAILABLE — "
+            f"{computed.get('warning')} Reconcile from the findings, "
+            "previews, and figures only; do not present any cross-dataset "
+            "number as computed.\n")
+           if computed and computed.get("status") != "success" else "")
         + "\n\n--- PER-DATASET FINDINGS TO RECONCILE ---\n\n"
         + "\n\n".join(blocks)
     )
@@ -1274,10 +1487,6 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
 
     # Persist the fused report + record a fusion ledger entry.
     from datetime import datetime
-    with orch._fanout_lock:
-        fusion_n = sum(1 for e in ledger if e.get("mode") == "fusion") + 1
-    out_dir = orch.fusion_dir / f"{fusion_n:02d}"
-    out_dir.mkdir(parents=True, exist_ok=True)
     report_path = out_dir / "fusion_report.json"
     fused = {
         "fused_from": [e["index"] for e in ok],
@@ -1287,11 +1496,14 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
         "complementarity_warning": ungated_warning,
         "join_axis": join_axis,
         "branch_numerics": branch_numerics or None,
+        "computed_reconciliation": computed,
         "detailed_analysis": (
             (f"⚠️ UNGATED FUSION — {ungated_warning}\n\n" if ungated_warning else "")
             + parsed.get("detailed_analysis", "")),
         "scientific_claims": parsed.get("scientific_claims", []),
         "caveats": (([ungated_warning] if ungated_warning else [])
+                    + ([computed["warning"]]
+                       if computed and computed.get("warning") else [])
                     + (parsed.get("caveats", []) or [])),
         "novelty": novelty,
     }
@@ -1304,6 +1516,10 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
     # Human-facing HTML report: narrative + claims + the per-dataset figures.
     html_path = _write_fusion_html(out_dir, fused, figures)
     produced = [str(report_path)] + ([str(html_path)] if html_path else [])
+    if computed:
+        produced += [p for p in (computed.get("script_path"),
+                                 computed.get("numerics_path"),
+                                 computed.get("figure_path")) if p]
 
     with orch._fanout_lock:
         orch._delegation_ledger.append({
@@ -1329,6 +1545,7 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
         "complementarity_warning": ungated_warning,
         "join_axis": join_axis,
         "numerics_branches": len(branch_numerics),
+        "computed_reconciliation": computed,
         "figures_used": len(figures),
         "detailed_analysis": fused["detailed_analysis"],
         "scientific_claims": fused["scientific_claims"],
