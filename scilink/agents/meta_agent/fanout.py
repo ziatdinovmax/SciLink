@@ -1032,6 +1032,13 @@ Compute a pixel-level join ONLY if the inputs establish co-registration; \
 otherwise degrade to region statistics or a scalar comparison and record \
 that in "notes". "No correlation found" is a valid, valuable computed result.
 
+Marker reliability is part of the contract: a marker whose fit is degenerate \
+(error comparable to the axis span), or that contradicts the branch's own \
+trend analysis, must NOT be propagated into aggregate or headline quantities \
+(means, spreads, agreement verdicts) — substitute the branch's own reported \
+value for that technique, or exclude the technique from the aggregates, and \
+record the substitution or exclusion in "notes".
+
 SCRIPT CONTRACT (mandatory):
 - Standard scientific libraries only (numpy, pandas, scipy, matplotlib with \
 matplotlib.use('Agg')). No network access. Load inputs ONLY from the \
