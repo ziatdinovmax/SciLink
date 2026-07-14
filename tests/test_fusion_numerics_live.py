@@ -176,6 +176,16 @@ def main():
           "sigma_available" in (comp.get("results") or {}))
     check("COMPUTED RECONCILIATION block in synthesis prompt",
           "COMPUTED RECONCILIATION" in prompt)
+    ver = comp.get("verification") or {}
+    check("verification pass ran (phase c)",
+          ver.get("verdict") in ("accept", "refine"))
+    check("flagged result carries UNRESOLVED warning" if
+          ver.get("verdict") == "refine" else "accepted result carries no warning",
+          bool(comp.get("warning")) == (ver.get("verdict") == "refine"))
+    print(f"\nAUDIT VERDICT: {ver.get('verdict')} "
+          f"(attempts: {comp.get('attempts')})")
+    for i in ver.get("issues") or []:
+        print(f"  issue: {i}")
     if comp.get("figure_path"):
         print(f"\n(computed overlay figure: {comp['figure_path']})")
 
