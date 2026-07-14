@@ -67,22 +67,23 @@ def _install_fake_child():
     fo._make_ephemeral_analysis_child = fake_child
 
 
-def _verdict(paths, fanout_set):
+def _verdict(paths, fanout_set, join_type=None):
     return {"verdict": "complementary", "confidence": 0.9, "rationale": "r",
-            "join_axis": "grid", "fanout_set": list(fanout_set),
+            "join_axis": "grid", "join_type": join_type,
+            "fanout_set": list(fanout_set),
             "redundant_clusters": [], "unrelated": [], "excluded_notes": ""}
 
 
 GATE_PROMPTS = []   # every prompt the fake gate LLM received (for inspection)
 
 
-def _install_fake_gate(fanout_set):
+def _install_fake_gate(fanout_set, join_type=None):
     def fake(orch, prompt, extra_parts=None):
         GATE_PROMPTS.append(prompt)
         if "complementary measurements of ONE system" in prompt:   # HOLISTIC fusion prompt
             return {"detailed_analysis": "fused narrative",
                     "scientific_claims": [{"claim": "c", "keywords": ["k"]}]}
-        return _verdict(None, fanout_set)
+        return _verdict(None, fanout_set, join_type=join_type)
     fo._llm_json = fake
 
 
@@ -284,6 +285,8 @@ def main():
     # 12) Fix 3: same-dir branches WITH patterns -> gate probes each branch's
     #     own files, and companions hand over a representative FILE (loadable
     #     as an auxiliary operand), not the shared extension-less directory.
+    #     (join_type co_registered: the operand mesh is the one wiring that
+    #     still passes companions after the mesh-policy change.)
     ag, A, B, C = _agent()
     up3 = os.path.join(os.path.dirname(A), "uploads3")
     os.makedirs(up3, exist_ok=True)
@@ -293,7 +296,8 @@ def main():
         np.save(os.path.join(up3, f"xrd_{i:02d}.npy"), np.ones(64))
     ids3 = [f"{up3}#1", f"{up3}#2"]
     BEHAVIORS.clear()
-    _install_fake_gate(ids3); ag._complementarity_cache.clear()
+    _install_fake_gate(ids3, join_type="co_registered")
+    ag._complementarity_cache.clear()
     CAPTURED_TASKS.clear()
     out = json.loads(ag._run_fanout([
         {"data_path": up3, "task": "Fit the FTIR series", "label": "ftir",

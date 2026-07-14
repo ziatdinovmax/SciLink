@@ -460,8 +460,12 @@ class MetaOrchestratorTools:
             name="delegate_to_analyses",
             description=(
                 "Run SEVERAL analysis branches CONCURRENTLY over complementary "
-                "datasets, each branch seeing the others as auxiliary operands "
-                "(full mesh), then fuse with `fuse_delegations`. Use this — NOT "
+                "datasets, then fuse with `fuse_delegations`. Branches run "
+                "INDEPENDENTLY by default (fusion reconciles their reduced "
+                "results — independence is what makes cross-dataset agreement "
+                "meaningful); a CO-REGISTERED set (gate join_type) additionally "
+                "wires the companions in as auxiliary operands, and a branch "
+                "may opt into a steering hint via `steer`. Use this — NOT "
                 "repeated `delegate_to_analysis` — when the user has 2+ datasets "
                 "that are complementary measurements of ONE system and you want "
                 "each analysis informed by the others plus a final cross-dataset "

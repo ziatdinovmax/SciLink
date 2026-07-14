@@ -1,9 +1,15 @@
 """Parallel multi-dataset analysis (fan-out) + complementarity gating + fusion.
 
 See CLAUDE.md "The meta agent". This is the meta's **fan-out primitive**: run
-several analysis branches concurrently over GENUINELY COMPLEMENTARY datasets —
-each branch sees the others as full-mesh auxiliary operands — then fuse their
-findings into one cross-dataset narrative.
+several analysis branches concurrently over GENUINELY COMPLEMENTARY datasets,
+then fuse their findings into one cross-dataset narrative. Branches run
+INDEPENDENTLY by default — independence is what makes fusion's agreement
+claims mean anything — with two deliberate, recorded exceptions decided by
+the gate's join type and per-branch opt-in: a CO-REGISTERED set gets the
+operand mesh (pixel-level joint math fusion cannot redo post-hoc), and a
+branch may opt into STEERING (a companion's change-point hint under the
+additive-only guardrail). Both spend the branch's independence and are
+stamped ``informed_by`` so fusion discounts the agreement.
 
 Two guards bracket the fan-out, because the failure mode here is not a crash
 but a *plausible fabrication*:
@@ -93,12 +99,27 @@ Be conservative: if you are not confident the datasets share a system and a \
 join axis, prefer `uncertain` over `complementary`. A wrong `complementary` \
 call produces a fabricated cross-dataset claim, which is worse than declining.
 
+Classify the JOIN TYPE of the fanout_set — it decides how the branches are \
+wired (`join_type`):
+- "co_registered" — the datasets share one coordinate grid POINT-FOR-POINT \
+(same scan/session/field-of-view, or an explicit registration step is \
+stated). Pixel/point-level joint math between them is valid. Do NOT infer \
+this from two images merely being "of the same sample" — different \
+instruments are essentially never pixel-aligned.
+- "shared_parameter_axis" — series over the same control variable \
+(temperature, time, energy, ...): reconciliation happens between each \
+branch's REDUCED trends, after analysis.
+- "shared_sample" — same specimen but no shared axis or grid \
+(bulk-vs-local, complementary observables): reconciliation compares \
+derived quantities.
+
 Respond in valid JSON with EXACTLY these keys:
 {
   "verdict": "complementary" | "partially_complementary" | "redundant" | "unrelated" | "uncertain",
   "confidence": <float 0..1>,
   "rationale": "<one or two sentences: what the datasets are and why this verdict>",
   "join_axis": "<the shared axis the fanout_set reconciles on, or null>",
+  "join_type": "co_registered" | "shared_parameter_axis" | "shared_sample" | null,
   "fanout_set": ["<id>", ...],
   "redundant_clusters": [["<id>", "<id>"], ...],
   "unrelated": ["<id>", ...],
@@ -351,6 +372,19 @@ def assess_complementarity(orch, datasets: List[dict]) -> dict:
 # Confirmation
 # ======================================================================
 
+def _operand_mesh(verdict: dict) -> bool:
+    """Whether the branches see each other as auxiliary operands.
+
+    The gate's join type decides (#296 follow-up to #293): only a
+    CO-REGISTERED set gets the operand mesh — pixel/point-level joint math
+    is the one case fusion cannot reconstruct post-hoc from reduced trends.
+    Shared-axis and bulk-vs-local sets run INDEPENDENT branches: fusion does
+    the join there, and independence is what makes its agreement claims mean
+    anything (don't spend it by accident). A missing/unknown join_type
+    defaults to independent."""
+    return (verdict.get("join_type") or "").strip().lower() == "co_registered"
+
+
 def _confirm_fanout(orch, verdict: dict, fanout_set: List[str],
                     branches_by_id: Dict[str, dict]) -> tuple:
     """Decide whether to fire the fan-out. Returns (proceed: bool, reason: str).
@@ -360,7 +394,8 @@ def _confirm_fanout(orch, verdict: dict, fanout_set: List[str],
     only on a confident 'complementary' read within the soft cap.
     """
     n = len(fanout_set)
-    n_aux = n * (n - 1)  # full-mesh: each branch sees the other n-1
+    mesh = _operand_mesh(verdict)
+    n_aux = n * (n - 1) if mesh else 0  # operand mesh: each sees the other n-1
 
     if n > FANOUT_HARD_CAP:
         return False, (f"Complementary set has {n} datasets (> hard cap "
@@ -389,11 +424,15 @@ def _confirm_fanout(orch, verdict: dict, fanout_set: List[str],
         "=" * 78,
         f"  Complementarity verdict : {verdict.get('verdict')} "
         f"(confidence {verdict.get('confidence')})",
-        f"  Join axis               : {verdict.get('join_axis')}",
+        f"  Join axis               : {verdict.get('join_axis')} "
+        f"(join type: {verdict.get('join_type') or 'unspecified'})",
         f"  Rationale               : {verdict.get('rationale')}",
         "",
-        f"  Will run {n} branches concurrently, full-mesh "
-        f"(~{n_aux} auxiliary loads):",
+        (f"  Will run {n} branches concurrently as an OPERAND MESH "
+         f"(co-registered set; ~{n_aux} auxiliary loads — results become "
+         "jointly computed, flagged to fusion):" if mesh else
+         f"  Will run {n} INDEPENDENT branches concurrently (no companion "
+         "operands — fusion reconciles their reduced results):"),
     ]
     for bid in fanout_set:
         b = branches_by_id.get(bid, {})
@@ -531,18 +570,18 @@ def _mesh_task(branch: dict, companions: List[dict]) -> str:
              "run novelty / literature assessment (assess_novelty) on this branch's "
              "findings. Novelty is evaluated once on the FUSED cross-dataset "
              "interpretation afterward. Complete the analysis itself normally."]
-    if companions:
-        primary = _branch_primary_path(branch)
-        block += ["", "",
-                  f"PRIMARY dataset for THIS analysis: {primary} — pass it "
-                  "VERBATIM as run_analysis's `data_path`. The companion(s) below "
-                  "are AUXILIARY ONLY; do NOT analyze a companion as the primary."]
-        if branch.get("pattern") and branch.get("files"):
-            block += [f"That path is a FILE PATTERN selecting this branch's "
-                      f"{len(branch['files'])} file(s) out of a directory that also "
-                      "holds the companion datasets — pass the pattern itself, do "
-                      "NOT replace it with the parent directory (that would pull in "
-                      "the other datasets)."]
+    primary = _branch_primary_path(branch)
+    block += ["", "",
+              f"PRIMARY dataset for THIS analysis: {primary} — pass it "
+              "VERBATIM as run_analysis's `data_path`."
+              + (" The companion(s) below are AUXILIARY ONLY; do NOT "
+                 "analyze a companion as the primary." if companions else "")]
+    if branch.get("pattern") and branch.get("files"):
+        block += [f"That path is a FILE PATTERN selecting this branch's "
+                  f"{len(branch['files'])} file(s) out of a directory that "
+                  "also holds other datasets — pass the pattern itself, do "
+                  "NOT replace it with the parent directory (that would pull "
+                  "in the other datasets)."]
     # Forward the caller-supplied metadata so the branch USES it rather than
     # synthesizing metadata from the task prose (which loses technique-specific
     # fields the downstream skill needs, e.g. the EELS energy axis).
@@ -600,14 +639,15 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
 
 
 def run_fanout(orch, branches: List[dict]) -> str:
-    """Gate → confirm → run branches concurrently (full-mesh aux). Returns JSON.
+    """Gate → confirm → run branches concurrently. Returns JSON.
 
     `branches` is a list of ``{"data_path", "task", "label", "metadata"?,
-    "context"?, "pattern"?}``. ``pattern`` is a filename glob selecting the
-    branch's own files when ``data_path`` is a directory holding several
-    datasets (issue #326 Fix 3). The complementarity gate prunes to the
-    complementary subset; only that subset runs, each branch seeing the
-    others as auxiliary operands.
+    "context"?, "pattern"?, "steer"?}``. ``pattern`` is a filename glob
+    selecting the branch's own files when ``data_path`` is a directory
+    holding several datasets (issue #326 Fix 3). The complementarity gate
+    prunes to the complementary subset; only that subset runs. Branches run
+    independently unless the gate classifies the set co-registered (operand
+    mesh) — see ``_operand_mesh`` — and/or a branch opts into steering.
     """
     # --- normalize input ---
     norm: List[dict] = []
@@ -729,6 +769,9 @@ def run_fanout(orch, branches: List[dict]) -> str:
                   f"from: {[p['label'] for p in payloads]} (independence "
                   "spent — fusion will be told)")
 
+    # --- mesh policy: the gate's join type decides the wiring ---
+    mesh = _operand_mesh(verdict)
+
     # --- preallocate ledger slots (sequential, under lock — no concurrent append) ---
     with orch._fanout_lock:
         entries = []
@@ -738,8 +781,22 @@ def run_fanout(orch, branches: List[dict]) -> str:
                 "analysis", _mesh_task(b, []), b.get("context"), None, b["label"])
             entry["parallel_group"] = group_id
             entry["fanout"] = True
-            if b.get("_steering"):
-                entry["informed_by"] = [p["label"] for p in b["_steering"]]
+            # Independence provenance: ANY companion contact with a branch's
+            # numbers — operand mesh or steering — spends independence and is
+            # recorded mechanically so fusion can discount the agreement.
+            informed, via = [], []
+            if mesh and len(run_branches) > 1:
+                informed += [c["label"] for c in run_branches
+                             if c is not b]
+                via.append("co_registered_operands")
+            for p in (b.get("_steering") or []):
+                if p["label"] not in informed:
+                    informed.append(p["label"])
+                if "steering" not in via:
+                    via.append("steering")
+            if informed:
+                entry["informed_by"] = informed
+                entry["informed_via"] = "+".join(via)
             # Carry the input path/metadata so a later fuse_delegations can
             # recognize this set as already gated (or re-gate a mixed set).
             entry["data_path"] = b.get("data_path")
@@ -750,9 +807,10 @@ def run_fanout(orch, branches: List[dict]) -> str:
             entry["join_axis"] = verdict.get("join_axis")
             entries.append(entry)
 
-    # --- run concurrently; each branch sees all others (full mesh) ---
+    # --- run concurrently; wiring per the mesh policy ---
     print(f"  🔀 Launching {len(run_branches)} parallel analysis branches "
-          f"(group {group_id}, full-mesh aux)...")
+          f"(group {group_id}, "
+          f"{'operand mesh — co-registered set' if mesh else 'independent branches'})...")
 
     def _companions_for(i):
         # A companion must be LOADABLE as an auxiliary operand. For a branch
@@ -781,7 +839,7 @@ def run_fanout(orch, branches: List[dict]) -> str:
         fut_label = {}
         for i in range(n_total):
             fut = pool.submit(_run_one_branch, orch, run_branches[i],
-                              _companions_for(i), entries[i])
+                              _companions_for(i) if mesh else [], entries[i])
             fut_label[fut] = run_branches[i]["label"]
         # Wait with a periodic heartbeat so the user can see the parallel run is
         # alive (a slow branch can otherwise look like a hang). Each branch is
@@ -836,6 +894,8 @@ def run_fanout(orch, branches: List[dict]) -> str:
         "status": "success",
         "parallel_group": group_id,
         "join_axis": verdict.get("join_axis"),
+        "join_type": verdict.get("join_type"),
+        "mesh": "operand" if mesh else "independent",
         "branches_run": len(results),
         "branches_with_output": len(productive),
         "results": results,
@@ -1614,18 +1674,31 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
                 "not be verified as measuring the same system. Treat any "
                 "cross-dataset agreement as unverified and possibly spurious.")
 
-    # Independence provenance (#296 phase d): a steered branch is not a
-    # fully independent observation of its steering companion. The record is
-    # mechanical (never left to the LLM): stamped at launch, surfaced in the
-    # synthesis prompt, and written into the report caveats.
+    # Independence provenance (#296 phase d + mesh policy): a branch whose
+    # numbers were touched by a companion — steering hint OR co-registered
+    # operand — is not a fully independent observation of that companion.
+    # The record is mechanical (never left to the LLM): stamped at launch,
+    # surfaced in the synthesis prompt, written into the report caveats.
     informed = {(e.get("label") or f"delegation {e['index']}"): e["informed_by"]
                 for e in ok if e.get("informed_by")}
-    independence_caveats = [
-        (f"Branch '{lbl}' was steered at launch by a change-point hint from "
-         f"{srcs}; its agreement with those companion(s) near the hinted "
-         "value is partly by construction and must not be counted as "
-         "independent corroboration.")
-        for lbl, srcs in informed.items()]
+    informed_via = {(e.get("label") or f"delegation {e['index']}"):
+                    (e.get("informed_via") or "steering")
+                    for e in ok if e.get("informed_by")}
+    independence_caveats = []
+    for lbl, srcs in informed.items():
+        via = informed_via.get(lbl, "steering")
+        if "steering" in via:
+            independence_caveats.append(
+                f"Branch '{lbl}' was steered at launch by a change-point "
+                f"hint from {srcs}; its agreement with those companion(s) "
+                "near the hinted value is partly by construction and must "
+                "not be counted as independent corroboration.")
+        if "co_registered_operands" in via:
+            independence_caveats.append(
+                f"Branch '{lbl}' received {srcs} as co-registered numerical "
+                "operand(s); overlapping results may be jointly computed — "
+                "treat cross-branch agreement there as one joint "
+                "measurement, not as two independent confirmations.")
 
     blocks = []
     branch_numerics: Dict[str, Any] = {}   # label -> numerics dict (audit trail)
@@ -1748,14 +1821,17 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
             "previews, and figures only; do not present any cross-dataset "
             "number as computed.\n")
            if computed and computed.get("status") != "success" else "")
-        + ((f"\n\nINDEPENDENCE PROVENANCE: these branches were STEERED at "
-            "launch by a companion's change-point hint and are NOT fully "
-            f"independent of those companions: {json.dumps(informed)}. Where "
-            "a steered branch's finding coincides with its steering "
+        + ((f"\n\nINDEPENDENCE PROVENANCE: these branches are NOT fully "
+            "independent of the listed companions "
+            f"(mode per branch: {json.dumps(informed_via)}): "
+            f"{json.dumps(informed)}. A STEERED branch saw its companion's "
+            "change-point hint — where its finding coincides with that "
             "companion near the hinted value, the agreement is partly by "
-            "construction — discount it, say so explicitly, and do not "
-            "count it as independent corroboration. Branch pairs NOT listed "
-            "here are independent, and their agreement carries full weight.\n")
+            "construction: discount it and say so. A branch that received "
+            "CO-REGISTERED OPERANDS may have computed results jointly with "
+            "them — treat agreement there as one joint measurement, not two "
+            "independent confirmations. Branch pairs NOT listed here are "
+            "independent, and their agreement carries full weight.\n")
            if informed else "")
         + "\n\n--- PER-DATASET FINDINGS TO RECONCILE ---\n\n"
         + "\n\n".join(blocks)
