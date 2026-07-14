@@ -512,6 +512,19 @@ class MetaOrchestratorTools:
                                          "description": "Optional: path to a metadata JSON "
                                                         "or inline description (also feeds "
                                                         "the complementarity gate)."},
+                            "steer": {"type": "boolean",
+                                      "description": "Explicit opt-in (default false): give "
+                                                     "THIS branch a change-point hint from "
+                                                     "each companion SERIES (cheap "
+                                                     "unsupervised reduction) as an "
+                                                     "additive-only hypothesis — useful when "
+                                                     "the branch risks fitting the wrong "
+                                                     "model order. TRADE: steering spends "
+                                                     "the branch's independence; fusion is "
+                                                     "told (informed_by) and discounts its "
+                                                     "agreement with the steering companion "
+                                                     "as partly by construction. Opt in only "
+                                                     "when guidance is worth that cost."},
                         },
                         "required": ["data_path", "task", "label"],
                     },

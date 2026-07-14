@@ -403,6 +403,12 @@ def _confirm_fanout(orch, verdict: dict, fanout_set: List[str],
         lines.append(f"  Pruned as redundant     : {verdict['redundant_clusters']}")
     if verdict.get("unrelated"):
         lines.append(f"  Pruned as unrelated     : {verdict['unrelated']}")
+    steered = [branches_by_id[bid].get("label") for bid in fanout_set
+               if branches_by_id.get(bid, {}).get("steer")]
+    if steered:
+        lines.append(f"  Steering opt-in         : {steered} — receives "
+                     "companion change-point hints (spends independence; "
+                     "fusion will discount the agreement)")
     if n > FANOUT_SOFT_CAP:
         lines.append(f"  ⚠️  {n}-way mesh exceeds the soft cap ({FANOUT_SOFT_CAP}) "
                      "— this is expensive.")
@@ -467,6 +473,46 @@ def _branch_primary_path(branch: dict) -> str:
     return str(branch["data_path"])
 
 
+def _steering_block(steering: List[dict]) -> List[str]:
+    """Render a branch's steering payloads (#296 phase d) with the
+    ADDITIVE-ONLY guardrail. Steering may only add hypotheses or effort —
+    never subtract scope or lower an acceptance bar — because a range
+    restriction silently converts into a conclusion (it removes the branch's
+    ability to be falsified outside the window)."""
+    lines = ["", "",
+             "STEERING (explicit opt-in; ADDITIVE-ONLY): a cheap unsupervised "
+             "reduction of each companion series below locates where THAT "
+             "series changes along the shared control variable. Each is a "
+             "NOMINATED HYPOTHESIS for your analysis, nothing more:"]
+    for s in steering:
+        extra = []
+        if s.get("flags", {}).get("shift_dominated"):
+            extra.append("shift-dominated (location valid; its loadings are "
+                         "not species)")
+        if s.get("flags", {}).get("intensity_drift"):
+            extra.append("component 1 tracks overall intensity")
+        note = f"; {', '.join(extra)}" if extra else ""
+        fig = (f"; score curve: {s['score_curve_path']}"
+               if s.get("score_curve_path") else "")
+        lines.append(
+            f"  - companion '{s.get('label')}': sharpest change near "
+            f"control ≈ {s.get('change_point'):g} "
+            f"(sharpness {s.get('change_sharpness')}, PC1 "
+            f"{s.get('variance_explained', [0])[0]:.0%} of variance"
+            f"{note}{fig})")
+    lines += [
+        "RULES (non-negotiable): you may TEST for corresponding features "
+        "near the indicated value(s) and spend extra refinement effort "
+        "there — but you must still analyze the FULL range/series. Never "
+        "restrict a fit window or crop to the indicated region; never relax "
+        "an acceptance threshold for a companion-suggested feature (it must "
+        "clear your normal bar unaided); agreement with a companion is an "
+        "observation to report, never a target to fit toward. Report what "
+        "YOUR data shows — if it disagrees with the companion's indication, "
+        "report the disagreement plainly; that is a valid, valuable outcome."]
+    return lines
+
+
 def _mesh_task(branch: dict, companions: List[dict]) -> str:
     """Compose a branch's self-contained task with its full-mesh companions.
 
@@ -474,6 +520,8 @@ def _mesh_task(branch: dict, companions: List[dict]) -> str:
     specialist passes them through ``run_analysis``'s ``auxiliary_data`` /
     ``auxiliary_label`` — the existing operand path — and the codegen may use
     a shape-aligned companion numerically (correlate / mask / normalize).
+    A steered branch (#296 phase d) additionally gets each series
+    companion's change-point hint under the additive-only guardrail.
     """
     task = branch["task"].rstrip()
     # This is ONE branch of a joint multi-dataset analysis — novelty is assessed
@@ -517,6 +565,8 @@ def _mesh_task(branch: dict, companions: List[dict]) -> str:
             note = f"; {c['note']}" if c.get("note") else ""
             block.append(f"  - auxiliary_data: {c['data_path']}  "
                          f"(auxiliary_label: '{c['label']}'{note})")
+    if branch.get("_steering"):
+        block += _steering_block(branch["_steering"])
     if not block:
         return task
     return task + "\n".join(block)
@@ -589,6 +639,7 @@ def run_fanout(orch, branches: List[dict]) -> str:
             "metadata": b.get("metadata"), "context": b.get("context"),
             "pattern": pattern,
             "files": _resolve_branch_files(dp, pattern),
+            "steer": bool(b.get("steer")),
         })
     if len(norm) < 2:
         msg = ("Fan-out needs at least two branches, each with a data_path "
@@ -646,8 +697,39 @@ def run_fanout(orch, branches: List[dict]) -> str:
                            "verdict": verdict,
                            "fanout_set": fanout_set}, indent=2, default=str)
 
-    # --- preallocate ledger slots (sequential, under lock — no concurrent append) ---
     run_branches = [by_id[i] for i in fanout_set]
+
+    # --- steering payloads (#296 phase d) — explicit opt-in per branch ---
+    # A steered branch receives each SERIES companion's change-point hint
+    # (cheap unsupervised reduction, computed here at launch time) under the
+    # additive-only guardrail. Steering SPENDS the branch's independence:
+    # it is stamped as informed_by on the ledger entry so fusion discounts
+    # the agreement. A failed reduction just skips that payload.
+    for i, b in enumerate(run_branches):
+        if not b.get("steer"):
+            continue
+        from ...skills._shared.series_reduction import reduce_series
+        payloads = []
+        for j, c in enumerate(run_branches):
+            if j == i or not c.get("files"):
+                continue
+            sdir = (orch.fanout_dir / "steering"
+                    / f"{_slug(b['label'])}_from_{_slug(c['label'])}")
+            red = reduce_series(c["files"], out_dir=str(sdir),
+                                label=c["label"])
+            if red.get("status") == "success":
+                payloads.append(red)
+            else:
+                logger.warning(
+                    f"fan-out steering: reduction of '{c['label']}' failed "
+                    f"({red.get('error')}); no hint passed to '{b['label']}'")
+        if payloads:
+            b["_steering"] = payloads
+            print(f"  🧭 Steering '{b['label']}' with change-point hint(s) "
+                  f"from: {[p['label'] for p in payloads]} (independence "
+                  "spent — fusion will be told)")
+
+    # --- preallocate ledger slots (sequential, under lock — no concurrent append) ---
     with orch._fanout_lock:
         entries = []
         group_id = f"fanout_{len(orch._delegation_ledger) + 1}"
@@ -656,6 +738,8 @@ def run_fanout(orch, branches: List[dict]) -> str:
                 "analysis", _mesh_task(b, []), b.get("context"), None, b["label"])
             entry["parallel_group"] = group_id
             entry["fanout"] = True
+            if b.get("_steering"):
+                entry["informed_by"] = [p["label"] for p in b["_steering"]]
             # Carry the input path/metadata so a later fuse_delegations can
             # recognize this set as already gated (or re-gate a mixed set).
             entry["data_path"] = b.get("data_path")
@@ -1146,9 +1230,16 @@ def _fusion_codegen_inputs(ok: List[dict], branch_numerics: Dict[str, Any],
         num = branch_numerics.get(label)
         if not num:
             continue
-        per_branch.append({"dataset": label,
-                           "branch_summary": (e.get("summary") or "")[:600],
-                           **num})
+        entry = {"dataset": label,
+                 "branch_summary": (e.get("summary") or "")[:600],
+                 **num}
+        if e.get("informed_by"):
+            entry["informed_by"] = e["informed_by"]
+            entry["independence_note"] = (
+                "this branch was STEERED at launch by the listed "
+                "companion(s); agreement with them near the hinted value is "
+                "partly by construction")
+        per_branch.append(entry)
     return (f"\n\n--- JOIN AXIS (from the complementarity gate) ---\n"
             f"{join_axis or 'not stated'}\n"
             + (f"\n--- FUSION FOCUS ---\n{focus}\n" if focus else "")
@@ -1523,6 +1614,19 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
                 "not be verified as measuring the same system. Treat any "
                 "cross-dataset agreement as unverified and possibly spurious.")
 
+    # Independence provenance (#296 phase d): a steered branch is not a
+    # fully independent observation of its steering companion. The record is
+    # mechanical (never left to the LLM): stamped at launch, surfaced in the
+    # synthesis prompt, and written into the report caveats.
+    informed = {(e.get("label") or f"delegation {e['index']}"): e["informed_by"]
+                for e in ok if e.get("informed_by")}
+    independence_caveats = [
+        (f"Branch '{lbl}' was steered at launch by a change-point hint from "
+         f"{srcs}; its agreement with those companion(s) near the hinted "
+         "value is partly by construction and must not be counted as "
+         "independent corroboration.")
+        for lbl, srcs in informed.items()]
+
     blocks = []
     branch_numerics: Dict[str, Any] = {}   # label -> numerics dict (audit trail)
     for e in ok:
@@ -1644,6 +1748,15 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
             "previews, and figures only; do not present any cross-dataset "
             "number as computed.\n")
            if computed and computed.get("status") != "success" else "")
+        + ((f"\n\nINDEPENDENCE PROVENANCE: these branches were STEERED at "
+            "launch by a companion's change-point hint and are NOT fully "
+            f"independent of those companions: {json.dumps(informed)}. Where "
+            "a steered branch's finding coincides with its steering "
+            "companion near the hinted value, the agreement is partly by "
+            "construction — discount it, say so explicitly, and do not "
+            "count it as independent corroboration. Branch pairs NOT listed "
+            "here are independent, and their agreement carries full weight.\n")
+           if informed else "")
         + "\n\n--- PER-DATASET FINDINGS TO RECONCILE ---\n\n"
         + "\n\n".join(blocks)
     )
@@ -1687,6 +1800,7 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
         "join_axis": join_axis,
         "branch_numerics": branch_numerics or None,
         "computed_reconciliation": computed,
+        "independence": informed or None,
         "detailed_analysis": (
             (f"⚠️ UNGATED FUSION — {ungated_warning}\n\n" if ungated_warning else "")
             + parsed.get("detailed_analysis", "")),
@@ -1694,6 +1808,7 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
         "caveats": (([ungated_warning] if ungated_warning else [])
                     + ([computed["warning"]]
                        if computed and computed.get("warning") else [])
+                    + independence_caveats
                     + (parsed.get("caveats", []) or [])),
         "novelty": novelty,
     }
@@ -1736,6 +1851,7 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
         "join_axis": join_axis,
         "numerics_branches": len(branch_numerics),
         "computed_reconciliation": computed,
+        "independence": informed or None,
         "figures_used": len(figures),
         "detailed_analysis": fused["detailed_analysis"],
         "scientific_claims": fused["scientific_claims"],
