@@ -324,6 +324,34 @@ def main():
     check("mesh task warns against replacing the pattern with its parent dir",
           "do NOT replace it with the parent directory" in mesh)
 
+    # 13b) AUTONOMOUS accepts a confidently-pruned partially_complementary
+    #      verdict (the fanout_set IS the vouched-for subset), but still
+    #      declines it at low confidence.
+    ag, A, B, C = _agent()
+    BEHAVIORS.clear()
+
+    def _partial_gate(conf):
+        def fake(orch, prompt, extra_parts=None):
+            GATE_PROMPTS.append(prompt)
+            if "complementary measurements of ONE system" in prompt:
+                return {"detailed_analysis": "n", "scientific_claims": []}
+            return {"verdict": "partially_complementary", "confidence": conf,
+                    "rationale": "two of three join", "join_axis": "T",
+                    "join_type": "shared_parameter_axis",
+                    "fanout_set": [A, B], "redundant_clusters": [],
+                    "unrelated": [C], "excluded_notes": ""}
+        fo._llm_json = fake
+    _partial_gate(0.75); ag._complementarity_cache.clear()
+    out = json.loads(ag._run_fanout(_branches(A, B, C)))
+    print("13b) partially_complementary in autonomous:")
+    check("confident partial -> pruned set runs",
+          out.get("status") == "success" and out.get("branches_run") == 2)
+    ag, A, B, C = _agent()
+    _partial_gate(0.4); ag._complementarity_cache.clear()
+    out = json.loads(ag._run_fanout(_branches(A, B, C)))
+    check("low-confidence partial -> declined",
+          out.get("status") == "declined")
+
     # 13) Same (data_path, task) but DIFFERENT patterns are distinct branches,
     #     not duplicates.
     ag, A, B, C = _agent()

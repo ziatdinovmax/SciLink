@@ -403,13 +403,20 @@ def _confirm_fanout(orch, verdict: dict, fanout_set: List[str],
                        "smaller complementary groups.")
 
     if not orch._enable_human_feedback:
-        # AUTONOMOUS: verdict-gated, conservative.
+        # AUTONOMOUS: verdict-gated, conservative. 'partially_complementary'
+        # is accepted alongside 'complementary': it is the verdict on the
+        # INPUT set, while the gate's fanout_set is already PRUNED to the
+        # mutually-complementary subset it vouches for — refusing it would
+        # make partition-then-prune impossible without a human (found live
+        # on a 4-modality study pruned to a coherent pair).
         v = (verdict.get("verdict") or "").lower()
         conf = float(verdict.get("confidence") or 0.0)
-        if v != "complementary" or conf < AUTONOMOUS_CONFIDENCE_THRESHOLD:
+        if (v not in ("complementary", "partially_complementary")
+                or conf < AUTONOMOUS_CONFIDENCE_THRESHOLD):
             return False, (f"Autonomous mode declines fan-out: verdict='{v}' "
-                           f"confidence={conf:.2f} (needs 'complementary' >= "
-                           f"{AUTONOMOUS_CONFIDENCE_THRESHOLD}). "
+                           f"confidence={conf:.2f} (needs 'complementary' or "
+                           "a confidently-pruned 'partially_complementary' "
+                           f">= {AUTONOMOUS_CONFIDENCE_THRESHOLD}). "
                            f"{verdict.get('rationale', '')}")
         if n > FANOUT_SOFT_CAP:
             return False, (f"Autonomous mode declines a {n}-way mesh (> soft cap "
