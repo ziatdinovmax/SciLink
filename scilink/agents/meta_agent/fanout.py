@@ -661,6 +661,9 @@ def run_fanout(orch, branches: List[dict]) -> str:
             entry["data_path"] = b.get("data_path")
             entry["metadata"] = b.get("metadata")
             entry["pattern"] = b.get("pattern")
+            # The gate's join axis is the fusion stage's merge key (#296):
+            # without stamping it here it is lost after run_fanout returns.
+            entry["join_axis"] = verdict.get("join_axis")
             entries.append(entry)
 
     # --- run concurrently; each branch sees all others (full mesh) ---
@@ -813,6 +816,181 @@ def _load_figure_part(path: str) -> Optional[dict]:
         return None
 
 
+# ----------------------------------------------------------------------
+# Numerics bundle (issue #296 phase a). Each branch already writes its
+# numerical result to disk (features.csv keyed on the control variable,
+# trend_analysis / fitting_parameters in analysis_results.json) and the
+# ledger carries the paths — but fusion historically read only prose.
+# These helpers surface a COMPACT schema preview of those numbers into the
+# fusion prompt (never the full tables), so the synthesis can ground its
+# cross-dataset statements in computed quantities. Text fusion stays
+# authoritative; a branch with no readable numerics degrades to
+# text+figures, never blocks.
+# ----------------------------------------------------------------------
+
+_NUMERICS_MAX_TABLES = 3          # feature tables previewed per branch
+_NUMERICS_MAX_COLS_LISTED = 300   # column names listed per table
+_NUMERICS_TREND_MAX_CHARS = 1500  # branch trend_analysis JSON cap in the prompt
+_NUMERIC_RESULT_NAMES = ("analysis_results.json", "series_fit_results.json")
+
+
+def _match_join_column(columns: List[str], join_axis: Optional[str]) -> Optional[str]:
+    """Best-effort match of the gate's join-axis phrase to a table column.
+
+    Prefix matching on word tokens, longest join-axis token first, so
+    'sample temperature' finds 'temperature_C' and also an abbreviated
+    'temp_C', without an incidental substring hit (the 'per' inside
+    'temperature' must not select 'per_band_residual'). Returns the column
+    name or None — a miss is reported in the preview, never fatal
+    (LLM-assisted resolution is a later phase)."""
+    if not join_axis:
+        return None
+    tokens = sorted((t for t in re.split(r"[^a-z0-9]+", str(join_axis).lower())
+                     if len(t) >= 3), key=len, reverse=True)
+    parts_by_col = {c: [p for p in re.split(r"[^a-z0-9]+", str(c).lower())
+                        if len(p) >= 3] for c in columns}
+    for tok in tokens:
+        for col, parts in parts_by_col.items():
+            if any(p.startswith(tok)
+                   or (len(p) >= 4 and tok.startswith(p)) for p in parts):
+                return col
+    return None
+
+
+def _feature_table_preview(path: str, join_axis: Optional[str]) -> dict:
+    """Compact schema preview of one feature table: shape, column names, the
+    join-axis column's range — NOT the data. Exception: a one-row table (a
+    single-measurement branch) inlines its values, since that row IS the
+    branch's scalar result and is the join anchor fusion needs."""
+    import pandas as pd
+    df = pd.read_csv(path)
+    cols = [str(c) for c in df.columns]
+    prev: Dict[str, Any] = {"path": str(path), "n_rows": int(len(df)),
+                            "n_cols": int(df.shape[1])}
+    prev["columns"] = cols[:_NUMERICS_MAX_COLS_LISTED]
+    if len(cols) > _NUMERICS_MAX_COLS_LISTED:
+        prev["columns_truncated"] = len(cols) - _NUMERICS_MAX_COLS_LISTED
+    if join_axis:
+        jcol = _match_join_column(cols, join_axis)
+        prev["join_axis_column"] = None
+        if jcol is not None:
+            info: Dict[str, Any] = {"name": jcol}
+            try:
+                vals = pd.to_numeric(df[jcol], errors="coerce").dropna()
+                if len(vals):
+                    info.update({"min": float(vals.min()),
+                                 "max": float(vals.max()),
+                                 "n_points": int(len(vals))})
+            except Exception:  # noqa: BLE001 - range is a nicety, name suffices
+                pass
+            prev["join_axis_column"] = info
+    if len(df) == 1:
+        prev["values"] = {str(k): v for k, v in df.iloc[0].to_dict().items()
+                          if not (isinstance(v, float) and v != v)}  # drop NaN
+    return prev
+
+
+def _branch_numerics(entry: dict, join_axis: Optional[str]) -> Optional[dict]:
+    """Locate a branch's on-disk numerical results and reduce them to a
+    compact, prompt-ready dict. Returns None when the branch has no readable
+    numerics — fusion then proceeds on text+figures for that branch (#296
+    guardrail: degrade, never block)."""
+    files = [str(f) for f in (entry.get("files_produced") or [])]
+    tables = [str(t) for t in (entry.get("feature_tables") or [])
+              if Path(str(t)).exists()]
+    if not tables:
+        tables = [f for f in files
+                  if Path(f).name == "features.csv" and Path(f).exists()]
+
+    out: Dict[str, Any] = {}
+    previews = []
+    for t in tables[:_NUMERICS_MAX_TABLES]:
+        try:
+            previews.append(_feature_table_preview(t, join_axis))
+        except Exception as e:  # noqa: BLE001 - a bad table must not break fusion
+            logger.warning(f"fusion numerics: could not preview {t}: {e}")
+    if previews:
+        out["feature_tables"] = previews
+    if len(tables) > _NUMERICS_MAX_TABLES:
+        out["tables_omitted"] = len(tables) - _NUMERICS_MAX_TABLES
+
+    # The branch's own trend analysis names WHAT it tracked across the series
+    # — the signal fusion needs to pick the physically meaningful columns out
+    # of a wide table. Single-measurement branches carry scalar
+    # fitting_parameters/fit_quality instead (used only when no table loaded).
+    candidates = [Path(t).parent / "analysis_results.json" for t in tables]
+    candidates += [Path(f) for f in files
+                   if Path(f).name == "analysis_results.json"]
+    for cand in candidates:
+        if "trend_analysis" in out or not cand.exists():
+            continue
+        try:
+            with open(cand, "r", errors="replace") as fh:
+                data = json.load(fh)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"fusion numerics: could not read {cand}: {e}")
+            continue
+        trend = data.get("trend_analysis")
+        if isinstance(trend, dict) and trend and not trend.get("skipped"):
+            out["trend_analysis"] = trend
+        if not previews:
+            for key in ("fitting_parameters", "fit_quality"):
+                val = data.get(key)
+                if val and key not in out:
+                    out[key] = val
+
+    # Paths of the full numeric artifacts, for auditability (and for the
+    # phase-b codegen, which loads the tables itself).
+    numeric_files = tables + [f for f in files
+                              if Path(f).name in _NUMERIC_RESULT_NAMES]
+    if out and numeric_files:
+        out["numeric_files"] = list(dict.fromkeys(numeric_files))
+    return out or None
+
+
+def _numerics_prompt_block(num: dict) -> str:
+    """Render one branch's numerics dict into fusion-prompt text."""
+    lines = ["Numerical results on disk (schema preview — full tables NOT "
+             "loaded):"]
+    for p in num.get("feature_tables", []):
+        lines.append(f"- feature table: {p['path']} — {p['n_rows']} rows x "
+                     f"{p['n_cols']} cols")
+        if "join_axis_column" in p:
+            jc = p["join_axis_column"]
+            if jc is None:
+                lines.append("  join-axis column: none matched the gate's "
+                             "join axis")
+            elif "min" in jc:
+                lines.append(f"  join-axis column: {jc['name']} (range "
+                             f"{jc['min']:g} to {jc['max']:g}, "
+                             f"{jc['n_points']} points)")
+            else:
+                lines.append(f"  join-axis column: {jc['name']}")
+        cols = ", ".join(p["columns"])
+        if p.get("columns_truncated"):
+            cols += f", ... (+{p['columns_truncated']} more)"
+        lines.append(f"  columns: {cols}")
+        if p.get("values"):
+            lines.append("  single-row values: "
+                         + json.dumps(p["values"], default=str))
+    if num.get("tables_omitted"):
+        lines.append(f"- ({num['tables_omitted']} further feature table(s) "
+                     "not previewed)")
+    if num.get("trend_analysis") is not None:
+        t = json.dumps(num["trend_analysis"], default=str)
+        if len(t) > _NUMERICS_TREND_MAX_CHARS:
+            t = t[:_NUMERICS_TREND_MAX_CHARS] + "...(truncated)"
+        lines.append(f"- branch's own trend analysis: {t}")
+    for key, label in (("fitting_parameters", "fitting parameters"),
+                       ("fit_quality", "fit quality")):
+        if num.get(key) is not None:
+            lines.append(f"- {label}: " + json.dumps(num[key], default=str))
+    if num.get("numeric_files"):
+        lines.append("- full numeric artifacts (paths, for audit): "
+                     + ", ".join(num["numeric_files"]))
+    return "\n".join(lines)
+
+
 def _write_fusion_html(out_dir: Path, fused: dict, figures: list) -> Optional[Path]:
     """Write a self-contained HTML fusion report (narrative + claims + the
     per-dataset figures inline as base64). ``figures`` is a list of
@@ -947,7 +1125,9 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
     Reuses the HOLISTIC multi-modal synthesis template with the
     anti-spurious-correlation guard so "no correlation found" is a valid
     outcome. Reads each branch's findings from its ledger entry (summary +
-    key_findings). Records itself as a ``mode="fusion"`` ledger entry.
+    key_findings), plus a compact schema preview of the branch's on-disk
+    numerical results (#296 phase a — see ``_branch_numerics``). Records
+    itself as a ``mode="fusion"`` ledger entry.
     """
     from ..exp_agents.instruct import HOLISTIC_EXPERIMENTAL_SYNTHESIS_INSTRUCTIONS
 
@@ -981,6 +1161,10 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
     _groups = {e.get("parallel_group") for e in ok}
     gated = (all(e.get("fanout") for e in ok)
              and len(_groups) == 1 and None not in _groups)
+    # The gate's join axis is the merge key for the numerics previews below —
+    # stamped on fan-out branch entries at launch; a re-gated ad-hoc set gets
+    # it from the fresh verdict instead.
+    join_axis = next((e.get("join_axis") for e in ok if e.get("join_axis")), None)
     ungated_warning = None
     if not gated:
         _paths = [e.get("data_path") for e in ok]
@@ -990,6 +1174,7 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
                        for e in ok])
             _v = (_verdict.get("verdict") or "").lower()
             gated = _v == "complementary"
+            join_axis = join_axis or _verdict.get("join_axis")
             if not gated:
                 ungated_warning = (
                     f"These datasets were assessed NOT complementary (verdict: {_v}; "
@@ -1002,15 +1187,22 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
                 "cross-dataset agreement as unverified and possibly spurious.")
 
     blocks = []
+    branch_numerics: Dict[str, Any] = {}   # label -> numerics dict (audit trail)
     for e in ok:
         findings = e.get("key_findings") or []
         findings_str = "\n".join(f"- {k}" for k in findings) if findings else "- (none)"
-        blocks.append(
-            f"### Dataset: {e.get('label') or ('delegation ' + str(e['index']))} "
+        label = e.get("label") or f"delegation {e['index']}"
+        block = (
+            f"### Dataset: {label} "
             f"(delegation #{e['index']})\n"
             f"Summary:\n{e.get('summary', '') or '(none)'}\n\n"
             f"Key findings:\n{findings_str}"
         )
+        num = _branch_numerics(e, join_axis)
+        if num:
+            branch_numerics[label] = num
+            block += "\n\n" + _numerics_prompt_block(num)
+        blocks.append(block)
 
     # One representative figure per branch — attached to the (multimodal) fusion
     # call so spatial correlations can be verified from the actual plots, not
@@ -1040,6 +1232,15 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
            "this text, labeled by dataset. Use them to verify spatial/visual "
            "correlations DIRECTLY rather than relying on the text descriptions "
            "alone.\n" if image_parts else "")
+        + (("\n\nNUMERICS: dataset blocks below include a schema preview of the "
+            "branch's on-disk numerical result tables (shape, column names, the "
+            "join-axis column's range) and the branch's own trend analysis. "
+            "Ground cross-dataset statements in these computed quantities, and "
+            "quote ONLY numbers that appear in a preview or a finding — the "
+            "full tables were NOT loaded, so never invent values beyond them."
+            + (f" Shared join axis from the complementarity gate: {join_axis}."
+               if join_axis else "")
+            + "\n") if branch_numerics else "")
         + "\n\n--- PER-DATASET FINDINGS TO RECONCILE ---\n\n"
         + "\n\n".join(blocks)
     )
@@ -1084,6 +1285,8 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
         "focus": focus,
         "complementarity_gated": gated,
         "complementarity_warning": ungated_warning,
+        "join_axis": join_axis,
+        "branch_numerics": branch_numerics or None,
         "detailed_analysis": (
             (f"⚠️ UNGATED FUSION — {ungated_warning}\n\n" if ungated_warning else "")
             + parsed.get("detailed_analysis", "")),
@@ -1124,6 +1327,8 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
         "fused_from": [e["index"] for e in ok],
         "complementarity_gated": gated,
         "complementarity_warning": ungated_warning,
+        "join_axis": join_axis,
+        "numerics_branches": len(branch_numerics),
         "figures_used": len(figures),
         "detailed_analysis": fused["detailed_analysis"],
         "scientific_claims": fused["scientific_claims"],
