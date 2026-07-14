@@ -1,11 +1,15 @@
-"""Live validation for #296 phase (a) — the fusion numerics bundle.
+"""Live validation for #296 phases (a) + (b) — numerics bundle + computed
+reconciliation.
 
 Runs the same 3-dataset in-situ layout as the #326 live test (one standalone
 thermal curve + two file series sharing a directory), then asserts the NEW
 behavior: each branch's feature tables are schema-previewed into the fusion
 prompt (captured via a pass-through spy on the fusion LLM call), the gate's
-join_axis is stamped on the branch ledger entries, and the fusion report
-carries the branch_numerics audit trail.
+join_axis is stamped on the branch ledger entries, the fusion report carries
+the branch_numerics audit trail, and — phase (b) — a reconciliation script is
+generated, EXECUTED over the branch tables, and persisted with its computed
+fusion_numerics.json (+ overlay figure), whose quantities ground the
+synthesis prompt.
 
   export AWS_BEARER_TOKEN_BEDROCK=...   AWS_REGION_NAME=us-east-1
   UNSAFE_EXECUTION_OK=true python tests/test_fusion_numerics_live.py
@@ -159,6 +163,27 @@ def main():
     check("report branch_numerics for >= 2 branches", len(bn) >= 2)
     check("report join_axis recorded", bool(report.get("join_axis")))
 
+    # --- phase (b): computed reconciliation ---
+    comp = fout.get("computed_reconciliation") or {}
+    check("computed reconciliation ran", comp.get("status") == "success")
+    check("reconciliation script persisted", comp.get("script_path")
+          and os.path.exists(comp["script_path"]))
+    check("fusion_numerics.json persisted", comp.get("numerics_path")
+          and os.path.exists(comp["numerics_path"]))
+    q = (comp.get("results") or {}).get("quantities") or {}
+    check("computed quantities non-empty", bool(q))
+    check("sigma honesty recorded",
+          "sigma_available" in (comp.get("results") or {}))
+    check("COMPUTED RECONCILIATION block in synthesis prompt",
+          "COMPUTED RECONCILIATION" in prompt)
+    if comp.get("figure_path"):
+        print(f"\n(computed overlay figure: {comp['figure_path']})")
+
+    print("\n--- COMPUTED QUANTITIES ---")
+    print(json.dumps(comp.get("results"), indent=2, default=str)[:2500])
+    print("\n--- RECONCILIATION SCRIPT STDOUT ---")
+    print((comp.get("stdout") or "")[:1500])
+
     print("\n--- NUMERICS SECTIONS AS THE FUSION LLM SAW THEM ---")
     for chunk in prompt.split("### Dataset:")[1:]:
         head = chunk.splitlines()[0].strip()
@@ -174,7 +199,7 @@ def main():
 
     print("\n" + "=" * 60)
     npass = sum(checks.values())
-    print(f"FUSION NUMERICS LIVE (#296 phase a): {npass}/{len(checks)} checks passed")
+    print(f"FUSION NUMERICS LIVE (#296 phases a+b): {npass}/{len(checks)} checks passed")
     for k, v in checks.items():
         if not v:
             print("  FAILED:", k)
