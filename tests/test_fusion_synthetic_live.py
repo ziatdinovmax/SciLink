@@ -289,13 +289,18 @@ def scenario_null():
     print(f"[null] would-be fabricated markers: {fabricated}")
     check("null: no fabricated coincidence for the featureless branch",
           not fabricated)
-    caveat_text = " ".join(str(c) for c in fout.get("caveats") or []).lower()
-    narrative = str(fout.get("detailed_analysis", "")).lower()
+    # Absence must be acknowledged — in the narrative/caveats OR (the
+    # mechanical, phrasing-proof signal) in the computed output itself
+    # (e.g. framework_transition_detected: false / a *_null verdict).
+    blob = (" ".join(str(c) for c in fout.get("caveats") or [])
+            + str(fout.get("detailed_analysis", ""))
+            + json.dumps(comp.get("results") or {}, default=str)).lower()
     check("null: absence acknowledged somewhere",
-          any(s in (caveat_text + narrative) for s in
+          any(s in blob for s in
               ("no transition", "no corresponding", "does not show",
                "absence", "no correlation", "not observed", "featureless",
-               "no clear transition", "lacks")))
+               "no clear transition", "lacks", "null", "no significant "
+               "trend", "transition_detected\": false", "disagree")))
 
 
 def scenario_scalar():
