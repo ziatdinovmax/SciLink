@@ -488,10 +488,23 @@ class MetaOrchestratorTools:
                         "properties": {
                             "data_path": {"type": "string",
                                           "description": "Absolute path to THIS branch's "
-                                                         "primary dataset."},
+                                                         "primary dataset. Branches MAY "
+                                                         "share one path (a directory "
+                                                         "holding several measurement "
+                                                         "series): each series is its own "
+                                                         "branch, distinguished by its "
+                                                         "task — never merge distinct "
+                                                         "datasets into one branch."},
                             "task": {"type": "string",
                                      "description": "Complete, self-contained analysis "
                                                     "instruction for this dataset."},
+                            "pattern": {"type": "string",
+                                        "description": "Filename glob selecting THIS "
+                                                       "branch's files when data_path is "
+                                                       "a directory with several datasets "
+                                                       "(e.g. 'sample_*C.txt'). ALWAYS "
+                                                       "provide it when branches share a "
+                                                       "directory."},
                             "label": {"type": "string",
                                       "description": "Short 2-5 word UI label (the data "
                                                      "type, e.g. 'STEM image')."},
