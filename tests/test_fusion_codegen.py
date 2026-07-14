@@ -45,19 +45,35 @@ Image.new("RGB", (8, 8), "red").save("fusion_figure.png")
 print("offset 5.5 C between techniques")
 """
 
+GOOD_SCRIPT2 = GOOD_SCRIPT.replace('"offset_C": 5.5', '"offset_C": 6.1')
+
 BAD_SCRIPT = 'raise RuntimeError("synthetic script failure")\n'
 
 NO_OUTPUT_SCRIPT = 'print("ran fine but wrote nothing")\n'
 
 
-# Scripted codegen replies, consumed in order; repeats the last one.
+# Scripted codegen/verification replies, consumed in order; repeat the last.
 CODEGEN_REPLIES = []
 CODEGEN_CALLS = []      # captured codegen prompts
+VERIFY_REPLIES = []     # verification verdict dicts (default: accept)
+VERIFY_CALLS = []       # captured verification prompts
 FUSION_PROMPTS = []     # captured HOLISTIC synthesis prompts
+
+ACCEPT = {"verdict": "accept", "issues": [], "refinement_instructions": ""}
+REFINE = {"verdict": "refine",
+          "issues": ["degenerate sigmoid width far below sampling interval"],
+          "refinement_instructions": "use the dihydrate peak area as the "
+                                     "order parameter"}
 
 
 def _install_fake_llm(fanout_set, join_axis="sample temperature"):
     def fake(orch, prompt, extra_parts=None):
+        if "AUDITING a computed" in prompt:                   # verification
+            VERIFY_CALLS.append(prompt)
+            if not VERIFY_REPLIES:
+                return dict(ACCEPT)
+            i = min(len(VERIFY_CALLS) - 1, len(VERIFY_REPLIES) - 1)
+            return dict(VERIFY_REPLIES[i])
         if "SCRIPT CONTRACT" in prompt:                       # codegen call
             CODEGEN_CALLS.append(prompt)
             i = min(len(CODEGEN_CALLS) - 1, len(CODEGEN_REPLIES) - 1)
@@ -74,10 +90,11 @@ def _install_fake_llm(fanout_set, join_axis="sample temperature"):
     fo._llm_json = fake
 
 
-def _run(ag, A, B, replies):
+def _run(ag, A, B, replies, verify=None):
     BEHAVIORS.clear(); BEHAVIORS[A] = "series"; BEHAVIORS[B] = "single"
     CODEGEN_REPLIES[:] = replies
-    CODEGEN_CALLS.clear(); FUSION_PROMPTS.clear()
+    VERIFY_REPLIES[:] = (verify or [])
+    CODEGEN_CALLS.clear(); VERIFY_CALLS.clear(); FUSION_PROMPTS.clear()
     _install_fake_llm([A, B])
     ag._complementarity_cache.clear()
     out = json.loads(ag._run_fanout(_branches(A, B)))
@@ -125,6 +142,14 @@ def main():
     check("ledger files_produced includes script + numerics",
           any("fusion_reconciliation.py" in f for f in fusion_entry["files_produced"])
           and any("fusion_numerics.json" in f for f in fusion_entry["files_produced"]))
+    check("verification recorded as accept",
+          (comp.get("verification") or {}).get("verdict") == "accept")
+    check("audit acceptance told to synthesis",
+          "audit ACCEPTED this computation" in prompt)
+    html = open(fused["report_html_path"]).read()
+    check("HTML has computed-reconciliation card",
+          "Computed reconciliation" in html and "offset_C" in html)
+    check("HTML shows accepted audit badge", "audit: accepted" in html)
 
     # 2) First attempt crashes -> retry with the error fed back -> success.
     ag, A, B = _agent()
@@ -194,6 +219,57 @@ def main():
     check("declined: warning names the fix",
           "UNSAFE_EXECUTION_OK" in str(comp.get("warning", "")))
     check("declined: fusion still success", fused["status"] == "success")
+
+    # 7) Audit refine -> regenerate with the audit's instructions -> accept.
+    ag, A, B = _agent()
+    fused, prompt = _run(ag, A, B, [GOOD_SCRIPT, GOOD_SCRIPT2],
+                         verify=[REFINE, ACCEPT])
+    print("7) audit-driven refinement:")
+    comp = fused.get("computed_reconciliation") or {}
+    check("refined to accept on attempt 2", comp.get("status") == "success"
+          and comp.get("attempts") == 2
+          and (comp.get("verification") or {}).get("verdict") == "accept")
+    check("audit instructions fed to the second generation",
+          len(CODEGEN_CALLS) >= 2
+          and "FAILED A SCIENTIFIC AUDIT" in CODEGEN_CALLS[1]
+          and "dihydrate peak area" in CODEGEN_CALLS[1])
+    check("refined quantities returned",
+          (comp.get("results") or {}).get("quantities", {}).get("offset_C") == 6.1)
+    check("verification saw script + figure inputs",
+          len(VERIFY_CALLS) >= 1 and "EXECUTED SCRIPT" in VERIFY_CALLS[0])
+
+    # 8) Audit never satisfied -> best flagged result kept, honestly marked.
+    ag, A, B = _agent()
+    fused, prompt = _run(ag, A, B, [GOOD_SCRIPT], verify=[REFINE])
+    print("8) persistent refine keeps flagged best:")
+    comp = fused.get("computed_reconciliation") or {}
+    check("kept with status success", comp.get("status") == "success")
+    check("verdict recorded as refine",
+          (comp.get("verification") or {}).get("verdict") == "refine")
+    check("UNRESOLVED warning set",
+          "UNRESOLVED" in str(comp.get("warning", "")))
+    check("warning propagated to caveats",
+          any("UNRESOLVED" in str(c) for c in fused.get("caveats") or []))
+    check("synthesis warned about unresolved audit",
+          "UNRESOLVED issues" in prompt)
+    html = open(fused["report_html_path"]).read()
+    check("HTML shows unresolved-audit badge", "audit: unresolved issues" in html)
+
+    # 9) Crash after a refine-flagged success -> artifacts restored to the
+    #    returned (best) attempt so the audit trail matches the report.
+    ag, A, B = _agent()
+    fused, prompt = _run(ag, A, B, [GOOD_SCRIPT, BAD_SCRIPT],
+                         verify=[REFINE])
+    print("9) artifact restore after late crash:")
+    comp = fused.get("computed_reconciliation") or {}
+    check("flagged best returned despite later crashes",
+          comp.get("status") == "success"
+          and "UNRESOLVED" in str(comp.get("warning", "")))
+    check("script on disk is the returned attempt's",
+          "offset_C" in open(comp["script_path"]).read())
+    saved = json.load(open(comp["numerics_path"]))
+    check("numerics on disk match the returned results",
+          saved.get("quantities", {}).get("offset_C") == 5.5)
 
     print("\n" + "=" * 50)
     npass = sum(results.values())

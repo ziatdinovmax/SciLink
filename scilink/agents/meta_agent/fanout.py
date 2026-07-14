@@ -1057,6 +1057,76 @@ values):
 """
 
 
+FUSION_VERIFICATION_INSTRUCTIONS = """You are a skeptical measurement scientist AUDITING a computed cross-dataset \
+reconciliation. A generated script was executed over several analysis \
+branches' result tables; its numerical output (and overlay figure, when \
+attached) follows, together with the executed script and the same per-branch \
+inputs the script was given. Judge whether the COMPUTATION is scientifically \
+sound — a clean exit with an implausible number is a failure.
+
+Check, in order of importance:
+1. CROSS-CHECK against the branches' own trend analyses: each branch's inputs \
+name what it tracked and where its transitions lie. A computed marker that \
+disagrees substantially with the branch's own value needs a reason — and if \
+the script's choice of column / order parameter explains the disagreement, \
+that is a flaw in the script, not a discovery.
+2. DEGENERATE or PATHOLOGICAL fits: transition widths far below the sampling \
+interval, values pinned to a grid point or a range edge, sigmoids fit to \
+non-monotonic or spike-contaminated series.
+3. ORDER-PARAMETER CHOICE (use the figure): is each plotted trend actually \
+transition-shaped for its technique, or noisy/spiked such that the located \
+marker is an artifact? Prefer the quantity the branch's own trend analysis \
+tracked.
+4. SIGMA HONESTY: "sigma_available": true is valid only if real per-parameter \
+uncertainties (e.g. *_err columns) were actually used; never accept \
+fabricated weights.
+5. METHOD: is the chosen method appropriate for the join topology and the \
+sampling?
+
+Do NOT ask for refinement over cosmetic points — numerical nitpicks that do \
+not change the scientific conclusion are "accept" with the issue noted. Ask \
+for refinement when a reported quantity is misleading or an artifact.
+
+Respond in valid JSON with EXACTLY these keys:
+{
+  "verdict": "accept" | "refine",
+  "issues": ["<each concrete problem found; empty list if none>"],
+  "refinement_instructions": "<if refine: precise instructions for the next script attempt (which column / order parameter / fix); else empty string>"
+}
+"""
+
+
+def _verify_fusion_numerics(orch, candidate: dict, script: str,
+                            inputs: str) -> dict:
+    """Audit the computed reconciliation (#296 phase c): the fusion LLM
+    inspects the produced numbers, the script, and the overlay figure, and
+    returns {"verdict": "accept"|"refine", "issues": [...],
+    "refinement_instructions": ...}. On an unusable LLM reply, returns
+    verdict "unavailable" (recorded, never blocks)."""
+    parts = None
+    if candidate.get("figure_path"):
+        part = _load_figure_part(candidate["figure_path"])
+        if part:
+            parts = ["\n[Figure — the computed reconciliation overlay]:", part]
+    prompt = (
+        FUSION_VERIFICATION_INSTRUCTIONS
+        + "\n\n--- COMPUTED OUTPUT (fusion_numerics.json) ---\n"
+        + json.dumps(candidate.get("results"), indent=2, default=str)[:6000]
+        + "\n\n--- SCRIPT STDOUT ---\n" + (candidate.get("stdout") or "")[:1500]
+        + "\n\n--- THE EXECUTED SCRIPT ---\n" + (script or "")[:6000]
+        + "\n\n--- THE PER-BRANCH INPUTS THE SCRIPT RECEIVED ---"
+        + inputs
+    )
+    parsed = _llm_json(orch, prompt, extra_parts=parts)
+    if not parsed or parsed.get("verdict") not in ("accept", "refine"):
+        return {"verdict": "unavailable", "issues": [],
+                "refinement_instructions": ""}
+    return {"verdict": parsed["verdict"],
+            "issues": [str(i) for i in (parsed.get("issues") or [])],
+            "refinement_instructions":
+                str(parsed.get("refinement_instructions") or "")}
+
+
 def _fusion_codegen_inputs(ok: List[dict], branch_numerics: Dict[str, Any],
                            join_axis: Optional[str],
                            focus: Optional[str]) -> str:
@@ -1083,11 +1153,18 @@ def _fusion_codegen_inputs(ok: List[dict], branch_numerics: Dict[str, Any],
 def _run_fusion_codegen(orch, ok: List[dict], branch_numerics: Dict[str, Any],
                         join_axis: Optional[str], focus: Optional[str],
                         out_dir: Path) -> dict:
-    """Generate -> execute -> persist the reconciliation script (#296 phase b).
+    """Generate -> execute -> verify -> persist the reconciliation (#296 b+c).
 
-    Returns a dict with ``status`` ('success' | 'skipped' | 'failed'),
-    the persisted artifact paths, the parsed fusion_numerics.json under
-    ``results``, and a ``warning`` on any non-success. Never raises."""
+    After a successful execution the computed output is AUDITED
+    (``_verify_fusion_numerics``): an "accept" returns it; a "refine" feeds
+    the audit's instructions into the next generation attempt. If the
+    attempt budget runs out with only refine-flagged results, the best
+    executed result is returned WITH its unresolved issues recorded (an
+    audited-but-flagged number beats a silent one). Returns a dict with
+    ``status`` ('success' | 'skipped' | 'failed'), the persisted artifact
+    paths, the parsed fusion_numerics.json under ``results``, the
+    ``verification`` verdict, and a ``warning`` on anything non-clean.
+    Never raises."""
     from ...executors import ScriptExecutor, require_sandbox_approval
 
     if not require_sandbox_approval(
@@ -1100,8 +1177,12 @@ def _run_fusion_codegen(orch, ok: List[dict], branch_numerics: Dict[str, Any],
 
     inputs = _fusion_codegen_inputs(ok, branch_numerics, join_axis, focus)
     executor = ScriptExecutor(timeout=_FUSION_SCRIPT_TIMEOUT_S)
+    script_path = out_dir / "fusion_reconciliation.py"
+    numerics_path = out_dir / "fusion_numerics.json"
     feedback = ""
     err = "no usable script generated"
+    best = None          # last executed-but-refine-flagged candidate
+    best_script = None
     for attempt in range(1, _FUSION_CODEGEN_ATTEMPTS + 1):
         parsed = _llm_json(orch, FUSION_CODEGEN_INSTRUCTIONS + inputs + feedback)
         script = (parsed or {}).get("script")
@@ -1110,13 +1191,11 @@ def _run_fusion_codegen(orch, ok: List[dict], branch_numerics: Dict[str, Any],
             feedback = ("\n\n--- PREVIOUS ATTEMPT FAILED ---\n" + err
                         + ". Return the complete JSON again.")
             continue
-        script_path = out_dir / "fusion_reconciliation.py"
         try:
             script_path.write_text(script, encoding="utf-8")
         except Exception as e:  # noqa: BLE001
             logger.warning(f"fusion codegen: could not persist script: {e}")
         res = executor.execute_script(script, working_dir=str(out_dir))
-        numerics_path = out_dir / "fusion_numerics.json"
         if res.get("status") == "success" and numerics_path.exists():
             try:
                 with open(numerics_path, "r", errors="replace") as fh:
@@ -1126,15 +1205,32 @@ def _run_fusion_codegen(orch, ok: List[dict], branch_numerics: Dict[str, Any],
                 err = f"fusion_numerics.json is not valid JSON: {e}"
             if results is not None:
                 fig = out_dir / "fusion_figure.png"
-                return {"status": "success",
-                        "method": parsed.get("method"),
-                        "rationale": parsed.get("rationale"),
-                        "script_path": str(script_path),
-                        "numerics_path": str(numerics_path),
-                        "figure_path": str(fig) if fig.exists() else None,
-                        "results": results,
-                        "stdout": (res.get("stdout") or "")[-2000:],
-                        "attempts": attempt, "warning": None}
+                candidate = {"status": "success",
+                             "method": parsed.get("method"),
+                             "rationale": parsed.get("rationale"),
+                             "script_path": str(script_path),
+                             "numerics_path": str(numerics_path),
+                             "figure_path": str(fig) if fig.exists() else None,
+                             "results": results,
+                             "stdout": (res.get("stdout") or "")[-2000:],
+                             "attempts": attempt, "warning": None}
+                verification = _verify_fusion_numerics(orch, candidate,
+                                                       script, inputs)
+                candidate["verification"] = verification
+                if verification["verdict"] != "refine":
+                    return candidate
+                best, best_script = candidate, script
+                issues = "; ".join(verification["issues"])[:1500]
+                err = f"verification flagged the computation: {issues}"
+                logger.warning(f"fusion codegen attempt {attempt}: {err[:400]}")
+                feedback = (
+                    "\n\n--- PREVIOUS ATTEMPT EXECUTED, BUT ITS OUTPUT FAILED "
+                    "A SCIENTIFIC AUDIT ---\nIssues: " + issues
+                    + "\nInstructions: "
+                    + verification["refinement_instructions"][:1500]
+                    + "\nWrite an improved script and return the complete "
+                      "JSON again.")
+                continue
         elif res.get("status") == "success":
             err = "the script ran but did not write ./fusion_numerics.json"
         else:
@@ -1142,9 +1238,23 @@ def _run_fusion_codegen(orch, ok: List[dict], branch_numerics: Dict[str, Any],
         logger.warning(f"fusion codegen attempt {attempt} failed: {err[:400]}")
         feedback = ("\n\n--- PREVIOUS ATTEMPT FAILED ---\n" + err[:2000]
                     + "\nFix the script and return the complete JSON again.")
+    if best is not None:
+        # A later, worse attempt may have overwritten the persisted artifacts
+        # — restore the returned candidate's script + numerics so the audit
+        # trail matches what is reported. (The figure cannot be restored the
+        # same way; it is best-effort.)
+        try:
+            script_path.write_text(best_script, encoding="utf-8")
+            with open(numerics_path, "w") as fh:
+                json.dump(best["results"], fh, indent=2, default=str)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"fusion codegen: could not restore artifacts: {e}")
+        issues = "; ".join(best["verification"]["issues"])[:400]
+        best["warning"] = ("computed reconciliation kept with UNRESOLVED "
+                           f"verification issues: {issues}")
+        return best
     return {"status": "failed", "attempts": _FUSION_CODEGEN_ATTEMPTS,
-            "script_path": str(out_dir / "fusion_reconciliation.py")
-            if (out_dir / "fusion_reconciliation.py").exists() else None,
+            "script_path": str(script_path) if script_path.exists() else None,
             "warning": (f"computed reconciliation failed after "
                         f"{_FUSION_CODEGEN_ATTEMPTS} attempts "
                         f"({err[:200]}); fusion degraded to text+figures.")}
@@ -1184,6 +1294,52 @@ def _write_fusion_html(out_dir: Path, fused: dict, figures: list) -> Optional[Pa
             f"<img src='data:image/png;base64,{base64.b64encode(b).decode()}'></div>"
             for lbl, b in figures
         ) or "<p>(no figures available)</p>"
+        # Computed reconciliation card (#296 phase c): the executed script's
+        # quantities, the audit verdict, and the audit-trail paths.
+        comp = fused.get("computed_reconciliation") or {}
+        comp_html = ""
+        if comp and comp.get("status") == "success":
+            res = comp.get("results") or {}
+
+            def _fmt_qty(v):
+                return (f"{v:.6g}" if isinstance(v, float)
+                        else _html.escape(str(v)))
+            qrows = "".join(
+                f"<tr><td>{_html.escape(str(k))}</td>"
+                f"<td class='num'>{_fmt_qty(v)}</td></tr>"
+                for k, v in (res.get("quantities") or {}).items()
+            ) or "<tr><td colspan='2'>(none)</td></tr>"
+            notes_html = "".join(f"<li>{_html.escape(str(n))}</li>"
+                                 for n in (res.get("notes") or []))
+            ver = comp.get("verification") or {}
+            vbadge = {"accept": "<span class='vok'>audit: accepted</span>",
+                      "refine": "<span class='vbad'>audit: unresolved issues</span>"
+                      }.get(ver.get("verdict"),
+                            "<span class='vna'>audit: unavailable</span>")
+            issues_html = ("<ul class='cav'>" + "".join(
+                f"<li>{_html.escape(str(i))}</li>"
+                for i in ver.get("issues") or []) + "</ul>"
+            ) if ver.get("issues") else ""
+            comp_html = (
+                "<div class='card'><h2>Computed reconciliation "
+                f"<small>method: {_html.escape(str(comp.get('method')))} · "
+                f"σ available: {_html.escape(str(res.get('sigma_available')))}"
+                f"</small> {vbadge}</h2>"
+                f"<table class='qt'><tr><th>quantity</th><th>value</th></tr>"
+                f"{qrows}</table>"
+                + (f"<ul>{notes_html}</ul>" if notes_html else "")
+                + issues_html
+                + "<div class='paths'>script: "
+                + _html.escape(str(comp.get('script_path')))
+                + "<br>numerics: "
+                + _html.escape(str(comp.get('numerics_path'))) + "</div>"
+                "</div>")
+        elif comp:
+            comp_html = (
+                "<div class='card'><h2>Computed reconciliation</h2>"
+                "<div class='imp'>Not computed — "
+                + _html.escape(str(comp.get("warning") or comp.get("status")))
+                + "</div></div>")
         focus_html = (f"<div class='focus'><b>Focus:</b> {_html.escape(str(fused.get('focus')))}</div>"
                       if fused.get("focus") else "")
         # Styling follows the house report look (see planning_agents/
@@ -1217,6 +1373,16 @@ def _write_fusion_html(out_dir: Path, fused: dict, figures: list) -> Optional[Pa
  .novbadge{{background:#dbeafe;color:#1e40af;border-radius:20px;
    padding:2px 10px;font-size:.75em;font-weight:bold;white-space:nowrap}}
  h2 small{{color:#94a3b8;font-weight:normal;font-size:.7em}}
+ .qt{{border-collapse:collapse;margin-bottom:14px}}
+ .qt td,.qt th{{border:1px solid #e2e8f0;padding:4px 12px;text-align:left}}
+ .qt .num{{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}}
+ .vok,.vbad,.vna{{border-radius:20px;padding:2px 10px;font-size:.6em;
+   font-weight:bold;white-space:nowrap;vertical-align:middle}}
+ .vok{{background:#dcfce7;color:#166534}}
+ .vbad{{background:#fee2e2;color:#991b1b}}
+ .vna{{background:#e2e8f0;color:#475569}}
+ .paths{{color:#94a3b8;font-size:.8em;margin-top:8px;
+   font-family:ui-monospace,SFMono-Regular,Menlo,monospace}}
 </style></head><body>
 <header>
 <h1>🔀 Cross-dataset fusion</h1>
@@ -1225,6 +1391,7 @@ def _write_fusion_html(out_dir: Path, fused: dict, figures: list) -> Optional[Pa
 </header>
 <div class="card"><h2>Reconciled interpretation</h2>
 <div class="narr">{_html.escape(str(fused.get("detailed_analysis", "")))}</div></div>
+{comp_html}
 <div class="card"><h2>{_claims_hdr}</h2><ol>{claims_html}</ol></div>
 {caveats_html}
 <div class="card"><h2>Source figures (one per dataset)</h2>{figs_html}</div>
@@ -1415,6 +1582,21 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
             image_parts.append("\n[Figure — computed reconciliation overlay]:")
             image_parts.append(part)
 
+    # Verification verdict (#296 phase c) → one line for the synthesis: an
+    # accepted audit adds confidence; unresolved issues must be weighed.
+    _audit_note = ""
+    if computed and computed.get("status") == "success":
+        _v = computed.get("verification") or {}
+        _iss = "; ".join(_v.get("issues") or [])[:1200]
+        if _v.get("verdict") == "refine":
+            _audit_note = ("\n⚠️ A scientific audit of this computation "
+                           "flagged UNRESOLVED issues — weigh the flagged "
+                           "quantities against the branches' own trend values "
+                           f"and prefer the latter where they conflict: {_iss}\n")
+        elif _v.get("verdict") == "accept":
+            _audit_note = ("\nA scientific audit ACCEPTED this computation"
+                           + (f" (with notes: {_iss})" if _iss else "") + ".\n")
+
     prompt = (
         HOLISTIC_EXPERIMENTAL_SYNTHESIS_INSTRUCTIONS
         + (f"\n\n⚠️ UNGATED FUSION — {ungated_warning} Do NOT claim the datasets "
@@ -1445,6 +1627,7 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
             "prose, prefer the computed values. If a computed value looks "
             "physically implausible, say so rather than adopting it.\n"
             + json.dumps(computed.get("results"), indent=2, default=str)[:6000]
+            + _audit_note
             + f"\n(script persisted at {computed.get('script_path')}; its "
               "stdout summary:\n"
             + (computed.get("stdout") or "")[:1500] + ")\n")
