@@ -3630,7 +3630,7 @@ The standard fields are:
 ```python
 results = {{{{
     "analysis_type": "description of what was done",
-    "extracted_features": {{{{"feature_name": value, ...}}}},
+    "extracted_features": {{{{"feature_name": value, ...}}}},  # a value with a known uncertainty (tool std/err output, fit sigma) gets its OWN numeric "<feature_name>_err" entry — never bury an uncertainty in a prose note
     "quality_metrics": {{{{"metric_name": value, ...}}}},
     "summary": "Key finding in one sentence",
     "saved_arrays": {{{{...}}}}
@@ -3728,7 +3728,7 @@ The standard fields are:
 ```python
 results = {{{{
     "analysis_type": "description of what was done",
-    "extracted_features": {{{{"feature_name": value, ...}}}},
+    "extracted_features": {{{{"feature_name": value, ...}}}},  # a value with a known uncertainty (tool std/err output, fit sigma) gets its OWN numeric "<feature_name>_err" entry — never bury an uncertainty in a prose note
     "quality_metrics": {{{{"metric_name": value, ...}}}},
     "summary": "Key finding in one sentence",
     "saved_arrays": {{{{...}}}}
