@@ -912,7 +912,9 @@ class MetaOrchestratorAgent:
 
     def _delegate(self, mode: str, task: str, context: Optional[dict] = None,
                   context_from: Optional[list] = None,
-                  label: Optional[str] = None) -> str:
+                  label: Optional[str] = None,
+                  data_path: Optional[str] = None,
+                  metadata: Optional[str] = None) -> str:
         """Run a task on a child orchestrator, record it, return a JSON summary.
 
         The child runs under the meta's own autonomy mode (mapped by enum
@@ -924,6 +926,12 @@ class MetaOrchestratorAgent:
         A provisional 'running' ledger entry is opened before the child runs,
         so the UI delegation tree shows the delegation live; it is finalized
         with the result on completion.
+
+        ``data_path`` / ``metadata`` (analysis delegations) are stamped on the
+        ledger entry so a LATER ``fuse_delegations`` mixing this delegation
+        with others can re-run the complementarity gate — without them an
+        incremental fusion silently demotes to ungated (no computed
+        reconciliation).
         """
         if mode == "analysis":
             from ..exp_agents.analysis_orchestrator import AnalysisMode
@@ -938,6 +946,25 @@ class MetaOrchestratorAgent:
             })
 
         entry = self._open_delegation(mode, task, context, context_from, label)
+        if mode == "analysis" and data_path:
+            entry["data_path"] = str(data_path)
+            if metadata:
+                entry["metadata"] = str(metadata)
+        # A re-analysis guided by a prior fusion has effectively seen its
+        # companions' findings (stamped by _open_delegation). Bound the spend
+        # the same way steering is bounded: the guidance is additive-only.
+        # The ledger keeps the ACTUAL task sent, note included.
+        if entry.get("informed_via") == "fusion_feedback":
+            task = task + (
+                "\n\nNOTE — this re-analysis is guided by a prior "
+                "CROSS-DATASET FUSION, so you have effectively seen the "
+                "companion datasets' findings. That guidance is "
+                "ADDITIVE-ONLY: test the indicated hypotheses, but analyze "
+                "the FULL data range, never restrict your scope or relax an "
+                "acceptance criterion toward agreement, and report "
+                "disagreement with the fused picture plainly — it is a "
+                "valid, valuable outcome.")
+            entry["task"] = task
         try:
             child = get_child()
             result = child.run_task(
@@ -990,6 +1017,23 @@ class MetaOrchestratorAgent:
             "warnings": [],
             "error": None,
         }
+        # Independence provenance (#296): an analysis delegation that draws
+        # context from a FUSION entry has effectively seen every fused
+        # branch's findings — its later agreement with them is partly by
+        # construction. Stamp it mechanically so the next fusion discounts it.
+        if mode == "analysis" and sources:
+            by_index = {e["index"]: e for e in self._delegation_ledger}
+            fused_labels: list = []
+            for s in sources:
+                src = by_index.get(s)
+                if src and src.get("mode") == "fusion":
+                    fused_labels += [str(l) for l in (src.get("labels")
+                                                      or src.get("fused_labels")
+                                                      or [])
+                                     if str(l) not in fused_labels]
+            if fused_labels:
+                entry["informed_by"] = fused_labels
+                entry["informed_via"] = "fusion_feedback"
         self._delegation_ledger.append(entry)
         return entry
 

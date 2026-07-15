@@ -1724,6 +1724,13 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
                 "operand(s); overlapping results may be jointly computed — "
                 "treat cross-branch agreement there as one joint "
                 "measurement, not as two independent confirmations.")
+        if "fusion_feedback" in via:
+            independence_caveats.append(
+                f"Branch '{lbl}' was re-analyzed with feedback from a prior "
+                f"fusion of {srcs}; it has effectively seen its companions' "
+                "findings, so its agreement with them is partly by "
+                "construction and must not be counted as independent "
+                "corroboration.")
 
     blocks = []
     branch_numerics: Dict[str, Any] = {}   # label -> numerics dict (audit trail)
@@ -1855,9 +1862,20 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
             "construction: discount it and say so. A branch that received "
             "CO-REGISTERED OPERANDS may have computed results jointly with "
             "them — treat agreement there as one joint measurement, not two "
-            "independent confirmations. Branch pairs NOT listed here are "
+            "independent confirmations. A branch re-analyzed with FUSION "
+            "FEEDBACK has effectively seen ALL its companions' findings — "
+            "the same discount applies. Branch pairs NOT listed here are "
             "independent, and their agreement carries full weight.\n")
            if informed else "")
+        + ("\n\nBRANCH RE-ANALYSIS: if some branch's OWN analysis appears "
+           "flawed in a way a re-analysis could fix (wrong model order, a "
+           "poorly chosen order parameter, a companion-indicated feature it "
+           "never tested), add a JSON key `branch_reanalysis`: a list of "
+           "{\"label\", \"reason\", \"suggestion\"} objects naming the "
+           "dataset label, the flaw, and a concrete re-analysis instruction. "
+           "Use it ONLY for branch-level flaws (not for issues in this "
+           "fusion's own computation), and omit the key when no re-analysis "
+           "is warranted.\n")
         + "\n\n--- PER-DATASET FINDINGS TO RECONCILE ---\n\n"
         + "\n\n".join(blocks)
     )
@@ -1869,6 +1887,19 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
     if not parsed or "detailed_analysis" not in parsed:
         return json.dumps({"status": "error",
                            "message": "Fusion synthesis did not return a usable result."})
+
+    # Branch re-analysis suggestions (structured, so a caller/meta can act):
+    # rendered as followups that carry the provenance instruction — a re-run
+    # citing this fusion in context_from gets informed_via=fusion_feedback
+    # stamped and the next fusion discounts it.
+    reanalysis = [r for r in (parsed.get("branch_reanalysis") or [])
+                  if isinstance(r, dict) and r.get("label")]
+    reanalysis_followups = [
+        (f"Re-analyze '{r.get('label')}': {str(r.get('reason', '')).strip()} — "
+         f"{str(r.get('suggestion', '')).strip()} (When re-delegating, cite "
+         "this fusion's delegation index in context_from so the independence "
+         "provenance is stamped; the guidance is additive-only.)")
+        for r in reanalysis]
 
     # Joint-analysis novelty: assess the FUSED claims once (the branches were
     # told to skip per-branch novelty). No-op without a literature backend.
@@ -1902,6 +1933,7 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
         "branch_numerics": branch_numerics or None,
         "computed_reconciliation": computed,
         "independence": informed or None,
+        "branch_reanalysis": reanalysis or None,
         "detailed_analysis": (
             (f"⚠️ UNGATED FUSION — {ungated_warning}\n\n" if ungated_warning else "")
             + parsed.get("detailed_analysis", "")),
@@ -1934,12 +1966,17 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
             "mode": "fusion",
             "task": f"Fuse delegations {[e['index'] for e in ok]}",
             "label": "cross-dataset fusion",
+            # The fused branch labels: _open_delegation reads these to stamp
+            # informed_via=fusion_feedback on a re-analysis that cites this
+            # fusion in context_from.
+            "labels": [e.get("label") for e in ok],
             "context_from": [e["index"] for e in ok],
             "status": "success",
             "summary": fused["detailed_analysis"],
             "key_findings": [c.get("claim", "") for c in parsed.get("scientific_claims", [])
                              if isinstance(c, dict)],
             "files_produced": produced,
+            "suggested_followups": reanalysis_followups,
             "warnings": ([ungated_warning] if ungated_warning else []),
             "error": None,
         })
@@ -1953,6 +1990,8 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
         "numerics_branches": len(branch_numerics),
         "computed_reconciliation": computed,
         "independence": informed or None,
+        "branch_reanalysis": reanalysis or None,
+        "suggested_followups": reanalysis_followups,
         "figures_used": len(figures),
         "detailed_analysis": fused["detailed_analysis"],
         "scientific_claims": fused["scientific_claims"],

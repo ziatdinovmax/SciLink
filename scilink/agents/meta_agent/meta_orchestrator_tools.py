@@ -285,9 +285,13 @@ class MetaOrchestratorTools:
         # -- delegate_to_analysis -------------------------------------------
         def delegate_to_analysis(task: str, context: dict = None,
                                  context_from: list = None,
-                                 label: str = None) -> str:
+                                 label: str = None,
+                                 data_path: str = None,
+                                 metadata: str = None) -> str:
             print("  " + _handoff(f"🧪 Delegating to analysis specialist: {_task_summary(task)}"))
-            return self.orch._delegate("analysis", task, context, context_from, label)
+            return self.orch._delegate("analysis", task, context, context_from,
+                                       label, data_path=data_path,
+                                       metadata=metadata)
 
         self._register_tool(
             func=delegate_to_analysis,
@@ -349,6 +353,26 @@ class MetaOrchestratorTools:
                         "analyzed (e.g. '1-D Raman spectra', 'STEM image', "
                         "'hyperspectral datacube'). NOT a sentence or a "
                         "restatement of the task."
+                    ),
+                },
+                "data_path": {
+                    "type": "string",
+                    "description": (
+                        "Absolute path of THIS delegation's primary dataset "
+                        "(also stated in `task`). ALWAYS provide it when the "
+                        "task analyzes a dataset: it lets a later "
+                        "`fuse_delegations` that mixes this delegation with "
+                        "others re-run the complementarity gate — without it "
+                        "an incremental fusion demotes to ungated (no "
+                        "computed reconciliation)."
+                    ),
+                },
+                "metadata": {
+                    "type": "string",
+                    "description": (
+                        "Optional: metadata JSON path or short inline "
+                        "description of the dataset (feeds a later fusion's "
+                        "complementarity re-gate)."
                     ),
                 },
             },
