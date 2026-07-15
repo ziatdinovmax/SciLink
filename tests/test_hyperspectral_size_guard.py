@@ -82,6 +82,25 @@ def main():
     check("small cube renders sane minute estimates",
           "4096 pixels" in p_small)
 
+    # 3) Custom-preprocessing prompt path must serialize numpy-typed stats
+    #    (found live: a float32 cube's np.float32 statistics crashed
+    #    json.dumps in _generate_custom_script through all retries).
+    print("3) stats serialization:")
+    from scilink.agents.exp_agents.instruct import (
+        CUSTOM_PREPROCESSING_SCRIPT_INSTRUCTIONS)
+    import json as _json
+    f32 = np.random.rand(8, 8, 5).astype(np.float32)
+    stats = HyperspectralPreprocessingAgent._calculate_statistics(
+        _Stub(), f32)
+    try:
+        rendered = CUSTOM_PREPROCESSING_SCRIPT_INSTRUCTIONS.format(
+            instruction="i", input_filename="f.npy",
+            stats_json=_json.dumps(stats, indent=2, default=str))
+        ok = "mean" in rendered
+    except TypeError:
+        ok = False
+    check("float32-cube stats serialize into the custom-script prompt", ok)
+
     print("\n" + "=" * 50)
     npass = sum(results.values())
     print(f"HS SIZE GUARD: {npass}/{len(results)} checks passed")

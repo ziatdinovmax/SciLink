@@ -377,7 +377,7 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
         
         prompt = CUSTOM_PREPROCESSING_SCRIPT_INSTRUCTIONS.format(
             instruction=instruction,
-            stats_json=json.dumps(stats, indent=2),
+            stats_json=json.dumps(stats, indent=2, default=str),
             input_filename=input_filename
         )
         
@@ -806,7 +806,7 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
         
         prompt = CUSTOM_PREPROCESSING_SCRIPT_1D_INSTRUCTIONS.format(
             instruction=instruction,
-            stats_json=json.dumps(stats, indent=2),
+            stats_json=json.dumps(stats, indent=2, default=str),
             input_filename=input_filename
         )
         
