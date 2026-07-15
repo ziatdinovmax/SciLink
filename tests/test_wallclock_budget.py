@@ -238,10 +238,70 @@ def test_preprocess_budget():
           f"after {ag.MAX_SCRIPT_ATTEMPTS} attempts" in out2["message"])
 
 
+def test_queued_and_multi_timeout():
+    # A branch QUEUED behind a slow one (waiting for a worker slot) must not
+    # be timed out while waiting — the deadline runs from its actual start.
+    d = tempfile.mkdtemp()
+    paths = [os.path.join(d, f"{n}.npy") for n in "ABC"]
+    for p in paths:
+        np.save(p, np.zeros((8, 8)))
+    A, B, C = paths
+    ag = MetaOrchestratorAgent(base_dir=d, api_key="sk-dummy",
+                               model_name="claude-opus-4-6",
+                               meta_mode=MetaMode.AUTONOMOUS)
+    BEHAVIORS.clear()
+    BEHAVIORS.update({A: "slow", B: "good", C: "good"})
+    _install_fakes(paths)
+    ag._complementarity_cache.clear()
+    orig_poll, orig_workers = fo._FANOUT_POLL_S, fo.FANOUT_MAX_WORKERS
+    fo._FANOUT_POLL_S, fo.FANOUT_MAX_WORKERS = 0.2, 1   # force queueing
+    try:
+        out = json.loads(ag._run_fanout(
+            [{"data_path": p, "task": f"Analyze {p}",
+              "label": os.path.basename(p)} for p in paths],
+            branch_time_budget_s=0.8))
+    finally:
+        fo._FANOUT_POLL_S, fo.FANOUT_MAX_WORKERS = orig_poll, orig_workers
+    print("4) queued branches vs the deadline:")
+    check("only the RUNNING slow branch timed out (queued ones spared)",
+          out.get("branches_timed_out") == 1)
+    check("queued branches ran after the slot freed and succeeded",
+          out.get("branches_with_output") == 2)
+    fan = [e for e in ag._delegation_ledger if e.get("fanout")]
+    check("no queued branch carries a timeout verdict",
+          sum(1 for e in fan if e.get("timed_out")) == 1
+          and not any(e.get("timed_out") for e in fan
+                      if e["label"] in ("B.npy", "C.npy")))
+
+    # Two branches overdue in the same poll round -> both cut, run completes.
+    ag2 = MetaOrchestratorAgent(base_dir=tempfile.mkdtemp(), api_key="sk-dummy",
+                                model_name="claude-opus-4-6",
+                                meta_mode=MetaMode.AUTONOMOUS)
+    BEHAVIORS.update({A: "slow", B: "slow", C: "good"})
+    _install_fakes(paths); ag2._complementarity_cache.clear()
+    fo._FANOUT_POLL_S = 0.2
+    try:
+        t0 = time.monotonic()
+        out2 = json.loads(ag2._run_fanout(
+            [{"data_path": p, "task": f"Analyze {p}",
+              "label": os.path.basename(p)} for p in paths],
+            branch_time_budget_s=0.5))
+        dt = time.monotonic() - t0
+    finally:
+        fo._FANOUT_POLL_S = orig_poll
+    print("5) simultaneous multi-timeout:")
+    check("both slow branches timed out in one run",
+          out2.get("branches_timed_out") == 2)
+    check("run completed promptly with the survivor",
+          out2.get("branches_with_output") == 1 and dt < 1.8)
+    time.sleep(2.2)   # let abandoned workers finish before interpreter exit
+
+
 def main():
     test_fanout_budget()
     test_engine_budget()
     test_preprocess_budget()
+    test_queued_and_multi_timeout()
     print("\n" + "=" * 50)
     npass = sum(results.values())
     print(f"WALL-CLOCK BUDGET: {npass}/{len(results)} checks passed")
