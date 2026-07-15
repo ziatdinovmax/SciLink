@@ -90,8 +90,13 @@ share one filesystem path (a directory holding more than one measurement \
 series) and may look structurally alike (e.g. two 1-D curves): judge \
 redundancy by what each dataset measures and its stated analysis task, not by \
 path or structural shape. Put into `fanout_set` ONLY a subset that \
-is mutually complementary on all three criteria and shares ONE join axis \
-(>= 2 members to be worth running in parallel). Cluster exact-duplicate / \
+is mutually complementary on all three criteria and shares ONE join relation \
+(>= 2 members to be worth running in parallel). The join relation may be the \
+SHARED SAMPLE itself (criterion 3): for a multi-modality study of one sample \
+in one campaign, prefer the LARGEST mutually-complementary subset over the \
+tightest pair — a same-sample modality is not excluded because its observable \
+differs (that difference is what makes it complementary), only when criterion \
+1 or 3 actually fails for it. Cluster exact-duplicate / \
 same-information datasets in `redundant_clusters`. List datasets that belong \
 to a different system or have no join axis in `unrelated`.
 

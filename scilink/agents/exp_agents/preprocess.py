@@ -316,6 +316,12 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
         elif bin_f > 1:
             self.logger.info(
                 "spatial_bin_factor > 1 ignored: leading axes are not spatial.")
+        else:
+            # Log the no-binning decision too — otherwise "guard chose 1" and
+            # "preprocessing never ran" are indistinguishable in a session log.
+            self.logger.info(
+                f"Size guard: spatial_bin_factor=1 (no binning) for shape "
+                f"{data_to_process.shape}.")
 
         # 3. Calculate Masking strategy
         if strategy.get('apply_masking', False):
