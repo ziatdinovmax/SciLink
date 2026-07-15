@@ -677,10 +677,11 @@ Your code will run in a restricted `exec()` sandbox.
 
 **Performance Note:** `lmfit` adds per-fit setup overhead (~0.1-0.5ms) that can accumulate over thousands of pixels. For simple single-peak fits on large datasets, prefer raw `curve_fit` for speed. Use `lmfit` when you need its advantages: multi-peak composite models, parameter constraints/bounds, or built-in line shapes.
 
-**SIZE BUDGET (single-process sandbox — no multiprocessing):** this cube has {h}x{w} = {h * w} pixels. A per-pixel iterative fit at ~2-5 ms costs roughly {max(1, (h * w) // 25000)}-{max(1, (h * w) // 12000)} minutes over the full frame, and the execution is time-capped — budget accordingly:
+**SIZE BUDGET:** this cube has {h}x{w} = {h * w} pixels. A hand-written per-pixel iterative fit at ~2-5 ms costs roughly {max(1, (h * w) // 25000)}-{max(1, (h * w) // 12000)} minutes over the full frame, YOUR code runs single-process (a Python loop here cannot use multiprocessing), and the execution is time-capped — budget accordingly:
 - fit ONLY the pixels your objective/mask actually needs (compute a mask first, fit inside it);
 - vectorize or linearize wherever possible (batched linear algebra, log-linear fits, moment/centroid estimators) — vectorized NumPy also gets multithreaded BLAS for free, per-pixel Python loops do not;
-- for full-frame maps, go coarse-to-fine: fit a spatially binned copy (e.g. 4x4 mean) first, then refine at full resolution only where the binned map shows structure.
+- for an UNAVOIDABLE large per-pixel iterative fit whose model the registry primitives can express, call the pre-loaded `fit_per_pixel` tool (see REGISTERED TOOLS) — it parallelizes over processes, which your own loop cannot, and its `time_budget_s` returns partial maps instead of dying at the cap;
+- for models `fit_per_pixel` cannot express, go coarse-to-fine: fit a spatially binned copy (e.g. 4x4 mean) first, then refine at full resolution only where the binned map shows structure.
 
 ### 3. CODING CONSTRAINTS
 1. **NO External Imports:** Do not import `os`, `sys`, `matplotlib`, or `warnings`. The sandbox does not support them.
@@ -721,6 +722,12 @@ statistics correctly:
   (binning k x k cuts noise by k) and return the coarse map, stating the
   effective resolution in the description. Reserve not_measurable for
   features that fail even in aggregate.
+- Test the FEATURE against the spectrum's own noise floor in ABSOLUTE terms:
+  if the field-mean spectrum is statistically flat (no band deviates from a
+  constant beyond its noise), the feature is not_measurable regardless of
+  any ratio-based test — sigma estimated FROM a flat spectrum makes its own
+  ripples register as "prominence", and a cheap parallel fitter will happily
+  return bound-railing artifact maps from such data.
 If it is genuinely NOT measurable, return
 {{"maps": {{}}, "not_measurable": {{"feature": "<what was requested>",
 "evidence": "<the NUMBERS: prominence vs noise sigma, and where you looked>",
