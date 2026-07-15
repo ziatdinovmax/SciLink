@@ -2753,8 +2753,8 @@ class AnalysisOrchestratorTools:
                 if max_verification_iterations is not None:
                     # Thoroughness / turnaround override. 0 bypasses LLM
                     # verification (fast/in-situ), higher = more refinement
-                    # (thorough/post-experiment). Only forward to agents whose
-                    # analyze() accepts it (currently CurveFitting).
+                    # (thorough/post-experiment). Forwarded by signature
+                    # introspection (all three analysis agents accept it).
                     import inspect as _inspect
                     if "max_verification_iterations" in _inspect.signature(agent.analyze).parameters:
                         analyze_kwargs["max_verification_iterations"] = int(max_verification_iterations)
@@ -3156,19 +3156,22 @@ class AnalysisOrchestratorTools:
                 "max_verification_iterations": {
                     "type": "integer",
                     "description": (
-                        "CurveFitting agent only. Controls how thorough the "
-                        "fit-verification/refinement loop is — the speed-vs-rigor "
+                        "All analysis agents. Controls how thorough the "
+                        "verification/refinement loop is — the speed-vs-rigor "
                         "knob. Set it ONLY when the user asks about turnaround or "
                         "checking depth; leave unset for the standard (thorough) "
                         "default. Map the user's intent: a fast / quick / in-situ / "
                         "real-time / 'good enough' turnaround → 1 (a single check, "
                         "no refinement loop); 'skip/bypass/no verification' → 0 "
-                        "(accept the first good fit with no LLM verification at "
-                        "all); an explicit count (e.g. 'two verification steps') → "
-                        "that integer; thorough / careful / publication / "
-                        "post-experiment analysis → leave unset (defaults to 7). "
-                        "Often paired with r2_threshold (e.g. 'use R²=0.98 and a "
-                        "single verification step')."
+                        "(accept the first successful result with no verification "
+                        "or retry loop at all; a failed result still enters the "
+                        "recovery path); an explicit count (e.g. 'two verification "
+                        "steps') → that integer; thorough / careful / publication / "
+                        "post-experiment analysis → leave unset (defaults: 7 for "
+                        "curve/image verification passes, 4 retries for "
+                        "hyperspectral codegen). Often paired with r2_threshold "
+                        "for curve fits (e.g. 'use R²=0.98 and a single "
+                        "verification step')."
                     )
                 },
                 "starting_annealing_level": {

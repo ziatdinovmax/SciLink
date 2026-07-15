@@ -80,6 +80,11 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         run_preprocessing: bool = True,
         enable_human_feedback: bool = True,
         executor_timeout: int = 600,
+        # Retry budget for the dynamic-analysis codegen loop (#271):
+        # initial attempt + N retries. 0 => single attempt, accepted when
+        # the task succeeds (fast/in-situ), salvage path otherwise. None
+        # keeps the built-in default (4 retries, 5 total attempts).
+        max_verification_iterations: int | None = None,
     ):
         
         if not require_sandbox_approval(
@@ -126,6 +131,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # preprocessor's custom-script execution honors the same limit
         # the user set on the parent agent.
         self.executor_timeout = executor_timeout
+        self.max_verification_iterations = max_verification_iterations
         preprocess_dir = self.output_dir / "preprocessing"
         self.preprocessor = HyperspectralPreprocessingAgent(
             api_key=self.api_key,
@@ -152,6 +158,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             **pipeline_args,
             preprocessor=self.preprocessor,
             executor_timeout=executor_timeout,
+            max_verification_iterations=max_verification_iterations,
         )
         self.synthesis_pipeline = create_hyperspectral_synthesis_pipeline(
             **pipeline_args,
@@ -187,6 +194,11 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         auxiliary_data: str | list[str] | None = None,
         auxiliary_label: str | list[str] | None = None,
         literature_file: str | None = None,
+        # Per-call thoroughness override (fast/in-situ vs thorough) of the
+        # dynamic-analysis retry budget (#271). 0 => single codegen attempt,
+        # accepted when the task succeeds; higher => more retries. None
+        # falls back to the construction default.
+        max_verification_iterations: int | None = None,
         # Operating profile (#346): plumbed for parity with the curve agent;
         # realtime toggles are wired for curve only in v1 (hyperspectral
         # per-frame cost is numerics-dominated). Thorough is unaffected.
@@ -232,6 +244,12 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 target-planning, interpretation, and synthesis prompts.
                 Previously this argument was silently swallowed by
                 ``**kwargs`` — hyperspectral had no literature integration.
+            max_verification_iterations: Per-call override of the
+                dynamic-analysis retry budget (initial attempt + N
+                retries). 0 runs a single codegen attempt and accepts it
+                when the task succeeds (fast/in-situ); a failed attempt
+                still goes through the salvage path. None uses the
+                construction default.
             **kwargs: Additional options
 
         Returns:
@@ -255,6 +273,14 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         """
         # Operating profile (#346): accepted for surface parity; see the
         # parameter note — realtime is curve-only in v1.
+        # Use the per-call override or fall back to the instance default
+        # (None = the controller's built-in retry budget).
+        effective_max_verification = (
+            max_verification_iterations if max_verification_iterations is not None
+            else self.max_verification_iterations)
+        if effective_max_verification is not None and effective_max_verification < 0:
+            raise ValueError("max_verification_iterations must be >= 0")
+
         from ._qc_profile import resolve_profile
         if resolve_profile(profile).name == "realtime":
             self.logger.warning(
@@ -359,6 +385,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             prior_knowledge=prior_knowledge or [],
             auxiliary_state=auxiliary_state,
             literature_context=literature_context,
+            max_verification_iterations=effective_max_verification,
         )
         
         # Handle Errors
@@ -1007,6 +1034,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         prior_knowledge: list | None = None,
         auxiliary_state: Dict[str, Any] | None = None,
         literature_context: str | None = None,
+        max_verification_iterations: int | None = None,
     ) -> tuple[Dict[str, Any] | None, Dict[str, Any] | None]:
         """
         Main execution engine using Queue-Based Branching architecture.
@@ -1064,6 +1092,9 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "literature_context": literature_context,
                 "analysis_images": [],
                 "error_dict": None,
+                # Per-run retry-budget override (#271) — read by
+                # RunDynamicAnalysisController.execute(); None = default.
+                "max_verification_iterations": max_verification_iterations,
                 **skill_state,
                 **auxiliary_state,
             }
