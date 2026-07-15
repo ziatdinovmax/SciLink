@@ -15,9 +15,11 @@ LLM reasoning.  If extraction fails, the user is prompted and shown the
 sidecar contents to help them specify the variable manually.
 """
 
+import glob
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 import numpy as np
@@ -228,6 +230,51 @@ def _resolve_candidate_escalation(agent: Any, requested: Any) -> bool:
     except (TypeError, ValueError):
         return False
     return "candidate_escalation" in params
+
+
+_GLOB_MAGIC = ("*", "?", "[")
+
+
+def _is_glob(data_path) -> bool:
+    """True when data_path is a glob PATTERN rather than an existing path.
+
+    Strictly a fallback test: an existing file or directory (even one whose
+    name literally contains a bracket) is never treated as a pattern, so
+    directory / single-file inputs behave exactly as before.
+    """
+    if not isinstance(data_path, str):
+        return False
+    try:
+        if Path(data_path).exists():
+            return False
+    except OSError:  # noqa: PERF203 - absurdly long string is not a path
+        return False
+    return any(c in data_path for c in _GLOB_MAGIC)
+
+
+def _resolve_glob_files(pattern: str) -> tuple[list[Path], list[Path]]:
+    """Expand a glob into (data_files, all_files).
+
+    ``data_files`` are the matched non-metadata files; ``all_files`` adds the
+    stem-matched JSON sidecars sitting beside them (which the pattern itself
+    typically does not match, e.g. ``series_*.txt``), so sidecar-based series
+    metadata keeps working for a globbed subset of a directory.
+    """
+    matched = sorted((Path(f) for f in glob.glob(pattern) if os.path.isfile(f)),
+                     key=lambda p: p.name)
+    data_files = [
+        f for f in matched
+        if f.suffix.lower() != ".json"
+        and "metadata" not in f.name.lower()
+        and f.name.lower() not in ("info.txt", "description.txt",
+                                   "readme.txt", "readme.md")
+    ]
+    all_files = list(data_files)
+    for f in data_files:
+        sidecar = f.with_suffix(".json")
+        if sidecar.is_file():
+            all_files.append(sidecar)
+    return data_files, all_files
 
 
 def _detect_sidecar_jsons(
@@ -1125,32 +1172,55 @@ class AnalysisOrchestratorTools:
             (e.g. ``spec_5K.json`` ↔ ``spec_5K.csv``) are reported as
             per-file sidecar metadata in ``sidecar_json_files``, separate
             from global ``metadata_files``.
+
+            ``data_path`` may also be a glob PATTERN (e.g.
+            ``/data/series_*C.txt``) selecting ONE dataset out of a directory
+            that holds several; it is examined exactly like a directory
+            restricted to the matched files.
             """
             print(f"  ⚡ Tool: Examining data at {data_path}...")
-            
+
             path = Path(data_path)
-            if not path.exists():
+            is_glob_input = _is_glob(data_path)
+            if not is_glob_input and not path.exists():
                 return json.dumps({
                     "status": "error",
                     "message": f"File not found: {data_path}"
                 })
-            
+
             result = {
                 "status": "success",
                 "path": str(path.absolute()),
             }
-            
+
             try:
                 # ============================================================
-                # DIRECTORY: Multiple files (series)
+                # DIRECTORY or GLOB PATTERN: Multiple files (series)
                 # ============================================================
-                if path.is_dir():
-                    files = list(path.iterdir())
-                    files = [f for f in files if f.is_file() and not f.name.startswith('.')]
-                    
+                if path.is_dir() or is_glob_input:
+                    if is_glob_input:
+                        _dfiles, files = _resolve_glob_files(data_path)
+                        if not _dfiles:
+                            return json.dumps({
+                                "status": "error",
+                                "message": (f"No data files match the pattern "
+                                            f"'{data_path}'.")
+                            })
+                        result["is_pattern"] = True
+                        result["pattern"] = data_path
+                        result["pattern_hint"] = (
+                            f"This pattern selects {len(_dfiles)} file(s) out of "
+                            f"{Path(data_path).parent}. Pass the pattern itself as "
+                            "`data_path` to run_analysis — NOT the parent directory, "
+                            "which may hold other datasets."
+                        )
+                    else:
+                        files = list(path.iterdir())
+                        files = [f for f in files if f.is_file() and not f.name.startswith('.')]
+
                     result["is_directory"] = True
                     result["file_count"] = len(files)
-                    
+
                     if not files:
                         result["status"] = "error"
                         result["message"] = "Directory is empty"
@@ -1495,7 +1565,11 @@ class AnalysisOrchestratorTools:
             parameters={
                 "data_path": {
                     "type": "string",
-                    "description": "Path to the data file to examine"
+                    "description": (
+                        "Path to the data file or directory to examine. May also "
+                        "be a glob PATTERN (e.g. '/data/series_*C.txt') selecting "
+                        "one dataset out of a directory holding several."
+                    )
                 }
             },
             required=["data_path"]
@@ -2199,6 +2273,13 @@ class AnalysisOrchestratorTools:
                     _data = [f for f in _all if f.suffix.lower() != ".json"]
                     _smap, _ = _detect_sidecar_jsons(_data, _all)
                     has_sidecars = bool(_smap)
+                elif _is_glob(data_path):
+                    # A glob selects one dataset out of a directory holding
+                    # several (e.g. one in-situ series per pattern); its files'
+                    # sidecars supply metadata exactly as in the directory case.
+                    _data, _all = _resolve_glob_files(data_path)
+                    _smap, _ = _detect_sidecar_jsons(_data, _all)
+                    has_sidecars = bool(_smap)
                 if has_sidecars:
                     self.orch.current_metadata = {}
                 else:
@@ -2226,43 +2307,60 @@ class AnalysisOrchestratorTools:
                         })
             
             try:
-                # === Handle directory input - filter out metadata files ===
+                # === Handle directory / glob input - filter out metadata files ===
                 path = Path(data_path)
                 actual_data_input = data_path  # Default: pass as-is
-                
-                if path.is_dir():
-                    # Get all files excluding metadata
-                    all_files = [f for f in path.iterdir() if f.is_file() and not f.name.startswith('.')]
-                    
-                    # Filter out metadata files
-                    data_files = []
-                    for f in all_files:
-                        is_metadata = (
-                            f.suffix.lower() == '.json' or
-                            'metadata' in f.name.lower() or
-                            f.name.lower() in ['info.txt', 'description.txt', 'readme.txt', 'readme.md']
-                        )
-                        if not is_metadata:
-                            data_files.append(f)
-                    
-                    if not data_files:
-                        return json.dumps({
-                            "status": "error",
-                            "message": "No data files found in directory (only metadata files present)"
-                        })
-                    
+                is_glob_input = _is_glob(data_path)
+                all_files: list[Path] = []
+                data_files: list[Path] = []
+
+                if path.is_dir() or is_glob_input:
+                    if is_glob_input:
+                        # A glob names ONE dataset inside a directory that holds
+                        # several (distinct in-situ series in a single upload
+                        # folder); only its matched files are analyzed.
+                        data_files, all_files = _resolve_glob_files(data_path)
+                        if not data_files:
+                            return json.dumps({
+                                "status": "error",
+                                "message": (f"No data files match the pattern "
+                                            f"'{data_path}'.")
+                            })
+                        print(f"    Pattern '{Path(data_path).name}' matched "
+                              f"{len(data_files)} data file(s)")
+                    else:
+                        # Get all files excluding metadata
+                        all_files = [f for f in path.iterdir() if f.is_file() and not f.name.startswith('.')]
+
+                        # Filter out metadata files
+                        data_files = []
+                        for f in all_files:
+                            is_metadata = (
+                                f.suffix.lower() == '.json' or
+                                'metadata' in f.name.lower() or
+                                f.name.lower() in ['info.txt', 'description.txt', 'readme.txt', 'readme.md']
+                            )
+                            if not is_metadata:
+                                data_files.append(f)
+
+                        if not data_files:
+                            return json.dumps({
+                                "status": "error",
+                                "message": "No data files found in directory (only metadata files present)"
+                            })
+
+                        print(f"    Found {len(data_files)} data files (excluded metadata)")
+
                     # Sort for consistent ordering
                     data_files = sorted(data_files, key=lambda x: x.name)
-                    
-                    print(f"    Found {len(data_files)} data files (excluded metadata)")
-                    
+
                     # Pass as list of file paths for series analysis
                     actual_data_input = [str(f) for f in data_files]
-                    
+
                     # If only one file, pass as string (single spectrum mode)
                     if len(actual_data_input) == 1:
                         actual_data_input = actual_data_input[0]
-                        print(f"    Single file in directory, using single spectrum mode")
+                        print(f"    Single file, using single spectrum mode")
                     else:
                         print(f"    Series mode: passing {len(actual_data_input)} files")
                         for i, fp in enumerate(actual_data_input[:3]):
@@ -2287,7 +2385,7 @@ class AnalysisOrchestratorTools:
                         self.logger.warning(f"Failed to parse series_metadata: {e}")
 
                 # === Try to extract series metadata from sidecar JSON files ===
-                if is_series and not has_series_meta and path.is_dir():
+                if is_series and not has_series_meta and (path.is_dir() or is_glob_input):
                     sidecar_map, _global_jsons = _detect_sidecar_jsons(
                         data_files, all_files
                     )
@@ -2830,7 +2928,14 @@ class AnalysisOrchestratorTools:
             parameters={
                 "data_path": {
                     "type": "string",
-                    "description": "Path to data file (uses current if not specified)"
+                    "description": (
+                        "Path to a data file, a directory (analyzed as a series), "
+                        "or a glob PATTERN like '/data/series_*C.txt' selecting one "
+                        "dataset out of a directory that holds several. When you were "
+                        "given a pattern, pass it VERBATIM — substituting its parent "
+                        "directory would pull in the other datasets. Uses current if "
+                        "not specified."
+                    )
                 },
                 "agent_id": {
                     "type": "integer",

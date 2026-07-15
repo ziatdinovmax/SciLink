@@ -27,12 +27,15 @@ The logic lives here as free functions taking the orchestrator instance; thin
 sibling helper to the orchestrator.
 """
 
+import glob
 import io
 import json
 import logging
+import os
 import re
 import sys
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -75,7 +78,12 @@ phase fractions vs XPS/XRD/EDX composition) is itself a valid join — this \
 bulk-vs-local reconciliation is a canonical multimodal case, not a \
 manufactured correlation. Without any join there is nothing to fuse.
 
-Partition the datasets accordingly. Put into `fanout_set` ONLY a subset that \
+Partition the datasets accordingly. Each dataset carries an `id` — echo these \
+`id` values VERBATIM in every output list below. Several distinct datasets may \
+share one filesystem path (a directory holding more than one measurement \
+series) and may look structurally alike (e.g. two 1-D curves): judge \
+redundancy by what each dataset measures and its stated analysis task, not by \
+path or structural shape. Put into `fanout_set` ONLY a subset that \
 is mutually complementary on all three criteria and shares ONE join axis \
 (>= 2 members to be worth running in parallel). Cluster exact-duplicate / \
 same-information datasets in `redundant_clusters`. List datasets that belong \
@@ -91,9 +99,9 @@ Respond in valid JSON with EXACTLY these keys:
   "confidence": <float 0..1>,
   "rationale": "<one or two sentences: what the datasets are and why this verdict>",
   "join_axis": "<the shared axis the fanout_set reconciles on, or null>",
-  "fanout_set": ["<path>", ...],
-  "redundant_clusters": [["<path>", "<path>"], ...],
-  "unrelated": ["<path>", ...],
+  "fanout_set": ["<id>", ...],
+  "redundant_clusters": [["<id>", "<id>"], ...],
+  "unrelated": ["<id>", ...],
   "excluded_notes": "<why anything was left out of fanout_set, or empty>"
 }
 """
@@ -184,31 +192,93 @@ def _llm_json(orch, prompt: str, extra_parts=None) -> Optional[dict]:
     return None
 
 
+def _resolve_branch_files(data_path: str, pattern: Optional[str]) -> Optional[List[str]]:
+    """Resolve a branch's own file set from its glob pattern (issue #326 Fix 3).
+
+    Series data often lands as many files in one shared directory; the pattern
+    is what selects THIS branch's files out of it. Returns a sorted list of
+    matching file paths, or None when there is no pattern or nothing matches
+    (the branch then stays directory-shaped, as before).
+    """
+    if not pattern:
+        return None
+    try:
+        pat = (pattern if os.path.isabs(str(pattern))
+               else os.path.join(str(data_path), str(pattern)))
+        files = sorted(f for f in glob.glob(pat) if os.path.isfile(f))
+    except Exception as e:  # noqa: BLE001 - a bad pattern must not kill the fan-out
+        logger.warning(f"fan-out: could not resolve pattern {pattern!r}: {e}")
+        return None
+    if not files:
+        logger.warning(f"fan-out: pattern {pattern!r} matched no files "
+                       f"under {data_path}")
+        return None
+    return files
+
+
+def _existing_json_path(value) -> Optional[Path]:
+    """Interpret a metadata value as a metadata-JSON path if it plausibly is
+    one, else None (the value is an inline description). Inline metadata can
+    be arbitrarily long prose, and ``os.stat`` on such a string raises
+    ``OSError: File name too long`` — so the probe must be defensive."""
+    try:
+        p = Path(str(value))
+        if p.exists() and p.suffix.lower() == ".json":
+            return p
+    except OSError:
+        pass
+    return None
+
+
 def _dataset_descriptor(path: str, role: Optional[str],
-                        metadata: Optional[str]) -> dict:
+                        metadata: Optional[str],
+                        task: Optional[str] = None,
+                        label: Optional[str] = None,
+                        dataset_id: Optional[str] = None,
+                        files: Optional[List[str]] = None) -> dict:
     """Lightweight, router-tier descriptor of one dataset for the gate.
 
     Reuses the meta's content probe (shape/dtype, table columns, document /
     image dims) — the same evidence the meta routes on — plus any user-stated
     role and metadata. Deliberately does NOT load full arrays: the gate is a
     judgement over descriptors, consistent with the meta being a router.
+
+    ``task`` / ``label`` / ``dataset_id`` carry a fan-out branch's analysis
+    intent and identity (issue #326): when two branches share one path (a
+    series directory) and one structural probe (two 1-D curves), the task is
+    the only signal that separates a complementary pair from a duplicate.
+    ``files`` is the branch's resolved file set (Fix 3): when present, the
+    content probe runs on the branch's OWN first file instead of the shared
+    directory, so same-directory branches get distinct structural signatures.
     """
     from .meta_orchestrator_tools import _probe_file
 
     p = Path(path)
-    desc: Dict[str, Any] = {"path": str(path)}
+    desc: Dict[str, Any] = {"id": str(dataset_id or path), "path": str(path)}
+    if label:
+        desc["label"] = str(label)
+    if task:
+        desc["analysis_task"] = str(task)
+    if files:
+        names = [Path(f).name for f in files]
+        desc["n_files"] = len(names)
+        desc["files_sample"] = (names[:3] + ["..."] + names[-1:]
+                                if len(names) > 4 else names)
     if not p.exists():
         desc["note"] = "file not found"
         return desc
     try:
-        desc["probe"] = _probe_file(p)
+        target = Path(files[0]) if files else p
+        desc["probe"] = _probe_file(target)
+        if files:
+            desc["probe_note"] = "probe of the first file in this branch's file set"
     except Exception as e:  # noqa: BLE001 - probe must not break the gate
         desc["note"] = f"probe failed: {e}"
     if role:
         desc["stated_role"] = role
     if metadata:
-        mp = Path(metadata)
-        if mp.exists() and mp.suffix.lower() == ".json":
+        mp = _existing_json_path(metadata)
+        if mp is not None:
             try:
                 with open(mp, "r", errors="replace") as fh:
                     desc["metadata"] = json.load(fh)
@@ -222,26 +292,34 @@ def _dataset_descriptor(path: str, role: Optional[str],
 def assess_complementarity(orch, datasets: List[dict]) -> dict:
     """Partition datasets into complementary / redundant / unrelated.
 
-    `datasets` is a list of ``{"path", "role"?, "metadata"?}``. Returns the
-    verdict dict (see COMPLEMENTARITY_ASSESSMENT_INSTRUCTIONS). Cached on the
-    orchestrator by the frozenset of paths so the standalone tool and the
-    internal gate in run_fanout don't double-spend the LLM call.
+    `datasets` is a list of ``{"path", "role"?, "metadata"?, "id"?, "task"?,
+    "label"?}``. Identity is the per-dataset ``id`` — defaulting to ``path``,
+    which keeps the standalone tool's path-keyed behavior — so ``run_fanout``
+    can pass distinct ids for branches that share one path (issue #326); the
+    verdict lists (``fanout_set`` etc.) contain ids. Returns the verdict dict
+    (see COMPLEMENTARITY_ASSESSMENT_INSTRUCTIONS). Cached on the orchestrator
+    by the frozenset of ids so the standalone tool and the internal gate in
+    run_fanout don't double-spend the LLM call.
     """
-    paths = [d.get("path") for d in datasets if d.get("path")]
-    if len(paths) < 2:
+    datasets = [d for d in (datasets or [])
+                if isinstance(d, dict) and d.get("path")]
+    ids = [str(d.get("id") or d["path"]) for d in datasets]
+    if len(set(ids)) < 2:
         return {"verdict": "uncertain", "confidence": 0.0,
                 "rationale": "Need at least two datasets to assess complementarity.",
                 "join_axis": None, "fanout_set": [], "redundant_clusters": [],
-                "unrelated": list(paths), "excluded_notes": ""}
+                "unrelated": list(dict.fromkeys(ids)), "excluded_notes": ""}
 
-    key = frozenset(paths)
+    key = frozenset(ids)
     cached = orch._complementarity_cache.get(key)
     if cached is not None:
         return cached
 
     descriptors = [
-        _dataset_descriptor(d["path"], d.get("role"), d.get("metadata"))
-        for d in datasets if d.get("path")
+        _dataset_descriptor(d["path"], d.get("role"), d.get("metadata"),
+                            task=d.get("task"), label=d.get("label"),
+                            dataset_id=i, files=d.get("files"))
+        for d, i in zip(datasets, ids)
     ]
     prompt = (
         COMPLEMENTARITY_ASSESSMENT_INSTRUCTIONS
@@ -255,10 +333,10 @@ def assess_complementarity(orch, datasets: List[dict]) -> dict:
             "verdict": "uncertain", "confidence": 0.0,
             "rationale": "Complementarity assessment did not return a usable verdict.",
             "join_axis": None, "fanout_set": [], "redundant_clusters": [],
-            "unrelated": list(paths), "excluded_notes": "",
+            "unrelated": list(ids), "excluded_notes": "",
         }
-    # Constrain the model's fanout_set to the actually-requested paths.
-    requested = set(paths)
+    # Constrain the model's fanout_set to the actually-requested ids.
+    requested = set(ids)
     verdict["fanout_set"] = [p for p in (verdict.get("fanout_set") or [])
                              if p in requested]
     # Defensive: a clearly-negative verdict must never carry a runnable set,
@@ -274,7 +352,7 @@ def assess_complementarity(orch, datasets: List[dict]) -> dict:
 # ======================================================================
 
 def _confirm_fanout(orch, verdict: dict, fanout_set: List[str],
-                    branches_by_path: Dict[str, dict]) -> tuple:
+                    branches_by_id: Dict[str, dict]) -> tuple:
     """Decide whether to fire the fan-out. Returns (proceed: bool, reason: str).
 
     AUTOPILOT (human attached): show the verdict + the exact plan and ask the
@@ -317,9 +395,10 @@ def _confirm_fanout(orch, verdict: dict, fanout_set: List[str],
         f"  Will run {n} branches concurrently, full-mesh "
         f"(~{n_aux} auxiliary loads):",
     ]
-    for path in fanout_set:
-        b = branches_by_path.get(path, {})
-        lines.append(f"    • {b.get('label') or _slug(Path(path).name)}  ({Path(path).name})")
+    for bid in fanout_set:
+        b = branches_by_id.get(bid, {})
+        name = Path(b.get("data_path") or bid).name
+        lines.append(f"    • {b.get('label') or _slug(name)}  ({name})")
     if verdict.get("redundant_clusters"):
         lines.append(f"  Pruned as redundant     : {verdict['redundant_clusters']}")
     if verdict.get("unrelated"):
@@ -374,6 +453,20 @@ def _make_ephemeral_analysis_child(orch, base_dir: Path):
     return child
 
 
+def _branch_primary_path(branch: dict) -> str:
+    """The path the branch hands to ``run_analysis`` as its `data_path`.
+
+    For a pattern-scoped branch this is the GLOB (directory + pattern), not the
+    shared directory: ``run_analysis`` expands a glob to exactly that branch's
+    files, so a sibling series in the same folder is never pulled in (#326).
+    """
+    pattern = branch.get("pattern")
+    if pattern and branch.get("files"):
+        return (str(pattern) if os.path.isabs(str(pattern))
+                else os.path.join(str(branch["data_path"]), str(pattern)))
+    return str(branch["data_path"])
+
+
 def _mesh_task(branch: dict, companions: List[dict]) -> str:
     """Compose a branch's self-contained task with its full-mesh companions.
 
@@ -391,17 +484,24 @@ def _mesh_task(branch: dict, companions: List[dict]) -> str:
              "findings. Novelty is evaluated once on the FUSED cross-dataset "
              "interpretation afterward. Complete the analysis itself normally."]
     if companions:
+        primary = _branch_primary_path(branch)
         block += ["", "",
-                  f"PRIMARY dataset for THIS analysis: {branch['data_path']} — pass "
-                  "it as run_analysis's `data_path`. The companion(s) below are "
-                  "AUXILIARY ONLY; do NOT analyze a companion as the primary."]
+                  f"PRIMARY dataset for THIS analysis: {primary} — pass it "
+                  "VERBATIM as run_analysis's `data_path`. The companion(s) below "
+                  "are AUXILIARY ONLY; do NOT analyze a companion as the primary."]
+        if branch.get("pattern") and branch.get("files"):
+            block += [f"That path is a FILE PATTERN selecting this branch's "
+                      f"{len(branch['files'])} file(s) out of a directory that also "
+                      "holds the companion datasets — pass the pattern itself, do "
+                      "NOT replace it with the parent directory (that would pull in "
+                      "the other datasets)."]
     # Forward the caller-supplied metadata so the branch USES it rather than
     # synthesizing metadata from the task prose (which loses technique-specific
     # fields the downstream skill needs, e.g. the EELS energy axis).
     meta = branch.get("metadata")
     if meta:
-        mp = Path(str(meta))
-        if mp.exists() and mp.suffix.lower() == ".json":
+        mp = _existing_json_path(meta)
+        if mp is not None:
             block += ["", f"Metadata for the primary dataset is at {mp} — call "
                           "`load_metadata` on this path before `run_analysis`; do "
                           "NOT synthesize metadata when this file is provided."]
@@ -414,8 +514,9 @@ def _mesh_task(branch: dict, companions: List[dict]) -> str:
                   "generated code may correlate/mask/normalize against it where the "
                   "method benefits; they are optional operands, never required):"]
         for c in companions:
+            note = f"; {c['note']}" if c.get("note") else ""
             block.append(f"  - auxiliary_data: {c['data_path']}  "
-                         f"(auxiliary_label: '{c['label']}')")
+                         f"(auxiliary_label: '{c['label']}'{note})")
     if not block:
         return task
     return task + "\n".join(block)
@@ -452,34 +553,77 @@ def run_fanout(orch, branches: List[dict]) -> str:
     """Gate → confirm → run branches concurrently (full-mesh aux). Returns JSON.
 
     `branches` is a list of ``{"data_path", "task", "label", "metadata"?,
-    "context"?}``. The complementarity gate prunes to the complementary subset;
-    only that subset runs, each branch seeing the others as auxiliary operands.
+    "context"?, "pattern"?}``. ``pattern`` is a filename glob selecting the
+    branch's own files when ``data_path`` is a directory holding several
+    datasets (issue #326 Fix 3). The complementarity gate prunes to the
+    complementary subset; only that subset runs, each branch seeing the
+    others as auxiliary operands.
     """
     # --- normalize input ---
     norm: List[dict] = []
+    seen_dup: set = set()
+    n_dup_dropped = 0
     for b in (branches or []):
         if not isinstance(b, dict):
             continue
         dp, task = b.get("data_path"), b.get("task")
         if not dp or not task:
             continue
+        # True-duplicate guard (issue #326): the same (data_path, pattern,
+        # task) twice is an accidental repeat of ONE branch — running it twice
+        # wastes a slot and previously masked a silently-dropped sibling
+        # branch. Distinct tasks or patterns on one path (two series in one
+        # upload dir) are distinct branches and are kept.
+        pattern = b.get("pattern")
+        dup_key = (str(dp), str(pattern or ""),
+                   re.sub(r"\s+", " ", str(task)).strip().lower())
+        if dup_key in seen_dup:
+            n_dup_dropped += 1
+            logger.warning("fan-out: dropping duplicate branch "
+                           f"(same data_path AND task): {dp}")
+            continue
+        seen_dup.add(dup_key)
         norm.append({
             "data_path": dp, "task": task,
             "label": (b.get("label") or Path(dp).stem),
             "metadata": b.get("metadata"), "context": b.get("context"),
+            "pattern": pattern,
+            "files": _resolve_branch_files(dp, pattern),
         })
     if len(norm) < 2:
-        return json.dumps({"status": "error",
-                           "message": "Fan-out needs at least two branches, each "
-                                      "with a data_path and a task."})
+        msg = ("Fan-out needs at least two branches, each with a data_path "
+               "and a task.")
+        if n_dup_dropped:
+            msg += (f" ({n_dup_dropped} duplicate branch(es) with identical "
+                    "data_path + task were dropped.)")
+        return json.dumps({"status": "error", "message": msg})
 
-    by_path = {b["data_path"]: b for b in norm}
+    # --- branch identity (issue #326): id, not path ---
+    # Distinct branches may legitimately share one data_path (a series
+    # directory holding e.g. an FTIR and an XRD series, distinguished only by
+    # task), so keying on the path would collapse them last-write-wins. The
+    # id IS the path when unique — keeping the gate cache shared with the
+    # standalone assess_complementarity tool — and path#N for same-path
+    # siblings (which also forces a fresh, task-aware gate call instead of
+    # reusing a path-keyed verdict computed without task context).
+    path_n = Counter(b["data_path"] for b in norm)
+    nth: Dict[str, int] = {}
+    for b in norm:
+        dp = b["data_path"]
+        if path_n[dp] == 1:
+            b["branch_id"] = dp
+        else:
+            nth[dp] = nth.get(dp, 0) + 1
+            b["branch_id"] = f"{dp}#{nth[dp]}"
+    by_id = {b["branch_id"]: b for b in norm}
 
     # --- entry gate (reuses cached verdict if assess_complementarity ran) ---
-    datasets = [{"path": b["data_path"], "metadata": b.get("metadata")}
+    datasets = [{"path": b["data_path"], "metadata": b.get("metadata"),
+                 "id": b["branch_id"], "task": b["task"], "label": b["label"],
+                 "files": b.get("files")}
                 for b in norm]
     verdict = assess_complementarity(orch, datasets)
-    fanout_set = [p for p in (verdict.get("fanout_set") or []) if p in by_path]
+    fanout_set = [i for i in (verdict.get("fanout_set") or []) if i in by_id]
 
     if len(fanout_set) < 2:
         return json.dumps({
@@ -496,14 +640,14 @@ def run_fanout(orch, branches: List[dict]) -> str:
         }, indent=2, default=str)
 
     # --- confirmation ---
-    proceed, reason = _confirm_fanout(orch, verdict, fanout_set, by_path)
+    proceed, reason = _confirm_fanout(orch, verdict, fanout_set, by_id)
     if not proceed:
         return json.dumps({"status": "declined", "reason": reason,
                            "verdict": verdict,
                            "fanout_set": fanout_set}, indent=2, default=str)
 
     # --- preallocate ledger slots (sequential, under lock — no concurrent append) ---
-    run_branches = [by_path[p] for p in fanout_set]
+    run_branches = [by_id[i] for i in fanout_set]
     with orch._fanout_lock:
         entries = []
         group_id = f"fanout_{len(orch._delegation_ledger) + 1}"
@@ -516,6 +660,7 @@ def run_fanout(orch, branches: List[dict]) -> str:
             # recognize this set as already gated (or re-gate a mixed set).
             entry["data_path"] = b.get("data_path")
             entry["metadata"] = b.get("metadata")
+            entry["pattern"] = b.get("pattern")
             entries.append(entry)
 
     # --- run concurrently; each branch sees all others (full mesh) ---
@@ -523,9 +668,25 @@ def run_fanout(orch, branches: List[dict]) -> str:
           f"(group {group_id}, full-mesh aux)...")
 
     def _companions_for(i):
-        return [{"data_path": run_branches[j]["data_path"],
-                 "label": f"companion_{_slug(run_branches[j]['label'])}"}
-                for j in range(len(run_branches)) if j != i]
+        # A companion must be LOADABLE as an auxiliary operand. For a branch
+        # with a resolved file set, its shared directory is not (the aux
+        # loaders reject extension-less paths) — hand over a representative
+        # file of the series instead (Fix 3).
+        comps = []
+        for j in range(len(run_branches)):
+            if j == i:
+                continue
+            b = run_branches[j]
+            c = {"label": f"companion_{_slug(b['label'])}"}
+            if b.get("files"):
+                c["data_path"] = b["files"][0]
+                c["note"] = (f"one representative file of a "
+                             f"{len(b['files'])}-file series "
+                             f"('{b.get('pattern')}' in {b['data_path']})")
+            else:
+                c["data_path"] = b["data_path"]
+            comps.append(c)
+        return comps
 
     max_workers = min(len(run_branches), FANOUT_MAX_WORKERS)
     n_total = len(run_branches)
@@ -677,40 +838,59 @@ def _write_fusion_html(out_dir: Path, fused: dict, figures: list) -> Optional[Pa
                           else ""))
         caveats = [str(c) for c in (fused.get("caveats") or []) if str(c).strip()]
         caveats_html = (
-            "<h2>Caveats &amp; limitations</h2><ul class='cav'>"
-            + "".join(f"<li>{_html.escape(c)}</li>" for c in caveats) + "</ul>"
+            "<div class='card'><h2>Caveats &amp; limitations</h2><ul class='cav'>"
+            + "".join(f"<li>{_html.escape(c)}</li>" for c in caveats)
+            + "</ul></div>"
         ) if caveats else ""
         figs_html = "".join(
             f"<div class='fig'><h3>{_html.escape(str(lbl))}</h3>"
             f"<img src='data:image/png;base64,{base64.b64encode(b).decode()}'></div>"
             for lbl, b in figures
         ) or "<p>(no figures available)</p>"
-        focus_html = (f"<p><b>Focus:</b> {_html.escape(str(fused.get('focus')))}</p>"
+        focus_html = (f"<div class='focus'><b>Focus:</b> {_html.escape(str(fused.get('focus')))}</div>"
                       if fused.get("focus") else "")
+        # Styling follows the house report look (see planning_agents/
+        # html_generator.py): slate page, white shadowed cards, blue accent.
         doc = f"""<!doctype html><html><head><meta charset="utf-8">
 <title>Cross-dataset fusion</title><style>
- html{{background:#ffffff}}
- body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:920px;
-   margin:0 auto;padding:24px 18px;color:#1b1b1b;background:#ffffff;line-height:1.6}}
- h1{{font-size:1.5em}} h2{{margin-top:1.4em;border-bottom:1px solid #e3e3e3;padding-bottom:4px}}
- .narr{{white-space:pre-wrap;background:#fafafa;border:1px solid #eee;border-radius:8px;padding:14px 16px}}
- .imp{{color:#555;font-size:.9em;margin:2px 0 10px}}
- .fig{{margin:14px 0}} .fig img{{max-width:100%;border:1px solid #ddd;border-radius:8px}}
- ol{{padding-left:20px}} li{{margin-bottom:6px}}
- .cav{{background:#fff8f0;border:1px solid #f0e0c8;border-radius:8px;padding:10px 16px 10px 32px}}
- .cav li{{color:#6b4e1a}}
- .novbadge{{background:#e7efff;color:#274690;border:1px solid #c7d6f5;border-radius:10px;
-   padding:1px 8px;font-size:.8em;font-weight:bold;white-space:nowrap}}
- h2 small{{color:#888;font-weight:normal;font-size:.6em}}
+ :root{{--primary:#2563eb;--bg:#f8fafc;--card-bg:#ffffff}}
+ html{{background:var(--bg)}}
+ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+   max-width:1000px;margin:0 auto;padding:40px 18px;color:#334155;background:var(--bg);line-height:1.6}}
+ header{{background:var(--card-bg);padding:30px;border-radius:12px;
+   box-shadow:0 1px 3px rgba(0,0,0,0.1);margin-bottom:40px;border-bottom:4px solid var(--primary)}}
+ h1{{margin:0;color:#1e293b;font-size:1.7em}}
+ .meta{{color:#64748b;font-size:0.9em;margin-top:10px}}
+ .focus{{background:#eff6ff;border-left:4px solid var(--primary);padding:15px;
+   margin-top:20px;color:#1e40af}}
+ .card{{background:var(--card-bg);border-radius:12px;margin-bottom:40px;
+   box-shadow:0 4px 6px -1px rgba(0,0,0,0.1);overflow:hidden}}
+ h2{{margin:0 0 20px;padding:15px 25px;background:#f1f5f9;border-bottom:1px solid #e2e8f0;
+   font-size:1.2em;color:#475569}}
+ .card > *:not(h2){{margin-left:25px;margin-right:25px}}
+ .card > *:last-child{{padding-bottom:25px;margin-bottom:0}}
+ .narr{{white-space:pre-wrap}}
+ .imp{{color:#64748b;font-size:.9em;margin:2px 0 10px}}
+ .fig{{margin:14px 25px}} .fig h3{{color:#475569}}
+ .fig img{{max-width:100%;border:1px solid #e2e8f0;border-radius:8px}}
+ ol{{padding-left:45px}} li{{margin-bottom:8px}}
+ .cav{{background:#fffbeb;border:1px solid #fde68a;border-radius:8px;
+   padding:10px 16px 10px 32px}}
+ .cav li{{color:#92400e}}
+ .novbadge{{background:#dbeafe;color:#1e40af;border-radius:20px;
+   padding:2px 10px;font-size:.75em;font-weight:bold;white-space:nowrap}}
+ h2 small{{color:#94a3b8;font-weight:normal;font-size:.7em}}
 </style></head><body>
+<header>
 <h1>🔀 Cross-dataset fusion</h1>
-<p><b>Datasets:</b> {_html.escape(", ".join(str(l) for l in (fused.get("labels") or [])))}</p>
+<div class="meta"><b>Datasets:</b> {_html.escape(", ".join(str(l) for l in (fused.get("labels") or [])))}</div>
 {focus_html}
-<h2>Reconciled interpretation</h2>
-<div class="narr">{_html.escape(str(fused.get("detailed_analysis", "")))}</div>
-<h2>{_claims_hdr}</h2><ol>{claims_html}</ol>
+</header>
+<div class="card"><h2>Reconciled interpretation</h2>
+<div class="narr">{_html.escape(str(fused.get("detailed_analysis", "")))}</div></div>
+<div class="card"><h2>{_claims_hdr}</h2><ol>{claims_html}</ol></div>
 {caveats_html}
-<h2>Source figures (one per dataset)</h2>{figs_html}
+<div class="card"><h2>Source figures (one per dataset)</h2>{figs_html}</div>
 </body></html>"""
         path = out_dir / "fusion_report.html"
         path.write_text(doc, encoding="utf-8")
