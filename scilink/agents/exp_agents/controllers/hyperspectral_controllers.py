@@ -658,6 +658,11 @@ Your code will run in a restricted `exec()` sandbox.
 
 **Performance Note:** `lmfit` adds per-fit setup overhead (~0.1-0.5ms) that can accumulate over thousands of pixels. For simple single-peak fits on large datasets, prefer raw `curve_fit` for speed. Use `lmfit` when you need its advantages: multi-peak composite models, parameter constraints/bounds, or built-in line shapes.
 
+**SIZE BUDGET (single-process sandbox — no multiprocessing):** this cube has {h}x{w} = {h * w} pixels. A per-pixel iterative fit at ~2-5 ms costs roughly {max(1, (h * w) // 25000)}-{max(1, (h * w) // 12000)} minutes over the full frame, and the execution is time-capped — budget accordingly:
+- fit ONLY the pixels your objective/mask actually needs (compute a mask first, fit inside it);
+- vectorize or linearize wherever possible (batched linear algebra, log-linear fits, moment/centroid estimators) — vectorized NumPy also gets multithreaded BLAS for free, per-pixel Python loops do not;
+- for full-frame maps, go coarse-to-fine: fit a spatially binned copy (e.g. 4x4 mean) first, then refine at full resolution only where the binned map shows structure.
+
 ### 3. CODING CONSTRAINTS
 1. **NO External Imports:** Do not import `os`, `sys`, `matplotlib`, or `warnings`. The sandbox does not support them.
 2. **SciPy Submodules:** If you need a specific SciPy submodule that is NOT in the shortcuts list (e.g., `scipy.interpolate` or `scipy.integrate`), you MUST write `import scipy.interpolate` **inside** your function definition before using it.

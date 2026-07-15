@@ -1,9 +1,15 @@
 """Parallel multi-dataset analysis (fan-out) + complementarity gating + fusion.
 
 See CLAUDE.md "The meta agent". This is the meta's **fan-out primitive**: run
-several analysis branches concurrently over GENUINELY COMPLEMENTARY datasets —
-each branch sees the others as full-mesh auxiliary operands — then fuse their
-findings into one cross-dataset narrative.
+several analysis branches concurrently over GENUINELY COMPLEMENTARY datasets,
+then fuse their findings into one cross-dataset narrative. Branches run
+INDEPENDENTLY by default — independence is what makes fusion's agreement
+claims mean anything — with two deliberate, recorded exceptions decided by
+the gate's join type and per-branch opt-in: a CO-REGISTERED set gets the
+operand mesh (pixel-level joint math fusion cannot redo post-hoc), and a
+branch may opt into STEERING (a companion's change-point hint under the
+additive-only guardrail). Both spend the branch's independence and are
+stamped ``informed_by`` so fusion discounts the agreement.
 
 Two guards bracket the fan-out, because the failure mode here is not a crash
 but a *plausible fabrication*:
@@ -84,8 +90,13 @@ share one filesystem path (a directory holding more than one measurement \
 series) and may look structurally alike (e.g. two 1-D curves): judge \
 redundancy by what each dataset measures and its stated analysis task, not by \
 path or structural shape. Put into `fanout_set` ONLY a subset that \
-is mutually complementary on all three criteria and shares ONE join axis \
-(>= 2 members to be worth running in parallel). Cluster exact-duplicate / \
+is mutually complementary on all three criteria and shares ONE join relation \
+(>= 2 members to be worth running in parallel). The join relation may be the \
+SHARED SAMPLE itself (criterion 3): for a multi-modality study of one sample \
+in one campaign, prefer the LARGEST mutually-complementary subset over the \
+tightest pair — a same-sample modality is not excluded because its observable \
+differs (that difference is what makes it complementary), only when criterion \
+1 or 3 actually fails for it. Cluster exact-duplicate / \
 same-information datasets in `redundant_clusters`. List datasets that belong \
 to a different system or have no join axis in `unrelated`.
 
@@ -93,12 +104,27 @@ Be conservative: if you are not confident the datasets share a system and a \
 join axis, prefer `uncertain` over `complementary`. A wrong `complementary` \
 call produces a fabricated cross-dataset claim, which is worse than declining.
 
+Classify the JOIN TYPE of the fanout_set — it decides how the branches are \
+wired (`join_type`):
+- "co_registered" — the datasets share one coordinate grid POINT-FOR-POINT \
+(same scan/session/field-of-view, or an explicit registration step is \
+stated). Pixel/point-level joint math between them is valid. Do NOT infer \
+this from two images merely being "of the same sample" — different \
+instruments are essentially never pixel-aligned.
+- "shared_parameter_axis" — series over the same control variable \
+(temperature, time, energy, ...): reconciliation happens between each \
+branch's REDUCED trends, after analysis.
+- "shared_sample" — same specimen but no shared axis or grid \
+(bulk-vs-local, complementary observables): reconciliation compares \
+derived quantities.
+
 Respond in valid JSON with EXACTLY these keys:
 {
   "verdict": "complementary" | "partially_complementary" | "redundant" | "unrelated" | "uncertain",
   "confidence": <float 0..1>,
   "rationale": "<one or two sentences: what the datasets are and why this verdict>",
   "join_axis": "<the shared axis the fanout_set reconciles on, or null>",
+  "join_type": "co_registered" | "shared_parameter_axis" | "shared_sample" | null,
   "fanout_set": ["<id>", ...],
   "redundant_clusters": [["<id>", "<id>"], ...],
   "unrelated": ["<id>", ...],
@@ -351,6 +377,19 @@ def assess_complementarity(orch, datasets: List[dict]) -> dict:
 # Confirmation
 # ======================================================================
 
+def _operand_mesh(verdict: dict) -> bool:
+    """Whether the branches see each other as auxiliary operands.
+
+    The gate's join type decides (#296 follow-up to #293): only a
+    CO-REGISTERED set gets the operand mesh — pixel/point-level joint math
+    is the one case fusion cannot reconstruct post-hoc from reduced trends.
+    Shared-axis and bulk-vs-local sets run INDEPENDENT branches: fusion does
+    the join there, and independence is what makes its agreement claims mean
+    anything (don't spend it by accident). A missing/unknown join_type
+    defaults to independent."""
+    return (verdict.get("join_type") or "").strip().lower() == "co_registered"
+
+
 def _confirm_fanout(orch, verdict: dict, fanout_set: List[str],
                     branches_by_id: Dict[str, dict]) -> tuple:
     """Decide whether to fire the fan-out. Returns (proceed: bool, reason: str).
@@ -360,7 +399,8 @@ def _confirm_fanout(orch, verdict: dict, fanout_set: List[str],
     only on a confident 'complementary' read within the soft cap.
     """
     n = len(fanout_set)
-    n_aux = n * (n - 1)  # full-mesh: each branch sees the other n-1
+    mesh = _operand_mesh(verdict)
+    n_aux = n * (n - 1) if mesh else 0  # operand mesh: each sees the other n-1
 
     if n > FANOUT_HARD_CAP:
         return False, (f"Complementary set has {n} datasets (> hard cap "
@@ -368,13 +408,20 @@ def _confirm_fanout(orch, verdict: dict, fanout_set: List[str],
                        "smaller complementary groups.")
 
     if not orch._enable_human_feedback:
-        # AUTONOMOUS: verdict-gated, conservative.
+        # AUTONOMOUS: verdict-gated, conservative. 'partially_complementary'
+        # is accepted alongside 'complementary': it is the verdict on the
+        # INPUT set, while the gate's fanout_set is already PRUNED to the
+        # mutually-complementary subset it vouches for — refusing it would
+        # make partition-then-prune impossible without a human (found live
+        # on a 4-modality study pruned to a coherent pair).
         v = (verdict.get("verdict") or "").lower()
         conf = float(verdict.get("confidence") or 0.0)
-        if v != "complementary" or conf < AUTONOMOUS_CONFIDENCE_THRESHOLD:
+        if (v not in ("complementary", "partially_complementary")
+                or conf < AUTONOMOUS_CONFIDENCE_THRESHOLD):
             return False, (f"Autonomous mode declines fan-out: verdict='{v}' "
-                           f"confidence={conf:.2f} (needs 'complementary' >= "
-                           f"{AUTONOMOUS_CONFIDENCE_THRESHOLD}). "
+                           f"confidence={conf:.2f} (needs 'complementary' or "
+                           "a confidently-pruned 'partially_complementary' "
+                           f">= {AUTONOMOUS_CONFIDENCE_THRESHOLD}). "
                            f"{verdict.get('rationale', '')}")
         if n > FANOUT_SOFT_CAP:
             return False, (f"Autonomous mode declines a {n}-way mesh (> soft cap "
@@ -389,11 +436,15 @@ def _confirm_fanout(orch, verdict: dict, fanout_set: List[str],
         "=" * 78,
         f"  Complementarity verdict : {verdict.get('verdict')} "
         f"(confidence {verdict.get('confidence')})",
-        f"  Join axis               : {verdict.get('join_axis')}",
+        f"  Join axis               : {verdict.get('join_axis')} "
+        f"(join type: {verdict.get('join_type') or 'unspecified'})",
         f"  Rationale               : {verdict.get('rationale')}",
         "",
-        f"  Will run {n} branches concurrently, full-mesh "
-        f"(~{n_aux} auxiliary loads):",
+        (f"  Will run {n} branches concurrently as an OPERAND MESH "
+         f"(co-registered set; ~{n_aux} auxiliary loads — results become "
+         "jointly computed, flagged to fusion):" if mesh else
+         f"  Will run {n} INDEPENDENT branches concurrently (no companion "
+         "operands — fusion reconciles their reduced results):"),
     ]
     for bid in fanout_set:
         b = branches_by_id.get(bid, {})
@@ -403,6 +454,12 @@ def _confirm_fanout(orch, verdict: dict, fanout_set: List[str],
         lines.append(f"  Pruned as redundant     : {verdict['redundant_clusters']}")
     if verdict.get("unrelated"):
         lines.append(f"  Pruned as unrelated     : {verdict['unrelated']}")
+    steered = [branches_by_id[bid].get("label") for bid in fanout_set
+               if branches_by_id.get(bid, {}).get("steer")]
+    if steered:
+        lines.append(f"  Steering opt-in         : {steered} — receives "
+                     "companion change-point hints (spends independence; "
+                     "fusion will discount the agreement)")
     if n > FANOUT_SOFT_CAP:
         lines.append(f"  ⚠️  {n}-way mesh exceeds the soft cap ({FANOUT_SOFT_CAP}) "
                      "— this is expensive.")
@@ -467,6 +524,46 @@ def _branch_primary_path(branch: dict) -> str:
     return str(branch["data_path"])
 
 
+def _steering_block(steering: List[dict]) -> List[str]:
+    """Render a branch's steering payloads (#296 phase d) with the
+    ADDITIVE-ONLY guardrail. Steering may only add hypotheses or effort —
+    never subtract scope or lower an acceptance bar — because a range
+    restriction silently converts into a conclusion (it removes the branch's
+    ability to be falsified outside the window)."""
+    lines = ["", "",
+             "STEERING (explicit opt-in; ADDITIVE-ONLY): a cheap unsupervised "
+             "reduction of each companion series below locates where THAT "
+             "series changes along the shared control variable. Each is a "
+             "NOMINATED HYPOTHESIS for your analysis, nothing more:"]
+    for s in steering:
+        extra = []
+        if s.get("flags", {}).get("shift_dominated"):
+            extra.append("shift-dominated (location valid; its loadings are "
+                         "not species)")
+        if s.get("flags", {}).get("intensity_drift"):
+            extra.append("component 1 tracks overall intensity")
+        note = f"; {', '.join(extra)}" if extra else ""
+        fig = (f"; score curve: {s['score_curve_path']}"
+               if s.get("score_curve_path") else "")
+        lines.append(
+            f"  - companion '{s.get('label')}': sharpest change near "
+            f"control ≈ {s.get('change_point'):g} "
+            f"(sharpness {s.get('change_sharpness')}, PC1 "
+            f"{s.get('variance_explained', [0])[0]:.0%} of variance"
+            f"{note}{fig})")
+    lines += [
+        "RULES (non-negotiable): you may TEST for corresponding features "
+        "near the indicated value(s) and spend extra refinement effort "
+        "there — but you must still analyze the FULL range/series. Never "
+        "restrict a fit window or crop to the indicated region; never relax "
+        "an acceptance threshold for a companion-suggested feature (it must "
+        "clear your normal bar unaided); agreement with a companion is an "
+        "observation to report, never a target to fit toward. Report what "
+        "YOUR data shows — if it disagrees with the companion's indication, "
+        "report the disagreement plainly; that is a valid, valuable outcome."]
+    return lines
+
+
 def _mesh_task(branch: dict, companions: List[dict]) -> str:
     """Compose a branch's self-contained task with its full-mesh companions.
 
@@ -474,6 +571,8 @@ def _mesh_task(branch: dict, companions: List[dict]) -> str:
     specialist passes them through ``run_analysis``'s ``auxiliary_data`` /
     ``auxiliary_label`` — the existing operand path — and the codegen may use
     a shape-aligned companion numerically (correlate / mask / normalize).
+    A steered branch (#296 phase d) additionally gets each series
+    companion's change-point hint under the additive-only guardrail.
     """
     task = branch["task"].rstrip()
     # This is ONE branch of a joint multi-dataset analysis — novelty is assessed
@@ -483,18 +582,18 @@ def _mesh_task(branch: dict, companions: List[dict]) -> str:
              "run novelty / literature assessment (assess_novelty) on this branch's "
              "findings. Novelty is evaluated once on the FUSED cross-dataset "
              "interpretation afterward. Complete the analysis itself normally."]
-    if companions:
-        primary = _branch_primary_path(branch)
-        block += ["", "",
-                  f"PRIMARY dataset for THIS analysis: {primary} — pass it "
-                  "VERBATIM as run_analysis's `data_path`. The companion(s) below "
-                  "are AUXILIARY ONLY; do NOT analyze a companion as the primary."]
-        if branch.get("pattern") and branch.get("files"):
-            block += [f"That path is a FILE PATTERN selecting this branch's "
-                      f"{len(branch['files'])} file(s) out of a directory that also "
-                      "holds the companion datasets — pass the pattern itself, do "
-                      "NOT replace it with the parent directory (that would pull in "
-                      "the other datasets)."]
+    primary = _branch_primary_path(branch)
+    block += ["", "",
+              f"PRIMARY dataset for THIS analysis: {primary} — pass it "
+              "VERBATIM as run_analysis's `data_path`."
+              + (" The companion(s) below are AUXILIARY ONLY; do NOT "
+                 "analyze a companion as the primary." if companions else "")]
+    if branch.get("pattern") and branch.get("files"):
+        block += [f"That path is a FILE PATTERN selecting this branch's "
+                  f"{len(branch['files'])} file(s) out of a directory that "
+                  "also holds other datasets — pass the pattern itself, do "
+                  "NOT replace it with the parent directory (that would pull "
+                  "in the other datasets)."]
     # Forward the caller-supplied metadata so the branch USES it rather than
     # synthesizing metadata from the task prose (which loses technique-specific
     # fields the downstream skill needs, e.g. the EELS energy axis).
@@ -517,6 +616,8 @@ def _mesh_task(branch: dict, companions: List[dict]) -> str:
             note = f"; {c['note']}" if c.get("note") else ""
             block.append(f"  - auxiliary_data: {c['data_path']}  "
                          f"(auxiliary_label: '{c['label']}'{note})")
+    if branch.get("_steering"):
+        block += _steering_block(branch["_steering"])
     if not block:
         return task
     return task + "\n".join(block)
@@ -550,14 +651,15 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
 
 
 def run_fanout(orch, branches: List[dict]) -> str:
-    """Gate → confirm → run branches concurrently (full-mesh aux). Returns JSON.
+    """Gate → confirm → run branches concurrently. Returns JSON.
 
     `branches` is a list of ``{"data_path", "task", "label", "metadata"?,
-    "context"?, "pattern"?}``. ``pattern`` is a filename glob selecting the
-    branch's own files when ``data_path`` is a directory holding several
-    datasets (issue #326 Fix 3). The complementarity gate prunes to the
-    complementary subset; only that subset runs, each branch seeing the
-    others as auxiliary operands.
+    "context"?, "pattern"?, "steer"?}``. ``pattern`` is a filename glob
+    selecting the branch's own files when ``data_path`` is a directory
+    holding several datasets (issue #326 Fix 3). The complementarity gate
+    prunes to the complementary subset; only that subset runs. Branches run
+    independently unless the gate classifies the set co-registered (operand
+    mesh) — see ``_operand_mesh`` — and/or a branch opts into steering.
     """
     # --- normalize input ---
     norm: List[dict] = []
@@ -589,6 +691,7 @@ def run_fanout(orch, branches: List[dict]) -> str:
             "metadata": b.get("metadata"), "context": b.get("context"),
             "pattern": pattern,
             "files": _resolve_branch_files(dp, pattern),
+            "steer": bool(b.get("steer")),
         })
     if len(norm) < 2:
         msg = ("Fan-out needs at least two branches, each with a data_path "
@@ -646,26 +749,40 @@ def run_fanout(orch, branches: List[dict]) -> str:
                            "verdict": verdict,
                            "fanout_set": fanout_set}, indent=2, default=str)
 
-    # --- preallocate ledger slots (sequential, under lock — no concurrent append) ---
     run_branches = [by_id[i] for i in fanout_set]
-    with orch._fanout_lock:
-        entries = []
-        group_id = f"fanout_{len(orch._delegation_ledger) + 1}"
-        for b in run_branches:
-            entry = orch._open_delegation(
-                "analysis", _mesh_task(b, []), b.get("context"), None, b["label"])
-            entry["parallel_group"] = group_id
-            entry["fanout"] = True
-            # Carry the input path/metadata so a later fuse_delegations can
-            # recognize this set as already gated (or re-gate a mixed set).
-            entry["data_path"] = b.get("data_path")
-            entry["metadata"] = b.get("metadata")
-            entry["pattern"] = b.get("pattern")
-            entries.append(entry)
 
-    # --- run concurrently; each branch sees all others (full mesh) ---
-    print(f"  🔀 Launching {len(run_branches)} parallel analysis branches "
-          f"(group {group_id}, full-mesh aux)...")
+    # --- steering payloads (#296 phase d) — explicit opt-in per branch ---
+    # A steered branch receives each SERIES companion's change-point hint
+    # (cheap unsupervised reduction, computed here at launch time) under the
+    # additive-only guardrail. Steering SPENDS the branch's independence:
+    # it is stamped as informed_by on the ledger entry so fusion discounts
+    # the agreement. A failed reduction just skips that payload.
+    for i, b in enumerate(run_branches):
+        if not b.get("steer"):
+            continue
+        from ...skills._shared.series_reduction import reduce_series
+        payloads = []
+        for j, c in enumerate(run_branches):
+            if j == i or not c.get("files"):
+                continue
+            sdir = (orch.fanout_dir / "steering"
+                    / f"{_slug(b['label'])}_from_{_slug(c['label'])}")
+            red = reduce_series(c["files"], out_dir=str(sdir),
+                                label=c["label"])
+            if red.get("status") == "success":
+                payloads.append(red)
+            else:
+                logger.warning(
+                    f"fan-out steering: reduction of '{c['label']}' failed "
+                    f"({red.get('error')}); no hint passed to '{b['label']}'")
+        if payloads:
+            b["_steering"] = payloads
+            print(f"  🧭 Steering '{b['label']}' with change-point hint(s) "
+                  f"from: {[p['label'] for p in payloads]} (independence "
+                  "spent — fusion will be told)")
+
+    # --- mesh policy: the gate's join type decides the wiring ---
+    mesh = _operand_mesh(verdict)
 
     def _companions_for(i):
         # A companion must be LOADABLE as an auxiliary operand. For a branch
@@ -676,17 +793,63 @@ def run_fanout(orch, branches: List[dict]) -> str:
         for j in range(len(run_branches)):
             if j == i:
                 continue
-            b = run_branches[j]
-            c = {"label": f"companion_{_slug(b['label'])}"}
-            if b.get("files"):
-                c["data_path"] = b["files"][0]
-                c["note"] = (f"one representative file of a "
-                             f"{len(b['files'])}-file series "
-                             f"('{b.get('pattern')}' in {b['data_path']})")
+            c = run_branches[j]
+            comp = {"label": f"companion_{_slug(c['label'])}"}
+            if c.get("files"):
+                comp["data_path"] = c["files"][0]
+                comp["note"] = (f"one representative file of a "
+                                f"{len(c['files'])}-file series "
+                                f"('{c.get('pattern')}' in {c['data_path']})")
             else:
-                c["data_path"] = b["data_path"]
-            comps.append(c)
+                comp["data_path"] = c["data_path"]
+            comps.append(comp)
         return comps
+
+    branch_companions = [_companions_for(i) if mesh else []
+                         for i in range(len(run_branches))]
+
+    # --- preallocate ledger slots (sequential, under lock — no concurrent append) ---
+    with orch._fanout_lock:
+        entries = []
+        group_id = f"fanout_{len(orch._delegation_ledger) + 1}"
+        for i, b in enumerate(run_branches):
+            # The ledger records the ACTUAL task the branch receives —
+            # companions included — so the audit trail shows what informed it.
+            entry = orch._open_delegation(
+                "analysis", _mesh_task(b, branch_companions[i]),
+                b.get("context"), None, b["label"])
+            entry["parallel_group"] = group_id
+            entry["fanout"] = True
+            # Independence provenance: ANY companion contact with a branch's
+            # numbers — operand mesh or steering — spends independence and is
+            # recorded mechanically so fusion can discount the agreement.
+            informed, via = [], []
+            if mesh and len(run_branches) > 1:
+                informed += [c["label"] for c in run_branches
+                             if c is not b]
+                via.append("co_registered_operands")
+            for p in (b.get("_steering") or []):
+                if p["label"] not in informed:
+                    informed.append(p["label"])
+                if "steering" not in via:
+                    via.append("steering")
+            if informed:
+                entry["informed_by"] = informed
+                entry["informed_via"] = "+".join(via)
+            # Carry the input path/metadata so a later fuse_delegations can
+            # recognize this set as already gated (or re-gate a mixed set).
+            entry["data_path"] = b.get("data_path")
+            entry["metadata"] = b.get("metadata")
+            entry["pattern"] = b.get("pattern")
+            # The gate's join axis is the fusion stage's merge key (#296):
+            # without stamping it here it is lost after run_fanout returns.
+            entry["join_axis"] = verdict.get("join_axis")
+            entries.append(entry)
+
+    # --- run concurrently; wiring per the mesh policy ---
+    print(f"  🔀 Launching {len(run_branches)} parallel analysis branches "
+          f"(group {group_id}, "
+          f"{'operand mesh — co-registered set' if mesh else 'independent branches'})...")
 
     max_workers = min(len(run_branches), FANOUT_MAX_WORKERS)
     n_total = len(run_branches)
@@ -694,7 +857,7 @@ def run_fanout(orch, branches: List[dict]) -> str:
         fut_label = {}
         for i in range(n_total):
             fut = pool.submit(_run_one_branch, orch, run_branches[i],
-                              _companions_for(i), entries[i])
+                              branch_companions[i], entries[i])
             fut_label[fut] = run_branches[i]["label"]
         # Wait with a periodic heartbeat so the user can see the parallel run is
         # alive (a slow branch can otherwise look like a hang). Each branch is
@@ -749,6 +912,8 @@ def run_fanout(orch, branches: List[dict]) -> str:
         "status": "success",
         "parallel_group": group_id,
         "join_axis": verdict.get("join_axis"),
+        "join_type": verdict.get("join_type"),
+        "mesh": "operand" if mesh else "independent",
         "branches_run": len(results),
         "branches_with_output": len(productive),
         "results": results,
@@ -813,6 +978,471 @@ def _load_figure_part(path: str) -> Optional[dict]:
         return None
 
 
+# ----------------------------------------------------------------------
+# Numerics bundle (issue #296 phase a). Each branch already writes its
+# numerical result to disk (features.csv keyed on the control variable,
+# trend_analysis / fitting_parameters in analysis_results.json) and the
+# ledger carries the paths — but fusion historically read only prose.
+# These helpers surface a COMPACT schema preview of those numbers into the
+# fusion prompt (never the full tables), so the synthesis can ground its
+# cross-dataset statements in computed quantities. Text fusion stays
+# authoritative; a branch with no readable numerics degrades to
+# text+figures, never blocks.
+# ----------------------------------------------------------------------
+
+_NUMERICS_MAX_TABLES = 3          # feature tables previewed per branch
+_NUMERICS_MAX_COLS_LISTED = 300   # column names listed per table
+_NUMERICS_TREND_MAX_CHARS = 1500  # branch trend_analysis JSON cap in the prompt
+_NUMERIC_RESULT_NAMES = ("analysis_results.json", "series_fit_results.json")
+
+
+def _match_join_column(columns: List[str], join_axis: Optional[str]) -> Optional[str]:
+    """Best-effort match of the gate's join-axis phrase to a table column.
+
+    Prefix matching on word tokens, longest join-axis token first, so
+    'sample temperature' finds 'temperature_C' and also an abbreviated
+    'temp_C', without an incidental substring hit (the 'per' inside
+    'temperature' must not select 'per_band_residual'). Returns the column
+    name or None — a miss is reported in the preview, never fatal
+    (LLM-assisted resolution is a later phase)."""
+    if not join_axis:
+        return None
+    tokens = sorted((t for t in re.split(r"[^a-z0-9]+", str(join_axis).lower())
+                     if len(t) >= 3), key=len, reverse=True)
+    parts_by_col = {c: [p for p in re.split(r"[^a-z0-9]+", str(c).lower())
+                        if len(p) >= 3] for c in columns}
+    for tok in tokens:
+        for col, parts in parts_by_col.items():
+            if any(p.startswith(tok)
+                   or (len(p) >= 4 and tok.startswith(p)) for p in parts):
+                return col
+    return None
+
+
+def _feature_table_preview(path: str, join_axis: Optional[str]) -> dict:
+    """Compact schema preview of one feature table: shape, column names, the
+    join-axis column's range — NOT the data. Exception: a one-row table (a
+    single-measurement branch) inlines its values, since that row IS the
+    branch's scalar result and is the join anchor fusion needs."""
+    import pandas as pd
+    df = pd.read_csv(path)
+    cols = [str(c) for c in df.columns]
+    prev: Dict[str, Any] = {"path": str(path), "n_rows": int(len(df)),
+                            "n_cols": int(df.shape[1])}
+    prev["columns"] = cols[:_NUMERICS_MAX_COLS_LISTED]
+    if len(cols) > _NUMERICS_MAX_COLS_LISTED:
+        prev["columns_truncated"] = len(cols) - _NUMERICS_MAX_COLS_LISTED
+    if join_axis:
+        jcol = _match_join_column(cols, join_axis)
+        prev["join_axis_column"] = None
+        if jcol is not None:
+            info: Dict[str, Any] = {"name": jcol}
+            try:
+                vals = pd.to_numeric(df[jcol], errors="coerce").dropna()
+                if len(vals):
+                    info.update({"min": float(vals.min()),
+                                 "max": float(vals.max()),
+                                 "n_points": int(len(vals))})
+            except Exception:  # noqa: BLE001 - range is a nicety, name suffices
+                pass
+            prev["join_axis_column"] = info
+    if len(df) == 1:
+        prev["values"] = {str(k): v for k, v in df.iloc[0].to_dict().items()
+                          if not (isinstance(v, float) and v != v)}  # drop NaN
+    return prev
+
+
+def _branch_numerics(entry: dict, join_axis: Optional[str]) -> Optional[dict]:
+    """Locate a branch's on-disk numerical results and reduce them to a
+    compact, prompt-ready dict. Returns None when the branch has no readable
+    numerics — fusion then proceeds on text+figures for that branch (#296
+    guardrail: degrade, never block)."""
+    files = [str(f) for f in (entry.get("files_produced") or [])]
+    tables = [str(t) for t in (entry.get("feature_tables") or [])
+              if Path(str(t)).exists()]
+    if not tables:
+        tables = [f for f in files
+                  if Path(f).name == "features.csv" and Path(f).exists()]
+
+    out: Dict[str, Any] = {}
+    previews = []
+    for t in tables[:_NUMERICS_MAX_TABLES]:
+        try:
+            previews.append(_feature_table_preview(t, join_axis))
+        except Exception as e:  # noqa: BLE001 - a bad table must not break fusion
+            logger.warning(f"fusion numerics: could not preview {t}: {e}")
+    if previews:
+        out["feature_tables"] = previews
+    if len(tables) > _NUMERICS_MAX_TABLES:
+        out["tables_omitted"] = len(tables) - _NUMERICS_MAX_TABLES
+
+    # The branch's own trend analysis names WHAT it tracked across the series
+    # — the signal fusion needs to pick the physically meaningful columns out
+    # of a wide table. Single-measurement branches carry scalar
+    # fitting_parameters/fit_quality instead (used only when no table loaded).
+    candidates = [Path(t).parent / "analysis_results.json" for t in tables]
+    candidates += [Path(f) for f in files
+                   if Path(f).name == "analysis_results.json"]
+    for cand in candidates:
+        if "trend_analysis" in out or not cand.exists():
+            continue
+        try:
+            with open(cand, "r", errors="replace") as fh:
+                data = json.load(fh)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"fusion numerics: could not read {cand}: {e}")
+            continue
+        trend = data.get("trend_analysis")
+        if isinstance(trend, dict) and trend and not trend.get("skipped"):
+            out["trend_analysis"] = trend
+        if not previews:
+            for key in ("fitting_parameters", "fit_quality"):
+                val = data.get(key)
+                if val and key not in out:
+                    out[key] = val
+
+    # Paths of the full numeric artifacts, for auditability (and for the
+    # phase-b codegen, which loads the tables itself).
+    numeric_files = tables + [f for f in files
+                              if Path(f).name in _NUMERIC_RESULT_NAMES]
+    if out and numeric_files:
+        out["numeric_files"] = list(dict.fromkeys(numeric_files))
+    return out or None
+
+
+def _numerics_prompt_block(num: dict) -> str:
+    """Render one branch's numerics dict into fusion-prompt text."""
+    lines = ["Numerical results on disk (schema preview — full tables NOT "
+             "loaded):"]
+    for p in num.get("feature_tables", []):
+        lines.append(f"- feature table: {p['path']} — {p['n_rows']} rows x "
+                     f"{p['n_cols']} cols")
+        if "join_axis_column" in p:
+            jc = p["join_axis_column"]
+            if jc is None:
+                lines.append("  join-axis column: none matched the gate's "
+                             "join axis")
+            elif "min" in jc:
+                lines.append(f"  join-axis column: {jc['name']} (range "
+                             f"{jc['min']:g} to {jc['max']:g}, "
+                             f"{jc['n_points']} points)")
+            else:
+                lines.append(f"  join-axis column: {jc['name']}")
+        cols = ", ".join(p["columns"])
+        if p.get("columns_truncated"):
+            cols += f", ... (+{p['columns_truncated']} more)"
+        lines.append(f"  columns: {cols}")
+        if p.get("values"):
+            lines.append("  single-row values: "
+                         + json.dumps(p["values"], default=str))
+    if num.get("tables_omitted"):
+        lines.append(f"- ({num['tables_omitted']} further feature table(s) "
+                     "not previewed)")
+    if num.get("trend_analysis") is not None:
+        t = json.dumps(num["trend_analysis"], default=str)
+        if len(t) > _NUMERICS_TREND_MAX_CHARS:
+            t = t[:_NUMERICS_TREND_MAX_CHARS] + "...(truncated)"
+        lines.append(f"- branch's own trend analysis: {t}")
+    for key, label in (("fitting_parameters", "fitting parameters"),
+                       ("fit_quality", "fit quality")):
+        if num.get(key) is not None:
+            lines.append(f"- {label}: " + json.dumps(num[key], default=str))
+    if num.get("numeric_files"):
+        lines.append("- full numeric artifacts (paths, for audit): "
+                     + ", ".join(num["numeric_files"]))
+    return "\n".join(lines)
+
+
+# ----------------------------------------------------------------------
+# Computed reconciliation (issue #296 phase b). Behind the complementarity
+# gate and the sandbox gate, the fusion stage generates ONE reconciliation
+# script over the branches' result tables, executes it, and persists the
+# script + its numerical output next to the report — so the fused numbers
+# trace to code, not to prose. Method selection lives in the baseline
+# prompt (no hardcoded estimator); a failure degrades to text+figure
+# fusion with a warning, never blocks.
+# ----------------------------------------------------------------------
+
+_FUSION_CODEGEN_ATTEMPTS = 3
+_FUSION_SCRIPT_TIMEOUT_S = 300
+
+FUSION_CODEGEN_INSTRUCTIONS = """You are a measurement scientist writing ONE Python script that COMPUTES the \
+quantitative reconciliation of several analysis branches' findings. Each \
+branch has already reduced its raw data to result tables on disk (paths and \
+schema previews below). Your script loads those tables and computes the \
+reconciliation, so the fused claims trace to computed numbers instead of \
+prose.
+
+Choose the method the data actually supports — inspect the previews first:
+- correspondence / axis alignment — for a shared 1-D join axis: load each \
+branch's physically meaningful trend (prefer the columns the branch's own \
+trend analysis names; derived scalars over raw per-peak parameters), align \
+on the join axis, locate each technique's transition (breakpoint / sigmoid \
+midpoint / peak / onset), and report the offsets between techniques.
+- derived quantity — compute a physical quantity that needs several branches.
+- cross-correlation — only where trends are dense and sampled on comparable grids.
+- weighted estimate / consistency test — ONLY where the tables carry real \
+per-parameter uncertainties (e.g. *_err columns). NEVER weight by, or \
+fabricate, an uncertainty that does not trace to a real branch value; when \
+sigma is unavailable, set "sigma_available": false and use unweighted methods.
+- qualitative consistency — the honest fallback when no computation is \
+supportable.
+
+Join topology: the join axis may be a table column (shared parameter axis), \
+a scalar-vs-scalar comparison (same sample, no axis), or a shared 2-D grid. \
+Compute a pixel-level join ONLY if the inputs establish co-registration; \
+otherwise degrade to region statistics or a scalar comparison and record \
+that in "notes". "No correlation found" is a valid, valuable computed result.
+
+Marker reliability is part of the contract: a marker whose fit is degenerate \
+(error comparable to the axis span), or that contradicts the branch's own \
+trend analysis, must NOT be propagated into aggregate or headline quantities \
+(means, spreads, agreement verdicts) — substitute the branch's own reported \
+value for that technique, or exclude the technique from the aggregates, and \
+record the substitution or exclusion in "notes".
+
+SCRIPT CONTRACT (mandatory):
+- Standard scientific libraries only (numpy, pandas, scipy, matplotlib with \
+matplotlib.use('Agg')). No network access. Load inputs ONLY from the \
+absolute paths given below.
+- Write ./fusion_numerics.json (current working directory): {"method": ..., \
+"sigma_available": true|false, "quantities": {<computed values, keys named \
+with units>}, "notes": [<what was skipped or degraded, and why>]}. Every \
+number in it must be computed by this script. Plain floats only; write \
+NaN/inf as null.
+- Strongly preferred: write ./fusion_figure.png — the aligned overlay of \
+the branch trends on the shared axis, with the located transitions marked.
+- Print a short (<= 20 lines) plain-text summary to stdout.
+- Be robust: a missing column or unreadable file must degrade (recorded in \
+"notes"), not crash.
+
+Respond in valid JSON with EXACTLY these keys (no markdown fences inside \
+values):
+{
+  "method": "correspondence" | "derived_quantity" | "cross_correlation" | "weighted_estimate" | "qualitative",
+  "rationale": "<2-3 sentences: why this method fits these inputs>",
+  "script": "<the complete Python script, as a single JSON string>"
+}
+"""
+
+
+FUSION_VERIFICATION_INSTRUCTIONS = """You are a skeptical measurement scientist AUDITING a computed cross-dataset \
+reconciliation. A generated script was executed over several analysis \
+branches' result tables; its numerical output (and overlay figure, when \
+attached) follows, together with the executed script and the same per-branch \
+inputs the script was given. Judge whether the COMPUTATION is scientifically \
+sound — a clean exit with an implausible number is a failure.
+
+Check, in order of importance:
+1. CROSS-CHECK against the branches' own trend analyses: each branch's inputs \
+name what it tracked and where its transitions lie. A computed marker that \
+disagrees substantially with the branch's own value needs a reason — and if \
+the script's choice of column / order parameter explains the disagreement, \
+that is a flaw in the script, not a discovery.
+2. DEGENERATE or PATHOLOGICAL fits: transition widths far below the sampling \
+interval, values pinned to a grid point or a range edge, sigmoids fit to \
+non-monotonic or spike-contaminated series.
+3. ORDER-PARAMETER CHOICE (use the figure): is each plotted trend actually \
+transition-shaped for its technique, or noisy/spiked such that the located \
+marker is an artifact? Prefer the quantity the branch's own trend analysis \
+tracked.
+4. SIGMA HONESTY: "sigma_available": true is valid only if real per-parameter \
+uncertainties (e.g. *_err columns) were actually used; never accept \
+fabricated weights.
+5. METHOD: is the chosen method appropriate for the join topology and the \
+sampling?
+
+Do NOT ask for refinement over cosmetic points — numerical nitpicks that do \
+not change the scientific conclusion are "accept" with the issue noted. Ask \
+for refinement when a reported quantity is misleading or an artifact.
+
+Respond in valid JSON with EXACTLY these keys:
+{
+  "verdict": "accept" | "refine",
+  "issues": ["<each concrete problem found; empty list if none>"],
+  "refinement_instructions": "<if refine: precise instructions for the next script attempt (which column / order parameter / fix); else empty string>"
+}
+"""
+
+
+def _verify_fusion_numerics(orch, candidate: dict, script: str,
+                            inputs: str) -> dict:
+    """Audit the computed reconciliation (#296 phase c): the fusion LLM
+    inspects the produced numbers, the script, and the overlay figure, and
+    returns {"verdict": "accept"|"refine", "issues": [...],
+    "refinement_instructions": ...}. On an unusable LLM reply, returns
+    verdict "unavailable" (recorded, never blocks)."""
+    parts = None
+    if candidate.get("figure_path"):
+        part = _load_figure_part(candidate["figure_path"])
+        if part:
+            parts = ["\n[Figure — the computed reconciliation overlay]:", part]
+    prompt = (
+        FUSION_VERIFICATION_INSTRUCTIONS
+        + "\n\n--- COMPUTED OUTPUT (fusion_numerics.json) ---\n"
+        + json.dumps(candidate.get("results"), indent=2, default=str)[:6000]
+        + "\n\n--- SCRIPT STDOUT ---\n" + (candidate.get("stdout") or "")[:1500]
+        + "\n\n--- THE EXECUTED SCRIPT ---\n" + (script or "")[:6000]
+        + "\n\n--- THE PER-BRANCH INPUTS THE SCRIPT RECEIVED ---"
+        + inputs
+    )
+    parsed = _llm_json(orch, prompt, extra_parts=parts)
+    if not parsed or parsed.get("verdict") not in ("accept", "refine"):
+        return {"verdict": "unavailable", "issues": [],
+                "refinement_instructions": ""}
+    return {"verdict": parsed["verdict"],
+            "issues": [str(i) for i in (parsed.get("issues") or [])],
+            "refinement_instructions":
+                str(parsed.get("refinement_instructions") or "")}
+
+
+def _fusion_codegen_inputs(ok: List[dict], branch_numerics: Dict[str, Any],
+                           join_axis: Optional[str],
+                           focus: Optional[str]) -> str:
+    """Assemble the codegen prompt's input block: per-branch numerics (table
+    paths + schema previews + the branch's own trend analysis) plus the join
+    axis and any fusion focus."""
+    per_branch = []
+    for e in ok:
+        label = e.get("label") or f"delegation {e['index']}"
+        num = branch_numerics.get(label)
+        if not num:
+            continue
+        entry = {"dataset": label,
+                 "branch_summary": (e.get("summary") or "")[:600],
+                 **num}
+        if e.get("informed_by"):
+            entry["informed_by"] = e["informed_by"]
+            via = e.get("informed_via") or "steering"
+            notes = []
+            if "steering" in via:
+                notes.append("steered at launch by the listed companion(s): "
+                             "agreement near the hinted value is partly by "
+                             "construction")
+            if "co_registered_operands" in via:
+                notes.append("received the listed companion(s) as "
+                             "co-registered operands: overlapping results "
+                             "may be jointly computed, not independent")
+            entry["independence_note"] = "; ".join(notes)
+        per_branch.append(entry)
+    return (f"\n\n--- JOIN AXIS (from the complementarity gate) ---\n"
+            f"{join_axis or 'not stated'}\n"
+            + (f"\n--- FUSION FOCUS ---\n{focus}\n" if focus else "")
+            + "\n--- PER-BRANCH NUMERICS (tables on disk; load from these "
+              "paths) ---\n"
+            + json.dumps(per_branch, indent=2, default=str))
+
+
+def _run_fusion_codegen(orch, ok: List[dict], branch_numerics: Dict[str, Any],
+                        join_axis: Optional[str], focus: Optional[str],
+                        out_dir: Path) -> dict:
+    """Generate -> execute -> verify -> persist the reconciliation (#296 b+c).
+
+    After a successful execution the computed output is AUDITED
+    (``_verify_fusion_numerics``): an "accept" returns it; a "refine" feeds
+    the audit's instructions into the next generation attempt. If the
+    attempt budget runs out with only refine-flagged results, the best
+    executed result is returned WITH its unresolved issues recorded (an
+    audited-but-flagged number beats a silent one). Returns a dict with
+    ``status`` ('success' | 'skipped' | 'failed'), the persisted artifact
+    paths, the parsed fusion_numerics.json under ``results``, the
+    ``verification`` verdict, and a ``warning`` on anything non-clean.
+    Never raises."""
+    from ...executors import ScriptExecutor, require_sandbox_approval
+
+    if not require_sandbox_approval(
+            context="Cross-dataset fusion (computed reconciliation)"):
+        return {"status": "skipped", "attempts": 0,
+                "warning": ("sandbox approval unavailable — computed "
+                            "reconciliation skipped; fusion is text+figures "
+                            "only. Set UNSAFE_EXECUTION_OK=true or run in "
+                            "Docker/VM/Colab to enable it.")}
+
+    inputs = _fusion_codegen_inputs(ok, branch_numerics, join_axis, focus)
+    executor = ScriptExecutor(timeout=_FUSION_SCRIPT_TIMEOUT_S)
+    script_path = out_dir / "fusion_reconciliation.py"
+    numerics_path = out_dir / "fusion_numerics.json"
+    feedback = ""
+    err = "no usable script generated"
+    best = None          # last executed-but-refine-flagged candidate
+    best_script = None
+    for attempt in range(1, _FUSION_CODEGEN_ATTEMPTS + 1):
+        parsed = _llm_json(orch, FUSION_CODEGEN_INSTRUCTIONS + inputs + feedback)
+        script = (parsed or {}).get("script")
+        if not script or not isinstance(script, str):
+            err = "reply carried no usable 'script' string"
+            feedback = ("\n\n--- PREVIOUS ATTEMPT FAILED ---\n" + err
+                        + ". Return the complete JSON again.")
+            continue
+        try:
+            script_path.write_text(script, encoding="utf-8")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"fusion codegen: could not persist script: {e}")
+        res = executor.execute_script(script, working_dir=str(out_dir))
+        if res.get("status") == "success" and numerics_path.exists():
+            try:
+                with open(numerics_path, "r", errors="replace") as fh:
+                    results = json.load(fh)
+            except Exception as e:  # noqa: BLE001
+                results = None
+                err = f"fusion_numerics.json is not valid JSON: {e}"
+            if results is not None:
+                fig = out_dir / "fusion_figure.png"
+                candidate = {"status": "success",
+                             "method": parsed.get("method"),
+                             "rationale": parsed.get("rationale"),
+                             "script_path": str(script_path),
+                             "numerics_path": str(numerics_path),
+                             "figure_path": str(fig) if fig.exists() else None,
+                             "results": results,
+                             "stdout": (res.get("stdout") or "")[-2000:],
+                             "attempts": attempt, "warning": None}
+                verification = _verify_fusion_numerics(orch, candidate,
+                                                       script, inputs)
+                candidate["verification"] = verification
+                if verification["verdict"] != "refine":
+                    return candidate
+                best, best_script = candidate, script
+                issues = "; ".join(verification["issues"])[:1500]
+                err = f"verification flagged the computation: {issues}"
+                logger.warning(f"fusion codegen attempt {attempt}: {err[:400]}")
+                feedback = (
+                    "\n\n--- PREVIOUS ATTEMPT EXECUTED, BUT ITS OUTPUT FAILED "
+                    "A SCIENTIFIC AUDIT ---\nIssues: " + issues
+                    + "\nInstructions: "
+                    + verification["refinement_instructions"][:1500]
+                    + "\nWrite an improved script and return the complete "
+                      "JSON again.")
+                continue
+        elif res.get("status") == "success":
+            err = "the script ran but did not write ./fusion_numerics.json"
+        else:
+            err = res.get("message") or "execution failed"
+        logger.warning(f"fusion codegen attempt {attempt} failed: {err[:400]}")
+        feedback = ("\n\n--- PREVIOUS ATTEMPT FAILED ---\n" + err[:2000]
+                    + "\nFix the script and return the complete JSON again.")
+    if best is not None:
+        # A later, worse attempt may have overwritten the persisted artifacts
+        # — restore the returned candidate's script + numerics so the audit
+        # trail matches what is reported. (The figure cannot be restored the
+        # same way; it is best-effort.)
+        try:
+            script_path.write_text(best_script, encoding="utf-8")
+            with open(numerics_path, "w") as fh:
+                json.dump(best["results"], fh, indent=2, default=str)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"fusion codegen: could not restore artifacts: {e}")
+        issues = "; ".join(best["verification"]["issues"])[:400]
+        best["warning"] = ("computed reconciliation kept with UNRESOLVED "
+                           f"verification issues: {issues}")
+        return best
+    return {"status": "failed", "attempts": _FUSION_CODEGEN_ATTEMPTS,
+            "script_path": str(script_path) if script_path.exists() else None,
+            "warning": (f"computed reconciliation failed after "
+                        f"{_FUSION_CODEGEN_ATTEMPTS} attempts "
+                        f"({err[:200]}); fusion degraded to text+figures.")}
+
+
 def _write_fusion_html(out_dir: Path, fused: dict, figures: list) -> Optional[Path]:
     """Write a self-contained HTML fusion report (narrative + claims + the
     per-dataset figures inline as base64). ``figures`` is a list of
@@ -847,6 +1477,52 @@ def _write_fusion_html(out_dir: Path, fused: dict, figures: list) -> Optional[Pa
             f"<img src='data:image/png;base64,{base64.b64encode(b).decode()}'></div>"
             for lbl, b in figures
         ) or "<p>(no figures available)</p>"
+        # Computed reconciliation card (#296 phase c): the executed script's
+        # quantities, the audit verdict, and the audit-trail paths.
+        comp = fused.get("computed_reconciliation") or {}
+        comp_html = ""
+        if comp and comp.get("status") == "success":
+            res = comp.get("results") or {}
+
+            def _fmt_qty(v):
+                return (f"{v:.6g}" if isinstance(v, float)
+                        else _html.escape(str(v)))
+            qrows = "".join(
+                f"<tr><td>{_html.escape(str(k))}</td>"
+                f"<td class='num'>{_fmt_qty(v)}</td></tr>"
+                for k, v in (res.get("quantities") or {}).items()
+            ) or "<tr><td colspan='2'>(none)</td></tr>"
+            notes_html = "".join(f"<li>{_html.escape(str(n))}</li>"
+                                 for n in (res.get("notes") or []))
+            ver = comp.get("verification") or {}
+            vbadge = {"accept": "<span class='vok'>audit: accepted</span>",
+                      "refine": "<span class='vbad'>audit: unresolved issues</span>"
+                      }.get(ver.get("verdict"),
+                            "<span class='vna'>audit: unavailable</span>")
+            issues_html = ("<ul class='cav'>" + "".join(
+                f"<li>{_html.escape(str(i))}</li>"
+                for i in ver.get("issues") or []) + "</ul>"
+            ) if ver.get("issues") else ""
+            comp_html = (
+                "<div class='card'><h2>Computed reconciliation "
+                f"<small>method: {_html.escape(str(comp.get('method')))} · "
+                f"σ available: {_html.escape(str(res.get('sigma_available')))}"
+                f"</small> {vbadge}</h2>"
+                f"<table class='qt'><tr><th>quantity</th><th>value</th></tr>"
+                f"{qrows}</table>"
+                + (f"<ul>{notes_html}</ul>" if notes_html else "")
+                + issues_html
+                + "<div class='paths'>script: "
+                + _html.escape(str(comp.get('script_path')))
+                + "<br>numerics: "
+                + _html.escape(str(comp.get('numerics_path'))) + "</div>"
+                "</div>")
+        elif comp:
+            comp_html = (
+                "<div class='card'><h2>Computed reconciliation</h2>"
+                "<div class='imp'>Not computed — "
+                + _html.escape(str(comp.get("warning") or comp.get("status")))
+                + "</div></div>")
         focus_html = (f"<div class='focus'><b>Focus:</b> {_html.escape(str(fused.get('focus')))}</div>"
                       if fused.get("focus") else "")
         # Styling follows the house report look (see planning_agents/
@@ -880,6 +1556,16 @@ def _write_fusion_html(out_dir: Path, fused: dict, figures: list) -> Optional[Pa
  .novbadge{{background:#dbeafe;color:#1e40af;border-radius:20px;
    padding:2px 10px;font-size:.75em;font-weight:bold;white-space:nowrap}}
  h2 small{{color:#94a3b8;font-weight:normal;font-size:.7em}}
+ .qt{{border-collapse:collapse;margin-bottom:14px}}
+ .qt td,.qt th{{border:1px solid #e2e8f0;padding:4px 12px;text-align:left}}
+ .qt .num{{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}}
+ .vok,.vbad,.vna{{border-radius:20px;padding:2px 10px;font-size:.6em;
+   font-weight:bold;white-space:nowrap;vertical-align:middle}}
+ .vok{{background:#dcfce7;color:#166534}}
+ .vbad{{background:#fee2e2;color:#991b1b}}
+ .vna{{background:#e2e8f0;color:#475569}}
+ .paths{{color:#94a3b8;font-size:.8em;margin-top:8px;
+   font-family:ui-monospace,SFMono-Regular,Menlo,monospace}}
 </style></head><body>
 <header>
 <h1>🔀 Cross-dataset fusion</h1>
@@ -888,6 +1574,7 @@ def _write_fusion_html(out_dir: Path, fused: dict, figures: list) -> Optional[Pa
 </header>
 <div class="card"><h2>Reconciled interpretation</h2>
 <div class="narr">{_html.escape(str(fused.get("detailed_analysis", "")))}</div></div>
+{comp_html}
 <div class="card"><h2>{_claims_hdr}</h2><ol>{claims_html}</ol></div>
 {caveats_html}
 <div class="card"><h2>Source figures (one per dataset)</h2>{figs_html}</div>
@@ -947,7 +1634,13 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
     Reuses the HOLISTIC multi-modal synthesis template with the
     anti-spurious-correlation guard so "no correlation found" is a valid
     outcome. Reads each branch's findings from its ledger entry (summary +
-    key_findings). Records itself as a ``mode="fusion"`` ledger entry.
+    key_findings), plus a compact schema preview of the branch's on-disk
+    numerical results (#296 phase a — see ``_branch_numerics``). When the
+    fusion is gated and >= 2 branches carry numerics, also generates and
+    EXECUTES a reconciliation script over those tables (#296 phase b — see
+    ``_run_fusion_codegen``), grounding the synthesis in computed quantities;
+    the script and its outputs are persisted next to the report. Records
+    itself as a ``mode="fusion"`` ledger entry.
     """
     from ..exp_agents.instruct import HOLISTIC_EXPERIMENTAL_SYNTHESIS_INSTRUCTIONS
 
@@ -981,15 +1674,39 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
     _groups = {e.get("parallel_group") for e in ok}
     gated = (all(e.get("fanout") for e in ok)
              and len(_groups) == 1 and None not in _groups)
+    # The gate's join axis is the merge key for the numerics previews below —
+    # stamped on fan-out branch entries at launch; a re-gated ad-hoc set gets
+    # it from the fresh verdict instead.
+    join_axis = next((e.get("join_axis") for e in ok if e.get("join_axis")), None)
     ungated_warning = None
     if not gated:
         _paths = [e.get("data_path") for e in ok]
-        if all(_paths) and len(set(_paths)) >= 2:
+        if all(_paths):
+            # The re-gate descriptors must carry the same identity signals
+            # the launch gate gets (#326): id/task/label separate two
+            # same-directory pattern branches — path-only descriptors
+            # collapse them and read the set as redundant (found live on an
+            # incremental fusion over a shared upload directory).
             _verdict = assess_complementarity(
-                orch, [{"path": e.get("data_path"), "metadata": e.get("metadata")}
+                orch, [{"path": e.get("data_path"),
+                        "metadata": e.get("metadata"),
+                        "id": (f"{e.get('label') or 'delegation'}"
+                               f"#{e['index']}"),
+                        "task": (e.get("task") or "")[:400],
+                        "label": e.get("label"),
+                        "files": _resolve_branch_files(
+                            e.get("data_path"), e.get("pattern"))}
                        for e in ok])
             _v = (_verdict.get("verdict") or "").lower()
-            gated = _v == "complementary"
+            # A partial verdict gates this fusion only if the gate's pruned
+            # set covers EVERY entry being fused (the verdict describes the
+            # input; fanout_set is what it vouches for).
+            _ids = {f"{e.get('label') or 'delegation'}#{e['index']}"
+                    for e in ok}
+            gated = (_v == "complementary"
+                     or (_v == "partially_complementary"
+                         and _ids <= set(_verdict.get("fanout_set") or [])))
+            join_axis = join_axis or _verdict.get("join_axis")
             if not gated:
                 ungated_warning = (
                     f"These datasets were assessed NOT complementary (verdict: {_v}; "
@@ -1001,16 +1718,83 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
                 "not be verified as measuring the same system. Treat any "
                 "cross-dataset agreement as unverified and possibly spurious.")
 
+    # Independence provenance (#296 phase d + mesh policy): a branch whose
+    # numbers were touched by a companion — steering hint OR co-registered
+    # operand — is not a fully independent observation of that companion.
+    # The record is mechanical (never left to the LLM): stamped at launch,
+    # surfaced in the synthesis prompt, written into the report caveats.
+    informed = {(e.get("label") or f"delegation {e['index']}"): e["informed_by"]
+                for e in ok if e.get("informed_by")}
+    informed_via = {(e.get("label") or f"delegation {e['index']}"):
+                    (e.get("informed_via") or "steering")
+                    for e in ok if e.get("informed_by")}
+    independence_caveats = []
+    for lbl, srcs in informed.items():
+        via = informed_via.get(lbl, "steering")
+        if "steering" in via:
+            independence_caveats.append(
+                f"Branch '{lbl}' was steered at launch by a change-point "
+                f"hint from {srcs}; its agreement with those companion(s) "
+                "near the hinted value is partly by construction and must "
+                "not be counted as independent corroboration.")
+        if "co_registered_operands" in via:
+            independence_caveats.append(
+                f"Branch '{lbl}' received {srcs} as co-registered numerical "
+                "operand(s); overlapping results may be jointly computed — "
+                "treat cross-branch agreement there as one joint "
+                "measurement, not as two independent confirmations.")
+        if "fusion_feedback" in via:
+            independence_caveats.append(
+                f"Branch '{lbl}' was re-analyzed with feedback from a prior "
+                f"fusion of {srcs}; it has effectively seen its companions' "
+                "findings, so its agreement with them is partly by "
+                "construction and must not be counted as independent "
+                "corroboration.")
+
     blocks = []
+    branch_numerics: Dict[str, Any] = {}   # label -> numerics dict (audit trail)
     for e in ok:
         findings = e.get("key_findings") or []
         findings_str = "\n".join(f"- {k}" for k in findings) if findings else "- (none)"
-        blocks.append(
-            f"### Dataset: {e.get('label') or ('delegation ' + str(e['index']))} "
+        label = e.get("label") or f"delegation {e['index']}"
+        block = (
+            f"### Dataset: {label} "
             f"(delegation #{e['index']})\n"
             f"Summary:\n{e.get('summary', '') or '(none)'}\n\n"
             f"Key findings:\n{findings_str}"
         )
+        num = _branch_numerics(e, join_axis)
+        if num:
+            branch_numerics[label] = num
+            block += "\n\n" + _numerics_prompt_block(num)
+        blocks.append(block)
+
+    # Allocate the fusion output dir up front: the computed reconciliation
+    # (#296 phase b) persists its script + artifacts there before the
+    # synthesis call runs.
+    with orch._fanout_lock:
+        fusion_n = sum(1 for e in ledger if e.get("mode") == "fusion") + 1
+    out_dir = orch.fusion_dir / f"{fusion_n:02d}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Computed reconciliation (#296 phase b): generate + execute + persist a
+    # reconciliation script over the branch tables. Only behind the
+    # complementarity gate — an ungated fusion must not compute a correlation
+    # — and only when >= 2 branches actually carry numerics. Degrades to
+    # text+figure fusion (with a recorded warning) on any failure.
+    computed = None
+    if len(branch_numerics) >= 2:
+        if gated:
+            print("  🧮 Computing quantitative reconciliation "
+                  f"({len(branch_numerics)} branches with numerics)...")
+            computed = _run_fusion_codegen(orch, ok, branch_numerics,
+                                           join_axis, focus, out_dir)
+        else:
+            computed = {"status": "skipped", "attempts": 0,
+                        "warning": ("ungated fusion — computed reconciliation "
+                                    "not run (an unverified dataset pairing "
+                                    "must not have a correlation computed "
+                                    "over it).")}
 
     # One representative figure per branch — attached to the (multimodal) fusion
     # call so spatial correlations can be verified from the actual plots, not
@@ -1026,6 +1810,27 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
             figures.append((label, part["data"]))
             image_parts.append(f"\n[Figure — {label}]:")
             image_parts.append(part)
+    if computed and computed.get("figure_path"):
+        part = _load_figure_part(computed["figure_path"])
+        if part:
+            figures.append(("computed reconciliation", part["data"]))
+            image_parts.append("\n[Figure — computed reconciliation overlay]:")
+            image_parts.append(part)
+
+    # Verification verdict (#296 phase c) → one line for the synthesis: an
+    # accepted audit adds confidence; unresolved issues must be weighed.
+    _audit_note = ""
+    if computed and computed.get("status") == "success":
+        _v = computed.get("verification") or {}
+        _iss = "; ".join(_v.get("issues") or [])[:1200]
+        if _v.get("verdict") == "refine":
+            _audit_note = ("\n⚠️ A scientific audit of this computation "
+                           "flagged UNRESOLVED issues — weigh the flagged "
+                           "quantities against the branches' own trend values "
+                           f"and prefer the latter where they conflict: {_iss}\n")
+        elif _v.get("verdict") == "accept":
+            _audit_note = ("\nA scientific audit ACCEPTED this computation"
+                           + (f" (with notes: {_iss})" if _iss else "") + ".\n")
 
     prompt = (
         HOLISTIC_EXPERIMENTAL_SYNTHESIS_INSTRUCTIONS
@@ -1040,6 +1845,56 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
            "this text, labeled by dataset. Use them to verify spatial/visual "
            "correlations DIRECTLY rather than relying on the text descriptions "
            "alone.\n" if image_parts else "")
+        + (("\n\nNUMERICS: dataset blocks below include a schema preview of the "
+            "branch's on-disk numerical result tables (shape, column names, the "
+            "join-axis column's range) and the branch's own trend analysis. "
+            "Ground cross-dataset statements in these computed quantities, and "
+            "quote ONLY numbers that appear in a preview or a finding — the "
+            "full tables were NOT loaded, so never invent values beyond them."
+            + (f" Shared join axis from the complementarity gate: {join_axis}."
+               if join_axis else "")
+            + "\n") if branch_numerics else "")
+        + ((f"\n\nCOMPUTED RECONCILIATION (method: {computed.get('method')}): "
+            "a reconciliation script was generated and EXECUTED over the "
+            "branch tables; its output follows. These quantities are "
+            "COMPUTED, not transcribed — ground the cross-dataset synthesis "
+            "in them first, and where they conflict with numbers recalled in "
+            "prose, prefer the computed values. If a computed value looks "
+            "physically implausible, say so rather than adopting it.\n"
+            + json.dumps(computed.get("results"), indent=2, default=str)[:6000]
+            + _audit_note
+            + f"\n(script persisted at {computed.get('script_path')}; its "
+              "stdout summary:\n"
+            + (computed.get("stdout") or "")[:1500] + ")\n")
+           if computed and computed.get("status") == "success" else "")
+        + ((f"\n\n⚠️ COMPUTED RECONCILIATION UNAVAILABLE — "
+            f"{computed.get('warning')} Reconcile from the findings, "
+            "previews, and figures only; do not present any cross-dataset "
+            "number as computed.\n")
+           if computed and computed.get("status") != "success" else "")
+        + ((f"\n\nINDEPENDENCE PROVENANCE: these branches are NOT fully "
+            "independent of the listed companions "
+            f"(mode per branch: {json.dumps(informed_via)}): "
+            f"{json.dumps(informed)}. A STEERED branch saw its companion's "
+            "change-point hint — where its finding coincides with that "
+            "companion near the hinted value, the agreement is partly by "
+            "construction: discount it and say so. A branch that received "
+            "CO-REGISTERED OPERANDS may have computed results jointly with "
+            "them — treat agreement there as one joint measurement, not two "
+            "independent confirmations. A branch re-analyzed with FUSION "
+            "FEEDBACK has effectively seen ALL its companions' findings — "
+            "the same discount applies. Branch pairs NOT listed here are "
+            "independent, and their agreement carries full weight.\n")
+           if informed else "")
+        + ("\n\nBRANCH RE-ANALYSIS: if some branch's OWN analysis appears "
+           "flawed in a way a re-analysis could fix (wrong model order, a "
+           "poorly chosen order parameter, a companion-indicated feature it "
+           "never tested), add a JSON key `branch_reanalysis`: a list of "
+           "{\"label\", \"reason\", \"suggestion\"} objects naming the "
+           "dataset label, the flaw, and a concrete re-analysis instruction. "
+           "Use it ONLY for branch-level flaws (not for issues in this "
+           "fusion's own computation), and omit the key when no re-analysis "
+           "is warranted.\n")
         + "\n\n--- PER-DATASET FINDINGS TO RECONCILE ---\n\n"
         + "\n\n".join(blocks)
     )
@@ -1051,6 +1906,19 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
     if not parsed or "detailed_analysis" not in parsed:
         return json.dumps({"status": "error",
                            "message": "Fusion synthesis did not return a usable result."})
+
+    # Branch re-analysis suggestions (structured, so a caller/meta can act):
+    # rendered as followups that carry the provenance instruction — a re-run
+    # citing this fusion in context_from gets informed_via=fusion_feedback
+    # stamped and the next fusion discounts it.
+    reanalysis = [r for r in (parsed.get("branch_reanalysis") or [])
+                  if isinstance(r, dict) and r.get("label")]
+    reanalysis_followups = [
+        (f"Re-analyze '{r.get('label')}': {str(r.get('reason', '')).strip()} — "
+         f"{str(r.get('suggestion', '')).strip()} (When re-delegating, cite "
+         "this fusion's delegation index in context_from so the independence "
+         "provenance is stamped; the guidance is additive-only.)")
+        for r in reanalysis]
 
     # Joint-analysis novelty: assess the FUSED claims once (the branches were
     # told to skip per-branch novelty). No-op without a literature backend.
@@ -1073,10 +1941,6 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
 
     # Persist the fused report + record a fusion ledger entry.
     from datetime import datetime
-    with orch._fanout_lock:
-        fusion_n = sum(1 for e in ledger if e.get("mode") == "fusion") + 1
-    out_dir = orch.fusion_dir / f"{fusion_n:02d}"
-    out_dir.mkdir(parents=True, exist_ok=True)
     report_path = out_dir / "fusion_report.json"
     fused = {
         "fused_from": [e["index"] for e in ok],
@@ -1084,11 +1948,19 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
         "focus": focus,
         "complementarity_gated": gated,
         "complementarity_warning": ungated_warning,
+        "join_axis": join_axis,
+        "branch_numerics": branch_numerics or None,
+        "computed_reconciliation": computed,
+        "independence": informed or None,
+        "branch_reanalysis": reanalysis or None,
         "detailed_analysis": (
             (f"⚠️ UNGATED FUSION — {ungated_warning}\n\n" if ungated_warning else "")
             + parsed.get("detailed_analysis", "")),
         "scientific_claims": parsed.get("scientific_claims", []),
         "caveats": (([ungated_warning] if ungated_warning else [])
+                    + ([computed["warning"]]
+                       if computed and computed.get("warning") else [])
+                    + independence_caveats
                     + (parsed.get("caveats", []) or [])),
         "novelty": novelty,
     }
@@ -1101,6 +1973,10 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
     # Human-facing HTML report: narrative + claims + the per-dataset figures.
     html_path = _write_fusion_html(out_dir, fused, figures)
     produced = [str(report_path)] + ([str(html_path)] if html_path else [])
+    if computed:
+        produced += [p for p in (computed.get("script_path"),
+                                 computed.get("numerics_path"),
+                                 computed.get("figure_path")) if p]
 
     with orch._fanout_lock:
         orch._delegation_ledger.append({
@@ -1109,12 +1985,17 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
             "mode": "fusion",
             "task": f"Fuse delegations {[e['index'] for e in ok]}",
             "label": "cross-dataset fusion",
+            # The fused branch labels: _open_delegation reads these to stamp
+            # informed_via=fusion_feedback on a re-analysis that cites this
+            # fusion in context_from.
+            "labels": [e.get("label") for e in ok],
             "context_from": [e["index"] for e in ok],
             "status": "success",
             "summary": fused["detailed_analysis"],
             "key_findings": [c.get("claim", "") for c in parsed.get("scientific_claims", [])
                              if isinstance(c, dict)],
             "files_produced": produced,
+            "suggested_followups": reanalysis_followups,
             "warnings": ([ungated_warning] if ungated_warning else []),
             "error": None,
         })
@@ -1124,6 +2005,12 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
         "fused_from": [e["index"] for e in ok],
         "complementarity_gated": gated,
         "complementarity_warning": ungated_warning,
+        "join_axis": join_axis,
+        "numerics_branches": len(branch_numerics),
+        "computed_reconciliation": computed,
+        "independence": informed or None,
+        "branch_reanalysis": reanalysis or None,
+        "suggested_followups": reanalysis_followups,
         "figures_used": len(figures),
         "detailed_analysis": fused["detailed_analysis"],
         "scientific_claims": fused["scientific_claims"],

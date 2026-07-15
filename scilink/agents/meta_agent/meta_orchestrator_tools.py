@@ -285,9 +285,13 @@ class MetaOrchestratorTools:
         # -- delegate_to_analysis -------------------------------------------
         def delegate_to_analysis(task: str, context: dict = None,
                                  context_from: list = None,
-                                 label: str = None) -> str:
+                                 label: str = None,
+                                 data_path: str = None,
+                                 metadata: str = None) -> str:
             print("  " + _handoff(f"🧪 Delegating to analysis specialist: {_task_summary(task)}"))
-            return self.orch._delegate("analysis", task, context, context_from, label)
+            return self.orch._delegate("analysis", task, context, context_from,
+                                       label, data_path=data_path,
+                                       metadata=metadata)
 
         self._register_tool(
             func=delegate_to_analysis,
@@ -349,6 +353,26 @@ class MetaOrchestratorTools:
                         "analyzed (e.g. '1-D Raman spectra', 'STEM image', "
                         "'hyperspectral datacube'). NOT a sentence or a "
                         "restatement of the task."
+                    ),
+                },
+                "data_path": {
+                    "type": "string",
+                    "description": (
+                        "Absolute path of THIS delegation's primary dataset "
+                        "(also stated in `task`). ALWAYS provide it when the "
+                        "task analyzes a dataset: it lets a later "
+                        "`fuse_delegations` that mixes this delegation with "
+                        "others re-run the complementarity gate — without it "
+                        "an incremental fusion demotes to ungated (no "
+                        "computed reconciliation)."
+                    ),
+                },
+                "metadata": {
+                    "type": "string",
+                    "description": (
+                        "Optional: metadata JSON path or short inline "
+                        "description of the dataset (feeds a later fusion's "
+                        "complementarity re-gate)."
                     ),
                 },
             },
@@ -460,8 +484,12 @@ class MetaOrchestratorTools:
             name="delegate_to_analyses",
             description=(
                 "Run SEVERAL analysis branches CONCURRENTLY over complementary "
-                "datasets, each branch seeing the others as auxiliary operands "
-                "(full mesh), then fuse with `fuse_delegations`. Use this — NOT "
+                "datasets, then fuse with `fuse_delegations`. Branches run "
+                "INDEPENDENTLY by default (fusion reconciles their reduced "
+                "results — independence is what makes cross-dataset agreement "
+                "meaningful); a CO-REGISTERED set (gate join_type) additionally "
+                "wires the companions in as auxiliary operands, and a branch "
+                "may opt into a steering hint via `steer`. Use this — NOT "
                 "repeated `delegate_to_analysis` — when the user has 2+ datasets "
                 "that are complementary measurements of ONE system and you want "
                 "each analysis informed by the others plus a final cross-dataset "
@@ -512,6 +540,19 @@ class MetaOrchestratorTools:
                                          "description": "Optional: path to a metadata JSON "
                                                         "or inline description (also feeds "
                                                         "the complementarity gate)."},
+                            "steer": {"type": "boolean",
+                                      "description": "Explicit opt-in (default false): give "
+                                                     "THIS branch a change-point hint from "
+                                                     "each companion SERIES (cheap "
+                                                     "unsupervised reduction) as an "
+                                                     "additive-only hypothesis — useful when "
+                                                     "the branch risks fitting the wrong "
+                                                     "model order. TRADE: steering spends "
+                                                     "the branch's independence; fusion is "
+                                                     "told (informed_by) and discounts its "
+                                                     "agreement with the steering companion "
+                                                     "as partly by construction. Opt in only "
+                                                     "when guidance is worth that cost."},
                         },
                         "required": ["data_path", "task", "label"],
                     },
