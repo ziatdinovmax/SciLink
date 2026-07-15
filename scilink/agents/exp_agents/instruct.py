@@ -1274,6 +1274,14 @@ Depending on the analysis method used in the current iteration, you will receive
    * *Tip:* The custom code sandbox provides `lmfit` in addition to `numpy`/`scipy`/`sklearn`. Use `lmfit` for multi-peak or complex fitting scenarios — it offers built-in models (GaussianModel, LorentzianModel, VoigtModel), parameter constraints, and composite models via the `+` operator. For simple single-peak fits on large datasets, raw `curve_fit` is faster due to lower per-pixel overhead.
    * *SIZE GUARD — scale every target to the pixel count:* the sandbox is single-process, so a per-pixel iterative fit (~2-5 ms each) over a full frame costs ~4-40 minutes per 100k pixels and can exceed the execution timeout. State in the target's description WHICH pixels the fit touches. Above ~50k pixels, the target must specify a reduction: restrict fitting to the scientifically relevant mask/region, or go coarse-to-fine (fit a spatially binned map first, refine only where structure appears), or use a vectorized/linearized estimator instead of per-pixel iterative fits.
 
+4. **LARGE-DATA GATE — decomposition-first staging (above ~50k pixels):**
+   Commit each decision to ONE of four verdicts, using the decomposition evidence in front of you:
+   * **fit-within-dilated-mask** — the signal of interest is spatially LOCALIZED in a component's abundance map: set `"fit_scope": "component_mask"` and `"mask_component_index": <0-based component index>` on the target. The pipeline builds the mask from that component's high-abundance region WITH a dilation halo (mask-boundary physics lives at the edges) and scopes the generated code to it.
+   * **fit-global-then-decide** — a WEAK feature may be present everywhere (uniform signals give decomposition no spatial contrast to separate): describe a target whose code fits the MEAN spectrum first (one cheap fit) and maps per-pixel only where that detection justifies it.
+   * **fit-everywhere** — only when the objective genuinely needs full-frame per-pixel parameters; then apply the size-guard tactics (vectorize, coarse-to-fine).
+   * **decomposition-only (STOP)** — permitted ONLY when the components are clean AND the residuals are unstructured AND the objective names no per-pixel quantity. A STRUCTURED residual (derivative shapes, coherent spatial patterns, high residual autocorrelation) is the signature of continuous parameter variation or a weak everywhere-signal — physics decomposition CANNOT model — and mandates a fitting target even when every component looks clean.
+   The gate is ASYMMETRIC: use decomposition evidence freely to ADD scope (nominate a component, a mask, a global-first plan), but RESTRICT scope or STOP only under the residual-certified conditions above. A user objective explicitly requesting per-pixel quantities ALWAYS overrides the gate.
+
 ---
 
 **Output Format:**
@@ -1282,6 +1290,7 @@ You MUST output a valid JSON object.
 **STRICT TYPE RULES:**
 * All refinement targets have `"type": "custom_code"`.
 * For `custom_code` targets: `value = null` (the description field is what matters).
+* Optional scoping fields on a `custom_code` target (the LARGE-DATA GATE): `"fit_scope"`: `"full_frame"` (default) or `"component_mask"`; when `"component_mask"`, also set `"mask_component_index"` (0-based index of the decomposition component whose high-abundance region defines the fitting mask).
 * Targets of other types (e.g. legacy `"spatial"` or `"spectral"`) are NOT supported and will be ignored by the downstream pipeline. Do not emit them.
 
 **Required outputs (objective-aware QC enforcement):**

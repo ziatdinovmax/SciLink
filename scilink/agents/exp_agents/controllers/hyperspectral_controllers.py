@@ -531,6 +531,7 @@ def build_code_generation_prompt(
     skill_implementation: str | None = None,
     reconstruction_available: bool = False,
     auxiliary_operands: dict | None = None,
+    fit_mask_pixels: tuple | None = None,
 ) -> str:
     skill_section = ""
     if skill_implementation:
@@ -586,7 +587,24 @@ Prioritize this guidance in your analysis, but also capture any other significan
         _sig_extra.append("reconstruction=None")
     if auxiliary_operands:
         _sig_extra.append("auxiliary=None")
+    if fit_mask_pixels:
+        _sig_extra.append("fit_mask=None")
     signature = "analyze_feature(data, axis" + "".join(f", {p}" for p in _sig_extra) + ")"
+
+    fit_mask_section = ""
+    if fit_mask_pixels:
+        _n_true, _n_total, _comp = fit_mask_pixels
+        fit_mask_section = f"""
+
+### FIT MASK — MANDATORY SCOPE (`fit_mask`)
+Your function is handed `fit_mask`: a boolean ({h}, {w}) array marking the
+{_n_true} pixels ({_n_true / max(_n_total, 1):.1%} of the frame) your fit is
+scoped to — the dilated high-abundance region of decomposition component
+{_comp}. This is the LARGE-DATA GATE: fit ONLY where `fit_mask` is True
+(e.g. iterate over `np.argwhere(fit_mask)` or index with `data[fit_mask]`),
+and fill every returned map with `np.nan` outside the mask. Do NOT fit the
+full frame — that is exactly the cost this mask exists to avoid.
+"""
 
     auxiliary_section = ""
     if auxiliary_operands:
@@ -683,7 +701,7 @@ This is the RAW cube — no smoothing/clipping/despiking has been applied for yo
 noise/spike/negative handling you judge necessary for a stable per-pixel fit —
 the goal is fittable spectra — but do NOT erase the feature you are measuring.
 If performing derivative-based operations (like `find_peaks` or `curve_fit`) on noisy data, apply appropriate smoothing to ensure convergence.
-{reconstruction_section}{auxiliary_section}{hints_section}
+{reconstruction_section}{auxiliary_section}{fit_mask_section}{hints_section}
 ### REQUIRED RETURN FORMAT
 {{
     "maps": {{
@@ -717,24 +735,76 @@ def _sanitize_filename(text: str) -> str:
     return safe_text
 
 
-def _invoke_analyze_feature(func, data, axis, reconstruction=None, *, auxiliary=None):
-    """Call the generated ``analyze_feature``, passing the optional operands
-    (``reconstruction``, ``auxiliary``) only when the function declares them.
+def _build_fit_mask(abundance_maps, comp_idx, shape, logger,
+                    dilate_frac: float = 0.04):
+    """Build a DILATED fitting mask from one component's abundance map
+    (#359 fit_scope="component_mask").
 
-    Both are *options*, not a contract: a function that keeps the legacy
+    Threshold at HALF-MAX of the abundance range, then binary-
+    dilate by ~``dilate_frac`` of the smaller spatial dimension (min 3 px)
+    so mask-boundary physics (interfaces, transition zones) stays inside
+    the fitted region. Returns a bool (h, w) array, or None when the maps /
+    index are unusable (the caller falls back to full-frame)."""
+    try:
+        if abundance_maps is None or comp_idx is None:
+            return None
+        maps = np.asarray(abundance_maps)
+        idx = int(comp_idx)
+        if maps.ndim != 3 or not (0 <= idx < maps.shape[0]):
+            return None
+        amap = maps[idx]
+        if amap.shape != tuple(shape):
+            return None
+        amap = np.asarray(amap, float)
+        lo, hi = float(np.nanmin(amap)), float(np.nanmax(amap))
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+            return None
+        # Half-max threshold: the mask tracks the component's actual
+        # footprint rather than a fixed fraction of the frame.
+        mask = amap >= (lo + 0.5 * (hi - lo))
+        if not mask.any() or mask.all():
+            return None
+        from scipy.ndimage import binary_dilation
+        n_iter = max(3, int(dilate_frac * min(shape)))
+        mask = binary_dilation(mask, iterations=n_iter)
+        if mask.mean() > 0.5:
+            # The component covers most of the frame — masking buys nothing;
+            # fall back to full-frame.
+            return None
+        logger.info(
+            f"    Fit mask from component {idx}: half-max abundance "
+            f"threshold + {n_iter}px dilation -> {int(mask.sum())} of "
+            f"{mask.size} pixels ({mask.mean():.1%}).")
+        return mask
+    except Exception as e:  # noqa: BLE001 - mask is an optimization, never fatal
+        logger.warning(f"    Fit-mask construction failed: {e}")
+        return None
+
+
+def _invoke_analyze_feature(func, data, axis, reconstruction=None, *,
+                            auxiliary=None, fit_mask=None):
+    """Call the generated ``analyze_feature``, passing the optional operands
+    (``reconstruction``, ``auxiliary``, ``fit_mask``) only when the function
+    declares them.
+
+    All are *options*, not a contract: a function that keeps the legacy
     two-argument signature is valid and simply fits the raw ``data`` (issue
-    #219 for ``reconstruction``; #226 for ``auxiliary``). We never force an
-    extra argument on a function that doesn't accept it — that would raise
-    ``TypeError`` and break a perfectly good fit.
+    #219 for ``reconstruction``; #226 for ``auxiliary``; #359 for
+    ``fit_mask``). We never force an extra argument on a function that
+    doesn't accept it — that would raise ``TypeError`` and break a
+    perfectly good fit.
 
     ``auxiliary`` is a ``{label: array}`` dict of shape-aligned companion
     operands (e.g. a reference spectrum to divide by); passed by keyword only.
+    ``fit_mask`` is a bool (h, w) array scoping the per-pixel fit.
     """
     optional = {}
     if reconstruction is not None:
         optional["reconstruction"] = reconstruction
     if auxiliary:  # non-empty dict
         optional["auxiliary"] = auxiliary
+    if fit_mask is not None:
+        optional["fit_mask"] = fit_mask
     if not optional:
         return func(data, axis)
 
@@ -1619,6 +1689,21 @@ class SelectRefinementTargetController:
         prompt_parts = [self.instructions]
         prompt_parts.append(f"\n\n--- Current Analysis: {state.get('iteration_title', 'Analysis')} ---")
 
+        # Data size for the LARGE-DATA GATE (#359): the gate's verdicts
+        # (masked fit / global-first / decomposition-only) apply above
+        # ~50k pixels; below that the decision is unconstrained.
+        try:
+            _h, _w, _e = state["hspy_data"].shape
+            prompt_parts.append(
+                f"\n\nDATA SIZE: {_h}x{_w} = {_h * _w} pixels x {_e} bands"
+                + (" — the LARGE-DATA GATE applies: commit each decision to "
+                   "one of its four verdicts."
+                   if _h * _w > 50_000 else
+                   " — small data; the LARGE-DATA GATE does not constrain "
+                   "this decision."))
+        except Exception:  # noqa: BLE001 - size line is advisory
+            pass
+
         if skip_mode:
             prompt_parts.append("""
 
@@ -2344,6 +2429,20 @@ class RunDynamicAnalysisController:
             else:
                 self.logger.info(f"👉 Task {i}/{len(custom_targets)}: {target_desc}")
 
+            # LARGE-DATA GATE (#359): a target may scope its fit to the
+            # dilated high-abundance region of a decomposition component.
+            # A failed mask construction falls back to full-frame (logged) —
+            # the mask is an optimization, never a gate on correctness.
+            fit_mask = None
+            if str(target.get("fit_scope") or "full_frame") == "component_mask":
+                fit_mask = _build_fit_mask(
+                    state.get("final_abundance_maps"),
+                    target.get("mask_component_index"), (h, w), self.logger)
+                if fit_mask is None:
+                    self.logger.warning(
+                        "    fit_scope=component_mask requested but no usable "
+                        "abundance mask — falling back to full_frame.")
+
             # 1. Define Prompt for this specific task
             base_prompt = build_code_generation_prompt(
                 target_desc=target_desc,
@@ -2362,6 +2461,9 @@ class RunDynamicAnalysisController:
                 skill_implementation=_render_skill_block(state, "implementation"),
                 reconstruction_available=reconstruction is not None,
                 auxiliary_operands={k: v.shape for k, v in auxiliary_operands.items()},
+                fit_mask_pixels=((int(fit_mask.sum()), int(fit_mask.size),
+                                  int(target.get("mask_component_index")))
+                                 if fit_mask is not None else None),
             )
 
             # Registered tools from the _shared registry (this agent + active
@@ -2453,6 +2555,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 "optimal_data": optimal_data,
                 "reconstruction": reconstruction,
                 "auxiliary_operands": auxiliary_operands,
+                "fit_mask": fit_mask,
                 "processing_note": processing_note,
                 "all_valid_maps": all_valid_maps,
                 "all_valid_meta": all_valid_meta,
@@ -2704,6 +2807,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
         optimal_data = ctx.session["optimal_data"]
         reconstruction = ctx.session["reconstruction"]
         auxiliary_operands = ctx.session["auxiliary_operands"]
+        fit_mask = ctx.session.get("fit_mask")
         processing_note = ctx.session["processing_note"]
         retries = ctx.retries
 
@@ -2760,7 +2864,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 func = local_scope["analyze_feature"]
                 result_dict = _invoke_analyze_feature(
                     func, optimal_data, state["energy_axis"], reconstruction,
-                    auxiliary=auxiliary_operands,
+                    auxiliary=auxiliary_operands, fit_mask=fit_mask,
                 )
 
             # Validation
@@ -2844,6 +2948,14 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                             f"{float(np.nanmean(result_map)):.4g} {current_unit}; "
                             f"valid coverage {_cov:.1f}% "
                             f"({int(_real.sum())} of {result_map.size} pixels finite & non-zero)")
+                        if fit_mask is not None:
+                            summary += (
+                                f" NOTE: the fit was SCOPED to a "
+                                f"{int(fit_mask.sum())}-pixel mask "
+                                f"({fit_mask.mean():.1%} of the frame; "
+                                "large-data gate) — NaN outside the masked "
+                                "region is BY DESIGN, so judge coverage and "
+                                "structure WITHIN the mask only.")
                         if ctx.session.get("flux_table"):
                             summary += "\n\n" + ctx.session["flux_table"]
                         tool_descriptions = _used_tool_descriptions(state, code_str)
@@ -2862,8 +2974,14 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                         # Diagnostic (non-required) map: lighter single
                         # visual QC — no method/physics gate needed.
                         self.logger.info(f"    👀 Performing Visual QC on {feature_name}...")
+                        _mask_note = (
+                            "" if fit_mask is None else
+                            f" [fit scoped to a {int(fit_mask.sum())}-pixel "
+                            "mask; NaN outside it is by design — judge "
+                            "within the mask only]")
                         is_valid, critique = self._check_result_visually(
-                            dashboard_bytes, f"{target_desc} ({feature_name})")
+                            dashboard_bytes,
+                            f"{target_desc} ({feature_name}){_mask_note}")
 
                     if is_valid:
                         # STAGE DATA (Do not commit to state yet)
