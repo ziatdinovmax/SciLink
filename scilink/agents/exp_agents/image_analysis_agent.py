@@ -248,6 +248,11 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         literature_file: Optional[str] = None,
         # Quality control overrides
         outlier_sigma: Optional[float] = None,
+        # Per-call thoroughness override (fast/in-situ vs thorough).
+        # 0 => accept a successful initial analysis with no LLM
+        # verification loop; higher => more refinement passes. None
+        # falls back to the construction default.
+        max_verification_iterations: Optional[int] = None,
         # Number of independent anchor-analysis attempts run in parallel;
         # an LLM judge compares finished attempts (scores + visualizations)
         # and locks the winner. Default 1 = no fan-out.
@@ -300,6 +305,11 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 generator so generated scripts can load prior outputs via
                 absolute path.
             outlier_sigma: Override default outlier sigma
+            max_verification_iterations: Per-call override of the LLM
+                verification budget. 0 accepts a successful initial
+                analysis with no verification loop (fast/in-situ); a
+                failed initial analysis still enters the recovery path.
+                None uses the construction default.
             n_candidates: Number of independent anchor-analysis attempts run
                 in parallel (clamped to 1-8). Each anchor (single image, or
                 first image of each series regime) is analyzed N times with
@@ -323,6 +333,11 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         effective_outlier_sigma = (
             outlier_sigma if outlier_sigma is not None else self.outlier_sigma
         )
+        effective_max_verification = (
+            max_verification_iterations if max_verification_iterations is not None
+            else self.max_verification_iterations)
+        if effective_max_verification < 0:
+            raise ValueError("max_verification_iterations must be >= 0")
         try:
             n_candidates = max(1, min(int(n_candidates or 1), 8))
         except (TypeError, ValueError):
@@ -557,7 +572,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             literature_agent=self.literature_agent,
             enable_human_feedback=self.enable_human_feedback,
             outlier_sigma=effective_outlier_sigma,
-            max_verification_iterations=self.max_verification_iterations,
+            max_verification_iterations=effective_max_verification,
             num_plan_candidates=self.num_plan_candidates,
         )
 
@@ -621,6 +636,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             num_images=num_images, is_single_image=is_single_image,
             first_image_name=first_image_name,
             effective_outlier_sigma=effective_outlier_sigma,
+            effective_max_verification=effective_max_verification,
         )
 
         if self.analysis_depth == "auto" and tier1_results["status"] == "success":
@@ -1206,6 +1222,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         image_paths, image_stack, input_type,
         num_images, is_single_image, first_image_name,
         effective_outlier_sigma,
+        effective_max_verification=None,
         tier2_decision=None,
     ) -> Optional[dict]:
         """Run Tier 2 pipeline and return compiled results, or None on failure."""
@@ -1271,7 +1288,10 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             literature_agent=self.literature_agent,
             enable_human_feedback=self.enable_human_feedback,
             outlier_sigma=effective_outlier_sigma,
-            max_verification_iterations=self.max_verification_iterations,
+            max_verification_iterations=(
+                effective_max_verification
+                if effective_max_verification is not None
+                else self.max_verification_iterations),
             num_plan_candidates=self.num_plan_candidates,
         )
 

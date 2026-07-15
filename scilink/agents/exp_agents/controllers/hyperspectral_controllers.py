@@ -2277,12 +2277,18 @@ class RunDynamicAnalysisController:
     def max_verification_iterations(self) -> int:
         """Engine loop budget: initial attempt + N refits, the last verdict
         checked by the for/else final pass == ``MAX_RETRIES`` total attempts,
-        exactly the pre-port while-loop budget."""
+        exactly the pre-port while-loop budget. A caller override (#271,
+        constructor or per-run via ``state``) replaces the retry count:
+        0 => single attempt, accepted via qc_verification_bypass when the
+        task succeeds, salvage path otherwise."""
+        if self._max_verification_override is not None:
+            return max(int(self._max_verification_override), 0)
         return self.MAX_RETRIES - 1
 
     def __init__(self, model, logger, generation_config, safety_settings, parse_fn,
                  executor_timeout: int = 600,
-                 qc_time_budget_s: float = 1800.0):
+                 qc_time_budget_s: float = 1800.0,
+                 max_verification_iterations: int = None):
         self.model = model
         self.logger = logger
         self.generation_config = generation_config
@@ -2298,9 +2304,22 @@ class RunDynamicAnalysisController:
         # loop; falsy disables. Hyperspectral is the only host that sets
         # this — curve/image behavior is byte-identical.
         self.qc_time_budget_s = qc_time_budget_s
+        # Caller override of the retry budget (#271). Construction-level
+        # default; execute() refreshes it per run from state (the agent's
+        # per-call analyze() override), so a pipeline built once at agent
+        # construction still honors per-call fast mode. None = MAX_RETRIES-1.
+        self._ctor_max_verification = max_verification_iterations
+        self._max_verification_override = max_verification_iterations
         self._parse_llm_response = parse_fn
 
     def execute(self, state: dict) -> dict:
+        # Per-run retry-budget override (#271): the agent's analyze() stamps
+        # its effective value into state; absent, fall back to the
+        # construction-level override (which may itself be None = default).
+        _mvi = state.get("max_verification_iterations")
+        self._max_verification_override = (
+            _mvi if _mvi is not None else self._ctor_max_verification)
+
         decision = state.get("refinement_decision", {})
         targets = decision.get("targets", [])
         
@@ -2649,6 +2668,18 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
         pass  # unreachable: attempts always succeed at the engine level
 
     def qc_verification_bypass(self, ctx: QCItemContext) -> bool:
+        if (self.max_verification_iterations <= 0
+                and ctx.best_result and ctx.best_result.get("task_success")):
+            # Explicit retry bypass (max_verification_iterations=0, #271):
+            # single attempt, accepted as-is when the task succeeded. A
+            # failed attempt (task_success False) returns False here and —
+            # with a zero-length engine loop — falls straight through to
+            # qc_fallback's salvage path rather than locking garbage.
+            self.logger.info(
+                "    ⏩ Retries bypassed (max_verification_iterations=0); "
+                "accepting the single successful attempt")
+            ctx.approved = True
+            return True
         return False
 
     def qc_log_skip_verification(self, ctx: QCItemContext) -> None:
@@ -2716,7 +2747,9 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
         code_str = ctx.last_code
         mean_spec_bytes = ctx.mean_spec_bytes
 
-        self.logger.error(f"    ⚠️ Task {ctx.target_index} failed after {self.MAX_RETRIES} attempts.")
+        self.logger.error(
+            f"    ⚠️ Task {ctx.target_index} failed after "
+            f"{self.max_verification_iterations + 1} attempt(s).")
         # Salvage the strongest attempt rather than discarding all work:
         # commit its passing maps so a recoverable output survives an
         # unsatisfiable required one. The required-output failure is still

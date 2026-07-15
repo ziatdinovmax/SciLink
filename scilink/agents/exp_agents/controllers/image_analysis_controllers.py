@@ -3458,8 +3458,25 @@ Return JSON with:
             ctx.best_config = ctx.state.get("locked_analysis_config", {}).copy()
 
     def qc_verification_bypass(self, ctx: QCItemContext) -> bool:
-        # No verification bypass on the image side (curve-only fast/in-situ
-        # path) — deliberate asymmetry, preserved.
+        if (ctx.is_anchor and self.max_verification_iterations <= 0
+                and ctx.best_result and ctx.best_result.get("success")):
+            # Explicit verification bypass (max_verification_iterations=0):
+            # the caller asked for a fast / in-situ turnaround (#271).
+            # Accept the successful initial analysis as-is, with no LLM
+            # verification or refinement loop. Only triggers at <= 0, so
+            # the default thorough path (>= 1) is unaffected. A failed
+            # initial analysis (no success) still falls through to the
+            # loop below for the recovery path rather than locking garbage.
+            self.logger.info(
+                "   ⏩ Verification bypassed (max_verification_iterations=0); "
+                "accepting initial analysis without LLM verification")
+            ctx.approved = True
+            # The initial score is provisional (0.0 — verification is
+            # authoritative, and none ran), so qc_post_verification's
+            # accept gate would reject it. Flag the bypass so it returns
+            # the result directly.
+            ctx._verification_bypassed = True
+            return True
         return False
 
     def qc_log_skip_verification(self, ctx: QCItemContext) -> None:
@@ -3710,6 +3727,24 @@ Return JSON with:
         # Judge is only called after all alternatives are exhausted.
 
     def qc_post_verification(self, ctx: QCItemContext) -> Optional[dict]:
+        # --- Explicit fast-path bypass (#271) ---
+        # The initial score is provisional (0.0) when no verification ran,
+        # so the accept gate below cannot pass it; return the accepted
+        # result directly. Narrowly scoped to the bypass flag — a normal
+        # loop-approved result still goes through the gate + the CO_PILOT
+        # human-feedback prompt below.
+        if getattr(ctx, "_verification_bypassed", False):
+            quality_history = self._build_quality_history(
+                ctx.best_score, ctx.quality_threshold, ctx.all_attempts,
+                ctx.verification_history, ctx.judge_result,
+                ctx.best_result.get("script_errors"),
+            )
+            quality_history["approved"] = True
+            quality_history["approved_by"] = "bypass"
+            ctx.best_result["quality_history"] = quality_history
+            self._stamp_hot_deviation(ctx.best_result)
+            return ctx.best_result
+
         # --- Check if quality is acceptable ---
         if ctx.accept_gate.is_accept(ctx.best_score):
             self.logger.info(

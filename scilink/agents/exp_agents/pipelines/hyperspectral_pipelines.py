@@ -28,6 +28,7 @@ def create_hyperspectral_iteration_pipeline(
     preprocessor: HyperspectralPreprocessingAgent,
     parse_fn: Callable,
     executor_timeout: int = 600,
+    max_verification_iterations: int = None,
 ) -> List:
     """
     Assembles the pipeline that runs *per-iteration* of the recursive analysis.
@@ -74,6 +75,7 @@ def create_hyperspectral_iteration_pipeline(
     pipeline.append(RunDynamicAnalysisController(
         model, logger, generation_config, safety_settings, parse_fn,
         executor_timeout=executor_timeout,
+        max_verification_iterations=max_verification_iterations,
     ))
 
     logger.info(f"Hyperspectral iteration pipeline created with {len(pipeline)} steps.")
