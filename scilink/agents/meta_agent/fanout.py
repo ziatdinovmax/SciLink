@@ -1681,12 +1681,31 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
     ungated_warning = None
     if not gated:
         _paths = [e.get("data_path") for e in ok]
-        if all(_paths) and len(set(_paths)) >= 2:
+        if all(_paths):
+            # The re-gate descriptors must carry the same identity signals
+            # the launch gate gets (#326): id/task/label separate two
+            # same-directory pattern branches — path-only descriptors
+            # collapse them and read the set as redundant (found live on an
+            # incremental fusion over a shared upload directory).
             _verdict = assess_complementarity(
-                orch, [{"path": e.get("data_path"), "metadata": e.get("metadata")}
+                orch, [{"path": e.get("data_path"),
+                        "metadata": e.get("metadata"),
+                        "id": (f"{e.get('label') or 'delegation'}"
+                               f"#{e['index']}"),
+                        "task": (e.get("task") or "")[:400],
+                        "label": e.get("label"),
+                        "files": _resolve_branch_files(
+                            e.get("data_path"), e.get("pattern"))}
                        for e in ok])
             _v = (_verdict.get("verdict") or "").lower()
-            gated = _v == "complementary"
+            # A partial verdict gates this fusion only if the gate's pruned
+            # set covers EVERY entry being fused (the verdict describes the
+            # input; fanout_set is what it vouches for).
+            _ids = {f"{e.get('label') or 'delegation'}#{e['index']}"
+                    for e in ok}
+            gated = (_v == "complementary"
+                     or (_v == "partially_complementary"
+                         and _ids <= set(_verdict.get("fanout_set") or [])))
             join_axis = join_axis or _verdict.get("join_axis")
             if not gated:
                 ungated_warning = (

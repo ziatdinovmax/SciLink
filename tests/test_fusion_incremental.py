@@ -185,6 +185,76 @@ def main():
     check("no informed_by", not entry.get("informed_by"))
     check("no note appended", "ADDITIVE-ONLY" not in sent_task)
 
+    # 6) Same-directory pattern branches + a late dataset: the RE-GATE must
+    #    carry branch identity (id/task/files) — path-only descriptors
+    #    collapse same-dir branches into "redundant" (found live; the #326
+    #    lesson resurfacing in the re-gate path).
+    from test_fanout_steering import _write_series
+    d = tempfile.mkdtemp()
+    ag = MetaOrchestratorAgent(base_dir=d, api_key="sk-dummy",
+                               model_name="claude-opus-4-6",
+                               meta_mode=MetaMode.AUTONOMOUS)
+    up = os.path.join(d, "uploads"); os.makedirs(up)
+    pat_a = _write_series(up, "techA")
+    pat_b = _write_series(up, "techB")
+    C = os.path.join(d, "late.npy"); np.save(C, np.zeros((8, 8)))
+    GATE_PROMPTS.clear(); FUSION_PROMPTS.clear(); REANALYSIS_REPLY.clear()
+    _install_fake_child()
+    _install_fake_llm([f"{up}#1", f"{up}#2"])
+    ag._complementarity_cache.clear()
+    out = json.loads(ag._run_fanout([
+        {"data_path": up, "pattern": pat_a, "label": "techA series",
+         "task": "Analyze the techA series."},
+        {"data_path": up, "pattern": pat_b, "label": "techB series",
+         "task": "Analyze the techB series."},
+    ]))
+    assert out.get("branches_run") == 2
+    entry, _ = _fake_direct_delegation(ag, C, data_path=True)
+    _install_fake_llm(["techA series#1", "techB series#2",
+                       f"new dataset#{entry['index']}"])
+    ag._complementarity_cache.clear()
+    n_gate = len(GATE_PROMPTS)
+    f6 = json.loads(ag._fuse_delegations([1, 2, entry["index"]]))
+    print("6) same-dir branches in the incremental re-gate:")
+    check("re-gate ran for the mixed same-dir set", len(GATE_PROMPTS) > n_gate)
+    gp = GATE_PROMPTS[-1]
+    check("re-gate descriptors carry branch identity",
+          "techA series#1" in gp and "techB series#2" in gp
+          and "analysis_task" in gp)
+    check("re-gate descriptors carry per-branch file sets",
+          '"n_files"' in gp)
+    check("same-dir incremental fusion stays gated",
+          f6.get("complementarity_gated"))
+    # Partial coverage rule: a partial verdict whose fanout_set misses one
+    # fused entry must NOT gate this fusion.
+    def _partial_llm(fset):
+        def fake(orch, prompt, extra_parts=None):
+            if "complementary measurements of ONE system" in prompt:
+                FUSION_PROMPTS.append(prompt)
+                return {"detailed_analysis": "n", "scientific_claims": []}
+            if "SCRIPT CONTRACT" in prompt or "AUDITING a computed" in prompt:
+                return {"verdict": "accept", "issues": [],
+                        "refinement_instructions": "", "method": "qualitative",
+                        "rationale": "r", "script": ""}
+            GATE_PROMPTS.append(prompt)
+            return {"verdict": "partially_complementary", "confidence": 0.8,
+                    "rationale": "r", "join_axis": "T",
+                    "join_type": "shared_parameter_axis", "fanout_set": fset,
+                    "redundant_clusters": [], "unrelated": [],
+                    "excluded_notes": ""}
+        fo._llm_json = fake
+    _partial_llm(["techA series#1", "techB series#2"])   # misses the newcomer
+    ag._complementarity_cache.clear()
+    f7 = json.loads(ag._fuse_delegations([1, 2, entry["index"]]))
+    check("partial verdict NOT covering all entries -> ungated",
+          not f7.get("complementarity_gated"))
+    _partial_llm(["techA series#1", "techB series#2",
+                  f"new dataset#{entry['index']}"])       # covers all
+    ag._complementarity_cache.clear()
+    f8 = json.loads(ag._fuse_delegations([1, 2, entry["index"]]))
+    check("partial verdict covering all entries -> gated",
+          f8.get("complementarity_gated"))
+
     print("\n" + "=" * 50)
     npass = sum(results.values())
     print(f"FUSION INCREMENTAL: {npass}/{len(results)} checks passed")
