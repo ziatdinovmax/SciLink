@@ -299,6 +299,24 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
                 "axis_spec.signal_is_nonnegative is False — preserving signed values."
             )
 
+        # 2b. Spatial binning (the SIZE GUARD): mean-bin the two spatial axes
+        # by the strategy's factor so downstream decomposition / per-pixel
+        # fitting scale with the science, not the sensor. Spectra are never
+        # binned; skipped when the leading axes are not spatial.
+        bin_f = int(strategy.get('spatial_bin_factor', 1) or 1)
+        if bin_f > 1 and leading_axes_are_spatial:
+            h0, w0, e0 = data_to_process.shape
+            hb, wb = (h0 // bin_f) * bin_f, (w0 // bin_f) * bin_f
+            data_to_process = data_to_process[:hb, :wb].reshape(
+                hb // bin_f, bin_f, wb // bin_f, bin_f, e0).mean(axis=(1, 3))
+            self.logger.info(
+                f"Applied {bin_f}x{bin_f} spatial mean-binning (size guard): "
+                f"({h0}, {w0}, {e0}) -> {data_to_process.shape}; "
+                "spectra unmodified")
+        elif bin_f > 1:
+            self.logger.info(
+                "spatial_bin_factor > 1 ignored: leading axes are not spatial.")
+
         # 3. Calculate Masking strategy
         if strategy.get('apply_masking', False):
             total_intensities = np.sum(data_to_process, axis=2) # (h, w)

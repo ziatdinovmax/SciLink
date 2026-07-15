@@ -372,7 +372,14 @@ These are heuristics, not rigid rules. Use your expert judgment to synthesize th
         * For *very clean data* (e.g., `1st Percentile` is close to the median), you might use a *lower* percentile (e.g., 1.0-2.0).
         * For *very noisy data* (e.g., a high `Data Std` relative to `Data Mean`), you might use a *higher* percentile (e.g., 10.0-15.0) to be more aggressive in removing the noisy baseline.
 
-5.  **`reasoning` (str):**
+5.  **`spatial_bin_factor` (int) — the SIZE GUARD:**
+    * Downstream decomposition and per-pixel fitting scale with pixels x bands; an oversized cube burns hours of compute without adding science for spatially smooth samples. Judge from the `shape` in the statistics:
+        * up to ~20 million values -> `1` (no binning);
+        * ~20-100 million values -> `2` (2x2 mean-binning of the spatial axes);
+        * above ~100 million values -> `4`.
+    * Override toward `1` only when the objective / `system_info` genuinely needs single-pixel spatial resolution (e.g., atomic-resolution mapping, few-pixel features) — and say so in `reasoning`. Spectra are never binned, only the two spatial axes.
+
+6.  **`reasoning` (str):**
     * Briefly explain your choices *based on the statistics and context*.
 
 You MUST output a valid JSON object with these keys:
@@ -381,6 +388,7 @@ You MUST output a valid JSON object with these keys:
   "despike_kernel_size": "[integer, e.g., 3]",
   "apply_masking": "[true/false]",
   "mask_threshold_percentile": "[float, e.g., 5.0]",
+  "spatial_bin_factor": "[integer: 1, 2, or 4]",
   "reasoning": "[Your string explanation]"
 }
 """
@@ -1264,6 +1272,7 @@ Depending on the analysis method used in the current iteration, you will receive
    * *Observation (skip-decomposition mode):* The user's objective specifies a per-pixel quantitative measurement.
    * *Action:* Define a target with `type: "custom_code"`. Describe the *math* needed (e.g., "Fit a Gaussian to model the peak shift around 0.6 eV").
    * *Tip:* The custom code sandbox provides `lmfit` in addition to `numpy`/`scipy`/`sklearn`. Use `lmfit` for multi-peak or complex fitting scenarios — it offers built-in models (GaussianModel, LorentzianModel, VoigtModel), parameter constraints, and composite models via the `+` operator. For simple single-peak fits on large datasets, raw `curve_fit` is faster due to lower per-pixel overhead.
+   * *SIZE GUARD — scale every target to the pixel count:* the sandbox is single-process, so a per-pixel iterative fit (~2-5 ms each) over a full frame costs ~4-40 minutes per 100k pixels and can exceed the execution timeout. State in the target's description WHICH pixels the fit touches. Above ~50k pixels, the target must specify a reduction: restrict fitting to the scientifically relevant mask/region, or go coarse-to-fine (fit a spatially binned map first, refine only where structure appears), or use a vectorized/linearized estimator instead of per-pixel iterative fits.
 
 ---
 
