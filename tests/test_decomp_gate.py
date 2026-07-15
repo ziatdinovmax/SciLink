@@ -109,6 +109,59 @@ def main():
     check("**kwargs function receives the mask",
           got.get("kw", {}).get("fit_mask") is mask)
 
+    # 5) Honest-null contract (#358 follow-up): prompt + judged declaration.
+    print("5) measurability gate / honest null:")
+    p = build_code_generation_prompt("t", 96, 96, 180, "nm", 400.0, 900.0,
+                                     "raw")
+    check("codegen prompt carries the MEASURABILITY GATE contract",
+          "MEASURABILITY GATE" in p and "not_measurable" in p
+          and "evidence" in p)
+    from scilink.agents.exp_agents.controllers.hyperspectral_controllers import (
+        RunDynamicAnalysisController)
+
+    class _Resp:
+        def __init__(self, obj): self._o = obj
+        text = ""
+
+    class _Model:
+        def __init__(self, verdict): self.verdict = verdict
+        def generate_content(self, prompt, generation_config=None,
+                             safety_settings=None):
+            if isinstance(self.verdict, Exception):
+                raise self.verdict
+            return _Resp(self.verdict)
+
+    def _parse(resp):
+        return resp._o, None
+
+    class _Ctx:
+        session = {"flux_table": "band | flux\n400-500 | 100.0"}
+        mean_spec_bytes = None
+
+    def _mk(verdict):
+        c = object.__new__(RunDynamicAnalysisController)
+        c.model = _Model(verdict)
+        c.logger = LOG
+        c.generation_config = None
+        c.safety_settings = None
+        c._parse_llm_response = _parse
+        return c
+
+    nm = {"feature": "two peaks", "evidence": "prominence 0.08 vs sigma 0.4",
+          "description": "flat field"}
+    ok, _ = _mk({"defensible": True, "critique": "confirmed"})\
+        ._judge_not_measurable(nm, _Ctx())
+    check("defensible null accepted", ok is True)
+    ok, crit = _mk({"defensible": False, "critique": "flux table shows a band"})\
+        ._judge_not_measurable(nm, _Ctx())
+    check("indefensible null rejected with critique",
+          ok is False and "band" in crit)
+    ok, crit = _mk(RuntimeError("api down"))._judge_not_measurable(nm, _Ctx())
+    check("judge crash fails CLOSED (reject, retry)",
+          ok is False and "unavailable" in crit)
+    ok, _ = _mk({"something": "else"})._judge_not_measurable(nm, _Ctx())
+    check("unusable verdict fails CLOSED", ok is False)
+
     print("\n" + "=" * 50)
     npass = sum(results.values())
     print(f"DECOMP GATE: {npass}/{len(results)} checks passed")

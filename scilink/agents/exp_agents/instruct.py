@@ -1656,6 +1656,28 @@ Return a JSON object:
 """
 
 
+NOT_MEASURABLE_JUDGE_INSTRUCTIONS = """You are a skeptical spectroscopist judging a NULL DETERMINATION. Generated \
+analysis code declined to map a per-pixel feature, declaring it NOT \
+MEASURABLE in this dataset, with the evidence below. Decide whether the \
+declaration is scientifically defensible or an evasion of a hard but real fit.
+
+ACCEPT only when the evidence is NUMERIC and decisive (e.g. feature \
+prominence in the field-mean/masked-mean spectrum below a few times the \
+noise sigma) AND the deterministic MEASURED FLUX BY BAND table is consistent \
+with the claimed absence (no band stands out where the feature was expected).
+REJECT when the evidence is vague, non-numeric, contradicted by the flux \
+table, or when the feature could plausibly be recovered by a better method \
+(masking, denoising, narrower window) — rejection sends the task back for \
+another attempt.
+
+Respond in valid JSON with EXACTLY these keys:
+{
+  "defensible": true | false,
+  "critique": "<if false: what the evidence misses / what to try instead; else a one-line confirmation>"
+}
+"""
+
+
 SPECTROSCOPY_SALVAGE_JUDGE_INSTRUCTIONS = """
 You are a senior scientist making a FINAL salvage decision. Automated extraction
 did NOT fully pass verification after all retries. You are shown the BEST partial

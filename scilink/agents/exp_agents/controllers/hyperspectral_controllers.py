@@ -27,6 +27,7 @@ from ..instruct import (
     SPECTROSCOPY_PHYSICS_SANITY_INSTRUCTIONS,
     SPECTROSCOPY_RESULT_REVIEW_INSTRUCTIONS,
     SPECTROSCOPY_SALVAGE_JUDGE_INSTRUCTIONS,
+    NOT_MEASURABLE_JUDGE_INSTRUCTIONS,
 )
 
 from ....skills.hyperspectral.eels.eels import AGENT_METADATA_KEYS_TO_STRIP
@@ -701,6 +702,20 @@ This is the RAW cube — no smoothing/clipping/despiking has been applied for yo
 noise/spike/negative handling you judge necessary for a stable per-pixel fit —
 the goal is fittable spectra — but do NOT erase the feature you are measuring.
 If performing derivative-based operations (like `find_peaks` or `curve_fit`) on noisy data, apply appropriate smoothing to ensure convergence.
+
+### MEASURABILITY GATE — the honest null
+BEFORE mapping any per-pixel feature, TEST that it is measurable: examine the
+field-mean (or masked-mean) spectrum and require the feature's prominence to
+exceed a noise-derived threshold (several times the per-channel noise sigma).
+If it is NOT measurable, return
+{{"maps": {{}}, "not_measurable": {{"feature": "<what was requested>",
+"evidence": "<the NUMBERS: prominence vs noise sigma, and where you looked>",
+"description": "<one-line determination>"}}}}
+instead of estimator outputs — centroid/moment values computed on flat noise
+look plausible and are worse than an honest null. A judge reviews every
+not_measurable declaration against the deterministic band-flux evidence:
+declaring it without numeric evidence, or to dodge a hard but real fit, is
+rejected and retried.
 {reconstruction_section}{auxiliary_section}{fit_mask_section}{hints_section}
 ### REQUIRED RETURN FORMAT
 {{
@@ -2568,6 +2583,18 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 state.setdefault("dynamic_analysis_records", []).append(record)
 
         # --- FINAL AGGREGATION ---
+        _null_meta = [m for m in all_valid_meta
+                      if isinstance(m, dict) and m.get("determination")]
+        if not all_valid_maps and _null_meta:
+            # Every task resolved to a judged honest null — that is a
+            # COMPLETED determination, not a failure. Commit the metadata so
+            # the synthesis reports the absence.
+            self.logger.warning(
+                "∅ Dynamic analysis completed with NULL determinations only "
+                f"({len(_null_meta)}): the requested feature(s) are not "
+                "measurable in this dataset.")
+            state["custom_analysis_metadata_list"] = all_valid_meta
+            return state
         if not all_valid_maps:
             self.logger.warning("⚠️ All dynamic analysis tasks failed.")
             state["dynamic_analysis_failed"] = True
@@ -2773,8 +2800,10 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             # which the numeric fraction alone cannot — overwrite
             # (curve's verifier-approved path does the same).
             _hist["approved"] = bool(task_success)
+            _nm_rec = getattr(ctx, "not_measurable", None)
             return {
                 "target": ctx.item_name,
+                **({"not_measurable": _nm_rec} if _nm_rec else {}),
                 "required_outputs": ctx.required_outputs,
                 "task_success": bool(task_success),
                 "salvaged": (not task_success) and ctx.best_attempt["valid_count"] > 0,
@@ -2869,6 +2898,43 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
 
             # Validation
             if not isinstance(result_dict, dict): raise ValueError("Function return must be a dict.")
+
+            # Honest-null path (#358 follow-up): the generated code may
+            # DECLARE the requested feature not measurable, with numeric
+            # evidence. A judge reviews the declaration against the
+            # deterministic flux table; an accepted null TERMINATES the task
+            # as a completed determination (retrying an unmeasurable fit is
+            # exactly the churn the wall-clock budget otherwise has to kill).
+            # A rejected declaration raises -> the normal retry feedback path.
+            _nm = result_dict.get("not_measurable")
+            if isinstance(_nm, dict) and not result_dict.get("maps"):
+                ok, critique = self._judge_not_measurable(_nm, ctx)
+                if ok:
+                    self.logger.warning(
+                        f"    ∅ Task {i}: NOT-MEASURABLE determination "
+                        f"accepted by the judge — {_nm.get('description')} "
+                        f"(evidence: {str(_nm.get('evidence'))[:200]})")
+                    ctx.not_measurable = dict(_nm)
+                    ctx.attempt_entries.append({
+                        "attempt": retries + 1,
+                        "not_measurable": True,
+                        "evidence": str(_nm.get("evidence"))[:400],
+                    })
+                    # Surface the determination to the downstream synthesis.
+                    ctx.session["all_valid_meta"].append({
+                        "feature_name": str(_nm.get("feature") or target_desc),
+                        "determination": "not measurable in this dataset "
+                                         "(judged honest null)",
+                        "evidence": str(_nm.get("evidence"))[:400],
+                        "description": str(_nm.get("description"))[:300],
+                    })
+                    ctx.retries = retries + 1
+                    return {"success": True, "task_success": True,
+                            "not_measurable": dict(_nm)}
+                raise ValueError(
+                    f"not_measurable declaration rejected by the judge: "
+                    f"{critique}")
+
             maps_dict = result_dict.get("maps")
             if not maps_dict or not isinstance(maps_dict, dict):
                 raise ValueError("Return dict must contain a 'maps' key.")
@@ -3242,6 +3308,35 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             if reject_votes + remaining < self.SANITY_REJECT_MAJORITY:
                 return True, ""
         return True, ""
+
+    def _judge_not_measurable(self, nm: dict, ctx) -> tuple:
+        """Judge a generated code's NOT-MEASURABLE declaration (#358 follow-
+        up) against the deterministic band-flux table (and the mean-spectrum
+        figure when available). Returns (defensible: bool, critique: str).
+        Fails CLOSED (reject on any judge error): a wrongly-rejected null
+        costs one retry; a wrongly-accepted null hides a real feature."""
+        try:
+            prompt = [NOT_MEASURABLE_JUDGE_INSTRUCTIONS,
+                      "\n--- DECLARATION ---\n"
+                      + json.dumps(nm, default=str)[:1500]]
+            if ctx.session.get("flux_table"):
+                prompt.append("\n--- DETERMINISTIC MEASURED FLUX BY BAND ---\n"
+                              + ctx.session["flux_table"])
+            if ctx.mean_spec_bytes:
+                prompt.append("\nField-mean spectrum:")
+                prompt.append({"mime_type": "image/jpeg",
+                               "data": ctx.mean_spec_bytes})
+            resp = self.model.generate_content(
+                prompt, generation_config=self.generation_config,
+                safety_settings=self.safety_settings)
+            verdict, _ = self._parse_llm_response(resp)
+            if not isinstance(verdict, dict) or "defensible" not in verdict:
+                return False, "judge returned no usable verdict"
+            return (bool(verdict.get("defensible")),
+                    str(verdict.get("critique") or ""))
+        except Exception as e:  # noqa: BLE001 - fail closed
+            self.logger.warning(f"    not-measurable judge crashed: {e}")
+            return False, f"judge unavailable ({e}); retry with maps"
 
     def _judge_salvage(self, dashboard_bytes, code_str, mean_spec_bytes,
                        system_info, objective, tool_descriptions, result_summary):
