@@ -185,9 +185,25 @@ class CodegenQCEngine:
 
         host.qc_loop_setup(ctx)
 
+        # Cumulative wall-clock budget for the whole verification loop
+        # (#358). OPT-IN via a host attribute — hosts that don't set it get
+        # byte-identical behavior. Attempt counts alone don't bound time:
+        # each iteration regenerates + re-executes code, so N cheap-but-
+        # failing attempts can run for hours without a ceiling.
+        import time as _time
+        _budget = getattr(host, "qc_time_budget_s", None)
+        _loop_t0 = _time.monotonic()
+
         max_iters = host.max_verification_iterations
         for verification_iter in range(max_iters):
             ctx.iteration = verification_iter
+            if _budget and _time.monotonic() - _loop_t0 > _budget:
+                logger.warning(
+                    f"   Verification loop wall-clock budget exceeded "
+                    f"({int(_budget)}s) after {verification_iter} "
+                    "iteration(s) — stopping with the best result so far.")
+                host.qc_final_verify(ctx)
+                return
             logger.info(
                 f"   Verification {verification_iter + 1}/{max_iters} "
                 f"(annealing level {ctx.annealing_level})..."

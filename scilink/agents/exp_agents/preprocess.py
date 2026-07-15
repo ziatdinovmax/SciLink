@@ -47,6 +47,9 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
     """
 
     MAX_SCRIPT_ATTEMPTS = 3
+    # Cumulative wall-clock budget for the custom-script retry
+    # loop (#358); falsy disables.
+    SCRIPT_LOOP_TIME_BUDGET_S = 900.0
 
     def __init__(self, *args,
                  output_dir: str = "preprocessing_output",
@@ -395,7 +398,20 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
         last_error = "No script generated yet."
         custom_script = None
 
+        # Cumulative wall-clock budget across ALL attempts (#358): each
+        # attempt can run up to the executor timeout, so the attempt cap
+        # alone does not bound total time.
+        import time as _time
+        _t0 = _time.monotonic()
+
         for attempt in range(1, self.MAX_SCRIPT_ATTEMPTS + 1):
+            if (attempt > 1 and self.SCRIPT_LOOP_TIME_BUDGET_S
+                    and _time.monotonic() - _t0 > self.SCRIPT_LOOP_TIME_BUDGET_S):
+                last_error = (f"custom-script wall-clock budget exceeded "
+                              f"({int(self.SCRIPT_LOOP_TIME_BUDGET_S)}s) "
+                              f"after {attempt - 1} attempt(s)")
+                self.logger.warning(last_error)
+                break
             try:
                 if attempt == 1:
                     self.logger.info(f"Attempt {attempt}/{self.MAX_SCRIPT_ATTEMPTS}: Generating initial script...")
@@ -515,6 +531,9 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
     """
     
     MAX_SCRIPT_ATTEMPTS = 5
+    # Cumulative wall-clock budget for the custom-script retry
+    # loop (#358); falsy disables.
+    SCRIPT_LOOP_TIME_BUDGET_S = 900.0
     MAX_MODEL_ATTEMPTS = 5
 
     def __init__(self, *args,
@@ -826,7 +845,20 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
         last_error = "No script generated yet."
         custom_script = None
 
+        # Cumulative wall-clock budget across ALL attempts (#358): each
+        # attempt can run up to the executor timeout, so the attempt cap
+        # alone does not bound total time.
+        import time as _time
+        _t0 = _time.monotonic()
+
         for attempt in range(1, self.MAX_SCRIPT_ATTEMPTS + 1):
+            if (attempt > 1 and self.SCRIPT_LOOP_TIME_BUDGET_S
+                    and _time.monotonic() - _t0 > self.SCRIPT_LOOP_TIME_BUDGET_S):
+                last_error = (f"custom-script wall-clock budget exceeded "
+                              f"({int(self.SCRIPT_LOOP_TIME_BUDGET_S)}s) "
+                              f"after {attempt - 1} attempt(s)")
+                self.logger.warning(last_error)
+                break
             try:
                 if attempt == 1:
                     custom_script = self._generate_custom_script_1d(stats, instruction, input_filename)

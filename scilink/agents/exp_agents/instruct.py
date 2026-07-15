@@ -1274,6 +1274,14 @@ Depending on the analysis method used in the current iteration, you will receive
    * *Tip:* The custom code sandbox provides `lmfit` in addition to `numpy`/`scipy`/`sklearn`. Use `lmfit` for multi-peak or complex fitting scenarios — it offers built-in models (GaussianModel, LorentzianModel, VoigtModel), parameter constraints, and composite models via the `+` operator. For simple single-peak fits on large datasets, raw `curve_fit` is faster due to lower per-pixel overhead.
    * *SIZE GUARD — scale every target to the pixel count:* the sandbox is single-process, so a per-pixel iterative fit (~2-5 ms each) over a full frame costs ~4-40 minutes per 100k pixels and can exceed the execution timeout. State in the target's description WHICH pixels the fit touches. Above ~50k pixels, the target must specify a reduction: restrict fitting to the scientifically relevant mask/region, or go coarse-to-fine (fit a spatially binned map first, refine only where structure appears), or use a vectorized/linearized estimator instead of per-pixel iterative fits.
 
+4. **LARGE-DATA GATE — decomposition-first staging (above ~50k pixels):**
+   Commit each decision to ONE of four verdicts, using the decomposition evidence in front of you:
+   * **fit-within-dilated-mask** — the signal of interest is spatially LOCALIZED in a component's abundance map: set `"fit_scope": "component_mask"` and `"mask_component_index": <0-based component index>` on the target. The pipeline builds the mask from that component's high-abundance region WITH a dilation halo (mask-boundary physics lives at the edges) and scopes the generated code to it.
+   * **fit-global-then-decide** — a WEAK feature may be present everywhere (uniform signals give decomposition no spatial contrast to separate): describe a target whose code fits the MEAN spectrum first (one cheap fit) and maps per-pixel only where that detection justifies it.
+   * **fit-everywhere** — only when the objective genuinely needs full-frame per-pixel parameters; then apply the size-guard tactics (vectorize, coarse-to-fine).
+   * **decomposition-only (STOP)** — permitted ONLY when the components are clean AND the residuals are unstructured AND the objective names no per-pixel quantity. A STRUCTURED residual (derivative shapes, coherent spatial patterns, high residual autocorrelation) is the signature of continuous parameter variation or a weak everywhere-signal — physics decomposition CANNOT model — and mandates a fitting target even when every component looks clean.
+   The gate is ASYMMETRIC: use decomposition evidence freely to ADD scope (nominate a component, a mask, a global-first plan), but RESTRICT scope or STOP only under the residual-certified conditions above. A user objective explicitly requesting per-pixel quantities ALWAYS overrides the gate.
+
 ---
 
 **Output Format:**
@@ -1282,6 +1290,7 @@ You MUST output a valid JSON object.
 **STRICT TYPE RULES:**
 * All refinement targets have `"type": "custom_code"`.
 * For `custom_code` targets: `value = null` (the description field is what matters).
+* Optional scoping fields on a `custom_code` target (the LARGE-DATA GATE): `"fit_scope"`: `"full_frame"` (default) or `"component_mask"`; when `"component_mask"`, also set `"mask_component_index"` (0-based index of the decomposition component whose high-abundance region defines the fitting mask).
 * Targets of other types (e.g. legacy `"spatial"` or `"spectral"`) are NOT supported and will be ignored by the downstream pipeline. Do not emit them.
 
 **Required outputs (objective-aware QC enforcement):**
@@ -1644,6 +1653,39 @@ measurability, …):
 Return a JSON object:
 - 'valid': boolean (true = accept; false = clear flaw)
 - 'critique': string (if false: name the specific flaw and corrective direction)
+"""
+
+
+NOT_MEASURABLE_JUDGE_INSTRUCTIONS = """You are a skeptical spectroscopist judging a NULL DETERMINATION. Generated \
+analysis code declined to map a per-pixel feature, declaring it NOT \
+MEASURABLE in this dataset, with the evidence below. Decide whether the \
+declaration is scientifically defensible or an evasion of a hard but real fit.
+
+ACCEPT only when the evidence is NUMERIC and decisive AND survives these \
+checks:
+1. ARITHMETIC CONSISTENCY — recompute the claim from its own numbers. The \
+correct noise reference for an N-spectrum average is sigma_pixel/sqrt(N), \
+NOT the per-pixel sigma; if the declaration's own figures imply a detection \
+(e.g. it states a mean-spectrum SNR at or above its own threshold, or its \
+prominence exceeds a few times sigma_pixel/sqrt(N)), REJECT — the code \
+applied the wrong statistics.
+2. LOCALIZATION — a feature confined to a small region is diluted \
+~(region/frame) in the field mean AND in the field-integrated flux table; \
+the declaration must show the feature also fails in a BRIGHT-REGION mean \
+(top few % of pixels by intensity). A field-mean-only null on possibly \
+localized data is not decisive: REJECT.
+3. FLUX TABLE — the deterministic MEASURED FLUX BY BAND must be consistent \
+with the claimed absence for spatially extended features (remembering it \
+cannot rule out localized ones — see check 2).
+REJECT also when the evidence is vague, non-numeric, or the feature could \
+plausibly be recovered by a better method (masking, denoising, narrower \
+window) — rejection sends the task back for another attempt.
+
+Respond in valid JSON with EXACTLY these keys:
+{
+  "defensible": true | false,
+  "critique": "<if false: what the evidence misses / what to try instead; else a one-line confirmation>"
+}
 """
 
 

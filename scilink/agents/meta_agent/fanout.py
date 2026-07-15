@@ -56,6 +56,12 @@ _FANOUT_POLL_S = 5              # how often to check for finished branches
 _FANOUT_HEARTBEAT_S = 60        # min gap between "still running" ticks
 FANOUT_SOFT_CAP = 5             # warn / confirm beyond this many fused branches
 FANOUT_HARD_CAP = 8             # refuse beyond this — cost/quality cliff
+# Per-branch wall-clock budget (#358). A stuck branch (e.g. an analysis
+# retry loop that keeps failing QC) must not hold the whole fan-out: on
+# expiry the branch is recorded degraded and ABANDONED (its subprocesses are
+# killed; the thread itself cannot be killed safely and may finish late,
+# which is recorded for audit without changing the verdict). <= 0 disables.
+FANOUT_BRANCH_TIME_BUDGET_S = 3600.0
 # In AUTONOMOUS mode there is no human to confirm, so the verdict IS the gate:
 # proceed only on a confident 'complementary' read.
 AUTONOMOUS_CONFIDENCE_THRESHOLD = 0.6
@@ -630,10 +636,20 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
     Each worker touches ONLY its own ``entry`` dict, so there is no shared
     mutation across threads. Never raises — failures are captured into the
     ledger slot like ``_delegate`` does.
+
+    Records its start time and thread id on the entry so ``run_fanout``'s
+    wait loop can enforce the branch wall-clock budget (#358): an abandoned
+    branch has ``timed_out`` set on its entry, in which case a late
+    completion must NOT clobber the timeout verdict (fusion already ran
+    without it) — the late outcome is recorded under ``late_result`` for
+    audit instead.
     """
+    import threading
     index = entry["index"]
     slug = _slug(branch.get("label") or Path(branch["data_path"]).stem)
     base_dir = orch.fanout_dir / f"{index:02d}_{slug}"
+    entry["_started_at"] = time.monotonic()
+    entry["_branch_tid"] = threading.get_ident()
     try:
         from ..exp_agents.analysis_orchestrator import AnalysisMode
         child = _make_ephemeral_analysis_child(orch, base_dir)
@@ -647,10 +663,21 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
         result = {"status": "error", "error": str(e), "summary": "",
                   "key_findings": [], "files_produced": [],
                   "suggested_followups": [], "warnings": []}
+    if entry.get("timed_out"):
+        logger.warning(
+            f"fan-out branch {index} finished AFTER its wall-clock budget "
+            f"expired (late status: {result.get('status')}); the timeout "
+            "verdict stands — late outcome recorded for audit only.")
+        entry["late_result"] = {
+            "status": result.get("status"),
+            "summary_head": (result.get("summary") or "")[:300],
+            "n_files": len(result.get("files_produced") or [])}
+        return
     orch._close_delegation(entry, result)
 
 
-def run_fanout(orch, branches: List[dict]) -> str:
+def run_fanout(orch, branches: List[dict],
+               branch_time_budget_s: Optional[float] = None) -> str:
     """Gate → confirm → run branches concurrently. Returns JSON.
 
     `branches` is a list of ``{"data_path", "task", "label", "metadata"?,
@@ -660,6 +687,11 @@ def run_fanout(orch, branches: List[dict]) -> str:
     prunes to the complementary subset; only that subset runs. Branches run
     independently unless the gate classifies the set co-registered (operand
     mesh) — see ``_operand_mesh`` — and/or a branch opts into steering.
+
+    ``branch_time_budget_s`` caps each branch's wall clock (#358; default
+    ``FANOUT_BRANCH_TIME_BUDGET_S``, <= 0 disables): an overdue branch is
+    recorded degraded and abandoned so the fan-out completes and fusion runs
+    over the productive branches.
     """
     # --- normalize input ---
     norm: List[dict] = []
@@ -853,12 +885,19 @@ def run_fanout(orch, branches: List[dict]) -> str:
 
     max_workers = min(len(run_branches), FANOUT_MAX_WORKERS)
     n_total = len(run_branches)
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        fut_label = {}
+    budget = (FANOUT_BRANCH_TIME_BUDGET_S if branch_time_budget_s is None
+              else float(branch_time_budget_s))
+    # No context manager: an abandoned (timed-out) branch thread cannot be
+    # killed, and `with` would join it — the pool is shut down without
+    # waiting instead (#358).
+    pool = ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        fut_label, fut_entry = {}, {}
         for i in range(n_total):
             fut = pool.submit(_run_one_branch, orch, run_branches[i],
                               branch_companions[i], entries[i])
             fut_label[fut] = run_branches[i]["label"]
+            fut_entry[fut] = entries[i]
         # Wait with a periodic heartbeat so the user can see the parallel run is
         # alive (a slow branch can otherwise look like a hang). Each branch is
         # announced as it finishes; the rest get a "still running" tick.
@@ -880,11 +919,49 @@ def run_fanout(orch, branches: List[dict]) -> str:
                 print(f"  ✅ analysis branch finished: {fut_label[f]}  "
                       f"({n_total - len(pending)}/{n_total} done)")
                 since_tick = 0.0  # a completion already shows the run is alive
+            # Branch wall-clock budget (#358): abandon a branch that has run
+            # past its deadline — record it degraded (the existing
+            # degraded-branch machinery excludes it from fusion), kill its
+            # registered subprocesses, and stop waiting for its thread.
+            if budget > 0:
+                overdue = [f for f in pending
+                           if fut_entry[f].get("_started_at") is not None
+                           and fut_entry[f].get("status") == "running"
+                           and (time.monotonic() - fut_entry[f]["_started_at"]
+                                > budget)]
+                for f in overdue:
+                    e = fut_entry[f]
+                    e["timed_out"] = True
+                    print(f"  ⏱️  analysis branch '{fut_label[f]}' exceeded "
+                          f"its wall-clock budget ({int(budget)}s) — "
+                          "abandoning it (degraded, excluded from fusion).")
+                    logger.warning(
+                        f"fan-out branch {e['index']} ('{fut_label[f]}') "
+                        f"abandoned after {int(budget)}s wall-clock budget")
+                    tid = e.get("_branch_tid")
+                    if tid:
+                        try:
+                            from ...executors import kill_subprocesses_for_thread
+                            kill_subprocesses_for_thread(tid)
+                        except Exception:  # noqa: BLE001 - best-effort cleanup
+                            pass
+                    orch._close_delegation(e, {
+                        "status": "error",
+                        "error": (f"branch wall-clock budget exceeded "
+                                  f"({int(budget)}s); branch abandoned"),
+                        "summary": "", "key_findings": [],
+                        "files_produced": [], "suggested_followups": [],
+                        "warnings": [f"abandoned after {int(budget)}s "
+                                     "wall-clock budget (#358)"],
+                    })
+                    pending.discard(f)
             if pending and since_tick >= _FANOUT_HEARTBEAT_S:
                 since_tick = 0.0
                 elapsed = int(time.monotonic() - start)
                 print(f"  ⏳ {len(pending)} of {n_total} parallel analyses still "
                       f"running ... (~{elapsed}s elapsed)")
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
     def _productive(e):
         # A branch that reports success but yields neither findings nor files
@@ -928,12 +1005,18 @@ def run_fanout(orch, branches: List[dict]) -> str:
     }
     if degraded:
         n_err = sum(1 for r in degraded if r["status"] != "success")
+        n_timeout = sum(1 for e in entries if e.get("timed_out"))
         out["warning"] = (
             f"{len(degraded)} branch(es) produced no usable output "
-            f"({n_err} errored, {len(degraded) - n_err} succeeded-but-empty, "
+            f"({n_err} errored"
+            + (f", of which {n_timeout} abandoned on the "
+               f"branch wall-clock budget" if n_timeout else "")
+            + f", {len(degraded) - n_err} succeeded-but-empty, "
             "e.g. analysis code could not execute). Do not treat these as "
             "completed analyses or fuse them; report the gap to the user."
         )
+        if n_timeout:
+            out["branches_timed_out"] = n_timeout
     return json.dumps(out, indent=2, default=str)
 
 
