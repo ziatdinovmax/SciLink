@@ -1661,14 +1661,25 @@ analysis code declined to map a per-pixel feature, declaring it NOT \
 MEASURABLE in this dataset, with the evidence below. Decide whether the \
 declaration is scientifically defensible or an evasion of a hard but real fit.
 
-ACCEPT only when the evidence is NUMERIC and decisive (e.g. feature \
-prominence in the field-mean/masked-mean spectrum below a few times the \
-noise sigma) AND the deterministic MEASURED FLUX BY BAND table is consistent \
-with the claimed absence (no band stands out where the feature was expected).
-REJECT when the evidence is vague, non-numeric, contradicted by the flux \
-table, or when the feature could plausibly be recovered by a better method \
-(masking, denoising, narrower window) — rejection sends the task back for \
-another attempt.
+ACCEPT only when the evidence is NUMERIC and decisive AND survives these \
+checks:
+1. ARITHMETIC CONSISTENCY — recompute the claim from its own numbers. The \
+correct noise reference for an N-spectrum average is sigma_pixel/sqrt(N), \
+NOT the per-pixel sigma; if the declaration's own figures imply a detection \
+(e.g. it states a mean-spectrum SNR at or above its own threshold, or its \
+prominence exceeds a few times sigma_pixel/sqrt(N)), REJECT — the code \
+applied the wrong statistics.
+2. LOCALIZATION — a feature confined to a small region is diluted \
+~(region/frame) in the field mean AND in the field-integrated flux table; \
+the declaration must show the feature also fails in a BRIGHT-REGION mean \
+(top few % of pixels by intensity). A field-mean-only null on possibly \
+localized data is not decisive: REJECT.
+3. FLUX TABLE — the deterministic MEASURED FLUX BY BAND must be consistent \
+with the claimed absence for spatially extended features (remembering it \
+cannot rule out localized ones — see check 2).
+REJECT also when the evidence is vague, non-numeric, or the feature could \
+plausibly be recovered by a better method (masking, denoising, narrower \
+window) — rejection sends the task back for another attempt.
 
 Respond in valid JSON with EXACTLY these keys:
 {

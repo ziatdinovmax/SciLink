@@ -704,10 +704,24 @@ the goal is fittable spectra — but do NOT erase the feature you are measuring.
 If performing derivative-based operations (like `find_peaks` or `curve_fit`) on noisy data, apply appropriate smoothing to ensure convergence.
 
 ### MEASURABILITY GATE — the honest null
-BEFORE mapping any per-pixel feature, TEST that it is measurable: examine the
-field-mean (or masked-mean) spectrum and require the feature's prominence to
-exceed a noise-derived threshold (several times the per-channel noise sigma).
-If it is NOT measurable, return
+BEFORE mapping any per-pixel feature, TEST that it is measurable. Do the
+statistics correctly:
+- Compare the feature's prominence in an AVERAGED spectrum against the noise
+  OF THAT AVERAGE: averaging N spectra reduces noise by sqrt(N), so the
+  threshold is several times sigma_pixel/sqrt(N) — NOT the per-pixel sigma.
+  (A prominence of 0.2 with sigma_pixel=0.4 over 10,000 averaged spectra is
+  a ~50-sigma detection, not a null.)
+- Test BRIGHT-REGION means as well as the field mean: a feature localized to
+  a small region is diluted ~(region/frame) in the field mean but fully
+  present in the mean over the brightest pixels (e.g. top 1-5% by integrated
+  intensity). Declare not_measurable ONLY if it fails in BOTH.
+- Measurability is RESOLUTION-DEPENDENT: a feature detectable in the mean
+  but with per-pixel SNR below threshold is not mappable at native
+  resolution — spatially BIN until the binned per-pixel SNR clears the bar
+  (binning k x k cuts noise by k) and return the coarse map, stating the
+  effective resolution in the description. Reserve not_measurable for
+  features that fail even in aggregate.
+If it is genuinely NOT measurable, return
 {{"maps": {{}}, "not_measurable": {{"feature": "<what was requested>",
 "evidence": "<the NUMBERS: prominence vs noise sigma, and where you looked>",
 "description": "<one-line determination>"}}}}

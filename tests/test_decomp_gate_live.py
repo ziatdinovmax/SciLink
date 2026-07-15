@@ -181,8 +181,66 @@ def scenario_null_demand():
           or "not measurable" in summary.lower())
 
 
+def scenario_blob_demand():
+    """FALSE-NULL guard (the adversarial inverse of null_demand): a REAL
+    two-peak emission confined to a small blob (~1% of pixels — diluted
+    ~100:1 in the field mean), with per-pixel outputs DEMANDED. The code
+    must NOT declare this not-measurable: a localized feature is dilute in
+    the field mean but measurable in bright-region spectra. The judged
+    null must not fire on real data."""
+    h = w = 256
+    yy, xx = np.mgrid[0:h, 0:w]
+    blob = ((xx - 90) ** 2 + (yy - 150) ** 2) < 14 ** 2      # ~600 px
+    spec = 4.0 * _g(WL, 520, 12) + 3.0 * _g(WL, 610, 15)
+    cube = (5.0 + RNG.normal(0, 0.4, (h, w, WL.size))
+            + blob[..., None] * spec[None, None, :])
+    p = _save_cube(cube, "blobdemand", "survey acquisition")
+    res, summary, dt, base = _run(
+        p, f"Analyze the hyperspectral image at {p} (256x256x160; "
+           f"wavelengths in the metadata JSON). Extract PER-PIXEL maps of "
+           "the two emission peaks: report Peak1_Position and "
+           "Peak2_Position wherever emission is present.", "blob_demand")
+    check("blob_demand: success", res.get("status") == "success")
+    lo = summary.lower()
+    falsely_nulled = ("not measurable" in lo
+                      and not re.search(r"5[1-3]\d(?:\.\d+)?", summary))
+    check("blob_demand: real localized feature NOT falsely nulled",
+          not falsely_nulled)
+    nums = [float(v) for v in re.findall(r"\b(\d{3})(?:\.\d+)?\b", summary)]
+    check("blob_demand: both planted peaks recovered (~520/~610)",
+          any(abs(v - 520) <= 12 for v in nums)
+          and any(abs(v - 610) <= 12 for v in nums))
+    check("blob_demand: bounded (< 25 min)", dt < 1500)
+
+
+def scenario_weak_real():
+    """Borderline-real case: a weak but genuine single emission band present
+    EVERYWHERE (mean-spectrum SNR ~8 — above any honest measurability
+    threshold, below 'obvious'). Demanded outputs; the code must fit it,
+    not null it."""
+    h = w = 256
+    spec = 0.35 * _g(WL, 560, 14)                 # weak vs noise sigma 0.4
+    cube = (5.0 + RNG.normal(0, 0.4, (h, w, WL.size))
+            + spec[None, None, :])                # SNR_mean ~ 0.35/(0.4/sqrt(65k))>>1
+    p = _save_cube(cube, "weakreal", "survey acquisition")
+    res, summary, dt, base = _run(
+        p, f"Analyze the hyperspectral image at {p} (256x256x160; "
+           f"wavelengths in the metadata JSON). Extract a PER-PIXEL map of "
+           "the emission peak position (report Peak_Position).", "weak_real")
+    check("weak_real: success", res.get("status") == "success")
+    check("weak_real: weak-but-real feature NOT nulled",
+          "not measurable" not in summary.lower()
+          or re.search(r"5[5-7]\d", summary))
+    nums = [float(v) for v in re.findall(r"\b(\d{3})(?:\.\d+)?\b", summary)]
+    check("weak_real: planted 560 nm band recovered",
+          any(abs(v - 560) <= 12 for v in nums))
+    check("weak_real: bounded (< 25 min)", dt < 1500)
+
+
 SCENARIOS = {"blob": scenario_blob, "noise": scenario_noise,
-             "shift": scenario_shift, "null_demand": scenario_null_demand}
+             "shift": scenario_shift, "null_demand": scenario_null_demand,
+             "blob_demand": scenario_blob_demand,
+             "weak_real": scenario_weak_real}
 
 
 def main():
