@@ -2167,7 +2167,8 @@ class RunDynamicAnalysisController:
         return self.MAX_RETRIES - 1
 
     def __init__(self, model, logger, generation_config, safety_settings, parse_fn,
-                 executor_timeout: int = 600):
+                 executor_timeout: int = 600,
+                 qc_time_budget_s: float = 1800.0):
         self.model = model
         self.logger = logger
         self.generation_config = generation_config
@@ -2177,6 +2178,12 @@ class RunDynamicAnalysisController:
         # executor_timeout kwarg so the user's chosen limit is honored
         # and the log line below reports the actual value.
         self.executor_timeout = executor_timeout
+        # Cumulative wall-clock budget for the QC verification loop (#358):
+        # the attempt cap alone doesn't bound time (each attempt can run up
+        # to executor_timeout). Consumed by CodegenQCEngine's verification
+        # loop; falsy disables. Hyperspectral is the only host that sets
+        # this — curve/image behavior is byte-identical.
+        self.qc_time_budget_s = qc_time_budget_s
         self._parse_llm_response = parse_fn
 
     def execute(self, state: dict) -> dict:
