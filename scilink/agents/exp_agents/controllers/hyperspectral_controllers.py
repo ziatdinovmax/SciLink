@@ -722,6 +722,12 @@ statistics correctly:
   (binning k x k cuts noise by k) and return the coarse map, stating the
   effective resolution in the description. Reserve not_measurable for
   features that fail even in aggregate.
+- Test the FEATURE against the spectrum's own noise floor in ABSOLUTE terms:
+  if the field-mean spectrum is statistically flat (no band deviates from a
+  constant beyond its noise), the feature is not_measurable regardless of
+  any ratio-based test — sigma estimated FROM a flat spectrum makes its own
+  ripples register as "prominence", and a cheap parallel fitter will happily
+  return bound-railing artifact maps from such data.
 If it is genuinely NOT measurable, return
 {{"maps": {{}}, "not_measurable": {{"feature": "<what was requested>",
 "evidence": "<the NUMBERS: prominence vs noise sigma, and where you looked>",
