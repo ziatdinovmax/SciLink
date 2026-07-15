@@ -1,18 +1,24 @@
-"""Live validation of the hyperspectral size guard on FULL-RES SOC-710 cubes.
+"""Live validation of the hyperspectral size guard on a full-resolution cube.
 
-Hands the agent the same full-resolution 704x704x260 cubes (129M values)
-whose unguarded analysis previously ground for 3 hours, via the exact path
-the fan-out branches use (AnalysisOrchestratorAgent.run_task). Expected:
-the preprocessing strategy selects spatial_bin_factor=4 by itself (logged
-"spatial mean-binning (size guard)"), the analysis completes in sane wall
-time, and the fluorescence science still lands (two Dy(III) emission
-peaks, ~480 / ~575 nm).
+Bring your own data: point HS_GUARD_CUBE at a large (>= ~50M values) .npy
+hyperspectral cube with a matching .json metadata sidecar, and drive it
+through the exact path the fan-out branches use
+(AnalysisOrchestratorAgent.run_task). The guard's invariant is NO UNBOUNDED
+GRIND: either the preprocessing strategy selects spatial binning by itself
+(logged "spatial mean-binning (size guard)"), or the analysis completes
+quickly anyway via a light path. Optionally pass known spectral features to
+assert the reduction did not cost the science.
 
   export AWS_BEARER_TOKEN_BEDROCK=...  AWS_REGION_NAME=us-east-1
-  UNSAFE_EXECUTION_OK=true python tests/test_hs_size_guard_live.py
+  UNSAFE_EXECUTION_OK=true \
+  HS_GUARD_CUBE=/path/to/cube.npy \
+  HS_GUARD_TASK="Analyze the hyperspectral image at {p} (wavelengths in the \
+metadata JSON at {m}). Characterize the spectral features and report their \
+positions." \
+  HS_GUARD_EXPECT_NM="480,575" \
+      python tests/test_hs_size_guard_live.py
 """
 import io
-import json
 import logging
 import os
 import re
@@ -22,8 +28,17 @@ import time
 
 MODEL = os.environ.get("SCILINK_TEST_MODEL",
                        "bedrock/us.anthropic.claude-opus-4-8")
-D = os.path.expanduser("~/Code/benchmarking_for_paper2/Labric_MZI_scilink")
-WALL_LIMIT_S = 3600           # vs ~3 h unguarded
+CUBE = os.environ.get("HS_GUARD_CUBE")
+TASK = os.environ.get(
+    "HS_GUARD_TASK",
+    "Analyze the hyperspectral image at {p} (wavelengths in the metadata "
+    "JSON at {m}). Characterize the spectral features and report their "
+    "positions.")
+EXPECT_NM = [float(v) for v in
+             os.environ.get("HS_GUARD_EXPECT_NM", "").split(",") if v.strip()]
+EXPECT_TOL_NM = float(os.environ.get("HS_GUARD_EXPECT_TOL_NM", "10"))
+WALL_LIMIT_S = int(os.environ.get("HS_GUARD_WALL_LIMIT_S", "3600"))
+FAST_S = 1200      # "completed fast without binning" threshold
 
 checks = {}
 
@@ -36,7 +51,18 @@ def check(name, cond):
 def main():
     if not os.environ.get("AWS_BEARER_TOKEN_BEDROCK"):
         print("Set AWS_BEARER_TOKEN_BEDROCK (+ AWS_REGION_NAME)."); sys.exit(2)
-    # Capture INFO logs so the size-guard line is assertable.
+    if not CUBE or not os.path.exists(CUBE):
+        print("Set HS_GUARD_CUBE to a large .npy hyperspectral cube "
+              "(with a .json metadata sidecar)."); sys.exit(2)
+    import numpy as np
+    shape = np.load(CUBE, mmap_mode="r").shape
+    n_values = int(np.prod(shape))
+    print(f"cube: {CUBE} shape={shape} ({n_values / 1e6:.0f}M values)")
+    if n_values < 20e6:
+        print("NOTE: cube is below the guard's binning threshold (~20M); "
+              "this run only demonstrates the no-op path.")
+
+    # Capture INFO logs so the size-guard decision lines are assertable.
     buf = io.StringIO()
     h = logging.StreamHandler(buf)
     h.setLevel(logging.INFO)
@@ -45,68 +71,37 @@ def main():
 
     from scilink.agents.exp_agents.analysis_orchestrator import (
         AnalysisOrchestratorAgent, AnalysisMode)
+    base = tempfile.mkdtemp(prefix="hs_guard_")
+    print("session:", base)
+    ag = AnalysisOrchestratorAgent(
+        base_dir=base, api_key=None, base_url=None, model_name=MODEL,
+        restore_checkpoint=False, analysis_mode=AnalysisMode.AUTONOMOUS)
+    m = os.path.splitext(CUBE)[0] + ".json"
+    t0 = time.monotonic()
+    res = ag.run_task(TASK.format(p=CUBE, m=m),
+                      autonomy=AnalysisMode.AUTONOMOUS)
+    dt = time.monotonic() - t0
+    log = buf.getvalue()
+    print(f"wall time: {dt / 60:.1f} min | status: {res.get('status')}")
+    check(f"completed within {WALL_LIMIT_S // 60} min", dt < WALL_LIMIT_S)
+    check("run_task success", res.get("status") == "success")
+    mm = re.findall(r"Applied (\d)x\1 spatial mean-binning \(size guard\)", log)
+    no_bin = re.findall(r"Size guard: spatial_bin_factor=1", log)
+    print(f"size-guard decisions: binned={mm} explicit-no-bin={len(no_bin)}")
+    # The guard is a judgment heuristic; the INVARIANT is "no unbounded
+    # grind": binning fired, or the run finished quickly via a light path.
+    check("guard fired (factor >= 2) or run was fast",
+          any(int(f) >= 2 for f in mm) or dt < FAST_S)
 
-    runs = [
-        ("fluorescence", "fluorescence_cube_magnet_off",
-         "Analyze the hyperspectral fluorescence image at {p} (704x704x260; "
-         "wavelengths in the metadata JSON at {m}; 325 nm HeCd excitation, "
-         "filtered out of the recorded range; magnet off). The sample is "
-         "1 M Dy(NO3)3 in 0.1 M aqueous HNO3. Separate the emission from "
-         "detector background/striping, characterize the emission spectrum "
-         "and its spatial localization, and report the emission peak "
-         "positions."),
-        ("absorbance", "absorbance_cube_magnet_off",
-         "Analyze the hyperspectral absorbance-mode image at {p} "
-         "(704x704x260 raw transmitted intensity, white light on; "
-         "wavelengths in the metadata JSON at {m}; magnet off). The sample "
-         "is 1 M Dy(NO3)3 in 0.1 M aqueous HNO3. Identify the absorption "
-         "features of the solution (dips vs the broadband illumination) and "
-         "report their wavelengths."),
-    ]
-    summaries = {}
-    for tag, stem, task_tpl in runs:
-        base = tempfile.mkdtemp(prefix=f"hs_guard_{tag}_")
-        print(f"\n### {tag}: full-res cube via run_task — session {base}")
-        ag = AnalysisOrchestratorAgent(
-            base_dir=base, api_key=None, base_url=None, model_name=MODEL,
-            restore_checkpoint=False, analysis_mode=AnalysisMode.AUTONOMOUS)
-        p = os.path.join(D, stem + ".npy")
-        m = os.path.join(D, stem + ".json")
-        t0 = time.monotonic()
-        res = ag.run_task(task_tpl.format(p=p, m=m),
-                          autonomy=AnalysisMode.AUTONOMOUS)
-        dt = time.monotonic() - t0
-        log = buf.getvalue()
-        print(f"[{tag}] wall time: {dt/60:.1f} min | status: {res.get('status')}")
-        check(f"{tag}: completed within {WALL_LIMIT_S//60} min "
-              f"(was ~180 unguarded)", dt < WALL_LIMIT_S)
-        check(f"{tag}: run_task success", res.get("status") == "success")
-        mm = re.findall(r"Applied (\d)x\1 spatial mean-binning \(size guard\): "
-                        r"\(704, 704, 260\) -> \((\d+), (\d+), 260\)", log)
-        no_bin = re.findall(r"Size guard: spatial_bin_factor=1", log)
-        print(f"[{tag}] size-guard log hits: {mm} | explicit no-bin "
-              f"decisions: {len(no_bin)}")
-        # The guard is a judgment heuristic; the INVARIANT is "no unbounded
-        # grind": either binning fired, or the run finished quickly anyway
-        # (a light analysis path can legitimately skip the reduction).
-        check(f"{tag}: guard fired (factor >= 2) or run was fast (< 20 min)",
-              any(int(f) >= 2 for f, *_ in mm) or dt < 1200)
-        summaries[tag] = (res.get("summary") or "") + " ".join(
-            str(k) for k in res.get("key_findings") or [])
-        print(f"[{tag}] summary (first 1200):\n{summaries[tag][:1200]}")
-        buf.truncate(0); buf.seek(0)
-
-    # Science checks (the guard must not cost the answer):
-    fl = summaries.get("fluorescence", "")
-    nums = [float(v) for v in re.findall(r"\b(\d{3}(?:\.\d+)?)\s*nm\b", fl)]
-    check("fluorescence: ~480 nm Dy emission found",
-          any(470 <= v <= 490 for v in nums))
-    check("fluorescence: ~575 nm Dy emission found",
-          any(565 <= v <= 585 for v in nums))
-    ab = summaries.get("absorbance", "")
-    anums = [float(v) for v in re.findall(r"\b(\d{3}(?:\.\d+)?)\s*nm\b", ab)]
-    check("absorbance: NIR Dy band found (740-920 nm)",
-          any(740 <= v <= 920 for v in anums))
+    summary = (res.get("summary") or "") + " ".join(
+        str(k) for k in res.get("key_findings") or [])
+    print("summary (first 1200):\n", summary[:1200])
+    if EXPECT_NM:
+        nums = [float(v) for v in
+                re.findall(r"\b(\d{3,4}(?:\.\d+)?)\s*nm\b", summary)]
+        for target in EXPECT_NM:
+            check(f"expected feature ~{target:g} nm recovered after reduction",
+                  any(abs(v - target) <= EXPECT_TOL_NM for v in nums))
 
     print("\n" + "=" * 60)
     npass = sum(checks.values())
