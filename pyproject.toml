@@ -69,14 +69,12 @@ structure-matching = [
     "pulp>=2.7.0",
     "pyarrow>=14.0",
 ]
-gsas = [
-    # GSAS-II full-profile XRD simulation engine (optional 'gsas' backend of
-    # simulate_xrd_pattern). Built from source, so it needs a Fortran compiler
-    # available at install time (e.g. `conda install -c conda-forge
-    # fortran-compiler meson ninja`). Deliberately NOT in [all]: the from-source
-    # build would break `pip install scilink[all]` on machines without a compiler.
-    "GSAS-II @ git+https://github.com/AdvancedPhotonSource/GSAS-II.git",
-]
+# NOTE: GSAS-II (the optional 'gsas' backend of simulate_xrd_pattern) cannot be
+# an extra: it is not on PyPI, and PyPI rejects uploads whose metadata carries a
+# direct URL dependency ("Can't have direct dependency"). Install it manually —
+# it builds from source, so a Fortran compiler must be present (e.g.
+# `conda install -c conda-forge fortran-compiler meson ninja`):
+#   pip install "GSAS-II @ git+https://github.com/AdvancedPhotonSource/GSAS-II.git"
 all = [
     "scilink[sim]",
     "scilink[ui]",

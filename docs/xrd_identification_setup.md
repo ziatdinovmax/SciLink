@@ -7,7 +7,7 @@ anything.
 ```
 Tier 1  pip install scilink[structure-matching]     search/simulate/score + fingerprint tools
 Tier 2  scilink fetch-xrd-library                   one-time reference-library download
-Tier 3  pip install scilink[gsas]  (needs Fortran)  GSAS-II: profiles, indexing, Le Bail, Rietveld
+Tier 3  pip install "GSAS-II @ git+..."  (needs Fortran)  GSAS-II: profiles, indexing, Le Bail, Rietveld
 ```
 
 ## Tool → dependency matrix
@@ -112,8 +112,8 @@ exist first. The verified recipe (conda supplies the compilers):
 conda create -n scilink python=3.12
 conda activate scilink
 conda install -c conda-forge fortran-compiler meson ninja
-pip install "scilink[structure-matching]"   # BEFORE gsas: settles the numpy ABI
-pip install "scilink[gsas]"
+pip install "scilink[structure-matching]"   # BEFORE GSAS-II: settles the numpy ABI
+pip install "GSAS-II @ git+https://github.com/AdvancedPhotonSource/GSAS-II.git"
 ```
 
 Verify:
@@ -128,13 +128,14 @@ python -c "from GSASII import GSASIIscriptable; print('GSAS-II OK')"
 |---|---|
 | `ERROR: Compiler gfortran cannot compile programs` during pip install | The conda compiler activation scripts did not run (`CONDA_BUILD_SYSROOT` unset). Happens with bare `conda run -n env pip install ...`. Fix: `conda activate` the env in a shell (or `source .../etc/profile.d/conda.sh && conda activate env`), then pip install. |
 | `Unknown compiler(s): gfortran` | No Fortran toolchain at all — run the `conda install -c conda-forge fortran-compiler meson ninja` step. |
-| numpy ABI errors importing GSAS-II | GSAS-II was compiled against a different numpy than the one now installed. Fix: install scilink (which pins the scientific stack) **before** the `gsas` extra; reinstall the extra after major numpy changes. |
+| numpy ABI errors importing GSAS-II | GSAS-II was compiled against a different numpy than the one now installed. Fix: install scilink (which pins the scientific stack) **before** GSAS-II; reinstall GSAS-II after major numpy changes. |
 | `ModuleNotFoundError: GSASII` but tools "registered" | Expected degradation: the Tier-3 tools stay importable and registry-visible without GSAS-II and raise an actionable error naming this recipe only when actually called. |
 | GSAS-II console noise (`config.ini does not exist`, refinement logs) | Harmless; the tools capture or tolerate it. |
 
-`[gsas]` is deliberately **excluded from `scilink[all]`**: a from-source
-Fortran build would break `pip install scilink[all]` on machines without a
-compiler.
+GSAS-II is deliberately **not a scilink extra**: it is not on PyPI, and PyPI
+rejects package metadata that carries a direct URL dependency (so a `[gsas]`
+extra would block publishing scilink itself). It must be installed manually
+with the command above.
 
 ## Maintainers — refreshing the prebuilt artifact
 
