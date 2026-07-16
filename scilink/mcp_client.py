@@ -2,7 +2,7 @@
 
 Provides a thin synchronous wrapper around the async MCP Python SDK so that
 the analysis orchestrator can discover and call tools exposed by any
-MCP-compatible server over stdio or SSE transports.
+MCP-compatible server over stdio, SSE, or streamable HTTP transports.
 
 The ``mcp`` package is installed by default with SciLink.
 """
@@ -26,6 +26,12 @@ try:
 except ImportError:
     HAS_SSE = False
 
+try:
+    from mcp.client.streamable_http import streamablehttp_client
+    HAS_STREAMABLE_HTTP = True
+except ImportError:
+    HAS_STREAMABLE_HTTP = False
+
 
 def _require_mcp():
     if not HAS_MCP:
@@ -46,9 +52,17 @@ class MCPConnection:
         Command + arguments for stdio transport,
         e.g. ``["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]``.
     url : str | None
-        URL for SSE transport, e.g. ``"http://localhost:8080/sse"``.
+        URL for a network transport, e.g. ``"http://localhost:8080/sse"``
+        (SSE) or ``"https://host/mcp"`` (streamable HTTP).
     env : dict | None
         Extra environment variables passed to the stdio subprocess.
+    transport : str | None
+        Which transport to use for ``url``: ``"sse"`` (default, matches
+        historical behavior) or ``"http"`` (streamable HTTP). Ignored for
+        ``command`` connections, which are always stdio.
+    headers : dict | None
+        HTTP headers sent with every request on the ``url`` transports —
+        e.g. ``{"Authorization": "Bearer <token>"}``.
     """
 
     def __init__(
@@ -57,15 +71,25 @@ class MCPConnection:
         command: Optional[List[str]] = None,
         url: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
+        transport: Optional[str] = None,
+        headers: Optional[Dict[str, str]] = None,
     ):
         _require_mcp()
         if not command and not url:
-            raise ValueError("Provide either 'command' (stdio) or 'url' (SSE).")
+            raise ValueError(
+                "Provide either 'command' (stdio) or 'url' (SSE / streamable HTTP)."
+            )
+        if transport is not None and transport not in ("sse", "http"):
+            raise ValueError(
+                f"Unknown transport '{transport}': expected 'sse' or 'http'."
+            )
 
         self.server_name = server_name
         self.command = command
         self.url = url
         self.env = env
+        self.transport = transport or "sse"
+        self.headers = headers
 
         self._tool_schemas: List[dict] = []
         self._connected = False
@@ -121,18 +145,27 @@ class MCPConnection:
                 env=self.env,
             )
             transport_ctx = stdio_client(params)
+        elif self.url and self.transport == "http":
+            if not HAS_STREAMABLE_HTTP:
+                raise ImportError(
+                    "Streamable HTTP transport requires a recent 'mcp' package. "
+                    "Install with: pip install -U mcp"
+                )
+            transport_ctx = streamablehttp_client(self.url, headers=self.headers)
         elif self.url:
             if not HAS_SSE:
                 raise ImportError(
                     "SSE transport requires 'mcp[sse]'. "
                     "Install with: pip install mcp[sse]"
                 )
-            transport_ctx = sse_client(self.url)
+            transport_ctx = sse_client(self.url, headers=self.headers)
         else:
             raise ValueError("No transport configured.")
 
         # Enter the transport context manager manually so it stays open.
-        read_stream, write_stream = await transport_ctx.__aenter__()
+        # stdio/SSE yield (read, write); streamable HTTP yields
+        # (read, write, get_session_id) — the star soaks up the extra.
+        read_stream, write_stream, *_ = await transport_ctx.__aenter__()
         self._cleanup_coros.append(transport_ctx.__aexit__)
 
         session_ctx = ClientSession(read_stream, write_stream)
