@@ -3,6 +3,7 @@ Hyperspectral Analysis Agent
 """
 
 
+import json
 import os
 import numpy as np
 import cv2
@@ -467,19 +468,80 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         if staged:
             response["staged_solutions"] = staged
 
+        # Persist the numeric results to <output_dir>/analysis_results.json
+        # so the shared feature-table writer (feature_table.py, generic
+        # extracted_features adapter) can emit features.csv — the file the
+        # orchestrator's run_task collects into `feature_tables` and the
+        # meta fusion's numerics bundle reads. Without this, hyperspectral
+        # branches can never feed the computed reconciliation.
+        self._write_results_file(response)
+
         self._log_action(
             action="analyze",
             input_ctx={"data": data_path},
             result=response,
             rationale="Hyperspectral analysis completed."
         )
-        
+
         self.logger.info(f"\n{'='*80}")
         self.logger.info(f"✅ ANALYSIS COMPLETE")
         self.logger.info(f"   Output: {self.output_dir}")
         self.logger.info(f"{'='*80}\n")
         
         return response
+
+    def _write_results_file(self, response: dict) -> str | None:
+        """Persist a compact ``analysis_results.json`` with a FLAT
+        ``extracted_features`` dict, feature-table ready.
+
+        The dynamic-analysis features live in ``response`` as a LIST of
+        per-map records ({name, units, description, stats:{min,max,mean}})
+        — the shape the synthesis prompts consume — but the shared feature
+        -table adapter (``feature_table._extracted_feature_rows``) needs a
+        dict of scalars. Flatten each committed map's stats into
+        ``<Map_Name>_<stat>[_<units>]`` columns. Judged honest-null
+        determinations are recorded as ``<feature>_not_measurable = 1`` so
+        an absence survives into the table as data, not as a missing row.
+        Failure-isolated: never breaks the analysis.
+        """
+        try:
+            feats: dict = {}
+            for m in response.get("extracted_features") or []:
+                if not isinstance(m, dict):
+                    continue
+                nm = m.get("not_measurable")
+                if isinstance(nm, dict) and nm.get("feature"):
+                    base = str(nm["feature"]).strip().replace(" ", "_")[:60]
+                    feats[f"{base}_not_measurable"] = 1
+                    continue
+                stats = m.get("stats")
+                if not isinstance(stats, dict):
+                    continue
+                base = str(m.get("name") or "feature").strip().replace(" ", "_")
+                units = str(m.get("units") or "").strip()
+                suffix = ("_" + units.replace(" ", "").replace("/", "per")
+                          if units and units.lower() not in ("a.u.", "au", "")
+                          else "")
+                for k, v in stats.items():
+                    if isinstance(v, (int, float)) and np.isfinite(v):
+                        feats[f"{base}_{k}{suffix}"] = float(v)
+            if not feats:
+                return None
+            payload = {
+                "agent_type": "hyperspectral",
+                "status": response.get("status"),
+                "extracted_features": feats,
+            }
+            path = self.output_dir / "analysis_results.json"
+            with open(path, "w") as fh:
+                json.dump(payload, fh, indent=2, default=str)
+            self.logger.info(
+                f"   📄 Numeric features persisted for downstream fusion: "
+                f"{path.name} ({len(feats)} scalars)")
+            return str(path)
+        except Exception as e:  # noqa: BLE001 - table emit must never break analyze
+            self.logger.warning(f"Could not write analysis_results.json: {e}")
+            return None
 
     def _maybe_stage_t2_solutions(self, records: list, skill_state: dict) -> list:
         """Stage novel hot-retry successes for later, review-gated distillation.
