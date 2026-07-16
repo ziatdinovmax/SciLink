@@ -1298,6 +1298,8 @@ When the user's objective explicitly names one or more scalar quantities that sh
 
 Example: if the objective says *"extract the peak position (in eV) of the dominant feature at every pixel"*, the target should set `"required_outputs": ["Peak_Position"]`. The generated code's `maps` dict must then include a key named exactly `Peak_Position`.
 
+**Demand outputs at the scope the evidence supports.** A required output is a promise the data must be able to keep: every retry it fails burns the branch's budget. Before requiring a PER-PIXEL map of a feature, check the decomposition evidence in front of you — if the feature is WEAK (near the noise floor in the components/flux evidence) or LOCALIZED (a compact abundance footprint), the defensible demand is the REGION-INTEGRATED quantity (one fit over the footprint's summed spectrum: position, width, ratio with uncertainties), with the per-pixel map requested in the description as best-effort, NOT in `required_outputs`. Require native-resolution per-pixel maps only for features the evidence shows are strong at the single-pixel level. A user objective phrased per-pixel does not override physics: deliver the region-level quantity as the required output and let the honest-null / resolution-ladder machinery handle the per-pixel question.
+
 **Example 1: STOP (Decomposition Artifact)**
 {
   "refinement_needed": false,
@@ -1701,6 +1703,19 @@ to zero, pure noise, or a clear artifact) and must be withheld.
 Presenting an APPROXIMATE / uncertain result is acceptable — provided its
 limitations and uncertainty are stated honestly. Withhold ONLY if there is no
 real signal to report.
+
+LOCALIZED SIGNALS: a signal confined to a small region is diluted by the
+area ratio in ANY field-level statistic — a flat field-mean spectrum or
+band-flux table is NOT evidence of absence when the spatial evidence below
+(component footprints, dashboards) shows a compact feature. Judge such a
+signal at ITS OWN scale: the statistic over the detected footprint, or over
+the brightest pixels at a comparable area fraction — never a fixed large
+percentage of the frame. Your caveat must NAME the region statistic your
+verdict rests on (e.g. "footprint-mean over the 0.2%-area component"), so a
+field-mean-only justification is never presented as a physics conclusion.
+
+### SPATIAL FOOTPRINT EVIDENCE (from the run's own decomposition)
+{spatial_evidence}
 
 ### OBJECTIVE
 {objective}
@@ -2695,6 +2710,16 @@ baseline structure, noise level)?
 - Is there structure in the residuals that suggests model inadequacy \
 (systematic misfit, unmodeled shoulder, baseline drift, unexpected oscillation)?
 - Given parameter uncertainties, how well-constrained are the physical claims you could make?
+
+CLAIM-ANCHORED RESIDUAL CHECK: any structural claim that names a specific \
+feature (a doublet/splitting at X, a shoulder, a secondary phase peak) must be \
+checked against the residuals AT THAT LOCATION before you state it. A \
+multi-component fit whose residual shows a large systematic feature BETWEEN \
+its claimed components (e.g. a positive spike where the data actually peaks, \
+flanked by the model's two centers) is evidence the splitting is a fit \
+artifact, not a resolved structure — report "no resolved splitting; residual \
+lineshape excess" instead. Global R² cannot arbitrate this: a wrong \
+decomposition of one band barely moves R² when a strong baseline dominates.
 
 Frame your Stage 1 answer as if you had to recommend a model yourself from this evidence.
 """
