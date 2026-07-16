@@ -1000,6 +1000,8 @@ class AnalysisOrchestratorAgent:
         command: list = None,
         url: str = None,
         env: dict = None,
+        transport: str = None,
+        headers: dict = None,
     ) -> int:
         """Connect to an MCP server and register its tools.
 
@@ -1007,8 +1009,12 @@ class AnalysisOrchestratorAgent:
             server_name: Human-readable label for this server.
             command: Command + args for stdio transport,
                 e.g. ``["npx", "-y", "@mcp/server-filesystem", "/tmp"]``.
-            url: URL for SSE transport.
+            url: URL for a network transport (SSE or streamable HTTP).
             env: Optional environment variables for the subprocess.
+            transport: Transport for ``url`` — ``"sse"`` (default) or
+                ``"http"`` (streamable HTTP).
+            headers: Optional HTTP headers for the ``url`` transports,
+                e.g. ``{"Authorization": "Bearer <token>"}``.
 
         Returns:
             Number of tools registered from this server.
@@ -1022,7 +1028,10 @@ class AnalysisOrchestratorAgent:
             )
             return 0
 
-        conn = MCPConnection(server_name, command=command, url=url, env=env)
+        conn = MCPConnection(
+            server_name, command=command, url=url, env=env,
+            transport=transport, headers=headers,
+        )
         schemas = conn.connect()
 
         existing_names = {t["name"] for t in self._external_tools}

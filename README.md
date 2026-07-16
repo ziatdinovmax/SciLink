@@ -179,6 +179,9 @@ Connect external MCP servers to extend SciLink with additional tools:
 ```bash
 # Python MCP server (e.g., arXiv paper search)
 scilink analyze --mcp stdio:arxiv:python,-m,arxiv_mcp_server,--storage-path,/tmp/papers
+
+# Remote streamable-HTTP server (e.g., a hosted lab platform with token auth)
+scilink analyze --mcp mcp_config.json   # {"url": "...", "transport": "http", "headers": {...}}
 ```
 
 Programmatically:
@@ -189,9 +192,17 @@ tool_count = orchestrator.connect_mcp_server(
     server_name="arxiv",
     command=["python", "-m", "arxiv_mcp_server", "--storage-path", "/tmp/papers"]
 )
+
+# or a remote server over streamable HTTP with bearer-token auth
+tool_count = orchestrator.connect_mcp_server(
+    server_name="lab-platform",
+    url="https://mcp.example.com/mcp",
+    transport="http",
+    headers={"Authorization": f"Bearer {os.environ['LAB_PLATFORM_API_KEY']}"},
+)
 ```
 
-In the **web UI**, go to the **Tools** tab > **MCP Servers** section, select a transport (stdio/SSE), enter the server name and command, and click **Connect**.
+In the **web UI**, go to the **Tools** tab > **MCP Servers** section, select a transport (stdio/SSE/HTTP), enter the server name and command or URL (plus optional headers for authenticated servers), and click **Connect**.
 
 See [docs/mcp_client_integration.md](docs/mcp_client_integration.md) for the full MCP guide.
 
