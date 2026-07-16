@@ -23,8 +23,8 @@ Environment:
                        (use if the LAMMPS binary the skill finds is wrong)
 
 Usage:
-  python examples/run_md_oneshot_deception.py            # Stage A, direct
-  python examples/run_md_oneshot_deception.py --via-meta # Stage B, through meta
+  python examples/run_md_oneshot.py            # Stage A, direct
+  python examples/run_md_oneshot.py --via-meta # Stage B, through meta
 """
 
 import argparse

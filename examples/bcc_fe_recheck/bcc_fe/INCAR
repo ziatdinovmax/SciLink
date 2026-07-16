@@ -1,0 +1,35 @@
+SYSTEM = BCC Fe - ground state SCF (PBE)
+
+# Functional
+GGA = PE
+
+# Electronic convergence
+PREC = Accurate
+ENCUT = 400
+EDIFF = 1E-6
+NELM = 100
+ALGO = Normal
+
+# Smearing - metal: use Methfessel-Paxton, NOT tetrahedron
+ISMEAR = 1
+SIGMA = 0.1
+
+# Static calculation (single-point SCF energy)
+NSW = 0
+ISIF = 0
+LORBIT = 11
+
+# Spin polarization - Fe is ferromagnetic
+ISPIN = 2
+MAGMOM = 2*5.0
+
+# Write charge density
+LCHARG = .TRUE.
+LWAVE = .FALSE.
+
+# Real-space projection - use exact for small cell
+LREAL = .FALSE.
+
+# Parallelization
+NCORE = 4
+KPAR = 2

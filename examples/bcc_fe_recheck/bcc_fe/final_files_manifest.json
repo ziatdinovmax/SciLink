@@ -1,0 +1,12 @@
+{
+  "workflow_status": "success",
+  "user_request": "Bulk iron in the BCC structure, 1-atom primitive cell. This is a ferromagnetic system: use spin-polarized DFT (ISPIN = 2) with an initial MAGMOM of about 5 muB on iron. Compute the ground-state SCF energy with PBE.",
+  "output_directory": "/Users/sarah.allec/Library/CloudStorage/OneDrive-PNNL/Documents/Github_Repos/SciLink_fork/SciLink/examples/bcc_fe_recheck/bcc_fe",
+  "final_files": {
+    "structure": "POSCAR",
+    "incar": "INCAR",
+    "kpoints": "KPOINTS"
+  },
+  "ready_for_vasp": true,
+  "literature_validated": false
+}
