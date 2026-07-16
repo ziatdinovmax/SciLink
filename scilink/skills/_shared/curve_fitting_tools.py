@@ -50,6 +50,85 @@ _X_AXIS_HINTS = (
 _NON_Y_HINTS = ("err", "error", "sigma", "std", "uncert", "weight", "noise")
 
 
+_AMPLITUDE_KEYS = ("area", "amplitude", "intensity", "height", "step")
+_SHAPE_KEYS = ("center", "position", "sigma", "gamma", "fwhm", "width",
+               "eta", "decay", "tau", "frequency", "phase", "asymmetry")
+
+ABSENT_COMPONENT_FIX = (
+    "For each component flagged '_absent': refit with the component's SHAPE "
+    "parameters FROZEN at the plan's (or last-fitted) values and ONLY its "
+    "amplitude free; report that amplitude and its covariance error as the "
+    "component's amplitude-like parameters (for localized peaks the "
+    "baseline-subtracted window integral is an acceptable fast path), and "
+    "report shape parameters as null. Absence is a measurement, not a gap."
+)
+
+
+def validate_absent_component_contract(parameters) -> list:
+    """Deterministic check of the absence-as-value results contract.
+
+    For every component whose dict (or a sibling key) carries an
+    ``*_absent: true`` flag: its amplitude-like parameters (area/amplitude/
+    intensity/height/step) must be FINITE numbers with ``_err`` siblings —
+    the frozen-shape amplitude measurement — and its shape parameters
+    (center/width/...) must be null. Returns human-readable violation
+    strings (empty = compliant) for the correction-retry feedback channel.
+    Never raises. Technique-blind: keys are matched by parameter ROLE.
+    """
+    import numpy as _np
+    out = []
+    if not isinstance(parameters, dict):
+        return out
+
+    def _flagged(d):
+        return any(str(k).endswith("_absent") and v in (True, "true", "True", 1)
+                   for k, v in d.items() if not isinstance(v, dict))
+
+    comps = {k: v for k, v in parameters.items() if isinstance(v, dict)}
+    for name, comp in comps.items():
+        if not (_flagged(comp)
+                or parameters.get(f"{name}_absent") in (True, "true", "True", 1)):
+            continue
+        amp_keys = [k for k in comp
+                    if any(a in str(k).lower() for a in _AMPLITUDE_KEYS)
+                    and not str(k).lower().endswith("_err")]
+        if not amp_keys:
+            out.append(f"component '{name}' is flagged absent but reports no "
+                       "amplitude-like parameter at all")
+        for k in amp_keys:
+            v = comp.get(k)
+            ok_num = isinstance(v, (int, float)) and _np.isfinite(v)
+            if not ok_num:
+                out.append(f"absent component '{name}': '{k}' must be the "
+                           "MEASURED frozen-shape amplitude (finite number), "
+                           f"got {v!r}")
+            elif f"{k}_err" in comp and not (
+                    isinstance(comp[f"{k}_err"], (int, float))
+                    and _np.isfinite(comp[f"{k}_err"])):
+                out.append(f"absent component '{name}': '{k}_err' must be a "
+                           "finite propagated uncertainty")
+        # Shape parameters: null is the contract, but a leftover numeric
+        # value is tolerated (harmless to trends, which key on amplitude).
+    return out
+
+
+def _is_index_ramp(col) -> bool:
+    """True for a perfect arithmetic progression — a row counter / frame
+    index / uniform axis, never a physical signal. Fitting one of these as
+    Y yields a perfect straight-line "result" (R^2 = 1.0 on y = t) that
+    looks like success while measuring nothing; observed live collapsing a
+    6-column instrument trace into its frame counter repeatedly."""
+    import numpy as _np
+    c = _np.asarray(col, float)
+    if c.size < 3 or not _np.all(_np.isfinite(c)):
+        return False
+    d = _np.diff(c)
+    span = float(_np.nanmax(c) - _np.nanmin(c))
+    if span <= 0:
+        return False
+    return bool(_np.allclose(d, d[0], rtol=1e-6, atol=1e-9 * max(span, 1.0)))
+
+
 def _choose_xy_indices(arr, system_info, column_names, log):
     """Pick (x_index, y_index) from a >2-column array.
 
@@ -81,9 +160,17 @@ def _choose_xy_indices(arr, system_info, column_names, log):
         x_guess = next((i for i, c in enumerate(low)
                         if any(h in c for h in _X_AXIS_HINTS)), None)
         if x_guess is not None:
-            y_guess = next((i for i in range(n) if i != x_guess
-                            and not any(b in low[i] for b in _NON_Y_HINTS)),
-                           next((i for i in range(n) if i != x_guess), None))
+            def _y_ok(i, strict):
+                if i == x_guess or any(b in low[i] for b in _NON_Y_HINTS):
+                    return False
+                if strict and (any(h in low[i] for h in _X_AXIS_HINTS)
+                               or _is_index_ramp(arr[:, i])):
+                    return False   # a second axis / counter is not a signal
+                return True
+            y_guess = next((i for i in range(n) if _y_ok(i, True)),
+                           next((i for i in range(n) if _y_ok(i, False)),
+                                next((i for i in range(n) if i != x_guess),
+                                     None)))
             return x_guess, y_guess
 
     # Monotonic-column heuristic (last-resort fallback). A monotonic column is
@@ -132,6 +219,22 @@ def select_xy_columns(data, system_info=None, logger_=None, column_names=None) -
     if n_cols == 2:
         return _try_orient_xy(np.ascontiguousarray(arr))
     xi, yi = _choose_xy_indices(arr, system_info, column_names, log)
+    if _is_index_ramp(arr[:, yi]):
+        alt = next((j for j in range(n_cols)
+                    if j not in (xi, yi) and not _is_index_ramp(arr[:, j])),
+                   None)
+        if alt is not None:
+            if log:
+                log.warning(
+                    f"select_xy_columns: chosen Y (col {yi}) is a perfect "
+                    f"index/counter ramp — not a signal; switching Y to "
+                    f"col {alt}.")
+            yi = alt
+        elif log:
+            log.warning(
+                "select_xy_columns: every candidate Y column is an "
+                "index/counter ramp — fitting it would measure nothing; "
+                "proceeding under protest.")
     if log:
         cols_desc = f" ({column_names})" if column_names else ""
         log.warning(

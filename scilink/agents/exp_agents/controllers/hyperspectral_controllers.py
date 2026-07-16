@@ -712,10 +712,15 @@ statistics correctly:
   threshold is several times sigma_pixel/sqrt(N) — NOT the per-pixel sigma.
   (A prominence of 0.2 with sigma_pixel=0.4 over 10,000 averaged spectra is
   a ~50-sigma detection, not a null.)
-- Test BRIGHT-REGION means as well as the field mean: a feature localized to
-  a small region is diluted ~(region/frame) in the field mean but fully
-  present in the mean over the brightest pixels (e.g. top 1-5% by integrated
-  intensity). Declare not_measurable ONLY if it fails in BOTH.
+- Test BRIGHT-REGION means as well as the field mean — AT THE SIGNAL'S OWN
+  SCALE: a feature localized to a small region is diluted ~(region/frame)
+  in the field mean, and a FIXED bright fraction has the same flaw (a 0.2%-
+  area emitter is still diluted 25x inside a "top 5%" mean). When the
+  decomposition abundance maps show a compact footprint, average over THAT
+  footprint; otherwise walk the bright fraction DOWN (5% -> 1% -> 0.1% ->
+  the brightest few hundred pixels) until it stops changing the answer.
+  Declare not_measurable ONLY if the feature fails in the field mean AND at
+  every tested scale.
 - Measurability is RESOLUTION-DEPENDENT: a feature detectable in the mean
   but with per-pixel SNR below threshold is not mappable at native
   resolution — spatially BIN until the binned per-pixel SNR clears the bar
@@ -769,6 +774,41 @@ def _sanitize_filename(text: str) -> str:
     # Replace spaces with underscores, remove non-alphanumeric chars except _ and -
     safe_text = re.sub(r'[^\w\-\_]', '', text.replace(" ", "_"))
     return safe_text
+
+
+def _footprint_evidence(state: dict) -> str:
+    """One line per decomposition component: its half-max footprint as a
+    fraction of the frame. This is the salvage judge's defense against
+    field-mean dilution — a LOCALIZED tag tells it the signal must be
+    judged at footprint scale, not frame scale."""
+    maps = state.get("final_abundance_maps")
+    if maps is None:
+        return "(no decomposition ran)"
+    try:
+        maps = np.asarray(maps)
+        if maps.ndim != 3:
+            return "(no usable abundance maps)"
+        # Component axis: package convention is component-LAST; fall back
+        # to component-first for legacy stacks (smallest axis heuristic).
+        if maps.shape[-1] <= maps.shape[0]:
+            n, get = maps.shape[-1], (lambda k: maps[:, :, k])
+        else:
+            n, get = maps.shape[0], (lambda k: maps[k])
+        lines = []
+        for k in range(min(int(n), 8)):
+            a = np.asarray(get(k), float)
+            lo, hi = float(np.nanmin(a)), float(np.nanmax(a))
+            if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+                continue
+            frac = float((a >= lo + 0.5 * (hi - lo)).mean())
+            lines.append(
+                f"Component {k + 1}: half-max footprint {frac:.2%} of the "
+                f"frame" + ("  <-- LOCALIZED: judge this signal at its own "
+                            "footprint scale, NOT the field mean"
+                            if frac < 0.05 else ""))
+        return "\n".join(lines) or "(no usable abundance maps)"
+    except Exception:  # noqa: BLE001 - evidence is best-effort
+        return "(footprint evidence unavailable)"
 
 
 def _build_fit_mask(abundance_maps, comp_idx, shape, logger,
@@ -2857,7 +2897,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             present, conf, caveat = self._judge_salvage(
                 rep_dash, code_str, mean_spec_bytes or None,
                 state.get("system_info"), state.get("analysis_objective"),
-                _used_tool_descriptions(state, code_str), result_summary)
+                _used_tool_descriptions(state, code_str), result_summary,
+                spatial_evidence=_footprint_evidence(state))
 
             # Record the degradation so the top-level status reflects it
             # (a salvage is NOT a clean success). Threaded up to analyze().
@@ -3460,7 +3501,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             return False, f"judge unavailable ({e}); retry with maps"
 
     def _judge_salvage(self, dashboard_bytes, code_str, mean_spec_bytes,
-                       system_info, objective, tool_descriptions, result_summary):
+                       system_info, objective, tool_descriptions, result_summary,
+                       spatial_evidence=None):
         """Final salvage judge (single call). When ALL attempts fail, decide from
         the physics whether the best partial result is a defensible APPROXIMATE
         answer worth presenting with caveats, or is meaningless and should be
@@ -3477,6 +3519,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 method=(code_str or "(unavailable)")[:6000],
                 tool_descriptions=tool_descriptions or "(no registered tool was called)",
                 result_summary=result_summary,
+                spatial_evidence=spatial_evidence or "(no decomposition ran)",
             )]
             if dashboard_bytes:
                 prompt.append("Representative result dashboard (map + histogram):")

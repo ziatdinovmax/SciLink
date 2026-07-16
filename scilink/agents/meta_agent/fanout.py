@@ -51,7 +51,83 @@ logger = logging.getLogger("meta_agent.fanout")
 # Concurrency + sizing. The complementary SET (post-gate) is what these bound,
 # not the raw input: the gate prunes first, so a 6-upload request with one
 # complementary pair runs a 2-way mesh, not a 6-way one.
-FANOUT_MAX_WORKERS = 4          # peak concurrent branches (rate-limit ceiling)
+FANOUT_MAX_WORKERS = int(os.environ.get("SCILINK_FANOUT_MAX_WORKERS", "4"))
+"""Peak concurrent branches (rate-limit ceiling). Overridable via the
+SCILINK_FANOUT_MAX_WORKERS env var: two concurrent large-datacube branches
+(each holding float64 working copies plus a process-pool of fitters) can sum
+past physical RAM and get the whole meta process memory-killed — observed
+live twice on a 704x704x260 pair. Set to 1 to serialize branches on
+memory-constrained machines."""
+
+# Memory-aware co-scheduling guard: don't LAUNCH a branch whose estimated
+# working set, together with the branches already running, exceeds the
+# machine's available memory — hold it until a slot frees. Estimates are
+# coarse (input bytes x a float64-plus-copies factor, + a per-pool
+# constant when the data is big enough to invite parallel fitting), and the
+# guard only DELAYS branches, never drops them, so a bad estimate costs
+# wall-clock, not results.
+_BRANCH_MEM_FACTOR = 6.0          # input bytes -> peak working-set multiple
+_BRANCH_POOL_OVERHEAD = 4e9       # loky pool cost for large per-pixel fits
+_BRANCH_MEM_FLOOR = 5e8           # assume at least this per branch
+_BRANCH_MEM_MARGIN = 1.5e9        # keep this much headroom for the OS
+
+import threading as _threading
+_mem_cv = _threading.Condition()
+_mem_running: dict = {}           # admitted branch key -> estimated bytes
+
+
+def _branch_mem_estimate(branch: dict) -> float:
+    """Coarse peak-working-set estimate for a branch, from its input size."""
+    try:
+        p = Path(str(branch.get("data_path") or ""))
+        nbytes = 0
+        if p.is_file():
+            nbytes = p.stat().st_size
+        elif p.is_dir():
+            pat = branch.get("pattern") or "*"
+            nbytes = sum(f.stat().st_size for f in p.glob(pat) if f.is_file())
+        est = max(nbytes * _BRANCH_MEM_FACTOR, _BRANCH_MEM_FLOOR)
+        if nbytes > 1e8:   # big enough to invite a parallel per-pixel fit
+            est += _BRANCH_POOL_OVERHEAD
+        return est
+    except Exception:  # noqa: BLE001 - an estimate must never break a branch
+        return _BRANCH_MEM_FLOOR
+
+
+def _available_memory() -> Optional[float]:
+    try:
+        import psutil
+        return float(psutil.virtual_memory().available)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _admit_branch(key: str, est: float, label: str) -> None:
+    """Hold a branch until its estimated working set fits in available
+    memory alongside the branches already running. Progress guarantee: a
+    branch is ALWAYS admitted when nothing else is running, so the guard
+    can only delay work, never deadlock or drop it."""
+    with _mem_cv:
+        held_logged = False
+        while True:
+            avail = _available_memory()
+            if (not _mem_running or avail is None
+                    or avail >= est + _BRANCH_MEM_MARGIN):
+                _mem_running[key] = est
+                return
+            if not held_logged:
+                print(f"  ⏸  holding branch '{label}' for memory headroom "
+                      f"(needs ~{est / 1e9:.1f} GB, available "
+                      f"{avail / 1e9:.1f} GB; {len(_mem_running)} branch(es) "
+                      "running)")
+                held_logged = True
+            _mem_cv.wait(timeout=30)
+
+
+def _release_branch(key: str) -> None:
+    with _mem_cv:
+        _mem_running.pop(key, None)
+        _mem_cv.notify_all()
 _FANOUT_POLL_S = 5              # how often to check for finished branches
 _FANOUT_HEARTBEAT_S = 60        # min gap between "still running" ticks
 FANOUT_SOFT_CAP = 5             # warn / confirm beyond this many fused branches
@@ -648,21 +724,27 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
     index = entry["index"]
     slug = _slug(branch.get("label") or Path(branch["data_path"]).stem)
     base_dir = orch.fanout_dir / f"{index:02d}_{slug}"
+    mem_key = f"{index}:{slug}"
+    _admit_branch(mem_key, _branch_mem_estimate(branch),
+                  branch.get("label") or slug)
     entry["_started_at"] = time.monotonic()
     entry["_branch_tid"] = threading.get_ident()
     try:
-        from ..exp_agents.analysis_orchestrator import AnalysisMode
-        child = _make_ephemeral_analysis_child(orch, base_dir)
-        result = child.run_task(
-            _mesh_task(branch, companions),
-            context=branch.get("context"),
-            autonomy=AnalysisMode.AUTONOMOUS,
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.exception(f"fan-out branch {index} failed: {e}")
-        result = {"status": "error", "error": str(e), "summary": "",
-                  "key_findings": [], "files_produced": [],
-                  "suggested_followups": [], "warnings": []}
+        try:
+            from ..exp_agents.analysis_orchestrator import AnalysisMode
+            child = _make_ephemeral_analysis_child(orch, base_dir)
+            result = child.run_task(
+                _mesh_task(branch, companions),
+                context=branch.get("context"),
+                autonomy=AnalysisMode.AUTONOMOUS,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception(f"fan-out branch {index} failed: {e}")
+            result = {"status": "error", "error": str(e), "summary": "",
+                      "key_findings": [], "files_produced": [],
+                      "suggested_followups": [], "warnings": []}
+    finally:
+        _release_branch(mem_key)
     if entry.get("timed_out"):
         logger.warning(
             f"fan-out branch {index} finished AFTER its wall-clock budget "
@@ -1349,6 +1431,11 @@ uncertainties (e.g. *_err columns) were actually used; never accept \
 fabricated weights.
 5. METHOD: is the chosen method appropriate for the join topology and the \
 sampling?
+6. FIGURE INTEGRITY (when the overlay figure is attached): the figure is a \
+deliverable, not decoration — an EMPTY or broken panel (axes with no data \
+drawn, a legend referencing absent curves, a panel contradicting the \
+computed numbers) is a script defect: verdict "refine" naming the panel. \
+Judge what is actually rendered, not what the script intended to render.
 
 Do NOT ask for refinement over cosmetic points — numerical nitpicks that do \
 not change the scientific conclusion are "accept" with the issue noted. Ask \
