@@ -371,11 +371,28 @@ def fit_per_pixel(data, axis, model, mask=None, init="auto", bounds=None,
                          "to per-pixel moment init")
 
     # --- worker count / backend --------------------------------------------
+    # A loky worker is a full Python+numpy+lmfit process (~300-450 MB
+    # resident), so on RAM-constrained machines the pool — not the data —
+    # dominates the footprint (observed live: a single 16-worker pool peaked
+    # ~6.7 GB and two concurrent ones OOM-killed the host). The DEFAULT
+    # (n_jobs=-1) therefore also caps by available memory; an explicit
+    # positive n_jobs is honored as given.
     n_cores = os.cpu_count() or 1
     if n_jobs in (None, 0):
         n_jobs = 1
     elif n_jobs < 0:
         n_jobs = max(1, min(n_cores + 1 + n_jobs, 16))
+        try:
+            import psutil
+            _avail = psutil.virtual_memory().available
+            _ram_cap = max(1, int((_avail - 1e9) / 4e8))
+            if _ram_cap < n_jobs:
+                notes.append(
+                    f"worker pool capped by available memory: {_ram_cap} "
+                    f"workers (core-based cap was {n_jobs})")
+                n_jobs = _ram_cap
+        except Exception:  # noqa: BLE001 - cap is best-effort
+            pass
     n_jobs = int(min(n_jobs, 16))
     chunk_size = max(64, int(chunk_size))
     chunks = _chunk_ranges(len(kept_idx), chunk_size)
