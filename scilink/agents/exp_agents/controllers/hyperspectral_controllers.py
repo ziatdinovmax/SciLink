@@ -781,36 +781,97 @@ def _build_fit_mask(abundance_maps, comp_idx, shape, logger,
     so mask-boundary physics (interfaces, transition zones) stays inside
     the fitted region. Returns a bool (h, w) array, or None when the maps /
     index are unusable (the caller falls back to full-frame)."""
+    def _no(reason):
+        logger.info(f"    Fit-mask not built: {reason}")
+        return None
+
     try:
-        if abundance_maps is None or comp_idx is None:
-            return None
+        if abundance_maps is None:
+            return _no("no abundance maps in state (decomposition skipped "
+                       "or failed)")
+        if comp_idx is None:
+            return _no("target carries no mask_component_index")
         maps = np.asarray(abundance_maps)
         idx = int(comp_idx)
-        if maps.ndim != 3 or not (0 <= idx < maps.shape[0]):
-            return None
-        amap = maps[idx]
-        if amap.shape != tuple(shape):
-            return None
+        if maps.ndim != 3:
+            return _no(f"abundance maps have unusable shape {maps.shape}")
+
+        # The package convention is component-LAST — (H, W, n), the shape
+        # ``run_spectral_unmixing`` returns and ``reconstruct_cube``
+        # documents. (This builder originally indexed component-FIRST and
+        # silently sliced rows off every real decomposition.) Resolve the
+        # component axis by which spatial grid actually aligns with the raw
+        # frame — same-scale or an integer-factor binning of it; accept a
+        # component-first stack defensively.
+        def _grid_scale(hw):
+            fy, ry = divmod(int(shape[0]), hw[0])
+            fx, rx = divmod(int(shape[1]), hw[1])
+            return None if (ry or rx or fy < 1 or fx < 1) else (fy, fx)
+
+        last_ok = _grid_scale(maps.shape[:2]) is not None
+        first_ok = _grid_scale(maps.shape[1:]) is not None
+        if last_ok and first_ok:
+            # Both readings align with the frame (divisibility accident) —
+            # the component axis is the SMALL one (n is <=8 in practice,
+            # spatial dims are tens to hundreds).
+            last_ok = maps.shape[2] <= maps.shape[0]
+            first_ok = not last_ok
+        if last_ok:
+            n_comp = maps.shape[2]
+            comp_slice = lambda k: maps[:, :, k]     # noqa: E731
+        elif first_ok:
+            n_comp = maps.shape[0]
+            comp_slice = lambda k: maps[k]           # noqa: E731
+        else:
+            return _no(f"abundance grid {maps.shape} does not align with "
+                       f"the raw frame {tuple(shape)} (same scale or "
+                       "integer-factor binning)")
+
+        # The index contract is the 1-BASED "Component N" label used in
+        # every decomposition plot the planner sees (a 0-based schema note
+        # lost to that visual context live). Tolerate the 0-based habit:
+        # 0 also means the first component.
+        if 1 <= idx <= n_comp:
+            idx -= 1
+        elif idx != 0:
+            return _no(f"component index {idx} out of range (1..{n_comp})")
+        amap = comp_slice(idx)
+        # A preprocessing spatial_bin_factor shrinks the decomposition's
+        # spatial grid while codegen fits the RAW cube. When the raw frame
+        # is an integer multiple of the abundance grid, the mask is valid
+        # at the binned scale — build it there and upsample by pixel
+        # repetition at the end.
+        scale = _grid_scale(amap.shape)
+        if scale == (1, 1):
+            scale = None
         amap = np.asarray(amap, float)
         lo, hi = float(np.nanmin(amap)), float(np.nanmax(amap))
         if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
-            return None
+            return _no("abundance map is degenerate (flat or non-finite)")
         # Half-max threshold: the mask tracks the component's actual
         # footprint rather than a fixed fraction of the frame.
         mask = amap >= (lo + 0.5 * (hi - lo))
         if not mask.any() or mask.all():
-            return None
+            return _no("half-max threshold yields an empty or whole-frame mask")
         from scipy.ndimage import binary_dilation
-        n_iter = max(3, int(dilate_frac * min(shape)))
+        # Dilate at the scale the mask was built at, so the physical halo
+        # is ~dilate_frac of the frame regardless of binning.
+        n_iter = max(3, int(dilate_frac * min(mask.shape)))
         mask = binary_dilation(mask, iterations=n_iter)
         if mask.mean() > 0.5:
             # The component covers most of the frame — masking buys nothing;
             # fall back to full-frame.
-            return None
+            return _no(f"component footprint covers {mask.mean():.0%} of the frame — masking buys nothing")
+        if scale is not None:
+            mask = np.repeat(np.repeat(mask, scale[0], axis=0),
+                             scale[1], axis=1)
         logger.info(
-            f"    Fit mask from component {idx}: half-max abundance "
-            f"threshold + {n_iter}px dilation -> {int(mask.sum())} of "
-            f"{mask.size} pixels ({mask.mean():.1%}).")
+            f"    Fit mask from Component {idx + 1}: half-max abundance "
+            f"threshold + {n_iter}px dilation"
+            + (f" + {scale[0]}x{scale[1]} upsample (binned decomposition)"
+               if scale else "")
+            + f" -> {int(mask.sum())} of {mask.size} pixels "
+              f"({mask.mean():.1%}).")
         return mask
     except Exception as e:  # noqa: BLE001 - mask is an optimization, never fatal
         logger.warning(f"    Fit-mask construction failed: {e}")
@@ -2347,7 +2408,13 @@ class RunDynamicAnalysisController:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         # --- PREPARE DATA CONTEXT ---
-        h, w, e = state["hspy_data"].shape
+        # Shapes must describe the cube the generated code actually receives:
+        # the RAW cube (original_hspy_data -> optimal_data below). When a
+        # preprocessing spatial_bin_factor shrank hspy_data, using the binned
+        # shape here misstated the size in the codegen prompt and — worse —
+        # made the (h, w) commit check below reject every returned raw-scale
+        # map as a "shape mismatch".
+        h, w, e = state["original_hspy_data"].shape
 
         # Axis & Unit Detection — reads through resolve_axis_spec so non-energy
         # axes (time, voltage, frequency, ...) work the same as the legacy
