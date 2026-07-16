@@ -1307,6 +1307,71 @@ class SeriesScoutController:
                 return np.load(data_path)
             return np.loadtxt(data_path, delimiter=',')
 
+    # The visual scout is capped at 7 spectra; the SVD reduction runs on the
+    # full series so a transition the subsample straddles is still located.
+    # This cap only bounds file-loading cost on very long series.
+    _REDUCTION_MAX_SPECTRA = 256
+
+    def _run_series_reduction(self, state: dict, num_spectra: int) -> None:
+        """Full-series unsupervised change detection (mean-centered SVD).
+
+        Stores the `reduce_curves` result under `state["series_reduction"]`
+        (None on any failure — never blocks the scout). Control axis comes
+        from `series_metadata` values when they are numeric and per-spectrum,
+        else spectrum index.
+        """
+        from ....skills._shared.series_reduction import reduce_curves
+
+        try:
+            indices = list(range(num_spectra))
+            if num_spectra > self._REDUCTION_MAX_SPECTRA:
+                step = (num_spectra - 1) / (self._REDUCTION_MAX_SPECTRA - 1)
+                indices = sorted({round(i * step)
+                                  for i in range(self._REDUCTION_MAX_SPECTRA)})
+            series_metadata = state.get("series_metadata", {})
+            values = series_metadata.get("values", [])
+            curves, controls = [], []
+            for idx in indices:
+                try:
+                    x, y = self._extract_xy(self._load_spectrum(idx, state))
+                except Exception:
+                    continue
+                cv = None
+                if idx < len(values):
+                    try:
+                        cv = float(values[idx])
+                    except (TypeError, ValueError):
+                        cv = None
+                curves.append((x, y))
+                controls.append(cv)
+
+            if curves and all(c is not None for c in controls):
+                ctrl = controls
+                control_source = series_metadata.get("variable") or "index"
+            else:
+                ctrl, control_source = None, "index"
+
+            result = reduce_curves(
+                curves, controls=ctrl, control_source=control_source,
+                label="series", return_figure=True,
+            )
+            if result.get("status") != "success":
+                self.logger.info(
+                    f"  Change detection skipped: {result.get('error')}")
+                state["series_reduction"] = None
+                return
+            if len(curves) < num_spectra:
+                result["subsampled"] = f"{len(curves)} of {num_spectra} spectra"
+            state["series_reduction"] = result
+            self.logger.info(
+                f"  Change detection (all {result['n_points']} spectra): "
+                f"change point ≈ {result['change_point']:g} "
+                f"({control_source}), sharpness {result['change_sharpness']}"
+            )
+        except Exception as e:
+            self.logger.warning(f"  Series change detection failed: {e}")
+            state["series_reduction"] = None
+
     def execute(self, state: dict) -> dict:
         if state.get("error_dict") or state.get("is_single_spectrum", True):
             return state
@@ -1368,6 +1433,11 @@ class SeriesScoutController:
                 state["scout_overlay_plot"] = None
         else:
             state["scout_overlay_plot"] = None
+
+        # Full-series change detection (additive: the scouts above remain the
+        # visual evidence; this locates WHERE the series changes using every
+        # spectrum, which the <=7-spectrum subsample cannot).
+        self._run_series_reduction(state, num_spectra)
 
         state["scout_data"] = scout_data
         self.logger.info(f"  Scouted {len(scout_data)} of {num_spectra} spectra")
@@ -2108,6 +2178,47 @@ class CurveFittingPlanningController:
                 "mime_type": "image/png",
                 "data": overlay,
             })
+
+        # Full-series SVD change detection (computed on every spectrum, not
+        # just the scouts — a transition between scout indices still shows).
+        reduction = state.get("series_reduction")
+        if reduction:
+            unit = series_metadata.get("unit", "")
+            axis = reduction.get("control_variable", {}).get("source", "index")
+            flags = reduction.get("flags", {})
+            flag_names = [k for k in ("shift_dominated", "intensity_drift",
+                                      "resampled_to_common_grid")
+                          if flags.get(k)]
+            coverage = reduction.get("subsampled") or (
+                f"all {reduction['n_points']} spectra")
+            lines = [
+                "\n### Full-Series Change Detection (computed)",
+                f"Unsupervised SVD change detection ran on {coverage} — "
+                "unlike the scout plots above, it sees between the scouted "
+                "indices.",
+                f"- Change point: {axis} ≈ {reduction['change_point']:g} "
+                f"{unit}".rstrip(),
+                f"- Change sharpness: {reduction['change_sharpness']} "
+                "(steepest single step as a fraction of the score range; "
+                "near 1 = abrupt transition, small = gradual evolution)",
+                f"- Variance explained by first two components: "
+                f"{reduction['variance_explained']}",
+            ]
+            if flag_names:
+                lines.append(f"- Flags: {', '.join(flag_names)}")
+            if reduction.get("caution"):
+                lines.append(f"- Caution: {reduction['caution']}")
+            lines.append(
+                "Use this to place regime boundaries and to judge whether "
+                "the scouts straddle a transition; the plots remain the "
+                "evidence for WHAT changes."
+            )
+            prompt.append("\n".join(lines))
+            if reduction.get("score_curve_png"):
+                prompt.append({
+                    "mime_type": "image/png",
+                    "data": reduction["score_curve_png"],
+                })
 
         prompt.append("\n### Individual Scout Spectra")
         for scout in scout_data:
