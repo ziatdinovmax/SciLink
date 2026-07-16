@@ -1293,8 +1293,17 @@ absolute paths given below.
 with units>}, "notes": [<what was skipped or degraded, and why>]}. Every \
 number in it must be computed by this script. Plain floats only; write \
 NaN/inf as null.
-- Strongly preferred: write ./fusion_figure.png — the aligned overlay of \
-the branch trends on the shared axis, with the located transitions marked.
+- Strongly preferred: write ./fusion_figure.png. Design the figure YOURSELF \
+for what these particular results need — there is no fixed template, and the \
+right form (overlay, difference plot, timeline, small multiples, ...) follows \
+from the join type and the finding. The only requirements: it shows the \
+RECONCILIATION itself (the cross-branch relationship, not a re-plot of one \
+branch); every plotted number comes from this script's computation; \
+uncertainties are drawn when available; the SCALE is chosen so the finding \
+is actually visible (an effect small against the absolute values needs a \
+difference/zoomed view, not full-range axes); and known confounds/flags are \
+annotated on the figure. A reader should be able to judge the headline \
+claim from the figure alone.
 - Print a short (<= 20 lines) plain-text summary to stdout.
 - Be robust: a missing column or unreadable file must degrade (recorded in \
 "notes"), not crash.
