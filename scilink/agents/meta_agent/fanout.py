@@ -1031,14 +1031,20 @@ _FUSION_FIG_MAX_DIM = 1536   # enough to read spatial structure; keeps payload s
 def _branch_key_figure(entry: dict) -> Optional[str]:
     """Pick one representative figure from a branch's produced files.
 
-    Prefers known representative names (segmentation overlay, NMF/PCA summary
-    grid, fit-review plot); falls back to the first image. Returns a path or None.
+    Priority order encodes evidence SCALE: a series branch's story is its
+    cross-series trend (parameter_trends.png), not any single unit's fit —
+    fusion reconciles trends, so the trend plot is what both the report
+    reader and the fusion LLM should see. Single-measurement branches
+    produce no trend figure and fall through to the representative
+    per-unit names (summary grid, overlay, fit plot); last resort is the
+    first image. Returns a path or None.
     """
     imgs = [str(f) for f in (entry.get("files_produced") or [])
             if Path(str(f)).suffix.lower() in _FIGURE_EXTS and Path(str(f)).exists()]
     if not imgs:
         return None
-    for pat in ("summary_grid", "visualization", "overlay", "review", "fit", "map"):
+    for pat in ("trend", "summary_grid", "visualization", "overlay",
+                "review", "fit", "map"):
         for f in imgs:
             if pat in Path(f).name.lower():
                 return f
