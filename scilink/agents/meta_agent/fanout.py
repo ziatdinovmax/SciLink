@@ -1031,14 +1031,20 @@ _FUSION_FIG_MAX_DIM = 1536   # enough to read spatial structure; keeps payload s
 def _branch_key_figure(entry: dict) -> Optional[str]:
     """Pick one representative figure from a branch's produced files.
 
-    Prefers known representative names (segmentation overlay, NMF/PCA summary
-    grid, fit-review plot); falls back to the first image. Returns a path or None.
+    Priority order encodes evidence SCALE: a series branch's story is its
+    cross-series trend (parameter_trends.png), not any single unit's fit —
+    fusion reconciles trends, so the trend plot is what both the report
+    reader and the fusion LLM should see. Single-measurement branches
+    produce no trend figure and fall through to the representative
+    per-unit names (summary grid, overlay, fit plot); last resort is the
+    first image. Returns a path or None.
     """
     imgs = [str(f) for f in (entry.get("files_produced") or [])
             if Path(str(f)).suffix.lower() in _FIGURE_EXTS and Path(str(f)).exists()]
     if not imgs:
         return None
-    for pat in ("summary_grid", "visualization", "overlay", "review", "fit", "map"):
+    for pat in ("trend", "summary_grid", "visualization", "overlay",
+                "review", "fit", "map"):
         for f in imgs:
             if pat in Path(f).name.lower():
                 return f
@@ -1293,8 +1299,17 @@ absolute paths given below.
 with units>}, "notes": [<what was skipped or degraded, and why>]}. Every \
 number in it must be computed by this script. Plain floats only; write \
 NaN/inf as null.
-- Strongly preferred: write ./fusion_figure.png — the aligned overlay of \
-the branch trends on the shared axis, with the located transitions marked.
+- Strongly preferred: write ./fusion_figure.png. Design the figure YOURSELF \
+for what these particular results need — there is no fixed template, and the \
+right form (overlay, difference plot, timeline, small multiples, ...) follows \
+from the join type and the finding. The only requirements: it shows the \
+RECONCILIATION itself (the cross-branch relationship, not a re-plot of one \
+branch); every plotted number comes from this script's computation; \
+uncertainties are drawn when available; the SCALE is chosen so the finding \
+is actually visible (an effect small against the absolute values needs a \
+difference/zoomed view, not full-range axes); and known confounds/flags are \
+annotated on the figure. A reader should be able to judge the headline \
+claim from the figure alone.
 - Print a short (<= 20 lines) plain-text summary to stdout.
 - Be robust: a missing column or unreadable file must degrade (recorded in \
 "notes"), not crash.

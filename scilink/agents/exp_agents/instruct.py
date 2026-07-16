@@ -1276,7 +1276,7 @@ Depending on the analysis method used in the current iteration, you will receive
 
 4. **LARGE-DATA GATE — decomposition-first staging (above ~50k pixels):**
    Commit each decision to ONE of four verdicts, using the decomposition evidence in front of you:
-   * **fit-within-dilated-mask** — the signal of interest is spatially LOCALIZED in a component's abundance map: set `"fit_scope": "component_mask"` and `"mask_component_index": <0-based component index>` on the target. The pipeline builds the mask from that component's high-abundance region WITH a dilation halo (mask-boundary physics lives at the edges) and scopes the generated code to it.
+   * **fit-within-dilated-mask** — the signal of interest is spatially LOCALIZED in a component's abundance map: set `"fit_scope": "component_mask"` and `"mask_component_index": <component NUMBER as labeled in the decomposition plots — "Component 2" means 2>` on the target. The pipeline builds the mask from that component's high-abundance region WITH a dilation halo (mask-boundary physics lives at the edges) and scopes the generated code to it.
    * **fit-global-then-decide** — a WEAK feature may be present everywhere (uniform signals give decomposition no spatial contrast to separate): describe a target whose code fits the MEAN spectrum first (one cheap fit) and maps per-pixel only where that detection justifies it.
    * **fit-everywhere** — only when the objective genuinely needs full-frame per-pixel parameters; then apply the size-guard tactics (vectorize, coarse-to-fine).
    * **decomposition-only (STOP)** — permitted ONLY when the components are clean AND the residuals are unstructured AND the objective names no per-pixel quantity. A STRUCTURED residual (derivative shapes, coherent spatial patterns, high residual autocorrelation) is the signature of continuous parameter variation or a weak everywhere-signal — physics decomposition CANNOT model — and mandates a fitting target even when every component looks clean.
@@ -1290,7 +1290,7 @@ You MUST output a valid JSON object.
 **STRICT TYPE RULES:**
 * All refinement targets have `"type": "custom_code"`.
 * For `custom_code` targets: `value = null` (the description field is what matters).
-* Optional scoping fields on a `custom_code` target (the LARGE-DATA GATE): `"fit_scope"`: `"full_frame"` (default) or `"component_mask"`; when `"component_mask"`, also set `"mask_component_index"` (0-based index of the decomposition component whose high-abundance region defines the fitting mask).
+* Optional scoping fields on a `custom_code` target (the LARGE-DATA GATE): `"fit_scope"`: `"full_frame"` (default) or `"component_mask"`; when `"component_mask"`, also set `"mask_component_index"` (the component NUMBER as labeled in the decomposition plots, i.e. "Component N" -> N; its high-abundance region defines the fitting mask).
 * Targets of other types (e.g. legacy `"spatial"` or `"spectral"`) are NOT supported and will be ignored by the downstream pipeline. Do not emit them.
 
 **Required outputs (objective-aware QC enforcement):**
