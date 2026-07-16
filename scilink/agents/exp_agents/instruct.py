@@ -2516,6 +2516,22 @@ NOT any material/phase name, NOT any model name)
    model evaluated at the SAME x-points as `data.npy` (length N). The reviewer uses
    it to compute residual diagnostics (residual = data_y − fit). If you masked or
    excluded any points, still evaluate the model at all N x-points so lengths match.
+
+**Absent components are measurements, not gaps.** When a planned component is
+not present at this unit (a band vanished on heating, a phase peak gone above
+a transition), do NOT drop it from `parameters` and do NOT report NaN for
+everything. Report by parameter type: its AMPLITUDE-LIKE parameters (area,
+amplitude, intensity, height, step) as a MEASUREMENT — refit with the
+component's shape parameters FROZEN at their planned/last-fitted values
+and only its amplitude free, and report that amplitude (a real near-zero
+number, valid for any component form: peak, step, decay, oscillation)
+with its covariance error in the matching `_err` key (for localized peaks
+the baseline-subtracted window integral is an acceptable fast path); its INTENSIVE parameters
+(center, width, eta) as null (a nonexistent peak has no position — a fake 0
+would poison position trends); and add `"<component>_absent": true`. This
+keeps trend/sigmoid fits over a series anchored by their lower plateau
+instead of losing exactly the points that prove the transition completed.
+
 7. Print results as JSON:
 ```python
 results = {{
@@ -2532,6 +2548,11 @@ print(f"FIT_RESULTS_JSON:{{json.dumps(results)}}")
 
 
 FITTING_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed script.
+The corrected script must keep the full results contract of the original
+instructions — including reporting ABSENT planned components as
+measurements (extensive parameters as windowed residual integrals with
+`_err`, intensive parameters null, plus `"<component>_absent": true`),
+never as missing keys.
 
 **Plan:** {analysis_approach} | **Model:** {physical_model}
 
@@ -2562,6 +2583,10 @@ use "Data"/"Fit"/"Component N"/"Residuals" only — no material names, no peak a
 
 
 PLAN_CONFORMANCE_CHECK_INSTRUCTIONS = """You are verifying that a Python script correctly implements a scientific analysis plan.
+(Contract note: a script that reports a planned-but-absent component with
+near-zero extensive parameters, null intensive parameters, and an
+`_absent: true` flag is FOLLOWING the results contract — do not flag that
+as dropping a planned component.)
 
 **ANALYSIS PLAN (authoritative specification):**
 - Approach: {analysis_approach}

@@ -117,9 +117,25 @@ def preprocess_image(image: np.ndarray, max_dim: int = MAX_IMG_DIM) -> tuple[np.
     return denoised, scale_factor
 
 def convert_numpy_to_jpeg_bytes(image_array: np.ndarray, quality: int = 85) -> bytes:
-    """Converts a NumPy array into compressed JPEG bytes."""
+    """Converts a NumPy array into compressed JPEG bytes.
+
+    JPEG holds 8-bit samples only, so higher-depth scientific frames
+    (uint16 cameras, int32/float detectors) are percentile-normalized to
+    uint8 first — PIL otherwise refuses ("cannot write mode I;16 as
+    JPEG") or emits a broken data stream, which blocked an entire
+    hologram-stack analysis live."""
     try:
-        pil_img = Image.fromarray(image_array)
+        arr = np.asarray(image_array)
+        if arr.dtype != np.uint8 and not (arr.ndim == 3 and arr.dtype == np.uint8):
+            a = arr.astype(np.float32)
+            a = np.nan_to_num(a, nan=0.0, posinf=0.0, neginf=0.0)
+            lo, hi = np.percentile(a, (1.0, 99.5))
+            if hi <= lo:
+                lo, hi = float(a.min()), float(max(a.max(), a.min() + 1))
+            arr = np.clip((a - lo) / (hi - lo) * 255.0, 0, 255).astype(np.uint8)
+        pil_img = Image.fromarray(arr)
+        if pil_img.mode not in ("L", "RGB"):
+            pil_img = pil_img.convert("RGB" if arr.ndim == 3 else "L")
         buffered = BytesIO()
         pil_img.save(buffered, format="JPEG", quality=quality)
         return buffered.getvalue()

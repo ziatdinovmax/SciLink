@@ -24,6 +24,26 @@ def check(name, cond):
     print(f"  [{'PASS' if cond else 'FAIL'}] {name}")
 
 
+def extra_absence_validator_checks():
+    """Section 5 (frozen-shape absence contract) — run via main2()."""
+    from scilink.skills._shared.curve_fitting_tools import (
+        validate_absent_component_contract as V, ABSENT_COMPONENT_FIX)
+    print("5) absence-as-value validator:")
+    check("compliant absent component passes",
+          V({"c": {"c_absent": True, "area": 0.5, "area_err": 0.4,
+                   "center": None}}) == [])
+    bad = V({"c": {"c_absent": True, "area": None, "center": None}})
+    check("empty amplitude on flagged component -> violation with fix cue",
+          bool(bad) and "MEASURED frozen-shape amplitude" in bad[0])
+    check("sibling-flag form detected",
+          bool(V({"c": {"area": float("nan")}, "c_absent": True})))
+    check("non-absent components untouched",
+          V({"p": {"area": None, "center": 1052.0}}) == [])
+    check("junk input never raises", V(None) == [] and V("x") == [])
+    check("fix prescription is form-agnostic",
+          "FROZEN" in ABSENT_COMPONENT_FIX and "amplitude" in ABSENT_COMPONENT_FIX)
+
+
 def main():
     from scilink.agents.exp_agents.instruct import (
         SPECTROSCOPY_SALVAGE_JUDGE_INSTRUCTIONS as S,
@@ -75,6 +95,8 @@ def main():
           and "fit artifact" in T and "no resolved splitting" in T)
     check("R2 explicitly disqualified as arbiter", "cannot arbitrate" in T)
 
+    extra_absence_validator_checks()
+
     print("\n" + "=" * 50)
     npass = sum(results.values())
     print(f"JUDGMENT CALIBRATION: {npass}/{len(results)} checks passed")
@@ -86,3 +108,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

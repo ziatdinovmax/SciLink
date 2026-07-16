@@ -3203,6 +3203,25 @@ Your guidance: '''
 
         fit_results = _parse_script_markers(run["stdout"])
 
+        # Absence-as-value contract (deterministic): a component flagged
+        # `_absent` must carry a MEASURED frozen-shape amplitude (finite,
+        # with `_err`), not empty keys — otherwise downstream series trends
+        # lose exactly the plateau points that prove a transition completed.
+        # Violations ride the script_errors channel into the verifier
+        # context and quality history, with the precise fix prescribed.
+        from ...skills._shared.curve_fitting_tools import (
+            validate_absent_component_contract, ABSENT_COMPONENT_FIX)
+        _acv = validate_absent_component_contract(
+            fit_results.get("parameters"))
+        if _acv:
+            script_errors.append({
+                "error": "absence-as-value contract violation: "
+                         + "; ".join(_acv),
+                "diagnosis": ABSENT_COMPONENT_FIX,
+            })
+            self.logger.warning(
+                "    ⚠️ Absence contract: %s", "; ".join(_acv))
+
         # Best-effort residual diagnostics from the saved fitted curve (vision aid):
         # reliable per-region structure metrics the verifier can reason over instead
         # of eyeballing a dynamic-range-crushed plot. Skipped silently if fit.npy
