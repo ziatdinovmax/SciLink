@@ -475,9 +475,10 @@ class MetaOrchestratorTools:
         )
 
         # -- delegate_to_analyses (parallel fan-out, full-mesh aux) ----------
-        def delegate_to_analyses(branches: list) -> str:
+        def delegate_to_analyses(branches: list,
+                                 figure_style: str = None) -> str:
             print(f"  🔀 Parallel analysis over {len(branches or [])} dataset(s)...")
-            return self.orch._run_fanout(branches)
+            return self.orch._run_fanout(branches, figure_style=figure_style)
 
         self._register_tool(
             func=delegate_to_analyses,
@@ -557,6 +558,17 @@ class MetaOrchestratorTools:
                         "required": ["data_path", "task", "label"],
                     },
                     "description": "The analysis branches to run in parallel (>= 2).",
+                },
+                "figure_style": {
+                    "type": "string",
+                    "description": (
+                        "Optional figure-presentation preference applied to "
+                        "EVERY branch's figures AND the fusion figure (e.g. "
+                        "'place legends outside the axes — never on top of "
+                        "data', 'use colorblind-safe colors'). Set it when "
+                        "the user expresses any preference about how plots "
+                        "should look; leave unset otherwise."
+                    ),
                 },
             },
             required=["branches"],

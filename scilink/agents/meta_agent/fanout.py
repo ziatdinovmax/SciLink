@@ -700,6 +700,13 @@ def _mesh_task(branch: dict, companions: List[dict]) -> str:
                          f"(auxiliary_label: '{c['label']}'{note})")
     if branch.get("_steering"):
         block += _steering_block(branch["_steering"])
+    if branch.get("figure_style"):
+        block += ["",
+                  "FIGURE PRESENTATION (user preference — apply to every "
+                  "figure this branch produces): "
+                  + str(branch["figure_style"])
+                  + " Forward this instruction verbatim via run_analysis's "
+                  "`hints` parameter so it reaches the plotting code."]
     if not block:
         return task
     return task + "\n".join(block)
@@ -759,7 +766,8 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
 
 
 def run_fanout(orch, branches: List[dict],
-               branch_time_budget_s: Optional[float] = None) -> str:
+               branch_time_budget_s: Optional[float] = None,
+               figure_style: Optional[str] = None) -> str:
     """Gate → confirm → run branches concurrently. Returns JSON.
 
     `branches` is a list of ``{"data_path", "task", "label", "metadata"?,
@@ -806,7 +814,15 @@ def run_fanout(orch, branches: List[dict],
             "pattern": pattern,
             "files": _resolve_branch_files(dp, pattern),
             "steer": bool(b.get("steer")),
+            # User figure-presentation preference: forwarded verbatim into
+            # every branch task (_mesh_task) and stashed on the orchestrator
+            # for the later fusion codegen. None -> branches byte-identical
+            # to pre-feature behavior.
+            "figure_style": (str(figure_style) if figure_style else None),
         })
+    # Stash for fuse_delegations (a separate tool call): fusion codegen
+    # applies the same presentation preference to fusion_figure.png.
+    orch._fanout_figure_style = str(figure_style) if figure_style else None
     if len(norm) < 2:
         msg = ("Fan-out needs at least two branches, each with a data_path "
                "and a task.")
@@ -1552,7 +1568,15 @@ def _run_fusion_codegen(orch, ok: List[dict], branch_numerics: Dict[str, Any],
     best = None          # last executed-but-refine-flagged candidate
     best_script = None
     for attempt in range(1, _FUSION_CODEGEN_ATTEMPTS + 1):
-        parsed = _llm_json(orch, FUSION_CODEGEN_INSTRUCTIONS + inputs + feedback)
+        # User figure-presentation preference from the fan-out (if any) —
+        # applies to fusion_figure.png too. Empty when unset (byte-identical
+        # prompt to pre-feature behavior).
+        _style = getattr(orch, "_fanout_figure_style", None)
+        _style_block = (
+            ("\nFIGURE PRESENTATION (user preference — apply to "
+             "fusion_figure.png): " + _style + "\n") if _style else "")
+        parsed = _llm_json(orch, FUSION_CODEGEN_INSTRUCTIONS + _style_block
+                           + inputs + feedback)
         script = (parsed or {}).get("script")
         if not script or not isinstance(script, str):
             err = "reply carried no usable 'script' string"

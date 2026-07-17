@@ -1191,11 +1191,13 @@ class MetaOrchestratorAgent:
                           indent=2, default=str)
 
     def _run_fanout(self, branches: list,
-                    branch_time_budget_s: Optional[float] = None) -> str:
+                    branch_time_budget_s: Optional[float] = None,
+                    figure_style: Optional[str] = None) -> str:
         """Gate, confirm, then run analysis branches concurrently."""
         from .fanout import run_fanout
         return run_fanout(self, branches,
-                          branch_time_budget_s=branch_time_budget_s)
+                          branch_time_budget_s=branch_time_budget_s,
+                          figure_style=figure_style)
 
     def _fuse_delegations(self, indices: list, focus: Optional[str] = None) -> str:
         """Reconcile finished complementary branch findings into one narrative."""
