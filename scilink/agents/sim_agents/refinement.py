@@ -649,16 +649,27 @@ def _resolve_skill_callable(skill: Optional[str], domain: Optional[str],
 
 
 def _stage_dry_dir(run_dir: str, dry_dir: str, entry: str) -> None:
-    """Recreate ``dry_dir`` with the run's dependency files (data files, etc.)
-    copied from ``run_dir`` — everything except the deck itself and subdirs."""
+    """Recreate ``dry_dir`` with the run's dependency files linked from
+    ``run_dir`` — everything except the deck itself and subdirs.
+
+    Symlinks the dependencies rather than copying them: the dry run only reads
+    the inputs (the deck is written fresh into ``dry_dir``), so re-copying large
+    inputs — e.g. a serialized force-field system — every gate cycle is wasted
+    I/O. Engine-neutral: it never inspects filenames, so it makes no assumption
+    about which files an engine reads. Falls back to a copy if the filesystem
+    refuses the link."""
     if os.path.isdir(dry_dir):
         shutil.rmtree(dry_dir)
     os.makedirs(dry_dir, exist_ok=True)
     for name in os.listdir(run_dir):
-        src = os.path.join(run_dir, name)
+        src = os.path.abspath(os.path.join(run_dir, name))
         if name == entry or not os.path.isfile(src):
             continue
-        shutil.copy2(src, os.path.join(dry_dir, name))
+        dst = os.path.join(dry_dir, name)
+        try:
+            os.symlink(src, dst)
+        except OSError:
+            shutil.copy2(src, dst)
 
 
 def _dry_run_gate(

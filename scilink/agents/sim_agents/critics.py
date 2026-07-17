@@ -296,9 +296,13 @@ def _run_deterministic_syntax_check(
 def _has_runnable_content(text: str) -> bool:
     """Whether a proposed input file has any non-comment, non-blank line.
 
-    Engine-neutral: ``#`` and ``!`` are the comment markers across the engines
-    we target (LAMMPS, VASP). A whole-file fix that is only comments/blank is a
-    no-op deck — running it does nothing — so it is not a real fix.
+    Scoped to the engines on the executor path today (LAMMPS, VASP), whose
+    comment markers are ``#`` and ``!``. This is NOT fully engine-neutral: a
+    GROMACS ``.top`` comments with ``;`` and treats ``#include`` / ``#ifdef`` as
+    directives (runnable, not comments), so this heuristic would misjudge one —
+    handle those markers here before putting a GROMACS-style engine on the
+    executor path. A whole-file fix that is only comments/blank is a no-op deck —
+    running it does nothing — so it is not a real fix.
     """
     return any(
         s and not s.startswith(("#", "!"))
