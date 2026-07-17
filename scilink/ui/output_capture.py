@@ -5,8 +5,15 @@ import sys
 import threading
 
 
-class AgentStoppedError(Exception):
-    """Raised inside the agent thread when the user clicks Stop."""
+class AgentStoppedError(BaseException):
+    """Raised inside the agent thread when the user clicks Stop.
+
+    Deliberately a ``BaseException`` (like ``KeyboardInterrupt``): the agent
+    stack is full of ``except Exception`` recovery handlers (tool dispatch,
+    retry loops, the orchestrator's own chat() catch-all) that would otherwise
+    swallow the stop, feed it back to the LLM as a tool error, and let the run
+    continue. A user-initiated stop must not be recoverable-from.
+    """
 
 
 class TeeStream:
@@ -55,6 +62,11 @@ class OutputCapture:
         self._old_stderr = None
         self._stop_event = threading.Event()
         self._agent_thread_id: int | None = None
+
+    @property
+    def stop_requested(self) -> bool:
+        """True once request_stop() has been called."""
+        return self._stop_event.is_set()
 
     def request_stop(self) -> None:
         """Signal the agent thread to abort on the next print() call.

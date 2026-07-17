@@ -110,7 +110,7 @@ class LAMMPSAnalysisUpdater:
             if match:
                 try:
                     return json.loads(match.group(0))
-                except:
+                except Exception:
                     pass
             raise ValueError(f"Could not parse JSON: {e}")
     

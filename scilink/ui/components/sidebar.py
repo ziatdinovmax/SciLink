@@ -1158,9 +1158,13 @@ def resume_session(
 def _reset_session() -> None:
     # Stop the agent thread if it's still running
     task = st.session_state.get("chat_task")
-    if task and task.is_running and task.feedback_request is not None:
-        task.feedback_request.response = ""
-        task.feedback_request.event.set()
+    if task and task.is_running:
+        task.stopped = True
+        if task.live_capture:
+            task.live_capture.request_stop()
+        if task.feedback_request is not None:
+            task.feedback_request.response = ""
+            task.feedback_request.event.set()
 
     # Disconnect MCP servers to avoid orphaned subprocesses
     agent = st.session_state.get("agent")
