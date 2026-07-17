@@ -2190,6 +2190,7 @@ class AnalysisOrchestratorTools:
             max_verification_iterations: int = None,
             starting_annealing_level: int = None,
             n_candidates: int = None,
+            executor_timeout: int = None,
         ) -> str:
             """
             Execute analysis with the selected or specified agent.
@@ -2640,7 +2641,9 @@ class AnalysisOrchestratorTools:
                 # NOTE: Code-executing agents may prompt the user
                 # for sandbox approval and raise RuntimeError if declined.
                 try:
-                    agent = self.orch.create_agent_for_analysis(agent_id, str(analysis_output_dir))
+                    agent = self.orch.create_agent_for_analysis(
+                        agent_id, str(analysis_output_dir),
+                        executor_timeout=executor_timeout)
                 except RuntimeError as e:
                     # Handle sandbox rejection or other init failures
                     error_msg = str(e)
@@ -2821,7 +2824,12 @@ class AnalysisOrchestratorTools:
                 self.orch.analysis_results.append(analysis_record)
                 
                 # === Format response ===
-                if result.get("status") == "success":
+                # "partial" is hyperspectral's salvage outcome (approximate /
+                # withheld maps with honest caveats) — a usable, degraded
+                # result. It gets the full success-shaped payload with its
+                # caveats attached, NOT the error branch (which used to
+                # surface it as an error with an empty error object).
+                if result.get("status") in ("success", "partial"):
                     # Find main visualization
                     viz_path = None
                     for candidate in analysis_output_dir.rglob("*_analysis.png"):
@@ -2838,7 +2846,7 @@ class AnalysisOrchestratorTools:
                                 break
 
                     response = {
-                        "status": "success",
+                        "status": result.get("status"),
                         "analysis_id": analysis_id,
                         "agent_used": self.AGENT_NAMES.get(agent_id),
                         "output_directory": str(analysis_output_dir),
@@ -2848,6 +2856,17 @@ class AnalysisOrchestratorTools:
                         "note": f"All outputs saved to: {analysis_output_dir}",
                         "next_steps": "Use assess_novelty to check literature for these claims, or get_recommendations for follow-up experiments.",
                     }
+                    if result.get("status") == "partial":
+                        response["confidence"] = result.get("confidence")
+                        response["warnings"] = result.get("warnings") or []
+                        if result.get("degraded_outputs"):
+                            response["degraded_outputs"] = result[
+                                "degraded_outputs"]
+                        response["note"] = (
+                            "PARTIAL result: some outputs are approximate or "
+                            "were withheld (see warnings). "
+                            + response["note"]
+                        )
                     if viz_path:
                         response["visualization_path"] = viz_path
                     if result.get("tier2_results"):
@@ -3151,6 +3170,20 @@ class AnalysisOrchestratorTools:
                         "skill's R² gate (a warning is logged on conflict), but it "
                         "will NOT replace a skill that scores by a non-R² metric. "
                         "Leave unset for standard analyses."
+                    )
+                },
+                "executor_timeout": {
+                    "type": "integer",
+                    "description": (
+                        "All analysis agents. Per-run script-execution timeout "
+                        "in seconds (default 600; the adaptive escalation "
+                        "ladder retries a timed-out script at 2x up to 1800 s "
+                        "before any LLM correction). RAISE it when a previous "
+                        "run of the same data failed with 'Script execution "
+                        "timed out' or when the dataset is very large and a "
+                        "single fit legitimately needs longer; LOWER it (e.g. "
+                        "30-60) for real-time/quick-look turnaround where a "
+                        "slow fit should fail fast. Leave unset otherwise."
                     )
                 },
                 "max_verification_iterations": {

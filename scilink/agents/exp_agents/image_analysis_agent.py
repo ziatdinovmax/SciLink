@@ -1499,6 +1499,21 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "output_directory": str(self.output_dir),
         }
 
+        # Zero-success guard: if every image failed every attempt (a
+        # per-item condition, so no controller set error_dict), the run must
+        # not report top-level success. Salvaged best-available results carry
+        # success=True (with quality_warning) and are unaffected.
+        if series_results and all(
+                isinstance(r, dict) and r.get("success") is False
+                for r in series_results):
+            item_errors = [r.get("error") for r in series_results
+                           if r.get("error")]
+            results["status"] = "error"
+            results["error"] = {
+                "error": f"All {len(series_results)} image analysis(es) failed",
+                "details": item_errors[-1] if item_errors else "",
+            }
+
         if is_single:
             # Single image: compact structure
             analysis_result = state.get("analysis_result", {})
@@ -1570,6 +1585,11 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "analysis_type": r.get("analysis_type"),
                     "visualization_path": r.get("visualization_path"),
                     "error": r.get("error"),
+                    # Structured failure-mode tag + per-attempt audit trail
+                    # (matches curve; absent on successes/untagged failures).
+                    **({"kind": r["kind"]} if r.get("kind") else {}),
+                    **({"script_errors": r["script_errors"]}
+                       if r.get("script_errors") else {}),
                     "flagged": r.get("flagged", False),
                     "flag_reason": r.get("flag_reason"),
                     "adaptively_refitted": r.get("adaptively_refitted", False),
