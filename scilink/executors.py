@@ -285,14 +285,25 @@ class ScriptExecutor:
         
         logging.info(f"ScriptExecutor initialized (timeout: {self.timeout}s)")
 
-    def execute_script(self, script_content: str, working_dir: str = None) -> dict:
+    def execute_script(self, script_content: str, working_dir: str = None,
+                       timeout: int | None = None) -> dict:
         """Execute a Python script.
 
         Thread-safe: the subprocess's CWD is set via ``Popen(cwd=...)`` and the
         caller's process CWD is never mutated, so concurrent calls from
         different threads do not race on a shared global.
+
+        Args:
+            script_content: Python source to execute.
+            working_dir: Directory to use as the subprocess's CWD (and where
+                the temp script file is written). Defaults to current CWD.
+            timeout: Per-call timeout in seconds. When ``None`` (the default),
+                uses ``self.timeout`` from construction. Callers that need an
+                adaptive-timeout escalation pattern pass the override here
+                without mutating shared executor state.
         """
-        logging.info("   Executing Python script...")
+        effective_timeout = self.timeout if timeout is None else timeout
+        logging.info(f"   Executing Python script (timeout: {effective_timeout}s)...")
 
         if working_dir:
             os.makedirs(working_dir, exist_ok=True)
@@ -318,11 +329,11 @@ class ScriptExecutor:
             # Register so OutputCapture.kill_subprocesses() can terminate it.
             _register_subprocess(proc)
             try:
-                stdout, stderr = proc.communicate(timeout=self.timeout)
+                stdout, stderr = proc.communicate(timeout=effective_timeout)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
-                return {"status": "error", "message": f"Script execution timed out after {self.timeout} seconds."}
+                return {"status": "error", "message": f"Script execution timed out after {effective_timeout} seconds."}
             finally:
                 _unregister_subprocess(proc)
 

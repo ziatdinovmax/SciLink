@@ -198,3 +198,25 @@ benchmark_suite_*/
 
 # Office autosave temp files (Word/Excel/PowerPoint)
 ~$*
+
+# Large binaries / local-only artifacts (exceed GitHub's 100 MB limit or are
+# scratch material that shouldn't live in the repo). The earlier `.vscode*.tar`
+# entry was malformed and let tar archives slip through.
+*.tar
+dcnn_trained/
+
+# Slide decks and Office documents (drafts/proposals kept locally, not tracked)
+*.pptx
+*.docx
+*.xlsx
+
+# Media scratch (figures/animations generated during analysis)
+*.mp4
+*.gif
+
+# Root-level PDFs (papers/exports dropped in the working dir; tracked example
+# PDFs under examples/ are unaffected)
+/*.pdf
+
+# macOS
+.DS_Store

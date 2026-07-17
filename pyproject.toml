@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scilink"
-version = "0.0.45"
+version = "0.0.57"
 authors = [
   { name="SciLink Team", email="maxim.ziatdinov@gmail.com" },
 ]
@@ -84,6 +84,12 @@ ff = [
     "parmed>=4.0",
     "rdkit>=2023.3",
 ]
+# NOTE: GSAS-II (the optional 'gsas' backend of simulate_xrd_pattern) cannot be
+# an extra: it is not on PyPI, and PyPI rejects uploads whose metadata carries a
+# direct URL dependency ("Can't have direct dependency"). Install it manually —
+# it builds from source, so a Fortran compiler must be present (e.g.
+# `conda install -c conda-forge fortran-compiler meson ninja`):
+#   pip install "GSAS-II @ git+https://github.com/AdvancedPhotonSource/GSAS-II.git"
 all = [
     "scilink[sim]",
     "scilink[ui]",

@@ -24,6 +24,9 @@ scilink analyze --mcp stdio:arxiv:python,-m,arxiv_mcp_server,--storage-path,/tmp
 # SSE transport (connects to a running server)
 scilink analyze --mcp sse:myserver:http://localhost:8000/sse
 
+# Streamable HTTP transport (remote/hosted servers)
+scilink analyze --mcp http:myserver:https://host/mcp
+
 # JSON config file
 scilink analyze --mcp /path/to/mcp_config.json
 
@@ -34,6 +37,7 @@ scilink analyze --mcp stdio:arxiv:python,-m,arxiv_mcp_server stdio:fs:npx,-y,@mo
 **Shorthand format:**
 - stdio: `stdio:<name>:<command>,<arg1>,<arg2>`
 - SSE: `sse:<name>:<url>`
+- Streamable HTTP: `http:<name>:<url>`
 
 **JSON config file format:**
 ```json
@@ -52,14 +56,27 @@ Or for SSE:
 }
 ```
 
+Or for streamable HTTP with authentication (the shape most hosted platform
+APIs use — `${VAR}` in header values is expanded from the environment, so the
+token never lands in the JSON file):
+```json
+{
+  "name": "lab-platform",
+  "url": "https://mcp.example.com/mcp",
+  "transport": "http",
+  "headers": {"Authorization": "Bearer ${LAB_PLATFORM_API_KEY}"}
+}
+```
+
 ### 2. UI (Tools & Agents tab)
 
 In the Streamlit UI, go to the **Tools & Agents** tab and find the **MCP Servers** section:
 
-1. Select transport type (**stdio** or **sse**)
+1. Select transport type (**stdio**, **sse**, or **http** — streamable HTTP, for remote/hosted servers)
 2. Enter a **server name** (any label you choose)
-3. Enter the **command** (for stdio) or **URL** (for SSE)
-4. Click **Connect**
+3. Enter the **command** (for stdio) or **URL** (for sse/http)
+4. For sse/http, optionally enter **Headers** as a JSON object, e.g. `{"Authorization": "Bearer ${MY_API_KEY}"}` — `${VAR}` is expanded from the environment
+5. Click **Connect**
 
 Connected servers and their tool counts appear below. Click **Disconnect** to remove a server.
 
@@ -80,6 +97,14 @@ count = orch.connect_mcp_server(
 count = orch.connect_mcp_server(
     "myserver",
     url="http://localhost:8000/sse",
+)
+
+# Streamable HTTP transport with bearer-token auth (remote/hosted servers)
+count = orch.connect_mcp_server(
+    "lab-platform",
+    url="https://mcp.example.com/mcp",
+    transport="http",
+    headers={"Authorization": f"Bearer {os.environ['LAB_PLATFORM_API_KEY']}"},
 )
 
 # With environment variables (stdio only)
@@ -123,7 +148,7 @@ The LLM will use the arXiv MCP tools to search and retrieve papers, then use Sci
 
 ## Example: OpentronsAI protocol generation
 
-Connect to the OpentronsAI MCP server (hosted on Hugging Face) to generate Opentrons protocols:
+Connect to the OpentronsAI MCP server (hosted on Hugging Face) to generate Opentrons protocols. (This example predates native streamable-HTTP support and bridges through `npx mcp-remote`; for servers speaking streamable HTTP, connect directly with the `http` transport instead — no Node.js required.)
 
 ```bash
 # CLI

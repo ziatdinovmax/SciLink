@@ -46,6 +46,43 @@ def format_library_inventory() -> str:
     return "\n".join(lines)
 
 
+# Shared across every tool-using prompt (planning AND code-gen, all agents) — the
+# single statement of "lean on the tool". Used by format_tool_inventory and by the
+# controllers' list-based _append_tool_inventory so both stages get it identically.
+TOOL_USE_PRINCIPLE = (
+    "USE WHAT A TOOL RETURNS — DO NOT RE-DERIVE IT. A tool returns its "
+    "computed results (see its **Returns**) and often a finished figure. "
+    "Read those fields and reuse the figure; do not recompute, re-render, "
+    "or otherwise reimplement a quantity a tool you called already returns — "
+    "re-deriving a tool's own output is a top source of units / scaling / "
+    "normalization bugs. Post-process only what no tool provides, on the "
+    "tool's returned values. When a tool already answers the objective, keep "
+    "the pipeline THIN (call → read → report) and base any accept/reject "
+    "check on the tool's OWN quality fields (coherence, flags, sanity "
+    "outputs), not on a numeric threshold you impose on its results — a "
+    "self-imposed threshold the real data exceeds causes false-fail loops."
+)
+
+
+# The verifier-facing counterpart of TOOL_USE_PRINCIPLE (shared across the image
+# and curve verifiers). Deliberately NOT "defer to the tool": it preserves the
+# verifier's independent-scrutiny role (a tool can be wrong) while forbidding the
+# specific failure mode — reimplementing a tool's computation to second-guess it,
+# or instructing the agent to re-derive what the tool already returns.
+VERIFIER_TOOL_SCRUTINY_PRINCIPLE = (
+    "SCRUTINIZE TOOL RESULTS — DON'T REIMPLEMENT THEM. When a registered tool "
+    "produced or anchored the result, judge it by the tool's OWN quality fields "
+    "(e.g. fit metrics, coherence, SNR, uncertainties, sanity flags), by domain "
+    "knowledge/physics, and by independent cross-checks (a second tool, a known "
+    "or physical bound) — NOT by reimplementing the tool's computation to "
+    "second-guess it, and do NOT instruct the agent to recompute or re-derive a "
+    "quantity the tool already returns (point it at the returned field instead). "
+    "Apply your own numeric thresholds only to quantities no tool vouches for. A "
+    "tool can still be wrong, so keep scrutinizing — just via its QC + domain "
+    "knowledge + cross-checks, not by re-deriving."
+)
+
+
 def format_tool_inventory(
     agent: str = "image_analysis",
     active_skills: list[str] | None = None,
@@ -70,6 +107,7 @@ def format_tool_inventory(
             "code for post-processing. A tool call anchoring the hard step followed "
             "by custom code is usually more reliable than an all-custom pipeline."
         )
+        parts.append(TOOL_USE_PRINCIPLE)
         for spec in specs:
             parts.append(spec.to_prompt())
 

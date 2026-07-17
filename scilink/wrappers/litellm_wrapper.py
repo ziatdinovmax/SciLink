@@ -244,6 +244,7 @@ def litellm_completion(*args, **kwargs):
     (or first positional arg) and scopes param-dropping to it before the call.
     """
     _scope_drop_params(kwargs.get("model") or (args[0] if args else None))
+    kwargs.setdefault("num_retries", 4)   # retry transient provider errors w/ backoff
     return litellm.completion(*args, **kwargs)
 
 
@@ -369,6 +370,11 @@ class LiteLLMGenerativeModel:
                 api_base=self.base_url,
                 stream=stream,
                 timeout=self.timeout,
+                # Retry transient provider errors (Bedrock ServiceUnavailable /
+                # InternalServer / RateLimit / Timeout) with LiteLLM's exponential
+                # backoff, so a momentary hiccup during e.g. a verification call is
+                # not mistaken for a failed step (which would tag the iteration 0.0).
+                num_retries=params.pop("num_retries", 4),
                 **params
             )
             

@@ -43,11 +43,16 @@ model-type field if the metadata carries one) and pass it to `fit_relaxation`.
 An inversion recovery is signed (negative at short t); never force its amplitude
 positive.
 
-**Decide mono vs stretched.** Start mono-exponential (β = 1). Use a **stretched
-exponent (β < 1)** when a single τ underfits — a systematic residual that a mono-
-exponential leaves, typical of a **disordered solid / glassy electrolyte / broad
-quadrupolar line** (e.g. ²³Na, ⁷Li in a solid electrolyte). Solution-state and
-clean crystalline sites are almost always mono-exponential.
+**Decide mono vs stretched — by the system, then let β decide; don't drop β on a
+gate pass.** For a **disordered / glassy / solid-electrolyte / broad-quadrupolar**
+system, β (the width of the relaxation-time distribution) IS a deliverable, so fit
+**stretched by default** and read β: if it refines to ~1 within its uncertainty
+the relaxation is effectively mono-exponential; otherwise β < 1 quantifies the
+heterogeneity (smaller β = broader distribution). Do **not** default to mono and
+omit β just because a mono fit clears the R² gate — a gate-passing mono fit on a
+disordered solid silently discards the disorder measurement that is the point of
+the experiment. **Solution-state and clean crystalline sites** are genuinely
+mono-exponential (β = 1) — use mono there.
 
 **Decide one vs two components.** Two relaxation times (`n_components=2`) when
 the residual of a single-component fit is systematic and the sample has two
@@ -55,12 +60,30 @@ known environments (e.g. mobile + bound, surface + bulk). Don't add a second
 component to chase noise — keep it only if R² improves materially and both
 populations are non-negligible.
 
-**Variable-temperature (VT) series → activation energy.** When the same
-relaxation experiment is run across temperature, fit T1/T2 at each T, then
-extract the **activation energy** from the motional regime: in the fast-motion
-limit 1/T1 ∝ τc and τc = τ0·exp(Ea/kT), so a plot of ln(1/T1) (or ln τc) vs 1/T
-is linear with slope ±Ea/k. Report Ea (eV or kJ/mol) — for an ion conductor this
-is the **hopping barrier**, the headline number.
+**Relaxation series → trend vs the series variable.** Read the variable from the
+series metadata; **do NOT assume it is temperature.**
+
+- **vs temperature → activation energy.** 1/T1 ∝ τc and τc = τ0·exp(Ea/kT), so
+  ln(1/T1) (or ln τc) vs 1/T is *piecewise* linear, slope ±Ea/k. **Do not assume
+  a single line, and do not assume two.** Fit one Arrhenius line first, then add a
+  breakpoint only while each added segment **materially and statistically**
+  improves the fit **and** spans enough temperatures to be real (never claim a
+  regime from ~2 points). Report however many regimes (1, 2, …) the data justify,
+  with the crossover temperature(s) and the per-regime Ea (each is a hopping
+  barrier). If the best piecewise residual is itself **systematically curved**,
+  the process is continuously non-Arrhenius (e.g. VFT) — report curvature, not a
+  stack of straight lines. Quote Ea only where the points lie on one side of the
+  BPP minimum; an upturn (V-shape) means the data straddle it.
+- **vs any other variable** (composition, pressure, hydration, …) → there is no
+  Arrhenius. Report the relaxation-time trend and any **extremum / turning point**
+  (a T1 minimum signals a crossover in the dynamics) — without forcing an
+  activation energy.
+
+**Lock the form, not the count, across the series.** Hold the lineshape *form*
+fixed (mono vs stretched — choosing mono at some points and stretched at others
+makes β jump artificially and corrupts the β trend), but let `n_components`
+follow the data at each point: a second relaxation component appearing along the
+series (a new environment/phase) is a result, not noise to suppress.
 
 ## implementation
 
@@ -71,14 +94,19 @@ from scilink.skills.curve_fitting.nmr_relaxation.relaxation import fit_relaxatio
 # delays in seconds, integrals signed (negative at short t for inversion recovery)
 res = fit_relaxation(delay.tolist(), integral.tolist(),
                      model=MODEL,        # from the pulse program (see table); never guess
-                     stretched=False)    # set True for disordered solids
+                     stretched=STRETCHED) # True by default for a disordered/electrolyte
+                                          # solid; False for solution / clean crystalline
 p = res["parameters"]   # T1_s (or T2_s), beta, I0, A_inversion / populations
 ```
 
-If the mono-exponential residual is systematic, re-fit with `stretched=True`
-(or `n_components=2`) and keep the better fit. Emit `FIT_RESULTS_JSON:` with
-`fit_quality` (`r_squared`), the relaxation time in **seconds**, β, and — for a
-VT series — the per-temperature T1 so the Arrhenius fit can run downstream.
+Clearing the R² gate does not end the decision: on a disordered solid, also read
+β — if a stretched fit returns β meaningfully below 1, keep it (the heterogeneity
+is real) rather than reverting to the gate-passing mono fit. Use `n_components=2`
+when a single component leaves a systematic residual and the sample has two known
+environments; keep it only if it improves the fit and both populations are
+non-negligible. Emit `FIT_RESULTS_JSON:` with `fit_quality` (`r_squared`), the
+relaxation time in **seconds**, β, and — for a VT series — the per-temperature T1
+so the Arrhenius fit can run downstream.
 
 ## interpretation
 
@@ -116,6 +144,9 @@ measurement for solid-electrolyte ion mobility.
   shortest, is unconstrained — widen the delay list or report it as a bound.
 - **Stretched β ∈ (0, 1].** β pinned at 1 with a poor fit → try a second
   component; β ≪ 1 → quote a distribution, not a single time.
-- **VT Arrhenius:** check the ln(1/T1)-vs-1/T points are linear and on one side
-  of the BPP minimum before quoting Ea; a V-shape means the data straddle the
-  minimum and the simple slope is invalid.
+- **VT Arrhenius:** before quoting a *single* Ea, check the ln(1/T1)-vs-1/T points
+  are actually linear over the whole range and on one side of the BPP minimum. A
+  reproducible slope change (not noise) = multiple regimes → report per-regime Ea
+  + crossover T, not one averaged slope; smooth curvature = continuously
+  non-Arrhenius (report curvature); a V-shape = the data straddle the BPP minimum.
+  Forcing a single line through any of these understates the physics.

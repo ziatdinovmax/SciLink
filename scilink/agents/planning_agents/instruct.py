@@ -353,6 +353,44 @@ The same surrogate is used for every objective — there is no per-output choice
 }
 """
 
+# Appended to the strategy-config prompt ONLY when a fidelity column is declared
+# (the fidelity_config data signal) — multi-fidelity is a baseline capability
+# surfaced like `mixed` is for categoricals, not a skill (issue #196).
+BO_MULTIFIDELITY_ADDENDUM = """
+
+**MULTI-FIDELITY (a fidelity column is declared in this campaign).**
+This problem has cheap approximate evaluations and expensive accurate ones,
+indexed by the fidelity column. Two extra options are available and should be
+preferred here:
+* SURROGATE `"single_task_multi_fidelity"`: models all fidelities jointly with a
+  linear-truncated fidelity kernel, sharing information from cheap data toward
+  the target fidelity. Prefer it over `single_task`. Caveat: low-fidelity data
+  only helps if correlated with the target — if LOO-CV residuals stratified by
+  fidelity show the cheap source is misleading, fall back to `single_task` fit
+  on target-fidelity data only.
+* ACQUISITION `"mf_kg"`: cost-aware multi-fidelity Knowledge Gradient. Use it
+  WITH `single_task_multi_fidelity`. It chooses both the input AND the fidelity
+  to evaluate next, spending cheap fidelities to learn early and the target
+  fidelity to confirm before declaring an optimum. Never spend final-shot
+  budget on a low fidelity. Treat the remaining budget as cost units, not raw
+  iteration count.
+"""
+
+# Appended to the strategy-config prompt ONLY when the input dimension is high
+# (a data signal) — surfaces the SAAS surrogate, a baseline high-D capability.
+BO_HIGHD_ADDENDUM = """
+
+**HIGH-DIMENSIONAL ({n_dims} inputs).**
+* SURROGATE `"saas"`: Sparse Axis-Aligned Subspace fully-Bayesian GP (fit by
+  NUTS). Use when you suspect only a few of the many inputs actually drive the
+  response — SAAS places sparsity priors on the length-scales and concentrates
+  on the active dimensions, where `single_task`/`dkl` get swamped by the
+  irrelevant ones. It is markedly more expensive (MCMC) and single-objective
+  only; reserve it for genuinely high-D problems with adequate budget. After
+  fitting, cross-check the inferred active dimensions against the Sobol panel —
+  if they disagree, the MCMC likely did not converge; fall back to `single_task`.
+"""
+
 BO_VISUAL_INSPECTION_PROMPT = """
 You are a Data Scientist validating a GP model and its optimization strategy.
 Analyze the 4-panel diagnostic dashboard.
@@ -693,6 +731,11 @@ Rules:
 - If the data file contains ONLY measurement data (e.g., spectra: wavelength/intensity,
   time series: time/signal) with NO controllable parameters, set inputs to an empty list [].
   This signals that experimental conditions must be provided externally (e.g., via metadata sidecar).
+- FIDELITY (rare — omit unless clearly present): declare a `"fidelity"` role ONLY when the
+  same objective is evaluated at distinct levels of cost/accuracy and a column indexes that
+  level — e.g., a `fidelity`/`quality`/`resolution` column, or coarse vs fine simulation /
+  measurement. The fidelity column MUST also appear in `inputs`. Do NOT invent a fidelity axis
+  for ordinary optimization data; when in doubt, omit it.
 
 **LLM RESPONSE FORMAT:**
 You (the Agent) must return a single JSON object containing the code AND column classification:
@@ -711,6 +754,10 @@ You (the Agent) must return a single JSON object containing the code AND column 
     "reasoning": "Temperature and concentration are continuous knobs; Solvent is an unordered identity (DMSO/DMF/MeCN). Yield is the measured outcome to maximize."
   }
 }
+
+OPTIONAL `column_roles.fidelity` — include ONLY for a genuine multi-fidelity dataset (see rule above):
+  "fidelity": {"column": "<one of inputs>", "target_fidelity": <highest/most-accurate level>, "costs": {"<level>": <relative cost>}}
+`costs` is optional. Example: "fidelity": {"column": "sim_resolution", "target_fidelity": 1.0, "costs": {"0": 1, "1": 10}}.
 """
 
 SCALARIZER_REFLECTION_PROMPT = """

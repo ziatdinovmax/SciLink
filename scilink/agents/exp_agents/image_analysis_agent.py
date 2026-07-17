@@ -248,6 +248,11 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         literature_file: Optional[str] = None,
         # Quality control overrides
         outlier_sigma: Optional[float] = None,
+        # Per-call thoroughness override (fast/in-situ vs thorough).
+        # 0 => accept a successful initial analysis with no LLM
+        # verification loop; higher => more refinement passes. None
+        # falls back to the construction default.
+        max_verification_iterations: Optional[int] = None,
         # Number of independent anchor-analysis attempts run in parallel;
         # an LLM judge compares finished attempts (scores + visualizations)
         # and locks the winner. Default 1 = no fan-out.
@@ -260,6 +265,9 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # start higher (e.g. hot) so it does not re-obey early constraint stages
         # a prior run already found inadequate.
         starting_annealing_level: Optional[int] = None,
+        # Operating profile (#346): plumbed for parity with the curve agent;
+        # the realtime toggles are wired for curve only in v1 — see below.
+        profile: Optional[Any] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -297,6 +305,11 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 generator so generated scripts can load prior outputs via
                 absolute path.
             outlier_sigma: Override default outlier sigma
+            max_verification_iterations: Per-call override of the LLM
+                verification budget. 0 accepts a successful initial
+                analysis with no verification loop (fast/in-situ); a
+                failed initial analysis still enters the recovery path.
+                None uses the construction default.
             n_candidates: Number of independent anchor-analysis attempts run
                 in parallel (clamped to 1-8). Each anchor (single image, or
                 first image of each series regime) is analyzed N times with
@@ -320,6 +333,11 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         effective_outlier_sigma = (
             outlier_sigma if outlier_sigma is not None else self.outlier_sigma
         )
+        effective_max_verification = (
+            max_verification_iterations if max_verification_iterations is not None
+            else self.max_verification_iterations)
+        if effective_max_verification < 0:
+            raise ValueError("max_verification_iterations must be >= 0")
         try:
             n_candidates = max(1, min(int(n_candidates or 1), 8))
         except (TypeError, ValueError):
@@ -431,6 +449,11 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         handled_system_info, series_metadata = self._extract_series_metadata(
             handled_system_info, series_metadata
         )
+        # Canonicalize a filename-keyed `values` dict into a file-ordered list
+        # (consumers expect a list — see _normalize_series_values).
+        series_metadata = self._normalize_series_values(
+            series_metadata, image_paths
+        )
 
         # Recover embedded file metadata (e.g. TIFF tags / ImageDescription) that
         # OpenCV-based pixel loading drops, and fold it into system_info without
@@ -442,6 +465,19 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 self.logger.info(
                     f"   🏷️  Recovered embedded metadata from {Path(image_paths[0]).name}"
                 )
+
+        # Operating profile (#346): accepted for surface parity; realtime
+        # toggles are wired for the curve agent only in v1 (image lacks a
+        # deterministic per-frame gate metric — a design decision to make
+        # before a zero-LLM image frame is honest). Thorough is unaffected.
+        from ._qc_profile import resolve_profile
+        qc_profile = resolve_profile(profile)
+        if qc_profile.name == "realtime":
+            self.logger.warning(
+                "profile='realtime' is not wired for image analysis yet "
+                "(no deterministic per-frame gate metric); running under "
+                "the thorough profile."
+            )
 
         # Build initial state
         state = {
@@ -536,7 +572,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             literature_agent=self.literature_agent,
             enable_human_feedback=self.enable_human_feedback,
             outlier_sigma=effective_outlier_sigma,
-            max_verification_iterations=self.max_verification_iterations,
+            max_verification_iterations=effective_max_verification,
             num_plan_candidates=self.num_plan_candidates,
         )
 
@@ -600,6 +636,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             num_images=num_images, is_single_image=is_single_image,
             first_image_name=first_image_name,
             effective_outlier_sigma=effective_outlier_sigma,
+            effective_max_verification=effective_max_verification,
         )
 
         if self.analysis_depth == "auto" and tier1_results["status"] == "success":
@@ -639,7 +676,14 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         else:
             final_results = tier1_results
 
-        # Stage novel T=2 (hot-annealing) successes for later, review-gated
+        # Bank every approved working script as episodic memory (script bank,
+        # #346) — deterministic, no LLM, failure-isolated. Runs BEFORE T=2
+        # staging so a hot win is nominated by promoting its bank record.
+        banked = self._maybe_bank_scripts(tier1_state)
+        if banked:
+            final_results["banked_scripts"] = banked
+
+        # Nominate novel T=2 (hot-annealing) successes for review-gated
         # distillation. Failure-isolated; keys off Tier-1 state (which ran the
         # verification/annealing loop). Surfaces staged ids on the result.
         staged = self._maybe_stage_t2_solutions(tier1_state)
@@ -912,7 +956,23 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "working_script": script,
                     "session": self.output_dir.name,
                 }
-                sid = _staging.stage_solution("image_analysis", technique, record)
+                # Unified path (see curve agent): promote the fresh bank
+                # record; legacy direct staging when the bank is disabled.
+                from scilink.skills._shared import _script_bank
+                sid = None
+                bank_rec = (_script_bank.find_by_script("image_analysis", script)
+                            if _script_bank.bank_enabled() else None)
+                if bank_rec is not None:
+                    out = _script_bank.promote_to_staging(
+                        "image_analysis", bank_rec["id"], technique=technique,
+                        provenance="t2_hot_win",
+                        extra={k: v for k, v in record.items()
+                               if k not in ("working_script", "session")},
+                    )
+                    if out.get("status") == "success":
+                        sid = out["staged_id"]
+                if sid is None:
+                    sid = _staging.stage_solution("image_analysis", technique, record)
                 staged.append(sid)
                 self.logger.info(
                     f"   🧠 Staged T=2 image solution [{technique}] id={sid}"
@@ -927,6 +987,92 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 f"`scilink memory staged`."
             )
         return staged
+
+    def _maybe_bank_scripts(self, state: dict) -> List[str]:
+        """Bank every approved working script in the script bank (#346).
+
+        Image-side mirror of ``CurveFittingAgent._maybe_bank_scripts``:
+        episodic complement to T=2 staging — no hot/novelty gate, no LLM.
+        Each distinct approved script is stored once per run with the
+        measurement context, a fingerprint of the image it solved, and the
+        outcome. Fully failure-isolated; gated by ``SCILINK_SCRIPT_BANK`` /
+        persistent-memory setting.
+        """
+        from scilink.skills._shared import _script_bank
+        if not _script_bank.bank_enabled():
+            return []
+
+        banked: List[str] = []
+        try:
+            from .controllers.image_analysis_controllers import _active_skill_names
+            from scilink.skills._shared.image_analysis_tools import resolve_pixel_size_nm
+
+            approach = state.get("analysis_approach")
+            active_skills = _active_skill_names(state)
+            system_info = state.get("system_info") or {}
+            stack = state.get("image_stack")
+            seen_hashes = set()
+
+            for r in state.get("series_results", []) or []:
+                if not r.get("success"):
+                    continue
+                script = r.get("script")
+                qh = r.get("quality_history") or {}
+                # Quality gate: QC approval, or the reuse fast path's own
+                # gate — a reused script passing on NEW data is exactly the
+                # cross-session success signal the bank counts.
+                passed = (qh.get("approved")
+                          or (r.get("reuse_validity") or {}).get("verdict") == "good")
+                if not script or not passed:
+                    continue
+                h = _script_bank.script_hash(script)
+                if h in seen_hashes:  # locked-recipe series: bank once per run
+                    continue
+                seen_hashes.add(h)
+
+                # Prefer the fingerprint stamped where the image was in scope
+                # (file inputs load per image inside the controller); the
+                # stack fallback covers array inputs.
+                fingerprint = r.get("_bank_fingerprint")
+                if fingerprint is None:
+                    img = None
+                    idx = r.get("index")
+                    if stack is not None and idx is not None and 0 <= idx < len(stack):
+                        img = np.asarray(stack[idx])
+                    if img is not None and img.ndim >= 2:
+                        fingerprint = _script_bank.image_fingerprint(
+                            img, pixel_size_nm=resolve_pixel_size_nm(system_info, img.shape)
+                        )
+
+                score = qh.get("final_score")
+                res = _script_bank.add_record("image_analysis", {
+                    "technique_signals": {
+                        "active_skills": active_skills,
+                        "analysis_type": r.get("analysis_type") or approach,
+                    },
+                    "measurement_context": _script_bank.measurement_context(system_info),
+                    "data_fingerprint": fingerprint,
+                    "outcome": {
+                        "analysis_type": r.get("analysis_type"),
+                        "metric": ({"name": "quality_score", "value": round(float(score), 4)}
+                                   if isinstance(score, (int, float)) else None),
+                        "plan_summary": approach,
+                    },
+                    "provenance": {"session": self.output_dir.name,
+                                   "item": r.get("name"),
+                                   "data_file": os.path.basename(
+                                       str((state.get("image_paths") or [None])[0] or "")
+                                   ) or None},
+                    "working_script": script,
+                })
+                if res.get("id"):
+                    banked.append(res["id"])
+                    self.logger.info(
+                        f"   🏦 Banked script [{res['action']}] id={res['id']}"
+                    )
+        except Exception as e:
+            self.logger.warning(f"Script banking skipped: {e}")
+        return banked
 
     def _maybe_stage_feedback_errors(self, state: dict, final_results: dict) -> List[str]:
         """Image-side mirror of the feedback/error staging hook (see the curve-
@@ -991,7 +1137,10 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         ) or "No claims generated."
 
         prompt = IMAGE_ANALYSIS_TIER2_DECISION_INSTRUCTIONS.format(
-            tier1_summary=tier1_results.get("detailed_analysis", "")[:2000],
+            # `.get(k, "")` does not guard a present-but-None value (observed
+            # live: a synthesis pass returned detailed_analysis=None and
+            # None[:2000] crashed the whole analyze()).
+            tier1_summary=(tier1_results.get("detailed_analysis") or "")[:2000],
             tier1_features=features_str,
             tier1_claims=claims_str,
             objective=objective or "General image analysis",
@@ -1073,6 +1222,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         image_paths, image_stack, input_type,
         num_images, is_single_image, first_image_name,
         effective_outlier_sigma,
+        effective_max_verification=None,
         tier2_decision=None,
     ) -> Optional[dict]:
         """Run Tier 2 pipeline and return compiled results, or None on failure."""
@@ -1138,7 +1288,10 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             literature_agent=self.literature_agent,
             enable_human_feedback=self.enable_human_feedback,
             outlier_sigma=effective_outlier_sigma,
-            max_verification_iterations=self.max_verification_iterations,
+            max_verification_iterations=(
+                effective_max_verification
+                if effective_max_verification is not None
+                else self.max_verification_iterations),
             num_plan_candidates=self.num_plan_candidates,
         )
 
@@ -1346,6 +1499,21 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "output_directory": str(self.output_dir),
         }
 
+        # Zero-success guard: if every image failed every attempt (a
+        # per-item condition, so no controller set error_dict), the run must
+        # not report top-level success. Salvaged best-available results carry
+        # success=True (with quality_warning) and are unaffected.
+        if series_results and all(
+                isinstance(r, dict) and r.get("success") is False
+                for r in series_results):
+            item_errors = [r.get("error") for r in series_results
+                           if r.get("error")]
+            results["status"] = "error"
+            results["error"] = {
+                "error": f"All {len(series_results)} image analysis(es) failed",
+                "details": item_errors[-1] if item_errors else "",
+            }
+
         if is_single:
             # Single image: compact structure
             analysis_result = state.get("analysis_result", {})
@@ -1357,6 +1525,14 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             results["analysis_approach"] = state.get(
                 "locked_analysis_config", {}
             ).get("analysis_approach")
+            # Hoist the executed script's features to top level. This also
+            # fixes a dead consumer: the Tier-2 decision and tier merging
+            # already read results["extracted_features"], which was never
+            # set — the Tier-2 decision prompt saw "{}" regardless of what
+            # the analysis extracted. (#323 prereq; issue #327 phase 2.)
+            results["extracted_features"] = analysis_result.get(
+                "extracted_features", {}
+            )
             results["literature_files"] = state.get("literature_files")
 
             if series_results and series_results[0].get("quality_warning"):
@@ -1409,6 +1585,11 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "analysis_type": r.get("analysis_type"),
                     "visualization_path": r.get("visualization_path"),
                     "error": r.get("error"),
+                    # Structured failure-mode tag + per-attempt audit trail
+                    # (matches curve; absent on successes/untagged failures).
+                    **({"kind": r["kind"]} if r.get("kind") else {}),
+                    **({"script_errors": r["script_errors"]}
+                       if r.get("script_errors") else {}),
                     "flagged": r.get("flagged", False),
                     "flag_reason": r.get("flag_reason"),
                     "adaptively_refitted": r.get("adaptively_refitted", False),

@@ -176,6 +176,155 @@ def promote_memory(
     }
 
 
+def demote_memory(domain: str, name: str, *, root: Optional[Path] = None) -> Dict[str, Any]:
+    """Demote a skill back to provisional — the reverse of ``promote_memory``.
+
+    Sets ``provisional: true`` in the YAML frontmatter (section bodies stay
+    byte-for-byte unchanged), taking the skill OUT of the auto-routing menu
+    while keeping it explicitly loadable and reviewable. For a skill that
+    turned out to mis-route or needs another look before it keeps
+    auto-applying.
+    """
+    root = root or graduated_skills_dir()
+    md = _bundle_path(domain, name, root=root)
+    if not md.exists():
+        raise FileNotFoundError(f"No skill bundle: {domain}/{name}")
+
+    import yaml
+
+    text = md.read_text()
+    match = _FRONTMATTER_BLOCK_RE.match(text)
+    if match:
+        meta = yaml.safe_load(match.group(1)) or {}
+        if not isinstance(meta, dict):
+            meta = {}
+        meta = dict(meta)
+        body = text[match.end():]
+    else:
+        meta = {}
+        body = text
+    meta["provisional"] = True
+    frontmatter = yaml.safe_dump(
+        meta,
+        default_flow_style=False,
+        sort_keys=False,
+        allow_unicode=True,
+        width=10_000,
+    ).strip()
+    md.write_text(f"---\n{frontmatter}\n---\n{body}")
+    return {
+        "status": "success",
+        "name": name,
+        "domain": domain,
+        "path": str(md),
+        "provisional": True,
+    }
+
+
+def edit_memory(domain: str, name: str, content: str, *,
+                root: Optional[Path] = None) -> Dict[str, Any]:
+    """Overwrite a persistent skill's markdown with user-edited content.
+
+    The manual-curation counterpart of the LLM upgrade: same backup
+    discipline (previous version copied to ``.md.bak``), plus a sanity
+    validation so a hand edit cannot silently break loading — the YAML
+    frontmatter (if present) must parse and at least one ``## section``
+    must remain.
+    """
+    root = root or graduated_skills_dir()
+    md = _bundle_path(domain, name, root=root)
+    if not md.exists():
+        raise FileNotFoundError(f"No skill bundle: {domain}/{name}")
+
+    import re
+    content = content if content.endswith("\n") else content + "\n"
+    match = _FRONTMATTER_BLOCK_RE.match(content)
+    if content.startswith("---") and not match:
+        return {"status": "error",
+                "message": "Frontmatter fence is malformed (--- ... ---)."}
+    if match:
+        import yaml
+        try:
+            meta = yaml.safe_load(match.group(1))
+        except yaml.YAMLError as e:
+            return {"status": "error",
+                    "message": f"Frontmatter is not valid YAML: {e}"}
+        if meta is not None and not isinstance(meta, dict):
+            return {"status": "error",
+                    "message": "Frontmatter must be a YAML mapping."}
+    if not re.search(r"^##\s+\S", content, re.M):
+        return {"status": "error",
+                "message": "The skill needs at least one '## section' heading."}
+
+    backup = md.with_name(md.name + ".bak")
+    backup.write_text(md.read_text())
+    md.write_text(content)
+    return {"status": "success", "path": str(md), "backup_path": str(backup)}
+
+
+def fork_builtin(domain: str, name: str, *, root: Optional[Path] = None) -> Dict[str, Any]:
+    """Copy a built-in (package) skill into the persistent store.
+
+    The copy-on-write path for improving a shipped skill: package skills are
+    immutable to the runtime machinery, but the loader's precedence (user
+    roots > persistent store > built-in) means the forked copy SHADOWS the
+    shipped one immediately — and the review-gated upgrade machinery can
+    then evolve it. Contribute the divergence back with a package PR (see
+    ``scilink memory diff-builtin``) and prune the fork afterwards.
+
+    The markdown is copied byte-identical (so diff-builtin starts clean).
+    Sibling ``.py`` tool files are NOT copied: TOOL_SPEC discovery walks the
+    installed package by skill name, so the shipped tools keep registering
+    for the forked skill unchanged.
+    """
+    from ..loader import _SKILLS_DIR
+
+    src_md = _SKILLS_DIR / domain / name / f"{name}.md"
+    if not src_md.is_file():
+        raise FileNotFoundError(f"No built-in skill: {domain}/{name}")
+    root = root or graduated_skills_dir()
+    dest_dir = root / domain / name
+    dest_md = dest_dir / f"{name}.md"
+    if dest_md.exists():
+        return {"status": "error",
+                "message": (f"{domain}/{name} is already forked "
+                            f"({dest_md}); upgrade or prune that copy.")}
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    (dest_dir / "__init__.py").touch()
+    dest_md.write_text(src_md.read_text())
+    sibling_tools = sorted(
+        f.name for f in src_md.parent.glob("*.py") if f.name != "__init__.py")
+    return {
+        "status": "success",
+        "domain": domain,
+        "name": name,
+        "path": str(dest_md),
+        "builtin_path": str(src_md),
+        "has_sibling_tools": bool(sibling_tools),
+        "sibling_tools": sibling_tools,
+    }
+
+
+def diff_builtin(domain: str, name: str, *, root: Optional[Path] = None) -> Dict[str, Any]:
+    """Unified diff of a forked skill against its shipped built-in original."""
+    import difflib
+    from ..loader import _SKILLS_DIR
+
+    src_md = _SKILLS_DIR / domain / name / f"{name}.md"
+    fork_md = (root or graduated_skills_dir()) / domain / name / f"{name}.md"
+    if not src_md.is_file():
+        raise FileNotFoundError(f"No built-in skill: {domain}/{name}")
+    if not fork_md.is_file():
+        raise FileNotFoundError(f"No forked copy of {domain}/{name} "
+                                f"(run `scilink memory fork {domain}/{name}`).")
+    diff = "\n".join(difflib.unified_diff(
+        src_md.read_text().splitlines(), fork_md.read_text().splitlines(),
+        fromfile=f"built-in/{name}.md", tofile=f"fork/{name}.md", lineterm=""))
+    return {"status": "success", "diff": diff,
+            "identical": not diff, "builtin_path": str(src_md),
+            "fork_path": str(fork_md)}
+
+
 def prune_memory(domain: str, name: str, *, root: Optional[Path] = None) -> Dict[str, Any]:
     """Delete a persisted skill bundle directory."""
     root = root or graduated_skills_dir()

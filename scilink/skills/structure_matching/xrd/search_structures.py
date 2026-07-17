@@ -63,12 +63,21 @@ TOOL_SPEC = ToolSpec(
         "query": {
             "type": "dict",
             "description": (
-                "Spec: {chemistry: list[str] OR list[list[str]] (required), "
-                "space_group_hints?: list[int], lattice_param_ranges?: "
-                "{a: (min,max), ...}, max_e_above_hull?: float, top_n?: int "
+                "Spec: {chemistry: list[str] OR list[list[str]] (required "
+                "UNLESS lattice_param_ranges is given), space_group_hints?: "
+                "list[int], lattice_param_ranges?: {a: (min,max), ..., "
+                "volume?: (min,max) Å³}, max_e_above_hull?: float, top_n?: int "
                 "(default 10, per chemistry hypothesis), z_range?: "
                 "(int, int), density_range?: (float, float) (g/cm³), "
                 "anonymous_formula?: str (e.g. 'AB2').\n\n"
+                "CELL-ONLY (blind) query: when the sample chemistry is UNKNOWN, "
+                "omit chemistry and pass lattice_param_ranges from "
+                "index_pattern's recovered cell — the unit cell becomes the "
+                "search key. Prefer including the permutation-invariant "
+                "'volume' range (axis conventions can differ between the "
+                "indexed cell and a database setting). Served by the COD and "
+                "local-CIF backends; Materials Project requires chemistry and "
+                "skips cell-only queries.\n\n"
                 "Use a single list for one hypothesis: chemistry=['Ti','O']. "
                 "Use a list of lists when the chemistry is unknown and you "
                 "want to test multiple candidates in one call: "
@@ -191,18 +200,23 @@ def _coerce_query_specs(query: dict) -> list[QuerySpec]:
     """
     chemistry = query.get("chemistry")
     if not chemistry:
-        raise ValueError(
-            "query.chemistry is required (non-empty list of element symbols, "
-            "or a non-empty list-of-lists for multiple hypotheses)"
-        )
-    if not isinstance(chemistry, list):
+        # Cell-only (blind) query: no chemistry, the lattice filter is the key.
+        # This is the index-first identification path — the unit cell recovered
+        # by index_pattern drives the search when the composition is unknown.
+        if not query.get("lattice_param_ranges"):
+            raise ValueError(
+                "query needs chemistry (element symbols, or list-of-lists for "
+                "multiple hypotheses) and/or lattice_param_ranges (cell-only "
+                "blind query, e.g. from index_pattern's recovered cell)"
+            )
+        chemistries: list[list[str]] = [[]]
+    elif not isinstance(chemistry, list):
         raise ValueError(
             f"query.chemistry must be a list, got {type(chemistry).__name__}"
         )
-
     # Normalize to list[list[str]].
-    if all(isinstance(c, str) for c in chemistry):
-        chemistries: list[list[str]] = [list(chemistry)]
+    elif all(isinstance(c, str) for c in chemistry):
+        chemistries = [list(chemistry)]
     elif all(isinstance(c, list) and c and all(isinstance(e, str) for e in c)
               for c in chemistry):
         chemistries = [list(c) for c in chemistry]

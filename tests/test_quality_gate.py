@@ -222,3 +222,52 @@ def test_no_user_threshold_preserves_skill_over_legacy():
                                    "hard_reject_threshold": 0.75}}
     resolved = resolve_gate(skill_meta=skill_meta, legacy_threshold=0.95)
     assert resolved.accept_threshold == pytest.approx(0.90)  # skill, not legacy
+
+
+# --- Escalation fast-accept margin (metric-agnostic) --------------------------
+
+def test_fast_margin_r2_default_reproduces_legacy():
+    # band 0.05, fraction 0.4 -> 0.02; cap (1-0.95)/2=0.025 -> 0.02; bar 0.97.
+    g = R_SQUARED_DEFAULT
+    assert g.fast_accept_margin(0.4) == pytest.approx(0.02)
+    assert g.clears_by_fast_margin(0.98, 0.4) is True
+    assert g.clears_by_fast_margin(0.955, 0.4) is False
+    assert g.clears_by_fast_margin(0.97, 0.4) is True  # exactly the bar
+
+
+def test_fast_margin_r2_clamped_near_ceiling():
+    # accept 0.99 -> band preserved 0.05 -> raw 0.02, capped at (1-0.99)/2.
+    g = R_SQUARED_DEFAULT.with_accept_threshold(0.99)
+    assert g.fast_accept_margin(0.4) == pytest.approx(0.005)
+    assert g.clears_by_fast_margin(0.997, 0.4) is True   # >= 0.995
+    assert g.clears_by_fast_margin(0.993, 0.4) is False  # approved but < 0.995
+
+
+def test_fast_margin_lower_is_better_direction():
+    g = QualityGate(metric="reduced_chi2", accept_threshold=1.5,
+                    hard_reject_threshold=3.0, direction="lower_is_better",
+                    best_value=0.0)
+    assert g.fast_accept_margin(0.4) == pytest.approx(0.6)  # 0.4 * band 1.5
+    assert g.clears_by_fast_margin(0.8, 0.4) is True    # <= 0.9
+    assert g.clears_by_fast_margin(1.4, 0.4) is False   # accepted but > 0.9
+
+
+def test_fast_margin_unbounded_metric_no_cap():
+    # No best_value -> margin is the full band fraction, no ceiling clamp.
+    g = QualityGate(metric="bic", accept_threshold=100.0,
+                    hard_reject_threshold=200.0, direction="lower_is_better")
+    assert g.best_value is None
+    assert g.fast_accept_margin(0.4) == pytest.approx(40.0)
+
+
+def test_fast_margin_missing_value_does_not_clear():
+    assert R_SQUARED_DEFAULT.clears_by_fast_margin(None, 0.4) is False
+
+
+def test_from_mapping_infers_best_value_for_r_squared():
+    g = from_mapping({"metric": "r_squared", "accept_threshold": 0.99,
+                      "hard_reject_threshold": 0.94})
+    assert g.best_value == 1.0
+    g2 = from_mapping({"metric": "reduced_chi2", "accept_threshold": 1.5,
+                       "hard_reject_threshold": 3.0, "direction": "lower_is_better"})
+    assert g2.best_value is None  # unknown metric -> unbounded unless declared

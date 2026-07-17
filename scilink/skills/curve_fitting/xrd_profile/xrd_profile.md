@@ -2,9 +2,9 @@
 description: 'p-XRD profile fitting — the quantitative follow-up to phase identification: per-peak pseudo-Voigt fits (position, intensity, FWHM), Scherrer crystallite size and Williamson-Hall microstrain, and a Rietveld tier (phase fractions / accurate lattice; engine pending) that refines against the identified-phase CIF.'
 technique: [XRD, "X-ray diffraction", "powder diffraction", pXRD]
 quality_gate:
-  metric: r_squared
-  accept_threshold: 0.95
-  hard_reject_threshold: 0.85
+  metric: peak_region_r2
+  accept_threshold: 0.90
+  hard_reject_threshold: 0.55
   direction: higher_is_better
 ---
 # p-XRD Profile Fitting Skill
@@ -68,6 +68,57 @@ known, proceed standalone.
 points below shape *that* fit — how many peaks matter, when Williamson-Hall
 is admissible, which background — rather than a peak-by-peak procedure.
 
+**Exclude a corrupting low-angle upturn — without clipping a real reflection.**
+Lab patterns often have a steep air-scatter / beamstop rise in the first few
+degrees. It is *not* diffraction, and it breaks the fit two ways: SNIP
+background overshoots on the steep edge, and the inflated intensity range
+starves prominence-based detection — the tell is `fit_pattern` returning only
+1–2 peaks with a deceptively high R² on a near-empty fit. When you see that
+rise, pass `fit_range=(lo, hi)` to exclude only the climb; excluded channels are
+dropped from background, detection, and the fit but returned as matched, so the
+residual diagnostics still work.
+
+The hazard is over-cropping: genuine low-angle Bragg peaks are common (layered
+materials, clays, MOFs, surfactants, many molecular/pharmaceutical crystals with
+large d-spacings) and live in the same first few degrees, so **do not blindly use
+a fixed cutoff** — look at the low-angle data and set `lo` deliberately. The
+decision is **where the steep climb flattens into ordinary background**, not just
+"below the lowest bump":
+- **Set `lo` where the climb has flattened.** A reflection that sits on **flat**
+  background just past the climb — keep it (put `lo` below it). A feature sitting
+  **on the steep part of the climb itself** — exclude it with the rest of the
+  climb. Do *not* lower `lo` into the climb to rescue such a feature: a peak
+  buried in air-scatter cannot be reliably fit there anyway, and — because
+  `fit_range` sets a single lower bound — keeping any of the steep climb keeps the
+  SNIP overshoot and the starved detection across the **whole** pattern, so you
+  trade one ambiguous low-angle peak for a bad fit everywhere.
+- **Read the result, not your intent.** If the fit comes back with only a handful
+  of peaks and/or a large oscillatory residual in the first few degrees, `lo` is
+  still **inside the climb** — raise it to where the background goes flat and
+  re-fit. A clean fit with many reflections and a structureless low-angle residual
+  means `lo` is right.
+- **A dominant low-angle feature that suppresses the rest of the pattern is
+  air-scatter — exclude it.** Prominence-based detection scales its floor to the
+  tallest peak in the window, so one enormous low-angle feature (the air-scatter /
+  beam-stop maximum, often *orders of magnitude* above every real reflection)
+  starves detection of the weaker peaks. The tell is a fit that captures only the
+  two or three tallest peaks while the rest of the pattern — which plainly shows
+  reflections in the raw data — sits unmodeled at baseline. When you see that, the
+  giant low-angle feature is air-scatter, not a reflection you must keep: raise
+  `lo` above it and re-fit; recovering the full set of reflections confirms it.
+  The trigger is **suppression of otherwise-visible peaks**, not size alone — a
+  genuinely strong reflection leaves the rest of the pattern detectable and does
+  not fire this rule (e.g. a 100×-dominant peak whose neighbours are still fit is
+  fine; it is only a problem when the neighbours vanish from the fit).
+- A genuine reflection truly buried on the climb is a **background problem**, not
+  a `fit_range` problem: report that the low-angle region needs a dedicated
+  background (or a measurement with a beam stop / variable slits) rather than
+  forcing the single-bound crop to do both jobs.
+
+The same knob (with the same caution) excludes a detector artifact or a known
+contaminant region. For a series, set one window on the establishing frame and
+reuse it on every frame.
+
 **How many peaks to fit:**
 - Scherrer alone: 3–5 strongest, well-isolated peaks is enough — report
   size per peak and the mean.
@@ -76,12 +127,20 @@ is admissible, which background — rather than a peak-by-peak procedure.
   becomes degenerate. Refuse W-H and fall back to peak-by-peak Scherrer
   when sin θ range < 0.1.
 
-**Background first, fit second.** Subtract a background (`fit_background`
-with `method='snip'` is the standard p-XRD choice) before per-peak
-fitting. SNIP handles smooth amorphous backgrounds and fluorescence
-floors without imposing a polynomial shape. Use `method='polynomial'`
-only when a polynomial is genuinely the right model (capillary
-scattering on a flat baseline).
+**Background: default to SNIP; do not switch to polynomial to "keep a
+pedestal".** `fit_background(method='snip')` (also `fit_pattern`'s default) is
+the right choice for almost every p-XRD pattern: it follows smooth amorphous
+humps, broad diffracted pedestals, and fluorescence floors without imposing a
+shape, and its iteration count (`snip_iterations='auto'` sweeps it) sets how much
+of a broad pedestal it treats as background. So if a broad pedestal under a
+cluster is being over-subtracted (crystalline apexes not reaching full data
+height), **tune the SNIP iterations** (fewer iterations leaves more of the
+pedestal) — do **not** change method. Reach for `method='polynomial'` only for a
+specific, known smooth scattering on a genuinely flat baseline (e.g. capillary
+scattering), **never** to preserve an amorphous pedestal: a Chebyshev/polynomial
+background oscillates and goes **negative between peaks**, producing a
+pathological model that dips below zero in the gaps — almost never what XRD data
+needs.
 
 **Line shape: pseudo-Voigt as default.** A pseudo-Voigt mixes Gaussian
 and Lorentzian contributions through a single mixing parameter `eta` —
@@ -140,6 +199,31 @@ engine is wired, do not attempt a whole-pattern refine with the kinematic
 tools** — report tiers 1–2 and recommend Rietveld as the explicit next step,
 naming the matched CIF as the model to refine.
 
+*Refinement order (engine-pending — the protocol for when `refine_rietveld`
+exists; do not apply it to the tier-1/2 empirical `fit_pattern`, which has no
+such refinement groups).* A manual Rietveld runs in a set order, and that order
+is most of the skill: the logic is identical in GSAS-II or TOPAS, only the
+parameter names differ. **Nothing is freed all at once** — refine one group at a
+time, holding everything else at its current value and carrying the converged
+values forward; freeing everything together tends to diverge or settle in a
+false minimum on overlap-heavy data. The order:
+1. **Scale + background** first — just to get the calculated curve roughly onto
+   the observed one.
+2. **Sample/setup group** (the parameters with no "correct" value to look up —
+   they are whatever the packing and alignment produced that day): zero-shift /
+   sample displacement for peak positions, the profile terms for width and
+   shape, and preferred orientation if the intensities are off.
+3. **Structural group** (a separate bucket, anchored by the published CIF for a
+   known phase): the cell refines only a little for a fixed phase at fixed
+   conditions; atomic coordinates and occupancies stay fixed unless the data
+   really justify touching them.
+
+The step-2 corrections are exactly the ones that quietly absorb error from
+elsewhere and still produce a clean Rwp — judge each by the sample-and-mounting
+priors in **validation** (a large displacement or preferred-orientation or
+lattice change is suspect unless the sample/mounting/conditions make it real),
+not by the fit statistic.
+
 ## implementation
 
 **Default path: one global fit with `fit_pattern`.** Prefer `fit_pattern`
@@ -190,6 +274,13 @@ fit = fit_pattern(
 peaks = fit['peaks']            # each: center, fwhm, amplitude, area, eta
 r_squared = fit['r_squared']    # GLOBAL R²
 
+# Save the fit overlay (fit.npy) on the RAW-intensity scale so it matches the raw
+# data. fit['fit_curve'] is on the BACKGROUND-SUBTRACTED scale; saving THAT makes a
+# good fit look collapsed (peaks at a fraction of height, gaps near zero) whenever
+# the background is large — use fit['fit_curve_raw'] (= fit_curve + background).
+import numpy as np
+np.save('fit.npy', np.asarray(fit['fit_curve_raw'], dtype=float))
+
 # ---- Step 3: Per-peak Scherrer size ----
 sizes_nm = []
 for p in peaks:
@@ -220,15 +311,53 @@ print("FIT_RESULTS_JSON: " + json.dumps({
     "scherrer_per_peak_nm": sizes_nm,
     "williamson_hall": wh,
     "fit_quality": {
-        "r_squared": r_squared,                       # GLOBAL
+        # peak_region_r2 is the GATE METRIC: R² over the channels that carry
+        # diffracted intensity, so a correct fit of a weak/noisy pattern is not
+        # failed by the noise-only background channels. fit_pattern returns it.
+        "peak_region_r2": fit['peak_region_r2'],
+        "r_squared": r_squared,                       # GLOBAL (reported for context)
         "residual_rms_over_noise": fit['residual_rms_over_noise'],
-        "verdict": "accept" if r_squared >= 0.95 else (
-            "marginal" if r_squared >= 0.85 else "reject"
-        ),
+        # Worst single LOCAL misfit in noise units. R²/peak_region_r2/RMS average
+        # and hide a localized error (a mis-shaped sharp apex on a tall peak); this
+        # exposes it. Read against residual_rms_over_noise (>> RMS = localized ->
+        # look at the figure); its scale rises with dynamic range, so it is an
+        # attention signal, not a thresholded verdict.
+        "max_abs_residual_over_noise": fit['max_abs_residual_over_noise'],
         "n_peaks_fitted": fit['n_peaks'],
     },
 }))
 ```
+
+**A high `peak_region_r2` is necessary but not sufficient — use
+`max_abs_residual_over_noise` to decide where to look.** The gate metric (like
+global R² and RMS) averages over the whole pattern, so on a high-dynamic-range
+pattern — one or two giant peaks dwarfing the rest — a localized error such as a
+mis-shaped sharp apex is invisible to it (`peak_region_r2 ≈ 0.99` while that apex
+is far off). `max_abs_residual_over_noise` is the **worst single local misfit**,
+the complement of the averaged statistics. Read it *against*
+`residual_rms_over_noise`: when it is much larger than the RMS, the misfit is
+**localized** (concentrated at a few channels) rather than spread out — that is a
+prompt to **look at the residual figure at that location**, not a verdict.
+Do **not** attach an absolute threshold to it: its scale rises with dynamic range
+(a tiny fractional residual on a giant peak is many σ), so a large value is
+*expected* on very sharp, intense peaks and is not by itself a failure. The
+figure decides: a single sharp apex is the split pseudo-Voigt's irreducible
+profile limit (accept, and **report the residual honestly rather than claiming a
+clean fit** — do not refine endlessly); a residual that is an unmodelled
+reflection or a missed shoulder is a real miss (refine). The value's job is to
+stop a high `peak_region_r2` from being rubber-stamped without that look.
+
+The gate scores `peak_region_r2`. A large global-`r_squared` ↔ `peak_region_r2`
+gap is **only** a benign low-SNR artifact when you have *verified* both that the
+pattern is genuinely low-SNR (weak counts over a noisy background) **and** that
+the residual in the gap regions is structureless (noise-only). Do not assume the
+gap is benign: on a high-SNR pattern a low global `r_squared` should be presumed
+a **real** problem (a missed reflection or a mis-shaped peak) until the residual
+is checked and found featureless. Conversely, when `peak_region_r2` itself is low,
+real reflections are mis- or un-modelled — that is **not** rescued, so refine
+(lower `prominence_frac`/`min_distance_deg` and re-run the single global
+`fit_pattern`). `peak_region_r2` equals the global R² on a high-SNR pattern, so
+on clean data there is no gap to explain.
 
 **In-situ / series use — lock the method, not the values.** `fit_pattern` is
 one fast call per frame, so it drops straight into the agent's per-spectrum
@@ -247,6 +376,39 @@ the identical method plus aligning the detected peaks across frames in
 interpretation, not from frozen centers.** Only pass an explicit `peak_centers`
 for a one-off re-fit of a single known-stable pattern — never as the series
 default.
+
+**Phase identity and fractions across a series are the `xrd` skill's job.**
+This skill answers peak shapes/positions/widths per frame; WHICH phases each
+frame contains and HOW MUCH of each is answered by the structure-matching
+`xrd` skill's series workflow — identify the series endpoints, then
+`track_phase_series` (or the lock-file pattern) scores every frame against
+that fixed endmember set, returning per-frame phase shares, the transition
+window, and residual alerts. The two compose: its transition-window frame
+indices tell this skill's regime segmentation where to expect a model
+change, and its lattice-scale drift corroborates peak-shift trends fitted
+here. To COUPLE the two over a series — attribute the peak-evolution trends
+fitted here to the phases identified there, and cross-check the transition —
+run both passes and join them with the `xrd` skill's
+`reconcile_series_phases`. That is the recommended in-situ deliverable when
+the phases might not all be in a database: profile fitting (here) keeps
+producing trends where identification hits the "not in any database" wall, so
+the reconciliation labels what it can and reports the rest as honestly
+unidentified.
+
+**The detection settings ARE part of the recipe — tune them, then freeze them.**
+`prominence_frac` and `min_distance_deg` are *settings*, not *values*: tune them
+on the establishing frame so every visible reflection is modelled, then carry the
+chosen numbers into the series call. Doing so is locking the *method* (correct);
+it is the peak *centers* that must never be frozen. Watch `prominence_frac` in
+particular — its floor scales with the pattern's intensity range, so the weakest
+(usually high-angle) reflections sit just above it and are the first to be
+dropped. **A residual statistic will not warn you**: a weak peak on a noisy
+high-angle floor reads only a few σ even when it is entirely unmodelled, so the
+fit can miss real reflections while R²/peak_region_r2/RMS all look clean. Verify
+coverage **by eye against the data across the full 2θ range** — a log-scale
+data-vs-fit overlay — not by the residual number: if the raw data plainly shows
+reflections the model leaves at baseline, lower `prominence_frac` (0.02 → 0.01 →
+0.005) until they are caught, then freeze that value for the series.
 
 For speed across a long series: the default `snip_iterations='auto'` sweeps
 a few background widths per frame (~4× the fit cost). Once the establishing
@@ -331,9 +493,19 @@ auto-detect catches it and re-run the single global `fit_pattern` — keep the
 recipe auto-detecting (so it still generalises frame-to-frame), not spliced
 sub-fits or hardcoded centers.
 
-**Per-peak fit checks:**
-- `r_squared` ≥ 0.95 for each fit accepts; 0.85–0.95 marginal; below
-  0.85 reject the fit and either widen the window or drop the peak.
+**Gate on `peak_region_r2`, read the global R² as context.** The whole-pattern
+`r_squared` is depressed by noise-only background channels on a weak/noisy
+pattern, so a correct fit can score a misleadingly low global R² (e.g. a faint
+powder pattern whose Bragg peaks are well fit can sit at global R² ≈ 0.5 with
+`peak_region_r2` ≈ 0.9). Score acceptance on `peak_region_r2`:
+- `peak_region_r2` ≥ 0.90 accepts; 0.55–0.90 marginal (the verifier decides on
+  residual structure); below 0.55 reject.
+- A large `r_squared` ↔ `peak_region_r2` gap with a **structureless (noise-only)
+  residual** = low-SNR pattern, fit is good → accept. The same gap with
+  *peaked* residual (unmodelled-reflection spikes) = real miss → refine: lower
+  `prominence_frac`/`min_distance_deg` and re-run the single global `fit_pattern`.
+  `peak_region_r2` does not rescue a fit that genuinely misses reflections, so a
+  low `peak_region_r2` is a true reject, not a metric artifact.
 - FWHM sanity: 0.05° (typical instrumental floor for a lab CuKa
   diffractometer) ≤ FWHM ≤ 2.0° (very small crystallites; peak overlap
   dominates above this).
@@ -365,3 +537,21 @@ sub-fits or hardcoded centers.
   resolution-limited. Report "size below sensitivity limit
   (~ Scherrer with β = instrumental)" rather than NaN or a complex
   number.
+
+**Sample-and-mounting priors — the fit statistic can't tell you these, the
+sample does.** The corrections that absorb position/intensity error (sample
+displacement, preferred orientation, and a refined lattice) will quietly soak up
+error from elsewhere and still leave a clean R²/Rwp, so a good fit statistic does
+*not* mean the correction is real. Judge each against what the sample is and how
+it was mounted, not against the fit:
+- **Sample displacement / zero-shift:** ~0 on a properly seated zero-background
+  holder. A large fitted displacement points to a misaligned sample, not a
+  correction worth trusting — flag it rather than reporting it as physical.
+- **Preferred orientation / intensity mismatch:** on a loosely packed random
+  powder there should be little texture, so a large PO correction usually means
+  something *else* is wrong (it is absorbing error); on a flat plate of platy or
+  needle crystals the texture is real and a correction along the right axis is
+  legitimate. Use the known morphology/mounting to decide which case you are in.
+- **Lattice change:** for a fixed phase at fixed conditions the cell should move
+  only a little; a large shift is suspect — *except* in a variable-temperature /
+  in-situ run, where the cell genuinely moves and tracking it is the point.

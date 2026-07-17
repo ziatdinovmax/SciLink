@@ -30,6 +30,7 @@ import ast
 import hashlib
 import json
 import re
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -664,3 +665,44 @@ def prepare_inputs_batch(input_paths, model, executor, output_dir, probes=None,
             "n_fallback": n_fallback, "n_failed": n_failed,
         },
     }
+
+
+def stage_pairs_flat(results: list, flat_dir) -> dict:
+    """Stage a batch's verified (data, metadata) pairs into ONE flat directory
+    with stem-matched names, so a series consumer can ingest the whole batch as a
+    directory and pair each data file with its sidecar by stem.
+
+    The per-file split machinery writes each pair into its own collision-safe
+    subdir with mismatched stems (``<stem>_data.csv`` + ``<stem>_metadata.json``)
+    — correct for the split/verify step but unusable by the directory-based series
+    loader, which excludes ``.json`` as metadata and pairs sidecars by EXACT stem
+    (``spec_00.csv`` ↔ ``spec_00.json``). This copies (never moves — the originals
+    and their round-trip provenance stay intact) each successful pair to
+    ``flat_dir/<input_stem><data_suffix>`` + ``flat_dir/<input_stem>.json``, using
+    the ORIGINAL input filename as the stem (meaningful ``unit`` rows downstream)
+    and disambiguating only on collision. Failed splits are skipped.
+
+    Returns ``{"staged_dir": str, "pairs": [{"data", "metadata"}], "n": int}``.
+    """
+    flat = Path(flat_dir)
+    flat.mkdir(parents=True, exist_ok=True)
+    pairs: list = []
+    used: set = set()
+    for r in results or []:
+        if r.get("status") != "success":
+            continue
+        dp, mp = Path(r.get("data_path", "")), Path(r.get("metadata_path", ""))
+        if not (dp.is_file() and mp.is_file()):
+            continue
+        base = re.sub(r"[^0-9A-Za-z_-]", "_", Path(r.get("file") or dp).stem) or "input"
+        stem, n = base, 1
+        while (stem in used or (flat / f"{stem}{dp.suffix}").exists()
+               or (flat / f"{stem}.json").exists()):
+            n += 1
+            stem = f"{base}_{n}"
+        used.add(stem)
+        data_dst, meta_dst = flat / f"{stem}{dp.suffix}", flat / f"{stem}.json"
+        shutil.copy2(dp, data_dst)
+        shutil.copy2(mp, meta_dst)
+        pairs.append({"data": str(data_dst), "metadata": str(meta_dst)})
+    return {"staged_dir": str(flat), "pairs": pairs, "n": len(pairs)}

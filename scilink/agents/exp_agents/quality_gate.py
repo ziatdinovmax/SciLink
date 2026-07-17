@@ -29,6 +29,9 @@ from typing import Any, Optional
 #   lower_is_better  → accept if value <= accept_threshold; hard-reject if value > hard_reject_threshold
 _DIRECTIONS = {"higher_is_better", "lower_is_better"}
 
+# Where a gate reads its metric value from (see QualityGate.value_source).
+_VALUE_SOURCES = {"result", "verdict"}
+
 
 @dataclass(frozen=True)
 class QualityGate:
@@ -44,6 +47,12 @@ class QualityGate:
     accept_threshold: float = 0.95
     hard_reject_threshold: float = 0.90
     direction: str = "higher_is_better"
+    # Where the metric value comes from:
+    #   "result"  → the script's own numbers: fit_result["fit_quality"][metric]
+    #               (curve fitting — deterministic, computed by the executed code)
+    #   "verdict" → the LLM verifier's returned JSON: verdict[metric]
+    #               (image analysis — the verifier IS the score source)
+    value_source: str = "result"
     # Whether the LLM physics verifier runs on top of the numeric gate.
     # True for goodness-of-fit metrics (r_squared, peak_region_r2, BIC, …) — the
     # verifier inspects the plot/residuals/parameters for physics problems a
@@ -51,6 +60,13 @@ class QualityGate:
     # figure_of_merit), where the skill's own scoring tool IS the verification
     # and the goodness-of-fit-shaped prompt does not apply.
     physical_review: bool = True
+    # The metric's theoretical best-possible value: the CEILING for
+    # higher_is_better (e.g. 1.0 for R²) or the FLOOR for lower_is_better
+    # (e.g. 0.0 for χ²/RMSE). None when the metric is unbounded on its
+    # "better" side (e.g. raw BIC). Used only to cap the escalation
+    # fast-accept margin so a near-optimal accept_threshold can't demand an
+    # unreachable value (reproduces the old R² `(1-accept)/2` cap).
+    best_value: Optional[float] = None
 
     @property
     def label(self) -> str:
@@ -66,6 +82,11 @@ class QualityGate:
         return "<" if self.direction == "higher_is_better" else ">"
 
     def __post_init__(self) -> None:
+        if self.value_source not in _VALUE_SOURCES:
+            raise ValueError(
+                f"QualityGate.value_source must be one of {sorted(_VALUE_SOURCES)}; "
+                f"got {self.value_source!r}"
+            )
         if self.direction not in _DIRECTIONS:
             raise ValueError(
                 f"QualityGate.direction must be one of {sorted(_DIRECTIONS)}; "
@@ -88,15 +109,22 @@ class QualityGate:
 
     # -- evaluation -------------------------------------------------------
 
-    def extract(self, fit_quality: Optional[dict]) -> Optional[float]:
-        """Read this gate's metric value from a ``fit_quality`` dict.
+    def extract(self, fit_quality: Optional[dict],
+                verdict: Optional[dict] = None) -> Optional[float]:
+        """Read this gate's metric value.
+
+        ``value_source == "result"`` reads ``fit_quality[metric]`` (the
+        executed script's own numbers). ``value_source == "verdict"`` reads
+        ``verdict[metric]`` (the LLM verifier's returned JSON) — pass the
+        verifier verdict via the ``verdict`` keyword.
 
         Returns ``None`` when missing, non-numeric, or NaN — callers
         treat ``None`` as a hard reject.
         """
-        if not isinstance(fit_quality, dict):
+        source = verdict if self.value_source == "verdict" else fit_quality
+        if not isinstance(source, dict):
             return None
-        v = fit_quality.get(self.metric)
+        v = source.get(self.metric)
         try:
             f = float(v)
         except (TypeError, ValueError):
@@ -124,6 +152,37 @@ class QualityGate:
         if value is None:
             return False
         return (not self.is_accept(value)) and (not self.is_hard_reject(value))
+
+    # -- escalation fast-accept (metric-agnostic) -------------------------
+
+    def fast_accept_margin(self, fraction: float) -> float:
+        """Escalation fast-accept margin (in metric units, >= 0).
+
+        A fraction of the soft band (``|accept - hard_reject|``), capped at
+        half the room to ``best_value`` so the fast-accept point never passes
+        the metric's optimum. For the default R² gate (band 0.05, best 1.0)
+        and ``fraction=0.4`` this is 0.02 — identical to the old absolute
+        ``ESCALATION_R2_MARGIN`` — and the cap reproduces the old
+        ``(1 - accept)/2`` shrink as accept_threshold approaches 1.0.
+        """
+        band = abs(self.accept_threshold - self.hard_reject_threshold)
+        margin = max(0.0, fraction) * band
+        if self.best_value is not None:
+            room = abs(self.best_value - self.accept_threshold)
+            margin = min(margin, room / 2.0)
+        return margin
+
+    def clears_by_fast_margin(
+        self, value: Optional[float], fraction: float
+    ) -> bool:
+        """True if ``value`` clears ``accept_threshold`` by the fast margin in
+        the gate's direction — the escalation fast-accept quality test."""
+        if value is None:
+            return False
+        margin = self.fast_accept_margin(fraction)
+        if self.direction == "higher_is_better":
+            return value >= self.accept_threshold + margin
+        return value <= self.accept_threshold - margin
 
     # -- display helpers --------------------------------------------------
 
@@ -164,7 +223,26 @@ R_SQUARED_DEFAULT = QualityGate(
     accept_threshold=0.95,
     hard_reject_threshold=0.90,
     direction="higher_is_better",
+    best_value=1.0,
 )
+
+# The image-analysis accept criterion as a gate object: the LLM verifier's
+# quality_score against the classic 0.7 threshold. hard_reject == accept ⇒
+# an empty soft band, which is exactly the plain-threshold semantics the
+# image controller has always had (no verifier-arbitrated in-between zone).
+IMAGE_SCORE_DEFAULT = QualityGate(
+    metric="quality_score",
+    accept_threshold=0.7,
+    hard_reject_threshold=0.7,
+    direction="higher_is_better",
+    physical_review=True,
+    best_value=1.0,
+    value_source="verdict",
+)
+
+# Metrics with a known optimum on their "better" side, used to default
+# ``best_value`` when a skill's frontmatter gate omits it.
+_KNOWN_BEST_VALUE = {"r_squared": 1.0, "peak_region_r2": 1.0, "quality_score": 1.0}
 
 
 def resolve_gate(
@@ -238,14 +316,20 @@ def resolve_gate(
 
 def from_mapping(data: dict) -> QualityGate:
     """Construct a QualityGate from a frontmatter-style mapping."""
+    metric = str(data.get("metric", R_SQUARED_DEFAULT.metric))
+    # Default best_value for known bounded GOF metrics when not declared, so
+    # the fast-accept ceiling cap applies even to skill-authored R² gates.
+    bv = data.get("best_value", _KNOWN_BEST_VALUE.get(metric))
     return QualityGate(
-        metric=str(data.get("metric", R_SQUARED_DEFAULT.metric)),
+        metric=metric,
         accept_threshold=float(data.get("accept_threshold", R_SQUARED_DEFAULT.accept_threshold)),
         hard_reject_threshold=float(data.get(
             "hard_reject_threshold", R_SQUARED_DEFAULT.hard_reject_threshold
         )),
         direction=str(data.get("direction", R_SQUARED_DEFAULT.direction)),
         physical_review=bool(data.get("physical_review", R_SQUARED_DEFAULT.physical_review)),
+        best_value=(float(bv) if bv is not None else None),
+        value_source=str(data.get("value_source", R_SQUARED_DEFAULT.value_source)),
     )
 
 
