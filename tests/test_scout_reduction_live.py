@@ -117,22 +117,28 @@ def main() -> int:
     check("change point within one step of planted 405 K",
           m is not None and abs(cp - 405.0) <= 10.0)
 
-    # Planner log format ("<name>: indices [...], model: ..."), falling back
-    # to the regime banner ("Spectra: indices [...]").
-    groups = re.findall(r": indices \[([^\]]*)\], model:", log)
-    if not groups:
-        groups = re.findall(r"Spectra: indices \[([^\]]*)\]", log)
-    regime_indices = [
-        sorted(int(v) for v in re.findall(r"\d+", g)) for g in groups
-    ]
-    print(f"    regimes (spectrum indices): {regime_indices}")
-    check("series plan has >= 2 regimes", len(regime_indices) >= 2)
-    boundary_ok = False
-    if len(regime_indices) >= 2:
+    # The locked-configuration banner is authoritative — the plan can be
+    # logged twice (initial + post-validation revision). Fall back to the
+    # plan-log / regime-banner formats.
+    n_regimes, splits = 0, []
+    locked = re.search(r"First-in-regime spectra \(full QC\): \[([^\]]*)\]",
+                       log)
+    if locked:
+        firsts = [int(v) for v in re.findall(r"\d+", locked.group(1))]
+        n_regimes, splits = len(firsts), sorted(firsts[1:])
+    else:
+        groups = (re.findall(r": indices \[([^\]]*)\], model:", log)
+                  or re.findall(r"Spectra: indices \[([^\]]*)\]", log))
+        regime_indices = [
+            sorted(int(v) for v in re.findall(r"\d+", g)) for g in groups
+        ]
+        n_regimes = len(regime_indices)
         splits = sorted(r[0] for r in regime_indices[1:])
-        boundary_ok = any(s in (10, 11) for s in splits)
-        print(f"    regime split point(s): {splits} (planted: 11)")
-    check("regime boundary at index 10/11 (sub-scout resolution)", boundary_ok)
+    print(f"    locked regimes: {n_regimes}, split point(s): {splits} "
+          "(planted: 11)")
+    check("series plan has >= 2 regimes", n_regimes >= 2)
+    check("regime boundary at index 10/11 (sub-scout resolution)",
+          any(s in (10, 11) for s in splits))
 
     status = (result or {}).get("status", "no result")
     print(f"    analyze status: {status}")

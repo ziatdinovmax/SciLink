@@ -2051,17 +2051,8 @@ class CurveFittingPlanningController:
         """
         from ..instruct import CURVE_FITTING_PLAN_VALIDATION_PROMPT
 
-        regime_section = ""
-        series_plan = state.get("series_analysis_plan")
-        if series_plan and series_plan.get("regimes"):
-            lines = ["\n**Regimes:**"]
-            for regime in series_plan["regimes"]:
-                lines.append(
-                    f"- {regime.get('name', 'Unnamed')}: "
-                    f"model={regime.get('physical_model', 'N/A')}, "
-                    f"params={', '.join(regime.get('parameters_to_extract', []))}"
-                )
-            regime_section = "\n".join(lines)
+        regime_section = self._build_regime_section(
+            state.get("series_analysis_plan"))
 
         prompt_text = CURVE_FITTING_PLAN_VALIDATION_PROMPT.format(
             analysis_approach=state.get("analysis_approach", "N/A"),
@@ -2086,6 +2077,19 @@ class CurveFittingPlanningController:
         data_plot = state.get("scout_overlay_plot") or state.get("original_plot_bytes")
         if data_plot:
             prompt_parts.append("\n**Data:**")
+            # The overlay is a SUBSAMPLE — without saying so, the validator
+            # reads its legend as the whole series and "corrects" valid
+            # regime spectrum_indices down to the scouted count (seen live).
+            if state.get("scout_overlay_plot") and not state.get(
+                    "is_single_spectrum", True):
+                num_spectra = state.get("num_spectra", 1)
+                n_scouts = len(state.get("scout_data") or [])
+                prompt_parts.append(
+                    f"The overlay shows {n_scouts} representative spectra "
+                    f"scouted from the full series of {num_spectra}. Regime "
+                    f"spectrum_indices refer to the full series "
+                    f"(0..{num_spectra - 1}), not to the overlay curves."
+                )
             prompt_parts.append({"mime_type": "image/png", "data": data_plot})
         # Same fit-free zoom into hard-to-resolve regions so the validator can
         # catch unresolved structure the plan mischaracterized (no-op for series
@@ -2125,6 +2129,49 @@ class CurveFittingPlanningController:
             self.logger.warning(f"  Plan validation failed: {e}, keeping plan")
 
         return state
+
+    @staticmethod
+    def _format_spectrum_indices(indices) -> str:
+        """Compact range rendering of an index list: '0-11, 13, 15-20'."""
+        idx = sorted({int(i) for i in (indices or [])})
+        if not idx:
+            return ""
+        parts, start, prev = [], idx[0], idx[0]
+        for i in idx[1:]:
+            if i == prev + 1:
+                prev = i
+                continue
+            parts.append(f"{start}-{prev}" if prev > start else f"{start}")
+            start = prev = i
+        parts.append(f"{start}-{prev}" if prev > start else f"{start}")
+        return ", ".join(parts)
+
+    @classmethod
+    def _build_regime_section(cls, series_plan) -> str:
+        """Regime block for the plan-validation prompt.
+
+        Shows each regime's spectrum_indices — the validator cannot preserve
+        an assignment it never saw — and states the omission semantics that
+        `_extract_series_plan` implements on the way back.
+        """
+        if not (series_plan and series_plan.get("regimes")):
+            return ""
+        lines = ["\n**Regimes:**"]
+        for regime in series_plan["regimes"]:
+            spectra = cls._format_spectrum_indices(
+                regime.get("spectrum_indices", []))
+            lines.append(
+                f"- {regime.get('name', 'Unnamed')}: "
+                f"spectra=[{spectra}], "
+                f"model={regime.get('physical_model', 'N/A')}, "
+                f"params={', '.join(regime.get('parameters_to_extract', []))}"
+            )
+        lines.append(
+            "If you revise the series plan, return spectrum_indices for each "
+            "regime; a regime returned without them inherits its current "
+            "assignment shown above."
+        )
+        return "\n".join(lines)
 
     def _append_scout_context(self, prompt: list, state: dict, scout_data: list) -> None:
         """Append scout spectrum plots and series regime planning instructions."""
@@ -2253,6 +2300,34 @@ class CurveFittingPlanningController:
         if not regimes:
             state["series_analysis_plan"] = None
             return
+
+        # A validation/refinement revision may return regimes without
+        # spectrum_indices — omission means "assignment unchanged", not
+        # "unassign". Inherit from the plan being revised (by regime name,
+        # else by position when the regime count is unchanged); otherwise
+        # the missing-index fallback below assigns every spectrum to
+        # regime 1 and drops the rest as empty, silently collapsing a
+        # multi-regime plan whenever the revision was about something else.
+        prior_regimes = (state.get("series_analysis_plan") or {}).get("regimes") or []
+        if prior_regimes:
+            prior_by_name = {
+                r.get("name"): r for r in prior_regimes if r.get("name")
+            }
+            same_count = len(regimes) == len(prior_regimes)
+            for pos, regime in enumerate(regimes):
+                if regime.get("spectrum_indices"):
+                    continue
+                source = prior_by_name.get(regime.get("name"))
+                if source is None and same_count:
+                    source = prior_regimes[pos]
+                inherited = (source or {}).get("spectrum_indices")
+                if inherited:
+                    regime["spectrum_indices"] = list(inherited)
+                    self.logger.info(
+                        f"  Regime '{regime.get('name', 'unnamed')}' returned "
+                        f"without spectrum_indices — inherited "
+                        f"{len(inherited)} from the plan being revised"
+                    )
 
         # Validate index coverage
         all_indices = set()
