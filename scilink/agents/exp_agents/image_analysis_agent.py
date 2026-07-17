@@ -1585,6 +1585,11 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "analysis_type": r.get("analysis_type"),
                     "visualization_path": r.get("visualization_path"),
                     "error": r.get("error"),
+                    # Structured failure-mode tag + per-attempt audit trail
+                    # (matches curve; absent on successes/untagged failures).
+                    **({"kind": r["kind"]} if r.get("kind") else {}),
+                    **({"script_errors": r["script_errors"]}
+                       if r.get("script_errors") else {}),
                     "flagged": r.get("flagged", False),
                     "flag_reason": r.get("flag_reason"),
                     "adaptively_refitted": r.get("adaptively_refitted", False),

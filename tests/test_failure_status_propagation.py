@@ -103,7 +103,27 @@ def main():
     # individual_results — so the guard's explicit `is False` requirement
     # is purely defensive and has no reachable counterexample to test.)
 
-    # 6) Orchestrator formatting branch accepts partial (source-level check:
+    # 6) HS plain-total-failure predicate: fires only when every target
+    #    failed with no salvage AND no honest not-measurable resolution.
+    from scilink.agents.exp_agents.hyperspectral_analysis_agent import (
+        HyperspectralAnalysisAgent as HS)
+    plain = HS._plain_total_dynamic_failure
+    print("6) HS plain-total-failure predicate:")
+    check("all plain failures -> fires",
+          plain([{"task_success": False}, {"task_success": False}]))
+    check("mixed plain + not_measurable -> fires (plain part unresolved)",
+          plain([{"task_success": False, "not_measurable": {"why": "x"}},
+                 {"task_success": False}]))
+    check("all not_measurable -> honest null, does NOT fire",
+          not plain([{"task_success": False,
+                      "not_measurable": {"why": "x"}}]))
+    check("salvaged failure -> handled by degradation notes, does NOT fire",
+          not plain([{"task_success": False, "salvaged": True}]))
+    check("any success -> does NOT fire",
+          not plain([{"task_success": True}, {"task_success": False}]))
+    check("no records -> does NOT fire", not plain([]) and not plain(None))
+
+    # 7) Orchestrator formatting branch accepts partial (source-level check:
     #    the closure is not unit-instantiable, live test covers behavior).
     import inspect
     from scilink.agents.exp_agents import analysis_orchestrator_tools as aot

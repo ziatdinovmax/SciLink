@@ -1161,20 +1161,25 @@ class AnalysisOrchestratorAgent:
             )
             return data_path
 
-    def create_agent_for_analysis(self, agent_id: int, output_dir: str) -> Any:
+    def create_agent_for_analysis(self, agent_id: int, output_dir: str,
+                                  executor_timeout: int = None) -> Any:
         """
         Create an agent instance configured for a specific analysis run.
-        
+
         Each analysis run gets a fresh agent instance with its own output
         directory, ensuring outputs from different analyses don't collide.
-        
+
         Args:
             agent_id: The agent type ID (0-2)
             output_dir: Unique output directory for this analysis run
-            
+            executor_timeout: Optional per-run script-execution timeout in
+                seconds (the adaptive-escalation ladder starts from this
+                value). None keeps the agent's default. Filtered out by the
+                signature check below for agents that don't accept it.
+
         Returns:
             Configured agent instance
-            
+
         Raises:
             ValueError: If agent_id is invalid
         """
@@ -1196,6 +1201,8 @@ class AnalysisOrchestratorAgent:
             # (hyperspectral, FFT, SAM, atomistic) — passing it would raise.
             "analysis_depth": self.image_analysis_depth,
         }
+        if executor_timeout is not None:
+            common_kwargs["executor_timeout"] = int(executor_timeout)
 
         # Lazy-load built-in agents; custom agents already carry their class.
         cls = entry.get("class")

@@ -119,6 +119,43 @@ def stage_and_run(executor, script, primary_array, item_dir, *,
     }
 
 
+def is_timeout_error(err) -> bool:
+    """True when an attempt error is the executor's timeout message."""
+    return "timed out" in str(err or "").lower()
+
+
+def trailing_timeout_failures(attempts: list) -> int:
+    """Count consecutive TRAILING attempts that failed on execution timeout.
+
+    Used to tell a refit/rewrite that the recent failures were budget
+    failures, not quality failures — a different-but-equally-slow approach
+    would fail the same way.
+    """
+    n = 0
+    for a in reversed(attempts or []):
+        r = a.get("result") or {}
+        if r.get("success") is False and is_timeout_error(r.get("error")):
+            n += 1
+        else:
+            break
+    return n
+
+
+def should_escalate_timeout_model(base_script, attempt: int,
+                                  max_attempts: int,
+                                  consecutive_timeouts: int) -> bool:
+    """Last-resort model escalation predicate (shared by curve + image).
+
+    Fires ONLY on the final TWO corrections of a fresh fit (base_script
+    None — locked-reuse items must never restructure) whose recent failures
+    are >= 2 consecutive timeouts. Two chances, not one: a restructured
+    script sometimes carries an introduced bug, and a crash resets the
+    consecutive-timeout counter, so the very next correction naturally takes
+    the plain debug path and can fix it (observed live)."""
+    return (base_script is None and attempt >= max_attempts - 1
+            and consecutive_timeouts >= 2)
+
+
 # Adaptive-timeout policy for the per-item attempt loops. A subprocess that
 # times out is rarely "broken code" — usually the fit just needs longer.
 # Re-running the SAME script with 2× the timeout, up to a hard cap, avoids

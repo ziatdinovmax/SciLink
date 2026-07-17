@@ -1795,6 +1795,14 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "fit_quality": r.get("fit_quality", {}),
                     "visualization_path": r.get("visualization_path"),
                     "error": r.get("error"),
+                    # Structured failure-mode tag ("timeout" today); absent
+                    # on successes and untagged failures. script_errors is
+                    # the per-attempt audit trail ({error, diagnosis, kind}
+                    # entries — no scripts), surfaced so callers can filter
+                    # failure modes without string-matching messages.
+                    **({"kind": r["kind"]} if r.get("kind") else {}),
+                    **({"script_errors": r["script_errors"]}
+                       if r.get("script_errors") else {}),
                     "flagged": r.get("flagged", False),
                     "flag_reason": r.get("flag_reason"),
                     "flag_recommendation": r.get("flag_recommendation"),

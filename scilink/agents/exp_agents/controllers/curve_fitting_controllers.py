@@ -2669,26 +2669,12 @@ def _write_series_fit_results(output_dir, state, series_results, quality_setting
 # Backwards-compatible alias (pre-rename import path).
 HumanFeedbackRefinementController = CurveFittingPlanningController
 
-def _is_timeout_error(err) -> bool:
-    """True when an attempt error is the executor's timeout message."""
-    return "timed out" in str(err or "").lower()
-
-
-def _trailing_timeout_failures(attempts: list) -> int:
-    """Count consecutive TRAILING attempts that failed on execution timeout.
-
-    Used to tell a refit/rewrite that the recent failures were budget
-    failures, not fit-quality failures — a different-but-equally-slow
-    approach would fail the same way.
-    """
-    n = 0
-    for a in reversed(attempts or []):
-        r = a.get("result") or {}
-        if r.get("success") is False and _is_timeout_error(r.get("error")):
-            n += 1
-        else:
-            break
-    return n
+# Shared timeout-failure helpers (one copy for curve + image) — re-exported
+# under the historical underscore names so existing imports keep working.
+from .._locked_exec import (  # noqa: E402
+    is_timeout_error as _is_timeout_error,
+    trailing_timeout_failures as _trailing_timeout_failures,
+)
 
 
 class UnifiedSeriesProcessingController:
@@ -3109,15 +3095,11 @@ Your guidance: '''
     def _should_escalate_timeout_model(base_script, attempt: int,
                                        max_attempts: int,
                                        consecutive_timeouts: int) -> bool:
-        """Fire the last-resort model escalation ONLY on the final TWO
-        corrections of a fresh fit (base_script None — locked-reuse fits must
-        never restructure) whose recent failures are >= 2 consecutive
-        timeouts. Two chances, not one: a restructured script sometimes
-        carries an introduced bug, and a crash resets the consecutive-timeout
-        counter, so the very next correction naturally takes the plain
-        debug path and can fix it (observed live)."""
-        return (base_script is None and attempt >= max_attempts - 1
-                and consecutive_timeouts >= 2)
+        """See :func:`_locked_exec.should_escalate_timeout_model` (shared
+        with image analysis)."""
+        from .._locked_exec import should_escalate_timeout_model
+        return should_escalate_timeout_model(
+            base_script, attempt, max_attempts, consecutive_timeouts)
 
     def _correct_script_with_timeout_escalation(
             self, state: dict, script: str, error_msg: str) -> tuple[str, str]:
@@ -3436,7 +3418,13 @@ Your guidance: '''
                     else:
                         script, diagnosis = self._correct_script(
                             state, script, last_error)
-                    script_errors.append({"error": last_error, "diagnosis": diagnosis})
+                    entry = {"error": last_error, "diagnosis": diagnosis}
+                    if _is_timeout_error(last_error):
+                        # Structured failure-mode tag: lets the fallback
+                        # judge / post-hoc sweeps filter timeouts without
+                        # string-matching the message.
+                        entry["kind"] = "timeout"
+                    script_errors.append(entry)
 
                 state["_verify_working_dir"] = str(item_dir)
                 # Adaptive timeout: a slow-but-correct script is retried
@@ -3485,7 +3473,7 @@ Your guidance: '''
               and run["visualization_path"] is not None
               and "FIT_RESULTS_JSON:" in run["stdout"])
         if not ok:
-            return {
+            failure = {
                 "index": spectrum_idx,
                 "name": spectrum_name,
                 "success": False,
@@ -3495,6 +3483,9 @@ Your guidance: '''
                 "script": script,
                 "script_errors": script_errors,
             }
+            if _is_timeout_error(last_error):
+                failure["kind"] = "timeout"
+            return failure
 
         fit_results = _parse_script_markers(run["stdout"])
 
@@ -5149,18 +5140,29 @@ Return JSON with:
         else:
             # Surface the last attempt's own error (e.g. the realtime
             # pre-flight gate's reason) instead of only the generic summary.
-            last_err = next(
-                (e for e in ((a.get("result") or {}).get("error")
-                             for a in reversed(ctx.all_attempts)) if e),
-                None,
+            last_result = next(
+                (r for r in ((a.get("result") or {})
+                             for a in reversed(ctx.all_attempts))
+                 if r.get("error")),
+                {},
             )
-            return {
+            last_err = last_result.get("error")
+            failure = {
                 "index": ctx.item_idx, "name": ctx.item_name, "success": False,
                 "error": ("All fitting attempts failed"
                           + (f": {last_err}" if last_err else "")),
                 "attempts": len(ctx.all_attempts),
                 "parameters": {}, "fit_quality": {},
             }
+            # Carry the structured failure-mode tag and the per-attempt
+            # audit trail from the underlying attempt result — without this,
+            # the anchor's fallback dict lost the kind=timeout tag that
+            # _fit_single_spectrum set (observed live).
+            if last_result.get("kind"):
+                failure["kind"] = last_result["kind"]
+            if last_result.get("script_errors"):
+                failure["script_errors"] = last_result["script_errors"]
+            return failure
 
     def _fit_with_quality_control_best_of_n(
         self,

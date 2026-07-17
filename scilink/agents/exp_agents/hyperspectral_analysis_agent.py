@@ -179,6 +179,18 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
     # PRIMARY ENTRY POINT
     # =========================================================================
 
+    @staticmethod
+    def _plain_total_dynamic_failure(records) -> bool:
+        """True when EVERY dynamic-analysis target failed PLAINLY — no
+        success, nothing salvaged, and no honest not-measurable resolution
+        (which is a legitimate answered outcome, not a silent failure)."""
+        records = records or []
+        if not records or any(r.get("task_success") for r in records):
+            return False
+        plain = [r for r in records
+                 if not r.get("salvaged") and not r.get("not_measurable")]
+        return bool(plain)
+
     def analyze(
         self,
         data: AnalysisInput,
@@ -446,6 +458,25 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             response["confidence"] = worst.get("confidence", "low")
             response["warnings"] = [d["caveat"] for d in degradation if d.get("caveat")]
             response["degraded_outputs"] = degradation
+
+        # Total dynamic-analysis failure with nothing salvageable used to
+        # slip through as a bare "success" with empty features: degradation
+        # notes exist only when some maps passed QC (valid_count > 0), so a
+        # zero-valid total failure recorded nothing. Downgrade honestly —
+        # unless every failed target was resolved through the honest
+        # not-measurable channel, which is a legitimate answered outcome.
+        if (response.get("status") != "partial"
+                and self._plain_total_dynamic_failure(
+                    result_json.get("dynamic_analysis_records"))):
+            records = result_json.get("dynamic_analysis_records") or []
+            response["status"] = "partial"
+            response["confidence"] = "none"
+            response.setdefault("warnings", []).append(
+                f"Dynamic analysis failed for all {len(records)} "
+                f"target(s): no requested output passed verification "
+                f"and nothing was salvageable. Decomposition-level "
+                f"outputs and the descriptive analysis (if any) are "
+                f"unaffected.")
 
 
         # Stage novel hot-annealing successes (method-family abandoned and a

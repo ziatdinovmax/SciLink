@@ -36,6 +36,7 @@ import numpy as np
 
 from .._locked_exec import (
     stage_and_run, stage_and_run_adaptive, script_uses_canonical_input,
+    is_timeout_error, trailing_timeout_failures, should_escalate_timeout_model,
     DATA_NAME, VIZ_NAME, CANDIDATES_DIR_NAME, atomic_np_save,
 )
 from .._qc_engine import CodegenQCEngine, QCEngineSpec, QCItemContext
@@ -2017,6 +2018,7 @@ Your guidance: '''
         data_path: str,
         stats: dict,
         base_script: str | None = None,
+        extra_issues: list | None = None,
     ) -> str:
         """Generate an image analysis script using the locked config.
 
@@ -2024,9 +2026,18 @@ Your guidance: '''
         prompt to adapt the previous attempt's script to the refined plan
         rather than regenerating from scratch. When ``None`` or empty,
         falls back to fresh generation via ``self.script_instructions``.
+
+        ``extra_issues`` (optional) — findings from prior attempts the new
+        script must address (e.g. the qc_refit EXECUTION BUDGET note when
+        trailing attempts failed by timeout). None/empty is a no-op.
         """
         config = state.get("locked_analysis_config", {})
         context_parts = []
+        if extra_issues:
+            context_parts.append(
+                "## Prior-attempt findings (address these)\n"
+                + "\n".join(f"- {i}" for i in extra_issues)
+            )
         # Authoritative calibration: when the caller supplied spatial metadata it
         # is staged as ``metadata.json`` in the working directory (see
         # stage_and_run). Point the generated script at it so pixel size and the
@@ -2237,6 +2248,47 @@ Your guidance: '''
 
         return result["script"]
 
+    # Last-resort pipeline escalation for persistent execution timeouts —
+    # the image twin of the curve controller's clause. Fires only when even
+    # carve-out corrections kept timing out on a FRESH (non-locked-reuse)
+    # analysis, meaning the locked pipeline itself is infeasible within the
+    # execution budget.
+    _TIMEOUT_MODEL_ESCALATION_CLAUSE = (
+        "\n**TIMEOUT ESCALATION — LAST RESORT. This clause SUPERSEDES the "
+        "CRITICAL rule and the timeout exception above for this single "
+        "correction:** computational-strategy fixes were already attempted "
+        "in earlier corrections and the script STILL exceeds the execution "
+        "budget — efficiency alone has failed, so the locked pipeline "
+        "itself is computationally infeasible. RESTRUCTURE the pipeline "
+        "into a computationally feasible alternative that preserves the "
+        "plan's scientific intent and still extracts the planned features "
+        "(a cheaper segmentation/detection method, coarser internal search, "
+        "fewer expensive stages). Do not return another implementation of "
+        "the same infeasible pipeline. The full image extent remains "
+        "untouchable. State exactly what you changed and why in "
+        "`diagnosis`.\n"
+    )
+
+    def _correct_script_with_timeout_escalation(
+            self, state: dict, script: str, error_msg: str) -> tuple:
+        """`_correct_script` under the last-resort timeout escalation: the
+        escalation clause is injected and the annealing level is raised to
+        hot for this ONE call (skill strictness relaxes in lockstep), then
+        both are restored so no later stage sees the elevated state."""
+        saved_level = state.get("_annealing_level", 0)
+        state["_timeout_model_escalation"] = True
+        state["_annealing_level"] = max(saved_level, self._hot_annealing_level)
+        self.logger.warning(
+            "    🔥 Last-resort timeout escalation: allowing pipeline "
+            "restructure on this correction (consecutive execution "
+            "timeouts persisted after computational fixes)."
+        )
+        try:
+            return self._correct_script(state, script, error_msg)
+        finally:
+            state["_annealing_level"] = saved_level
+            state.pop("_timeout_model_escalation", None)
+
     def _correct_script(
         self, state: dict, script: str, error_msg: str
     ) -> tuple:
@@ -2257,6 +2309,18 @@ Your guidance: '''
             error_message=error_msg,
             tool_inventory=format_tool_inventory("image_analysis", active_skills=active_skills),
         )
+        # Last-resort timeout escalation (set transiently by
+        # _correct_script_with_timeout_escalation; absent otherwise).
+        # Injected BEFORE the response-format footer — appended after it,
+        # the clause loses to the locked-pipeline prohibitions above.
+        if state.get("_timeout_model_escalation"):
+            marker = "**Response:**"
+            if marker in prompt:
+                prompt = prompt.replace(
+                    marker,
+                    self._TIMEOUT_MODEL_ESCALATION_CLAUSE + "\n" + marker, 1)
+            else:
+                prompt += self._TIMEOUT_MODEL_ESCALATION_CLAUSE
         # Codegen recipe from ALL co-active skills (see the generate-script path).
         recipes = _collect_codegen_recipe(state)
         if recipes:
@@ -2354,6 +2418,7 @@ Your guidance: '''
         image_idx: int,
         base_script: Optional[str] = None,
         refine_from_script: Optional[str] = None,
+        refine_from_issues: Optional[list] = None,
     ) -> dict:
         """Execute analysis pipeline on a single image with retry logic.
 
@@ -2393,6 +2458,8 @@ Your guidance: '''
         run = None
         script_errors = []
         last_diagnosis = None
+        consecutive_timeouts = 0
+        used_timeout_escalation = False
 
         for attempt in range(1, self.MAX_ATTEMPTS + 1):
             try:
@@ -2404,6 +2471,7 @@ Your guidance: '''
                         DATA_NAME,
                         stats,
                         base_script=refine_from_script,
+                        extra_issues=refine_from_issues,
                     )
                     if not script_uses_canonical_input(script):
                         last_error = (
@@ -2436,9 +2504,17 @@ Your guidance: '''
                             "; ".join(conformance["justified_deviations"]),
                         )
                 else:
-                    script, last_diagnosis = self._correct_script(
-                        state, script, last_error
-                    )
+                    if should_escalate_timeout_model(
+                            base_script, attempt, self.MAX_ATTEMPTS,
+                            consecutive_timeouts):
+                        script, last_diagnosis = (
+                            self._correct_script_with_timeout_escalation(
+                                state, script, last_error))
+                        used_timeout_escalation = True
+                    else:
+                        script, last_diagnosis = self._correct_script(
+                            state, script, last_error
+                        )
 
                 # Sanitize the script
                 script = self._sanitize_script(script)
@@ -2480,19 +2556,28 @@ Your guidance: '''
                             "fix": (last_diagnosis or "")[:300] or None,
                         })
                         last_diagnosis = None
+                        consecutive_timeouts = 0
                 else:
                     last_error = exec_result.get("message", "Unknown error")
                     self.logger.warning(
                         f"    Attempt {attempt} failed: {last_error[:100]}"
                     )
-                    script_errors.append({
+                    entry = {
                         "attempt": attempt,
                         "error": last_error[:300],
                         "fix": (last_diagnosis or "")[:300] or None,
-                    })
+                    }
+                    if is_timeout_error(last_error):
+                        # Structured failure-mode tag (matches curve).
+                        entry["kind"] = "timeout"
+                        consecutive_timeouts += 1
+                    else:
+                        consecutive_timeouts = 0
+                    script_errors.append(entry)
                     last_diagnosis = None
             except Exception as e:
                 last_error = str(e)
+                consecutive_timeouts = 0
                 self.logger.error(f"    Attempt {attempt} error: {e}")
                 script_errors.append({
                     "attempt": attempt,
@@ -2506,7 +2591,7 @@ Your guidance: '''
               and run["visualization_path"] is not None
               and "IMAGE_ANALYSIS_RESULTS_JSON:" in run["stdout"])
         if not ok:
-            return {
+            failure = {
                 "index": image_idx,
                 "name": image_name,
                 "success": False,
@@ -2516,6 +2601,9 @@ Your guidance: '''
                 "script": script,
                 "script_errors": script_errors,
             }
+            if is_timeout_error(last_error):
+                failure["kind"] = "timeout"
+            return failure
 
         # Parse results from stdout
         analysis_results = {}
@@ -2546,6 +2634,11 @@ Your guidance: '''
             "script": script,
             "script_errors": script_errors,
         }
+        if used_timeout_escalation:
+            # Provenance: this analysis came from the last-resort pipeline
+            # restructure after persistent timeouts — the executed script,
+            # not the locked plan prose, is authoritative for the pipeline.
+            result["timeout_model_escalation"] = True
         # Fingerprint of the image this script solved (script bank, #346) —
         # stamped here because per-image arrays for file inputs never reach
         # the outer state the bank write hook reads. No-op unless the bank is
@@ -3666,11 +3759,27 @@ Return JSON with:
         self.logger.info(
             "   Re-analyzing with verification feedback..."
         )
+        # Timeout-aware refit context (matches curve): the stall counter
+        # that drives annealing is cause-blind, so a hot rewrite needs to be
+        # TOLD when the trailing failures were budget failures. No trailing
+        # timeouts -> no issues passed, no behavior change.
+        issues = None
+        n_timeouts = trailing_timeout_failures(ctx.all_attempts)
+        if n_timeouts:
+            issues = [
+                f"EXECUTION BUDGET: the previous {n_timeouts} attempt(s) "
+                f"failed by execution TIMEOUT, not by analysis quality. The "
+                f"next approach must be computationally cheaper (vectorized, "
+                f"cheaper segmentation/detection, fewer expensive stages) — "
+                f"a different but equally slow approach will fail the same "
+                f"way."
+            ]
         return self._process_single_image(
             state=ctx.state, image_data=ctx.data,
             data_path=ctx.data_path, image_name=ctx.item_name,
             image_idx=ctx.item_idx, base_script=None,
             refine_from_script=refine_from,
+            refine_from_issues=issues,
         )
 
     def qc_after_refit(self, ctx: QCItemContext, verified_result: dict,
@@ -3963,15 +4072,32 @@ Return JSON with:
             )
             return ctx.best_result
         else:
-            return {
+            # Carry error detail, the structured failure-mode tag, and the
+            # per-attempt audit trail from the underlying attempt result
+            # (matches curve; without this the anchor's fallback dict lost
+            # the kind=timeout tag that _process_single_image set).
+            last_result = next(
+                (r for r in ((a.get("result") or {})
+                             for a in reversed(ctx.all_attempts))
+                 if r.get("error")),
+                {},
+            )
+            last_err = last_result.get("error")
+            failure = {
                 "index": ctx.item_idx,
                 "name": ctx.item_name,
                 "success": False,
-                "error": "All analysis attempts failed",
+                "error": ("All analysis attempts failed"
+                          + (f": {last_err}" if last_err else "")),
                 "attempts": len(ctx.all_attempts),
                 "extracted_features": {},
                 "quality_metrics": {},
             }
+            if last_result.get("kind"):
+                failure["kind"] = last_result["kind"]
+            if last_result.get("script_errors"):
+                failure["script_errors"] = last_result["script_errors"]
+            return failure
 
     # Total image-byte budget for the best-of-N judge call (original image +
     # N candidate visualizations); per-image cap is derived from it.

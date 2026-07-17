@@ -2190,6 +2190,7 @@ class AnalysisOrchestratorTools:
             max_verification_iterations: int = None,
             starting_annealing_level: int = None,
             n_candidates: int = None,
+            executor_timeout: int = None,
         ) -> str:
             """
             Execute analysis with the selected or specified agent.
@@ -2640,7 +2641,9 @@ class AnalysisOrchestratorTools:
                 # NOTE: Code-executing agents may prompt the user
                 # for sandbox approval and raise RuntimeError if declined.
                 try:
-                    agent = self.orch.create_agent_for_analysis(agent_id, str(analysis_output_dir))
+                    agent = self.orch.create_agent_for_analysis(
+                        agent_id, str(analysis_output_dir),
+                        executor_timeout=executor_timeout)
                 except RuntimeError as e:
                     # Handle sandbox rejection or other init failures
                     error_msg = str(e)
@@ -3167,6 +3170,20 @@ class AnalysisOrchestratorTools:
                         "skill's R² gate (a warning is logged on conflict), but it "
                         "will NOT replace a skill that scores by a non-R² metric. "
                         "Leave unset for standard analyses."
+                    )
+                },
+                "executor_timeout": {
+                    "type": "integer",
+                    "description": (
+                        "All analysis agents. Per-run script-execution timeout "
+                        "in seconds (default 600; the adaptive escalation "
+                        "ladder retries a timed-out script at 2x up to 1800 s "
+                        "before any LLM correction). RAISE it when a previous "
+                        "run of the same data failed with 'Script execution "
+                        "timed out' or when the dataset is very large and a "
+                        "single fit legitimately needs longer; LOWER it (e.g. "
+                        "30-60) for real-time/quick-look turnaround where a "
+                        "slow fit should fail fast. Leave unset otherwise."
                     )
                 },
                 "max_verification_iterations": {
