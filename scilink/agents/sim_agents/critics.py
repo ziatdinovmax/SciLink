@@ -573,7 +573,14 @@ class InputValidator(_CriticBase):
         engine_label = (skill or "the engine").upper()
         try:
             from ..lit_agents.literature_agent import IncarLiteratureAgent
-            agent = IncarLiteratureAgent(api_key=self.futurehouse_api_key)
+            agent = IncarLiteratureAgent(
+                api_key=self.futurehouse_api_key,
+                # 50-min ceiling, matching every other literature call site
+                # (Edison CROW jobs routinely take 20-30 min; the class
+                # default of 300s timed out on essentially every real query,
+                # silently disabling INCAR literature validation).
+                max_wait_time=3000,
+            )
             result = agent.validate_inputs(
                 input_files_text=_format_input_files(input_files),
                 system_description=system_description,

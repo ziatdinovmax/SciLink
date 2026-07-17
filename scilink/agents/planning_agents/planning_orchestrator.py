@@ -662,6 +662,7 @@ class PlanningOrchestratorAgent:
         self.target_directions = {}  # e.g. {"Yield": "maximize", "Defect_Density": "minimize"}
         self.expected_input_types = None  # {col: "continuous" | "categorical"} from scalarizer
         self.expected_input_levels = None  # {col: [level0, level1, ...]} for categorical inputs
+        self.fidelity_spec = None  # {column, target_fidelity?, costs?} when the data has a fidelity axis
         self.latest_tea_results = None
 
         # Per-delegation output isolation. Used only by run_task: the meta
@@ -1029,14 +1030,20 @@ class PlanningOrchestratorAgent:
         command: list = None,
         url: str = None,
         env: dict = None,
+        transport: str = None,
+        headers: dict = None,
     ) -> int:
         """Connect to an MCP server and register its tools.
 
         Args:
             server_name: Human-readable label for this server.
             command: Command + args for stdio transport.
-            url: URL for SSE transport.
+            url: URL for a network transport (SSE or streamable HTTP).
             env: Optional environment variables for the subprocess.
+            transport: Transport for ``url`` — ``"sse"`` (default) or
+                ``"http"`` (streamable HTTP).
+            headers: Optional HTTP headers for the ``url`` transports,
+                e.g. ``{"Authorization": "Bearer <token>"}``.
 
         Returns:
             Number of tools registered from this server.
@@ -1050,7 +1057,10 @@ class PlanningOrchestratorAgent:
             )
             return 0
 
-        conn = MCPConnection(server_name, command=command, url=url, env=env)
+        conn = MCPConnection(
+            server_name, command=command, url=url, env=env,
+            transport=transport, headers=headers,
+        )
         schemas = conn.connect()
 
         existing_names = {t["name"] for t in self._external_tools}
@@ -1144,6 +1154,7 @@ class PlanningOrchestratorAgent:
             self.target_directions = state.get("target_directions", {})
             self.expected_input_types = state.get("expected_input_types")
             self.expected_input_levels = state.get("expected_input_levels")
+            self.fidelity_spec = state.get("fidelity_spec")
             self.latest_tea_results = state.get("latest_tea_results")
             self._delegation_counter = state.get("delegation_counter", 0)
 
@@ -1446,6 +1457,7 @@ class PlanningOrchestratorAgent:
                 "target_directions": self.target_directions,
                 "expected_input_types": self.expected_input_types,
                 "expected_input_levels": self.expected_input_levels,
+                "fidelity_spec": self.fidelity_spec,
                 "data_points_collected": len(pd.read_csv(self.bo_data_path)) if self.bo_data_path.exists() else 0,
                 "planner_state": self.planner.state,
                 "message_count": self.message_count,
@@ -1603,10 +1615,22 @@ class PlanningOrchestratorAgent:
         if not text:
             return
         import sys
-        style, reset = (("\033[2;3;36m", "\033[0m")
+        # A meta-delegated run reasons in AMBER (33), the meta's own in CYAN (36),
+        # so the CLI distinguishes them the way the UI does (dim + italic either way).
+        specialist = getattr(self, "_agent_label", "Agent") != "Agent"
+        color = "33" if specialist else "36"
+        style, reset = ((f"\033[2;3;{color}m", "\033[0m")
                         if sys.stdout.isatty() else ("", ""))
         body = text.replace("\n", "\n     ")  # indent continuation lines
-        print(f"\n  {style}💭 {body}{reset}\n")
+        # Tag a meta-delegated run's reasoning with an INVISIBLE marker (U+2063)
+        # right after 💭 so the UI renders it a distinct color from the meta's
+        # own 💭 while the visible glyph stays identical. ANSI color can't carry
+        # this: the UI captures non-tty output (no ANSI emitted) and re-colors by
+        # the 💭 marker, so the source must ride in the text. Gated on
+        # `_agent_label` (the 🤖-answer attribution mechanism); a standalone
+        # session keeps a plain 💭, unchanged.
+        mark = "\u2063" if specialist else ""
+        print(f"\n  {style}💭{mark} {body}{reset}\n")
 
     def _print_agent_answer(self, text) -> None:
         """Print the agent's final answer — a deliverable, emphasized (bold +
@@ -1616,8 +1640,14 @@ class PlanningOrchestratorAgent:
         mistaken for the meta's own user-facing response."""
         import sys
         label = getattr(self, "_agent_label", "Agent")
-        bold, reset = ("\033[1;96m", "\033[0m") if sys.stdout.isatty() else ("", "")
-        print(f"\n{bold}🤖 {label}:{reset}")
+        # A delegated specialist's answer header takes the specialist color (bold
+        # AMBER, 33) to match its reasoning; the meta's own stays bold BRIGHT CYAN
+        # (96). The UI mirrors this via the invisible U+2063 marker after 🤖.
+        specialist = label != "Agent"
+        code = "1;33" if specialist else "1;96"
+        mark = "\u2063" if specialist else ""
+        bold, reset = (f"\033[{code}m", "\033[0m") if sys.stdout.isatty() else ("", "")
+        print(f"\n{bold}🤖{mark} {label}:{reset}")
         print(text if text is not None else "")
 
     def _handle_litellm_chat(self, user_input: str) -> str:

@@ -152,9 +152,12 @@ Supported Models:
         metavar='MCP_CONFIG',
         help=(
             'MCP server configurations. Each entry can be:\n'
-            '  - A JSON config file ({"name":"...", "command":["..."], "env":{}})\n'
+            '  - A JSON config file ({"name":"...", "command":["..."], "url":"...", '
+            '"transport":"sse|http", "headers":{...}, "env":{}}; ${VAR} in header '
+            'values is expanded from the environment)\n'
             '  - stdio shorthand:  stdio:name:command,arg1,arg2\n'
             '  - SSE shorthand:    sse:name:http://host:port/sse\n'
+            '  - Streamable HTTP shorthand: http:name:https://host/mcp\n'
             'Example: scilink plan --mcp stdio:fs:npx,-y,@modelcontextprotocol/server-filesystem,/tmp'
         )
     )
@@ -585,17 +588,38 @@ class OrchestratorPlayground:
                     count = self.agent.connect_mcp_server(name, url=url)
                     print(f"   ✅ Registered {count} tool(s) from '{name}'")
 
+                elif entry.startswith("http:"):
+                    parts = entry[len("http:"):].split(":", 1)
+                    name = parts[0]
+                    url = parts[1] if len(parts) > 1 else ""
+                    print(f"\n🔌 Connecting to MCP server '{name}' "
+                          "(streamable HTTP)...")
+                    count = self.agent.connect_mcp_server(
+                        name, url=url, transport="http"
+                    )
+                    print(f"   ✅ Registered {count} tool(s) from '{name}'")
+
                 else:
                     path = Path(entry).resolve()
                     with open(path) as f:
                         cfg = _json.load(f)
                     name = cfg.get("name", path.stem)
+                    headers = cfg.get("headers")
+                    if headers:
+                        # ${VAR} in header values is expanded so tokens stay
+                        # in the environment, not in the JSON file.
+                        headers = {
+                            k: os.path.expandvars(v)
+                            for k, v in headers.items()
+                        }
                     print(f"\n🔌 Connecting to MCP server '{name}'...")
                     count = self.agent.connect_mcp_server(
                         name,
                         command=cfg.get("command"),
                         url=cfg.get("url"),
                         env=cfg.get("env"),
+                        transport=cfg.get("transport"),
+                        headers=headers,
                     )
                     print(f"   ✅ Registered {count} tool(s) from '{name}'")
 

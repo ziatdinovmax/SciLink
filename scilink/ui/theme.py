@@ -182,7 +182,8 @@ div:has(> [data-testid="stMarkdown"] .theme-toggle-anchor) + div button:hover {
 /* Fan-out confirm — force Cancel/Launch to IDENTICAL box size and shape.
    Equal st.columns fixes width; the secondary (Cancel) and primary (Launch)
    otherwise differ in height/box-model, so pin both to one height + padding. */
-div:has(> [data-testid="stMarkdown"] .fanout-actions-anchor) + div .stButton > button {
+div:has(> [data-testid="stMarkdown"] .fanout-actions-anchor) + div .stButton > button,
+div:has(> [data-testid="stMarkdown"] .bestofn-actions-anchor) + div .stButton > button {
     min-height: 2.75rem !important;
     height: 2.75rem !important;
     padding-top: 0 !important;
@@ -191,12 +192,22 @@ div:has(> [data-testid="stMarkdown"] .fanout-actions-anchor) + div .stButton > b
     align-items: center !important;
     justify-content: center !important;
 }
-/* Cancel (secondary) gets a solid neutral fill so it reads as the SAME box as
-   the purple primary Launch — equal size AND equal shape, color = the only
-   difference (grey = abort, purple = go). */
+/* Fan-out Cancel (secondary) gets a solid neutral fill so it reads as the SAME
+   box as the purple primary Launch — grey = abort, purple = go. */
 div:has(> [data-testid="stMarkdown"] .fanout-actions-anchor) + div .stButton > button[kind="secondary"] {
     background-color: #3A4556 !important;
     color: #C7D0DC !important;
+}
+/* Best-of-N "Accept judge's pick" (secondary) goes GREEN — trusting the AI's
+   recommendation is a positive/confirm action — vs the purple primary
+   "Use selected" (manual override). Equal box, color carries the meaning. */
+div:has(> [data-testid="stMarkdown"] .bestofn-actions-anchor) + div .stButton > button[kind="secondary"] {
+    background-color: #2E7D46 !important;
+    color: #E8F5E9 !important;
+}
+div:has(> [data-testid="stMarkdown"] .bestofn-actions-anchor) + div .stButton > button[kind="secondary"]:hover {
+    background-color: #388E4F !important;
+    box-shadow: 0 2px 8px rgba(46, 125, 70, 0.35) !important;
 }
 /* File explorer tree buttons — soft gray, blue on selection */
 [data-testid="stExpander"] .stButton > button,

@@ -244,6 +244,39 @@ def _ci_pop(d: dict, aliases: list[str]):
     return None
 
 
+def _describes_spectral_imaging(metadata: dict) -> bool:
+    """True when the metadata describes a spectral-imaging / hyperspectral
+    datacube — a dataset whose defining third axis is an energy/spectral axis.
+
+    For such data the energy axis is *required* (downstream builds the channel
+    axis from it); for 1D curves or plain microscopy it is optional. Heuristic
+    on the free-text ``experiment_type`` + ``experiment.technique`` so a dict
+    that only names the technique in prose still routes correctly.
+    """
+    exp = metadata.get("experiment")
+    technique = exp.get("technique", "") if isinstance(exp, dict) else ""
+    blob = f"{metadata.get('experiment_type') or ''} {technique}".lower()
+    if "hyperspectral" in blob or "datacube" in blob:
+        return True
+    # "spectral/spectroscopy ... imaging/mapping/spectrum-image/cube"
+    return ("spectr" in blob
+            and any(w in blob for w in ("imag", "map", "cube", "spectrum image")))
+
+
+def _has_resolvable_energy_axis(metadata: dict) -> bool:
+    """True when an energy/signal axis with both endpoints can be resolved —
+    either legacy ``energy_range`` or ``axis_spec.axis_2`` carries start+end."""
+    er = metadata.get("energy_range")
+    if isinstance(er, dict) and er.get("start") is not None and er.get("end") is not None:
+        return True
+    ax = metadata.get("axis_spec")
+    if isinstance(ax, dict):
+        a2 = ax.get("axis_2")
+        if isinstance(a2, dict) and a2.get("start") is not None and a2.get("end") is not None:
+            return True
+    return False
+
+
 def check_schema_conformance(metadata: dict) -> tuple[bool, list[str]]:
     """Check whether *metadata* conforms to the canonical schema.
 
@@ -278,6 +311,16 @@ def check_schema_conformance(metadata: dict) -> tuple[bool, list[str]]:
         val = metadata.get(key)
         if val is not None and not isinstance(val, dict):
             issues.append(f"'{key}' should be a dict or null")
+
+    # A spectral-imaging / hyperspectral datacube MUST carry a resolvable energy
+    # axis (energy_range.start/end or axis_spec.axis_2.start/end). Without it the
+    # axis silently falls back to channel indices, so the spectral axis is only
+    # in prose — flag it non-conformant so the LLM normalizer re-extracts it.
+    if _describes_spectral_imaging(metadata) and not _has_resolvable_energy_axis(metadata):
+        issues.append(
+            "Spectral-imaging/hyperspectral metadata is missing a resolvable "
+            "energy axis (energy_range.start/end or axis_spec.axis_2.start/end)"
+        )
 
     return (len(issues) == 0, issues)
 

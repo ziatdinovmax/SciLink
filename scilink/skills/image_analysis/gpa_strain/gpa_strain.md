@@ -109,7 +109,7 @@ Read `flags`:
 
 ```python
 import numpy as np
-from scilink.skills._shared.gpa_strain import gpa_strain_map
+from scilink.skills._shared.strain import gpa_strain_map
 
 img = np.load("data.npy")
 if img.ndim == 3:                      # use luminance for an RGB/stack input
@@ -199,7 +199,7 @@ peak-strain location in nm.
 ### foundational
 - **Reference ≈ 0**: the median strain over the reference box must be ~0 (the
   tool enforces this; if not, the reference is bad).
-- **Self-test available**: `gpa_strain.make_strained_lattice` + a known
+- **Self-test available**: `strain.make_strained_lattice` + a known
   displacement field recovers imposed strain to within ~10% — run it if unsure
   the calibration/orientation is being handled correctly.
 - **Physical range**: referenced strains within a few percent (precipitate/defect

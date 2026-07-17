@@ -34,6 +34,26 @@ _SKILLS_DIR = Path(__file__).parent
 
 _KNOWN_SECTIONS = {"overview", "planning", "analysis", "interpretation", "validation", "implementation"}
 
+# Per-domain section vocabularies. A foundation agent whose pipeline stages
+# differ from the analysis six-section set declares its own vocabulary here;
+# the loader consults it (keyed by the ``domain`` arg) when parsing sections,
+# so authors write guidance under headings that match the agent's pipeline
+# rather than being forced into analysis-flavored names. Domains absent from
+# this map fall through to ``_KNOWN_SECTIONS`` (current behavior, unchanged).
+# Optimization's vocabulary maps 1:1 to the OptimizationAgent pipeline stages
+# (issue #196): setup → data framing, surrogate/acquisition → strategy config,
+# diagnostics → diagnostics + visual inspection, implementation → bounded
+# codegen recipe.
+_DOMAIN_VOCABULARIES = {
+    "optimization": {"overview", "setup", "surrogate", "acquisition",
+                     "diagnostics", "interpretation", "implementation"},
+}
+
+
+def _vocab_for(domain: str) -> set:
+    """The section vocabulary for ``domain`` (defaults to ``_KNOWN_SECTIONS``)."""
+    return _DOMAIN_VOCABULARIES.get(domain, _KNOWN_SECTIONS)
+
 # The three analysis modalities each operate on a different data shape
 # (1D curves / 2D images / 3D datacubes); their skills are NOT interchangeable.
 # A bare-name cross-domain fallback must not pull, e.g., the hyperspectral `eels`
@@ -261,7 +281,9 @@ def load_skill(skill: str, domain: str = "curve_fitting") -> Dict:
         raise ValueError(f"Skill file is empty: {path}")
 
     meta, body = _split_frontmatter(text, source=str(path))
-    sections, extras = _parse_sections(body, source=str(path))
+    sections, extras = _parse_sections(
+        body, source=str(path), known_sections=_vocab_for(domain)
+    )
 
     # Synonym fold: `analysis` and `implementation` are treated as synonyms
     # for the codegen-recipe role across foundation agents (history: this
@@ -420,7 +442,8 @@ def _split_frontmatter(text: str, source: str = "<skill>") -> tuple[dict, str]:
     return parsed, text[m.end():]
 
 
-def _parse_sections(text: str, source: str = "<skill>") -> tuple[Dict[str, str], Dict[str, str]]:
+def _parse_sections(text: str, source: str = "<skill>",
+                    known_sections: set = _KNOWN_SECTIONS) -> tuple[Dict[str, str], Dict[str, str]]:
     """Parse markdown into sections keyed by ``## heading`` name.
 
     Returns ``(known_sections, extras)`` where ``known_sections`` covers
@@ -428,8 +451,12 @@ def _parse_sections(text: str, source: str = "<skill>") -> tuple[Dict[str, str],
     ``extras`` captures any other ``## ...`` sections (lowercased heading
     → body). Unknown headings emit a warning so authors get feedback when
     content would otherwise be silently dropped.
+
+    ``known_sections`` is the section vocabulary to recognize; it defaults to
+    :data:`_KNOWN_SECTIONS` but a domain-specific vocabulary (see
+    :data:`_DOMAIN_VOCABULARIES`) is passed in by :func:`load_skill`.
     """
-    sections = {k: "" for k in _KNOWN_SECTIONS}
+    sections = {k: "" for k in known_sections}
     extras: Dict[str, str] = {}
 
     parts = re.split(r"^##\s+", text, flags=re.MULTILINE)
@@ -438,14 +465,14 @@ def _parse_sections(text: str, source: str = "<skill>") -> tuple[Dict[str, str],
         lines = part.split("\n", 1)
         heading = lines[0].strip().lower()
         body = lines[1].strip() if len(lines) > 1 else ""
-        if heading in _KNOWN_SECTIONS:
+        if heading in known_sections:
             sections[heading] = body
         else:
             extras[heading] = body
             _logger.warning(
                 "Skill %s: section '## %s' is not in the canonical vocabulary "
                 "(%s); preserved under 'extras'.",
-                source, heading, sorted(_KNOWN_SECTIONS),
+                source, heading, sorted(known_sections),
             )
 
     return sections, extras

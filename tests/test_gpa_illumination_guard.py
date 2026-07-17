@@ -7,7 +7,7 @@ correlation and withholds `answerable`.
 """
 import numpy as np
 
-from scilink.skills._shared.gpa_strain import gpa_strain_map, make_strained_lattice
+from scilink.skills._shared.strain import gpa_strain_map, make_strained_lattice
 
 
 def _clean_lattice(shape=(256, 256)):

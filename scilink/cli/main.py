@@ -163,6 +163,11 @@ def main():
         sys.argv = [sys.argv[0] + ' memory'] + sys.argv[2:]
         return memory_main()
 
+    elif command == 'fetch-xrd-library':
+        from scilink.cli.fetch_data import main as fetch_main
+        sys.argv = [sys.argv[0] + ' fetch-xrd-library'] + sys.argv[2:]
+        return fetch_main()
+
     elif command == 'ui':
         from scilink.cli.ui import main as ui_main
         sys.argv = [sys.argv[0] + ' ui'] + sys.argv[2:]
@@ -218,6 +223,11 @@ Available Commands:
 
   memory        Manage persistent memory — list, review, promote, or prune
                 graduated and auto-distilled skills
+
+  fetch-xrd-library
+                One-time download of the prebuilt XRD fingerprint reference
+                library (COD-derived) enabling offline powder-pattern
+                identification via search_match_pattern
 
   ui            Launch the Streamlit web interface for interactive
                 analysis (requires: pip install scilink[ui])

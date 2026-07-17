@@ -68,6 +68,41 @@ def _build_planning_skill_description(custom_skills: dict = None) -> str:
     return " ".join(parts)
 
 
+def _build_optimization_skill_description() -> str:
+    """Build the ``skill`` parameter description for ``run_optimization``.
+
+    Lists the available optimization skill bundles (``domain="optimization"``)
+    so the orchestrator LLM can activate one by name. Mirrors the planning
+    helper above, scoped to the optimization domain.
+    """
+    parts = [
+        "Optional optimization skill: a built-in optimization skill name. When "
+        "set, the skill's guidance is injected into the BO strategy and "
+        "inspection stages, and any surrogate/acquisition the skill contributes "
+        "becomes selectable. Pass when the user's problem matches a skill below."
+    ]
+    try:
+        names = list_skills(domain="optimization")
+    except Exception:
+        names = []
+
+    skill_descs = []
+    for name in names:
+        try:
+            parsed = load_skill(name, domain="optimization")
+            desc = (parsed.get("meta") or {}).get("description")
+            if not desc:
+                desc = parsed.get("overview", "").split("\n")[0].strip()
+            desc = desc.rstrip(".;,") if desc else desc
+            skill_descs.append(f"'{name}' — {desc}" if desc else f"'{name}'")
+        except Exception:
+            skill_descs.append(f"'{name}'")
+    if skill_descs:
+        parts.append(f"Available optimization skills: {'; '.join(skill_descs)}.")
+
+    return " ".join(parts)
+
+
 class OrchestratorTools:
     """
     Manages tool definitions, schemas, and execution for the OrchestratorAgent.
@@ -124,8 +159,12 @@ class OrchestratorTools:
 
         Filters to declared input columns only; missing entries default to
         "continuous" downstream. No-op when column_roles has no input_types
-        field (backward-compat with older scalarizer outputs).
+        field (backward-compat with older scalarizer outputs). Also captures the
+        optional fidelity role (multi-fidelity) declared in the same column_roles.
         """
+        # Capture the optional fidelity role first — it is independent of
+        # input_types and must run even when input_types is absent.
+        self._capture_fidelity_spec(column_roles, input_columns)
         if not input_columns:
             return
         types_in = (column_roles or {}).get("input_types") or {}
@@ -134,6 +173,30 @@ class OrchestratorTools:
         filtered = {c: types_in[c] for c in input_columns if c in types_in}
         if filtered:
             self.orch.expected_input_types = filtered
+
+    def _capture_fidelity_spec(self, column_roles: Dict, input_columns: List[str]) -> None:
+        """Persist an optional scalarizer-declared fidelity column (multi-fidelity).
+
+        A fidelity column is a normal input that also indexes evaluation
+        cost/accuracy. Sets ``orch.fidelity_spec`` to a validated
+        {column, target_fidelity?, costs?} dict when the scalarizer declares one
+        whose column is among the inputs; otherwise resets it to None (standard
+        single-fidelity BO). Backward-compatible: older scalarizer outputs that
+        omit the field reset to None.
+        """
+        spec = (column_roles or {}).get("fidelity")
+        col = spec.get("column") if isinstance(spec, dict) else None
+        if col and input_columns and col in input_columns:
+            clean = {"column": col}
+            if spec.get("target_fidelity") is not None:
+                clean["target_fidelity"] = spec["target_fidelity"]
+            if isinstance(spec.get("costs"), dict) and spec["costs"]:
+                clean["costs"] = spec["costs"]
+            self.orch.fidelity_spec = clean
+            print(f"    📶  Fidelity axis declared: '{col}'"
+                  + (f" (target={clean['target_fidelity']})" if "target_fidelity" in clean else ""))
+        else:
+            self.orch.fidelity_spec = None
 
     def _compute_file_hash(self, file_path: str) -> str:
         """Compute MD5 hash of file content for deduplication."""
@@ -2491,7 +2554,8 @@ class OrchestratorTools:
             physical_constraints: str = None,
             experimental_budget: int = None,
             targets: list[str] = None,
-            strategy_hint: str = None
+            strategy_hint: str = None,
+            skill: str = None
         ):
             """
             Runs Bayesian Optimization to suggest next parameters.
@@ -2838,6 +2902,24 @@ class OrchestratorTools:
                 bo_objective = self._distill_objective_for_bo(
                     self.orch.expected_target_columns
                 )
+
+                # Multi-fidelity: if the scalarizer declared a fidelity column
+                # (and it survives into the final input set), translate it to a
+                # fidelity_config keyed by the column's index in input_cols. None
+                # otherwise -> standard single-fidelity BO (unchanged behavior).
+                fidelity_config = None
+                fspec = getattr(self.orch, "fidelity_spec", None)
+                if fspec and fspec.get("column") in (self.orch.expected_input_columns or []):
+                    fidelity_config = {
+                        "fidelity_col": self.orch.expected_input_columns.index(fspec["column"])
+                    }
+                    if fspec.get("target_fidelity") is not None:
+                        fidelity_config["target_fidelity"] = fspec["target_fidelity"]
+                    if fspec.get("costs"):
+                        fidelity_config["fidelity_costs"] = fspec["costs"]
+                    print(f"    📶  Multi-fidelity active: column '{fspec['column']}' "
+                          f"(index {fidelity_config['fidelity_col']})")
+
                 res = self.orch.bo.run_optimization_loop(
                     data_path=bo_data_path_for_run,
                     objective_text=bo_objective,
@@ -2853,6 +2935,8 @@ class OrchestratorTools:
                     plot_acq=True,
                     save_acq=True,
                     cat_dims=cat_dims if cat_dims else None,
+                    skill=skill,
+                    fidelity_config=fidelity_config,
                 )
                 
                 if res.get("status") != "success":
@@ -2993,6 +3077,10 @@ class OrchestratorTools:
                         "'switch to Matern-1.5', 'use UCB with high exploration'. "
                         "The hint is respected unless it conflicts with budget constraints."
                     )
+                },
+                "skill": {
+                    "type": "string",
+                    "description": _build_optimization_skill_description()
                 }
             },
             required=[]

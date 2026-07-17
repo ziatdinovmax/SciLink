@@ -187,12 +187,11 @@ def test_curve_planner_omits_literature_when_absent():
 
 # --- Curve synthesis — unconditional lit injection ---------------------------
 
-def test_curve_synthesis_injects_literature_unconditionally():
-    """`UnifiedCurveSynthesisController` Stage-2 prompt builder appends
-    `## Literature` whenever `state["literature_context"]` is set, with no
-    task_mode guard. This means identification-mode candidate enumeration
-    still receives the lit context for ranking candidates against literature
-    evidence.
+def test_curve_synthesis_gates_literature_in_id_mode():
+    """`UnifiedCurveSynthesisController` Stage-1 appends `## Literature` for
+    non-ID runs (opportunistic Channel-A reuse, issue #323 D1) but MUST gate
+    it out in identification mode (D2: ID runs are literature-free in-run;
+    literature enters only post-fit via `refine_interpretation`).
 
     Construct-then-call is prohibitively heavy for this controller (many
     coupled state keys); a source-level check is the right granularity for
@@ -200,17 +199,12 @@ def test_curve_synthesis_injects_literature_unconditionally():
     """
     from scilink.agents.exp_agents.controllers import curve_fitting_controllers
     src = inspect.getsource(curve_fitting_controllers.UnifiedCurveSynthesisController)
-    # The Stage-2 prompt builder is the only consumer of literature_context
-    # inside this class. Confirm: (a) injection exists, (b) NO task_mode
-    # branch gates it.
-    assert 'state.get("literature_context")' in src
-    # Find every line that gates on literature_context; none may also test task_mode
     lit_gates = [
         line for line in src.splitlines()
         if 'state.get("literature_context")' in line
     ]
     assert lit_gates, "expected at least one lit-context conditional in synthesis"
     for line in lit_gates:
-        assert 'task_mode' not in line, (
-            f"unexpected task_mode guard on synthesis lit injection: {line!r}"
+        assert 'task_mode' in line and '"identification"' in line, (
+            f"synthesis lit injection missing the identification-mode gate: {line!r}"
         )

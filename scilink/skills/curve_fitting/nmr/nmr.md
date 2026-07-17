@@ -30,11 +30,16 @@ dictates the lineshape:
   quadrupolar nuclei show an asymmetric **second-order quadrupolar
   central-transition** lineshape that carries C_Q and η_Q.
 
-**Out of scope (v0):** 2D experiments; J-coupling multiplet structure (treat
-resolved multiplets as separate peaks); satellite transitions, MQMAS, CSA
-tensor extraction from sideband intensities; relaxation/T1–T2 series (a separate
-"integral vs. delay" task, not a single-spectrum fit); raw-FID reprocessing
-(this skill works on the processed spectrum).
+**Resolved J-coupled multiplets** (a doublet/triplet/quartet from one chemical
+environment, e.g. a CF₃ carbon split by fluorines) are fit as ONE constrained
+manifold with `fit_jcoupled_multiplet`, not as independent Voigts — see the
+routing in Implementation.
+
+**Out of scope (v0):** 2D experiments; second-order / non-binomial multiplet
+patterns (roofing, second-order strong coupling); satellite transitions, MQMAS,
+CSA tensor extraction from sideband intensities; relaxation/T1–T2 series (a
+separate "integral vs. delay" task, not a single-spectrum fit); raw-FID
+reprocessing (this skill works on the processed spectrum).
 
 ## planning
 
@@ -61,6 +66,17 @@ A weak, broad, or inverted line (common for low-γ quadrupolar nuclei like ⁶�
 ²⁵Mg, ³³S near their detection limit) is still a resonance — recover it rather
 than declaring "no signal" and fitting baseline only.
 
+**But abstain when the data cannot support a fit — the counterweight to "recover
+weak lines".** On a near-noise spectrum a flexible Voigt+baseline model will
+"succeed" by fitting the noise, reporting a confident lineshape and a high
+peak-region R² for a measurement that is not there. Before trusting a low-SNR
+fit, run `assess_detection` (see Implementation): it returns a verdict —
+**detected** (fit and report), **marginal** (report the shift tentatively / as an
+upper bound, no precise linewidth or integral), or **absent** (report a
+NON-DETECTION with an intensity upper bound; do not report a fitted peak). A
+resonance must be either a resolved contiguous feature OR statistically justified
+over a flat baseline (F-test); a high R² alone does not make it real.
+
 **Step 2 — Correct a rolling baseline BEFORE fitting.** Processed spectra
 (especially ¹H MAS) frequently carry a broad oscillating baseline distortion
 (first-point / digital-filter / probe-background artifact — wide humps and deep
@@ -76,8 +92,7 @@ flat and need none. (See Implementation for the recipe.)
 |---|---|
 | Solution-state, any nucleus | Sum of **Voigt** (Lorentzian-dominant); use a pure Lorentzian only if the Gaussian width refines to ~0 |
 | Solid MAS, spin-½ (¹³C, ³¹P, ¹⁹F, ¹H) | Sum of **Voigt** centrebands; account for sidebands (Step 4) |
-| Solid MAS, half-integer quadrupolar, **symmetric narrow** line | **pseudo-Voigt** — and report FWHM, *not* C_Q (see below) |
-| Solid MAS, half-integer quadrupolar, **visibly asymmetric / broad** line | second-order quadrupolar central-transition lineshape via `fit_quad_ct` |
+| Solid MAS, half-integer quadrupolar | **`fit_quad_ct`** — attempt it by *default* (C_Q/η_Q is the deliverable); do not pre-judge "looks symmetric → skip it". The tool returns `Cq_resolved`: if False, fall back to a **pseudo-Voigt** and report FWHM, not C_Q (Step 5). A broad, washed-out *disordered* line → **`fit_quad_czjzek`**. |
 
 Default to **Voigt over pure Lorentzian** — real NMR lines carry a Gaussian
 (shim/disorder) contribution, and a pure Lorentzian over-peaks the apex.
@@ -86,25 +101,39 @@ Default to **Voigt over pure Lorentzian** — real NMR lines carry a Gaussian
 by exactly the **MAS rate** (ν_r in Hz → ν_r/ν_L ppm) flanking each centreband
 is spinning sidebands, *not* distinct chemical sites. Two valid strategies: (a)
 crop to the centreband and fit only that, or (b) fit the centreband plus the
-sidebands as satellites at ±k·ν_r sharing the centreband's shape. **Either way,
-any integrated-intensity / quantification claim must include sideband intensity**
-— excluding it undercounts. Verify the spacing equals the known MAS rate.
+sidebands as satellites at ±k·ν_r sharing the centreband's shape — for (b),
+use the registered `fit_sideband_manifold` tool (one call per sideband-bearing
+site): it locks the comb positions to the MAS rate and returns the
+sideband-inclusive total intensity and centreband fraction directly. **Either
+way, any integrated-intensity / quantification claim must include sideband
+intensity** — excluding it undercounts. Verify the spacing equals the known
+MAS rate.
 
-**Step 5 — When to use the quadrupolar lineshape (and when not).** The
-central-transition second-order lineshape pins C_Q and η_Q **only when it is
-resolved** — i.e. the quadrupolar broadening clearly exceeds the
-instrumental/disorder broadening, giving a visibly asymmetric line with
-"horn"+"foot" structure. For a narrow, near-symmetric quadrupolar line, C_Q and
-the linewidth are **degenerate** (a smaller C_Q + more broadening fits equally
-well); `fit_quad_ct` returns a `Cq_resolved=False` flag in that case — then
-treat C_Q as an upper bound and report the pseudo-Voigt FWHM as the primary
-descriptor, recommending MQMAS / satellite-transition data to pin C_Q.
+**Step 5 — Let the tool, not the eye, decide whether C_Q is determined.** For a
+solid half-integer quadrupolar line, *run* `fit_quad_ct` rather than pre-judging
+from the apparent symmetry — the second-order lineshape pins C_Q and η_Q only
+when the quadrupolar broadening exceeds the instrumental/disorder broadening, and
+the tool reports this for you via `Cq_resolved`. When `Cq_resolved=True`, report
+C_Q/η_Q. When `Cq_resolved=False` (a narrow, near-symmetric line where C_Q and the
+linewidth are **degenerate**), treat C_Q as an upper bound and report the
+pseudo-Voigt FWHM as the primary descriptor, recommending MQMAS / satellite data
+to pin C_Q. Either way you have *attempted* the physics and let the fit — not a
+visual guess — set whether C_Q is reportable.
 
-**Series fits (composition / temperature / treatment ladders).** Lock the model
-(number of sites, lineshape, baseline strategy) across the series; let
-shift/width/amplitude (and C_Q/η_Q where resolved) float per spectrum. The
-scientific signal is then a single per-sample column (e.g. δ_iso vs. x,
-linewidth vs. T) read across the series.
+**Series fits (composition / temperature / treatment ladders).** Lock the *form*
+— lineshape type and baseline strategy — across the series so shifts and widths
+stay comparable, and let shift/width/amplitude (and C_Q/η_Q where resolved) float
+per spectrum. **Do NOT lock the number of components.** The structure can change
+along the series — a new phase or site appearing/disappearing, a line splitting
+under slow exchange, a polymorph emerging — and that change is usually the
+scientific signal, not noise to suppress. At each point let the data set the
+component count under the same parsimony test you use for a single spectrum (add
+a component only if it materially improves the peak-region fit; drop one that
+refines to negligible amplitude). Report **two** things across the series: the
+per-sample parameter column (e.g. δ_iso vs x, C_Q vs x, linewidth vs T) **and the
+component count vs the variable** — the value(s) of the variable where the count
+changes mark the transition / onset. Do not assume the number of components is
+fixed (or that it is one); let it be whatever the data justify at each point.
 
 ## implementation
 
@@ -153,10 +182,54 @@ to Hz with the Larmor frequency for reporting. (Edge case the tool does not
 robustly separate: two peaks at the *same* shift differing only in width
 — a sharp+broad co-centred pair; fit those manually if present.)
 
-**Routing — which fitter:** one symmetric line → single Voigt; several distinct
-chemical shifts → `fit_multipeak_voigt`; a single *asymmetric quadrupolar*
-powder line → `fit_quad_ct` (do NOT mimic a quadrupolar lineshape with a stack
-of Voigts).
+**J-coupled multiplet fitting** (a resolved doublet/triplet/quartet from ONE
+chemical environment — equally-spaced lines with a binomial 1:1 / 1:2:1 / 1:3:3:1
+intensity ratio). Do NOT fit these as independent Voigts (badly under-determined,
+unstable, and it discards the coupling). Use the constrained manifold fitter,
+which shares one shift, one J, one linewidth across all lines (6 parameters total)
+and returns J directly:
+
+```python
+from scilink.skills.curve_fitting.nmr.multiplet import fit_jcoupled_multiplet
+# crop x/y to the multiplet. Pass the line count you read off the spectrum as
+# `multiplicity` (4 for a quartet); omit it to auto-detect. nu_L_MHz gives J in Hz.
+res = fit_jcoupled_multiplet(xroi.tolist(), yroi.tolist(), baseline=base.tolist(),
+                             multiplicity=4, nu_L_MHz=NU_L)
+# res['J_hz'], res['center_ppm'] (coupling-free shift), res['fwhm_hz']
+```
+
+A multiplet is one *environment*: two coupled species at different shifts are two
+calls (or `fit_multipeak_voigt` for the centroids). This handles first-order
+binomial coupling only — for second-order / roofing patterns fall back to
+`fit_multipeak_voigt`.
+
+**Disordered (Czjzek) quadrupolar lineshape.** A *disordered* solid — amorphous,
+glassy, a solid solution, or heavily defective — does not have one well-defined
+(C_Q, η); every site sees a slightly different EFG, so the central transition is
+the average over a *distribution* of (C_Q, η). The line is then broad and
+**smoothly skewed with the sharp single-site horns washed out**, and neither a
+pseudo-Voigt nor a single-site `fit_quad_ct` reproduces it (they leave systematic
+residual — `residual_structured=True`). Fit it with the Czjzek model, which
+returns the EFG-distribution width σ_Cz:
+
+```python
+from scilink.skills.curve_fitting.nmr.quadrupolar import fit_quad_czjzek
+res = fit_quad_czjzek(ppm_roi.tolist(), y_roi.tolist(), nu_L_MHz=NU_L, I=1.5)
+# res['parameters']: sigma_cz_MHz (disorder width), mean_Cq_MHz, delta_iso_ppm
+```
+
+Decide single-site vs Czjzek by the lineshape and the residual: visible, sharp
+horns → `fit_quad_ct`; washed-out, smoothly skewed, or `fit_quad_ct` leaves
+`residual_structured=True` → `fit_quad_czjzek`. (Solution-state quadrupolar
+nuclei tumble fast → plain Voigt, neither model.)
+
+**Routing — which fitter:** one symmetric uncoupled line → single Voigt; a
+resolved J-coupled multiplet (equal spacing, binomial ratio) → `fit_jcoupled_multiplet`;
+several distinct chemical shifts → `fit_multipeak_voigt`; a single *asymmetric
+quadrupolar* powder line with sharp horns → `fit_quad_ct`; a *broad, disordered*
+quadrupolar line (washed-out horns) → `fit_quad_czjzek` (do NOT mimic a
+quadrupolar lineshape with a stack of Voigts). For any low-SNR spectrum, gate the
+result with `assess_detection` before reporting (see Planning Step 1).
 
 **Let the residual drive escalation — don't stop at a single component while
 structure remains.** After any fit, inspect the residual *within the peak
@@ -168,6 +241,18 @@ it to `fit_multipeak_voigt`; for a half-integer quadrupolar line whose residual
 shows the characteristic asymmetric foot, try `fit_quad_ct` (one quadrupolar
 site) before adding Voigts. This is residual-driven, not nucleus-driven — apply
 it whenever a single symmetric component leaves real structure behind.
+
+**A gate-passing fit is not automatically done.** If `peak_region_r2` clears the
+gate but `residual_structured` is True, the (pseudo-)Voigt is the wrong *model*
+(it returns no C_Q / J), so re-fit with the matching physical model and compare.
+Trigger on the `residual_structured` flag only — it is calibrated on the
+signal-relative `apex_resid_frac` / `resid_rms_frac`; do not escalate on
+`apex_resid_over_noise` or `frac_resid_gt_3sigma`, which stay large even for a
+perfect fit of a high-SNR line. Keep whichever fit has the lower `resid_rms_frac`
+and clears the flag — **never adopt a model that fits worse** — and make sure the
+physical model represents every site/environment the line actually contains (a
+multi-site line needs a multi-site model). Fall back to the (pseudo-)Voigt with a
+stated limitation when no physical model improves it.
 
 **Second-order quadrupolar central transition** (solid half-integer, resolved
 asymmetric line): call the skill tool — it does the orientation-averaged powder
@@ -182,6 +267,21 @@ p, d = res["parameters"], res["derived"]
 # Honor d["Cq_resolved"]: if False, report p["Cq_MHz"] as an upper bound only.
 ```
 
+**Detection check for low-SNR spectra.** When the signal is weak or the nucleus
+is insensitive (low-γ, dilute), screen the result before reporting a lineshape:
+
+```python
+from scilink.skills.curve_fitting.nmr.detection import assess_detection
+# pass the fit and its free-parameter count to enable the peak-vs-baseline F-test.
+det = assess_detection(x.tolist(), y.tolist(), y_fit=y_fit.tolist(),
+                       n_model_params=n_params, baseline=baseline.tolist())
+# det["verdict"] in {detected, marginal, absent}; honor det["recommendation"].
+```
+
+If the verdict is **absent**, report a non-detection with `det["upper_bound"]`,
+not a fitted peak; if **marginal**, report the shift with a wide uncertainty and
+no quantitative integral.
+
 **Quality metric (MANDATORY — the gate scores by `peak_region_r2`).** NMR's
 wide digitized window makes a whole-window R² meaningless for a narrow peak
 (noise dominates the variance), so after fitting, compute the peak-region R²
@@ -195,6 +295,16 @@ from scilink.skills.curve_fitting.nmr.quality import peak_region_r2
 q = peak_region_r2(x.tolist(), y.tolist(), y_fit.tolist(), baseline=baseline.tolist())
 # q["peak_region_r2"] is the gate metric; q["r_squared"] is the global value.
 ```
+
+**A high `peak_region_r2` is necessary but not sufficient — also read the
+residual-structure diagnostics the same call returns.** `q["residual_structured"]`
+is True when the residual is both large relative to the peak height
+(`q["apex_resid_frac"]`) and systematically correlated (`q["resid_autocorr_lag1"]`
+near 1, `q["frac_resid_gt_3sigma"]` high) — the signature of a fit that misses
+where the signal is (an unmodeled shoulder, a wrong lineshape, a quadrupolar foot
+forced into a Voigt) even at R² ≈ 0.96. When it is True, escalate the model
+(add an environment, switch to `fit_quad_ct` / `fit_jcoupled_multiplet`) rather
+than accept the fit on R² alone.
 
 Emit `FIT_RESULTS_JSON:` with `fit_quality` containing **`peak_region_r2`** (the
 gate metric) and the global `r_squared`, plus per-peak δ (ppm) and width
@@ -274,7 +384,12 @@ intensity envelope encodes the CSA (spin-½) or the satellite/CSA interplay
   as a measurement only when resolved; otherwise as an upper bound with an
   MQMAS/satellite recommendation. Watch for η railing to 0 or 1 (poorly
   determined) — reported in `reliability_flags`.
-- **Cross-series consistency.** In a composition/temperature ladder, δ_iso and
-  linewidth should vary smoothly; an outlier spectrum usually means a
-  mis-assigned sideband, an uncorrected baseline, or a phase flip — re-inspect
-  rather than accept a discontinuity.
+- **Cross-series consistency.** In a composition/temperature ladder the per-sample
+  parameters and the component count usually vary smoothly. A discontinuity has
+  two possible causes — distinguish them, don't assume it is an error: a
+  *spurious* jump from a mis-assigned sideband, an uncorrected baseline, or a
+  phase flip (re-inspect and fix), versus a *real* structural transition — a new
+  phase/site appearing, a peak splitting — which is a genuine result to report
+  with the variable value at which it occurs. A locked-count model will hide the
+  latter, so verify the count is data-driven before calling a discontinuity an
+  artifact.

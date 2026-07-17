@@ -35,9 +35,11 @@ from typing import Callable, Optional, Any, Dict, List
 import numpy as np
 
 from .._locked_exec import (
-    stage_and_run, script_uses_canonical_input,
+    stage_and_run, stage_and_run_adaptive, script_uses_canonical_input,
+    is_timeout_error, trailing_timeout_failures, should_escalate_timeout_model,
     DATA_NAME, VIZ_NAME, CANDIDATES_DIR_NAME, atomic_np_save,
 )
+from .._qc_engine import CodegenQCEngine, QCEngineSpec, QCItemContext
 from ....utils.codegen_parse import parse_codegen_response
 from ....utils.synthesis_parse import salvage_synthesis_from_response
 
@@ -179,49 +181,17 @@ def build_verification_prompt_with_history(
     current_result: dict,
     previous_iterations: List[dict],
 ) -> str:
-    """Build history context string for verification prompt."""
-    if not previous_iterations:
-        return ""
+    """Build history context string for verification prompt.
 
-    lines = [
-        "\n\n## PREVIOUS VERIFICATION ATTEMPTS",
-        "Review what was tried before. Don't suggest fixes that already failed.\n"
-    ]
-
-    for i, prev in enumerate(previous_iterations, 1):
-        lines.append(f"\n### Attempt {i}")
-        score = prev.get('quality_score')
-        lines.append(f"- Quality score = {score:.2f}" if score is not None else "- Quality score = N/A")
-        lines.append(f"- Pipeline: {prev.get('config_used', {}).get('processing_pipeline', 'N/A')}")
-        lines.append(f"- Assessment: {prev.get('overall_assessment', 'N/A')}")
-
-        issues = prev.get('issues_found', [])
-        if issues:
-            lines.append(f"- Issues ({len(issues)}):")
-            for issue in issues:
-                lines.append(f"  - {issue.get('location', '?')}: {issue.get('problem', '?')}")
-
-        if prev.get('recommended_action'):
-            lines.append(f"- Action taken: {prev['recommended_action']}")
-
-        if prev.get('refinement_error'):
-            lines.append(
-                f"- **NOTE: The recommended fix was NOT applied** because "
-                f"the refinement LLM call failed ({prev['refinement_error']}). "
-                f"The results below are UNCHANGED from this attempt — "
-                f"do not penalize for identical output. Re-evaluate the "
-                f"recommended action and suggest concrete fixes."
-            )
-
-    lines.extend([
-        "\n\n## IMPORTANT",
-        "1. Check if previous issues were RESOLVED or still PERSIST",
-        "2. If a fix didn't work, suggest something DIFFERENT",
-        "3. If a previous fix was NOT applied due to an API error, "
-        "re-suggest it or propose an alternative",
-    ])
-
-    return "\n".join(lines)
+    Delegates to the shared builder (``_verification_record``) with the
+    image keymap — output is byte-identical to the historical inline version
+    (golden-pinned).
+    """
+    from .._verification_record import (
+        IMAGE_PROMPT_KEYMAP,
+        build_verification_prompt_history,
+    )
+    return build_verification_prompt_history(previous_iterations, IMAGE_PROMPT_KEYMAP)
 
 
 def _sanitize_aux_name(label: str, idx: int) -> str:
@@ -271,6 +241,7 @@ def _append_tool_inventory(
     from ....skills._shared._registry import (
         format_library_inventory,
         get_tools_for,
+        TOOL_USE_PRINCIPLE,
     )
 
     specs = get_tools_for(agent, active_skills=active_skills)
@@ -282,6 +253,7 @@ def _append_tool_inventory(
             "code for post-processing. A tool call anchoring the hard step followed "
             "by custom code is usually more reliable than an all-custom pipeline."
         )
+        prompt.append(TOOL_USE_PRINCIPLE)
         for spec in specs:
             prompt.append(spec.to_prompt())
 
@@ -1150,6 +1122,11 @@ class ImagePlanningController:
 
             series_metadata = state.get("series_metadata", {})
             values = series_metadata.get("values", [])
+            # Defensive: tolerate a filename-keyed dict (normalized upstream by
+            # _normalize_series_values) so a stray dict can't crash planning via
+            # min/max — display only needs the scalar range.
+            if isinstance(values, dict):
+                values = list(values.values())
             unit = series_metadata.get("unit", "")
 
             for i, regime in enumerate(regimes, 1):
@@ -1266,6 +1243,65 @@ class ImagePlanningController:
         # Extract series analysis plan if present
         self._extract_series_plan(state, plan)
 
+        return state
+
+    def _lock_config(self, state: dict) -> None:
+        """Freeze the current plan fields into ``locked_analysis_config`` (and
+        per-regime configs for a multi-regime series). Shared by ``execute``
+        and the per-candidate ``replan_headless`` so both lock identically."""
+        state["locked_analysis_config"] = {
+            "analysis_approach": state.get("analysis_approach"),
+            "processing_pipeline": state.get("processing_pipeline"),
+            "features_to_extract": state.get("features_to_extract", []),
+            "quality_criteria": state.get("quality_criteria"),
+            "expected_outputs": state.get("expected_outputs", []),
+        }
+
+        series_plan = state.get("series_analysis_plan")
+        if series_plan and series_plan.get("regimes"):
+            regime_configs = {}
+            for regime in series_plan["regimes"]:
+                regime_config = {
+                    "analysis_approach": state.get("analysis_approach"),
+                    "processing_pipeline": regime.get(
+                        "processing_pipeline", state.get("processing_pipeline")
+                    ),
+                    "features_to_extract": regime.get(
+                        "features_to_extract",
+                        state.get("features_to_extract", []),
+                    ),
+                    "quality_criteria": state.get("quality_criteria"),
+                    "expected_outputs": state.get("expected_outputs", []),
+                }
+                for idx in regime.get("image_indices", []):
+                    regime_configs[idx] = regime_config
+            state["regime_configs"] = regime_configs
+            self.logger.info(
+                f"  Locked {len(series_plan['regimes'])} regime "
+                f"configuration(s) for series processing."
+            )
+        else:
+            state["regime_configs"] = None
+            self.logger.info(
+                "  Analysis configuration locked for series processing."
+            )
+
+    def replan_headless(self, state: dict) -> dict:
+        """Generate a fresh, INDEPENDENT plan for one best-of-N candidate.
+
+        Mirrors ``execute``'s planning — one ``_plan_analysis`` (NO diversity
+        suffix: divergence between candidates comes from inherent sampling,
+        like running the agent again) + ``_validate_plan`` + ``_lock_config`` —
+        but with NO candidate-plan selection and NO human feedback. The fan-out
+        calls this per candidate (>=1) so each starts from its own approach
+        instead of a shared locked plan. Mutates and returns ``state``.
+        """
+        plan = self._plan_analysis(state)
+        state = self._apply_plan_to_state(state, plan)
+        self.logger.info(f"  Approach: {state['analysis_approach']}")
+        self.logger.info(f"  Pipeline: {state['processing_pipeline']}")
+        state = self._validate_plan(state)
+        self._lock_config(state)
         return state
 
     def _generate_candidate_plans(self, state: dict) -> dict:
@@ -1612,6 +1648,13 @@ class ImagePlanningController:
 
         prompt_parts = [prompt_text]
 
+        # Inject the user's objective so the validator judges the plan against
+        # what was actually asked — not image appearance alone. Without this,
+        # an explicit requirement (e.g. "exclude the substrate region") is
+        # invisible here and gets silently stripped when the image looks
+        # ambiguous.
+        _append_objective_context(prompt_parts, state)
+
         # Include skill context so validator understands domain guidance
         _append_skill_context(prompt_parts, state, "planning")
 
@@ -1714,7 +1757,11 @@ class ImagePlanningController:
             # Validate plan against actual images
             state = self._validate_plan(state)
 
-            if self.enable_human_feedback:
+            # On a verbatim locked-script reuse turn (#172) the plan is
+            # foreordained to re-run the prior script unchanged, so re-approving
+            # it is pointless interruption. Planning still ran above (downstream
+            # stages need its fields); we only skip the display/approval gate.
+            if self.enable_human_feedback and not state.get("reuse_locked_script"):
                 iteration = 0
                 while iteration < self.max_iterations:
                     state = self._get_human_feedback(state)
@@ -1733,43 +1780,7 @@ class ImagePlanningController:
                     self.logger.warning("  Max iterations reached.")
                     print("Max refinements reached. Proceeding with current plan.")
 
-            state["locked_analysis_config"] = {
-                "analysis_approach": state.get("analysis_approach"),
-                "processing_pipeline": state.get("processing_pipeline"),
-                "features_to_extract": state.get("features_to_extract", []),
-                "quality_criteria": state.get("quality_criteria"),
-                "expected_outputs": state.get("expected_outputs", []),
-            }
-
-            # Build per-regime configs if series plan has multiple regimes
-            series_plan = state.get("series_analysis_plan")
-            if series_plan and series_plan.get("regimes"):
-                regime_configs = {}
-                for regime in series_plan["regimes"]:
-                    regime_config = {
-                        "analysis_approach": state.get("analysis_approach"),
-                        "processing_pipeline": regime.get(
-                            "processing_pipeline", state.get("processing_pipeline")
-                        ),
-                        "features_to_extract": regime.get(
-                            "features_to_extract",
-                            state.get("features_to_extract", []),
-                        ),
-                        "quality_criteria": state.get("quality_criteria"),
-                        "expected_outputs": state.get("expected_outputs", []),
-                    }
-                    for idx in regime.get("image_indices", []):
-                        regime_configs[idx] = regime_config
-                state["regime_configs"] = regime_configs
-                self.logger.info(
-                    f"  Locked {len(series_plan['regimes'])} regime "
-                    f"configuration(s) for series processing."
-                )
-            else:
-                state["regime_configs"] = None
-                self.logger.info(
-                    "  Analysis configuration locked for series processing."
-                )
+            self._lock_config(state)
 
         except Exception as e:
             self.logger.warning(f"Planning failed: {e}, using fallback")
@@ -1787,86 +1798,9 @@ class ImagePlanningController:
         return state
 
 
-class LiteratureSearchController:
-    """Search literature if enabled and query provided.
-
-    DEPRECATED: prefer the orchestrator-level `search_literature` tool, which
-    fetches lit context BEFORE planning so the planner can produce a
-    literature-informed plan. This in-pipeline controller is retained as a
-    fallback for direct-Python-API callers using `use_literature=True`.
-    """
-
-    def __init__(
-        self,
-        logger: logging.Logger,
-        literature_agent: Any | None = None,
-        output_dir: str = "",
-    ):
-        self.logger = logger
-        self.literature_agent = literature_agent
-        self.output_dir = output_dir
-
-    def _save_results(self, query: str, report: str) -> dict:
-        saved_files = {}
-        try:
-            lit_dir = os.path.join(self.output_dir, "literature")
-            os.makedirs(lit_dir, exist_ok=True)
-
-            query_path = os.path.join(lit_dir, "search_query.txt")
-            with open(query_path, "w") as f:
-                f.write(query)
-            saved_files["query_file"] = query_path
-
-            report_path = os.path.join(lit_dir, "literature_report.md")
-            with open(report_path, "w") as f:
-                f.write(report)
-            saved_files["report_file"] = report_path
-        except Exception as e:
-            self.logger.warning(f"Failed to save literature: {e}")
-        return saved_files
-
-    def execute(self, state: dict) -> dict:
-        if state.get("error_dict"):
-            return state
-
-        if state.get("literature_context"):
-            self.logger.info("\n--- Skipping Literature (pre-fetched via search_literature tool) ---\n")
-            return state
-
-        if self.literature_agent is None:
-            self.logger.info("\n--- Skipping Literature (disabled) ---\n")
-            state["literature_context"] = None
-            state["literature_files"] = None
-            return state
-
-        query = state.get("literature_query")
-        if not query:
-            self.logger.info("\n--- Skipping Literature (no query needed) ---\n")
-            state["literature_context"] = None
-            state["literature_files"] = None
-            return state
-
-        self.logger.info("\n--- Searching Literature ---\n")
-        self.logger.info(f"  Query: {query}")
-
-        try:
-            result = self.literature_agent.query_for_models(query)
-            if result.get("status") == "success":
-                state["literature_context"] = result["formatted_answer"]
-                self.logger.info("  Success")
-            else:
-                state["literature_context"] = None
-                self.logger.warning("  No results")
-
-            state["literature_files"] = self._save_results(
-                query, state["literature_context"] or f"No results: {result.get('message')}"
-            )
-        except Exception as e:
-            self.logger.error(f"  Failed: {e}")
-            state["literature_context"] = None
-            state["literature_files"] = self._save_results(query, f"Error: {e}")
-
-        return state
+# Shared implementation (one copy for all modalities) — re-exported under the
+# historical name so pipeline imports are unchanged.
+from .base_controllers import LiteratureSearchController  # noqa: E402,F401
 
 
 class UnifiedImageProcessingController:
@@ -1943,7 +1877,14 @@ class UnifiedImageProcessingController:
         "Prefer keeping registered tools in the pipeline and expressing fixes "
         "through their documented parameters. If you must recommend replacing a "
         "tool with custom code, briefly state why the tool's parameters could "
-        "not address the issue.\n",
+        "not address the issue.\n"
+        "If the pipeline is effectively a SINGLE registered-tool call (its "
+        "documented parameters were already explored at the previous level), do "
+        "not keep re-tweaking those parameters — the next step is to REPLACE the "
+        "tool: prefer a DIFFERENT registered tool that targets the same goal a "
+        "different way; only if no such sibling tool fits is custom code "
+        "justified, and then state why the tool's parameters and the available "
+        "registered tools cannot address the issue.\n",
         # T=2 open — main annealing already grants full freedom
         "",
     )
@@ -2036,6 +1977,7 @@ Your guidance: '''
         max_verification_iterations: int = None,
         conformance_instructions: str = "",
         refinement_instructions: str = "",
+        replanner: Any = None,
     ):
         self.model = model
         self.logger = logger
@@ -2054,6 +1996,21 @@ Your guidance: '''
         self.max_verification_iterations = max_verification_iterations if max_verification_iterations is not None else self.DEFAULT_MAX_VERIFICATION_ITERATIONS
         self.quality_threshold = self.DEFAULT_QUALITY_THRESHOLD
         self.conformance_instructions = conformance_instructions
+        # Planning controller used to give each best-of-N fan-out candidate
+        # (>=1) its OWN independent plan (ensemble diversity). None on helper
+        # instances (e.g. adaptive refit) -> candidates share the locked plan.
+        self.replanner = replanner
+
+    def _accept_gate(self):
+        """The driver's quality-score accept criterion as a :class:`QualityGate`.
+
+        Built from the live ``self.quality_threshold`` at call time. The
+        verifier's ``quality_score`` is the metric (``value_source="verdict"``)
+        and the empty soft band reproduces the plain-threshold semantics this
+        controller has always had. See analysis_qc_unification_plan.md §2.1.
+        """
+        from ..quality_gate import IMAGE_SCORE_DEFAULT
+        return IMAGE_SCORE_DEFAULT.with_accept_threshold(float(self.quality_threshold))
 
     def _generate_analysis_script(
         self,
@@ -2061,6 +2018,7 @@ Your guidance: '''
         data_path: str,
         stats: dict,
         base_script: str | None = None,
+        extra_issues: list | None = None,
     ) -> str:
         """Generate an image analysis script using the locked config.
 
@@ -2068,9 +2026,18 @@ Your guidance: '''
         prompt to adapt the previous attempt's script to the refined plan
         rather than regenerating from scratch. When ``None`` or empty,
         falls back to fresh generation via ``self.script_instructions``.
+
+        ``extra_issues`` (optional) — findings from prior attempts the new
+        script must address (e.g. the qc_refit EXECUTION BUDGET note when
+        trailing attempts failed by timeout). None/empty is a no-op.
         """
         config = state.get("locked_analysis_config", {})
         context_parts = []
+        if extra_issues:
+            context_parts.append(
+                "## Prior-attempt findings (address these)\n"
+                + "\n".join(f"- {i}" for i in extra_issues)
+            )
         # Authoritative calibration: when the caller supplied spatial metadata it
         # is staged as ``metadata.json`` in the working directory (see
         # stage_and_run). Point the generated script at it so pixel size and the
@@ -2109,6 +2076,15 @@ Your guidance: '''
                 min(level, len(self._SKILL_STRICTNESS_SCHEDULE) - 1)
             ].format(name=", ".join(n for n, _ in recipes))
             context_parts.append(preamble + _render_codegen_recipe(recipes))
+
+        # Script-bank exemplar (#346): first fresh generation only — never on
+        # refinements (base_script) and never once annealing has escalated,
+        # so the hot script-drop's from-scratch regeneration stays exemplar-free.
+        exemplar = state.get("_bank_exemplar")
+        if (exemplar and not base_script
+                and state.get("_annealing_level", 0) == 0):
+            from scilink.skills._shared import _script_bank
+            context_parts.append(_script_bank.render_exemplar_block(exemplar))
 
         # Add sub-agent preprocessing array paths
         for key in ("fft_preprocessing", "sam_preprocessing"):
@@ -2272,6 +2248,47 @@ Your guidance: '''
 
         return result["script"]
 
+    # Last-resort pipeline escalation for persistent execution timeouts —
+    # the image twin of the curve controller's clause. Fires only when even
+    # carve-out corrections kept timing out on a FRESH (non-locked-reuse)
+    # analysis, meaning the locked pipeline itself is infeasible within the
+    # execution budget.
+    _TIMEOUT_MODEL_ESCALATION_CLAUSE = (
+        "\n**TIMEOUT ESCALATION — LAST RESORT. This clause SUPERSEDES the "
+        "CRITICAL rule and the timeout exception above for this single "
+        "correction:** computational-strategy fixes were already attempted "
+        "in earlier corrections and the script STILL exceeds the execution "
+        "budget — efficiency alone has failed, so the locked pipeline "
+        "itself is computationally infeasible. RESTRUCTURE the pipeline "
+        "into a computationally feasible alternative that preserves the "
+        "plan's scientific intent and still extracts the planned features "
+        "(a cheaper segmentation/detection method, coarser internal search, "
+        "fewer expensive stages). Do not return another implementation of "
+        "the same infeasible pipeline. The full image extent remains "
+        "untouchable. State exactly what you changed and why in "
+        "`diagnosis`.\n"
+    )
+
+    def _correct_script_with_timeout_escalation(
+            self, state: dict, script: str, error_msg: str) -> tuple:
+        """`_correct_script` under the last-resort timeout escalation: the
+        escalation clause is injected and the annealing level is raised to
+        hot for this ONE call (skill strictness relaxes in lockstep), then
+        both are restored so no later stage sees the elevated state."""
+        saved_level = state.get("_annealing_level", 0)
+        state["_timeout_model_escalation"] = True
+        state["_annealing_level"] = max(saved_level, self._hot_annealing_level)
+        self.logger.warning(
+            "    🔥 Last-resort timeout escalation: allowing pipeline "
+            "restructure on this correction (consecutive execution "
+            "timeouts persisted after computational fixes)."
+        )
+        try:
+            return self._correct_script(state, script, error_msg)
+        finally:
+            state["_annealing_level"] = saved_level
+            state.pop("_timeout_model_escalation", None)
+
     def _correct_script(
         self, state: dict, script: str, error_msg: str
     ) -> tuple:
@@ -2292,6 +2309,18 @@ Your guidance: '''
             error_message=error_msg,
             tool_inventory=format_tool_inventory("image_analysis", active_skills=active_skills),
         )
+        # Last-resort timeout escalation (set transiently by
+        # _correct_script_with_timeout_escalation; absent otherwise).
+        # Injected BEFORE the response-format footer — appended after it,
+        # the clause loses to the locked-pipeline prohibitions above.
+        if state.get("_timeout_model_escalation"):
+            marker = "**Response:**"
+            if marker in prompt:
+                prompt = prompt.replace(
+                    marker,
+                    self._TIMEOUT_MODEL_ESCALATION_CLAUSE + "\n" + marker, 1)
+            else:
+                prompt += self._TIMEOUT_MODEL_ESCALATION_CLAUSE
         # Codegen recipe from ALL co-active skills (see the generate-script path).
         recipes = _collect_codegen_recipe(state)
         if recipes:
@@ -2389,6 +2418,7 @@ Your guidance: '''
         image_idx: int,
         base_script: Optional[str] = None,
         refine_from_script: Optional[str] = None,
+        refine_from_issues: Optional[list] = None,
     ) -> dict:
         """Execute analysis pipeline on a single image with retry logic.
 
@@ -2420,6 +2450,7 @@ Your guidance: '''
         if candidate_subdir:
             working_dir = working_dir / candidate_subdir
         working_dir.mkdir(parents=True, exist_ok=True)
+        state["_verify_working_dir"] = str(working_dir)
         output_prefix = f"image_{image_idx:04d}"
 
         script = None
@@ -2427,6 +2458,8 @@ Your guidance: '''
         run = None
         script_errors = []
         last_diagnosis = None
+        consecutive_timeouts = 0
+        used_timeout_escalation = False
 
         for attempt in range(1, self.MAX_ATTEMPTS + 1):
             try:
@@ -2438,6 +2471,7 @@ Your guidance: '''
                         DATA_NAME,
                         stats,
                         base_script=refine_from_script,
+                        extra_issues=refine_from_issues,
                     )
                     if not script_uses_canonical_input(script):
                         last_error = (
@@ -2470,15 +2504,28 @@ Your guidance: '''
                             "; ".join(conformance["justified_deviations"]),
                         )
                 else:
-                    script, last_diagnosis = self._correct_script(
-                        state, script, last_error
-                    )
+                    if should_escalate_timeout_model(
+                            base_script, attempt, self.MAX_ATTEMPTS,
+                            consecutive_timeouts):
+                        script, last_diagnosis = (
+                            self._correct_script_with_timeout_escalation(
+                                state, script, last_error))
+                        used_timeout_escalation = True
+                    else:
+                        script, last_diagnosis = self._correct_script(
+                            state, script, last_error
+                        )
 
                 # Sanitize the script
                 script = self._sanitize_script(script)
 
-                run = stage_and_run(self.executor, script, image_data, working_dir,
-                                    metadata=state.get("system_info"))
+                # Adaptive timeout: a slow-but-correct script is retried
+                # verbatim with doubled timeouts before the correction LLM
+                # ever sees a "timed out" error.
+                run = stage_and_run_adaptive(self.executor, script, image_data,
+                                             working_dir,
+                                             metadata=state.get("system_info"),
+                                             logger=self.logger)
                 exec_result = run["exec"]
 
                 if run["status"] == "success":
@@ -2509,19 +2556,28 @@ Your guidance: '''
                             "fix": (last_diagnosis or "")[:300] or None,
                         })
                         last_diagnosis = None
+                        consecutive_timeouts = 0
                 else:
                     last_error = exec_result.get("message", "Unknown error")
                     self.logger.warning(
                         f"    Attempt {attempt} failed: {last_error[:100]}"
                     )
-                    script_errors.append({
+                    entry = {
                         "attempt": attempt,
                         "error": last_error[:300],
                         "fix": (last_diagnosis or "")[:300] or None,
-                    })
+                    }
+                    if is_timeout_error(last_error):
+                        # Structured failure-mode tag (matches curve).
+                        entry["kind"] = "timeout"
+                        consecutive_timeouts += 1
+                    else:
+                        consecutive_timeouts = 0
+                    script_errors.append(entry)
                     last_diagnosis = None
             except Exception as e:
                 last_error = str(e)
+                consecutive_timeouts = 0
                 self.logger.error(f"    Attempt {attempt} error: {e}")
                 script_errors.append({
                     "attempt": attempt,
@@ -2535,7 +2591,7 @@ Your guidance: '''
               and run["visualization_path"] is not None
               and "IMAGE_ANALYSIS_RESULTS_JSON:" in run["stdout"])
         if not ok:
-            return {
+            failure = {
                 "index": image_idx,
                 "name": image_name,
                 "success": False,
@@ -2545,6 +2601,9 @@ Your guidance: '''
                 "script": script,
                 "script_errors": script_errors,
             }
+            if is_timeout_error(last_error):
+                failure["kind"] = "timeout"
+            return failure
 
         # Parse results from stdout
         analysis_results = {}
@@ -2558,7 +2617,7 @@ Your guidance: '''
                     pass
                 break
 
-        return {
+        result = {
             "index": image_idx,
             "name": image_name,
             "data_path": data_path,
@@ -2575,6 +2634,27 @@ Your guidance: '''
             "script": script,
             "script_errors": script_errors,
         }
+        if used_timeout_escalation:
+            # Provenance: this analysis came from the last-resort pipeline
+            # restructure after persistent timeouts — the executed script,
+            # not the locked plan prose, is authoritative for the pipeline.
+            result["timeout_model_escalation"] = True
+        # Fingerprint of the image this script solved (script bank, #346) —
+        # stamped here because per-image arrays for file inputs never reach
+        # the outer state the bank write hook reads. No-op unless the bank is
+        # enabled; never affects the analysis.
+        try:
+            from scilink.skills._shared import _script_bank
+            from scilink.skills._shared.image_analysis_tools import resolve_pixel_size_nm
+            if _script_bank.bank_enabled() and isinstance(image_data, np.ndarray):
+                result["_bank_fingerprint"] = _script_bank.image_fingerprint(
+                    image_data,
+                    pixel_size_nm=resolve_pixel_size_nm(
+                        state.get("system_info"), image_data.shape),
+                )
+        except Exception:
+            pass
+        return result
 
     QUALITY_VERIFICATION_PROMPT = '''You are a scientific image analysis expert reviewing an analysis result.
 
@@ -2583,6 +2663,8 @@ Your guidance: '''
 **ANALYSIS APPROACH:** {analysis_approach}
 **PROCESSING PIPELINE:** {processing_pipeline}
 **QUALITY CRITERIA (defined during planning):** {quality_criteria}
+
+**DATASET METADATA** (judge against THIS imaging modality's physics — do not invoke an artifact mechanism, or a correction, that belongs to a different technique): {metadata}
 
 **EXTRACTED FEATURES:**
 {features}
@@ -2613,7 +2695,12 @@ target objects that are NOT marked in the visualization, estimate the fraction
 missed, and lower Completeness by that fraction (also list them under
 `missed_features`). Treat under-detection (missing real objects) as exactly as
 serious as over-detection (adding false ones) — do NOT score misses with a
-lighter touch than false positives. This does NOT apply to data-driven
+lighter touch than false positives. For DENSE atom-column detection, judge
+over/under-detection from the zoom-in overlay panels and the reported
+NN/heatmap metrics (short-NN-distance spike = duplicates; coverage gaps =
+misses), NOT from a count-vs-expected ratio — that ratio is only
+order-of-magnitude for multi-sublattice materials, so a moderate value
+(~1.3x) is not over-detection. This does NOT apply to data-driven
 decompositions (NMF/PCA/ICA/FFT), which produce basis patterns rather than a
 per-object census, and it does not mean nitpicking a few small/ambiguous
 features (see below) — it means catching the case where a substantial,
@@ -2626,6 +2713,22 @@ Score: 0.0 (nothing captured) to 1.0 (everything captured).
 - For texture/phase tasks: do classified regions match what you see in the original?
 - For measurement tasks: do extracted values match visual estimates from the image?
 Score: 0.0 (entirely wrong) to 1.0 (all output is correct).
+
+**Wrong science vs. over-production — two causes of low Correctness that need
+opposite feedback.** *Wrong science*: the output is in the wrong place or
+absent — edges off the real boundary, the wrong region analyzed, hallucinated
+or missed structure. The fix is to reanalyze. *Over-production*: a single
+coherent dominant finding IS present and correctly located, but the output
+renders far more structure than the evidence supports — a per-object/per-atom
+edge mesh, dozens of micro-regions, a marker haze — so most of the rendered
+detail is noise riding on a correct result. Score the noise honestly in both
+cases (do NOT inflate an over-produced result), but DIAGNOSE which one it is:
+when the cause is over-production, set `recommended_action` (and the matching
+`suggested_fix`) to "the dominant finding is correct — reduce the output to the
+evidence-supported structure (e.g. the single dominant boundary contour) and
+re-render; prefer simplifying the existing result over switching approach."
+This steers refinement to simplify a correct result rather than abandon it for
+a worse one.
 
 ### C. Relevance — does the output address what was asked?
 - Does the analysis extract the features listed in the quality criteria?
@@ -2745,10 +2848,16 @@ Return JSON:
         tool_schedule = self._TOOL_CONSTRAINT_SCHEDULE
         tool_constraint = tool_schedule[min(level, len(tool_schedule) - 1)]
 
+        sysinfo = state.get("system_info")
+        metadata_str = (
+            json.dumps(sysinfo) if isinstance(sysinfo, dict) and sysinfo
+            else (str(sysinfo).strip() if sysinfo else "Not provided")
+        )
         prompt_text = self.QUALITY_VERIFICATION_PROMPT.format(
             analysis_approach=config.get("analysis_approach", "Unknown"),
             processing_pipeline=config.get("processing_pipeline", "Unknown"),
             quality_criteria=config.get("quality_criteria", "Visual inspection"),
+            metadata=metadata_str,
             features=features_str,
             metrics=metrics_str,
             quality_threshold=self.quality_threshold,
@@ -2792,15 +2901,96 @@ Return JSON:
                 "data": state["original_image_bytes"]
             })
 
-        # Include domain-specific validation criteria from skill
+        # Per-candidate / multi-view QC panels at FULL resolution. A generated
+        # script can save extra verifier views as `verifier_panel_*.png` in the
+        # working dir (e.g. one detection_quality_panels figure per
+        # target_pixel_size candidate). Passing them as SEPARATE images gives each
+        # the model's full per-image resolution budget — stitching many candidate
+        # figures into ONE comparison image (the previous convention) downsizes
+        # every panel below the column-level detail needed to judge detection.
+        # Capped so a wide sweep can't flood the context.
+        try:
+            import glob as _glob
+            _wd = state.get("_verify_working_dir")
+            if _wd:
+                _panels = sorted(_glob.glob(os.path.join(_wd, "verifier_panel_*.png")))
+                _PANEL_CAP = 6
+                if _panels:
+                    if len(_panels) > _PANEL_CAP:
+                        self.logger.info(
+                            f"      {len(_panels)} verifier panels found; passing first {_PANEL_CAP}")
+                        _panels = _panels[:_PANEL_CAP]
+                    prompt_parts.append(
+                        f"\n\n**CANDIDATE QC PANELS ({len(_panels)}, each FULL-resolution — "
+                        f"compare them to judge detection quality):**")
+                    for _pth in _panels:
+                        with open(_pth, "rb") as _pf:
+                            _pb, _pm = _fit_image_under_api_cap(_pf.read())
+                        prompt_parts.append(f"\n_{os.path.basename(_pth)}_")
+                        prompt_parts.append({"mime_type": _pm, "data": _pb})
+        except Exception as _e:
+            self.logger.debug(f"      verifier-panel collection skipped: {_e}")
+
+        # Include domain context from the skill. The verifier judges physical
+        # plausibility, so it needs the same domain PHYSICS the analysis stage
+        # had — without it, it falls back on generic-imaging priors (e.g.
+        # "horizontal contrast band -> illumination/scan artifact") that may not
+        # apply to this modality. Inject the interpretation (physics) section as
+        # well as the validation criteria, not validation alone.
         skill_sections = state.get("skill_sections")
-        if skill_sections and skill_sections.get("validation"):
+        if skill_sections:
             skill_name = state.get("skill_name", "domain skill")
+            if skill_sections.get("interpretation"):
+                prompt_parts.append(
+                    f"\n\n**Domain Physics & Interpretation ({skill_name}):**\n"
+                    "Judge physical plausibility against THIS modality's physics; "
+                    "do not invoke an artifact mechanism or correction that this "
+                    "modality does not support.\n\n"
+                    + skill_sections["interpretation"]
+                )
+            if skill_sections.get("validation"):
+                prompt_parts.append(
+                    f"\n\n**Domain Validation Criteria ({skill_name}):**\n"
+                    "Use these criteria when scoring completeness and correctness.\n\n"
+                    + skill_sections["validation"]
+                )
+
+        from ....skills._shared._registry import (
+            VERIFIER_TOOL_SCRUTINY_PRINCIPLE, format_tool_inventory, get_tools_for)
+        _active = _active_skill_names(state)
+        _tool_inv = format_tool_inventory("image_analysis", active_skills=_active)
+        if _tool_inv:
             prompt_parts.append(
-                f"\n\n**Domain Validation Criteria ({skill_name}):**\n"
-                "Use these criteria when scoring completeness and correctness.\n\n"
-                + skill_sections["validation"]
-            )
+                "\n\n**REGISTERED TOOLS AVAILABLE TO THIS ANALYSIS** — judge the result "
+                "against what each tool actually does and what its outputs mean; do not "
+                "re-derive or hypothesize a failure mode the tool already controls for:\n"
+                + _tool_inv)
+            # Which of those tools THIS iteration's script actually called
+            # (authoritative — the prose pipeline description above can deviate from
+            # the executed code). Parsed from the saved script in the working dir.
+            try:
+                import glob as _g
+                _wd = state.get("_verify_working_dir")
+                _names = [t.name for t in get_tools_for("image_analysis", active_skills=_active)]
+                _src = ""
+                if _wd:
+                    _hits = (_g.glob(os.path.join(_wd, "scripts", "*.py"))
+                             or _g.glob(os.path.join(_wd, "*.py")))
+                    if _hits:
+                        with open(_hits[0]) as _sf:
+                            _src = _sf.read()
+                import re as _re
+                _used = [n for n in _names
+                         if _re.search(rf"\b{_re.escape(n)}\b", _src)]
+                state["_last_tools_used"] = _used   # persisted into quality_history
+                if _used:
+                    prompt_parts.append(
+                        "\n\n**Registered tools this iteration's script actually CALLED:** "
+                        + ", ".join(_used) + " — apply each one's documented behaviour "
+                        "(above) when judging the result.")
+            except Exception:
+                pass
+        prompt_parts.append("\n\n" + VERIFIER_TOOL_SCRUTINY_PRINCIPLE)
 
         state["_last_verify_error"] = None
         try:
@@ -3149,6 +3339,15 @@ Return JSON with:
             self.logger.error(f"Failed to refine config from feedback: {e}")
             return config
 
+    # Modality constants for the shared per-item QC engine (#327 phase 4).
+    # refine_anchor="current": image refits adapt the LATEST attempt's script
+    # (curve anchors on the high-water best) — deliberate asymmetry, preserved.
+    _QC_ENGINE_SPEC = QCEngineSpec(
+        config_key="locked_analysis_config",
+        refine_anchor="current",
+        refit_fail_msg="   Re-analysis failed, stopping verification",
+    )
+
     def _execute_and_verify(
         self,
         state: dict,
@@ -3180,18 +3379,32 @@ Return JSON with:
         pass supplies a soft ``reuse_validity`` verdict the orchestrator can
         act on; it never re-derives the pipeline. Full QC runs only when the
         prior script cannot execute at all.
+
+        The flow runs on the shared ``CodegenQCEngine`` (#327 phase 4); every
+        image-specific stage is a ``qc_*`` hook below whose body moved
+        verbatim from the pre-extraction driver.
         """
-        all_attempts = []
-        verification_history = []
-        judge_result = None
-        best_result = None
-        best_score = -1.0
-        best_config = state.get("locked_analysis_config", {}).copy()
-        quality_threshold = self.quality_threshold
+        engine = CodegenQCEngine(host=self, spec=self._QC_ENGINE_SPEC)
+        ctx = QCItemContext(
+            state=state, data=image_data, data_path=data_path,
+            item_name=image_name, item_idx=image_idx,
+            is_regime_anchor=is_regime_anchor,
+            reuse_script=reuse_script, reuse_source=reuse_source,
+        )
+        return engine.run_item(ctx)
 
-        # Anchor = first image overall OR first in a regime; gets full QC
-        _is_anchor = image_idx == 0 or is_regime_anchor
+    # --- CodegenQCEngine hooks (bodies moved verbatim from the old driver) ---
 
+    def qc_setup(self, ctx: QCItemContext) -> None:
+        ctx.best_config = ctx.state.get("locked_analysis_config", {}).copy()
+        ctx.quality_threshold = self.quality_threshold
+        # Accept decisions route through the gate; captured alongside the
+        # local threshold so both reflect the same snapshot (image has no
+        # mid-run threshold mutation, unlike curve's adjust_threshold).
+        ctx.accept_gate = self._accept_gate()
+        ctx.judge_result = None
+
+    def qc_try_reuse(self, ctx: QCItemContext) -> Optional[dict]:
         # --- #172: locked-script reuse fast path ---
         # A prior image-analysis run supplied via prior_analysis_paths means
         # the new image is unit N+1 of that series: reuse the prior run's
@@ -3202,495 +3415,516 @@ Return JSON with:
         # orchestrator) — it never re-derives the pipeline, since a re-derived
         # pipeline could change the feature columns. The only fallback to full
         # QC is a prior script that cannot execute at all.
-        if reuse_script and _is_anchor:
-            self.logger.info(
-                f"   ♻️  Reusing locked analysis script from prior run "
-                f"'{reuse_source or 'prior'}'..."
-            )
-            reuse_result = self._process_single_image(
-                state=state, image_data=image_data, data_path=data_path,
-                image_name=image_name, image_idx=image_idx,
-                base_script=reuse_script,
-            )
-            if reuse_result.get("success"):
-                # Softer validity guard: a single vision-verification pass,
-                # no iterative re-derivation.
-                verification = self._verify_quality(
-                    state, reuse_result, history=[],
-                    verification_iter=0, annealing_level=0,
-                )
-                v_score = 0.0
-                if verification and isinstance(
-                    verification.get("quality_score"), (int, float)
-                ):
-                    v_score = verification["quality_score"]
-                verdict = "good" if v_score >= quality_threshold else "poor"
-                reuse_result["_quality_score"] = v_score
-                if verdict == "good":
-                    self.logger.info(
-                        f"   ✅ Reused script verified (score = {v_score:.2f} "
-                        f"≥ {quality_threshold}) — pipeline re-derivation "
-                        f"skipped"
-                    )
-                    message = (
-                        f"Reused the locked analysis script from prior run "
-                        f"'{reuse_source or 'prior'}'; vision verification "
-                        f"score {v_score:.2f} meets the threshold "
-                        f"{quality_threshold}."
-                    )
-                else:
-                    self.logger.warning(
-                        f"   ⚠️  Reused script verified low (score = "
-                        f"{v_score:.2f} < {quality_threshold}). Keeping the "
-                        f"result to preserve feature-schema consistency; "
-                        f"flagging it as low-confidence."
-                    )
-                    message = (
-                        f"Reused the locked analysis script from prior run "
-                        f"'{reuse_source or 'prior'}', but vision "
-                        f"verification scored {v_score:.2f}, below the "
-                        f"threshold {quality_threshold}. The new image may "
-                        f"not belong to this series, or imaging conditions "
-                        f"shifted. Extracted features are schema-consistent "
-                        f"but should be treated as low-confidence."
-                    )
-                reuse_result["reuse_validity"] = {
-                    "reused": True,
-                    "source": reuse_source,
-                    "quality_score": v_score,
-                    "threshold": quality_threshold,
-                    "verdict": verdict,
-                    "message": message,
-                }
-                reuse_result["quality_history"] = self._build_quality_history(
-                    v_score, quality_threshold, [],
-                    [verification] if verification else [], None,
-                )
-                if verdict == "poor":
-                    reuse_result["quality_warning"] = message
-                return reuse_result
-            self.logger.warning(
-                f"   ⚠️  Prior analysis script could not execute on this "
-                f"image (even after correction). Falling back to full "
-                f"pipeline re-derivation — the extracted-feature schema may "
-                f"differ from the prior run."
-            )
-
-        # --- Initial analysis (annealing schedule starts here; default T=0) ---
-        # A re-run may start the schedule HIGHER (e.g. hot) via
-        # `_starting_annealing_level`, so it does not repeat early constraint
-        # stages a prior run already found inadequate. Default 0 = unchanged.
-        _start_level = max(0, min(int(state.get("_starting_annealing_level") or 0),
-                                  len(self._CONSTRAINT_ANNEALING_SCHEDULE) - 1))
-        state["_annealing_level"] = _start_level
-
-        # --- Initial analysis ---
-        initial_pipeline = state.get(
-            'locked_analysis_config', {}
-        ).get('processing_pipeline', 'Initial pipeline')
-        self.logger.info(f"   Attempt 1: {initial_pipeline[:80]}...")
-
-        result = self._process_single_image(
-            state=state, image_data=image_data, data_path=data_path,
-            image_name=image_name, image_idx=image_idx, base_script=None,
+        self.logger.info(
+            f"   ♻️  Reusing locked analysis script from prior run "
+            f"'{ctx.reuse_source or 'prior'}'..."
         )
-
-        if result["success"]:
-            # Initial score is provisional — LLM verification is authoritative
-            score = 0.0  # Will be set by verification
-            result["_quality_score"] = score
-            all_attempts.append({
-                "pipeline": initial_pipeline,
-                "score": score,
-                "result": result,
-            })
-
-            if score > best_score:
-                best_score = score
-                best_result = result
-                best_config = state.get("locked_analysis_config", {}).copy()
-
-            user_accepted = False
-
-            # --- Verification loop (for anchor images) ---
-            if _is_anchor:
-                if not best_result or not best_result.get("success"):
-                    self.logger.warning(
-                        "   Initial analysis failed, skipping verification"
-                    )
-                else:
-                    verification_attempts = []
-                    analysis_was_approved = False
-                    current_result = best_result  # track latest for verification
-
-                    # Adaptive annealing state: start frozen, escalate
-                    # only when the best score stalls for multiple iterations.
-                    # Unlike curve fitting (deterministic R²), quality_score is
-                    # LLM-assigned and noisy, so we use a patience counter
-                    # instead of a rate-based formula.
-                    _annealing_level = _start_level
-                    # max(start-1,0): starting AT hot still registers the
-                    # transition into hot; start at 0 restores the original `= 0`.
-                    _previous_annealing_level = max(_start_level - 1, 0)
-                    _stall_count = 0
-                    _PATIENCE = 2
-                    _prev_best_score = best_score
-                    _n_anneal_levels = len(self._CONSTRAINT_ANNEALING_SCHEDULE)
-
-                    for verification_iter in range(self.max_verification_iterations):
-                        self.logger.info(
-                            f"   Verification {verification_iter + 1}/"
-                            f"{self.max_verification_iterations}"
-                            f" (annealing level {_annealing_level})..."
-                        )
-
-                        verification = self._verify_quality(
-                            state, current_result, history=verification_history,
-                            verification_iter=verification_iter,
-                            annealing_level=_annealing_level,
-                        )
-
-                        if verification is None:
-                            # Distinguish an API/transient failure (score
-                            # unknown) from a real negative verdict: tag the
-                            # attempt so the judge isn't misled by a fake 0.0.
-                            _verr = state.get("_last_verify_error")
-                            if _verr and all_attempts:
-                                all_attempts[-1]["verification_error"] = _verr
-                            self.logger.warning(
-                                "   Verification failed, skipping"
-                                + (f" (API error: {_verr})" if _verr else "")
-                            )
-                            break
-
-                        # Extract score first
-                        v_score = verification.get("quality_score", 0.0)
-                        if not isinstance(v_score, (int, float)):
-                            v_score = 0.0
-                        current_result["_quality_score"] = v_score
-
-                        # Update score in all_attempts for this result
-                        if all_attempts:
-                            all_attempts[-1]["score"] = v_score
-
-                        # Track best result (high-water mark)
-                        if v_score > best_score:
-                            best_score = v_score
-                            best_result = current_result
-                            best_config = state.get("locked_analysis_config", {}).copy()
-
-                        # Patience-based adaptive annealing: check if
-                        # best_score improved since last iteration.
-                        if best_score > _prev_best_score:
-                            _stall_count = 0
-                        else:
-                            _stall_count += 1
-                            if _stall_count >= _PATIENCE:
-                                _annealing_level = min(
-                                    _annealing_level + 1,
-                                    _n_anneal_levels - 1,
-                                )
-                                _stall_count = 0
-                                self.logger.info(
-                                    f"   Annealing: {_PATIENCE} stalled "
-                                    f"iterations, escalating to level "
-                                    f"{_annealing_level}"
-                                )
-                        _prev_best_score = best_score
-
-                        # Iteration-based floor: guarantees progression when
-                        # noisy quality scores keep resetting the stall
-                        # counter. Each level gets ~max_iter/n_levels slots
-                        # before the floor forces the next one.
-                        _floor = min(
-                            verification_iter // 2,
-                            _n_anneal_levels - 1,
-                        )
-                        if _floor > _annealing_level:
-                            self.logger.info(
-                                f"   Annealing: iteration floor lifting "
-                                f"level {_annealing_level} -> {_floor}"
-                            )
-                            _annealing_level = _floor
-                            _stall_count = 0
-
-                        _cur_level = _annealing_level
-
-                        # Optional: dump each verification iteration's visualization
-                        # for inspecting the refinement/annealing trajectory. Gated by
-                        # the DUMP_ITER_VIZ env var (a target directory); off by default,
-                        # best-effort so it never affects the analysis.
-                        _dump = os.environ.get("DUMP_ITER_VIZ")
-                        if _dump and current_result and current_result.get("visualization_bytes"):
-                            try:
-                                # Namespace per best-of-N candidate so concurrent
-                                # anchor attempts don't overwrite each other's dumps.
-                                _dump = os.path.join(_dump, state.get("_candidate_tag", ""))
-                                os.makedirs(_dump, exist_ok=True)
-                                with open(os.path.join(_dump,
-                                          f"iter{verification_iter:02d}_T{_cur_level}_q{v_score:.2f}.png"), "wb") as _f:
-                                    _f.write(current_result["visualization_bytes"])
-                            except Exception:
-                                pass
-
-                        verification_attempts.append({
-                            "result": current_result.copy() if current_result else {},
-                            "verification": verification,
-                            "config": state.get("locked_analysis_config", {}).copy(),
-                            "score": v_score,
-                        })
-
-                        verification_history.append({
-                            "quality_score": v_score,
-                            "result_type": verification.get("result_type"),
-                            "config_used": state.get("locked_analysis_config", {}),
-                            "issues_found": verification.get("issues_found", []),
-                            "overall_assessment": verification.get(
-                                "overall_assessment", ""
-                            ),
-                            "recommended_action": verification.get(
-                                "recommended_action", ""
-                            ),
-                            "annealing_level": _cur_level,
-                        })
-
-                        # Log sub-scores if available
-                        c = verification.get("completeness")
-                        cr = verification.get("correctness")
-                        r = verification.get("relevance")
-                        if c is not None or cr is not None or r is not None:
-                            self.logger.info(
-                                f"   Sub-scores: completeness={c}, "
-                                f"correctness={cr}, relevance={r}"
-                            )
-
-                        if best_score >= quality_threshold:
-                            self.logger.info(
-                                f"   Analysis approved (score = {best_score:.2f})"
-                            )
-                            analysis_was_approved = True
-                            break
-
-                        # Log issues and save last recommended action
-                        self._log_verification_issues(verification)
-                        if current_result:
-                            current_result["_last_recommended_action"] = (
-                                verification.get("recommended_action", "")
-                            )
-
-                        # Apply LLM's recommended fixes. Pass the
-                        # accumulated verification_history so the refiner
-                        # can see prior scores/pipelines and recognize
-                        # regressions instead of iterating blindly on the
-                        # previous (possibly degraded) config.
-                        refined_config = self._apply_verification_feedback(
-                            state, verification, history=verification_history
-                        )
-
-                        # If the refinement LLM call failed (transient
-                        # API error), tag the history so the next verifier
-                        # knows the fix was never applied.
-                        refinement_error = refined_config.pop(
-                            "_refinement_error", None
-                        )
-                        if refinement_error:
-                            verification_history[-1]["refinement_error"] = (
-                                refinement_error
-                            )
-
-                        if refined_config == state.get("locked_analysis_config", {}):
-                            # No changes at current temperature — escalate to
-                            # give the LLM more freedom before giving up.
-                            _annealing_level = min(
-                                _annealing_level + 1, _n_anneal_levels - 1
-                            )
-                            if _annealing_level == _cur_level:
-                                self.logger.info(
-                                    "   No config changes at max annealing level, "
-                                    "stopping verification"
-                                )
-                                break
-                            self.logger.info(
-                                f"   No config changes suggested, escalating "
-                                f"to annealing level {_annealing_level}"
-                            )
-                            continue
-
-                        # Clean up old visualization (but not the best result's viz)
-                        old_viz_path = current_result.get("visualization_path")
-                        if (old_viz_path and Path(old_viz_path).exists()
-                                and current_result is not best_result):
-                            try:
-                                os.remove(old_viz_path)
-                            except Exception:
-                                pass
-
-                        state["locked_analysis_config"] = refined_config
-
-                        # Sync skill strictness with adaptive annealing level
-                        state["_annealing_level"] = _annealing_level
-
-                        # Carry the previous attempt's script forward so the
-                        # code generator can adapt rather than regenerate
-                        # from scratch — except on the single iteration
-                        # where the annealing level escalates from < 2 to
-                        # = 2 (hot). That escalation step deliberately
-                        # gets fresh generation so the code generator can
-                        # restructure without anchor bias from the
-                        # structure that prompted the escalation.
-                        _just_escalated_to_hot = (
-                            _annealing_level >= 2
-                            and _previous_annealing_level < 2
-                        )
-                        _refine_from_script = (
-                            None if _just_escalated_to_hot
-                            else (current_result or {}).get("script")
-                        )
-
-                        # Re-analyze with refined config
-                        self.logger.info(
-                            "   Re-analyzing with verification feedback..."
-                        )
-                        verified_result = self._process_single_image(
-                            state=state, image_data=image_data,
-                            data_path=data_path, image_name=image_name,
-                            image_idx=image_idx, base_script=None,
-                            refine_from_script=_refine_from_script,
-                        )
-                        # Stamp the annealing level this re-analysis was generated
-                        # at, so a downstream consumer can tell whether the WINNING
-                        # result came from a hot (fresh-generation) regeneration.
-                        # Mirrors the curve-fitting controller; used by T=2
-                        # auto-distillation to flag a "novel pipeline".
-                        if isinstance(verified_result, dict):
-                            verified_result["_produced_at_level"] = _annealing_level
-                        _previous_annealing_level = _annealing_level
-
-                        if verified_result["success"]:
-                            verified_result["_quality_score"] = 0.0
-                            self.logger.info(
-                                "   Re-analysis complete, awaiting verification..."
-                            )
-
-                            # Track as latest result for next verification,
-                            # but preserve best result/score separately
-                            current_result = verified_result
-                            all_attempts.append({
-                                "pipeline": f"Verification-{verification_iter + 1}",
-                                "score": 0.0,  # will be updated by next verification
-                                "result": verified_result,
-                            })
-                        else:
-                            self.logger.warning(
-                                "   Re-analysis failed, stopping verification"
-                            )
-                            break
-
-                    else:
-                        # Loop exhausted without approval - verify final result
-                        self.logger.info("   Verifying final re-analysis...")
-                        final_verification = self._verify_quality(
-                            state, current_result,
-                            verification_iter=self.max_verification_iterations,
-                            annealing_level=_annealing_level,
-                        )
-
-                        if final_verification:
-                            v_score = final_verification.get(
-                                "quality_score", 0.0
-                            )
-                            if isinstance(v_score, (int, float)):
-                                current_result["_quality_score"] = v_score
-                                if v_score > best_score:
-                                    best_score = v_score
-                                    best_result = current_result
-                                    best_config = state.get("locked_analysis_config", {}).copy()
-
-                            verification_attempts.append({
-                                "result": current_result.copy() if current_result else {},
-                                "verification": final_verification,
-                                "config": state.get(
-                                    "locked_analysis_config", {}
-                                ).copy(),
-                                "score": v_score,
-                            })
-
-                            if best_score >= quality_threshold:
-                                self.logger.info(
-                                    f"   Final analysis approved "
-                                    f"(score = {best_score:.2f})"
-                                )
-                                analysis_was_approved = True
-                            else:
-                                self._log_verification_issues(final_verification)
-
-                        # If verification loop exhausted without approval,
-                        # keep best result and let alternative approaches try next.
-                        # Judge is only called after all alternatives are exhausted.
-
-                    # Restore config to match best result after verification loop
-                    state["locked_analysis_config"] = best_config
-
-            # --- Check if quality is acceptable ---
-            if best_score >= quality_threshold:
+        reuse_result = self._process_single_image(
+            state=ctx.state, image_data=ctx.data, data_path=ctx.data_path,
+            image_name=ctx.item_name, image_idx=ctx.item_idx,
+            base_script=ctx.reuse_script,
+        )
+        if reuse_result.get("success"):
+            # Softer validity guard: a single vision-verification pass,
+            # no iterative re-derivation.
+            verification = self._verify_quality(
+                ctx.state, reuse_result, history=[],
+                verification_iter=0, annealing_level=0,
+            )
+            v_score = 0.0
+            if verification and isinstance(
+                verification.get("quality_score"), (int, float)
+            ):
+                v_score = verification["quality_score"]
+            verdict = "good" if ctx.accept_gate.is_accept(v_score) else "poor"
+            reuse_result["_quality_score"] = v_score
+            if verdict == "good":
                 self.logger.info(
-                    f"Quality score = {best_score:.2f} (meets threshold "
-                    f"{quality_threshold})"
+                    f"   ✅ Reused script verified (score = {v_score:.2f} "
+                    f"≥ {ctx.quality_threshold}) — pipeline re-derivation "
+                    f"skipped"
                 )
-
-                # In CO_PILOT mode, show anchor result and ask for approval.
-                # Suppressed inside best-of-N candidate attempts: interactive
-                # prompts from N worker threads would interleave; the judge
-                # selects automatically and feedback applies to the winner.
-                if (
-                    _is_anchor
-                    and self.enable_human_feedback
-                    and not state.get("_suppress_human_feedback")
-                    and best_result.get("visualization_bytes")
-                ):
-                    user_feedback = self._get_user_feedback_on_result(
-                        state, best_result, best_score
-                    )
-                    if user_feedback:
-                        state.setdefault("human_feedback_log", []).append(str(user_feedback))
-                        best_result, best_score = self._apply_user_feedback(
-                            state, user_feedback, best_result, best_score,
-                            image_data, data_path, image_name,
-                            image_idx, all_attempts,
-                        )
-
-                best_result["quality_history"] = self._build_quality_history(
-                    best_score, quality_threshold, all_attempts,
-                    verification_history, judge_result,
-                    best_result.get("script_errors"),
+                message = (
+                    f"Reused the locked analysis script from prior run "
+                    f"'{ctx.reuse_source or 'prior'}'; vision verification "
+                    f"score {v_score:.2f} meets the threshold "
+                    f"{ctx.quality_threshold}."
                 )
-                self._stamp_hot_deviation(best_result)
-                return best_result
             else:
                 self.logger.warning(
-                    f"Quality score = {best_score:.2f} (below threshold "
-                    f"{quality_threshold})"
+                    f"   ⚠️  Reused script verified low (score = "
+                    f"{v_score:.2f} < {ctx.quality_threshold}). Keeping the "
+                    f"result to preserve feature-schema consistency; "
+                    f"flagging it as low-confidence."
                 )
-
-        else:
-            self.logger.error(
-                f"   Initial analysis failed: "
-                f"{result.get('error', 'Unknown')[:50]}"
+                message = (
+                    f"Reused the locked analysis script from prior run "
+                    f"'{ctx.reuse_source or 'prior'}', but vision "
+                    f"verification scored {v_score:.2f}, below the "
+                    f"threshold {ctx.quality_threshold}. The new image may "
+                    f"not belong to this series, or imaging conditions "
+                    f"shifted. Extracted features are schema-consistent "
+                    f"but should be treated as low-confidence."
+                )
+            reuse_result["reuse_validity"] = {
+                "reused": True,
+                "source": ctx.reuse_source,
+                "quality_score": v_score,
+                "threshold": ctx.quality_threshold,
+                "verdict": verdict,
+                "message": message,
+            }
+            reuse_result["quality_history"] = self._build_quality_history(
+                v_score, ctx.quality_threshold, [],
+                [verification] if verification else [], None,
             )
-            all_attempts.append({
-                "pipeline": initial_pipeline,
-                "score": 0,
-                "result": result,
+            if verdict == "poor":
+                reuse_result["quality_warning"] = message
+            return reuse_result
+        self.logger.warning(
+            f"   ⚠️  Prior analysis script could not execute on this "
+            f"image (even after correction). Falling back to full "
+            f"pipeline re-derivation — the extracted-feature schema may "
+            f"differ from the prior run."
+        )
+        return None
+
+    def qc_run_initial(self, ctx: QCItemContext) -> dict:
+        initial_pipeline = ctx.state.get(
+            'locked_analysis_config', {}
+        ).get('processing_pipeline', 'Initial pipeline')
+        ctx.initial_label = initial_pipeline
+        self.logger.info(f"   Attempt 1: {initial_pipeline[:80]}...")
+
+        self._offer_bank_exemplar(ctx)
+        return self._process_single_image(
+            state=ctx.state, image_data=ctx.data, data_path=ctx.data_path,
+            image_name=ctx.item_name, image_idx=ctx.item_idx, base_script=None,
+        )
+
+    def _offer_bank_exemplar(self, ctx: QCItemContext) -> None:
+        """Adapt-mode script-bank retrieval (#346 step 2) — image mirror of
+        the curve controller's hook: fingerprint the image, stash the best
+        bank match for the FIRST codegen attempt only (consumed by
+        ``_generate_analysis_script`` at annealing level 0, preserving the
+        hot script-drop). Explicit ``prior_analysis_paths`` wins over the
+        bank. Failure-isolated."""
+        state = ctx.state
+        state.pop("_bank_exemplar", None)
+        try:
+            from scilink.skills._shared import _script_bank
+            from scilink.skills._shared.image_analysis_tools import resolve_pixel_size_nm
+            if not _script_bank.bank_enabled() or state.get("prior_analysis_paths"):
+                return
+            img = np.asarray(ctx.data) if ctx.data is not None else None
+            if img is None or img.ndim < 2:
+                return
+            fingerprint = _script_bank.image_fingerprint(
+                img,
+                pixel_size_nm=resolve_pixel_size_nm(
+                    state.get("system_info"), img.shape),
+            )
+            matches = _script_bank.find_exemplar(
+                "image_analysis", fingerprint,
+                _script_bank.measurement_context(state.get("system_info") or {}),
+            )
+            if matches:
+                match = matches[0]
+                state["_bank_exemplar"] = match
+                _script_bank.mark_retrieved("image_analysis", match["record"]["id"])
+                self.logger.info(
+                    f"   🏦 Bank exemplar offered: id={match['record']['id']} "
+                    f"score={match['score']} "
+                    f"({str(match['record'].get('technique_signals', {}).get('analysis_type') or '')[:60]})"
+                )
+        except Exception as e:
+            self.logger.warning(f"Bank retrieval skipped: {e}")
+
+    def qc_record_initial(self, ctx: QCItemContext, result: dict) -> None:
+        # Initial score is provisional — LLM verification is authoritative
+        score = 0.0  # Will be set by verification
+        result["_quality_score"] = score
+        ctx.all_attempts.append({
+            "pipeline": ctx.initial_label,
+            "score": score,
+            "result": result,
+        })
+
+        if score > ctx.best_score:
+            ctx.best_score = score
+            ctx.best_result = result
+            ctx.best_config = ctx.state.get("locked_analysis_config", {}).copy()
+
+    def qc_verification_bypass(self, ctx: QCItemContext) -> bool:
+        if (ctx.is_anchor and self.max_verification_iterations <= 0
+                and ctx.best_result and ctx.best_result.get("success")):
+            # Explicit verification bypass (max_verification_iterations=0):
+            # the caller asked for a fast / in-situ turnaround (#271).
+            # Accept the successful initial analysis as-is, with no LLM
+            # verification or refinement loop. Only triggers at <= 0, so
+            # the default thorough path (>= 1) is unaffected. A failed
+            # initial analysis (no success) still falls through to the
+            # loop below for the recovery path rather than locking garbage.
+            self.logger.info(
+                "   ⏩ Verification bypassed (max_verification_iterations=0); "
+                "accepting initial analysis without LLM verification")
+            ctx.approved = True
+            # The initial score is provisional (0.0 — verification is
+            # authoritative, and none ran), so qc_post_verification's
+            # accept gate would reject it. Flag the bypass so it returns
+            # the result directly.
+            ctx._verification_bypassed = True
+            return True
+        return False
+
+    def qc_log_skip_verification(self, ctx: QCItemContext) -> None:
+        self.logger.warning(
+            "   Initial analysis failed, skipping verification"
+        )
+
+    def qc_loop_setup(self, ctx: QCItemContext) -> None:
+        # Adaptive annealing: unlike curve fitting (deterministic R²),
+        # quality_score is LLM-assigned and noisy, so escalation uses a
+        # patience counter instead of a rate-based formula (see qc_assess).
+        ctx.verification_attempts = []
+
+    def qc_verify(self, ctx: QCItemContext) -> Optional[dict]:
+        return self._verify_quality(
+            ctx.state, ctx.current_result, history=ctx.verification_history,
+            verification_iter=ctx.iteration,
+            annealing_level=ctx.annealing_level,
+        )
+
+    def qc_on_verify_none(self, ctx: QCItemContext) -> None:
+        # Distinguish an API/transient failure (score
+        # unknown) from a real negative verdict: tag the
+        # attempt so the judge isn't misled by a fake 0.0.
+        _verr = ctx.state.get("_last_verify_error")
+        if _verr and ctx.all_attempts:
+            ctx.all_attempts[-1]["verification_error"] = _verr
+        self.logger.warning(
+            "   Verification failed, skipping"
+            + (f" (API error: {_verr})" if _verr else "")
+        )
+
+    def qc_assess(self, ctx: QCItemContext, verification: dict) -> None:
+        # Extract score first
+        v_score = verification.get("quality_score", 0.0)
+        if not isinstance(v_score, (int, float)):
+            v_score = 0.0
+        ctx.current_result["_quality_score"] = v_score
+
+        # Update score in all_attempts for this result
+        if ctx.all_attempts:
+            ctx.all_attempts[-1]["score"] = v_score
+
+        # Track best result (high-water mark)
+        if v_score > ctx.best_score:
+            ctx.best_score = v_score
+            ctx.best_result = ctx.current_result
+            ctx.best_config = ctx.state.get("locked_analysis_config", {}).copy()
+
+        # Patience-based adaptive annealing: check if
+        # best_score improved since last iteration.
+        _PATIENCE = 2
+        if ctx.best_score > ctx.prev_best_score:
+            ctx.stall_count = 0
+        else:
+            ctx.stall_count += 1
+            if ctx.stall_count >= _PATIENCE:
+                ctx.annealing_level = min(
+                    ctx.annealing_level + 1,
+                    ctx.n_levels - 1,
+                )
+                ctx.stall_count = 0
+                self.logger.info(
+                    f"   Annealing: {_PATIENCE} stalled "
+                    f"iterations, escalating to level "
+                    f"{ctx.annealing_level}"
+                )
+        ctx.prev_best_score = ctx.best_score
+
+        # Iteration-based floor: guarantees progression when
+        # noisy quality scores keep resetting the stall
+        # counter. Each level gets ~max_iter/n_levels slots
+        # before the floor forces the next one.
+        # Front-loaded floor, adaptive to max_verification_iterations:
+        # one iteration at level 0, then spread the remaining N-1
+        # iterations evenly across the upper levels. This unlocks the
+        # permissive T=1 (swap/modify) rung at iter 1 regardless of N
+        # — swapping is then an OPTION, not a requirement, so reaching
+        # it early is low-risk — while full-freedom T=2 (custom code,
+        # where vetted tools get abandoned) stays a later resort
+        # (~midway for a 3-level ladder). For N=7 this is
+        # (0,1,1,1,2,2,2). Was linear `verification_iter // 2`.
+        _N = max(self.max_verification_iterations, 2)
+        _floor = 0 if ctx.iteration == 0 else min(
+            ctx.n_levels - 1,
+            1 + ((ctx.iteration - 1) * (ctx.n_levels - 1)) // (_N - 1),
+        )
+        if _floor > ctx.annealing_level:
+            self.logger.info(
+                f"   Annealing: iteration floor lifting "
+                f"level {ctx.annealing_level} -> {_floor}"
+            )
+            ctx.annealing_level = _floor
+            ctx.stall_count = 0
+
+        _cur_level = ctx.annealing_level
+
+        # Optional: dump each verification iteration's visualization
+        # for inspecting the refinement/annealing trajectory. Gated by
+        # the DUMP_ITER_VIZ env var (a target directory); off by default,
+        # best-effort so it never affects the analysis.
+        _dump = os.environ.get("DUMP_ITER_VIZ")
+        if _dump and ctx.current_result and ctx.current_result.get("visualization_bytes"):
+            try:
+                # Namespace per best-of-N candidate so concurrent
+                # anchor attempts don't overwrite each other's dumps.
+                _dump = os.path.join(_dump, ctx.state.get("_candidate_tag", ""))
+                os.makedirs(_dump, exist_ok=True)
+                with open(os.path.join(_dump,
+                          f"iter{ctx.iteration:02d}_T{_cur_level}_q{v_score:.2f}.png"), "wb") as _f:
+                    _f.write(ctx.current_result["visualization_bytes"])
+            except Exception:
+                pass
+
+        ctx.verification_attempts.append({
+            "result": ctx.current_result.copy() if ctx.current_result else {},
+            "verification": verification,
+            "config": ctx.state.get("locked_analysis_config", {}).copy(),
+            "score": v_score,
+        })
+
+        ctx.verification_history.append({
+            "quality_score": v_score,
+            "result_type": verification.get("result_type"),
+            "tools_used": ctx.state.get("_last_tools_used", []),
+            "config_used": ctx.state.get("locked_analysis_config", {}),
+            "issues_found": verification.get("issues_found", []),
+            "overall_assessment": verification.get(
+                "overall_assessment", ""
+            ),
+            "recommended_action": verification.get(
+                "recommended_action", ""
+            ),
+            "annealing_level": _cur_level,
+        })
+
+        # Log sub-scores if available
+        c = verification.get("completeness")
+        cr = verification.get("correctness")
+        r = verification.get("relevance")
+        if c is not None or cr is not None or r is not None:
+            self.logger.info(
+                f"   Sub-scores: completeness={c}, "
+                f"correctness={cr}, relevance={r}"
+            )
+
+    def qc_check_accept(self, ctx: QCItemContext, verification: dict) -> bool:
+        if ctx.accept_gate.is_accept(ctx.best_score):
+            self.logger.info(
+                f"   Analysis approved (score = {ctx.best_score:.2f})"
+            )
+            return True
+        return False
+
+    def qc_refine(self, ctx: QCItemContext, verification: dict) -> dict:
+        # Log issues and save last recommended action
+        self._log_verification_issues(verification)
+        if ctx.current_result:
+            ctx.current_result["_last_recommended_action"] = (
+                verification.get("recommended_action", "")
+            )
+
+        # Apply LLM's recommended fixes. Pass the
+        # accumulated verification_history so the refiner
+        # can see prior scores/pipelines and recognize
+        # regressions instead of iterating blindly on the
+        # previous (possibly degraded) config.
+        return self._apply_verification_feedback(
+            ctx.state, verification, history=ctx.verification_history
+        )
+
+    def qc_refit(self, ctx: QCItemContext, verification: dict,
+                 refine_from: Optional[str], just_escalated_to_hot: bool) -> dict:
+        # The engine carries the previous attempt's script forward so the
+        # code generator can adapt rather than regenerate from scratch —
+        # except on the single iteration where the annealing level
+        # escalates into hot, which deliberately gets fresh generation so
+        # the code generator can restructure without anchor bias from the
+        # structure that prompted the escalation.
+
+        # Re-analyze with refined config
+        self.logger.info(
+            "   Re-analyzing with verification feedback..."
+        )
+        # Timeout-aware refit context (matches curve): the stall counter
+        # that drives annealing is cause-blind, so a hot rewrite needs to be
+        # TOLD when the trailing failures were budget failures. No trailing
+        # timeouts -> no issues passed, no behavior change.
+        issues = None
+        n_timeouts = trailing_timeout_failures(ctx.all_attempts)
+        if n_timeouts:
+            issues = [
+                f"EXECUTION BUDGET: the previous {n_timeouts} attempt(s) "
+                f"failed by execution TIMEOUT, not by analysis quality. The "
+                f"next approach must be computationally cheaper (vectorized, "
+                f"cheaper segmentation/detection, fewer expensive stages) — "
+                f"a different but equally slow approach will fail the same "
+                f"way."
+            ]
+        return self._process_single_image(
+            state=ctx.state, image_data=ctx.data,
+            data_path=ctx.data_path, image_name=ctx.item_name,
+            image_idx=ctx.item_idx, base_script=None,
+            refine_from_script=refine_from,
+            refine_from_issues=issues,
+        )
+
+    def qc_after_refit(self, ctx: QCItemContext, verified_result: dict,
+                       verification: dict) -> None:
+        verified_result["_quality_score"] = 0.0
+        self.logger.info(
+            "   Re-analysis complete, awaiting verification..."
+        )
+
+        # Track as latest result for next verification,
+        # but preserve best result/score separately
+        ctx.current_result = verified_result
+        ctx.all_attempts.append({
+            "pipeline": f"Verification-{ctx.iteration + 1}",
+            "score": 0.0,  # will be updated by next verification
+            "result": verified_result,
+        })
+
+    def qc_final_verify(self, ctx: QCItemContext) -> None:
+        # Loop exhausted without approval - verify final result
+        self.logger.info("   Verifying final re-analysis...")
+        final_verification = self._verify_quality(
+            ctx.state, ctx.current_result,
+            verification_iter=self.max_verification_iterations,
+            annealing_level=ctx.annealing_level,
+        )
+
+        if final_verification:
+            v_score = final_verification.get(
+                "quality_score", 0.0
+            )
+            if isinstance(v_score, (int, float)):
+                ctx.current_result["_quality_score"] = v_score
+                if v_score > ctx.best_score:
+                    ctx.best_score = v_score
+                    ctx.best_result = ctx.current_result
+                    ctx.best_config = ctx.state.get("locked_analysis_config", {}).copy()
+
+            ctx.verification_attempts.append({
+                "result": ctx.current_result.copy() if ctx.current_result else {},
+                "verification": final_verification,
+                "config": ctx.state.get(
+                    "locked_analysis_config", {}
+                ).copy(),
+                "score": v_score,
             })
+
+            if ctx.accept_gate.is_accept(ctx.best_score):
+                self.logger.info(
+                    f"   Final analysis approved "
+                    f"(score = {ctx.best_score:.2f})"
+                )
+                ctx.approved = True
+            else:
+                self._log_verification_issues(final_verification)
+
+        # If verification loop exhausted without approval,
+        # keep best result and let alternative approaches try next.
+        # Judge is only called after all alternatives are exhausted.
+
+    def qc_post_verification(self, ctx: QCItemContext) -> Optional[dict]:
+        # --- Explicit fast-path bypass (#271) ---
+        # The initial score is provisional (0.0) when no verification ran,
+        # so the accept gate below cannot pass it; return the accepted
+        # result directly. Narrowly scoped to the bypass flag — a normal
+        # loop-approved result still goes through the gate + the CO_PILOT
+        # human-feedback prompt below.
+        if getattr(ctx, "_verification_bypassed", False):
+            quality_history = self._build_quality_history(
+                ctx.best_score, ctx.quality_threshold, ctx.all_attempts,
+                ctx.verification_history, ctx.judge_result,
+                ctx.best_result.get("script_errors"),
+            )
+            quality_history["approved"] = True
+            quality_history["approved_by"] = "bypass"
+            ctx.best_result["quality_history"] = quality_history
+            self._stamp_hot_deviation(ctx.best_result)
+            return ctx.best_result
+
+        # --- Check if quality is acceptable ---
+        if ctx.accept_gate.is_accept(ctx.best_score):
+            self.logger.info(
+                f"Quality score = {ctx.best_score:.2f} (meets threshold "
+                f"{ctx.quality_threshold})"
+            )
+
+            # In CO_PILOT mode, show anchor result and ask for approval.
+            # Suppressed inside best-of-N candidate attempts: interactive
+            # prompts from N worker threads would interleave; the judge
+            # selects automatically and feedback applies to the winner.
+            if (
+                ctx.is_anchor
+                and self.enable_human_feedback
+                and not ctx.state.get("_suppress_human_feedback")
+                and ctx.best_result.get("visualization_bytes")
+            ):
+                user_feedback = self._get_user_feedback_on_result(
+                    ctx.state, ctx.best_result, ctx.best_score
+                )
+                if user_feedback:
+                    ctx.state.setdefault("human_feedback_log", []).append(str(user_feedback))
+                    ctx.best_result, ctx.best_score = self._apply_user_feedback(
+                        ctx.state, user_feedback, ctx.best_result, ctx.best_score,
+                        ctx.data, ctx.data_path, ctx.item_name,
+                        ctx.item_idx, ctx.all_attempts,
+                    )
+
+            ctx.best_result["quality_history"] = self._build_quality_history(
+                ctx.best_score, ctx.quality_threshold, ctx.all_attempts,
+                ctx.verification_history, ctx.judge_result,
+                ctx.best_result.get("script_errors"),
+            )
+            self._stamp_hot_deviation(ctx.best_result)
+            return ctx.best_result
+        else:
+            self.logger.warning(
+                f"Quality score = {ctx.best_score:.2f} (below threshold "
+                f"{ctx.quality_threshold})"
+            )
+        return None
+
+    def qc_record_initial_failure(self, ctx: QCItemContext, result: dict) -> None:
+        self.logger.error(
+            f"   Initial analysis failed: "
+            f"{result.get('error', 'Unknown')[:50]}"
+        )
+        ctx.all_attempts.append({
+            "pipeline": ctx.initial_label,
+            "score": 0,
+            "result": result,
+        })
+
+    def qc_fallback(self, ctx: QCItemContext) -> dict:
+        state = ctx.state
+        quality_threshold = ctx.quality_threshold
+        judge_result = ctx.judge_result
 
         # --- Human feedback for poor quality (if enabled) ---
         if (
             self.enable_human_feedback
-            and _is_anchor
+            and ctx.is_anchor
             and not state.get("_suppress_human_feedback")
         ):
             feedback_result = self._get_human_feedback_for_poor_quality(
-                state, best_result, all_attempts
+                state, ctx.best_result, ctx.all_attempts
             )
 
             if feedback_result and feedback_result.get("action") == "retry":
@@ -3701,8 +3935,8 @@ Return JSON with:
                 state["locked_analysis_config"] = refined_config
 
                 human_guided_result = self._process_single_image(
-                    state=state, image_data=image_data, data_path=data_path,
-                    image_name=image_name, image_idx=image_idx,
+                    state=state, image_data=ctx.data, data_path=ctx.data_path,
+                    image_name=ctx.item_name, image_idx=ctx.item_idx,
                     base_script=None,
                 )
 
@@ -3720,11 +3954,11 @@ Return JSON with:
                         f"   Human-guided result: score = {human_score:.2f}"
                     )
 
-                    if human_score > best_score:
-                        best_score = human_score
-                        best_result = human_guided_result
-                        best_config = refined_config.copy()
-                        if _is_anchor:
+                    if human_score > ctx.best_score:
+                        ctx.best_score = human_score
+                        ctx.best_result = human_guided_result
+                        ctx.best_config = refined_config.copy()
+                        if ctx.is_anchor:
                             state["locked_analysis_config"] = refined_config
                     else:
                         state["locked_analysis_config"] = original_config
@@ -3737,10 +3971,10 @@ Return JSON with:
         # judge — given the error context — should adjudicate on the actual
         # result/visualization rather than trusting the missing score.
         _verify_errored = any(
-            a.get("verification_error") for a in all_attempts
+            a.get("verification_error") for a in ctx.all_attempts
         )
-        if best_score < quality_threshold and (
-            len(all_attempts) > 1 or _verify_errored
+        if ctx.best_score < quality_threshold and (
+            len(ctx.all_attempts) > 1 or _verify_errored
         ):
             self.logger.info(
                 "No result approved after all attempts - calling judge..."
@@ -3753,46 +3987,46 @@ Return JSON with:
                     "score": a.get("score", 0),
                     "verification_error": a.get("verification_error"),
                 }
-                for a in all_attempts
+                for a in ctx.all_attempts
             ]
             judge_result = self._judge_select_best(judge_attempts)
 
             selected_index = judge_result.get("selected_index")
             if selected_index is not None:
                 idx = selected_index
-                selected = all_attempts[idx]
-                best_result = selected["result"]
-                best_score = selected["score"]
+                selected = ctx.all_attempts[idx]
+                ctx.best_result = selected["result"]
+                ctx.best_score = selected["score"]
                 if selected.get("config"):
-                    best_config = selected["config"].copy()
+                    ctx.best_config = selected["config"].copy()
                     state["locked_analysis_config"] = selected["config"]
                 self.logger.info(
                     f"   Judge selected attempt {idx + 1} "
-                    f"(score = {best_score:.2f})"
+                    f"(score = {ctx.best_score:.2f})"
                 )
                 if judge_result.get("reasoning"):
-                    best_result["judge_reasoning"] = judge_result[
+                    ctx.best_result["judge_reasoning"] = judge_result[
                         "reasoning"
                     ][:500]
                 # Concise, downstream-readable reason the selected best carries a
                 # low/zero score (best-of-flawed vs. score-missing-from-API-error).
                 if judge_result.get("score_explanation"):
-                    best_result["score_explanation"] = judge_result[
+                    ctx.best_result["score_explanation"] = judge_result[
                         "score_explanation"
                     ][:400]
 
         # --- Summarize plan history ---
-        multiple_attempts = len(all_attempts) > 1
+        multiple_attempts = len(ctx.all_attempts) > 1
         if multiple_attempts:
             summary_lines = []
             summary_lines.append(
-                f"Original plan: {initial_pipeline[:100]}"
+                f"Original plan: {ctx.initial_label[:100]}"
             )
             summary_lines.append(
                 f"Original plan score: "
-                f"{all_attempts[0].get('score', 'N/A')}"
+                f"{ctx.all_attempts[0].get('score', 'N/A')}"
             )
-            for a in all_attempts[1:]:
+            for a in ctx.all_attempts[1:]:
                 summary_lines.append(
                     f"{a.get('pipeline', 'N/A')[:80]} "
                     f"(score: {a.get('score', 'N/A')})"
@@ -3811,42 +4045,59 @@ Return JSON with:
             print("=" * 60)
 
         # --- Return best available result ---
-        if best_result:
-            _expl = best_result.get("score_explanation")
-            best_result["quality_warning"] = (
-                f"Quality score = {best_score:.2f} below threshold "
+        if ctx.best_result:
+            _expl = ctx.best_result.get("score_explanation")
+            ctx.best_result["quality_warning"] = (
+                f"Quality score = {ctx.best_score:.2f} below threshold "
                 f"{quality_threshold}"
                 + (f". {_expl}" if _expl else "")
             )
-            best_result["attempted_pipelines"] = [
-                a["pipeline"] for a in all_attempts
+            ctx.best_result["attempted_pipelines"] = [
+                a["pipeline"] for a in ctx.all_attempts
             ]
             if multiple_attempts:
-                best_result["plan_deviation_summary"] = plan_summary
+                ctx.best_result["plan_deviation_summary"] = plan_summary
             self.logger.warning(
                 f"Proceeding with best available result "
-                f"(score = {best_score:.2f})"
+                f"(score = {ctx.best_score:.2f})"
             )
 
-            if _is_anchor:
-                state["locked_analysis_config"] = best_config
+            if ctx.is_anchor:
+                state["locked_analysis_config"] = ctx.best_config
 
-            best_result["quality_history"] = self._build_quality_history(
-                best_score, quality_threshold, all_attempts,
-                verification_history, judge_result,
-                best_result.get("script_errors"),
+            ctx.best_result["quality_history"] = self._build_quality_history(
+                ctx.best_score, quality_threshold, ctx.all_attempts,
+                ctx.verification_history, judge_result,
+                ctx.best_result.get("script_errors"),
             )
-            return best_result
+            return ctx.best_result
         else:
-            return {
-                "index": image_idx,
-                "name": image_name,
+            # Carry error detail, the structured failure-mode tag, and the
+            # per-attempt audit trail from the underlying attempt result
+            # (matches curve; without this the anchor's fallback dict lost
+            # the kind=timeout tag that _process_single_image set).
+            last_result = next(
+                (r for r in ((a.get("result") or {})
+                             for a in reversed(ctx.all_attempts))
+                 if r.get("error")),
+                {},
+            )
+            last_err = last_result.get("error")
+            failure = {
+                "index": ctx.item_idx,
+                "name": ctx.item_name,
                 "success": False,
-                "error": "All analysis attempts failed",
-                "attempts": len(all_attempts),
+                "error": ("All analysis attempts failed"
+                          + (f": {last_err}" if last_err else "")),
+                "attempts": len(ctx.all_attempts),
                 "extracted_features": {},
                 "quality_metrics": {},
             }
+            if last_result.get("kind"):
+                failure["kind"] = last_result["kind"]
+            if last_result.get("script_errors"):
+                failure["script_errors"] = last_result["script_errors"]
+            return failure
 
     # Total image-byte budget for the best-of-N judge call (original image +
     # N candidate visualizations); per-image cap is derived from it.
@@ -3899,7 +4150,7 @@ Return JSON with:
         from ....utils.log_context import register_worker, unregister_worker
         _parent_thread = _threading.get_ident()
 
-        def _run_candidate(i: int) -> tuple:
+        def _run_candidate(i: int, tagged: bool = True) -> tuple:
             # Shallow-copy state per attempt (cheap; shared fields are
             # read-only) but deep-copy the locked config: the QC loop refines
             # it in place per attempt and the winner's refinement must win.
@@ -3910,12 +4161,24 @@ Return JSON with:
                 f"{CANDIDATES_DIR_NAME}/cand_{i:02d}"
             )
             job_state["_suppress_human_feedback"] = True
-            # Attribute this worker's log records to the calling (chat)
-            # thread with a candidate prefix, so the detailed verification
-            # narration stays visible in the UI verbose panel and the CLI
-            # interleave is attributable.
-            register_worker(_parent_thread, f"cand_{i:02d}")
+            # Always register so this worker's log records route to the calling
+            # (chat) thread and stay visible in the UI verbose panel. The [cand]
+            # PREFIX, however, is added only when several candidates run
+            # concurrently (interleaved output needs attribution); a lone
+            # candidate keeps clean, unprefixed — but still visible — logs.
+            register_worker(_parent_thread, f"cand_{i:02d}", prefix=tagged)
             try:
+                # Ensemble diversity: each fan-out candidate (>=1) generates its
+                # OWN independent plan — like running the agent again, divergent
+                # approaches from inherent sampling, not a shared locked plan.
+                # Candidate 0 keeps the (human-approved) primary plan. Toggle
+                # off with state["independent_candidate_plans"] = False.
+                if (i >= 1 and self.replanner is not None
+                        and job_state.get("independent_candidate_plans", True)):
+                    self.logger.info(
+                        "Planning an independent approach for this candidate..."
+                    )
+                    self.replanner.replan_headless(job_state)
                 result = self._execute_and_verify(
                     state=job_state, image_data=image_data,
                     data_path=data_path, image_name=image_name,
@@ -3929,9 +4192,13 @@ Return JSON with:
 
         def _run_attempts(indices) -> None:
             indices = list(indices)
+            # Prefix worker logs with the candidate tag only when more than one
+            # candidate runs at once (interleaved output needs attribution);
+            # a single candidate stays unprefixed.
+            tagged = len(indices) > 1
             with ThreadPoolExecutor(max_workers=min(len(indices), 6)) as pool:
                 future_to_attempt = {
-                    pool.submit(_run_candidate, i): i for i in indices
+                    pool.submit(_run_candidate, i, tagged): i for i in indices
                 }
                 done_count = 0
                 for future in as_completed(future_to_attempt):
@@ -4040,11 +4307,17 @@ Return JSON with:
             _run_attempts([0])
             if not self._candidate_fast_accept(candidates[0]):
                 escalated = True
+                # Attempt 0 was weak. Fan out to genuinely different approaches:
+                # each candidate >=1 replans independently (see _run_candidate),
+                # so escalation explores alternatives rather than resampling the
+                # one plan that just underperformed.
                 self.logger.info(
-                    f"First attempt weak "
+                    f"First attempt not a clean win "
                     f"(score={candidates[0]['score']:.2f}, "
-                    f"iterations={candidates[0]['iterations']}) - "
-                    f"escalating to {n} candidates"
+                    f"iterations={candidates[0]['iterations']}, "
+                    f"climbed_to_hot="
+                    f"{self._candidate_climbed_to_hot(candidates[0])}) - "
+                    f"escalating to {n} independently-planned candidates"
                 )
                 _run_attempts(range(1, n))
         else:
@@ -4076,24 +4349,18 @@ Return JSON with:
         )
 
         # --- Join approval (CO_PILOT/AUTOPILOT) ---
+        # Only prompt when there is more than one candidate to compare. A single
+        # fast-accepted candidate (the escalation probe that passed the gate, or
+        # a single non-escalation attempt) just proceeds — the best-of-N
+        # comparison menu is meaningless for one result.
         if (
             self.enable_human_feedback
             and not state.get("_suppress_human_feedback")
+            and len(candidates) > 1
         ):
             choice = self._get_bestofn_join_approval(
-                candidates, winner, judge_info,
-                allow_more=(escalation and not escalated
-                            and len(candidates) < n),
+                candidates, winner, judge_info, allow_more=False,
             )
-            if choice == "more":
-                escalated = True
-                _run_attempts(range(1, n))
-                winner, judge_info = _select()
-                if winner is None:
-                    return candidates[0]["result"]
-                choice = self._get_bestofn_join_approval(
-                    candidates, winner, judge_info, allow_more=False
-                )
             if isinstance(choice, int):
                 winner = next(
                     c for c in candidates if c["attempt"] == choice
@@ -4134,19 +4401,56 @@ Return JSON with:
         }
         return result
 
-    # Escalation fast-accept gate: attempt 0 is accepted without fan-out when
-    # it passed verification with margin and converged quickly. Margin 0.15
-    # calibrated on 12 live fixed-3 runs (8 real TEM/OM/AFM benchmark images
-    # + 4 synthetic ground-truth runs): every fast-fire at score >= 0.85 was
-    # cost-free vs the full 3-way judge; the single fire below 0.85 (0.82)
-    # was the only real miss.
-    ESCALATION_SCORE_MARGIN = 0.15
-    ESCALATION_MAX_FAST_ITERS = 2
+    # Escalation fast-accept gate: attempt 0 is accepted without fan-out
+    # UNLESS it shows a sign of struggle. "Struggle" is read from the
+    # verification loop's own telemetry, not a raw iteration count:
+    #   - it failed, was not approved, or declined (#289), OR
+    #   - it landed only razor-thin above threshold, OR
+    #   - the adaptive annealing loop had to CLIMB into HOT (escalate to fully
+    #     relaxed plan constraints under stall) to get there.
+    # Note the signal is CLIMBING into hot, not BEING at hot: if a caller
+    # (an orchestrator / a re-run / a deepen turn) STARTS the fit at hot, then
+    # operating at hot is the baseline, not a struggle — reaching hot in that
+    # case must NOT trigger escalation. So we compare the trajectory's max
+    # level against its STARTING level. The margin is a thin backstop against a
+    # barely-over approval (was 0.15, which rejected genuinely good ~0.80
+    # results and fanned out needlessly — the trigger for this gate's redesign).
+    ESCALATION_SCORE_MARGIN = 0.05
+
+    @property
+    def _hot_annealing_level(self) -> int:
+        return len(self._CONSTRAINT_ANNEALING_SCHEDULE) - 1
+
+    @staticmethod
+    def _candidate_max_annealing_level(c: dict) -> int:
+        """Highest annealing level the candidate's verification loop reached."""
+        iters = (
+            (c["result"].get("quality_history") or {})
+            .get("verification_iterations") or []
+        )
+        return max(
+            (it.get("annealing_level", 0) for it in iters), default=0
+        )
+
+    def _candidate_climbed_to_hot(self, c: dict) -> bool:
+        """True only if the loop ESCALATED into hot annealing under stall —
+        i.e. it started below hot and had to climb there. A fit that STARTED at
+        hot (a caller set the starting annealing level) did not struggle, so
+        reaching hot is not held against it."""
+        iters = (
+            (c["result"].get("quality_history") or {})
+            .get("verification_iterations") or []
+        )
+        if not iters:
+            return False
+        levels = [it.get("annealing_level", 0) for it in iters]
+        hot = self._hot_annealing_level
+        return max(levels) >= hot and levels[0] < hot
 
     def _candidate_fast_accept(self, c: dict) -> bool:
         # Never fast-accept a null/decline (#289): the verifier scores
         # rigorous nulls high (no visible errors to deduct) and they converge
-        # fast, so both fast-accept criteria are biased toward them. A decline
+        # fast, so the fast-accept criteria are biased toward them. A decline
         # always escalates so the judge can compare it against attempts that
         # actually delivered. Absent result_type (older verifier output) is
         # treated as delivered.
@@ -4162,7 +4466,7 @@ Return JSON with:
             and c["approved"]
             and c["score"] >= self.quality_threshold
             + self.ESCALATION_SCORE_MARGIN
-            and c["iterations"] <= self.ESCALATION_MAX_FAST_ITERS
+            and not self._candidate_climbed_to_hot(c)
         )
 
     def _get_bestofn_join_approval(
@@ -4219,31 +4523,34 @@ Return JSON with:
                 )
             print("-" * 60)
 
-            response = input(
-                f"\nYour choice (Enter = accept candidate "
-                f"{winner['attempt']}): "
-            ).strip()
+            for _ in range(3):
+                response = input(
+                    f"\nYour choice (Enter = accept candidate "
+                    f"{winner['attempt']}): "
+                ).strip()
 
-            if not response:
-                return None
-            if allow_more and response.lower() == "more":
-                print("Running the remaining candidates...")
-                return "more"
-            if response.isdigit():
-                idx = int(response)
-                ok = any(
-                    c["attempt"] == idx and c["success"]
-                    for c in candidates
-                )
-                if ok:
-                    print(f"Using candidate {idx}.")
-                    return idx
+                if not response:
+                    return None
+                if allow_more and response.lower() == "more":
+                    print("Running the remaining candidates...")
+                    return "more"
+                if response.isdigit():
+                    idx = int(response)
+                    if any(c["attempt"] == idx and c["success"]
+                           for c in candidates):
+                        print(f"Using candidate {idx}.")
+                        return idx
+                    print(f"No successful candidate {idx} to use.")
+                    continue
+                # SELECTION step, not a refine step: do not silently discard
+                # unrecognized free text — re-prompt with the valid options so
+                # the input is never quietly dropped.
                 print(
-                    f"No successful candidate {idx}; accepting the "
-                    f"judge's pick."
+                    "Unrecognized input. Press Enter to accept candidate "
+                    f"{winner['attempt']}, or type a candidate number"
+                    + (" or 'more'" if allow_more else "") + "."
                 )
-                return None
-            print("Unrecognized input; accepting the judge's pick.")
+            print("No valid choice entered; accepting the judge's pick.")
             return None
         finally:
             for p in review_paths:
@@ -4468,37 +4775,23 @@ Return JSON with:
     ) -> dict:
         """Build a compact quality history dict for the best result.
 
-        Captures problem→solution pairs at every level: script errors,
-        verification iterations, alternative approaches, and judge reasoning.
+        Delegates to the shared builder (``_verification_record``) with the
+        image keymap — output is byte-identical to the historical inline
+        version (golden-pinned).
         """
-        return {
-            "final_score": best_score,
-            "threshold": quality_threshold,
-            "approved": best_score >= quality_threshold,
-            "verification_iterations": [
-                {
-                    "score": entry["quality_score"],
-                    "result_type": entry.get("result_type"),
-                    "annealing_level": entry.get("annealing_level", 0),
-                    "issues": [
-                        {
-                            "location": iss.get("location", ""),
-                            "problem": iss.get("problem", ""),
-                        }
-                        for iss in entry.get("issues_found", [])
-                    ],
-                    "fix_applied": entry.get("recommended_action", ""),
-                }
-                for entry in verification_history
-            ],
-            "script_errors": script_errors or [],
-            "judge_reasoning": (
-                (judge_result or {}).get("reasoning")
-            ),
-            "score_explanation": (
-                (judge_result or {}).get("score_explanation")
-            ),
-        }
+        from .._verification_record import (
+            IMAGE_HISTORY_KEYMAP,
+            build_quality_history,
+        )
+        return build_quality_history(
+            best_value=best_score,
+            threshold=quality_threshold,
+            all_attempts=all_attempts,
+            verification_history=verification_history,
+            judge_result=judge_result,
+            script_errors=script_errors,
+            keymap=IMAGE_HISTORY_KEYMAP,
+        )
 
     USER_FEEDBACK_SCRIPT_PROMPT = '''You have a working image analysis script and user feedback requesting changes.
 
@@ -4581,6 +4874,7 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
                     # Execute the patched script VERBATIM in the per-image dir
                     working_dir = self.output_dir / f"image_{image_idx:04d}"
                     canonical_viz = working_dir / VIZ_NAME
+                    state["_verify_working_dir"] = str(working_dir)
                     patched_script = self._sanitize_script(patched_script)
                     run = stage_and_run(self.executor, patched_script, image_data, working_dir,
                                         metadata=state.get("system_info"))

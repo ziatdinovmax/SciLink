@@ -102,6 +102,88 @@ def test_search_local_only_returns_matching_candidates(tmp_path):
     assert Path(cand["structure_path"]).is_file()
 
 
+def test_search_cell_only_blind_query(tmp_path):
+    # Blind identification: NO chemistry — the lattice filter (from
+    # index_pattern's recovered cell) is the search key. Si (a=5.43) must be
+    # found and diamond (a=3.57) excluded by the cell window alone.
+    cif_dir = tmp_path / "cifs"
+    cif_dir.mkdir()
+    _write_cif(cif_dir / "si.cif", _silicon())
+    _write_cif(cif_dir / "c.cif", _diamond())
+
+    with patch.dict("os.environ", {"SCILINK_LOCAL_CIF_DIR": str(cif_dir)}):
+        result = search_structures(
+            query={"lattice_param_ranges": {"a": (5.32, 5.54),
+                                            "volume": (150.6, 169.9)}},
+            sources=["local"],
+            output_dir=str(tmp_path / "candidates"),
+        )
+    assert len(result["candidates"]) == 1
+    assert result["candidates"][0]["formula"] == "Si"
+
+
+def test_search_cell_only_volume_only(tmp_path):
+    # The permutation-invariant volume window alone must also work (the
+    # recommended non-cubic form, where a database setting's axes may be a
+    # permutation of the indexed cell's).
+    cif_dir = tmp_path / "cifs"
+    cif_dir.mkdir()
+    _write_cif(cif_dir / "si.cif", _silicon())
+    _write_cif(cif_dir / "c.cif", _diamond())
+
+    with patch.dict("os.environ", {"SCILINK_LOCAL_CIF_DIR": str(cif_dir)}):
+        result = search_structures(
+            query={"lattice_param_ranges": {"volume": (40.0, 50.0)}},  # diamond ~45.5
+            sources=["local"],
+            output_dir=str(tmp_path / "candidates"),
+        )
+    assert len(result["candidates"]) == 1
+    assert result["candidates"][0]["formula"] == "C"
+
+
+def test_search_requires_chemistry_or_cell():
+    with pytest.raises(ValueError):
+        search_structures(query={}, sources=["local"], output_dir="/tmp/x")
+    with pytest.raises(ValueError):
+        search_structures(query={"top_n": 5}, sources=["local"], output_dir="/tmp/x")
+
+
+def test_queryspec_cell_only_validation():
+    from scilink.skills.structure_matching._backends._base import QuerySpec
+    QuerySpec(chemistry=[], lattice_param_ranges={"a": (5.3, 5.5)})  # cell-only OK
+    with pytest.raises(ValueError):
+        QuerySpec(chemistry=[])                                      # neither: invalid
+
+
+def test_chemistry_search_honors_lattice_filter(tmp_path):
+    # A chemistry query WITH a lattice filter must apply the filter: Si passes
+    # its own cell window and fails a wrong one.
+    cif_dir = tmp_path / "cifs"
+    cif_dir.mkdir()
+    _write_cif(cif_dir / "si.cif", _silicon())
+
+    with patch.dict("os.environ", {"SCILINK_LOCAL_CIF_DIR": str(cif_dir)}):
+        hit = search_structures(
+            query={"chemistry": ["Si"], "lattice_param_ranges": {"a": (5.3, 5.5)}},
+            sources=["local"], output_dir=str(tmp_path / "c1"))
+        miss = search_structures(
+            query={"chemistry": ["Si"], "lattice_param_ranges": {"a": (3.0, 3.2)}},
+            sources=["local"], output_dir=str(tmp_path / "c2"))
+    assert len(hit["candidates"]) == 1
+    assert len(miss["candidates"]) == 0
+
+
+def test_cod_query_volume_center():
+    # Cell-only ranking helper: explicit volume window wins; else the a/b/c
+    # midpoint product; None when edges are incomplete.
+    from scilink.skills.structure_matching._backends.cod import _query_volume_center
+    assert _query_volume_center({"volume": (150.0, 170.0)}) == pytest.approx(160.0)
+    assert _query_volume_center(
+        {"a": (5.3, 5.5), "b": (5.3, 5.5), "c": (5.3, 5.5)}
+    ) == pytest.approx(5.4 ** 3)
+    assert _query_volume_center({"a": (5.3, 5.5)}) is None
+
+
 def test_search_warns_when_no_backends_available(tmp_path):
     with patch.dict("os.environ", {}, clear=False):
         # Unset env vars that might enable a backend
