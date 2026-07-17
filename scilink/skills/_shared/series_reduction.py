@@ -1,10 +1,11 @@
-"""Cheap unsupervised reduction of a measurement series (fan-out steering).
+"""Cheap unsupervised reduction of a measurement series.
 
-The #296 phase-(d) steering payload: answer only "WHERE along the control
-variable does this series change, and how sharply?" via mean-centered SVD —
-a change DETECTOR, not a re-derivation (no fitting, no peak model, no phase
-assumptions). Available at branch-launch time, when the companion branch's
-own proper analysis does not exist yet.
+Answers only "WHERE along the control variable does this series change, and
+how sharply?" via mean-centered SVD — a change DETECTOR, not a re-derivation
+(no fitting, no peak model, no phase assumptions). Two consumers: fan-out
+branch steering (the #296 phase-(d) payload, file-based `reduce_series`) and
+the curve-series scout (in-memory `reduce_curves` over the full series, which
+the <=7-spectrum visual scout cannot see).
 
 The known artifacts are OWNED here (computed flags, not prompt prose):
 
@@ -112,11 +113,46 @@ def reduce_series(files: List[str], out_dir: Optional[str] = None,
             controls.append(cv)
             sources.append(src)
         if any(c is None for c in controls):
-            controls = list(range(len(files)))
-            source = "index"
+            controls, source = None, "index"
         else:
             source = next(s for s in sources if s)
+        return reduce_curves(curves, controls=controls, control_source=source,
+                             label=label, n_grid=n_grid, out_dir=out_dir)
+    except Exception as e:  # noqa: BLE001 - steering must never break a fan-out
+        logger.warning(f"series reduction failed for {label}: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+def reduce_curves(curves: list, controls=None, control_source: str = "index",
+                  label: str = "series", n_grid: int = _N_GRID,
+                  out_dir: Optional[str] = None,
+                  return_figure: bool = False) -> dict:
+    """In-memory core of :func:`reduce_series`.
+
+    ``curves`` is a list of ``(x, y)`` array pairs; ``controls`` an optional
+    per-curve control value (falls back to index order), ``control_source``
+    the name/provenance of that axis. With ``return_figure=True`` the score
+    curve is also returned as PNG bytes under ``score_curve_png`` (for
+    callers that embed it in a prompt rather than write artifacts). Same
+    return contract as :func:`reduce_series`; never raises."""
+    try:
+        curves = [(np.asarray(x, dtype=float), np.asarray(y, dtype=float))
+                  for x, y in (curves or [])]
+        if len(curves) < 4:
+            return {"status": "error",
+                    "error": f"need >= 4 series points, got {len(curves)}"}
+        for i, (x, _) in enumerate(curves):
+            if x.size < 8:
+                return {"status": "error",
+                        "error": f"curve {i}: too few channels"}
+        if controls is None:
+            controls, control_source = list(range(len(curves))), "index"
         controls = np.asarray(controls, dtype=float)
+        if controls.size != len(curves):
+            return {"status": "error",
+                    "error": f"{controls.size} control values for "
+                             f"{len(curves)} curves"}
+        source = control_source
 
         # Common grid: intersection of x-ranges (flags a resample if the
         # grids differ at all).
@@ -172,7 +208,7 @@ def reduce_series(files: List[str], out_dir: Optional[str] = None,
         out = {
             "status": "success",
             "label": label,
-            "n_points": int(len(files)),
+            "n_points": int(len(curves)),
             "n_channels": int(grid.size),
             "control_variable": {
                 "source": source,
@@ -193,7 +229,9 @@ def reduce_series(files: List[str], out_dir: Optional[str] = None,
                 json.dump({**out, "score1": score1.tolist(),
                            "controls": controls.tolist()}, fh, indent=2)
             out["reduction_json_path"] = jpath
+        if out_dir or return_figure:
             try:
+                import io
                 import matplotlib
                 matplotlib.use("Agg")
                 import matplotlib.pyplot as plt
@@ -209,13 +247,20 @@ def reduce_series(files: List[str], out_dir: Optional[str] = None,
                              f"(PC1 {var_explained[0]:.0%} of variance)")
                 ax.legend(fontsize=8)
                 fig.tight_layout()
-                fpath = os.path.join(out_dir, "score_curve.png")
-                fig.savefig(fpath, dpi=110)
+                buf = io.BytesIO()
+                fig.savefig(buf, format="png", dpi=110)
                 plt.close(fig)
-                out["score_curve_path"] = fpath
+                png = buf.getvalue()
+                if out_dir:
+                    fpath = os.path.join(out_dir, "score_curve.png")
+                    with open(fpath, "wb") as fh:
+                        fh.write(png)
+                    out["score_curve_path"] = fpath
+                if return_figure:
+                    out["score_curve_png"] = png
             except Exception as e:  # noqa: BLE001 - figure is best-effort
                 logger.warning(f"series reduction: could not plot: {e}")
         return out
-    except Exception as e:  # noqa: BLE001 - steering must never break a fan-out
+    except Exception as e:  # noqa: BLE001 - reduction must never break a caller
         logger.warning(f"series reduction failed for {label}: {e}")
         return {"status": "error", "error": str(e)}
