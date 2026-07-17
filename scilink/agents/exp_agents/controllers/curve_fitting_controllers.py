@@ -34,8 +34,8 @@ from typing import Callable, Optional, Any, Dict, List
 import numpy as np
 
 from .._locked_exec import (
-    stage_and_run, script_uses_canonical_input, DATA_NAME, CANDIDATES_DIR_NAME,
-    atomic_np_save,
+    stage_and_run, stage_and_run_adaptive, script_uses_canonical_input,
+    DATA_NAME, CANDIDATES_DIR_NAME, atomic_np_save,
 )
 from .._qc_engine import CodegenQCEngine, QCEngineSpec, QCItemContext
 from ....utils.codegen_parse import parse_codegen_response
@@ -3339,8 +3339,12 @@ Your guidance: '''
                     script_errors.append({"error": last_error, "diagnosis": diagnosis})
 
                 state["_verify_working_dir"] = str(item_dir)
-                run = stage_and_run(self.executor, script, curve_data, item_dir,
-                                    aux=extra_operands)
+                # Adaptive timeout: a slow-but-correct script is retried
+                # verbatim with doubled timeouts before the correction LLM
+                # ever sees a "timed out" error.
+                run = stage_and_run_adaptive(self.executor, script, curve_data,
+                                             item_dir, aux=extra_operands,
+                                             logger=self.logger)
                 exec_result = run["exec"]
 
                 if run["status"] == "success":

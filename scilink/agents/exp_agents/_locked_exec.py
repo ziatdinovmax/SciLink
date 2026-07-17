@@ -23,10 +23,13 @@ was actually duplicated and fragile.
 """
 
 import json
+import logging
 import os
 from pathlib import Path
 
 import numpy as np
+
+_LOG = logging.getLogger(__name__)
 
 DATA_NAME = "data.npy"
 VIZ_NAME = "visualization.png"
@@ -70,7 +73,8 @@ def script_uses_canonical_input(script: str, data_name: str = DATA_NAME) -> bool
 def stage_and_run(executor, script, primary_array, item_dir, *,
                   data_name: str = DATA_NAME, viz_name: str = VIZ_NAME,
                   aux: dict = None, metadata: dict = None,
-                  meta_name: str = META_NAME) -> dict:
+                  meta_name: str = META_NAME,
+                  timeout: int | None = None) -> dict:
     """Stage ``primary_array`` as ``data_name`` in ``item_dir`` and run ``script``
     VERBATIM there (working_dir=item_dir), then collect the canonical viz.
 
@@ -100,7 +104,8 @@ def stage_and_run(executor, script, primary_array, item_dir, *,
     viz = item_dir / viz_name
     viz.unlink(missing_ok=True)   # clear any stale viz before the run
 
-    exec_res = executor.execute_script(script, working_dir=str(item_dir))
+    exec_res = executor.execute_script(script, working_dir=str(item_dir),
+                                       timeout=timeout)
 
     has_viz = viz.exists()
     return {
@@ -112,3 +117,51 @@ def stage_and_run(executor, script, primary_array, item_dir, *,
         "visualization_bytes": viz.read_bytes() if has_viz else None,
         "item_dir": str(item_dir),
     }
+
+
+# Adaptive-timeout policy for the per-item attempt loops. A subprocess that
+# times out is rarely "broken code" — usually the fit just needs longer.
+# Re-running the SAME script with 2× the timeout, up to a hard cap, avoids
+# burning LLM tokens on a correction pass "fixing" code that wasn't wrong.
+TIMEOUT_ESCALATIONS = 2
+TIMEOUT_GROWTH = 2.0
+TIMEOUT_HARD_CAP_S = 1800
+
+
+def stage_and_run_adaptive(executor, script, primary_array, item_dir, *,
+                           aux: dict = None, metadata: dict = None,
+                           logger=None) -> dict:
+    """`stage_and_run` with adaptive timeout escalation.
+
+    Starts at the executor's configured timeout; on a timeout, retries the
+    SAME script with a doubled timeout, up to ``TIMEOUT_ESCALATIONS`` retries
+    bounded by ``TIMEOUT_HARD_CAP_S``. Non-timeout failures are returned
+    as-is so the caller's script-correction loop handles them. The final
+    (still timed-out) result is returned unchanged, so the correction LLM
+    sees the standard "timed out" message.
+    """
+    log = logger or _LOG
+    current = int(executor.timeout)
+    run = None
+    for esc in range(TIMEOUT_ESCALATIONS + 1):
+        run = stage_and_run(executor, script, primary_array, item_dir,
+                            aux=aux, metadata=metadata, timeout=current)
+        if run["status"] == "success":
+            return run
+        msg = (run["exec"].get("message") or "").lower()
+        if "timed out" not in msg:
+            return run  # genuine script error — the correction loop's job
+        next_timeout = min(int(current * TIMEOUT_GROWTH), TIMEOUT_HARD_CAP_S)
+        if next_timeout <= current or esc >= TIMEOUT_ESCALATIONS:
+            log.warning(
+                f"    ⏱  Timed out at {current}s; escalation budget exhausted "
+                f"({TIMEOUT_ESCALATIONS} retries, {TIMEOUT_HARD_CAP_S}s cap) "
+                f"— handing the timeout to the correction loop."
+            )
+            return run
+        log.warning(
+            f"    ⏱  Script timed out at {current}s — retrying same script "
+            f"with {next_timeout}s (escalation {esc + 1}/{TIMEOUT_ESCALATIONS})"
+        )
+        current = next_timeout
+    return run

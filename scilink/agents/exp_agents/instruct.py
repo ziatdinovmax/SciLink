@@ -2572,6 +2572,7 @@ never as missing keys.
 *(NumPy 2.x: aliases removed in NumPy 2.0 raise `AttributeError` — use `np.trapezoid` not `np.trapz`; prefer `scipy.integrate.trapezoid` for integration.)*
 
 **CRITICAL:** Fix only the execution error. Do NOT change the fitting model, its parameters, the fit domain/window, or the overall analysis approach — and never narrow the window or truncate the data to raise R². The model is locked for series consistency.
+**Narrow exception — timeout errors ONLY:** if the error says the script timed out, the script is too slow, not wrong. You may change the COMPUTATIONAL strategy — vectorize loops, reduce optimizer restarts/iterations, replace brute-force search with an efficient optimizer — but every rule above still holds: same model, same parameters, same fit domain/window, and ALL of the data.
 
 **I/O contract (do not deviate):** the data is `data.npy` in the current working directory — load it with `np.load` (do NOT look for .csv/.txt/.dat or glob for other files); save the plot to `visualization.png`; print one line `FIT_RESULTS_JSON:{{...}}` with the fit results. Missing any of these fails the run. Also keep saving `fit.npy` (1-D fitted curve at the `data.npy` x-points, length N) if the script you are fixing already did — it feeds the reviewer's residual diagnostics.
 
@@ -3859,6 +3860,10 @@ IMAGE_ANALYSIS_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed image analysi
 
 **CRITICAL:** Fix only the execution error. Do NOT change the analysis pipeline, feature \
 extraction approach, or the overall analysis strategy. The approach is locked for series consistency.
+**Narrow exception — timeout errors ONLY:** if the error says the script timed out, the script is \
+too slow, not wrong. You may change the COMPUTATIONAL strategy — vectorize loops, reduce iteration \
+counts, use coarser internal search grids — but the pipeline, the extracted features, and the full \
+image extent must not change.
 
 **Response:** Return only `{{"diagnosis": "...", "script": "..."}}`
 """

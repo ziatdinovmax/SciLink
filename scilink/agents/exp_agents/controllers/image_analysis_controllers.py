@@ -35,7 +35,7 @@ from typing import Callable, Optional, Any, Dict, List
 import numpy as np
 
 from .._locked_exec import (
-    stage_and_run, script_uses_canonical_input,
+    stage_and_run, stage_and_run_adaptive, script_uses_canonical_input,
     DATA_NAME, VIZ_NAME, CANDIDATES_DIR_NAME, atomic_np_save,
 )
 from .._qc_engine import CodegenQCEngine, QCEngineSpec, QCItemContext
@@ -2443,8 +2443,13 @@ Your guidance: '''
                 # Sanitize the script
                 script = self._sanitize_script(script)
 
-                run = stage_and_run(self.executor, script, image_data, working_dir,
-                                    metadata=state.get("system_info"))
+                # Adaptive timeout: a slow-but-correct script is retried
+                # verbatim with doubled timeouts before the correction LLM
+                # ever sees a "timed out" error.
+                run = stage_and_run_adaptive(self.executor, script, image_data,
+                                             working_dir,
+                                             metadata=state.get("system_info"),
+                                             logger=self.logger)
                 exec_result = run["exec"]
 
                 if run["status"] == "success":
