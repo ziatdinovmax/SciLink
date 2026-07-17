@@ -2669,6 +2669,28 @@ def _write_series_fit_results(output_dir, state, series_results, quality_setting
 # Backwards-compatible alias (pre-rename import path).
 HumanFeedbackRefinementController = CurveFittingPlanningController
 
+def _is_timeout_error(err) -> bool:
+    """True when an attempt error is the executor's timeout message."""
+    return "timed out" in str(err or "").lower()
+
+
+def _trailing_timeout_failures(attempts: list) -> int:
+    """Count consecutive TRAILING attempts that failed on execution timeout.
+
+    Used to tell a refit/rewrite that the recent failures were budget
+    failures, not fit-quality failures — a different-but-equally-slow
+    approach would fail the same way.
+    """
+    n = 0
+    for a in reversed(attempts or []):
+        r = a.get("result") or {}
+        if r.get("success") is False and _is_timeout_error(r.get("error")):
+            n += 1
+        else:
+            break
+    return n
+
+
 class UnifiedSeriesProcessingController:
     """
     Processes ALL spectra using the locked fitting model.
@@ -3063,6 +3085,60 @@ Your guidance: '''
 
         return result["script"]
 
+    # Last-resort model escalation for persistent execution timeouts. The
+    # locked-model rule (and its narrow computational-strategy carve-out)
+    # is the norm; this clause fires only when even carve-out corrections
+    # kept timing out on a FRESH (non-locked-reuse) fit — meaning the
+    # locked model itself is infeasible within the execution budget.
+    _TIMEOUT_MODEL_ESCALATION_CLAUSE = (
+        "\n**TIMEOUT ESCALATION — LAST RESORT. This clause SUPERSEDES the "
+        "CRITICAL rule and the timeout exception above for this single "
+        "correction:** computational-strategy fixes were already attempted "
+        "in earlier corrections and the script STILL exceeds the execution "
+        "budget — efficiency alone has failed, so the locked model itself "
+        "is computationally infeasible. RESTRUCTURE the model into a "
+        "computationally feasible alternative that preserves the plan's "
+        "scientific intent (fewer components, a cheaper lineshape, an "
+        "analytic approximation). Do not return another implementation of "
+        "the same infeasible model. The fit window and the data remain "
+        "untouchable: full window, ALL of the data. State exactly what you "
+        "changed and why in `diagnosis`.\n"
+    )
+
+    @staticmethod
+    def _should_escalate_timeout_model(base_script, attempt: int,
+                                       max_attempts: int,
+                                       consecutive_timeouts: int) -> bool:
+        """Fire the last-resort model escalation ONLY on the final TWO
+        corrections of a fresh fit (base_script None — locked-reuse fits must
+        never restructure) whose recent failures are >= 2 consecutive
+        timeouts. Two chances, not one: a restructured script sometimes
+        carries an introduced bug, and a crash resets the consecutive-timeout
+        counter, so the very next correction naturally takes the plain
+        debug path and can fix it (observed live)."""
+        return (base_script is None and attempt >= max_attempts - 1
+                and consecutive_timeouts >= 2)
+
+    def _correct_script_with_timeout_escalation(
+            self, state: dict, script: str, error_msg: str) -> tuple[str, str]:
+        """`_correct_script` under the last-resort timeout escalation: the
+        escalation clause is injected and the annealing level is raised to
+        hot for this ONE call (skill strictness relaxes in lockstep), then
+        both are restored so no later stage sees the elevated state."""
+        saved_level = state.get("_annealing_level", 0)
+        state["_timeout_model_escalation"] = True
+        state["_annealing_level"] = max(saved_level, self._hot_annealing_level)
+        self.logger.warning(
+            "    🔥 Last-resort timeout escalation: allowing model "
+            "restructure on the final correction (consecutive execution "
+            "timeouts persisted after computational fixes)."
+        )
+        try:
+            return self._correct_script(state, script, error_msg)
+        finally:
+            state["_annealing_level"] = saved_level
+            state.pop("_timeout_model_escalation", None)
+
     def _correct_script(self, state: dict, script: str, error_msg: str) -> tuple[str, str]:
         """Return ``(corrected_script, diagnosis)``."""
         config = state.get("locked_fitting_config", {})
@@ -3073,6 +3149,19 @@ Your guidance: '''
             error_message=error_msg,
             tool_inventory=_tool_inventory_text(state),
         )
+        # Last-resort timeout escalation (set transiently by
+        # _correct_script_with_timeout_escalation; absent otherwise).
+        # Injected BEFORE the response-format footer — appended after it,
+        # the clause loses to the two locked-model prohibitions above
+        # (observed live: the LLM kept an infeasible 40-component model).
+        if state.get("_timeout_model_escalation"):
+            marker = "**Response:**"
+            if marker in prompt:
+                prompt = prompt.replace(
+                    marker,
+                    self._TIMEOUT_MODEL_ESCALATION_CLAUSE + "\n" + marker, 1)
+            else:
+                prompt += self._TIMEOUT_MODEL_ESCALATION_CLAUSE
         # Codegen recipe from ALL co-active skills (see _generate_fitting_script).
         recipes = _collect_codegen_recipe(state)
         if recipes:
@@ -3291,6 +3380,8 @@ Your guidance: '''
         last_error = ""
         run = None
         script_errors: list[dict] = []
+        consecutive_timeouts = 0
+        used_timeout_escalation = False
 
         for attempt in range(1, self.MAX_ATTEMPTS + 1):
             try:
@@ -3335,7 +3426,16 @@ Your guidance: '''
                             "; ".join(conformance["justified_deviations"]),
                         )
                 else:
-                    script, diagnosis = self._correct_script(state, script, last_error)
+                    if self._should_escalate_timeout_model(
+                            base_script, attempt, self.MAX_ATTEMPTS,
+                            consecutive_timeouts):
+                        script, diagnosis = (
+                            self._correct_script_with_timeout_escalation(
+                                state, script, last_error))
+                        used_timeout_escalation = True
+                    else:
+                        script, diagnosis = self._correct_script(
+                            state, script, last_error)
                     script_errors.append({"error": last_error, "diagnosis": diagnosis})
 
                 state["_verify_working_dir"] = str(item_dir)
@@ -3366,11 +3466,16 @@ Your guidance: '''
                             f"'visualization.png' in the working directory."
                         )
                         self.logger.warning(f"    ⚠️ Attempt {attempt}: Script ran but missing outputs: {', '.join(missing)}")
+                        consecutive_timeouts = 0
                 else:
                     last_error = exec_result.get("message", "Unknown error")
+                    consecutive_timeouts = (
+                        consecutive_timeouts + 1
+                        if _is_timeout_error(last_error) else 0)
                     self.logger.warning(f"    ⚠️ Attempt {attempt} failed: {last_error[:100]}")
             except Exception as e:
                 last_error = str(e)
+                consecutive_timeouts = 0
                 self.logger.error(f"    ❌ Attempt {attempt} error: {e}")
 
         # Success iff the final run produced BOTH the marker and the viz (matches
@@ -3500,6 +3605,11 @@ Your guidance: '''
             "script": script,
             "script_errors": script_errors,
         }
+        if used_timeout_escalation:
+            # Provenance: this fit came from the last-resort model
+            # restructure after persistent timeouts — the executed script,
+            # not the locked plan prose, is authoritative for the model.
+            result["timeout_model_escalation"] = True
         # Fingerprint of the data this script solved (script bank, #346) —
         # stamped here because per-spectrum arrays for file inputs never reach
         # the outer state the bank write hook reads. No-op unless the bank is
@@ -4684,13 +4794,30 @@ Return JSON with:
         else:
             self.logger.info(f"   Refitting with verification feedback...")
 
+        # Timeout-aware refit context: when the trailing refit attempt(s)
+        # died on execution timeouts, say so explicitly — the stall counter
+        # that drives annealing is cause-blind, and without this a hot
+        # rewrite has model freedom but no signal that COST is the problem
+        # (it could regenerate another equally slow approach). No trailing
+        # timeouts -> identical issues list, no behavior change.
+        issues = list(verification.get("issues_found", []))
+        n_timeouts = _trailing_timeout_failures(ctx.all_attempts)
+        if n_timeouts:
+            issues.append(
+                f"EXECUTION BUDGET: the previous {n_timeouts} attempt(s) "
+                f"failed by execution TIMEOUT, not by fit quality. The next "
+                f"approach must be computationally cheaper (vectorized, "
+                f"efficient optimizer, fewer expensive components) — a "
+                f"different but equally slow approach will fail the same way."
+            )
+
         return self._fit_single_spectrum(
             state=ctx.state, curve_data=ctx.data, data_path=ctx.data_path,
             spectrum_name=ctx.item_name, spectrum_idx=ctx.item_idx,
             base_script=None,
             refine_from_script=refine_from,
             refine_from_r2=ctx.best_score,
-            refine_from_issues=verification.get("issues_found", []),
+            refine_from_issues=issues,
         )
 
     def qc_after_refit(self, ctx: QCItemContext, verified_result: dict,
