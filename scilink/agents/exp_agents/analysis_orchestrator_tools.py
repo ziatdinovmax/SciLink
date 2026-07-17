@@ -2979,8 +2979,13 @@ class AnalysisOrchestratorTools:
                     "description": (
                         "Tactical guidance to steer the analysis "
                         "(e.g. 'focus on the Ti L-edge around 460 eV', "
-                        "'pay attention to peaks between 280-300 nm'). "
-                        "Supported by CurveFitting and Hyperspectral agents."
+                        "'pay attention to peaks between 280-300 nm') AND/OR "
+                        "figure-presentation preferences, which reach the "
+                        "generated plotting code (e.g. 'place the legend "
+                        "outside the axes — it covers the data', 'use a log "
+                        "intensity scale'). Route any user request about how "
+                        "plots should LOOK through this parameter. Supported "
+                        "by CurveFitting, Image, and Hyperspectral agents."
                     )
                 },
                 "auxiliary_data": {

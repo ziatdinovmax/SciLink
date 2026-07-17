@@ -2038,6 +2038,14 @@ Your guidance: '''
                 "## Prior-attempt findings (address these)\n"
                 + "\n".join(f"- {i}" for i in extra_issues)
             )
+        # User guidance travels into codegen (matching hyperspectral, which
+        # always did this): tactical asks AND figure-presentation preferences
+        # (e.g. "place the legend outside the axes") must reach the script
+        # that actually draws visualization.png — planning-only injection
+        # silently dropped them.
+        if state.get("analysis_hints"):
+            context_parts.append(
+                "## User Guidance\n" + str(state["analysis_hints"]))
         # Authoritative calibration: when the caller supplied spatial metadata it
         # is staged as ``metadata.json`` in the working directory (see
         # stage_and_run). Point the generated script at it so pixel size and the
@@ -2309,6 +2317,17 @@ Your guidance: '''
             error_message=error_msg,
             tool_inventory=format_tool_inventory("image_analysis", active_skills=active_skills),
         )
+        # Keep user guidance (incl. figure-presentation preferences) visible
+        # during corrections so a fix doesn't silently undo it. Injected
+        # before the response footer — appended after it, guidance loses.
+        if state.get("analysis_hints"):
+            _guidance = ("\n## User Guidance\n"
+                         + str(state["analysis_hints"]) + "\n")
+            _marker = "**Response:**"
+            if _marker in prompt:
+                prompt = prompt.replace(_marker, _guidance + "\n" + _marker, 1)
+            else:
+                prompt += _guidance
         # Last-resort timeout escalation (set transiently by
         # _correct_script_with_timeout_escalation; absent otherwise).
         # Injected BEFORE the response-format footer — appended after it,

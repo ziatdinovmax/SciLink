@@ -2923,6 +2923,15 @@ Your guidance: '''
     ) -> str:
         config = state.get("locked_fitting_config", {})
         context_parts = []
+        # User guidance travels into codegen (matching hyperspectral, which
+        # always did this): tactical asks AND figure-presentation preferences
+        # (e.g. "place the legend outside the axes") must reach the script
+        # that actually draws visualization.png — planning-only injection
+        # silently dropped them. Label-text neutrality rules in the
+        # instructions still apply and take precedence over renaming asks.
+        if state.get("analysis_hints"):
+            context_parts.append(
+                "## User Guidance\n" + str(state["analysis_hints"]))
         # Identification mode is literature-free in-run (issue #323, D2):
         # literature must not shape the code that writes the fit, matching
         # the planner gates. Covers hand-supplied literature_file too.
@@ -3131,6 +3140,17 @@ Your guidance: '''
             error_message=error_msg,
             tool_inventory=_tool_inventory_text(state),
         )
+        # Keep user guidance (incl. figure-presentation preferences) visible
+        # during corrections so a fix doesn't silently undo it. Injected
+        # before the response footer — appended after it, guidance loses.
+        if state.get("analysis_hints"):
+            _guidance = ("\n## User Guidance\n"
+                         + str(state["analysis_hints"]) + "\n")
+            _marker = "**Response:**"
+            if _marker in prompt:
+                prompt = prompt.replace(_marker, _guidance + "\n" + _marker, 1)
+            else:
+                prompt += _guidance
         # Last-resort timeout escalation (set transiently by
         # _correct_script_with_timeout_escalation; absent otherwise).
         # Injected BEFORE the response-format footer — appended after it,
