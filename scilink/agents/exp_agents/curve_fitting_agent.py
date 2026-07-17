@@ -1675,6 +1675,22 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "task_mode": state.get("task_mode", "fitting"),
         }
 
+        # Zero-success guard: if every spectrum failed every attempt (a
+        # per-item condition, so no controller set error_dict), the run must
+        # not report top-level success — a caller checking only `status`
+        # would be misled. Salvaged best-available fits carry success=True
+        # (with quality_warning) and are unaffected.
+        if series_results and all(
+                isinstance(r, dict) and r.get("success") is False
+                for r in series_results):
+            item_errors = [r.get("error") for r in series_results
+                           if r.get("error")]
+            results["status"] = "error"
+            results["error"] = {
+                "error": f"All {len(series_results)} spectrum fit(s) failed",
+                "details": item_errors[-1] if item_errors else "",
+            }
+
         # Realtime provenance (#346 / plan §7.3): stamp the profile on the
         # top-level result AND each per-item quality_history so a post-hoc
         # sweep can select realtime frames for thorough re-analysis. Also

@@ -2821,7 +2821,12 @@ class AnalysisOrchestratorTools:
                 self.orch.analysis_results.append(analysis_record)
                 
                 # === Format response ===
-                if result.get("status") == "success":
+                # "partial" is hyperspectral's salvage outcome (approximate /
+                # withheld maps with honest caveats) — a usable, degraded
+                # result. It gets the full success-shaped payload with its
+                # caveats attached, NOT the error branch (which used to
+                # surface it as an error with an empty error object).
+                if result.get("status") in ("success", "partial"):
                     # Find main visualization
                     viz_path = None
                     for candidate in analysis_output_dir.rglob("*_analysis.png"):
@@ -2838,7 +2843,7 @@ class AnalysisOrchestratorTools:
                                 break
 
                     response = {
-                        "status": "success",
+                        "status": result.get("status"),
                         "analysis_id": analysis_id,
                         "agent_used": self.AGENT_NAMES.get(agent_id),
                         "output_directory": str(analysis_output_dir),
@@ -2848,6 +2853,17 @@ class AnalysisOrchestratorTools:
                         "note": f"All outputs saved to: {analysis_output_dir}",
                         "next_steps": "Use assess_novelty to check literature for these claims, or get_recommendations for follow-up experiments.",
                     }
+                    if result.get("status") == "partial":
+                        response["confidence"] = result.get("confidence")
+                        response["warnings"] = result.get("warnings") or []
+                        if result.get("degraded_outputs"):
+                            response["degraded_outputs"] = result[
+                                "degraded_outputs"]
+                        response["note"] = (
+                            "PARTIAL result: some outputs are approximate or "
+                            "were withheld (see warnings). "
+                            + response["note"]
+                        )
                     if viz_path:
                         response["visualization_path"] = viz_path
                     if result.get("tier2_results"):
