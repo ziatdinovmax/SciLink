@@ -51,7 +51,7 @@ class TestWorkflowComposition:
                 pass
 
             def assess(self, output_dir, research_goal, skill=None, domain=None,
-                       fixes_mode="auto"):
+                       fixes_mode="auto", input_files=None):
                 FakeRunCritic.calls += 1
                 if FakeRunCritic.calls == 1:
                     return {"status": "success", "run_status": "failed",
@@ -81,12 +81,16 @@ class TestWorkflowComposition:
         )
 
         # The whole step-4 glue ran: phases built, loop drove the real
-        # executor, the critic's fix was applied and re-run.
+        # executor, the critic's fix was applied and re-run. With the LAMMPS
+        # dry-run gate active, the fail→fix happens in the cheap pre-flight
+        # (critic calls 1–2), then the production run succeeds first try
+        # (call 3) — so the gate is exercised end to end in the real pipeline.
         assert result["final_status"] == "success", result
         assert result["refinement"]["status"] == "success"
-        assert FakeRunCritic.calls == 2          # fail, then good
+        assert result["refinement"]["dry_run"]["status"] == "passed"
+        assert FakeRunCritic.calls == 3          # gate: fail, good; run: good
         assert "refinement" in result["steps_completed"]
-        # The fix was written into the run dir on the second cycle.
+        # The gate's fix is the deck the production run executed.
         assert (out / "run.lammps").read_text() == "echo fixed\n"
 
     def test_no_executor_leaves_behavior_unchanged(self, tmp_path, monkeypatch):

@@ -154,8 +154,27 @@ ReaxFF:
 12. minimize (if needed)
 13. run
 
+**Fully-typed force-field data files invert steps 2–4.** When the data file
+already contains inline coefficients (the data-file analysis reports
+`Coefficients in data file: Yes` — e.g. an OpenFF Interchange export with `Pair
+Coeffs` / `Bond Coeffs` / `Angle Coeffs` / `Dihedral Coeffs` sections), declare
+every needed `*_style` (`pair_style`, plus `bond_style` / `angle_style` /
+`dihedral_style` for the bonded sections present) **before** `read_data`, and do
+**not** emit `pair_coeff` / `bond_coeff`. LAMMPS reads the coefficients from the
+data file at `read_data` time; parsing a `Pair Coeffs` section with no prior
+`pair_style` aborts with "Must define pair_style before Pair Coeffs". Only the
+coefficient-parsing styles move before `read_data` — put `kspace_style` (e.g.
+`pppm 1e-4`, needed for a `coul/long` pair_style) **after** `read_data`. A
+typed Interchange data file carries an `xy xz yz` line, so the box is triclinic
+and PPPM aborts with "Must redefine kspace_style after changing to triclinic
+box" if `kspace_style` is declared first.
+
 ### Forbidden patterns
 - pair_coeff before pair_style
+- read_data before pair_style when the data file has inline Pair Coeffs (a
+  fully-typed FF data file) — declare the coefficient styles first
+- kspace_style before read_data — declare kspace AFTER read_data (PPPM aborts on
+  a triclinic data file, which any OpenFF Interchange export is)
 - kspace_style with EAM/Tersoff/SW (no Coulomb)
 - kspace_style missing with coul/long or buck/coul/long
 - bond_style or fix shake with atom_style atomic
@@ -225,21 +244,29 @@ kspace_style pppm 1.0e-5
 (dynamics with timestep 1.0, Tdamp 100.0, Pdamp 1000.0)
 ```
 
-### Biomolecular (AMBER, coefficients in data file)
+### Biomolecular / typed force-field data file (AMBER / GAFF / OpenFF — coefficients in the data file)
+The data file carries Pair/Bond/Angle/Dihedral Coeffs, so **every `*_style` is
+declared BEFORE `read_data`** and **`kspace_style` AFTER it** (see Command
+ordering). `pair_modify` follows `pair_style`. Do **not** issue
+`pair_coeff`/`bond_coeff` — `read_data` supplies them.
 ```
 units real
 atom_style full
 boundary p p p
-read_data {data_filename}
-pair_style lj/charmm/coul/long 10.0 12.0
-pair_modify mix arithmetic
+# --- force-field styles FIRST (coeffs are read from the data file) ---
+pair_style lj/cut/coul/long 10.0          # GAFF/OpenFF; lj/charmm/coul/long 10.0 12.0 for CHARMM
+pair_modify mix arithmetic tail yes        # Lorentz-Berthelot; MUST follow pair_style
 bond_style harmonic
 angle_style harmonic
-dihedral_style fourier
-improper_style cvff
-special_bonds amber
-kspace_style pppm 1.0e-5
-fix SHAKE all shake 1.0e-5 100 0 m 1.008
+dihedral_style fourier                     # match the data file (OpenFF/Interchange: fourier)
+# improper_style cvff                      # only if the data file has impropers (improper types > 0)
+special_bonds amber                        # AMBER/GAFF/OpenFF 1-4 scaling
+read_data {data_filename}
+# --- kspace AFTER read_data (PPPM binds to the box; required for a triclinic data file) ---
+kspace_style pppm 1.0e-4
+neighbor 2.0 bin
+neigh_modify every 1 delay 0 check yes
+fix SHAKE all shake 1.0e-5 100 0 m 1.008   # constrains X-H bonds (rigid water); enables 2 fs
 (dynamics with timestep 2.0, Tdamp 100.0, Pdamp 1000.0)
 ```
 

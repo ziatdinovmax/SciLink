@@ -69,6 +69,21 @@ structure-matching = [
     "pulp>=2.7.0",
     "pyarrow>=14.0",
 ]
+# Force-field parameterization (engine-neutral, OpenFF Interchange core). NOTE:
+# the OpenFF stack is CONDA-FORGE ONLY — openff-toolkit's PyPI releases are
+# yanked, so `pip install scilink[ff]` cannot provide it. Install with conda:
+#
+#   conda install -c conda-forge openff-toolkit openff-interchange \
+#       openff-nagl openff-nagl-models parmed rdkit
+#
+# Charges come from NAGL (OpenFF's ML AM1-BCC surrogate) so the OpenFF path needs
+# no AmberTools/OpenEye; AmberTools (conda too) is needed only for the secondary
+# AMBER backend. This extra lists only the pip-installable pieces; the openff-*
+# packages above must come from conda-forge.
+ff = [
+    "parmed>=4.0",
+    "rdkit>=2023.3",
+]
 # NOTE: GSAS-II (the optional 'gsas' backend of simulate_xrd_pattern) cannot be
 # an extra: it is not on PyPI, and PyPI rejects uploads whose metadata carries a
 # direct URL dependency ("Can't have direct dependency"). Install it manually —
@@ -79,6 +94,7 @@ all = [
     "scilink[sim]",
     "scilink[ui]",
     "scilink[structure-matching]",
+    "scilink[ff]",
 ]
 
 [project.urls]
