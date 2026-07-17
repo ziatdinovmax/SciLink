@@ -296,9 +296,13 @@ def _run_deterministic_syntax_check(
 def _has_runnable_content(text: str) -> bool:
     """Whether a proposed input file has any non-comment, non-blank line.
 
-    Engine-neutral: ``#`` and ``!`` are the comment markers across the engines
-    we target (LAMMPS, VASP). A whole-file fix that is only comments/blank is a
-    no-op deck — running it does nothing — so it is not a real fix.
+    Scoped to the engines on the executor path today (LAMMPS, VASP), whose
+    comment markers are ``#`` and ``!``. This is NOT fully engine-neutral: a
+    GROMACS ``.top`` comments with ``;`` and treats ``#include`` / ``#ifdef`` as
+    directives (runnable, not comments), so this heuristic would misjudge one —
+    handle those markers here before putting a GROMACS-style engine on the
+    executor path. A whole-file fix that is only comments/blank is a no-op deck —
+    running it does nothing — so it is not a real fix.
     """
     return any(
         s and not s.startswith(("#", "!"))
@@ -705,9 +709,22 @@ and a successful run (give a verdict and sanity-check the physics).
 
 {fixes_directive}
 
+{observable_coverage}
 Return a JSON object with these fields:
   status              "success" | "error"
   run_status          "succeeded" | "failed" | "incomplete"
+  failure_class       "deck" | "structure" | null
+                      Set ONLY when run_status is "failed" — the ROOT cause.
+                      "structure" — the failure is caused by the initial atomic
+                      configuration itself (a broken / overlapping pack), so NO
+                      change to the run inputs can fix it and it must be
+                      regenerated; a tell is a non-finite or absurd energy /
+                      pressure at the very first step that persists even though
+                      the deck already minimizes. "deck" — anything a corrected
+                      input file fixes (a setting, a style, an unstable timestep,
+                      an atom leaving the grid mid-run). When "structure", set
+                      suggested_fixes to null: the structure must be regenerated,
+                      not patched.
   verdict             "good" | "warning" | "poor" | "needs_fixes"
                       good        — converged, physically sensible
                       warning     — converged but with concerns
@@ -716,14 +733,26 @@ Return a JSON object with these fields:
   reasoning           prose summary (3-6 sentences)
   suggested_fixes     {{ "filename": "complete_corrected_file", ... }} | null
                       Provide a non-null dict only when the verdict is
-                      "poor" or "needs_fixes" OR run_status is "failed".
-                      Otherwise return null.
+                      "poor" or "needs_fixes", run_status is "failed", OR
+                      `missing_observables` is non-empty. Otherwise return null.
                       Each key MUST be the exact name of one of the input
                       files shown above — do not invent a new file, a
                       ".patch", or a "header to insert after read_data".
                       Each value MUST be the COMPLETE corrected file (the
                       whole input, ready to run as-is), never a diff,
                       snippet, or fragment to splice in.
+  missing_observables list of {{ "property": ..., "required_output": ...,
+                      "reason": ... }} | null
+                      Populated ONLY when an observable-coverage check is
+                      requested above. BLOCKING gaps only: a property the goal
+                      requires whose data the run would not capture and could
+                      not be reconstructed post-hoc from what the deck saves
+                      (permanently lost). null/empty otherwise.
+  advisory_observables same shape | null
+                      NON-BLOCKING: goal-relevant properties that are absent
+                      but recoverable in post-processing from what the deck
+                      already saves, or optional/secondary. Informational —
+                      do not gate on these. null/empty when none.
   recommendations     list of short strings — next steps the user should
                       consider (rerun with X, gather more data, etc.)
   diagnostic_notes    optional prose — specific log lines, energies,
@@ -767,6 +796,7 @@ class RunCritic(_CriticBase):
         domain: Optional[str] = None,
         fixes_mode: str = "auto",
         input_files: Optional[Dict[str, str]] = None,
+        check_observables: bool = False,
     ) -> Dict[str, Any]:
         """Assess a finished run and return a verdict report.
 
@@ -805,6 +835,15 @@ class RunCritic(_CriticBase):
                 proposed fix patches the real inputs by their real names
                 with complete contents, rather than the critic guessing a
                 filename and emitting a fragment.
+            check_observables: When True, the critic additionally verifies
+                that the run captures the data needed for the properties the
+                research goal calls for. It separates BLOCKING gaps —
+                required data that would be permanently lost (reported in
+                ``missing_observables``, with a corrected deck in
+                ``suggested_fixes`` when input_files are provided) — from
+                recoverable-in-post-processing or optional ones (reported in
+                ``advisory_observables``, non-blocking). Intended for the
+                pre-run gate; defaults to False.
 
         Returns:
             A report dict with fields:
@@ -878,6 +917,41 @@ class RunCritic(_CriticBase):
             "is 'poor' or 'needs_fixes'.",
         )
 
+        if check_observables:
+            observable_coverage = (
+                "=== Observable-coverage check (pre-run) ===\n"
+                "Determine which physical properties the research goal requires. "
+                "A gap is BLOCKING only when the raw data needed to compute the "
+                "property is not being written at all and cannot be reconstructed "
+                "after the run. Apply this test:\n"
+                "- A saved trajectory of coordinates/velocities lets you recompute "
+                "geometry- and motion-based properties in post-processing "
+                "(structural, dynamical, correlation functions). Whenever any "
+                "trajectory is dumped, these are NON-blocking — no matter how "
+                "coarsely it is sampled.\n"
+                "- A quantity that must be accumulated DURING the run from "
+                "per-step forces, virial, or energy is NOT contained in a "
+                "coordinate/velocity trajectory and cannot be rebuilt afterward. "
+                "If the goal requires such a quantity and its log is absent, that "
+                "is BLOCKING.\n"
+                "- If no trajectory is saved at all, geometry/motion properties "
+                "become blocking too (nothing to post-process).\n"
+                "Resolution / sampling frequency is NEVER blocking.\n"
+                "- `missing_observables` (BLOCKING): required properties whose "
+                "raw data the run does not write at all. Only these justify "
+                "regenerating the deck before submission.\n"
+                "- `advisory_observables` (NON-BLOCKING): properties derivable in "
+                "post-processing from what the deck saves (including if "
+                "under-resolved), or optional/secondary. Report for awareness; do "
+                "NOT block.\n"
+                "Judge only what the goal actually requires; do not invent "
+                "observables. When `missing_observables` is non-empty, also return "
+                "`suggested_fixes`: the COMPLETE corrected deck(s) that add the "
+                "missing output(s), keyed by the exact input filename."
+            )
+        else:
+            observable_coverage = ""
+
         prompt = self.BASELINE_PROMPT_TEMPLATE.format(
             skill_context=skill_context or "(no engine skill loaded)",
             output_dir=str(out_path),
@@ -885,6 +959,7 @@ class RunCritic(_CriticBase):
             input_files_block=input_files_block,
             research_goal=research_goal,
             fixes_directive=fixes_directive,
+            observable_coverage=observable_coverage,
         )
         report = self._generate_json(prompt)
         report.setdefault("status", "success")

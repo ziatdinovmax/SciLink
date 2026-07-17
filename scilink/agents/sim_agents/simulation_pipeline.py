@@ -170,7 +170,7 @@ def _load_components_manifest(structure_path: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def run_complete_workflow(
+def _run_workflow_once(
     user_request: str,
     *,
     scale: str = "periodic_dft",
@@ -190,6 +190,7 @@ def run_complete_workflow(
     run_command: Optional[str] = None,
     autonomy: str = "autonomous",
     max_run_cycles: int = 3,
+    coverage_votes: int = 1,
     structure_file: Optional[str] = None,
     force_field_files: Optional[Dict[str, str]] = None,
     staged: bool = False,
@@ -231,6 +232,11 @@ def run_complete_workflow(
         autonomy: Autonomy level for the refinement loop (``"co-pilot"`` /
             ``"autopilot"`` / ``"autonomous"``); selects the built-in policy.
         max_run_cycles: Maximum run → assess → fix cycles per phase.
+        coverage_votes: Number of independent observable-coverage checks the
+            pre-run gate majority-votes before blocking a deck that omits a
+            required output (e.g. the stress log a viscosity goal needs). ``1``
+            is a single check; larger values damp the stochastic coverage
+            decision on borderline transport-property cases.
         structure_file: Optional path to an already-built structure. When
             provided, structure generation is skipped and this file is used
             directly — for callers that already have a structure and only want
@@ -393,7 +399,7 @@ def run_complete_workflow(
     ctx = RefinementContext(
         research_goal=user_request, scale=scale, engine=software,
         skill=software, domain=scale, autonomy=autonomy,
-        max_cycles=max_run_cycles,
+        max_cycles=max_run_cycles, coverage_votes=coverage_votes,
     )
     run_critic = RunCritic(
         api_key=api_key, base_url=base_url, model_name=model_name,
@@ -408,6 +414,44 @@ def run_complete_workflow(
         "success" if refinement.get("status") == "success"
         else f"refinement_{refinement.get('status', 'failed')}"
     )
+    return result
+
+
+def run_complete_workflow(
+    user_request: str,
+    *,
+    max_structure_retries: int = 0,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Run the full pipeline, regenerating the structure on a structure-caused failure.
+
+    Thin wrapper over :func:`_run_workflow_once`. The refinement loop can only
+    rewrite the run inputs, so it cannot recover from a broken *initial
+    structure* (a bad packmol pack that blows up at step 0 — the critic marks it
+    ``failure_class="structure"``), nor from structure generation failing
+    outright. When either happens and ``max_structure_retries`` remain, the
+    structure is regenerated (a fresh stochastic pack) and the whole workflow is
+    retried, since no deck edit can fix a broken configuration. ``0`` (default)
+    preserves the single-attempt behavior. All other arguments are forwarded
+    unchanged — see :func:`_run_workflow_once`.
+    """
+    caller_supplied_structure = kwargs.get("structure_file") is not None
+    result: Dict[str, Any] = {}
+    for attempt in range(max(0, max_structure_retries) + 1):
+        result = _run_workflow_once(user_request, **kwargs)
+        structure_caused = (
+            result.get("final_status") == "failed_structure_generation"
+            or (result.get("refinement") or {}).get("failure_class") == "structure"
+        )
+        if (structure_caused and not caller_supplied_structure
+                and attempt < max_structure_retries):
+            logger.info(
+                "structure-caused failure (%s); regenerating structure and "
+                "retrying (%d/%d)",
+                result.get("final_status"), attempt + 1, max_structure_retries,
+            )
+            continue
+        return result
     return result
 
 

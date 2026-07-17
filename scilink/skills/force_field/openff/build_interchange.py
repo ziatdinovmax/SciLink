@@ -212,6 +212,10 @@ TOOL_SPEC = ToolSpec(
         "force_field": {"type": "string", "description": "base SMIRNOFF .offxml (default Sage)"},
         "extra_force_fields": {"type": "list",
                                "description": "additional .offxml (e.g. water/ion model)"},
+        "nagl_model": {"type": "string",
+                       "description": ("NAGL graph-net charge model "
+                                       "(default openff-gnn-am1bcc-1.0.0.pt); "
+                                       "one released model today")},
     },
     required=["components", "coordinates_file"],
     signature=("build_interchange(components, coordinates_file, working_dir='.', "

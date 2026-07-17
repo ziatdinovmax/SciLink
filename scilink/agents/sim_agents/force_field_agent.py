@@ -1312,7 +1312,9 @@ Provide a brief summary of what the results mean and any actions needed.
             name=c.get("name", ""), smiles=c["smiles"], count=int(c["count"]),
             charge=float(c.get("charge", 0.0))) for c in components]
         return ParameterizedSystem(
-            backend=ff_kwargs.get("force_field", "openff-2.2.0"),
+            # Match build_interchange's own default so provenance is the full
+            # .offxml name whether or not the caller overrode the force field.
+            backend=ff_kwargs.get("force_field", "openff-2.2.0.offxml"),
             source_format="interchange",
             n_atoms=int(res["n_atoms"]), total_charge=float(res["total_charge"]),
             components=comps, coordinates_file=coordinates_file,

@@ -343,6 +343,16 @@ class MDSimulationAgent(SimulationAgent):
             plan,
         )
 
+        # Deck-gen boundary: the analysis's declared species-resolved selections
+        # must be distinctly expressible. A resolvable collision (two selections
+        # sharing an atom type) splits the type and regenerates the deck; a no-op
+        # otherwise.
+        script, system_info = self._enforce_analysis_realizability(
+            script, structure_file, research_goal, system_description,
+            system_info, plan,
+        )
+        self._last_system_info = system_info
+
         if force_field_files:
             script = self._integrate_force_fields(script, force_field_files)
 
@@ -494,7 +504,7 @@ class MDSimulationAgent(SimulationAgent):
         }
 
     def _generate_md_input(
-        self, structure_file, goal, desc, info, plan
+        self, structure_file, goal, desc, info, plan, resolved_selections=None
     ) -> str:
         data_filename = os.path.basename(structure_file)
 
@@ -504,6 +514,23 @@ class MDSimulationAgent(SimulationAgent):
                 type_info = self.tools_module.format_type_info(structure_file)
             except Exception:
                 pass
+
+        # When a boundary check split shared atom types so species-resolved
+        # selections became distinct, tell the agent which types now carry which
+        # selection so it writes the corresponding groups/computes.
+        resolved_block = ""
+        if resolved_selections:
+            rows = "\n".join(
+                f"- {sel}: atom type(s) {types}"
+                for sel, types in resolved_selections.items()
+            )
+            resolved_block = (
+                "\n## Species-resolved selections (distinct atom types)\n"
+                "These selections were given distinct atom types so they can be "
+                "analyzed separately; use exactly these types in the matching "
+                "groups/computes:\n"
+                f"{rows}\n"
+            )
 
         ts = plan.get("timestep", 2.0)
         equil_steps = int(
@@ -543,7 +570,8 @@ class MDSimulationAgent(SimulationAgent):
                 f"- Category: {info.get('system_category', 'unknown')}\n"
                 f"- Box: {info.get('box_dimensions', [])}\n"
                 f"- Vacuum: {'Yes -- slab' if info.get('has_vacuum') else 'No'}\n\n"
-                f"{type_info}\n\n"
+                f"{type_info}\n"
+                f"{resolved_block}\n"
                 "## Plan\n"
                 f"- Technique: {plan.get('simulation_technique')}\n"
                 f"- Ensemble: {plan.get('ensemble')}\n"
@@ -581,6 +609,107 @@ class MDSimulationAgent(SimulationAgent):
             )
 
         return self._generate_text(prompt)
+
+    def _declare_analysis_selections(self, research_goal, structure_file):
+        """Ask the agent which species-resolved atom selections its analysis must
+        resolve separately, given the goal and the components manifest.
+
+        This is the declared contract for the ``selection_realizable`` boundary
+        check: the agent states its intent (engine-neutral selection strings,
+        ``"<species>"`` or ``"<species>:<Element>"``), which the contradiction
+        framework then verifies and, if needed, resolves. Returns ``[]`` when
+        there is no manifest, fewer than two species, or the analysis needs no
+        species-resolved selection.
+        """
+        import json
+        comp_path = os.path.join(
+            os.path.dirname(structure_file) or ".", "components.json")
+        if not os.path.isfile(comp_path):
+            return []
+        try:
+            comps = json.load(open(comp_path)).get("components", [])
+        except Exception:
+            return []
+        if len(comps) < 2:
+            return []
+        species = "\n".join(
+            f"- {c.get('name')}  (SMILES {c.get('smiles')})" for c in comps)
+        prompt = (
+            "A downstream analysis of this simulation may need to distinguish "
+            "atoms of the same element that belong to different molecular "
+            "species.\n\n"
+            f"Research goal:\n{research_goal}\n\n"
+            f"Molecular species present:\n{species}\n\n"
+            "List the atom selections the analysis must be able to resolve "
+            "SEPARATELY, each as '<species>' or '<species>:<Element>' using the "
+            "exact species names above. Include a selection only if the goal's "
+            "analysis genuinely needs it on its own; return an empty list if no "
+            "species-resolved selection is needed.\n"
+            'Return JSON: {"selections": ["...", "..."]}'
+        )
+        try:
+            out = self._generate_json(prompt) or {}
+            return [s for s in (out.get("selections") or []) if isinstance(s, str)]
+        except Exception:
+            return []
+
+    def _enforce_analysis_realizability(
+        self, script, structure_file, research_goal, desc, info, plan
+    ):
+        """Deck-gen boundary check: the analysis's declared species-resolved
+        selections must be distinctly expressible in the generated input.
+
+        Runs the engine-neutral ``selection_realizable`` check; on a resolvable
+        collision (two required selections share an atom type) it applies the
+        engine's ``split_shared_types`` resolution, rewrites the data file, and
+        regenerates the deck against the now-distinct types. Fail-open — any
+        error leaves the deck and data file unchanged. Returns
+        ``(script, system_info)``.
+        """
+        try:
+            from .contradictions import Requirement, check_requirements
+            if self.tools_module is None or not hasattr(
+                self.tools_module, "split_shared_types"
+            ):
+                return script, info
+            selections = self._declare_analysis_selections(
+                research_goal, structure_file)
+            if len(selections) < 2:
+                return script, info
+            comp_path = os.path.join(
+                os.path.dirname(structure_file) or ".", "components.json")
+            req = Requirement(
+                "analysis selections", "selection_realizable",
+                params={"selections": selections})
+            arts = {
+                "data_file": structure_file, "components_json": comp_path,
+                "engine_tools": self.tools_module,
+            }
+            cons = check_requirements(
+                [req], arts,
+                active_skills=[self.skill_name] if self.skill_name else [])
+            if not cons:
+                return script, info
+            c = cons[0]
+            if not c.resolvable:
+                self.logger.warning(
+                    "Analysis realizability: %s (no resolution)", c.message)
+                return script, info
+            res = self.tools_module.split_shared_types(**c.resolution["kwargs"])
+            with open(structure_file, "w") as fh:
+                fh.write(res["data_file_text"])
+            self.logger.info(
+                "Analysis realizability: split shared types so %s are distinct",
+                list(res["type_map"]),
+            )
+            new_info = self.analyze_system(structure_file)
+            new_script = self._generate_md_input(
+                structure_file, research_goal, desc, new_info, plan,
+                resolved_selections=res["type_map"])
+            return new_script, new_info
+        except Exception as e:
+            self.logger.warning("Analysis realizability check skipped: %s", e)
+            return script, info
 
     def _build_multi_sim_block(self, plan):
         n = plan.get("number_of_simulations", 1)
