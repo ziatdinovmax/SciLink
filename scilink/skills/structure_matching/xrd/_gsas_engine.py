@@ -28,10 +28,10 @@ toolchain):
     conda create -n <env> python=3.12
     conda activate <env>
     conda install -c conda-forge fortran-compiler meson ninja
-    pip install "scilink[gsas]"        # or: pip install -e ".[gsas]" from a checkout
+    pip install "GSAS-II @ git+https://github.com/AdvancedPhotonSource/GSAS-II.git"
 
-The ``gsas`` extra pulls GSAS-II from its git repository
-(``git+https://github.com/AdvancedPhotonSource/GSAS-II.git``) and compiles its
+(GSAS-II is not on PyPI and PyPI forbids direct-URL dependencies in package
+metadata, so this cannot be a ``scilink[gsas]`` extra.) The install compiles its
 Fortran extensions against the environment's numpy. Install scilink/pymatgen
 *before* GSAS-II so the compile links against the final numpy ABI. Note: the
 compiler activation only happens inside an activated conda env — building via a
@@ -152,10 +152,10 @@ def _load_g2sc():
     except Exception as exc:  # pragma: no cover - env-dependent
         raise RuntimeError(
             "The 'gsas' XRD engine requires GSAS-II (GSASIIscriptable), which is "
-            "not importable in this environment. Install the optional extra: "
-            "pip install 'scilink[gsas]' (builds GSAS-II from source; needs a "
-            "Fortran compiler, e.g. `conda install -c conda-forge fortran-compiler "
-            "meson ninja`)."
+            "not importable in this environment. Install it with: pip install "
+            "\"GSAS-II @ git+https://github.com/AdvancedPhotonSource/GSAS-II.git\" "
+            "(builds from source; needs a Fortran compiler, e.g. `conda install "
+            "-c conda-forge fortran-compiler meson ninja`)."
         ) from exc
 
 
@@ -854,9 +854,9 @@ def index_pattern(
         from GSASII import GSASIIindex as G2indx
     except Exception as exc:  # pragma: no cover - env-dependent
         raise RuntimeError(
-            "index_pattern requires GSAS-II (GSASIIindex). Install the optional "
-            "extra: pip install 'scilink[gsas]' (see module docstring for the "
-            "Fortran-compiler recipe)."
+            "index_pattern requires GSAS-II (GSASIIindex). Install it with: "
+            "pip install \"GSAS-II @ git+https://github.com/AdvancedPhotonSource/"
+            "GSAS-II.git\" (see module docstring for the Fortran-compiler recipe)."
         ) from exc
 
     lam = _resolve_wavelength(wavelength)

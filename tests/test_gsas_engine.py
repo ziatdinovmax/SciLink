@@ -146,7 +146,7 @@ def test_actionable_error_without_gsas():
     with pytest.raises(RuntimeError) as exc:
         sx.simulate_xrd_pattern("x.cif", engine="gsas")
     msg = str(exc.value)
-    assert "scilink[gsas]" in msg and "Fortran" in msg
+    assert "GSAS-II @ git+" in msg and "Fortran" in msg
 
 
 @pytest.mark.skipif(not _pymatgen_available(), reason="pymatgen not installed")

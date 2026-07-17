@@ -185,7 +185,8 @@ The skill ships five tools the analysis script chains together:
 
 Install dependencies: `pip install scilink[structure-matching]` (pymatgen
 with the XRD analysis module, mp-api, pulp). Rietveld refinement
-additionally needs `pip install scilink[gsas]` (GSAS-II, built from source
+additionally needs GSAS-II, which is not on PyPI: `pip install "GSAS-II @
+git+https://github.com/AdvancedPhotonSource/GSAS-II.git"` (built from source
 — see the `simulate_xrd_pattern` `gsas` engine docs for the recipe).
 
 **Extending the backend list.** Materials Project, local CIF, and COD
