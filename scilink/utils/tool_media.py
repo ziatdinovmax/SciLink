@@ -131,6 +131,64 @@ def build_tool_message(tool_call_id: str, result_str: str, *,
     return {"role": "tool", "tool_call_id": tool_call_id, "content": content}
 
 
+_INTERRUPTED_TOOL_NOTE = (
+    "⚠️ Tool execution was interrupted before a result was produced "
+    "(the run was stopped). Re-run this tool if its output is still needed.")
+
+
+def repair_dangling_tool_calls(messages: list) -> list:
+    """Repair tool_use/tool_result pairing so a resumed history is valid.
+
+    A user Stop can abort the chat loop between appending an assistant
+    message with ``tool_calls`` and appending the matching ``tool``
+    result messages; history trimming can likewise slice a pair apart.
+    Providers (Anthropic/Bedrock in particular) reject such histories:
+    every tool_use id must be answered by a tool_result in the next
+    message. Called at the top of each chat turn:
+
+    - inserts a synthetic "interrupted" tool result for every tool_call
+      id that has no matching ``tool`` message,
+    - drops orphan / duplicate / foreign ``tool`` messages that answer
+      no pending tool_call id.
+    """
+    repaired: list = []
+    i, n = 0, len(messages)
+    while i < n:
+        m = messages[i]
+        if not isinstance(m, dict):
+            repaired.append(m)
+            i += 1
+            continue
+        if m.get("role") == "tool":
+            # Orphan tool result (its assistant tool_calls message was
+            # trimmed away, or it strayed) — drop it.
+            i += 1
+            continue
+        repaired.append(m)
+        tool_calls = m.get("tool_calls") if m.get("role") == "assistant" else None
+        if tool_calls:
+            expected = [tc.get("id") for tc in tool_calls
+                        if isinstance(tc, dict) and tc.get("id")]
+            answered: set = set()
+            j = i + 1
+            while j < n and isinstance(messages[j], dict) \
+                    and messages[j].get("role") == "tool":
+                tm = messages[j]
+                tcid = tm.get("tool_call_id")
+                if tcid in expected and tcid not in answered:
+                    answered.add(tcid)
+                    repaired.append(tm)
+                j += 1  # duplicates / foreign ids are dropped
+            for tcid in expected:
+                if tcid not in answered:
+                    repaired.append({"role": "tool", "tool_call_id": tcid,
+                                     "content": _INTERRUPTED_TOOL_NOTE})
+            i = j
+        else:
+            i += 1
+    return repaired
+
+
 def sanitize_history_images(messages: list) -> list:
     """Collapse any multimodal message content back to a plain string for
     persistence: keep the text parts, drop image parts (leaving a marker). No-op

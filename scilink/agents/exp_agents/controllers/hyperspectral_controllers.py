@@ -3107,7 +3107,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             try:
                 with open(os.path.join(output_dir, script_filename), "w", encoding="utf-8") as f:
                     f.write(f"# Auto-generated Script\n# Task: {target_desc}\n\n{code_str}")
-            except: pass
+            except Exception: pass
 
             # --- E. PROCESS MAPS (Dashboard + QC) ---
             total_maps_expected = len(maps_dict)

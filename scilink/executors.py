@@ -37,12 +37,19 @@ def _unregister_subprocess(proc: subprocess.Popen) -> None:
 
 
 def kill_subprocesses_for_thread(tid: int) -> None:
-    """Terminate all subprocesses registered by a given thread.
+    """Terminate all subprocesses registered by a given thread — including
+    subprocesses of fan-out worker threads registered (via
+    ``log_context.register_worker``) as children of that thread, so a
+    best-of-N candidate's running script is also stopped.
 
     Safe to call from any thread (e.g. the Streamlit UI thread).
     """
+    from scilink.utils.log_context import effective_thread
     with _active_subprocesses_lock:
-        procs = list(_active_subprocesses.pop(tid, []))
+        target_tids = [t for t in _active_subprocesses
+                       if t == tid or effective_thread(t) == tid]
+        procs = [p for t in target_tids
+                 for p in _active_subprocesses.pop(t, [])]
     for proc in procs:
         try:
             proc.terminate()          # SIGTERM first

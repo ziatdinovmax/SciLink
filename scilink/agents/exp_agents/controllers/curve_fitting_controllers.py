@@ -2787,6 +2787,9 @@ inspect the fit plots:
 3. Parsimony — when fits are comparable, prefer the simpler model and the run
    with fewer verification iterations (it stayed closer to the planned model).
 
+When your pick does not hold the best numeric metric, say so explicitly and
+justify via residual structure.
+
 **Return JSON:**
 {{
     "selected_index": <0-based index of the best run>,
@@ -3314,7 +3317,7 @@ Your guidance: '''
                     # Try tab-delimited
                     try:
                         return np.loadtxt(data_path, delimiter='\t', skiprows=1)
-                    except:
+                    except Exception:
                         raise ValueError(f"Could not parse text file: {data_path}")
         else:
             # Generic attempt
@@ -4258,7 +4261,7 @@ Return JSON with the refined fitting approach:
                     if new_threshold <= 1.0:
                         print(f"✓ Adjusting threshold to {new_threshold}")
                         return {"action": "adjust_threshold", "new_threshold": new_threshold}
-            except:
+            except Exception:
                 pass
         
         print("🔄 Will retry with your suggested approach...")
@@ -4313,7 +4316,7 @@ Return JSON with the refined fitting approach:
         if review_viz_path and review_viz_path.exists():
             try:
                 os.remove(review_viz_path)
-            except:
+            except Exception:
                 pass
         
         if not feedback:

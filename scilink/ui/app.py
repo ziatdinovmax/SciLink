@@ -399,14 +399,21 @@ def _run_agent_chat(task: ChatTask, agent, user_input: str) -> None:
     # per-attempt detail to milestones (executing / verification / outcome) so
     # the panel stays readable; a lone attempt and the CLI keep full detail.
     from scilink.utils.log_context import effective_thread, keep_in_fanout_panel
-    log_handler.addFilter(
-        lambda record: (
-            effective_thread(record.thread) == _this_thread
-            and keep_in_fanout_panel(
-                record.thread, record.getMessage(), record.levelno
-            )
+
+    def _panel_filter(record):
+        if effective_thread(record.thread) != _this_thread:
+            return False
+        # Stop propagation for logging-heavy phases: much of the agents'
+        # narration goes through logging (not print), so without this check
+        # a stopped run would only abort on its next print(). Filters run in
+        # the emitting thread, so the raise lands in the agent/worker thread.
+        if cap.stop_requested:
+            raise AgentStoppedError("Agent stopped by user")
+        return keep_in_fanout_panel(
+            record.thread, record.getMessage(), record.levelno
         )
-    )
+
+    log_handler.addFilter(_panel_filter)
     root_logger = logging.getLogger()
     # Lower root to INFO so agent logger.info() messages (execution
     # details, verification steps, R² values) reach the handler.

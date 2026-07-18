@@ -507,7 +507,7 @@ class OrchestratorTools:
                 try:
                     df = pd.read_csv(self.orch.bo_data_path)
                     data_count = len(df)
-                except:
+                except Exception:
                     pass
             
             return json.dumps({
@@ -3243,7 +3243,7 @@ class OrchestratorTools:
                 try:
                     df = pd.read_csv(self.orch.bo_data_path)
                     data_points = len(df)
-                except:
+                except Exception:
                     pass
             
             # Get message count (handle both OpenAI and Gemini)
@@ -3254,7 +3254,7 @@ class OrchestratorTools:
                 # Gemini: history is in chat_session
                 try:
                     message_count = len(self.orch.chat_session.history) if hasattr(self.orch.chat_session, 'history') else 0
-                except:
+                except Exception:
                     message_count = 0
             
             state = {
