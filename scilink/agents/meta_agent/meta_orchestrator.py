@@ -1050,6 +1050,34 @@ class MetaOrchestratorAgent:
         self._delegation_ledger.append(entry)
         return entry
 
+    def _sweep_interrupted_delegations(self) -> None:
+        """Finalize ledger entries left 'running' by an aborted turn.
+
+        A user Stop (AgentStoppedError) unwinds the delegation stack without
+        reaching ``_close_delegation``, leaving the provisional entry
+        'running' forever — misleading the UI delegation tree,
+        ``summarize_session_state``, and a later ``fuse_delegations``.
+        Nothing runs between chat turns, so any 'running' entry seen at turn
+        start is by definition dead: close it as 'interrupted' (a non-success
+        status, so the existing degraded-branch machinery excludes it from
+        fusion), mirroring the wall-clock-abandon path.
+        """
+        for e in self._delegation_ledger:
+            if e.get("status") == "running":
+                self.logger.warning(
+                    f"delegation {e.get('index')} "
+                    f"('{e.get('label') or e.get('mode')}') was left running "
+                    "by an interrupted turn — marking it interrupted")
+                self._close_delegation(e, {
+                    "status": "interrupted",
+                    "error": "interrupted by user stop before completion",
+                    "summary": "", "key_findings": [], "files_produced": [],
+                    "suggested_followups": [],
+                    "warnings": ["delegation interrupted mid-run (user "
+                                 "stop); results are incomplete — "
+                                 "re-delegate if still needed"],
+                })
+
     def _close_delegation(self, entry: Dict[str, Any], result: dict) -> None:
         """Finalize a provisional ledger entry with the child's result."""
         entry.update({
@@ -1322,6 +1350,9 @@ class MetaOrchestratorAgent:
         # First-turn: fill the system prompt's specialist-capability inventory
         # from the children's live tool registries (idempotent thereafter).
         self._inject_capabilities()
+
+        # Close out any delegation a mid-run Stop left dangling as 'running'.
+        self._sweep_interrupted_delegations()
 
         # Auto-checkpoint every N messages.
         if self.message_count - self.last_checkpoint_message_count >= self.CHECKPOINT_INTERVAL:

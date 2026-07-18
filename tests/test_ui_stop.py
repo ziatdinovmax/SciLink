@@ -183,6 +183,34 @@ def test_repair_noop_on_healthy_history():
     assert repair_dangling_tool_calls(msgs) == msgs
 
 
+def test_meta_sweep_closes_running_delegations_as_interrupted():
+    """A Stop mid-delegation bypasses _close_delegation, leaving the ledger
+    entry 'running' forever. The turn-start sweep must finalize it as
+    'interrupted' (non-success, so fusion's usable-branch predicate
+    excludes it) and leave completed entries untouched."""
+    import logging as _logging
+    from scilink.agents.meta_agent.meta_orchestrator import MetaOrchestratorAgent
+
+    orch = MetaOrchestratorAgent.__new__(MetaOrchestratorAgent)
+    orch.logger = _logging.getLogger("test_meta_sweep")
+    done = {"index": 1, "mode": "analysis", "label": "done-one",
+            "status": "success", "summary": "fine", "key_findings": ["x"]}
+    stuck = {"index": 2, "mode": "analysis", "label": "stuck-one",
+             "status": "running", "summary": "", "key_findings": []}
+    orch._delegation_ledger = [done, stuck]
+
+    orch._sweep_interrupted_delegations()
+
+    assert done["status"] == "success" and done["summary"] == "fine"
+    assert stuck["status"] == "interrupted"
+    assert "interrupted" in (stuck["error"] or "")
+    assert stuck["warnings"] and "re-delegate" in stuck["warnings"][0]
+    assert stuck.get("completed_at")
+    # idempotent — a second sweep changes nothing
+    orch._sweep_interrupted_delegations()
+    assert stuck["status"] == "interrupted"
+
+
 def test_agent_chat_catchall_does_not_eat_stop():
     """The orchestrator's chat() wraps everything in ``except Exception``
     and returns an error string; a stop must pass through it instead."""
