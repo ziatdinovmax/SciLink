@@ -24,7 +24,8 @@ from datetime import datetime
 from enum import Enum
 
 from ...auth import get_internal_proxy_key
-from ...utils.tool_media import (build_tool_message, provider_supports_tool_image,
+from ...utils.tool_media import (repair_dangling_tool_calls,
+                                 build_tool_message, provider_supports_tool_image,
                                  sanitize_history_images)
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
@@ -1362,6 +1363,9 @@ class MetaOrchestratorAgent:
             timeout=120.0,
         )
 
+        # Repair any tool_use left unanswered by a mid-run user Stop
+        # (or a trim slicing a pair apart) before extending history.
+        self.messages = repair_dangling_tool_calls(self.messages)
         self.messages.append({"role": "user", "content": user_input})
 
         if len(self.messages) > 120:
@@ -1468,6 +1472,9 @@ class MetaOrchestratorAgent:
         import litellm
         from ...wrappers.litellm_wrapper import litellm_completion
 
+        # Repair any tool_use left unanswered by a mid-run user Stop
+        # (or a trim slicing a pair apart) before extending history.
+        self.messages = repair_dangling_tool_calls(self.messages)
         self.messages.append({"role": "user", "content": user_input})
 
         if len(self.messages) > 120:

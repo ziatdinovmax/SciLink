@@ -9,6 +9,7 @@ from datetime import datetime
 from enum import Enum
 
 from ...auth import get_internal_proxy_key
+from ...utils.tool_media import repair_dangling_tool_calls
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .planning_agent import PlanningAgent
@@ -1521,6 +1522,9 @@ class PlanningOrchestratorAgent:
             base_url=self.model.base_url
         )
         
+        # Repair any tool_use left unanswered by a mid-run user Stop
+        # (or a trim slicing a pair apart) before extending history.
+        self.messages = repair_dangling_tool_calls(self.messages)
         self.messages.append({"role": "user", "content": user_input})
         
         if len(self.messages) > 120:
@@ -1655,6 +1659,9 @@ class PlanningOrchestratorAgent:
         import litellm
         from ...wrappers.litellm_wrapper import litellm_completion
         
+        # Repair any tool_use left unanswered by a mid-run user Stop
+        # (or a trim slicing a pair apart) before extending history.
+        self.messages = repair_dangling_tool_calls(self.messages)
         self.messages.append({"role": "user", "content": user_input})
         
         if len(self.messages) > 120:

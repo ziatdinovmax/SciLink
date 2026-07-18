@@ -125,6 +125,64 @@ def test_kill_subprocesses_includes_registered_fanout_workers():
     assert proc_holder["proc"].returncode is not None
 
 
+def _tc(tcid, name="run_analysis"):
+    return {"id": tcid, "type": "function",
+            "function": {"name": name, "arguments": "{}"}}
+
+
+def test_repair_inserts_synthetic_result_for_dangling_tool_call():
+    """The post-stop resume bug: history ends with assistant tool_calls and
+    no tool result — Bedrock rejects the next turn. Repair must insert a
+    synthetic 'interrupted' tool result."""
+    from scilink.utils.tool_media import repair_dangling_tool_calls
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "analyze this"},
+        {"role": "assistant", "content": None, "tool_calls": [_tc("t1")]},
+    ]
+    out = repair_dangling_tool_calls(msgs)
+    assert len(out) == 4
+    assert out[3]["role"] == "tool" and out[3]["tool_call_id"] == "t1"
+    assert "interrupted" in out[3]["content"].lower()
+
+
+def test_repair_fills_only_missing_of_parallel_tool_calls():
+    from scilink.utils.tool_media import repair_dangling_tool_calls
+    msgs = [
+        {"role": "assistant", "content": None,
+         "tool_calls": [_tc("t1"), _tc("t2")]},
+        {"role": "tool", "tool_call_id": "t1", "content": "done"},
+    ]
+    out = repair_dangling_tool_calls(msgs)
+    assert [m.get("tool_call_id") for m in out[1:]] == ["t1", "t2"]
+    assert out[1]["content"] == "done"
+    assert "interrupted" in out[2]["content"].lower()
+
+
+def test_repair_drops_orphan_tool_messages():
+    """History trimming can slice a pair apart the other way: a tool result
+    whose assistant tool_calls message was trimmed away."""
+    from scilink.utils.tool_media import repair_dangling_tool_calls
+    msgs = [
+        {"role": "tool", "tool_call_id": "gone", "content": "orphan"},
+        {"role": "user", "content": "hi"},
+    ]
+    out = repair_dangling_tool_calls(msgs)
+    assert out == [{"role": "user", "content": "hi"}]
+
+
+def test_repair_noop_on_healthy_history():
+    from scilink.utils.tool_media import repair_dangling_tool_calls
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "analyze"},
+        {"role": "assistant", "content": "thinking", "tool_calls": [_tc("t1")]},
+        {"role": "tool", "tool_call_id": "t1", "content": "result"},
+        {"role": "assistant", "content": "answer"},
+    ]
+    assert repair_dangling_tool_calls(msgs) == msgs
+
+
 def test_agent_chat_catchall_does_not_eat_stop():
     """The orchestrator's chat() wraps everything in ``except Exception``
     and returns an error string; a stop must pass through it instead."""
