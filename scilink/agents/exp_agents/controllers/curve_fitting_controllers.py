@@ -2787,6 +2787,9 @@ inspect the fit plots:
 3. Parsimony — when fits are comparable, prefer the simpler model and the run
    with fewer verification iterations (it stayed closer to the planned model).
 
+When your pick does not hold the best numeric metric, say so explicitly and
+justify via residual structure.
+
 **Return JSON:**
 {{
     "selected_index": <0-based index of the best run>,
