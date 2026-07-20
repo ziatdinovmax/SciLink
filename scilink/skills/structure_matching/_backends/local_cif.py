@@ -98,10 +98,11 @@ class LocalCIFBackend:
             return None
 
         present_elements = {str(el) for el in struct.composition.elements}
-        if not target_elements.issubset(present_elements):
-            return None
-        if target_elements != present_elements:
-            return None
+        if target_elements:  # empty = cell-only (blind) query: no element filter
+            if not target_elements.issubset(present_elements):
+                return None
+            if target_elements != present_elements:
+                return None
 
         sg_symbol = None
         sg_number = None
@@ -158,14 +159,12 @@ class LocalCIFBackend:
 
 
 def _lattice_within_ranges(lattice, ranges: dict) -> bool:
-    """Check lattice parameters against ``{a: (min, max), b: ..., c: ...}`` ranges."""
-    for key in ("a", "b", "c"):
-        if key in ranges:
-            lo, hi = ranges[key]
-            val = getattr(lattice, key)
-            if not (lo <= val <= hi):
-                return False
-    for key in ("alpha", "beta", "gamma"):
+    """Check lattice parameters against ``{a: (min, max), b: ..., c: ...}`` ranges.
+
+    Also accepts a ``volume`` key (Å³) — permutation-invariant, so it is the
+    robust primary filter when the axis convention of the query cell (e.g. from
+    autoindexing) may differ from the database entry's setting."""
+    for key in ("a", "b", "c", "alpha", "beta", "gamma", "volume"):
         if key in ranges:
             lo, hi = ranges[key]
             val = getattr(lattice, key)

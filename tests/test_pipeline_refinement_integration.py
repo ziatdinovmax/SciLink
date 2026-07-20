@@ -163,7 +163,12 @@ class TestGeneratedRemoteScript:
     def test_generated_call_kwargs_are_valid(self):
         script = self._render()
         tree = ast.parse(script)
-        valid = set(inspect.signature(sp.run_complete_workflow).parameters)
+        # run_complete_workflow is a thin wrapper — (user_request, *,
+        # max_structure_retries, **kwargs) — that forwards **kwargs to
+        # _run_workflow_once, so the accepted keyword names live on the
+        # delegate. Validate against the union of both signatures.
+        valid = (set(inspect.signature(sp.run_complete_workflow).parameters)
+                 | set(inspect.signature(sp._run_workflow_once).parameters))
         calls = [
             node for node in ast.walk(tree)
             if isinstance(node, ast.Call)

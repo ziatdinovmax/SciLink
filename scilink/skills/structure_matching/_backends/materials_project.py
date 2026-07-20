@@ -64,6 +64,11 @@ class MaterialsProjectBackend:
     def query(self, spec: QuerySpec) -> list[StructureCandidate]:
         if not self.is_available():
             return []
+        if not spec.chemistry:
+            # Cell-only (blind) queries are not supported here: mp-api searches
+            # are chemsys-keyed. COD / local-CIF handle the cell-only path.
+            _logger.debug("MP backend skipping cell-only query (needs chemistry)")
+            return []
 
         chemsys = "-".join(sorted(spec.chemistry))
         cache_key = (

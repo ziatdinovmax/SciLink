@@ -35,8 +35,16 @@ class QuerySpec:
     anonymous_formula: Optional[str] = None
 
     def __post_init__(self) -> None:
-        if not self.chemistry:
-            raise ValueError("QuerySpec.chemistry must be non-empty")
+        # Chemistry-free (cell-only) queries are allowed when a lattice filter is
+        # present — the blind-identification path, where the unit cell recovered
+        # by autoindexing (index_pattern) is the search key instead of elements.
+        # A backend that cannot search by cell alone returns [] for such specs.
+        if not self.chemistry and not self.lattice_param_ranges:
+            raise ValueError(
+                "QuerySpec needs chemistry and/or lattice_param_ranges — pass "
+                "element symbols, or a cell-only query (lattice_param_ranges "
+                "from index_pattern) when the chemistry is unknown"
+            )
         if self.top_n <= 0:
             raise ValueError("QuerySpec.top_n must be positive")
         if self.z_range is not None:

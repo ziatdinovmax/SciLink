@@ -41,7 +41,7 @@ from __future__ import annotations
 import numpy as np
 from scipy import ndimage as ndi
 
-from .gpa_strain import find_bragg_peaks
+from .strain import find_bragg_peaks
 
 __all__ = ["fft_defect_map", "make_defective_lattice"]
 
@@ -442,7 +442,7 @@ TOOL_SPEC = ToolSpec(
         "(noisy / low-dose / large field of view) or as an independent "
         "cross-check. NOT for dense disorder, extended defects or domains — "
         "for ordered-domain / second-phase LOCALIZATION use "
-        "fourier_reflection_map; for quantitative strain use gpa_strain. "
+        "fourier_reflection_map; for quantitative strain use gpa_strain_map. "
         "Candidates are periodicity anomalies, not typed defects: confirm type "
         "(vacancy vs dopant vs contamination) on a real-space crop around each "
         "returned (y, x), using each candidate's sign and coherence_dip flag."

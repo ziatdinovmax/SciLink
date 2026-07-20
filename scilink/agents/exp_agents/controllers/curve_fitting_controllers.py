@@ -34,9 +34,10 @@ from typing import Callable, Optional, Any, Dict, List
 import numpy as np
 
 from .._locked_exec import (
-    stage_and_run, script_uses_canonical_input, DATA_NAME, CANDIDATES_DIR_NAME,
-    atomic_np_save,
+    stage_and_run, stage_and_run_adaptive, script_uses_canonical_input,
+    DATA_NAME, CANDIDATES_DIR_NAME, atomic_np_save,
 )
+from .._qc_engine import CodegenQCEngine, QCEngineSpec, QCItemContext
 from ....utils.codegen_parse import parse_codegen_response
 from ....utils.synthesis_parse import salvage_synthesis_from_response
 
@@ -195,6 +196,276 @@ def _format_residual_diagnostics(diag) -> str:
     return "\n".join(lines)
 
 
+def _render_region_zoom_panels(x, y, fit, diag, max_panels: int = 3,
+                               rms_floor: float = 1.5, pad_frac: float = 0.15):
+    """Zoomed, locally-rescaled views of the most systematic residual regions.
+
+    The numeric residual diagnostics tell the verifier *where* the misfit is; the
+    full-range plot squashes the corresponding fine structure under a tall peak so
+    the verifier can't *see* what's missing. For each flagged window (already
+    sorted by severity) this crops the data + fit + residual to that x-range and
+    rescales the y-axis to the local data, so an unmodeled maximum/shoulder
+    becomes visible. The x-axis is the TRUE data axis and the title states the
+    real x-range, so the verifier can reference/seed components at correct
+    positions. Returns ``[(label, png_bytes), ...]`` (empty if nothing systematic
+    or inputs can't be rendered — the caller degrades gracefully).
+    """
+    if not diag or not diag.get("worst_windows"):
+        return []
+    try:
+        from io import BytesIO
+        from matplotlib import pyplot as plt
+        x = np.asarray(x, float).ravel()
+        y = np.asarray(y, float).ravel()
+        fit = np.asarray(fit, float)
+        if fit.ndim == 2:
+            fit = fit[:, -1]
+        fit = fit.ravel()
+        if not (x.shape[0] == y.shape[0] == fit.shape[0]):
+            return []
+        order = np.argsort(x)
+        x, y, fit = x[order], y[order], fit[order]
+        panels = []
+        for w in diag["worst_windows"]:
+            if len(panels) >= max_panels:
+                break
+            if float(w.get("rms_over_noise", 0.0)) < rms_floor:
+                continue
+            lo, hi = float(w["x_lo"]), float(w["x_hi"])
+            pad = (hi - lo) * pad_frac
+            mask = (x >= lo - pad) & (x <= hi + pad)
+            if int(mask.sum()) < 4:
+                continue
+            xs, ys, fs = x[mask], y[mask], fit[mask]
+            fig, (ax1, ax2) = plt.subplots(
+                2, 1, figsize=(6, 4.2), sharex=True,
+                gridspec_kw={"height_ratios": [3, 1]})
+            ax1.plot(xs, ys, "o", ms=3, color="#1f77b4", label="Data")
+            ax1.plot(xs, fs, "-", lw=1.8, color="#d62728", label="Fit")
+            ax1.legend(loc="best", fontsize=8)
+            ax1.set_ylabel("Intensity")
+            ax1.set_title(
+                f"Region {lo:.1f}–{hi:.1f} (true x axis)  |  "
+                f"RMS/noise={float(w.get('rms_over_noise', 0.0)):.1f}, "
+                f"{int(w.get('sign_changes', 0))} sign-changes",
+                fontsize=9)
+            ax2.plot(xs, ys - fs, "-", lw=1.0, color="#555555")
+            ax2.axhline(0, color="k", lw=0.7)
+            ax2.set_ylabel("Residual")
+            ax2.set_xlabel("x (data axis)")
+            fig.tight_layout()
+            buf = BytesIO()
+            fig.savefig(buf, format="png", dpi=110)
+            plt.close(fig)
+            panels.append((f"Region {lo:.1f}–{hi:.1f}", buf.getvalue()))
+        return panels
+    except Exception:
+        return []
+
+
+def _extract_xy(curve_data):
+    """(x, y) from a 1-D curve array, mirroring AnalyzeDataController's
+    heuristic: 1-D -> (index, data); [2,N] -> rows; [N,2] -> columns. Returns
+    None if the shape isn't a recognizable single curve."""
+    try:
+        d = np.asarray(curve_data, float)
+        if d.ndim == 1:
+            return np.arange(d.size, dtype=float), d
+        if d.ndim == 2 and d.shape[0] == 2:
+            return d[0], d[1]
+        if d.ndim == 2 and d.shape[1] == 2:
+            return d[:, 0], d[:, 1]
+    except Exception:
+        pass
+    return None
+
+
+_STRUCTURE_RMS_FLOOR = 2.5  # window structure must be this many × noise to count
+
+
+def _score_scale(x, y, sigma, global_span, n_windows):
+    """Score sliding windows at ONE scale. Window centers step by width/4 so a
+    window lands ON each feature regardless of grid alignment (a fixed grid
+    splits a narrow feature across a boundary and misses it). Returns the
+    windows whose structure clears the noise floor."""
+    width = (x.max() - x.min()) / n_windows
+    if width <= 0:
+        return []
+    half = width / 2.0
+    out = []
+    for c in np.arange(x.min() + half, x.max() - half + 1e-9, width / 4.0):
+        lo, hi = c - half, c + half
+        wm = (x >= lo) & (x <= hi)
+        if int(wm.sum()) < 6:
+            continue
+        xw, yw = x[wm], y[wm]
+        xc = xw - xw.mean()
+        try:                                    # local LINE = the resolvable trend
+            dr = yw - np.polyval(np.polyfit(xc, yw, 1), xc)
+        except Exception:
+            dr = yw - yw.mean()
+        rms_over_noise = float(np.sqrt(np.mean(dr ** 2)) / sigma)
+        if rms_over_noise < _STRUCTURE_RMS_FLOOR:    # no structure above the noise
+            continue
+        # Sign-changes of the BIN-AVERAGED detrend residual: systematic local
+        # structure (a shoulder -> 1, an unresolved doublet -> several), not noise.
+        nb = int(min(10, max(3, dr.size // 8)))
+        cuts = np.linspace(0, dr.size, nb + 1).astype(int)
+        bmeans = np.array([dr[cuts[k]:cuts[k + 1]].mean()
+                           for k in range(nb) if cuts[k + 1] > cuts[k]])
+        bsigns = np.sign(bmeans)
+        bsigns = bsigns[bsigns != 0]
+        sign_changes = int(np.sum(bsigns[:-1] != bsigns[1:])) if bsigns.size > 1 else 0
+        local_span = float(np.ptp(yw)) or sigma
+        compression = max(1.0, global_span / local_span)
+        j = int(np.argmax(np.abs(dr)))
+        out.append({
+            "x_lo": float(lo), "x_hi": float(hi), "x_mid": float(c),
+            "rms_over_noise": rms_over_noise,
+            "max_abs_norm": float(np.abs(dr[j]) / sigma),
+            "x_at_max": float(xw[j]),
+            "sign_changes": sign_changes,
+            "compression": compression,
+            # structured AND squashed sorts to the top. Compression is weighted
+            # LINEARLY so a small feature hidden under a tall one — the actually-
+            # hard-to-resolve case — outranks the tall feature's own (already-
+            # visible) flanks. Safe because the rms floor excludes squashed noise.
+            "_score": rms_over_noise * compression,
+        })
+    return out
+
+
+def _data_structure_diagnostics(x, y, scales=(8, 16, 32)):
+    """Fit-FREE "where is the hard-to-resolve structure?" diagnostics for the
+    PLANNING stage. The planner sees only the full-range plot, which squashes
+    fine structure under the dominant features. ANALYSIS-AGNOSTIC — no assumed
+    model: per window it removes a local LINE (the part a glance already
+    resolves) and scores the leftover structure, so it flags bumps / shoulders /
+    unresolved doublets for spectra AND fine structure on edges / steep knees
+    for decays, steps and monotonic curves.
+
+    MULTI-SCALE: runs several window scales and merges (cross-scale non-max
+    suppression), so it adapts to ANY feature width — narrow shoulders and broad
+    humps alike — with no single ``n_windows`` to tune. Precision-first: a window
+    must clear the noise floor to count, so featureless / noisy data flags
+    nothing (a clean no-op). Returns ``None`` on unusable input.
+    """
+    try:
+        x = np.asarray(x, float).ravel()
+        y = np.asarray(y, float).ravel()
+        m = np.isfinite(x) & np.isfinite(y)
+        if int(m.sum()) < 16:
+            return None
+        x, y = x[m], y[m]
+        order = np.argsort(x)
+        x, y = x[order], y[order]
+        sigma = _robust_noise_sigma(y) or (float(np.std(y)) or 1.0)
+        global_span = float(np.ptp(y)) or 1.0
+        cand = []
+        for nw in scales:
+            cand.extend(_score_scale(x, y, sigma, global_span, nw))
+        # Cross-scale non-max suppression: highest score first; drop any window
+        # that overlaps an already-kept one (its center inside the kept range or
+        # vice-versa) so the result is up to 5 DISTINCT regions, each at the
+        # scale that best resolved it.
+        cand.sort(key=lambda w: w["_score"], reverse=True)
+        kept = []
+        for w in cand:
+            if not any((k["x_lo"] <= w["x_mid"] <= k["x_hi"])
+                       or (w["x_lo"] <= k["x_mid"] <= w["x_hi"]) for k in kept):
+                kept.append(w)
+            if len(kept) >= 5:
+                break
+        return {"noise_sigma": sigma, "global_span": global_span,
+                "worst_windows": kept}
+    except Exception:
+        return None
+
+
+def _render_data_zoom_panels(x, y, diag, max_panels: int = 3, pad_frac: float = 0.15):
+    """Zoomed, locally-rescaled DATA views of the most structured-but-squashed
+    regions, for the PLANNING stage (no fit exists yet). Returns
+    ``[(label, png_bytes), ...]`` (empty when nothing systematic / unrenderable
+    — caller degrades gracefully)."""
+    if not diag or not diag.get("worst_windows"):
+        return []
+    try:
+        from io import BytesIO
+        from matplotlib import pyplot as plt
+        x = np.asarray(x, float).ravel()
+        y = np.asarray(y, float).ravel()
+        if x.shape[0] != y.shape[0]:
+            return []
+        order = np.argsort(x)
+        x, y = x[order], y[order]
+        panels = []
+        for w in diag["worst_windows"]:
+            if len(panels) >= max_panels:
+                break
+            lo, hi = float(w["x_lo"]), float(w["x_hi"])
+            pad = (hi - lo) * pad_frac
+            mask = (x >= lo - pad) & (x <= hi + pad)
+            if int(mask.sum()) < 4:
+                continue
+            xs, ys = x[mask], y[mask]
+            fig, ax = plt.subplots(figsize=(6, 3.2))
+            ax.plot(xs, ys, "-o", ms=3, lw=1.0, color="#1f77b4")
+            ax.set_title(
+                f"Region {lo:.1f}–{hi:.1f} (true x axis)  |  local structure "
+                f"{float(w.get('rms_over_noise', 0.0)):.1f}×noise, "
+                f"{int(w.get('sign_changes', 0))} sign-changes",
+                fontsize=9)
+            ax.set_xlabel("x (data axis)")
+            ax.set_ylabel("Intensity (local scale)")
+            fig.tight_layout()
+            buf = BytesIO()
+            fig.savefig(buf, format="png", dpi=110)
+            plt.close(fig)
+            panels.append((f"Region {lo:.1f}–{hi:.1f}", buf.getvalue()))
+        return panels
+    except Exception:
+        return []
+
+
+def _append_structure_zoom(prompt: list, state: dict) -> bool:
+    """Append fit-free 'hard-to-resolve region' zoom panels to a planning /
+    validation prompt, so the planner sees fine structure the full-range plot
+    squashes. No-op (returns False) for multi-spectrum stacks or unstructured
+    data. Analysis-agnostic — works for spectra, decays, edges, steps."""
+    try:
+        xy = _extract_xy(state.get("curve_data"))
+        if xy is None:
+            return False
+        panels = _render_data_zoom_panels(
+            xy[0], xy[1], _data_structure_diagnostics(xy[0], xy[1]))
+        if not panels:
+            return False
+        prompt.append(
+            "\n## Candidate hard-to-resolve regions (zoomed, fit-free — ADVISORY)\n"
+            "The full-range plot above is the PRIMARY evidence. The windows below "
+            "are candidate regions where a smooth local trend leaves leftover "
+            "structure — cropped to their true x-range and y-rescaled to the LOCAL "
+            "data so squashed detail becomes visible. They are detected "
+            "GEOMETRICALLY (NO assumed model), so they apply whatever the analysis "
+            "type: a shoulder may need an extra component, a knee an extra decay "
+            "term, a split edge two features.\n"
+            "Treat them as HINTS, not findings: VERIFY each against the full plot "
+            "and the noise level before acting on it, and IGNORE any that look "
+            "like noise or are already clearly resolved in the full view. They "
+            "never override the full plot — at worst they are redundant. Use the "
+            "ones that hold up to choose the model/approach and seed feature "
+            "positions; absence of a flagged window does not mean absence of "
+            "structure. If a domain skill is loaded, cross-reference these regions "
+            "against the features that technique expects."
+        )
+        for label, png in panels:
+            prompt.append(f"\n**{label}:**")
+            prompt.append({"mime_type": "image/png", "data": png})
+        return True
+    except Exception:
+        return False
+
+
 def _active_skill_names(state: dict) -> list[str]:
     """Return names of all currently-loaded skills from a pipeline state dict.
 
@@ -319,49 +590,17 @@ def build_verification_prompt_with_history(
     current_fit: dict,
     previous_iterations: List[dict],
 ) -> str:
-    """Build history context string for verification prompt."""
-    if not previous_iterations:
-        return ""
-    
-    lines = [
-        "\n\n## PREVIOUS VERIFICATION ATTEMPTS",
-        "Review what was tried before. Don't suggest fixes that already failed.\n"
-    ]
-    
-    for i, prev in enumerate(previous_iterations, 1):
-        lines.append(f"\n### Attempt {i}")
-        r2 = prev.get('r_squared')
-        lines.append(f"- R² = {r2:.4f}" if r2 is not None else "- R² = N/A")
-        lines.append(f"- Config: {prev.get('config_used', {}).get('physical_model', 'N/A')}")
-        lines.append(f"- Assessment: {prev.get('overall_assessment', 'N/A')}")
-        
-        issues = prev.get('issues_found', [])
-        if issues:
-            lines.append(f"- Issues ({len(issues)}):")
-            for issue in issues:
-                lines.append(f"  • {issue.get('location', '?')}: {issue.get('problem', '?')}")
-        
-        if prev.get('recommended_action'):
-            lines.append(f"- Action taken: {prev['recommended_action']}")
+    """Build history context string for verification prompt.
 
-        if prev.get('refinement_error'):
-            lines.append(
-                f"- **NOTE: The recommended fix was NOT applied** because "
-                f"the refinement LLM call failed ({prev['refinement_error']}). "
-                f"The results below are UNCHANGED from this attempt — "
-                f"do not penalize for identical output. Re-evaluate the "
-                f"recommended action and suggest concrete fixes."
-            )
-
-    lines.extend([
-        "\n\n## IMPORTANT",
-        "1. Check if previous issues were RESOLVED or still PERSIST",
-        "2. If a fix didn't work, suggest something DIFFERENT",
-        "3. If a previous fix was NOT applied due to an API error, "
-        "re-suggest it or propose an alternative",
-    ])
-    
-    return "\n".join(lines)
+    Delegates to the shared builder (``_verification_record``) with the
+    curve keymap — output is byte-identical to the historical inline version
+    (golden-pinned).
+    """
+    from .._verification_record import (
+        CURVE_PROMPT_KEYMAP,
+        build_verification_prompt_history,
+    )
+    return build_verification_prompt_history(previous_iterations, CURVE_PROMPT_KEYMAP)
 
 
 def _append_deviation_note(prompt: list, fit_results: dict) -> None:
@@ -705,6 +944,68 @@ def _load_prior_curve_fit_state(raw_path):
     return anchor_dir, summary, script_text, script_label
 
 
+def _degenerate_data_check(curve_data):
+    """Reason string when the data cannot support ANY fit, else ``None``.
+
+    The realtime pre-flight gate (#346): a detector-glitch frame (all-zero,
+    flat, runt, all-NaN) fails in milliseconds with an honest flag instead of
+    burning bounded LLM correction calls trying to rescue the unfittable
+    (measured: ~8 calls / ~4 min per glitch frame without this). Deliberately
+    conservative — partial corruption (e.g. a NaN-laced but otherwise real
+    spectrum) passes, because the correction path demonstrably salvages it.
+    Applied only under the realtime profile; thorough runs are untouched.
+    """
+    xy = _extract_xy(curve_data)
+    if xy is None:
+        return "unrecognizable data shape"
+    y = np.asarray(xy[1], dtype=float)
+    finite = y[np.isfinite(y)]
+    if finite.size < 32:
+        return (f"only {finite.size} finite data points "
+                f"(need ≥ 32 to support any fit)")
+    lo, hi = np.percentile(finite, [0.5, 99.5])
+    if not np.isfinite(hi - lo) or (hi - lo) <= 0:
+        return "zero dynamic range (flat or constant signal)"
+    return None
+
+
+def _load_anchor_fingerprint(anchor_dir):
+    """Data fingerprint of the anchor run's first successful spectrum.
+
+    Feeds the realtime drift check (#346 step 3): a per-frame fingerprint is
+    compared against this to detect that the DATA changed even when the
+    reused script still fits well (the R² gate is blind to phase transitions
+    under auto-adaptive scripts). Prefers the fingerprint persisted in
+    ``series_fit_results.json`` (stamped when the script bank is enabled);
+    falls back to re-reading the anchor's data file. Returns ``None`` when
+    neither is possible — drift is then reported as unavailable, never
+    guessed.
+    """
+    try:
+        data = json.loads(
+            (Path(anchor_dir) / "series_fit_results.json").read_text())
+    except Exception:  # noqa: BLE001
+        return None
+    for r in data.get("results") or []:
+        if not (isinstance(r, dict) and r.get("success")):
+            continue
+        fp = r.get("_bank_fingerprint")
+        if isinstance(fp, dict) and fp.get("kind") == "curve":
+            return fp
+        dp = r.get("data_path")
+        if dp and Path(str(dp)).is_file():
+            try:
+                from scilink.skills._shared import _script_bank
+                from scilink.skills._shared.curve_fitting_tools import load_curve_data
+                xy = _extract_xy(load_curve_data(str(dp)))
+                if xy is not None:
+                    return _script_bank.curve_fingerprint(xy[0], xy[1])
+            except Exception:  # noqa: BLE001
+                return None
+        return None  # anchor = first successful result only
+    return None
+
+
 def _prior_curve_fit_block(state: dict) -> str:
     """A reference-context block for prior curve-fit runs named in
     ``state['prior_analysis_paths']`` — a compact fit summary plus each
@@ -1006,6 +1307,71 @@ class SeriesScoutController:
                 return np.load(data_path)
             return np.loadtxt(data_path, delimiter=',')
 
+    # The visual scout is capped at 7 spectra; the SVD reduction runs on the
+    # full series so a transition the subsample straddles is still located.
+    # This cap only bounds file-loading cost on very long series.
+    _REDUCTION_MAX_SPECTRA = 256
+
+    def _run_series_reduction(self, state: dict, num_spectra: int) -> None:
+        """Full-series unsupervised change detection (mean-centered SVD).
+
+        Stores the `reduce_curves` result under `state["series_reduction"]`
+        (None on any failure — never blocks the scout). Control axis comes
+        from `series_metadata` values when they are numeric and per-spectrum,
+        else spectrum index.
+        """
+        from ....skills._shared.series_reduction import reduce_curves
+
+        try:
+            indices = list(range(num_spectra))
+            if num_spectra > self._REDUCTION_MAX_SPECTRA:
+                step = (num_spectra - 1) / (self._REDUCTION_MAX_SPECTRA - 1)
+                indices = sorted({round(i * step)
+                                  for i in range(self._REDUCTION_MAX_SPECTRA)})
+            series_metadata = state.get("series_metadata", {})
+            values = series_metadata.get("values", [])
+            curves, controls = [], []
+            for idx in indices:
+                try:
+                    x, y = self._extract_xy(self._load_spectrum(idx, state))
+                except Exception:
+                    continue
+                cv = None
+                if idx < len(values):
+                    try:
+                        cv = float(values[idx])
+                    except (TypeError, ValueError):
+                        cv = None
+                curves.append((x, y))
+                controls.append(cv)
+
+            if curves and all(c is not None for c in controls):
+                ctrl = controls
+                control_source = series_metadata.get("variable") or "index"
+            else:
+                ctrl, control_source = None, "index"
+
+            result = reduce_curves(
+                curves, controls=ctrl, control_source=control_source,
+                label="series", return_figure=True,
+            )
+            if result.get("status") != "success":
+                self.logger.info(
+                    f"  Change detection skipped: {result.get('error')}")
+                state["series_reduction"] = None
+                return
+            if len(curves) < num_spectra:
+                result["subsampled"] = f"{len(curves)} of {num_spectra} spectra"
+            state["series_reduction"] = result
+            self.logger.info(
+                f"  Change detection (all {result['n_points']} spectra): "
+                f"change point ≈ {result['change_point']:g} "
+                f"({control_source}), sharpness {result['change_sharpness']}"
+            )
+        except Exception as e:
+            self.logger.warning(f"  Series change detection failed: {e}")
+            state["series_reduction"] = None
+
     def execute(self, state: dict) -> dict:
         if state.get("error_dict") or state.get("is_single_spectrum", True):
             return state
@@ -1068,92 +1434,20 @@ class SeriesScoutController:
         else:
             state["scout_overlay_plot"] = None
 
+        # Full-series change detection (additive: the scouts above remain the
+        # visual evidence; this locates WHERE the series changes using every
+        # spectrum, which the <=7-spectrum subsample cannot).
+        self._run_series_reduction(state, num_spectra)
+
         state["scout_data"] = scout_data
         self.logger.info(f"  Scouted {len(scout_data)} of {num_spectra} spectra")
 
         return state
 
 
-class LiteratureSearchController:
-    """Search literature if enabled and query provided.
-
-    DEPRECATED: prefer the orchestrator-level `search_literature` tool, which
-    fetches lit context BEFORE planning so the planner can produce a
-    literature-informed plan. This in-pipeline controller is retained as a
-    fallback for direct-Python-API callers using `use_literature=True`.
-    """
-
-    def __init__(
-        self,
-        logger: logging.Logger,
-        literature_agent: Any | None,
-        output_dir: str,
-    ):
-        self.logger = logger
-        self.literature_agent = literature_agent
-        self.output_dir = output_dir
-
-    def _save_results(self, query: str, report: str) -> dict:
-        saved_files = {}
-        try:
-            lit_dir = os.path.join(self.output_dir, "literature")
-            os.makedirs(lit_dir, exist_ok=True)
-
-            query_path = os.path.join(lit_dir, "search_query.txt")
-            with open(query_path, "w") as f:
-                f.write(query)
-            saved_files["query_file"] = query_path
-
-            report_path = os.path.join(lit_dir, "literature_report.md")
-            with open(report_path, "w") as f:
-                f.write(report)
-            saved_files["report_file"] = report_path
-        except Exception as e:
-            self.logger.warning(f"Failed to save literature: {e}")
-        return saved_files
-
-    def execute(self, state: dict) -> dict:
-        if state.get("error_dict"):
-            return state
-
-        if state.get("literature_context"):
-            self.logger.info("\n📚 --- Skipping Literature (pre-fetched via search_literature tool) ---\n")
-            return state
-
-        if self.literature_agent is None:
-            self.logger.info("\n📚 --- Skipping Literature (disabled) ---\n")
-            state["literature_context"] = None
-            state["literature_files"] = None
-            return state
-
-        query = state.get("literature_query")
-        if not query:
-            self.logger.info("\n📚 --- Skipping Literature (no query needed) ---\n")
-            state["literature_context"] = None
-            state["literature_files"] = None
-            return state
-
-        self.logger.info("\n📚 --- Searching Literature ---\n")
-        self.logger.info(f"  Query: {query}")
-
-        try:
-            result = self.literature_agent.query_for_models(query)
-            if result.get("status") == "success":
-                state["literature_context"] = result["formatted_answer"]
-                self.logger.info("  ✅ Success")
-            else:
-                state["literature_context"] = None
-                self.logger.warning("  ⚠️ No results")
-
-            state["literature_files"] = self._save_results(
-                query, state["literature_context"] or f"No results: {result.get('message')}"
-            )
-        except Exception as e:
-            self.logger.error(f"  ❌ Failed: {e}")
-            state["literature_context"] = None
-            state["literature_files"] = self._save_results(query, f"Error: {e}")
-
-        return state
+# Shared implementation (one copy for all modalities) — re-exported under the
+# historical name so pipeline imports are unchanged.
+from .base_controllers import LiteratureSearchController  # noqa: E402,F401
 
 
 class GenerateCurveFittingReportController:
@@ -1501,9 +1795,19 @@ class GenerateCurveFittingReportController:
 # UNIFIED CONTROLLERS (for series analysis support)
 # ============================================================================
 
-class HumanFeedbackRefinementController:
+class CurveFittingPlanningController:
     """
-    Facilitates human-in-the-loop parameter refinement for the first spectrum.
+    Plans the fitting analysis for the first spectrum: drafts the plan (one
+    large model call over the plot + metadata + skill guidance), validates it
+    against the data and any mandatory skill rules (revising if needed), and
+    optionally runs a human-in-the-loop refinement gate before locking.
+
+    Renamed from ``HumanFeedbackRefinementController`` (kept as an alias) —
+    the old name described only the optional gate, not the planning work
+    that dominates the step.
+
+    Original description: facilitates human-in-the-loop parameter refinement
+    for the first spectrum.
     
     Works identically for single spectra and series:
     - Single spectrum: Refine fitting, then process that one spectrum
@@ -1567,6 +1871,12 @@ class HumanFeedbackRefinementController:
 
             series_metadata = state.get("series_metadata", {})
             values = series_metadata.get("values", [])
+            # Defensive: a filename-keyed dict should be normalized upstream
+            # (_normalize_series_values), but tolerate it here so a stray dict
+            # can't crash planning (min/max over dicts) — display only needs the
+            # scalar range, so value-order is irrelevant.
+            if isinstance(values, dict):
+                values = list(values.values())
             unit = series_metadata.get("unit", "")
 
             for i, regime in enumerate(regimes, 1):
@@ -1649,6 +1959,10 @@ class HumanFeedbackRefinementController:
         )
 
     def _plan_analysis(self, state: dict) -> dict:
+        self.logger.info(
+            "  ⏳ Drafting fitting plan — one large model call over the plot, "
+            "statistics and domain guidance (typically ~1 min; longer for "
+            "crowded spectra)...")
         prompt = [
             self.instructions,
             "\n## Data Plot",
@@ -1657,6 +1971,8 @@ class HumanFeedbackRefinementController:
             "\n## Metadata\n" + json.dumps(state.get("system_info", {}), indent=2),
         ]
 
+        # Fit-free zoom into hard-to-resolve regions the full plot squashes.
+        _append_structure_zoom(prompt, state)
         _append_objective_context(prompt, state)
         _append_fit_domain_guidance(prompt, state)
         _append_column_structure(prompt, state)
@@ -1735,17 +2051,8 @@ class HumanFeedbackRefinementController:
         """
         from ..instruct import CURVE_FITTING_PLAN_VALIDATION_PROMPT
 
-        regime_section = ""
-        series_plan = state.get("series_analysis_plan")
-        if series_plan and series_plan.get("regimes"):
-            lines = ["\n**Regimes:**"]
-            for regime in series_plan["regimes"]:
-                lines.append(
-                    f"- {regime.get('name', 'Unnamed')}: "
-                    f"model={regime.get('physical_model', 'N/A')}, "
-                    f"params={', '.join(regime.get('parameters_to_extract', []))}"
-                )
-            regime_section = "\n".join(lines)
+        regime_section = self._build_regime_section(
+            state.get("series_analysis_plan"))
 
         prompt_text = CURVE_FITTING_PLAN_VALIDATION_PROMPT.format(
             analysis_approach=state.get("analysis_approach", "N/A"),
@@ -1756,6 +2063,12 @@ class HumanFeedbackRefinementController:
         )
 
         prompt_parts = [prompt_text]
+        # Inject the user's objective so the validator judges the plan against
+        # what was actually asked — not the data plot alone. Without this, an
+        # explicit requirement (a region to exclude, a parameter to report) is
+        # invisible here and gets silently stripped when the data looks
+        # ambiguous. Mirrors the planning prompt and ImageAnalysis._validate_plan.
+        _append_objective_context(prompt_parts, state)
         _append_skill_context(prompt_parts, state, "planning")
 
         # For a series, show the multi-spectrum scout overlay (the single
@@ -1764,9 +2077,27 @@ class HumanFeedbackRefinementController:
         data_plot = state.get("scout_overlay_plot") or state.get("original_plot_bytes")
         if data_plot:
             prompt_parts.append("\n**Data:**")
+            # The overlay is a SUBSAMPLE — without saying so, the validator
+            # reads its legend as the whole series and "corrects" valid
+            # regime spectrum_indices down to the scouted count (seen live).
+            if state.get("scout_overlay_plot") and not state.get(
+                    "is_single_spectrum", True):
+                num_spectra = state.get("num_spectra", 1)
+                n_scouts = len(state.get("scout_data") or [])
+                prompt_parts.append(
+                    f"The overlay shows {n_scouts} representative spectra "
+                    f"scouted from the full series of {num_spectra}. Regime "
+                    f"spectrum_indices refer to the full series "
+                    f"(0..{num_spectra - 1}), not to the overlay curves."
+                )
             prompt_parts.append({"mime_type": "image/png", "data": data_plot})
+        # Same fit-free zoom into hard-to-resolve regions so the validator can
+        # catch unresolved structure the plan mischaracterized (no-op for series
+        # stacks, where _extract_xy returns None).
+        _append_structure_zoom(prompt_parts, state)
 
         try:
+            self.logger.info("  ⏳ Validating plan against the data and skill rules (second model call)...")
             response = self.model.generate_content(
                 prompt_parts, generation_config=self.generation_config,
             )
@@ -1798,6 +2129,49 @@ class HumanFeedbackRefinementController:
             self.logger.warning(f"  Plan validation failed: {e}, keeping plan")
 
         return state
+
+    @staticmethod
+    def _format_spectrum_indices(indices) -> str:
+        """Compact range rendering of an index list: '0-11, 13, 15-20'."""
+        idx = sorted({int(i) for i in (indices or [])})
+        if not idx:
+            return ""
+        parts, start, prev = [], idx[0], idx[0]
+        for i in idx[1:]:
+            if i == prev + 1:
+                prev = i
+                continue
+            parts.append(f"{start}-{prev}" if prev > start else f"{start}")
+            start = prev = i
+        parts.append(f"{start}-{prev}" if prev > start else f"{start}")
+        return ", ".join(parts)
+
+    @classmethod
+    def _build_regime_section(cls, series_plan) -> str:
+        """Regime block for the plan-validation prompt.
+
+        Shows each regime's spectrum_indices — the validator cannot preserve
+        an assignment it never saw — and states the omission semantics that
+        `_extract_series_plan` implements on the way back.
+        """
+        if not (series_plan and series_plan.get("regimes")):
+            return ""
+        lines = ["\n**Regimes:**"]
+        for regime in series_plan["regimes"]:
+            spectra = cls._format_spectrum_indices(
+                regime.get("spectrum_indices", []))
+            lines.append(
+                f"- {regime.get('name', 'Unnamed')}: "
+                f"spectra=[{spectra}], "
+                f"model={regime.get('physical_model', 'N/A')}, "
+                f"params={', '.join(regime.get('parameters_to_extract', []))}"
+            )
+        lines.append(
+            "If you revise the series plan, return spectrum_indices for each "
+            "regime; a regime returned without them inherits its current "
+            "assignment shown above."
+        )
+        return "\n".join(lines)
 
     def _append_scout_context(self, prompt: list, state: dict, scout_data: list) -> None:
         """Append scout spectrum plots and series regime planning instructions."""
@@ -1852,6 +2226,47 @@ class HumanFeedbackRefinementController:
                 "data": overlay,
             })
 
+        # Full-series SVD change detection (computed on every spectrum, not
+        # just the scouts — a transition between scout indices still shows).
+        reduction = state.get("series_reduction")
+        if reduction:
+            unit = series_metadata.get("unit", "")
+            axis = reduction.get("control_variable", {}).get("source", "index")
+            flags = reduction.get("flags", {})
+            flag_names = [k for k in ("shift_dominated", "intensity_drift",
+                                      "resampled_to_common_grid")
+                          if flags.get(k)]
+            coverage = reduction.get("subsampled") or (
+                f"all {reduction['n_points']} spectra")
+            lines = [
+                "\n### Full-Series Change Detection (computed)",
+                f"Unsupervised SVD change detection ran on {coverage} — "
+                "unlike the scout plots above, it sees between the scouted "
+                "indices.",
+                f"- Change point: {axis} ≈ {reduction['change_point']:g} "
+                f"{unit}".rstrip(),
+                f"- Change sharpness: {reduction['change_sharpness']} "
+                "(steepest single step as a fraction of the score range; "
+                "near 1 = abrupt transition, small = gradual evolution)",
+                f"- Variance explained by first two components: "
+                f"{reduction['variance_explained']}",
+            ]
+            if flag_names:
+                lines.append(f"- Flags: {', '.join(flag_names)}")
+            if reduction.get("caution"):
+                lines.append(f"- Caution: {reduction['caution']}")
+            lines.append(
+                "Use this to place regime boundaries and to judge whether "
+                "the scouts straddle a transition; the plots remain the "
+                "evidence for WHAT changes."
+            )
+            prompt.append("\n".join(lines))
+            if reduction.get("score_curve_png"):
+                prompt.append({
+                    "mime_type": "image/png",
+                    "data": reduction["score_curve_png"],
+                })
+
         prompt.append("\n### Individual Scout Spectra")
         for scout in scout_data:
             prompt.append(
@@ -1885,6 +2300,34 @@ class HumanFeedbackRefinementController:
         if not regimes:
             state["series_analysis_plan"] = None
             return
+
+        # A validation/refinement revision may return regimes without
+        # spectrum_indices — omission means "assignment unchanged", not
+        # "unassign". Inherit from the plan being revised (by regime name,
+        # else by position when the regime count is unchanged); otherwise
+        # the missing-index fallback below assigns every spectrum to
+        # regime 1 and drops the rest as empty, silently collapsing a
+        # multi-regime plan whenever the revision was about something else.
+        prior_regimes = (state.get("series_analysis_plan") or {}).get("regimes") or []
+        if prior_regimes:
+            prior_by_name = {
+                r.get("name"): r for r in prior_regimes if r.get("name")
+            }
+            same_count = len(regimes) == len(prior_regimes)
+            for pos, regime in enumerate(regimes):
+                if regime.get("spectrum_indices"):
+                    continue
+                source = prior_by_name.get(regime.get("name"))
+                if source is None and same_count:
+                    source = prior_regimes[pos]
+                inherited = (source or {}).get("spectrum_indices")
+                if inherited:
+                    regime["spectrum_indices"] = list(inherited)
+                    self.logger.info(
+                        f"  Regime '{regime.get('name', 'unnamed')}' returned "
+                        f"without spectrum_indices — inherited "
+                        f"{len(inherited)} from the plan being revised"
+                    )
 
         # Validate index coverage
         all_indices = set()
@@ -2049,7 +2492,11 @@ class HumanFeedbackRefinementController:
             self.logger.info(f"  Approach: {state['analysis_approach']}")
             self.logger.info(f"  Model: {state['physical_model']}")
 
-            if self.enable_human_feedback:
+            # On a verbatim locked-script reuse turn (#172) the plan is
+            # foreordained to re-run the prior script unchanged, so re-approving
+            # it is pointless interruption. Planning still ran above (downstream
+            # stages need its fields); we only skip the display/approval gate.
+            if self.enable_human_feedback and not state.get("reuse_locked_script"):
                 iteration = 0
                 while iteration < self.max_iterations:
                     state = self._get_human_feedback(state)
@@ -2085,46 +2532,7 @@ class HumanFeedbackRefinementController:
                     "  Column mapping unresolved/absent — heuristic X/Y selection."
                 )
 
-            state["locked_fitting_config"] = {
-                "analysis_approach": state.get("analysis_approach"),
-                "physical_model": state.get("physical_model") or "Model to be determined from the data",
-                "parameters_to_extract": state.get("parameters_to_extract", []),
-                "fitting_strategy": state.get("fitting_strategy"),
-                "column_mapping": column_mapping,
-            }
-
-            # Build per-regime configs if series plan has multiple regimes
-            series_plan = state.get("series_analysis_plan")
-            if series_plan and series_plan.get("regimes"):
-                regime_configs = {}
-                for regime in series_plan["regimes"]:
-                    regime_config = {
-                        "analysis_approach": state.get("analysis_approach"),
-                        "physical_model": regime.get(
-                            "physical_model", state.get("physical_model")
-                        ),
-                        "parameters_to_extract": regime.get(
-                            "parameters_to_extract",
-                            state.get("parameters_to_extract", []),
-                        ),
-                        "fitting_strategy": regime.get(
-                            "fitting_strategy", state.get("fitting_strategy")
-                        ),
-                        # Column roles are a file property — same across regimes.
-                        "column_mapping": column_mapping,
-                    }
-                    for idx in regime.get("spectrum_indices", []):
-                        regime_configs[idx] = regime_config
-                state["regime_configs"] = regime_configs
-                self.logger.info(
-                    f"  ✅ Locked {len(series_plan['regimes'])} regime "
-                    f"configuration(s) for series processing."
-                )
-            else:
-                state["regime_configs"] = None
-                self.logger.info(
-                    "  ✅ Fitting configuration locked for series processing."
-                )
+            self._lock_config(state, column_mapping)
 
         except Exception as e:
             self.logger.warning(f"⚠️ Planning failed: {e}, using fallback")
@@ -2148,6 +2556,74 @@ class HumanFeedbackRefinementController:
             state["series_analysis_plan"] = None
             state["regime_configs"] = None
 
+        return state
+
+    def _lock_config(self, state: dict, column_mapping) -> None:
+        """Freeze the current fitting-plan fields into ``locked_fitting_config``
+        (and per-regime configs). Shared by ``execute`` and the per-candidate
+        ``replan_headless`` so both lock identically. ``column_mapping`` is a
+        file-structure property resolved once and passed in — candidates
+        inherit the primary plan's mapping rather than re-resolving it."""
+        state["locked_fitting_config"] = {
+            "analysis_approach": state.get("analysis_approach"),
+            "physical_model": state.get("physical_model") or "Model to be determined from the data",
+            "parameters_to_extract": state.get("parameters_to_extract", []),
+            "fitting_strategy": state.get("fitting_strategy"),
+            "column_mapping": column_mapping,
+        }
+
+        # Build per-regime configs if series plan has multiple regimes
+        series_plan = state.get("series_analysis_plan")
+        if series_plan and series_plan.get("regimes"):
+            regime_configs = {}
+            for regime in series_plan["regimes"]:
+                regime_config = {
+                    "analysis_approach": state.get("analysis_approach"),
+                    "physical_model": regime.get(
+                        "physical_model", state.get("physical_model")
+                    ),
+                    "parameters_to_extract": regime.get(
+                        "parameters_to_extract",
+                        state.get("parameters_to_extract", []),
+                    ),
+                    "fitting_strategy": regime.get(
+                        "fitting_strategy", state.get("fitting_strategy")
+                    ),
+                    # Column roles are a file property — same across regimes.
+                    "column_mapping": column_mapping,
+                }
+                for idx in regime.get("spectrum_indices", []):
+                    regime_configs[idx] = regime_config
+            state["regime_configs"] = regime_configs
+            self.logger.info(
+                f"  ✅ Locked {len(series_plan['regimes'])} regime "
+                f"configuration(s) for series processing."
+            )
+        else:
+            state["regime_configs"] = None
+            self.logger.info(
+                "  ✅ Fitting configuration locked for series processing."
+            )
+
+    def replan_headless(self, state: dict) -> dict:
+        """Generate a fresh, INDEPENDENT fitting plan for one best-of-N
+        candidate.
+
+        Mirrors ``execute``'s planning — one ``_plan_analysis`` + ``_validate_plan``
+        + lock — with NO human feedback and NO candidate pre-selection.
+        Divergence comes from inherent sampling, which is especially valuable
+        for SKILL-LESS curves where initial-plan variance (model family, peak
+        count, background) is high; when an authoritative technique skill is
+        active the plans naturally converge on the mandated model (correct).
+        COLUMN MAPPING is a file-structure property already resolved and
+        applied to the shared data by the primary plan, so candidates INHERIT
+        it (no re-resolve, no re-slice). Mutates and returns ``state``.
+        """
+        state = self._plan_analysis(state)
+        self.logger.info(f"  Approach: {state['analysis_approach']}")
+        self.logger.info(f"  Model: {state['physical_model']}")
+        state = self._validate_plan(state)
+        self._lock_config(state, state.get("column_mapping_locked"))
         return state
 
 
@@ -2189,6 +2665,18 @@ def _write_series_fit_results(output_dir, state, series_results, quality_setting
     return str(results_path)
 
 
+
+# Backwards-compatible alias (pre-rename import path).
+HumanFeedbackRefinementController = CurveFittingPlanningController
+
+# Shared timeout-failure helpers (one copy for curve + image) — re-exported
+# under the historical underscore names so existing imports keep working.
+from .._locked_exec import (  # noqa: E402
+    is_timeout_error as _is_timeout_error,
+    trailing_timeout_failures as _trailing_timeout_failures,
+)
+
+
 class UnifiedSeriesProcessingController:
     """
     Processes ALL spectra using the locked fitting model.
@@ -2226,6 +2714,19 @@ class UnifiedSeriesProcessingController:
         XRD).  Always non-negative.
         """
         return max(min(cls.SOFT_BAND_MAX_WIDTH, 1.0 - r2_threshold), 0.0)
+
+    def _accept_gate(self):
+        """The driver's R² accept criterion as a :class:`QualityGate`.
+
+        Built from the LIVE ``self.r2_threshold`` at check time — not from the
+        gate snapshot in state — so the human-feedback ``adjust_threshold``
+        action is observed, and so behavior is unchanged when a skill declares
+        a non-R² gate (these driver checks have always compared R² against
+        ``r2_threshold`` regardless; unifying them with the skill gate is
+        engine-phase work, see analysis_qc_unification_plan.md §2.1).
+        """
+        from ..quality_gate import R_SQUARED_DEFAULT
+        return R_SQUARED_DEFAULT.with_accept_threshold(float(self.r2_threshold))
 
     JUDGE_PROMPT = '''You are a scientific data fitting expert acting as a judge.
 
@@ -2286,6 +2787,9 @@ inspect the fit plots:
 3. Parsimony — when fits are comparable, prefer the simpler model and the run
    with fewer verification iterations (it stayed closer to the planned model).
 
+When your pick does not hold the best numeric metric, say so explicitly and
+justify via residual structure.
+
 **Return JSON:**
 {{
     "selected_index": <0-based index of the best run>,
@@ -2328,6 +2832,7 @@ Your guidance: '''
         max_verification_iterations: int = None,
         conformance_instructions: str = "",
         parallel_workers: Optional[int] = None,
+        replanner: Any = None,
     ):
         self.model = model
         self.logger = logger
@@ -2340,6 +2845,10 @@ Your guidance: '''
         self.quality_instructions = quality_instructions
         self.output_dir = Path(output_dir)
         self.plot_fn = plot_fn
+        # Planning controller used to give each best-of-N fan-out candidate
+        # (>=1) its OWN independent fitting plan (ensemble diversity; most
+        # valuable for skill-less curves). None -> candidates share the plan.
+        self.replanner = replanner
         self.r2_threshold = r2_threshold if r2_threshold is not None else self.DEFAULT_R2_THRESHOLD
         # Vestigial: the alternative-models loop was removed in favor of
         # patience-counter-driven hot annealing inside the verification
@@ -2417,7 +2926,19 @@ Your guidance: '''
     ) -> str:
         config = state.get("locked_fitting_config", {})
         context_parts = []
-        if state.get("literature_context"):
+        # User guidance travels into codegen (matching hyperspectral, which
+        # always did this): tactical asks AND figure-presentation preferences
+        # (e.g. "place the legend outside the axes") must reach the script
+        # that actually draws visualization.png — planning-only injection
+        # silently dropped them. Label-text neutrality rules in the
+        # instructions still apply and take precedence over renaming asks.
+        if state.get("analysis_hints"):
+            context_parts.append(
+                "## User Guidance\n" + str(state["analysis_hints"]))
+        # Identification mode is literature-free in-run (issue #323, D2):
+        # literature must not shape the code that writes the fit, matching
+        # the planner gates. Covers hand-supplied literature_file too.
+        if state.get("literature_context") and state.get("task_mode") != "identification":
             context_parts.append(state["literature_context"])
         # Codegen recipe from ALL co-active skills (not just the top-ranked):
         # with several skills active each may own a different pipeline stage,
@@ -2433,6 +2954,14 @@ Your guidance: '''
         prior_runs = _prior_curve_fit_block(state)
         if prior_runs:
             context_parts.append(prior_runs)
+        # Script-bank exemplar (#346): first fresh generation only — never on
+        # refinements (prior_script) and never once annealing has escalated,
+        # so the hot script-drop's from-scratch regeneration stays exemplar-free.
+        exemplar = state.get("_bank_exemplar")
+        if (exemplar and prior_script is None
+                and state.get("_annealing_level", 0) == 0):
+            from scilink.skills._shared import _script_bank
+            context_parts.append(_script_bank.render_exemplar_block(exemplar))
 
         # Optional auxiliary operand(s) (#226): for each 1D auxiliary curve aligned
         # with the primary (same length), write it next to the spectrum and list
@@ -2532,7 +3061,11 @@ Your guidance: '''
                 "fit.npy save if present) verbatim; "
                 "only modify the model components, initial guesses, bounds, or "
                 "background treatment needed to address the issues. Do NOT "
-                "regenerate from scratch. If the RESIDUAL DIAGNOSTICS flagged a "
+                "regenerate from scratch. If an issue's fix departs from the "
+                "locked plan or a skill rule, implement it AND state the "
+                "justification explicitly in a script comment (deviations with "
+                "stated justification are acceptable; silent ones are flagged "
+                "as non-conformant). If the RESIDUAL DIAGNOSTICS flagged a "
                 "localized region with RMS far above noise and repeated "
                 "sign-changes, treat that as under-resolved real structure there "
                 "(add a physically-nameable component or fix the peak shape), not "
@@ -2550,6 +3083,56 @@ Your guidance: '''
 
         return result["script"]
 
+    # Last-resort model escalation for persistent execution timeouts. The
+    # locked-model rule (and its narrow computational-strategy carve-out)
+    # is the norm; this clause fires only when even carve-out corrections
+    # kept timing out on a FRESH (non-locked-reuse) fit — meaning the
+    # locked model itself is infeasible within the execution budget.
+    _TIMEOUT_MODEL_ESCALATION_CLAUSE = (
+        "\n**TIMEOUT ESCALATION — LAST RESORT. This clause SUPERSEDES the "
+        "CRITICAL rule and the timeout exception above for this single "
+        "correction:** computational-strategy fixes were already attempted "
+        "in earlier corrections and the script STILL exceeds the execution "
+        "budget — efficiency alone has failed, so the locked model itself "
+        "is computationally infeasible. RESTRUCTURE the model into a "
+        "computationally feasible alternative that preserves the plan's "
+        "scientific intent (fewer components, a cheaper lineshape, an "
+        "analytic approximation). Do not return another implementation of "
+        "the same infeasible model. The fit window and the data remain "
+        "untouchable: full window, ALL of the data. State exactly what you "
+        "changed and why in `diagnosis`.\n"
+    )
+
+    @staticmethod
+    def _should_escalate_timeout_model(base_script, attempt: int,
+                                       max_attempts: int,
+                                       consecutive_timeouts: int) -> bool:
+        """See :func:`_locked_exec.should_escalate_timeout_model` (shared
+        with image analysis)."""
+        from .._locked_exec import should_escalate_timeout_model
+        return should_escalate_timeout_model(
+            base_script, attempt, max_attempts, consecutive_timeouts)
+
+    def _correct_script_with_timeout_escalation(
+            self, state: dict, script: str, error_msg: str) -> tuple[str, str]:
+        """`_correct_script` under the last-resort timeout escalation: the
+        escalation clause is injected and the annealing level is raised to
+        hot for this ONE call (skill strictness relaxes in lockstep), then
+        both are restored so no later stage sees the elevated state."""
+        saved_level = state.get("_annealing_level", 0)
+        state["_timeout_model_escalation"] = True
+        state["_annealing_level"] = max(saved_level, self._hot_annealing_level)
+        self.logger.warning(
+            "    🔥 Last-resort timeout escalation: allowing model "
+            "restructure on the final correction (consecutive execution "
+            "timeouts persisted after computational fixes)."
+        )
+        try:
+            return self._correct_script(state, script, error_msg)
+        finally:
+            state["_annealing_level"] = saved_level
+            state.pop("_timeout_model_escalation", None)
+
     def _correct_script(self, state: dict, script: str, error_msg: str) -> tuple[str, str]:
         """Return ``(corrected_script, diagnosis)``."""
         config = state.get("locked_fitting_config", {})
@@ -2560,6 +3143,30 @@ Your guidance: '''
             error_message=error_msg,
             tool_inventory=_tool_inventory_text(state),
         )
+        # Keep user guidance (incl. figure-presentation preferences) visible
+        # during corrections so a fix doesn't silently undo it. Injected
+        # before the response footer — appended after it, guidance loses.
+        if state.get("analysis_hints"):
+            _guidance = ("\n## User Guidance\n"
+                         + str(state["analysis_hints"]) + "\n")
+            _marker = "**Response:**"
+            if _marker in prompt:
+                prompt = prompt.replace(_marker, _guidance + "\n" + _marker, 1)
+            else:
+                prompt += _guidance
+        # Last-resort timeout escalation (set transiently by
+        # _correct_script_with_timeout_escalation; absent otherwise).
+        # Injected BEFORE the response-format footer — appended after it,
+        # the clause loses to the two locked-model prohibitions above
+        # (observed live: the LLM kept an infeasible 40-component model).
+        if state.get("_timeout_model_escalation"):
+            marker = "**Response:**"
+            if marker in prompt:
+                prompt = prompt.replace(
+                    marker,
+                    self._TIMEOUT_MODEL_ESCALATION_CLAUSE + "\n" + marker, 1)
+            else:
+                prompt += self._TIMEOUT_MODEL_ESCALATION_CLAUSE
         # Codegen recipe from ALL co-active skills (see _generate_fitting_script).
         recipes = _collect_codegen_recipe(state)
         if recipes:
@@ -2606,7 +3213,10 @@ Your guidance: '''
                     rules_parts.append(f"### {stage.title()} rules\n{content}")
             if rules_parts:
                 skill_rules_text = (
-                    f"\n**MANDATORY Domain Skill Rules ({skill_name}):**\n"
+                    "\n" + self._SKILL_STRICTNESS_SCHEDULE[
+                        min(state.get("_annealing_level", 0),
+                            len(self._SKILL_STRICTNESS_SCHEDULE) - 1)
+                    ].format(name=skill_name)
                     + "\n".join(rules_parts)
                     + "\n"
                 )
@@ -2707,7 +3317,7 @@ Your guidance: '''
                     # Try tab-delimited
                     try:
                         return np.loadtxt(data_path, delimiter='\t', skiprows=1)
-                    except:
+                    except Exception:
                         raise ValueError(f"Could not parse text file: {data_path}")
         else:
             # Generic attempt
@@ -2728,6 +3338,31 @@ Your guidance: '''
         refine_from_r2: float = 0.0,
         refine_from_issues: Optional[list] = None,
     ) -> dict:
+        # Realtime pre-flight gate (#346): fail a glitch frame instantly —
+        # this single choke point covers reuse, non-anchor locked-script
+        # execution, AND the fallback codegen, so a degenerate frame costs
+        # milliseconds and zero LLM calls instead of the attempt ladders.
+        if state.get("_qc_profile") == "realtime":
+            _degenerate = _degenerate_data_check(curve_data)
+            if _degenerate:
+                self.logger.warning(
+                    f"   🚫 Pre-flight gate [{spectrum_name}]: {_degenerate} "
+                    f"— frame not analyzed (detector glitch?). Flagged for "
+                    f"the post-experiment sweep."
+                )
+                return {
+                    "index": spectrum_idx,
+                    "name": spectrum_name,
+                    "data_path": data_path,
+                    "success": False,
+                    "error": (f"Pre-flight degenerate-data gate: {_degenerate}. "
+                              f"The frame was not analyzed."),
+                    "parameters": {},
+                    "fit_quality": {},
+                    "script": None,
+                    "script_errors": [],
+                }
+
         stats = self._compute_statistics(curve_data)
         # Per-spectrum working dir: the locked script runs VERBATIM here with data
         # staged as the canonical DATA_NAME and viz written canonically — no
@@ -2750,6 +3385,8 @@ Your guidance: '''
         last_error = ""
         run = None
         script_errors: list[dict] = []
+        consecutive_timeouts = 0
+        used_timeout_escalation = False
 
         for attempt in range(1, self.MAX_ATTEMPTS + 1):
             try:
@@ -2794,11 +3431,31 @@ Your guidance: '''
                             "; ".join(conformance["justified_deviations"]),
                         )
                 else:
-                    script, diagnosis = self._correct_script(state, script, last_error)
-                    script_errors.append({"error": last_error, "diagnosis": diagnosis})
+                    if self._should_escalate_timeout_model(
+                            base_script, attempt, self.MAX_ATTEMPTS,
+                            consecutive_timeouts):
+                        script, diagnosis = (
+                            self._correct_script_with_timeout_escalation(
+                                state, script, last_error))
+                        used_timeout_escalation = True
+                    else:
+                        script, diagnosis = self._correct_script(
+                            state, script, last_error)
+                    entry = {"error": last_error, "diagnosis": diagnosis}
+                    if _is_timeout_error(last_error):
+                        # Structured failure-mode tag: lets the fallback
+                        # judge / post-hoc sweeps filter timeouts without
+                        # string-matching the message.
+                        entry["kind"] = "timeout"
+                    script_errors.append(entry)
 
-                run = stage_and_run(self.executor, script, curve_data, item_dir,
-                                    aux=extra_operands)
+                state["_verify_working_dir"] = str(item_dir)
+                # Adaptive timeout: a slow-but-correct script is retried
+                # verbatim with doubled timeouts before the correction LLM
+                # ever sees a "timed out" error.
+                run = stage_and_run_adaptive(self.executor, script, curve_data,
+                                             item_dir, aux=extra_operands,
+                                             logger=self.logger)
                 exec_result = run["exec"]
 
                 if run["status"] == "success":
@@ -2820,11 +3477,16 @@ Your guidance: '''
                             f"'visualization.png' in the working directory."
                         )
                         self.logger.warning(f"    ⚠️ Attempt {attempt}: Script ran but missing outputs: {', '.join(missing)}")
+                        consecutive_timeouts = 0
                 else:
                     last_error = exec_result.get("message", "Unknown error")
+                    consecutive_timeouts = (
+                        consecutive_timeouts + 1
+                        if _is_timeout_error(last_error) else 0)
                     self.logger.warning(f"    ⚠️ Attempt {attempt} failed: {last_error[:100]}")
             except Exception as e:
                 last_error = str(e)
+                consecutive_timeouts = 0
                 self.logger.error(f"    ❌ Attempt {attempt} error: {e}")
 
         # Success iff the final run produced BOTH the marker and the viz (matches
@@ -2834,7 +3496,7 @@ Your guidance: '''
               and run["visualization_path"] is not None
               and "FIT_RESULTS_JSON:" in run["stdout"])
         if not ok:
-            return {
+            failure = {
                 "index": spectrum_idx,
                 "name": spectrum_name,
                 "success": False,
@@ -2844,8 +3506,30 @@ Your guidance: '''
                 "script": script,
                 "script_errors": script_errors,
             }
+            if _is_timeout_error(last_error):
+                failure["kind"] = "timeout"
+            return failure
 
         fit_results = _parse_script_markers(run["stdout"])
+
+        # Absence-as-value contract (deterministic): a component flagged
+        # `_absent` must carry a MEASURED frozen-shape amplitude (finite,
+        # with `_err`), not empty keys — otherwise downstream series trends
+        # lose exactly the plateau points that prove a transition completed.
+        # Violations ride the script_errors channel into the verifier
+        # context and quality history, with the precise fix prescribed.
+        from ...skills._shared.curve_fitting_tools import (
+            validate_absent_component_contract, ABSENT_COMPONENT_FIX)
+        _acv = validate_absent_component_contract(
+            fit_results.get("parameters"))
+        if _acv:
+            script_errors.append({
+                "error": "absence-as-value contract violation: "
+                         + "; ".join(_acv),
+                "diagnosis": ABSENT_COMPONENT_FIX,
+            })
+            self.logger.warning(
+                "    ⚠️ Absence contract: %s", "; ".join(_acv))
 
         # Best-effort residual diagnostics from the saved fitted curve (vision aid):
         # reliable per-region structure metrics the verifier can reason over instead
@@ -2853,6 +3537,7 @@ Your guidance: '''
         # is absent (older/refit scripts) so this never breaks the fit path.
         fit_quality = dict(fit_results.get("fit_quality", {}) or {})
         residual_diag = None
+        residual_zoom_panels = []
         try:
             fit_path = Path(item_dir) / FIT_NAME
             if fit_path.exists():
@@ -2881,6 +3566,12 @@ Your guidance: '''
                         except Exception:
                             pass
                 residual_diag = _residual_diagnostics(xx, yy, fit_arr)
+                # Zoomed, locally-rescaled views of the flagged regions so the
+                # verifier can SEE unmodeled fine structure (e.g. crystal-field
+                # sub-peaks) the full-range plot squashes. x-axis is the true
+                # data axis so seed positions it suggests are correct.
+                residual_zoom_panels = _render_region_zoom_panels(
+                    xx, yy, fit_arr, residual_diag)
 
                 # Trust the saved fit over a broken self-reported R². The
                 # self-report is computed inside the (LLM-generated) script and
@@ -2889,8 +3580,12 @@ Your guidance: '''
                 # the saved fit is genuinely better than the script claimed. A
                 # *lower* recompute is left alone: it usually means a deliberate
                 # windowed/partial fit, where the script's own (windowed) number
-                # is the meaningful one. None (length mismatch / no signal) also
-                # keeps the self-report.
+                # is the meaningful one — but it can ALSO mean space-broken saved
+                # artifacts (e.g. a peaks-only fit saved against raw data after a
+                # baseline subtraction); the skills' output-space contract is the
+                # guard for that case, since this heuristic cannot distinguish
+                # the two. None (length mismatch / no signal) also keeps the
+                # self-report.
                 recomputed_r2 = _canonical_r2(yy, fit_arr)
                 self_r2 = fit_quality.get("r_squared")
                 if recomputed_r2 is not None:
@@ -2906,7 +3601,7 @@ Your guidance: '''
         except Exception:
             residual_diag = None
 
-        return {
+        result = {
             "index": spectrum_idx,
             "name": spectrum_name,
             "data_path": data_path,
@@ -2919,10 +3614,32 @@ Your guidance: '''
             "visualization_path": run["visualization_path"],
             "visualization_bytes": run["visualization_bytes"],
             "residual_diagnostics": residual_diag,
+            "residual_zoom_panels": residual_zoom_panels,
             "statistics": stats,
             "script": script,
             "script_errors": script_errors,
         }
+        if used_timeout_escalation:
+            # Provenance: this fit came from the last-resort model
+            # restructure after persistent timeouts — the executed script,
+            # not the locked plan prose, is authoritative for the model.
+            result["timeout_model_escalation"] = True
+        # Fingerprint of the data this script solved (script bank, #346) —
+        # stamped here because per-spectrum arrays for file inputs never reach
+        # the outer state the bank write hook reads. No-op unless the bank is
+        # enabled; never affects the fit.
+        try:
+            from scilink.skills._shared import _script_bank
+            if _script_bank.bank_enabled():
+                xy = _extract_xy(curve_data)
+                if xy is not None:
+                    result["_bank_fingerprint"] = _script_bank.curve_fingerprint(
+                        xy[0], xy[1],
+                        x_units=_script_bank.guess_x_units(state.get("system_info")),
+                    )
+        except Exception:
+            pass
+        return result
 
     FIT_VERIFICATION_PROMPT = '''You are a scientific data analysis expert reviewing a curve/spectral fit.
 
@@ -2957,6 +3674,18 @@ configured acceptance target:
 **Accept if:**
 - {metric_label} {accept_cmp} {accept_threshold:.2f} AND residuals are mostly random noise AND main data features are captured
 
+**Stop on plateau (convergence):** the PREVIOUS VERIFICATION ATTEMPTS section
+below lists, per iteration, the metric that drives acceptance ({metric_label}) —
+its value that step and the best-so-far. Track the best, not the latest (which can
+regress). **Plateau = the last two iterations produced no new best**, where
+"improvement" is judged relative to the accept threshold ({accept_threshold:.2f}):
+once the best sits comfortably past the threshold, a change small compared to its
+margin beyond the threshold does not count as a new best. When the best
+{metric_label} is {accept_cmp} {accept_threshold:.2f} AND it has plateaued in this
+sense, the fit has converged: set `fit_acceptable: true`, `recommended_action:
+"none"`, and record any remaining residual concern in `overall_assessment` as a
+caveat for the user, rather than continuing to refine.
+
 **Reject if:**
 - {metric_label} {reject_cmp} {reject_threshold:.2f} (hard-reject floor — numerical fit is too poor)
 - Major systematic residual pattern across ENTIRE spectrum (any {metric_label})
@@ -2984,6 +3713,24 @@ configured acceptance target:
 accept floor, give only the physics reason for rejection (the systematic
 residual, missed feature, or unphysical parameter), never the {metric_label} value, so the
 report stays factually correct.
+
+**Residual adequacy — the goal is residuals consistent with noise, i.e.
+*structureless* (no coherent shape, trend, or repeated oscillation), NOT residuals
+driven toward zero.** Once the residuals carry no systematic structure, the fit is
+as good as the data supports: accept it, and do not add components or keep retuning
+to shrink residual amplitude further (that is overfitting). It is the *structure*
+of a residual, not its amplitude or σ-multiple, that signals a real deficiency —
+reject only for a *structured* residual (a coherent local oscillation =
+under-resolved structure per above, or a global trend) or a genuine physics defect.
+
+For **count / shot-noise-limited data** (photon- or electron-counting — EELS, XPS,
+XRD, raw spectroscopy counts), refine this further: the noise grows with the
+signal (≈√counts), so a structured residual sitting on a tall, bright peak that is
+only a fraction of a percent of the local signal is within counting statistics —
+its large σ-multiple overstates it, so don't chase it with extra components. This
+refinement applies ONLY to count data; for **constant-noise data** (normalized,
+derivative, or processed signals with roughly uniform noise across the spectrum) a
+structured many-σ residual is significant at any signal level — do not discount it.
 
 **Do NOT reject for:**
 - Ambiguous or subtle features — but distinguish "subtle" (small, noise-level,
@@ -3057,12 +3804,14 @@ Remember: Rejecting a good fit ({metric_label} {accept_cmp} {accept_threshold:.2
         "If you believe a model change is necessary, suggest it, but explain "
         "why a parameter-level fix is insufficient.\n",
         # T=2  hot: full freedom, justify from data.
-        "\n**Plan constraint (open — previous iterations could not fix the fit):**\n"
-        "You have full freedom to suggest any change the data warrants, "
-        "from small parameter adjustments to a completely different model. "
-        "Choose the scale of change that fits the remaining issues. "
-        "The only requirement is that you justify every deviation from the "
-        "original plan based on what you observe in the data and residuals.\n",
+        "\n**Plan constraint (open):**\n"
+        "Earlier iterations stayed within tighter model constraints. If the fit "
+        "still needs work, you now have full freedom to suggest any change the data "
+        "warrants, from small parameter adjustments to a completely different model; "
+        "justify every deviation from what you observe in the data and residuals. "
+        "This freedom does NOT oblige a change: if the best metric is already above "
+        "the accept threshold and has plateaued, accept per the plateau rule instead "
+        "of proposing further changes.\n",
     )
 
     # Same annealing applied to domain skill strictness during fitting.
@@ -3313,12 +4062,71 @@ Remember: Rejecting a good fit ({metric_label} {accept_cmp} {accept_threshold:.2
             "with location 'preprocessing' and set recommended_action to 'none' — "
             "recorded as a caveat, not a refit trigger."
         )
+        # Per-region zoom panels: the flagged residual windows rendered zoomed and
+        # locally y-rescaled, so fine structure squashed on the full-range plot is
+        # visible. This turns the residual-diagnostics "where" into a "what" the
+        # model can see, and disambiguates add-a-component vs retune-the-shape.
+        zoom_panels = fit_result.get("residual_zoom_panels") or []
+        if zoom_panels:
+            prompt_parts.append(
+                "\n\n**RESOLVED RESIDUAL REGIONS** — each flagged window below is "
+                "zoomed and y-rescaled to its local range (x-axis is the TRUE data "
+                "axis). For each, look at the DATA (blue) vs FIT (red): if the data "
+                "shows a maximum or shoulder the fit does NOT cover, the model is "
+                "UNDER-RESOLVED there — ADD a component seeded at that x position "
+                "(report the position in recommended_action). Only retune "
+                "width/shape if the feature is already modelled. Do not treat a "
+                "clearly-real maximum as noise."
+            )
+            for label, png in zoom_panels:
+                prompt_parts.append(f"\n_{label}_")
+                prompt_parts.append({"mime_type": "image/png", "data": png})
+
         # Original (raw) data for reference.
         if state.get("original_plot_bytes"):
             prompt_parts.append("\n\n**ORIGINAL (RAW) DATA for reference:**")
             prompt_parts.append({"mime_type": "image/png", "data": state["original_plot_bytes"]})
 
-        
+        # Scrutinize-don't-reimplement: when a registered curve-fitting tool
+        # (e.g. fit_pattern, fit_sideband_manifold) produced the fit, judge it by
+        # the tool's QC + domain knowledge + cross-checks, not by re-deriving.
+        from ....skills._shared._registry import (
+            VERIFIER_TOOL_SCRUTINY_PRINCIPLE, get_tools_for)
+        _tool_inv = _tool_inventory_text(state)
+        if _tool_inv:
+            prompt_parts.append(
+                "\n\n**REGISTERED TOOLS AVAILABLE TO THIS FIT** — judge the result "
+                "against what each tool actually does and what its outputs mean; do not "
+                "re-derive a failure mode the tool already controls for:\n" + _tool_inv)
+            # Which of those tools THIS iteration's script actually called
+            # (authoritative — the prose pipeline description can deviate from the
+            # executed code). Parsed from the saved fitting script; only the name
+            # list is injected, never the script source.
+            try:
+                import glob as _g
+                _wd = state.get("_verify_working_dir")
+                _names = [t.name for t in get_tools_for(
+                    "curve_fitting", active_skills=_active_skill_names(state))]
+                _src = ""
+                if _wd:
+                    _hits = (_g.glob(os.path.join(_wd, "scripts", "*.py"))
+                             or _g.glob(os.path.join(_wd, "*.py")))
+                    if _hits:
+                        with open(_hits[0]) as _sf:
+                            _src = _sf.read()
+                import re as _re
+                _used = [n for n in _names
+                         if _re.search(rf"\b{_re.escape(n)}\b", _src)]
+                state["_last_tools_used"] = _used   # persisted into quality_history
+                if _used:
+                    prompt_parts.append(
+                        "\n\n**Registered tools this iteration's script actually CALLED:** "
+                        + ", ".join(_used) + " — apply each one's documented behaviour "
+                        "(above) when judging the result.")
+            except Exception:
+                pass
+        prompt_parts.append("\n\n" + VERIFIER_TOOL_SCRUTINY_PRINCIPLE)
+
         try:
             response = self.model.generate_content(
                 contents=prompt_parts,
@@ -3453,7 +4261,7 @@ Return JSON with the refined fitting approach:
                     if new_threshold <= 1.0:
                         print(f"✓ Adjusting threshold to {new_threshold}")
                         return {"action": "adjust_threshold", "new_threshold": new_threshold}
-            except:
+            except Exception:
                 pass
         
         print("🔄 Will retry with your suggested approach...")
@@ -3508,7 +4316,7 @@ Return JSON with the refined fitting approach:
         if review_viz_path and review_viz_path.exists():
             try:
                 os.remove(review_viz_path)
-            except:
+            except Exception:
                 pass
         
         if not feedback:
@@ -3575,6 +4383,28 @@ Return JSON with:
             self.logger.error(f"Failed to refine model from feedback: {e}")
             return config
 
+    def _gate_metric_str(self, state: dict, result: Optional[dict], fallback_r2: float) -> str:
+        """`"<label> = <value>"` for the active gate metric, for approval log
+        lines. Falls back to the global R² when the gate is r_squared or the
+        metric is missing — so a non-R² gate (e.g. peak_region_r2) is not logged
+        as "R²" with the global value it doesn't gate on."""
+        g = _gate(state)
+        if g is not None and getattr(g, "metric", "r_squared") != "r_squared":
+            try:
+                v = g.extract((result or {}).get("fit_quality"))
+                if v is not None:
+                    return f"{g.label} = {v:.4f}"
+            except Exception:
+                pass
+        return f"R² = {fallback_r2:.4f}"
+
+    # Modality constants for the shared per-item QC engine (#327 phase 4).
+    _QC_ENGINE_SPEC = QCEngineSpec(
+        config_key="locked_fitting_config",
+        refine_anchor="best",
+        refit_fail_msg="   Refit failed, stopping verification",
+    )
+
     def _fit_with_quality_control(self, state: dict, curve_data: np.ndarray, data_path: str, spectrum_name: str, spectrum_idx: int, is_regime_anchor: bool = False, reuse_script: Optional[str] = None, reuse_source: Optional[str] = None) -> dict:
         """
         Fit a single spectrum with quality control, verification, and optional judge selection.
@@ -3600,20 +4430,30 @@ Return JSON with:
         4. Unified judge evaluates ALL attempts when verifier kept rejecting
            the high-water best (Option B threshold gating).
         5. Attach quality_history to result for downstream synthesis.
+
+        The flow runs on the shared ``CodegenQCEngine`` (#327 phase 4); every
+        curve-specific stage is a ``qc_*`` hook below whose body moved
+        verbatim from the pre-extraction driver.
         """
-        all_attempts = []
-        verification_history = []
-        best_result = None
-        best_r2 = -1.0
-        best_config = (state.get("locked_fitting_config") or {}).copy()
+        engine = CodegenQCEngine(host=self, spec=self._QC_ENGINE_SPEC)
+        ctx = QCItemContext(
+            state=state, data=curve_data, data_path=data_path,
+            item_name=spectrum_name, item_idx=spectrum_idx,
+            is_regime_anchor=is_regime_anchor,
+            reuse_script=reuse_script, reuse_source=reuse_source,
+        )
+        return engine.run_item(ctx)
+
+    # --- CodegenQCEngine hooks (bodies moved verbatim from the old driver) ---
+
+    def qc_setup(self, ctx: QCItemContext) -> None:
+        ctx.best_config = (ctx.state.get("locked_fitting_config") or {}).copy()
         # Option B gate: set to True if the verifier ever rejects best_result
         # without later approving it.  Drives the threshold short-circuit
         # at the post-loop checkpoint.
-        best_ever_rejected = False
+        ctx.best_ever_rejected = False
 
-        # Anchor = first spectrum overall OR first in a regime; gets full QC
-        _is_anchor = spectrum_idx == 0 or is_regime_anchor
-
+    def qc_try_reuse(self, ctx: QCItemContext) -> Optional[dict]:
         # --- #172: locked-script reuse fast path ---
         # A prior curve-fit run supplied via prior_analysis_paths means the new
         # data is point N+1 of that series: reuse the prior run's locked fitting
@@ -3623,540 +4463,578 @@ Return JSON with:
         # for the orchestrator), never a gate that re-derives the model — a
         # re-derived model could change the feature columns. The only fallback
         # to full QC is a prior script that cannot execute at all.
-        if reuse_script and _is_anchor:
-            self.logger.info(
-                f"   ♻️  Reusing locked fitting script from prior run "
-                f"'{reuse_source or 'prior'}'..."
-            )
-            reuse_result = self._fit_single_spectrum(
-                state=state, curve_data=curve_data, data_path=data_path,
-                spectrum_name=spectrum_name, spectrum_idx=spectrum_idx,
-                base_script=reuse_script,
-            )
-            if reuse_result.get("success"):
-                reuse_r2 = (
-                    reuse_result.get("fit_quality", {}).get("r_squared") or 0
-                    or 0.0
-                )
-                verdict = "good" if reuse_r2 >= self.r2_threshold else "poor"
-                if verdict == "good":
-                    self.logger.info(
-                        f"   ✅ Reused script fits well (R² = {reuse_r2:.4f} ≥ "
-                        f"{self.r2_threshold:.3f}) — model re-derivation skipped"
-                    )
-                    message = (
-                        f"Reused the locked fitting script from prior run "
-                        f"'{reuse_source or 'prior'}'; R² = {reuse_r2:.4f} "
-                        f"meets the acceptance threshold "
-                        f"{self.r2_threshold:.3f}."
-                    )
-                else:
-                    self.logger.warning(
-                        f"   ⚠️  Reused script fits poorly (R² = "
-                        f"{reuse_r2:.4f} < {self.r2_threshold:.3f}). Keeping "
-                        f"the result to preserve feature-schema consistency; "
-                        f"flagging it as low-confidence."
-                    )
-                    message = (
-                        f"Reused the locked fitting script from prior run "
-                        f"'{reuse_source or 'prior'}', but R² = "
-                        f"{reuse_r2:.4f} is below the acceptance threshold "
-                        f"{self.r2_threshold:.3f}. The new measurement may "
-                        f"not belong to this series, or measurement "
-                        f"conditions shifted. Extracted parameters are "
-                        f"schema-consistent but should be treated as "
-                        f"low-confidence."
-                    )
-                reuse_result["reuse_validity"] = {
-                    "reused": True,
-                    "source": reuse_source,
-                    "r_squared": reuse_r2,
-                    "threshold": self.r2_threshold,
-                    "verdict": verdict,
-                    "message": message,
-                }
-                if verdict == "poor":
-                    reuse_result["quality_warning"] = message
-                return reuse_result
-            self.logger.warning(
-                f"   ⚠️  Prior fitting script could not execute on this data "
-                f"(even after correction). Falling back to full model "
-                f"re-derivation — the extracted-feature schema may differ "
-                f"from the prior run."
-            )
-
-        # --- Initial fit (annealing schedule starts here; default T=0) ---
-        # A re-run may start the schedule HIGHER (e.g. hot) via
-        # `_starting_annealing_level`, so it does not repeat early constraint
-        # stages a prior run already found inadequate. Default 0 = unchanged.
-        _start_level = max(0, min(int(state.get("_starting_annealing_level") or 0),
-                                  len(self._CONSTRAINT_ANNEALING_SCHEDULE) - 1))
-        state["_annealing_level"] = _start_level
-        initial_model = state.get('locked_fitting_config', {}).get('physical_model') or 'Initial model'
-        self.logger.info(f"   Attempt 1: {str(initial_model)[:80]}...")
-
-        result = self._fit_single_spectrum(
-            state=state, curve_data=curve_data, data_path=data_path,
-            spectrum_name=spectrum_name, spectrum_idx=spectrum_idx, base_script=None
+        self.logger.info(
+            f"   ♻️  Reusing locked fitting script from prior run "
+            f"'{ctx.reuse_source or 'prior'}'..."
         )
-
-        if result["success"]:
-            r2 = result.get("fit_quality", {}).get("r_squared") or 0
-            all_attempts.append({
-                "model": initial_model, "r2": r2, "result": result,
-                "config": (state.get("locked_fitting_config") or {}).copy(),
-            })
-
-            if r2 > best_r2:
-                best_r2 = r2
-                best_result = result
-                best_config = (state.get("locked_fitting_config") or {}).copy()
-
-            # --- Verification loop (for anchor spectra: first overall or first in regime) ---
-            fit_was_approved = False
-            if (_is_anchor and self.max_verification_iterations <= 0
-                    and best_result and best_result.get("success")):
-                # Explicit verification bypass (max_verification_iterations=0):
-                # the caller asked for a fast / in-situ turnaround. Accept the
-                # initial successful fit as-is, with no LLM verification or
-                # refit loop. Only triggers at <= 0, so the default thorough
-                # path (>= 1) is unaffected. A failed/degenerate initial fit
-                # (no success) still falls through to the loop below for the
-                # recovery path rather than locking garbage.
+        reuse_result = self._fit_single_spectrum(
+            state=ctx.state, curve_data=ctx.data, data_path=ctx.data_path,
+            spectrum_name=ctx.item_name, spectrum_idx=ctx.item_idx,
+            base_script=ctx.reuse_script,
+        )
+        if reuse_result.get("success"):
+            reuse_r2 = (
+                reuse_result.get("fit_quality", {}).get("r_squared") or 0
+                or 0.0
+            )
+            verdict = "good" if self._accept_gate().is_accept(reuse_r2) else "poor"
+            if verdict == "good":
                 self.logger.info(
-                    f"   ⏩ Verification bypassed (max_verification_iterations=0); "
-                    f"accepting initial fit (R² = {best_r2:.4f})")
-                fit_was_approved = True
-            elif _is_anchor:
-                # Skip verification ONLY when there is no successful fit to work
-                # with. A fit that executed but is degenerate (low/zero R²) must
-                # still enter the loop: the verifier + adaptive annealing (which
-                # reaches hot/fresh-generation) + residual diagnostics are the
-                # recovery path for a "ran-but-garbage" fit. Previously a
-                # `best_r2 < 0.1` clause skipped these cases, locking a degenerate
-                # script with no recovery (and, in a series, reusing it for every
-                # spectrum). Matches image-analysis, which gates on success only. (#245)
-                if not best_result or not best_result.get("success"):
-                    self.logger.warning(f"   Initial fit failed (no successful result, R²={best_r2:.4f}), skipping verification")
-                else:
-                    # Adaptive annealing state: start frozen, escalate via
-                    # three complementary mechanisms so hot annealing
-                    # (level n-1) is reliably reached when refits stall:
-                    #   (a) rate-based escalation: improvement too slow to
-                    #       reach threshold within the remaining iterations
-                    #   (b) patience counter: N consecutive iterations with
-                    #       best stuck → escalate (mirrors image-analysis
-                    #       _PATIENCE = 2 at image_analysis_controllers.py:3001)
-                    #   (c) iteration floor: floor(iter / floor_divisor) is
-                    #       the minimum allowed level — guarantees we hit the
-                    #       hot level by the end of the budget regardless of
-                    #       what the rate/patience say.
-                    _annealing_level = _start_level
-                    # Annealing level at which the PREVIOUS refit actually ran.
-                    # Used to detect the escalation INTO the hot level (see the
-                    # fresh-generation trigger below). Must track the prior
-                    # refit's level — not a same-iteration snapshot of
-                    # _annealing_level — because escalation happens at the end of
-                    # an iteration, so a start-of-iteration snapshot already
-                    # equals the (escalated) current level and never registers a
-                    # transition. Mirrors image_analysis's _previous_annealing_level.
-                    # max(start-1,0): starting AT hot still registers the
-                    # transition into hot (fires fresh generation); start at 0
-                    # restores the original `= 0`.
-                    _previous_annealing_level = max(_start_level - 1, 0)
-                    _prev_best_r2 = best_r2
-                    _n_anneal_levels = len(self._CONSTRAINT_ANNEALING_SCHEDULE)
-                    _PATIENCE = 2
-                    _stall_count = 0
-                    # Floor divisor chosen so the loop reaches level n-1 by
-                    # roughly the last third of the iteration budget.
-                    _floor_divisor = max(self.max_verification_iterations // _n_anneal_levels, 1)
-
-                    # current_result tracks the latest refit (what the verifier
-                    # diagnoses next); best_result is the high-water mark used
-                    # as the refinement anchor and final return value.
-                    current_result = best_result
-                    current_r2 = best_r2
-
-                    # best_ever_rejected is initialized at function scope.
-                    # Reset on promotion (new best hasn't been verified yet).
-                    # Used to gate the threshold short-circuit so a high-R²
-                    # but verifier-rejected best falls through to the
-                    # end-of-loop judge.
-                    best_verification = None  # last verifier verdict on best
-
-                    # R² floor for "in-band" promotion on physics grounds.
-                    # Catastrophic regressions (script bugs, complete failure)
-                    # are always rejected; small dips are admissible if the
-                    # verifier signals physical improvement.
-                    R2_FLOOR = max(self.r2_threshold - self._r2_soft_margin(self.r2_threshold), 0.0)
-
-                    for verification_iter in range(self.max_verification_iterations):
-                        self.logger.info(f"   Verification {verification_iter + 1}/{self.max_verification_iterations} (annealing level {_annealing_level})...")
-
-                        # Pass best_result for comparative assessment.  The
-                        # verifier emits physically_better_than_best only when
-                        # current and best are different objects.
-                        verification = self._verify_fit_with_llm(
-                            state, current_result,
-                            history=verification_history,
-                            verification_iter=verification_iter,
-                            annealing_level=_annealing_level,
-                            best_result=best_result,
-                            best_verification=best_verification,
-                        )
-
-                        if verification is None:
-                            self.logger.warning(f"   Verification failed, skipping")
-                            break
-
-                        _cur_level = _annealing_level
-                        _was_rejected = not verification.get("fit_acceptable", True)
-
-                        # Retroactive physics-based promotion: if a previous
-                        # iteration deferred current_result (in-band lower R²,
-                        # awaiting a verifier verdict), this verification just
-                        # rated it.  Promote if physics improved over best.
-                        if (current_result is not best_result
-                                and current_r2 >= R2_FLOOR
-                                and verification.get("physically_better_than_best", False)):
-                            note = (verification.get("comparison_note") or "physics improvement")[:90]
-                            best_r2 = current_r2
-                            best_result = current_result
-                            best_config = (state.get("locked_fitting_config") or {}).copy()
-                            state["locked_fitting_config"] = best_config
-                            self.logger.info(
-                                f"   Retroactively promoted current (R² = {current_r2:.4f}) on physics — {note}"
-                            )
-
-                        # If the verifier just inspected best_result itself
-                        # (either was already best or just promoted above),
-                        # record its verdict so the next iteration's prompt
-                        # can include best's complaint summary and the
-                        # post-loop threshold gate can know whether best is
-                        # under suspicion.
-                        if current_result is best_result:
-                            best_verification = verification
-                            best_ever_rejected = best_ever_rejected or _was_rejected
-
-                        # Store in history for next iteration's context
-                        verification_history.append({
-                            "r_squared": current_r2,
-                            "config_used": state.get("locked_fitting_config", {}),
-                            "issues_found": verification.get("issues_found", []),
-                            "overall_assessment": verification.get("overall_assessment", ""),
-                            "recommended_action": verification.get("recommended_action", ""),
-                            "physically_better_than_best": verification.get("physically_better_than_best", False),
-                            "comparison_note": verification.get("comparison_note", ""),
-                            "annealing_level": _cur_level,
-                        })
-
-                        if not _was_rejected:
-                            # Verifier approval trumps the R² high-water mark —
-                            # the verifier may accept a lower-R² fit on physics
-                            # grounds (e.g. better peak shape).  Promote.
-                            best_r2 = current_r2
-                            best_result = current_result
-                            best_config = (state.get("locked_fitting_config") or {}).copy()
-                            best_verification = verification
-                            best_ever_rejected = False
-                            state["locked_fitting_config"] = best_config
-                            self.logger.info(f"   ✅ Fit approved (R² = {best_r2:.4f})")
-                            fit_was_approved = True
-                            break
-
-                        # Log issues
-                        self._log_verification_issues(verification)
-
-                        # Apply LLM's recommended fixes
-                        refined_config = self._apply_llm_verification_feedback(state, verification)
-
-                        # If the refinement LLM call failed (transient
-                        # API error), tag the history so the next verifier
-                        # knows the fix was never applied.
-                        refinement_error = refined_config.pop(
-                            "_refinement_error", None
-                        )
-                        if refinement_error:
-                            verification_history[-1]["refinement_error"] = (
-                                refinement_error
-                            )
-
-                        if refined_config == state.get("locked_fitting_config", {}):
-                            # No changes at current temperature — escalate to
-                            # give the LLM more freedom before giving up.
-                            _annealing_level = min(_annealing_level + 1, _n_anneal_levels - 1)
-                            if _annealing_level == _cur_level:
-                                self.logger.info(f"   No config changes at max annealing level, stopping verification")
-                                break
-                            self.logger.info(f"   No config changes suggested, escalating to annealing level {_annealing_level}")
-                            continue
-
-                        # Clean up old visualization (but not the best result's
-                        # viz — best_result and current_result share the same
-                        # path when current was just promoted).
-                        old_viz_path = current_result.get("visualization_path")
-                        if (old_viz_path
-                                and Path(old_viz_path).exists()
-                                and current_result is not best_result):
-                            try:
-                                os.remove(old_viz_path)
-                            except:
-                                pass
-
-                        state["locked_fitting_config"] = refined_config
-
-                        # Sync skill strictness with adaptive annealing level
-                        state["_annealing_level"] = _annealing_level
-
-                        # Anchor the refinement on best_result.script (the
-                        # working version) so the LLM adapts known-good code
-                        # rather than regenerating from scratch.  Drop the
-                        # script when escalating to the hot annealing level
-                        # so the LLM can restructure freely.
-                        _just_escalated_to_hot = (
-                            _annealing_level >= _n_anneal_levels - 1
-                            and _previous_annealing_level < _n_anneal_levels - 1
-                        )
-                        _refine_from = (
-                            None if _just_escalated_to_hot
-                            else (best_result or {}).get("script")
-                        )
-
-                        if _just_escalated_to_hot:
-                            self.logger.info(f"   Refitting with verification feedback (fresh generation — hot annealing)...")
-                        elif _refine_from:
-                            self.logger.info(f"   Refitting with verification feedback (refining prior script)...")
-                        else:
-                            self.logger.info(f"   Refitting with verification feedback...")
-
-                        verified_result = self._fit_single_spectrum(
-                            state=state, curve_data=curve_data, data_path=data_path,
-                            spectrum_name=spectrum_name, spectrum_idx=spectrum_idx,
-                            base_script=None,
-                            refine_from_script=_refine_from,
-                            refine_from_r2=best_r2,
-                            refine_from_issues=verification.get("issues_found", []),
-                        )
-                        # Stamp the annealing level this refit was generated at,
-                        # so a downstream consumer can tell whether the WINNING
-                        # result came from a hot (fresh-generation) regeneration
-                        # vs. the original plan — used by T=2 auto-distillation
-                        # to decide a fit is a "novel pipeline". Travels with the
-                        # result dict through every promotion / judge path.
-                        if isinstance(verified_result, dict):
-                            verified_result["_produced_at_level"] = _annealing_level
-                        # Record the level this refit ran at, so the next
-                        # iteration can detect the escalation into hot. Updated
-                        # only on an actual refit (not the no-config-change
-                        # escalate-and-continue branch above).
-                        _previous_annealing_level = _annealing_level
-
-                        if verified_result["success"]:
-                            verified_r2 = verified_result.get("fit_quality", {}).get("r_squared") or 0
-
-                            all_attempts.append({
-                                "model": f"Verification-{verification_iter + 1}",
-                                "r2": verified_r2,
-                                "result": verified_result,
-                                "config": (state.get("locked_fitting_config") or {}).copy(),
-                                "verification": verification,
-                            })
-
-                            # Latest is always what the next verifier judges.
-                            current_result = verified_result
-                            current_r2 = verified_r2
-
-                            # Promotion rule (post-refit, no LLM call here):
-                            # 1. Strict R² improvement → promote immediately.
-                            # 2. Catastrophic regression (R² < floor) →
-                            #    reject; roll back the locked config so the
-                            #    next refit anchors on best.
-                            # 3. In-band lower R² → DEFER promotion to the
-                            #    next iteration's verifier, which will rate
-                            #    physically_better_than_best with the new
-                            #    fit's visualization.  Keep refined_config
-                            #    as the locked one so it matches current.
-                            if verified_r2 > best_r2:
-                                best_r2 = verified_r2
-                                best_result = verified_result
-                                best_config = (state.get("locked_fitting_config") or {}).copy()
-                                state["locked_fitting_config"] = best_config
-                                best_ever_rejected = False
-                                best_verification = None
-                                self.logger.info(
-                                    f"   Refit R² = {verified_r2:.4f} promoted (best now {best_r2:.4f})"
-                                )
-                            elif verified_r2 < R2_FLOOR:
-                                state["locked_fitting_config"] = best_config
-                                self.logger.info(
-                                    f"   Refit R² = {verified_r2:.4f} "
-                                    f"(best stays {best_r2:.4f} — below R² floor {R2_FLOOR:.2f})"
-                                )
-                            else:
-                                self.logger.info(
-                                    f"   Refit R² = {verified_r2:.4f} "
-                                    f"(best stays {best_r2:.4f}; deferred to next verifier for physics check)"
-                                )
-
-                            # Adaptive annealing — three escalation
-                            # triggers, applied in order; each can lift
-                            # _annealing_level (capped at n-1).
-                            improvement = best_r2 - _prev_best_r2
-                            remaining = max(self.max_verification_iterations - verification_iter - 1, 1)
-                            required_rate = max(self.r2_threshold - best_r2, 0.0) / remaining
-
-                            # (a) Rate-based: improvement too slow to reach
-                            #     threshold in remaining budget.
-                            rate_escalated = False
-                            if improvement < required_rate:
-                                _annealing_level = min(
-                                    _annealing_level + 1, _n_anneal_levels - 1
-                                )
-                                rate_escalated = True
-                                self.logger.info(
-                                    f"   Annealing: improvement {improvement:.4f} < required rate {required_rate:.4f}, "
-                                    f"escalating to level {_annealing_level}"
-                                )
-
-                            # (b) Patience-based: best stalled for _PATIENCE
-                            #     consecutive iterations.  Resets on any
-                            #     forward movement of best.
-                            if best_r2 > _prev_best_r2:
-                                _stall_count = 0
-                            else:
-                                _stall_count += 1
-                                if _stall_count >= _PATIENCE and not rate_escalated:
-                                    new_level = min(
-                                        _annealing_level + 1, _n_anneal_levels - 1
-                                    )
-                                    if new_level > _annealing_level:
-                                        _annealing_level = new_level
-                                        self.logger.info(
-                                            f"   Annealing: best stalled for {_stall_count} iterations, "
-                                            f"escalating to level {_annealing_level}"
-                                        )
-                                    _stall_count = 0
-
-                            # (c) Iteration floor: guarantees the hot level
-                            #     is reached even when rate/patience say
-                            #     otherwise (e.g., best ≥ threshold so
-                            #     required_rate degenerates to 0).
-                            _floor = min(
-                                (verification_iter + 1) // _floor_divisor,
-                                _n_anneal_levels - 1,
-                            )
-                            if _floor > _annealing_level:
-                                self.logger.info(
-                                    f"   Annealing: iteration floor lifting "
-                                    f"level {_annealing_level} → {_floor}"
-                                )
-                                _annealing_level = _floor
-                                _stall_count = 0
-
-                            if not rate_escalated and _stall_count == 0 and _floor <= _annealing_level:
-                                # No escalation this iteration; log the
-                                # rate decision for diagnostic continuity.
-                                pass  # already implicit; suppress duplicate logs
-
-                            _prev_best_r2 = best_r2
-                        else:
-                            self.logger.warning(f"   Refit failed, stopping verification")
-                            break
-
-                    else:
-                        # Loop exhausted without approval - one final pass to
-                        # rate the latest state.  If current was deferred
-                        # (in-band, awaiting physics verdict), this is its
-                        # last chance to be promoted.
-                        self.logger.info(f"   Verifying final refit...")
-                        final_verification = self._verify_fit_with_llm(
-                            state, current_result,
-                            verification_iter=self.max_verification_iterations,
-                            annealing_level=_annealing_level,
-                            best_result=best_result,
-                            best_verification=best_verification,
-                        )
-
-                        if final_verification:
-                            _final_rejected = not final_verification.get("fit_acceptable", True)
-
-                            # Retroactive promotion of deferred current
-                            if (current_result is not best_result
-                                    and current_r2 >= R2_FLOOR
-                                    and final_verification.get("physically_better_than_best", False)):
-                                note = (final_verification.get("comparison_note") or "physics improvement")[:90]
-                                best_r2 = current_r2
-                                best_result = current_result
-                                best_config = (state.get("locked_fitting_config") or {}).copy()
-                                self.logger.info(
-                                    f"   Post-loop promoted current (R² = {current_r2:.4f}) on physics — {note}"
-                                )
-
-                            # Update best's verdict tracking
-                            if current_result is best_result:
-                                best_verification = final_verification
-                                if not _final_rejected:
-                                    self.logger.info(f"   ✅ Final fit approved (R² = {best_r2:.4f})")
-                                    fit_was_approved = True
-                                    best_ever_rejected = False
-                                else:
-                                    best_ever_rejected = True
-                                    self._log_verification_issues(final_verification)
-                            else:
-                                # current still differs from best (no physics
-                                # promotion).  best's last verdict stands.
-                                if _final_rejected:
-                                    self._log_verification_issues(final_verification)
-
-                    # Restore config to match best result after verification loop
-                    state["locked_fitting_config"] = best_config
-
-            # --- Verifier-approved fits bypass the R² threshold check ---
-            if fit_was_approved:
-                self.logger.info(f"✅ Verifier approved fit (R² = {best_r2:.4f})")
-                quality_history = self._build_quality_history(
-                    best_r2, self.r2_threshold, all_attempts,
-                    verification_history, None,
-                    best_result.get("script_errors"),
+                    f"   ✅ Reused script fits well (R² = {reuse_r2:.4f} ≥ "
+                    f"{self.r2_threshold:.3f}) — model re-derivation skipped"
                 )
-                quality_history["approved"] = True
-                quality_history["approved_by"] = "verifier"
-                best_result["quality_history"] = quality_history
-                self._stamp_hot_deviation(best_result)
-                return best_result
-
-            # --- Check if we meet threshold ---
-            # Option B: when the verifier explicitly rejected best at some
-            # point and never approved it later, fall through to the judge
-            # even if R² meets the numerical threshold.  This catches the
-            # "high-R² but wrong-physics" trap where the verifier kept
-            # complaining about best on physics grounds.
-            if best_r2 >= self.r2_threshold and not best_ever_rejected:
-                self.logger.info(f"✅ R² = {best_r2:.4f} (meets threshold {self.r2_threshold})")
-                best_result["quality_history"] = self._build_quality_history(
-                    best_r2, self.r2_threshold, all_attempts,
-                    verification_history, None,
-                    best_result.get("script_errors"),
-                )
-                self._stamp_hot_deviation(best_result)
-                return best_result
-            elif best_r2 >= self.r2_threshold:
-                self.logger.info(
-                    f"⚠️ R² = {best_r2:.4f} meets threshold {self.r2_threshold}, "
-                    f"but verifier rejected best — deferring to judge"
+                message = (
+                    f"Reused the locked fitting script from prior run "
+                    f"'{ctx.reuse_source or 'prior'}'; R² = {reuse_r2:.4f} "
+                    f"meets the acceptance threshold "
+                    f"{self.r2_threshold:.3f}."
                 )
             else:
-                self.logger.warning(f"⚠️ R² = {best_r2:.4f} (below threshold {self.r2_threshold})")
-        else:
-            self.logger.error(f"   Initial fit failed: {result.get('error', 'Unknown')[:50]}")
-            all_attempts.append({"model": initial_model, "r2": 0, "result": result})
+                self.logger.warning(
+                    f"   ⚠️  Reused script fits poorly (R² = "
+                    f"{reuse_r2:.4f} < {self.r2_threshold:.3f}). Keeping "
+                    f"the result to preserve feature-schema consistency; "
+                    f"flagging it as low-confidence."
+                )
+                message = (
+                    f"Reused the locked fitting script from prior run "
+                    f"'{ctx.reuse_source or 'prior'}', but R² = "
+                    f"{reuse_r2:.4f} is below the acceptance threshold "
+                    f"{self.r2_threshold:.3f}. The new measurement may "
+                    f"not belong to this series, or measurement "
+                    f"conditions shifted. Extracted parameters are "
+                    f"schema-consistent but should be treated as "
+                    f"low-confidence."
+                )
+            reuse_result["reuse_validity"] = {
+                "reused": True,
+                "source": ctx.reuse_source,
+                "r_squared": reuse_r2,
+                "threshold": self.r2_threshold,
+                "verdict": verdict,
+                "message": message,
+            }
+            if verdict == "poor":
+                reuse_result["quality_warning"] = message
+            # Realtime drift channel (#346 step 3): the gate metric measures
+            # fit quality, not data identity — an auto-adaptive locked script
+            # fits a NEW phase with a high R² (live-proven on the dehydration
+            # series). The fingerprint distance to the anchor frame sees the
+            # data change; both signals are reported, escalation stays the
+            # caller's move.
+            if ctx.state.get("_qc_profile") == "realtime":
+                self._attach_drift_signal(ctx, reuse_result["reuse_validity"])
+            return reuse_result
+        self.logger.warning(
+            f"   ⚠️  Prior fitting script could not execute on this data "
+            f"(even after correction). Falling back to full model "
+            f"re-derivation — the extracted-feature schema may differ "
+            f"from the prior run."
+        )
+        return None
 
+    # Below this similarity to the anchor frame's fingerprint, a realtime
+    # frame is flagged drift="suspected". Calibrated on the in-situ
+    # dehydration series: same-phase frames score 1.000, transition-onset
+    # frames 0.900, post-transition frames 0.787 — 0.92 flags from onset.
+    DRIFT_SIMILARITY_THRESHOLD = 0.92
+
+    def _attach_drift_signal(self, ctx: QCItemContext, reuse_validity: dict) -> None:
+        """Fingerprint-distance drift check against the anchor frame (#346).
+
+        Deterministic and LLM-free: fingerprints this frame's data and scores
+        it against ``state['_anchor_fingerprint']`` with the script bank's
+        curve similarity. Adds ``fingerprint_similarity`` and ``drift``
+        ("none" | "suspected" | "unavailable") to ``reuse_validity``.
+        Failure-isolated — a drift-check error never affects the fit result.
+        """
+        try:
+            from scilink.skills._shared import _script_bank
+
+            anchor_fp = ctx.state.get("_anchor_fingerprint")
+            xy = _extract_xy(ctx.data)
+            if not anchor_fp or xy is None:
+                reuse_validity["drift"] = "unavailable"
+                return
+            frame_fp = _script_bank.curve_fingerprint(xy[0], xy[1])
+            sim = _script_bank._curve_similarity(frame_fp, anchor_fp)
+            reuse_validity["fingerprint_similarity"] = round(float(sim), 3)
+            drifted = sim < self.DRIFT_SIMILARITY_THRESHOLD
+            reuse_validity["drift"] = "suspected" if drifted else "none"
+            if drifted:
+                self.logger.warning(
+                    f"   🌡️ Drift suspected: fingerprint similarity to the "
+                    f"anchor frame is {sim:.3f} (< "
+                    f"{self.DRIFT_SIMILARITY_THRESHOLD}) — the data appears "
+                    f"to have changed even though the fit gate "
+                    f"{'passed' if reuse_validity.get('verdict') == 'good' else 'failed'}. "
+                    f"Consider re-anchoring or a thorough re-analysis of this frame."
+                )
+        except Exception as e:  # noqa: BLE001 - drift check never breaks the fit
+            reuse_validity.setdefault("drift", "unavailable")
+            self.logger.warning(f"Drift check skipped: {e}")
+
+    def qc_run_initial(self, ctx: QCItemContext) -> dict:
+        initial_model = ctx.state.get('locked_fitting_config', {}).get('physical_model') or 'Initial model'
+        ctx.initial_label = initial_model
+        self.logger.info(f"   Attempt 1: {str(initial_model)[:80]}...")
+
+        self._offer_bank_exemplar(ctx)
+        return self._fit_single_spectrum(
+            state=ctx.state, curve_data=ctx.data, data_path=ctx.data_path,
+            spectrum_name=ctx.item_name, spectrum_idx=ctx.item_idx, base_script=None
+        )
+
+    def _offer_bank_exemplar(self, ctx: QCItemContext) -> None:
+        """Adapt-mode script-bank retrieval (#346 step 2).
+
+        Fingerprints the item's data and, when the bank holds a closely
+        matching proven script, stashes it in state for the FIRST codegen
+        attempt to adapt (consumed by ``_generate_fitting_script`` at
+        annealing level 0 only, so the hot script-drop is preserved).
+        Precedence: explicit ``prior_analysis_paths`` reference material wins
+        — the bank never competes with a user-supplied prior. Failure-isolated.
+        """
+        state = ctx.state
+        state.pop("_bank_exemplar", None)
+        try:
+            from scilink.skills._shared import _script_bank
+            if not _script_bank.bank_enabled() or state.get("prior_analysis_paths"):
+                return
+            xy = _extract_xy(ctx.data)
+            if xy is None:
+                return
+            fingerprint = _script_bank.curve_fingerprint(
+                xy[0], xy[1],
+                x_units=_script_bank.guess_x_units(state.get("system_info")),
+            )
+            matches = _script_bank.find_exemplar(
+                "curve_fitting", fingerprint,
+                _script_bank.measurement_context(state.get("system_info") or {}),
+            )
+            if matches:
+                match = matches[0]
+                state["_bank_exemplar"] = match
+                _script_bank.mark_retrieved("curve_fitting", match["record"]["id"])
+                self.logger.info(
+                    f"   🏦 Bank exemplar offered: id={match['record']['id']} "
+                    f"score={match['score']} "
+                    f"({str(match['record'].get('technique_signals', {}).get('model_type') or '')[:60]})"
+                )
+        except Exception as e:
+            self.logger.warning(f"Bank retrieval skipped: {e}")
+
+    def qc_record_initial(self, ctx: QCItemContext, result: dict) -> None:
+        r2 = result.get("fit_quality", {}).get("r_squared") or 0
+        ctx.all_attempts.append({
+            "model": ctx.initial_label, "r2": r2, "result": result,
+            "config": (ctx.state.get("locked_fitting_config") or {}).copy(),
+        })
+
+        # A successful result must never be discarded by the R² ranking: a
+        # matching-type skill (gate metric figure_of_merit) reports no R²,
+        # and the residual-diagnostics backfill can then attach a deeply
+        # negative recomputed R² (a stick overlay is not a curve fit) that
+        # loses to the -1.0 sentinel — the run's ONLY successful result was
+        # dropped and the pipeline claimed "no successful result" (observed
+        # live: plan-CONFORMANT XRD search-match scripts failed while
+        # nonconformant ones, whose self-reported R² beat the sentinel,
+        # passed). Also fixes the latent curve-fit case of a successful
+        # first fit with R² <= -1, which must enter the verification /
+        # recovery loop per the #245 rationale below instead of being
+        # treated as nonexistent.
+        if ctx.best_result is None or r2 > ctx.best_score:
+            ctx.best_score = r2
+            ctx.best_result = result
+            ctx.best_config = (ctx.state.get("locked_fitting_config") or {}).copy()
+
+    def qc_verification_bypass(self, ctx: QCItemContext) -> bool:
+        if (ctx.is_anchor and self.max_verification_iterations <= 0
+                and ctx.best_result and ctx.best_result.get("success")):
+            # Explicit verification bypass (max_verification_iterations=0):
+            # the caller asked for a fast / in-situ turnaround. Accept the
+            # initial successful fit as-is, with no LLM verification or
+            # refit loop. Only triggers at <= 0, so the default thorough
+            # path (>= 1) is unaffected. A failed/degenerate initial fit
+            # (no success) still falls through to the loop below for the
+            # recovery path rather than locking garbage.
+            self.logger.info(
+                f"   ⏩ Verification bypassed (max_verification_iterations=0); "
+                f"accepting initial fit (R² = {ctx.best_score:.4f})")
+            ctx.approved = True
+            return True
+        return False
+
+    def qc_log_skip_verification(self, ctx: QCItemContext) -> None:
+        # Skip verification ONLY when there is no successful fit to work
+        # with. A fit that executed but is degenerate (low/zero R²) must
+        # still enter the loop: the verifier + adaptive annealing (which
+        # reaches hot/fresh-generation) + residual diagnostics are the
+        # recovery path for a "ran-but-garbage" fit. Previously a
+        # `best_r2 < 0.1` clause skipped these cases, locking a degenerate
+        # script with no recovery (and, in a series, reusing it for every
+        # spectrum). Matches image-analysis, which gates on success only. (#245)
+        self.logger.warning(f"   Initial fit failed (no successful result, R²={ctx.best_score:.4f}), skipping verification")
+
+    def qc_loop_setup(self, ctx: QCItemContext) -> None:
+        # best_ever_rejected is initialized in qc_setup.
+        # Reset on promotion (new best hasn't been verified yet).
+        # Used to gate the threshold short-circuit so a high-R²
+        # but verifier-rejected best falls through to the
+        # end-of-loop judge.
+        ctx.best_verification = None  # last verifier verdict on best
+
+        # R² floor for "in-band" promotion on physics grounds.
+        # Catastrophic regressions (script bugs, complete failure)
+        # are always rejected; small dips are admissible if the
+        # verifier signals physical improvement.
+        ctx.r2_floor = max(self.r2_threshold - self._r2_soft_margin(self.r2_threshold), 0.0)
+
+        # Floor divisor chosen so the loop reaches level n-1 by
+        # roughly the last third of the iteration budget.
+        ctx.floor_divisor = max(self.max_verification_iterations // ctx.n_levels, 1)
+
+    def qc_verify(self, ctx: QCItemContext) -> Optional[dict]:
+        # Pass best_result for comparative assessment.  The
+        # verifier emits physically_better_than_best only when
+        # current and best are different objects.
+        return self._verify_fit_with_llm(
+            ctx.state, ctx.current_result,
+            history=ctx.verification_history,
+            verification_iter=ctx.iteration,
+            annealing_level=ctx.annealing_level,
+            best_result=ctx.best_result,
+            best_verification=ctx.best_verification,
+        )
+
+    def qc_on_verify_none(self, ctx: QCItemContext) -> None:
+        self.logger.warning(f"   Verification failed, skipping")
+
+    def qc_assess(self, ctx: QCItemContext, verification: dict) -> None:
+        _cur_level = ctx.annealing_level
+        ctx.was_rejected = not verification.get("fit_acceptable", True)
+
+        # Retroactive physics-based promotion: if a previous
+        # iteration deferred current_result (in-band lower R²,
+        # awaiting a verifier verdict), this verification just
+        # rated it.  Promote if physics improved over best.
+        if (ctx.current_result is not ctx.best_result
+                and ctx.current_score >= ctx.r2_floor
+                and verification.get("physically_better_than_best", False)):
+            note = (verification.get("comparison_note") or "physics improvement")[:90]
+            ctx.best_score = ctx.current_score
+            ctx.best_result = ctx.current_result
+            ctx.best_config = (ctx.state.get("locked_fitting_config") or {}).copy()
+            ctx.state["locked_fitting_config"] = ctx.best_config
+            self.logger.info(
+                f"   Retroactively promoted current (R² = {ctx.current_score:.4f}) on physics — {note}"
+            )
+
+        # If the verifier just inspected best_result itself
+        # (either was already best or just promoted above),
+        # record its verdict so the next iteration's prompt
+        # can include best's complaint summary and the
+        # post-loop threshold gate can know whether best is
+        # under suspicion.
+        if ctx.current_result is ctx.best_result:
+            ctx.best_verification = verification
+            ctx.best_ever_rejected = ctx.best_ever_rejected or ctx.was_rejected
+
+        # Surface the GATE's driving metric (not always R²) per
+        # iteration, so the verifier judges the plateau on the
+        # actual acceptance metric — its value this step and the
+        # best-so-far. For the r_squared gate these are just R².
+        _g = _gate(ctx.state)
+        if _g is not None and getattr(_g, "metric", "r_squared") != "r_squared":
+            try:
+                _cur_metric = _g.extract(ctx.current_result.get("fit_quality"))
+                _best_metric = _g.extract(ctx.best_result.get("fit_quality"))
+                _metric_label = _g.label
+            except Exception:
+                _cur_metric, _best_metric, _metric_label = ctx.current_score, ctx.best_score, "R²"
+        else:
+            _cur_metric, _best_metric, _metric_label = ctx.current_score, ctx.best_score, "R²"
+
+        # Store in history for next iteration's context
+        ctx.verification_history.append({
+            "r_squared": ctx.current_score,
+            "best_so_far": ctx.best_score,
+            "metric_value": _cur_metric,
+            "best_metric_value": _best_metric,
+            "metric_label": _metric_label,
+            "tools_used": ctx.state.get("_last_tools_used", []),
+            "config_used": ctx.state.get("locked_fitting_config", {}),
+            "issues_found": verification.get("issues_found", []),
+            "overall_assessment": verification.get("overall_assessment", ""),
+            "recommended_action": verification.get("recommended_action", ""),
+            "physically_better_than_best": verification.get("physically_better_than_best", False),
+            "comparison_note": verification.get("comparison_note", ""),
+            "annealing_level": _cur_level,
+        })
+
+    def qc_check_accept(self, ctx: QCItemContext, verification: dict) -> bool:
+        if not ctx.was_rejected:
+            # Verifier approval trumps the R² high-water mark —
+            # the verifier may accept a lower-R² fit on physics
+            # grounds (e.g. better peak shape).  Promote.
+            ctx.best_score = ctx.current_score
+            ctx.best_result = ctx.current_result
+            ctx.best_config = (ctx.state.get("locked_fitting_config") or {}).copy()
+            ctx.best_verification = verification
+            ctx.best_ever_rejected = False
+            ctx.state["locked_fitting_config"] = ctx.best_config
+            self.logger.info(f"   ✅ Fit approved ({self._gate_metric_str(ctx.state, ctx.best_result, ctx.best_score)})")
+            return True
+        return False
+
+    def qc_refine(self, ctx: QCItemContext, verification: dict) -> dict:
+        # Log issues
+        self._log_verification_issues(verification)
+
+        # Apply LLM's recommended fixes
+        return self._apply_llm_verification_feedback(ctx.state, verification)
+
+    def qc_refit(self, ctx: QCItemContext, verification: dict,
+                 refine_from: Optional[str], just_escalated_to_hot: bool) -> dict:
+        # Anchor the refinement on best_result.script (the
+        # working version) so the LLM adapts known-good code
+        # rather than regenerating from scratch.  The engine drops
+        # the script when escalating to the hot annealing level
+        # so the LLM can restructure freely.
+        if just_escalated_to_hot:
+            self.logger.info(f"   Refitting with verification feedback (fresh generation — hot annealing)...")
+        elif refine_from:
+            self.logger.info(f"   Refitting with verification feedback (refining prior script)...")
+        else:
+            self.logger.info(f"   Refitting with verification feedback...")
+
+        # Timeout-aware refit context: when the trailing refit attempt(s)
+        # died on execution timeouts, say so explicitly — the stall counter
+        # that drives annealing is cause-blind, and without this a hot
+        # rewrite has model freedom but no signal that COST is the problem
+        # (it could regenerate another equally slow approach). No trailing
+        # timeouts -> identical issues list, no behavior change.
+        issues = list(verification.get("issues_found", []))
+        n_timeouts = _trailing_timeout_failures(ctx.all_attempts)
+        if n_timeouts:
+            issues.append(
+                f"EXECUTION BUDGET: the previous {n_timeouts} attempt(s) "
+                f"failed by execution TIMEOUT, not by fit quality. The next "
+                f"approach must be computationally cheaper (vectorized, "
+                f"efficient optimizer, fewer expensive components) — a "
+                f"different but equally slow approach will fail the same way."
+            )
+
+        return self._fit_single_spectrum(
+            state=ctx.state, curve_data=ctx.data, data_path=ctx.data_path,
+            spectrum_name=ctx.item_name, spectrum_idx=ctx.item_idx,
+            base_script=None,
+            refine_from_script=refine_from,
+            refine_from_r2=ctx.best_score,
+            refine_from_issues=issues,
+        )
+
+    def qc_after_refit(self, ctx: QCItemContext, verified_result: dict,
+                       verification: dict) -> None:
+        verified_r2 = verified_result.get("fit_quality", {}).get("r_squared") or 0
+
+        ctx.all_attempts.append({
+            "model": f"Verification-{ctx.iteration + 1}",
+            "r2": verified_r2,
+            "result": verified_result,
+            "config": (ctx.state.get("locked_fitting_config") or {}).copy(),
+            "verification": verification,
+        })
+
+        # Latest is always what the next verifier judges.
+        ctx.current_result = verified_result
+        ctx.current_score = verified_r2
+
+        # Promotion rule (post-refit, no LLM call here):
+        # 1. Strict R² improvement → promote immediately.
+        # 2. Catastrophic regression (R² < floor) →
+        #    reject; roll back the locked config so the
+        #    next refit anchors on best.
+        # 3. In-band lower R² → DEFER promotion to the
+        #    next iteration's verifier, which will rate
+        #    physically_better_than_best with the new
+        #    fit's visualization.  Keep refined_config
+        #    as the locked one so it matches current.
+        if verified_r2 > ctx.best_score:
+            ctx.best_score = verified_r2
+            ctx.best_result = verified_result
+            ctx.best_config = (ctx.state.get("locked_fitting_config") or {}).copy()
+            ctx.state["locked_fitting_config"] = ctx.best_config
+            ctx.best_ever_rejected = False
+            ctx.best_verification = None
+            self.logger.info(
+                f"   Refit R² = {verified_r2:.4f} promoted (best now {ctx.best_score:.4f})"
+            )
+        elif verified_r2 < ctx.r2_floor:
+            ctx.state["locked_fitting_config"] = ctx.best_config
+            self.logger.info(
+                f"   Refit R² = {verified_r2:.4f} below R² floor "
+                f"{ctx.r2_floor:.2f} → rejected (best stays {ctx.best_score:.4f})"
+            )
+        else:
+            self.logger.info(
+                f"   Refit R² = {verified_r2:.4f} "
+                f"(best stays {ctx.best_score:.4f}; deferred to next verifier for physics check)"
+            )
+
+        # Adaptive annealing — three escalation
+        # triggers, applied in order; each can lift
+        # the annealing level (capped at n-1).
+        _PATIENCE = 2
+        improvement = ctx.best_score - ctx.prev_best_score
+        remaining = max(self.max_verification_iterations - ctx.iteration - 1, 1)
+        required_rate = max(self.r2_threshold - ctx.best_score, 0.0) / remaining
+
+        # (a) Rate-based: improvement too slow to reach
+        #     threshold in remaining budget.
+        rate_escalated = False
+        if improvement < required_rate:
+            ctx.annealing_level = min(
+                ctx.annealing_level + 1, ctx.n_levels - 1
+            )
+            rate_escalated = True
+            self.logger.info(
+                f"   Annealing: improvement {improvement:.4f} < required rate {required_rate:.4f}, "
+                f"escalating to level {ctx.annealing_level}"
+            )
+
+        # (b) Patience-based: best stalled for _PATIENCE
+        #     consecutive iterations.  Resets on any
+        #     forward movement of best.
+        if ctx.best_score > ctx.prev_best_score:
+            ctx.stall_count = 0
+        else:
+            ctx.stall_count += 1
+            if ctx.stall_count >= _PATIENCE and not rate_escalated:
+                new_level = min(
+                    ctx.annealing_level + 1, ctx.n_levels - 1
+                )
+                if new_level > ctx.annealing_level:
+                    ctx.annealing_level = new_level
+                    self.logger.info(
+                        f"   Annealing: best stalled for {ctx.stall_count} iterations, "
+                        f"escalating to level {ctx.annealing_level}"
+                    )
+                ctx.stall_count = 0
+
+        # (c) Iteration floor: guarantees the hot level
+        #     is reached even when rate/patience say
+        #     otherwise (e.g., best ≥ threshold so
+        #     required_rate degenerates to 0).
+        _floor = min(
+            (ctx.iteration + 1) // ctx.floor_divisor,
+            ctx.n_levels - 1,
+        )
+        if _floor > ctx.annealing_level:
+            self.logger.info(
+                f"   Annealing: iteration floor lifting "
+                f"level {ctx.annealing_level} → {_floor}"
+            )
+            ctx.annealing_level = _floor
+            ctx.stall_count = 0
+
+        ctx.prev_best_score = ctx.best_score
+
+    def qc_final_verify(self, ctx: QCItemContext) -> None:
+        # Loop exhausted without approval - one final pass to
+        # rate the latest state.  If current was deferred
+        # (in-band, awaiting physics verdict), this is its
+        # last chance to be promoted.
+        self.logger.info(f"   Verifying final refit...")
+        final_verification = self._verify_fit_with_llm(
+            ctx.state, ctx.current_result,
+            verification_iter=self.max_verification_iterations,
+            annealing_level=ctx.annealing_level,
+            best_result=ctx.best_result,
+            best_verification=ctx.best_verification,
+        )
+
+        if final_verification:
+            _final_rejected = not final_verification.get("fit_acceptable", True)
+
+            # Retroactive promotion of deferred current
+            if (ctx.current_result is not ctx.best_result
+                    and ctx.current_score >= ctx.r2_floor
+                    and final_verification.get("physically_better_than_best", False)):
+                note = (final_verification.get("comparison_note") or "physics improvement")[:90]
+                ctx.best_score = ctx.current_score
+                ctx.best_result = ctx.current_result
+                ctx.best_config = (ctx.state.get("locked_fitting_config") or {}).copy()
+                self.logger.info(
+                    f"   Post-loop promoted current (R² = {ctx.current_score:.4f}) on physics — {note}"
+                )
+
+            # Update best's verdict tracking
+            if ctx.current_result is ctx.best_result:
+                ctx.best_verification = final_verification
+                if not _final_rejected:
+                    self.logger.info(f"   ✅ Final fit approved ({self._gate_metric_str(ctx.state, ctx.best_result, ctx.best_score)})")
+                    ctx.approved = True
+                    ctx.best_ever_rejected = False
+                else:
+                    ctx.best_ever_rejected = True
+                    self._log_verification_issues(final_verification)
+            else:
+                # current still differs from best (no physics
+                # promotion).  best's last verdict stands.
+                if _final_rejected:
+                    self._log_verification_issues(final_verification)
+
+    def qc_post_verification(self, ctx: QCItemContext) -> Optional[dict]:
+        # --- Verifier-approved fits bypass the R² threshold check ---
+        if ctx.approved:
+            self.logger.info(f"✅ Verifier approved fit ({self._gate_metric_str(ctx.state, ctx.best_result, ctx.best_score)})")
+            quality_history = self._build_quality_history(
+                ctx.best_score, self.r2_threshold, ctx.all_attempts,
+                ctx.verification_history, None,
+                ctx.best_result.get("script_errors"),
+            )
+            quality_history["approved"] = True
+            quality_history["approved_by"] = "verifier"
+            ctx.best_result["quality_history"] = quality_history
+            self._stamp_hot_deviation(ctx.best_result)
+            return ctx.best_result
+
+        # --- Check if we meet threshold ---
+        # Option B: when the verifier explicitly rejected best at some
+        # point and never approved it later, fall through to the judge
+        # even if R² meets the numerical threshold.  This catches the
+        # "high-R² but wrong-physics" trap where the verifier kept
+        # complaining about best on physics grounds.
+        if self._accept_gate().is_accept(ctx.best_score) and not ctx.best_ever_rejected:
+            self.logger.info(f"✅ R² = {ctx.best_score:.4f} (meets threshold {self.r2_threshold})")
+            ctx.best_result["quality_history"] = self._build_quality_history(
+                ctx.best_score, self.r2_threshold, ctx.all_attempts,
+                ctx.verification_history, None,
+                ctx.best_result.get("script_errors"),
+            )
+            self._stamp_hot_deviation(ctx.best_result)
+            return ctx.best_result
+        elif self._accept_gate().is_accept(ctx.best_score):
+            self.logger.info(
+                f"⚠️ R² = {ctx.best_score:.4f} meets threshold {self.r2_threshold}, "
+                f"but verifier rejected best — deferring to judge"
+            )
+        else:
+            self.logger.warning(f"⚠️ R² = {ctx.best_score:.4f} (below threshold {self.r2_threshold})")
+        return None
+
+    def qc_record_initial_failure(self, ctx: QCItemContext, result: dict) -> None:
+        self.logger.error(f"   Initial fit failed: {result.get('error', 'Unknown')[:50]}")
+        ctx.all_attempts.append({"model": ctx.initial_label, "r2": 0, "result": result})
+
+    def qc_fallback(self, ctx: QCItemContext) -> dict:
         # NOTE: the alternative-model loop was removed.  Hot annealing
         # (level n-1) inside the verification loop now drops the script
         # anchor and grants the LLM the same freedom to restructure the
         # model.  Patience counter and iteration floor guarantee the hot
         # level is reached when refits stall.
+        state = ctx.state
 
         # --- Human feedback for poor fit (if enabled) ---
         # Guard `best_result`: when every fitting attempt failed it is None, and
@@ -4166,23 +5044,24 @@ Return JSON with:
         # below mutates shared self.r2_threshold).
         if (
             self.enable_human_feedback
-            and _is_anchor
-            and best_result
+            and ctx.is_anchor
+            and ctx.best_result
             and not state.get("_suppress_human_feedback")
         ):
-            feedback_result = self._get_human_feedback_for_poor_fit(state, best_result, all_attempts)
+            feedback_result = self._get_human_feedback_for_poor_fit(state, ctx.best_result, ctx.all_attempts)
 
             if feedback_result:
                 if feedback_result.get("action") == "adjust_threshold":
                     self.r2_threshold = feedback_result["new_threshold"]
-                    if best_r2 >= self.r2_threshold:
+                    # _accept_gate() rebuilds from the just-mutated threshold.
+                    if self._accept_gate().is_accept(ctx.best_score):
                         self.logger.info(f"✅ Best fit now meets adjusted threshold")
-                        best_result["quality_history"] = self._build_quality_history(
-                            best_r2, self.r2_threshold, all_attempts,
-                            verification_history, None,
-                            best_result.get("script_errors"),
+                        ctx.best_result["quality_history"] = self._build_quality_history(
+                            ctx.best_score, self.r2_threshold, ctx.all_attempts,
+                            ctx.verification_history, None,
+                            ctx.best_result.get("script_errors"),
                         )
-                        return best_result
+                        return ctx.best_result
 
                 elif feedback_result.get("action") == "retry":
                     refined_config = self._refine_model_from_feedback(state, feedback_result["feedback"])
@@ -4190,19 +5069,19 @@ Return JSON with:
                     state["locked_fitting_config"] = refined_config
 
                     human_guided_result = self._fit_single_spectrum(
-                        state=state, curve_data=curve_data, data_path=data_path,
-                        spectrum_name=spectrum_name, spectrum_idx=spectrum_idx, base_script=None
+                        state=state, curve_data=ctx.data, data_path=ctx.data_path,
+                        spectrum_name=ctx.item_name, spectrum_idx=ctx.item_idx, base_script=None
                     )
 
                     if human_guided_result["success"]:
                         human_r2 = human_guided_result.get("fit_quality", {}).get("r_squared") or 0
                         self.logger.info(f"   Human-guided fit: R² = {human_r2:.4f}")
 
-                        if human_r2 > best_r2:
-                            best_r2 = human_r2
-                            best_result = human_guided_result
-                            best_config = refined_config.copy()
-                            if _is_anchor:
+                        if human_r2 > ctx.best_score:
+                            ctx.best_score = human_r2
+                            ctx.best_result = human_guided_result
+                            ctx.best_config = refined_config.copy()
+                            if ctx.is_anchor:
                                 state["locked_fitting_config"] = refined_config
                         else:
                             state["locked_fitting_config"] = original_config
@@ -4211,8 +5090,8 @@ Return JSON with:
 
         # --- Unified judge: evaluate ALL attempts (verification + alternatives) ---
         judge_result = None
-        successful_attempts = [a for a in all_attempts if a.get("r2", 0) > 0]
-        if _is_anchor and len(successful_attempts) > 1:
+        successful_attempts = [a for a in ctx.all_attempts if a.get("r2", 0) > 0]
+        if ctx.is_anchor and len(successful_attempts) > 1:
             judge_result = self._judge_select_best_fit(successful_attempts)
 
             selected_index = judge_result.get("selected_index")
@@ -4220,66 +5099,93 @@ Return JSON with:
 
             if selected_index is not None:
                 selected_attempt = successful_attempts[selected_index]
-                best_result = selected_attempt["result"]
-                best_r2 = selected_attempt["r2"]
+                ctx.best_result = selected_attempt["result"]
+                ctx.best_score = selected_attempt["r2"]
                 if selected_attempt.get("config"):
                     state["locked_fitting_config"] = selected_attempt["config"]
 
                 if is_acceptable:
                     if judge_result.get("issues_with_selected"):
-                        best_result["judge_note"] = judge_result["issues_with_selected"]
-                    self.logger.info(f"   ✅ Using judge-selected fit (R² = {best_r2:.4f})")
+                        ctx.best_result["judge_note"] = judge_result["issues_with_selected"]
+                    self.logger.info(f"   ✅ Using judge-selected fit (R² = {ctx.best_score:.4f})")
                 else:
-                    best_result["judge_warning"] = (
-                        f"Judge selected this as best available (R² = {best_r2:.4f}) "
+                    ctx.best_result["judge_warning"] = (
+                        f"Judge selected this as best available (R² = {ctx.best_score:.4f}) "
                         f"but noted it does not meet acceptance criteria. "
                         f"Reason: {judge_result.get('reasoning', 'No reason provided')[:200]}"
                     )
                     self.logger.warning(
-                        f"   ⚠️ Using judge-selected fit (R² = {best_r2:.4f}) "
+                        f"   ⚠️ Using judge-selected fit (R² = {ctx.best_score:.4f}) "
                         f"despite not meeting acceptance criteria"
                     )
             else:
-                best_result["judge_warning"] = (
+                ctx.best_result["judge_warning"] = (
                     f"Judge could not select any acceptable fit. "
                     f"Reason: {judge_result.get('reasoning', 'No reason provided')[:200]}"
                 )
-                self.logger.warning(f"   ⚠️ Judge could not select any fit - keeping current best (R² = {best_r2:.4f})")
+                self.logger.warning(f"   ⚠️ Judge could not select any fit - keeping current best (R² = {ctx.best_score:.4f})")
 
         # --- Return best available result ---
-        if best_result:
+        if ctx.best_result:
             # This is the "best available" fallback (the accept/threshold paths
             # return earlier). A fit can land here two ways: (a) R² genuinely
             # below threshold, or (b) R² meets threshold but the verifier kept
             # rejecting on PHYSICS grounds. Word the warning to match reality —
             # never claim "below threshold" when the number is at/above it.
-            if best_r2 >= self.r2_threshold:
-                best_result["quality_warning"] = (
-                    f"R² = {best_r2:.4f} meets the threshold {self.r2_threshold} but the "
+            if self._accept_gate().is_accept(ctx.best_score):
+                ctx.best_result["quality_warning"] = (
+                    f"R² = {ctx.best_score:.4f} meets the threshold {self.r2_threshold} but the "
                     f"fit was not accepted on physical grounds (see verifier notes)"
                 )
             else:
-                best_result["quality_warning"] = (
-                    f"R² = {best_r2:.4f} below threshold {self.r2_threshold}"
+                ctx.best_result["quality_warning"] = (
+                    f"R² = {ctx.best_score:.4f} below threshold {self.r2_threshold}"
                 )
-            best_result["attempted_models"] = [a["model"] for a in all_attempts]
-            best_result["quality_history"] = self._build_quality_history(
-                best_r2, self.r2_threshold, all_attempts,
-                verification_history, judge_result,
-                best_result.get("script_errors"),
+            ctx.best_result["attempted_models"] = [a["model"] for a in ctx.all_attempts]
+            ctx.best_result["quality_history"] = self._build_quality_history(
+                ctx.best_score, self.r2_threshold, ctx.all_attempts,
+                ctx.verification_history, judge_result,
+                ctx.best_result.get("script_errors"),
             )
-            self.logger.warning(f"⚠️ Proceeding with best available fit (R² = {best_r2:.4f})")
+            if self._accept_gate().is_accept(ctx.best_score):
+                self.logger.info(
+                    f"✅ Accepting best available fit (R² = {ctx.best_score:.4f} meets threshold {self.r2_threshold})"
+                )
+            else:
+                self.logger.warning(
+                    f"⚠️ Proceeding with best available fit (R² = {ctx.best_score:.4f}, below threshold {self.r2_threshold})"
+                )
 
-            if _is_anchor:
-                state["locked_fitting_config"] = best_config
+            if ctx.is_anchor:
+                state["locked_fitting_config"] = ctx.best_config
 
-            return best_result
+            return ctx.best_result
         else:
-            return {
-                "index": spectrum_idx, "name": spectrum_name, "success": False,
-                "error": "All fitting attempts failed", "attempts": len(all_attempts),
+            # Surface the last attempt's own error (e.g. the realtime
+            # pre-flight gate's reason) instead of only the generic summary.
+            last_result = next(
+                (r for r in ((a.get("result") or {})
+                             for a in reversed(ctx.all_attempts))
+                 if r.get("error")),
+                {},
+            )
+            last_err = last_result.get("error")
+            failure = {
+                "index": ctx.item_idx, "name": ctx.item_name, "success": False,
+                "error": ("All fitting attempts failed"
+                          + (f": {last_err}" if last_err else "")),
+                "attempts": len(ctx.all_attempts),
                 "parameters": {}, "fit_quality": {},
             }
+            # Carry the structured failure-mode tag and the per-attempt
+            # audit trail from the underlying attempt result — without this,
+            # the anchor's fallback dict lost the kind=timeout tag that
+            # _fit_single_spectrum set (observed live).
+            if last_result.get("kind"):
+                failure["kind"] = last_result["kind"]
+            if last_result.get("script_errors"):
+                failure["script_errors"] = last_result["script_errors"]
+            return failure
 
     def _fit_with_quality_control_best_of_n(
         self,
@@ -4313,6 +5219,23 @@ Return JSON with:
         attempts after a fast-accept.
         """
         n = max(1, int(state.get("n_candidates") or 1))
+        escalation = bool(state.get("candidate_escalation"))
+        # Skill-gated auto-escalation: the n>1 + escalation default is an AUTO
+        # ensemble (no explicit user count, used when curve fitting has no
+        # skill to guide it — high plan variance). A loaded domain skill PINS
+        # the technique, so independent candidates would just converge on the
+        # mandated model; run one skill-guided fit instead. An EXPLICIT user
+        # count (candidate_escalation False, e.g. "run 3 candidates") is always
+        # honored, skill or not.
+        if escalation and n > 1:
+            _active = _active_skill_names(state)
+            if _active:
+                self.logger.info(
+                    f"   Skill active ({', '.join(_active)}) — single "
+                    f"skill-guided fit; auto best-of-N suppressed (pass an "
+                    f"explicit n_candidates to force it)."
+                )
+                n = 1
         if n == 1 or reuse_script:
             return self._fit_with_quality_control(
                 state=state, curve_data=curve_data, data_path=data_path,
@@ -4321,14 +5244,13 @@ Return JSON with:
                 reuse_script=reuse_script, reuse_source=reuse_source,
             )
 
-        escalation = bool(state.get("candidate_escalation"))
         spectrum_config = state.get("locked_fitting_config", {})
 
         import threading as _threading
         from ....utils.log_context import register_worker, unregister_worker
         _parent_thread = _threading.get_ident()
 
-        def _run_candidate(i: int) -> tuple:
+        def _run_candidate(i: int, tagged: bool = True) -> tuple:
             job_state = dict(state)
             job_state["locked_fitting_config"] = copy.deepcopy(spectrum_config)
             job_state["_candidate_tag"] = f"cand_{i:02d}"
@@ -4336,10 +5258,24 @@ Return JSON with:
                 f"{CANDIDATES_DIR_NAME}/cand_{i:02d}"
             )
             job_state["_suppress_human_feedback"] = True
-            # Attribute this worker's log records to the calling (chat)
-            # thread with a candidate prefix (UI verbose panel + CLI).
-            register_worker(_parent_thread, f"cand_{i:02d}")
+            # Always register so this worker's log records route to the calling
+            # (chat) thread and stay visible in the UI verbose panel. The [cand]
+            # PREFIX is added only when several candidates run concurrently; a
+            # lone candidate keeps clean, unprefixed — but still visible — logs.
+            register_worker(_parent_thread, f"cand_{i:02d}", prefix=tagged)
             try:
+                # Ensemble diversity: each fan-out candidate (>=1) generates its
+                # OWN independent fitting plan — like running the agent again.
+                # Especially valuable for skill-less curves (high plan variance);
+                # with an authoritative skill the plans converge on the mandated
+                # model. Candidate 0 keeps the (human-approved) primary plan.
+                # Toggle off with state["independent_candidate_plans"] = False.
+                if (i >= 1 and self.replanner is not None
+                        and job_state.get("independent_candidate_plans", True)):
+                    self.logger.info(
+                        "Planning an independent approach for this candidate..."
+                    )
+                    self.replanner.replan_headless(job_state)
                 result = self._fit_with_quality_control(
                     state=job_state, curve_data=curve_data,
                     data_path=data_path, spectrum_name=spectrum_name,
@@ -4354,9 +5290,12 @@ Return JSON with:
 
         def _run_attempts(indices) -> None:
             indices = list(indices)
+            # Prefix worker logs with the candidate tag only when more than one
+            # candidate runs at once; a single candidate stays unprefixed.
+            tagged = len(indices) > 1
             with ThreadPoolExecutor(max_workers=min(len(indices), 6)) as pool:
                 future_to_attempt = {
-                    pool.submit(_run_candidate, i): i for i in indices
+                    pool.submit(_run_candidate, i, tagged): i for i in indices
                 }
                 done_count = 0
                 for future in as_completed(future_to_attempt):
@@ -4450,12 +5389,14 @@ Return JSON with:
                 f"fanning out only if it is weak"
             )
             _run_attempts([0])
-            if not self._candidate_fast_accept(candidates[0]):
+            if not self._candidate_fast_accept(candidates[0], _gate(state)):
                 escalated = True
                 self.logger.info(
-                    f"First attempt weak "
+                    f"First attempt not a clean win "
                     f"(R²={candidates[0]['score']:.4f}, "
-                    f"iterations={candidates[0]['iterations']}) - "
+                    f"iterations={candidates[0]['iterations']}, "
+                    f"climbed_to_hot="
+                    f"{self._candidate_climbed_to_hot(candidates[0])}) - "
                     f"escalating to {n} candidates"
                 )
                 _run_attempts(range(1, n))
@@ -4487,24 +5428,18 @@ Return JSON with:
         )
 
         # --- Join approval (CO_PILOT/AUTOPILOT) ---
+        # Only prompt when there is more than one candidate to compare. A single
+        # fast-accepted candidate (the escalation probe that passed the gate, or
+        # a single non-escalation attempt) just proceeds — the best-of-N
+        # comparison menu is meaningless for one result.
         if (
             self.enable_human_feedback
             and not state.get("_suppress_human_feedback")
+            and len(candidates) > 1
         ):
             choice = self._get_bestofn_join_approval(
-                candidates, winner, judge_info,
-                allow_more=(escalation and not escalated
-                            and len(candidates) < n),
+                candidates, winner, judge_info, allow_more=False,
             )
-            if choice == "more":
-                escalated = True
-                _run_attempts(range(1, n))
-                winner, judge_info = _select()
-                if winner is None:
-                    return candidates[0]["result"]
-                choice = self._get_bestofn_join_approval(
-                    candidates, winner, judge_info, allow_more=False
-                )
             if isinstance(choice, int):
                 winner = next(
                     c for c in candidates if c["attempt"] == choice
@@ -4546,21 +5481,66 @@ Return JSON with:
         }
         return result
 
-    # Escalation fast-accept gate: attempt 0 is accepted without fan-out when
-    # it passed the R² gate with margin and converged quickly. The margin is
-    # capped near 1.0 (an r2_threshold of 0.999 leaves no room for +0.02).
-    ESCALATION_R2_MARGIN = 0.02
-    ESCALATION_MAX_FAST_ITERS = 2
+    # Escalation fast-accept gate: attempt 0 skips the fan-out only when it
+    # cleared the acceptance metric WITH MARGIN and did NOT have to anneal
+    # "hot" to get there. Fit quality has TWO parts — the numeric metric
+    # (objective goodness-of-fit: R², or a skill's χ²/RMSE/FOM) and physical
+    # correctness (a verifier judgment, folded into `approved`). The metric
+    # half is a strong, objective signal; the physical-correctness half is
+    # SUBJECTIVE, and is exactly where a hot-annealed OVER-FIT (T=2 grants full
+    # model freedom to add components) can post a great metric, be physically
+    # wrong, and slip past a lenient verifier. The annealing-"struggle" check
+    # (max level < hot) corroborates that approval was earned WITHOUT relaxing
+    # the model. (Replaces the old `iterations <= 2` proxy, which fanned out
+    # needlessly on good-but-slow fits and did nothing about over-fit risk.)
+    #
+    # The margin is METRIC-AGNOSTIC: a fraction of the gate's accept↔hard-reject
+    # band, applied in the gate's direction, capped near the metric's optimum
+    # (QualityGate.clears_by_fast_margin). For the default R² gate (band 0.05,
+    # best 1.0) the fraction 0.4 reproduces the old absolute +0.02 / 0.97 bar
+    # exactly; a lower-is-better χ² gate instead requires value <= accept -
+    # margin. The R² `final_r2` score is NOT used as the bar — the gate reads
+    # its own metric from `fit_quality`, so a skill scored by χ²/RMSE is no
+    # longer wrongly required to also post a high R².
+    ESCALATION_MARGIN_FRACTION = 0.4
 
-    def _candidate_fast_accept(self, c: dict) -> bool:
-        fast_thr = self.r2_threshold + min(
-            self.ESCALATION_R2_MARGIN, (1.0 - self.r2_threshold) / 2
+    @property
+    def _hot_annealing_level(self) -> int:
+        return len(self._CONSTRAINT_ANNEALING_SCHEDULE) - 1
+
+    @staticmethod
+    def _candidate_max_annealing_level(c: dict) -> int:
+        """Highest annealing level the candidate's verification loop reached."""
+        iters = (
+            (c["result"].get("quality_history") or {})
+            .get("verification_iterations") or []
         )
+        return max(
+            (it.get("annealing_level", 0) for it in iters), default=0
+        )
+
+    def _candidate_climbed_to_hot(self, c: dict) -> bool:
+        """True only if the loop ESCALATED into hot annealing under stall — it
+        started below hot and had to climb there. A fit that STARTED at hot (a
+        caller / re-run set the starting annealing level) did not struggle, so
+        reaching hot is not held against it (that must NOT auto-escalate)."""
+        iters = (
+            (c["result"].get("quality_history") or {})
+            .get("verification_iterations") or []
+        )
+        if not iters:
+            return False
+        levels = [it.get("annealing_level", 0) for it in iters]
+        hot = self._hot_annealing_level
+        return max(levels) >= hot and levels[0] < hot
+
+    def _candidate_fast_accept(self, c: dict, gate) -> bool:
+        value = gate.extract((c["result"] or {}).get("fit_quality") or {})
         return (
             c["success"]
             and c["approved"]
-            and c["score"] >= fast_thr
-            and c["iterations"] <= self.ESCALATION_MAX_FAST_ITERS
+            and gate.clears_by_fast_margin(value, self.ESCALATION_MARGIN_FRACTION)
+            and not self._candidate_climbed_to_hot(c)
         )
 
     def _get_bestofn_join_approval(
@@ -4617,31 +5597,34 @@ Return JSON with:
                 )
             print("-" * 60)
 
-            response = input(
-                f"\nYour choice (Enter = accept candidate "
-                f"{winner['attempt']}): "
-            ).strip()
+            for _ in range(3):
+                response = input(
+                    f"\nYour choice (Enter = accept candidate "
+                    f"{winner['attempt']}): "
+                ).strip()
 
-            if not response:
-                return None
-            if allow_more and response.lower() == "more":
-                print("Running the remaining candidates...")
-                return "more"
-            if response.isdigit():
-                idx = int(response)
-                ok = any(
-                    c["attempt"] == idx and c["success"]
-                    for c in candidates
-                )
-                if ok:
-                    print(f"Using candidate {idx}.")
-                    return idx
+                if not response:
+                    return None
+                if allow_more and response.lower() == "more":
+                    print("Running the remaining candidates...")
+                    return "more"
+                if response.isdigit():
+                    idx = int(response)
+                    if any(c["attempt"] == idx and c["success"]
+                           for c in candidates):
+                        print(f"Using candidate {idx}.")
+                        return idx
+                    print(f"No successful candidate {idx} to use.")
+                    continue
+                # SELECTION step, not a refine step: do not silently discard
+                # unrecognized free text — re-prompt with the valid options so
+                # the input is never quietly dropped.
                 print(
-                    f"No successful candidate {idx}; accepting the "
-                    f"judge's pick."
+                    "Unrecognized input. Press Enter to accept candidate "
+                    f"{winner['attempt']}, or type a candidate number"
+                    + (" or 'more'" if allow_more else "") + "."
                 )
-                return None
-            print("Unrecognized input; accepting the judge's pick.")
+            print("No valid choice entered; accepting the judge's pick.")
             return None
         finally:
             for p in review_paths:
@@ -5056,10 +6039,15 @@ Return JSON with:
             )
         else:
             _cmp = "≥" if _gate_obj.direction == "higher_is_better" else "≤"
+            # Bypass is governed by physical_review, not by the metric name:
+            # goodness-of-fit gates (peak_region_r2, …) still run the verifier.
+            if _gate_obj.physical_review:
+                _verifier_note = "verifier runs, framed against this metric (not R²)"
+            else:
+                _verifier_note = "skill scoring is the verification (curve-fit verifier bypassed)"
             self.logger.info(
                 f"   Quality: {_gate_obj.metric} {_cmp} {_gate_obj.accept_threshold:.3f} "
-                f"accepts ({_gate_obj.direction}); skill scoring is the verification "
-                f"(curve-fit R² verifier bypassed)."
+                f"accepts ({_gate_obj.direction}); {_verifier_note}."
             )
         self.logger.info(f"   Max verification iterations: {self.max_verification_iterations}")
         if not is_single:
@@ -5122,6 +6110,15 @@ Return JSON with:
             reuse_script, reuse_source = _first_prior_curve_fit_script(state)
         else:
             reuse_script, reuse_source = None, None
+        # Verbatim cold start (#346 step 4): a realtime run with no explicit
+        # prior locked its recipe by auditioning bank candidates against the
+        # first frame (agent-side, pre-pipeline). The winner flows through the
+        # SAME reuse path as a prior-run script — validity gate, drift check,
+        # correction retry all apply unchanged.
+        if not reuse_script and state.get("_cold_start_reuse"):
+            cs = state["_cold_start_reuse"]
+            reuse_script = cs.get("script")
+            reuse_source = f"script_bank:{cs.get('id')}"
         if reuse_script and regime_configs:
             self.logger.info(
                 "   ♻️  Locked-script reuse requested, but this run is "
@@ -5514,44 +6511,23 @@ Return JSON with:
     ) -> dict:
         """Build a compact quality history dict for the best result.
 
-        Captures problem-solution pairs at every level: script errors,
-        verification iterations, alternative approaches, and judge reasoning.
+        Delegates to the shared builder (``_verification_record``) with the
+        curve keymap — output is byte-identical to the historical inline
+        version (golden-pinned).
         """
-        return {
-            "final_r2": best_r2,
-            "threshold": r2_threshold,
-            "approved": best_r2 >= r2_threshold,
-            "verification_iterations": [
-                {
-                    "r_squared": entry.get("r_squared"),
-                    "annealing_level": entry.get("annealing_level", 0),
-                    # The model in force at this iteration — lets a consumer
-                    # (e.g. the self-evolution figure) show the per-attempt
-                    # model alongside its R² and issues.
-                    "model": (entry.get("config_used") or {}).get("physical_model", ""),
-                    "issues": [
-                        {
-                            "location": iss.get("location", ""),
-                            "problem": iss.get("problem", ""),
-                        }
-                        for iss in entry.get("issues_found", [])
-                    ],
-                    "fix_applied": entry.get("recommended_action", ""),
-                }
-                for entry in verification_history
-            ],
-            "alternative_models": [
-                {
-                    "model": a.get("model", ""),
-                    "r2": a.get("r2", 0),
-                    "diagnosis": a.get("diagnosis", ""),
-                }
-                for a in all_attempts[1:]
-                if not str(a.get("model", "")).startswith("Verification")
-            ],
-            "script_errors": script_errors or [],
-            "judge_reasoning": (judge_result or {}).get("reasoning"),
-        }
+        from .._verification_record import (
+            CURVE_HISTORY_KEYMAP,
+            build_quality_history,
+        )
+        return build_quality_history(
+            best_value=best_r2,
+            threshold=r2_threshold,
+            all_attempts=all_attempts,
+            verification_history=verification_history,
+            judge_result=judge_result,
+            script_errors=script_errors,
+            keymap=CURVE_HISTORY_KEYMAP,
+        )
 
     def _judge_select_best_fit(self, attempts: List[dict]) -> dict:
         """
@@ -6657,7 +7633,12 @@ same trend.
                 + json.dumps(series_results[0]["quality_history"], indent=2)
             )
 
-        if state.get("literature_context"):
+        # Opportunistic Channel-A reuse (issue #323, D1): inject planning
+        # literature into interpretation when it exists — free when absent.
+        # The authoritative interpretation literature is the post-fit
+        # feature-conditioned pass (`refine_interpretation`). Gated off in
+        # identification mode (D2): ID runs are literature-free in-run.
+        if state.get("literature_context") and state.get("task_mode") != "identification":
             prompt_parts.extend(["\n## Literature", state["literature_context"]])
 
         _append_objective_context(prompt_parts, state)
@@ -6894,16 +7875,80 @@ class UnifiedCurveReportController:
     def _image_to_base64(self, image_bytes: bytes) -> str:
         return base64.b64encode(image_bytes).decode('utf-8')
 
+    @staticmethod
+    def _display_metric(fit_quality: dict) -> tuple:
+        """Return ``(label, formatted)`` for a per-frame quality metric,
+        metric-aware. Genuine curve fits report ``r_squared``; matching-mode
+        skills (XRD identification, …) report ``figure_of_merit`` and no
+        r_squared — so hard-coding ``R² = {r_squared or 0}`` prints a
+        meaningless ``R² = 0.0000`` on every matching-mode frame. Prefer the
+        figure of merit when present (it is the acceptance metric for those
+        skills), else r_squared."""
+        fq = fit_quality or {}
+        fom = fq.get("figure_of_merit")
+        if isinstance(fom, (int, float)):
+            return ("figure of merit", f"FoM = {float(fom):.3f}")
+        r2 = fq.get("r_squared")
+        if isinstance(r2, (int, float)):
+            return ("R²", f"R² = {float(r2):.4f}")
+        return ("", "")
+
+    @staticmethod
+    def _metric_value(r: dict) -> float:
+        """Sortable acceptance-metric value for a frame (FoM or R²); -1 if
+        absent, so frames without a metric sort last when picking the best."""
+        fq = r.get("fit_quality") or {}
+        v = fq.get("figure_of_merit")
+        if not isinstance(v, (int, float)):
+            v = fq.get("r_squared")
+        return float(v) if isinstance(v, (int, float)) else -1.0
+
+    # Matching-mode high-confidence threshold (Hanawalt convention): the skill
+    # accepts at figure_of_merit ≥ 0.70 but only calls ≥ this "high-confidence"
+    # — the band in between is "declare with caveats", not a clean success.
+    _MATCH_HIGH_CONFIDENCE = 0.85
+
+    @classmethod
+    def _is_marginal_match(cls, fit_quality: dict) -> bool:
+        """True for an accepted-but-low-confidence matching-mode frame
+        (figure_of_merit in [accept, high_confidence)). Only applies to
+        matching-mode skills — genuine curve fits carry no figure_of_merit
+        and return False, so their success labels are unchanged."""
+        fom = (fit_quality or {}).get("figure_of_merit")
+        return isinstance(fom, (int, float)) and fom < cls._MATCH_HIGH_CONFIDENCE
+
+    # Cap on individually-plotted flagged frames. The flagged gallery is built
+    # for the minority-exception case (a few anomalies worth examining one by
+    # one). When most of a series is flagged, an exhaustive gallery is
+    # redundant noise that buries the finding — cap it to a representative
+    # sample and say so.
+    _FLAGGED_GALLERY_CAP = 8
+
     def _generate_flagged_spectra_section(self, flagged_spectra: List[dict], series_results: List[dict], synthesis: dict) -> str:
         if not flagged_spectra:
             return ""
-        
+
         flagged_analysis = synthesis.get("flagged_spectra_analysis", {})
-        
+        n_flagged = len(flagged_spectra)
+        n_total = len(series_results) or n_flagged
+        majority = n_flagged >= max(2, 0.5 * n_total)
+        # When flagged frames are the MAJORITY, they are not isolated
+        # anomalies — the model/reference set does not describe the series.
+        # Reframe the section so the report conveys that, not "N problems".
+        if majority:
+            heading = "⚠️ Series-Wide Mismatch"
+            summary_line = (f"<strong>{n_flagged} of {n_total} frames are below the "
+                            f"acceptance threshold.</strong> This indicates the model / "
+                            f"reference set does not describe the series as a whole, "
+                            f"rather than isolated anomalous frames.")
+        else:
+            heading = "⚠️ Flagged Spectra"
+            summary_line = f"<strong>{n_flagged} spectra flagged for review</strong>"
+
         html = f"""
-        <h2>⚠️ Flagged Spectra</h2>
+        <h2>{heading}</h2>
         <div class="flagged-summary">
-            <p><strong>{len(flagged_spectra)} spectra flagged for review</strong></p>
+            <p>{summary_line}</p>
             <p>{flagged_analysis.get("summary", "Some spectra showed anomalous fitting behavior.")}</p>
         </div>
 """
@@ -6926,25 +7971,43 @@ class UnifiedCurveReportController:
         if significance:
             html += f"<h3>Scientific Significance</h3><p>{significance}</p>"
         
-        html += '<h3>Flagged Spectra Details</h3><div class="flagged-grid">'
-        
+        # Show at most _FLAGGED_GALLERY_CAP individual frames — the worst
+        # first (lowest metric), so the sample is representative rather than
+        # positional. Beyond the cap, an exhaustive gallery is redundant.
+        def _flag_metric(f):
+            r = next((x for x in series_results if x["index"] == f["index"]), None)
+            return self._metric_value(r) if r else (f.get("r_squared") or 1.0)
+        gallery = sorted(flagged_spectra, key=_flag_metric)[: self._FLAGGED_GALLERY_CAP]
+        n_hidden = len(flagged_spectra) - len(gallery)
+
+        details_note = ""
+        if n_hidden > 0:
+            details_note = (f"<p><em>Showing the {len(gallery)} lowest-scoring of "
+                            f"{len(flagged_spectra)} flagged frames; {n_hidden} similar "
+                            f"frames not individually displayed.</em></p>")
+        html += f'<h3>Flagged Spectra Details</h3>{details_note}<div class="flagged-grid">'
+
         badge_colors = {
             "fit_failed": ("#dc3545", "Failed"),
             "statistical_outlier": ("#fd7e14", "Outlier"),
-            "below_threshold": ("#ffc107", "Low R²"),
+            "below_threshold": ("#ffc107", "Low score"),
             "outlier_and_below_threshold": ("#dc3545", "Critical"),
         }
-        
-        for f in flagged_spectra:
+
+        for f in gallery:
             result = next((r for r in series_results if r["index"] == f["index"]), None)
             color, label = badge_colors.get(f["reason"], ("#6c757d", "Flagged"))
-            
+            # metric-aware: the flag record stores the acceptance-metric value
+            # under 'r_squared' regardless of skill, so for matching-mode
+            # skills it is actually the figure of merit — label it correctly.
+            mlabel = self._display_metric((result or {}).get("fit_quality", {}))[0] or "R²"
+
             html += f'<div class="flagged-card" style="border-color: {color};">'
             html += f'<div class="flagged-card-header"><strong>{f["name"]}</strong>'
             html += f'<span class="flagged-badge" style="background-color: {color};">{label}</span></div>'
-            
+
             if f.get("r_squared") is not None:
-                html += f'<p><strong>R²:</strong> {f["r_squared"]:.4f} (series median: {f["series_mean"]:.4f})</p>'
+                html += f'<p><strong>{mlabel}:</strong> {f["r_squared"]:.4f} (series median: {f["series_mean"]:.4f})</p>'
                 if f.get("deviation_sigma") is not None:
                     html += f'<p><strong>Deviation:</strong> {f["deviation_sigma"]:.1f}σ below median</p>'
             
@@ -7012,7 +8075,14 @@ class UnifiedCurveReportController:
         failed_indices = {i for i, r in enumerate(series_results) if not r["success"]}
         flagged_indices = {i for i, r in enumerate(series_results) if r.get("flagged")}
         priority_indices = failed_indices | flagged_indices
-        
+        # Best-scoring frames (highest FoM/R²) — always surface a few so a
+        # SUCCESSFUL series shows its confident results, not only the flagged
+        # ones. Without this the report can look like all-failure even when
+        # most frames succeeded (the flagged section already covers the rest).
+        best_indices = [i for i in sorted(range(num_spectra),
+                                          key=lambda j: -self._metric_value(series_results[j]))
+                        if self._metric_value(series_results[i]) >= 0][:3]
+
         if num_spectra <= 10:
             indices_to_show = set(range(num_spectra))
             section_note = ""
@@ -7023,13 +8093,15 @@ class UnifiedCurveReportController:
                 for i in range(3, num_spectra - 3, max(1, step)):
                     if len(indices_to_show) < 10:
                         indices_to_show.add(i)
+            indices_to_show.update(best_indices)
             indices_to_show.update(priority_indices)
             not_shown = num_spectra - len(indices_to_show)
-            section_note = f"<p><em>Showing {len(indices_to_show)} of {num_spectra} fits. {not_shown} fits not displayed.</em></p>"
+            section_note = f"<p><em>Showing {len(indices_to_show)} of {num_spectra} fits (boundary, best-scoring, and flagged). {not_shown} fits not displayed.</em></p>"
         else:
             indices_to_show = {0, 1, num_spectra - 2, num_spectra - 1}
+            indices_to_show.update(best_indices)
             indices_to_show.update(list(priority_indices)[:10])
-            section_note = f"<p><em>Large series ({num_spectra} spectra): Showing boundary fits and flagged/failed spectra.</em></p>"
+            section_note = f"<p><em>Large series ({num_spectra} spectra): Showing boundary fits, best-scoring fits, and flagged/failed spectra.</em></p>"
         
         indices_to_show = sorted(indices_to_show)
         
@@ -7052,11 +8124,18 @@ class UnifiedCurveReportController:
                     status, status_color = "🔄 Re-fitted", "#17a2b8"
                 elif r.get("flagged"):
                     status, status_color = f"⚠ {r.get('flag_reason', 'Flagged')}", "#fd7e14"
+                elif self._is_marginal_match(r.get("fit_quality", {})):
+                    # matching-mode skills accept at a LOW figure_of_merit
+                    # (0.70) but only call ≥0.85 high-confidence; a barely-
+                    # accepted match must not wear the same green ✓ as a
+                    # confident one (its overlay may visibly disagree — that
+                    # is what the marginal band means). Genuine curve fits
+                    # pass a strict acceptance gate, so they are unaffected.
+                    status, status_color = "~ marginal (low confidence)", "#f0ad4e"
                 else:
                     status, status_color = "✓", "#27ae60"
 
-                r_squared = r.get("fit_quality", {}).get("r_squared") or 0
-                r2_str = f"R² = {r_squared:.4f}" if isinstance(r_squared, float) else ""
+                _mlabel, r2_str = self._display_metric(r.get("fit_quality", {}))
                 refit_note = ""
                 if r.get("adaptively_refitted") and r.get("original_r2") is not None:
                     refit_note = f"<br><small>Original R²: {r['original_r2']:.4f}</small>"

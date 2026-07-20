@@ -294,29 +294,35 @@ class LLMAgentMixin:
         - dict with top-level keys (e.g., {"sample": "...", "technique": "..."}) -> returned as-is
         - dict with nested "system_info" key -> extracts the nested dict
         - str (file path to JSON) -> loads and processes as above
-        
+        - str (free-text metadata, not a file) -> {"description": <text>}
+
         This allows users to pass either:
         - A flat system_info dict directly
         - A full metadata file that contains a "system_info" key
         - A path to either type of JSON file
+        - A plain descriptive string (e.g. "17O NMR of D2O, shift vs intensity")
         """
         if system_info is None:
             return {}
-        
-        # Load from file if string path provided
+
+        # A string is either a path to a JSON metadata file or free-text
+        # metadata. Try to load it as a file; if it is not a readable path,
+        # PRESERVE it as free text rather than discarding it — a descriptive
+        # string is a natural metadata input, and dropping it silently blinds
+        # skill selection and every downstream metadata-dependent prompt.
         if isinstance(system_info, str):
             try:
                 with open(system_info, 'r') as f:
                     system_info = json.load(f)
-            except FileNotFoundError:
-                self.logger.error(f"system_info file not found: {system_info}")
-                return {}
             except json.JSONDecodeError as e:
+                # An existing file that is not valid JSON — a genuine error.
                 self.logger.error(f"Invalid JSON in system_info file {system_info}: {e}")
                 return {}
-            except Exception as e:
-                self.logger.error(f"Error loading system_info from {system_info}: {e}")
-                return {}
+            except (FileNotFoundError, OSError, ValueError):
+                # Not a readable path (missing file, name too long, null byte,
+                # ordinary prose) -> treat the string as free-text metadata.
+                self.logger.debug("system_info is free-text (not a file path); preserving as description")
+                return {"description": system_info}
         
         # Ensure we have a dict at this point
         if not isinstance(system_info, dict):
@@ -357,6 +363,38 @@ class LLMAgentMixin:
             system_info = dict(system_info)          # shallow copy to avoid mutating caller's dict
             series_metadata = system_info.pop("series")
         return system_info, series_metadata
+
+    @staticmethod
+    def _normalize_series_values(
+        series_metadata: dict | None,
+        ordered_paths: list | None,
+    ) -> dict | None:
+        """Coerce ``series_metadata['values']`` from a filename-keyed dict into
+        a list aligned to *ordered_paths* (file order) — the contract every
+        downstream consumer assumes (``values[idx]``, ``min``/``max``, the trend
+        codegen). The orchestrator normalizes this when it sorts a series, but
+        sidecar / continuation paths can hand the agent the raw
+        ``{filename: value}`` dict; a dict reaching a list-expecting consumer
+        raises ``'<' not supported between instances of 'dict' and 'dict'``
+        (min/max) or a ``KeyError`` (``values[int]``).
+
+        Idempotent: a list passes through unchanged. Only rewrites when every
+        spectrum finds a value — a partial/mismatched map is left as-is so the
+        caller's existing fallbacks (and the defensive consumer guards) handle
+        it rather than silently mis-aligning values to spectra.
+        """
+        if not series_metadata or not ordered_paths:
+            return series_metadata
+        values = series_metadata.get("values")
+        if not isinstance(values, dict):
+            return series_metadata
+        import os
+        by_name = {os.path.basename(str(k)): v for k, v in values.items()}
+        aligned = [by_name.get(os.path.basename(str(p))) for p in ordered_paths]
+        if aligned and all(v is not None for v in aligned):
+            series_metadata = dict(series_metadata)
+            series_metadata["values"] = aligned
+        return series_metadata
 
     def _build_system_info_prompt_section(self, system_info: Dict[str, Any]) -> str:
         """Build the system information section for LLM prompts."""
@@ -1367,6 +1405,101 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
         self.logger.info(f"Spatial calibration: {pixel_size:.3f} nm/pixel, FOV: {fov:.1f} nm")
         
         return pixel_size, fov
+
+    # =========================================================================
+    # SYNTHESIS RE-ENTRY (issue #322, Tier A)
+    # =========================================================================
+
+    @staticmethod
+    def surface_features_for_reentry(analysis_result: Dict[str, Any]) -> Dict[str, Any]:
+        """Collect the quantitative features of a completed analysis result.
+
+        Modality-agnostic: picks up whichever of the known feature fields are
+        present (curve: model/fit params/trends; image & hyperspectral:
+        ``extracted_features``). Used to ground Tier-A interpretation
+        re-entry in what was actually measured.
+        """
+        features: Dict[str, Any] = {}
+        for key in ("model_type", "fit_quality"):
+            if analysis_result.get(key):
+                features[key] = analysis_result[key]
+        trends = analysis_result.get("parameter_trends")
+        if trends:
+            features["parameter_trends"] = trends
+        elif analysis_result.get("fitting_parameters"):
+            features["fitting_parameters"] = analysis_result["fitting_parameters"]
+        if analysis_result.get("extracted_features"):
+            features["extracted_features"] = analysis_result["extracted_features"]
+        return features
+
+    def reenter_interpretation(
+        self,
+        analysis_result: Dict[str, Any],
+        critique,
+        system_info: Dict[str, Any] | str | None = None,
+        include_stored_images: bool = True,
+    ) -> Dict[str, Any]:
+        """Tier-A synthesis re-entry (issue #322): revise ONLY the
+        interpretation of a completed analysis with an injected critique.
+
+        ``critique`` is a :class:`~scilink.agents.exp_agents._critique.CritiquePayload`
+        or a plain string (wrapped as a human critique). The revision is
+        APPENDED to ``analysis_result["interpretation_revisions"]`` — the
+        original ``detailed_analysis`` / ``scientific_claims`` are never
+        overwritten. No per-unit re-analysis happens (the expensive upstream
+        results are reused as-is).
+
+        Returns ``{"status": "success", "revision": {...}}`` or
+        ``{"status": "error", "error": {...}}``.
+        """
+        from datetime import datetime as _dt
+
+        from ._critique import CritiquePayload
+        from .controllers.base_controllers import SynthesisReEntryController
+
+        if isinstance(critique, str):
+            payload = CritiquePayload(source="human", critique=critique)
+        else:
+            payload = critique
+
+        features = self.surface_features_for_reentry(analysis_result)
+        features_block = json.dumps(features, indent=2, default=str)[:4000] if features else ""
+
+        images = self._get_stored_analysis_images() if include_stored_images else []
+
+        controller = SynthesisReEntryController(
+            model=self.model,
+            logger=self.logger,
+            generation_config=self.generation_config,
+            safety_settings=self.safety_settings,
+            parse_fn=self._parse_llm_response,
+        )
+        revision, error = controller.revise(
+            analysis_result, payload,
+            features_block=features_block,
+            images=images,
+            system_info=self._handle_system_info(system_info) or None,
+        )
+        if error:
+            return {"status": "error", "error": error}
+
+        entry = {
+            "timestamp": _dt.now().isoformat(),
+            "source": payload.source,
+            "critique": payload.critique,
+            # Key name matches the orchestrator's refine_interpretation
+            # revisions so _effective_full_result-style consumers overlay
+            # both kinds uniformly.
+            "revised_analysis": revision["detailed_analysis"],
+            "revision_summary": revision.get("revision_summary", ""),
+        }
+        revised_claims = self._validate_scientific_claims(
+            revision.get("scientific_claims", [])
+        )
+        if revised_claims:
+            entry["revised_claims"] = revised_claims
+        analysis_result.setdefault("interpretation_revisions", []).append(entry)
+        return {"status": "success", "revision": entry}
 
     # =========================================================================
     # REFINEMENT WITH FEEDBACK

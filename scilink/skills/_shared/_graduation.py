@@ -347,7 +347,16 @@ def graduate_to_skill_file(
         )
 
     raw = llm_call(prompt)
-    parsed = parse_json_response(raw)
+    try:
+        parsed = parse_json_response(raw)
+    except ValueError:
+        # The model answered in prose (or the JSON was truncated off the
+        # end). One corrective retry with the contract restated up front.
+        retry_prompt = (
+            "Respond with ONLY a single JSON object — no prose before or "
+            "after it.\n\n" + prompt
+        )
+        parsed = parse_json_response(llm_call(retry_prompt))
     if extra_meta:
         for key in _EXTRA_META_KEYS:
             if key in extra_meta and extra_meta[key] is not None:

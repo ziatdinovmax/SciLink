@@ -15,9 +15,11 @@ LLM reasoning.  If extraction fails, the user is prompted and shown the
 sidecar contents to help them specify the variable manually.
 """
 
+import glob
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 import numpy as np
@@ -175,11 +177,18 @@ _GLOBAL_METADATA_NAMES = frozenset([
 ])
 
 # Best-of-N defaults per agent class when the LLM passes no n_candidates.
-# Image analysis shows real run-to-run variance, so it fans out by default;
-# agents absent from this dict default to a single attempt. Deterministic
-# policy in code (not prompt prose) — an explicit tool param still overrides.
+# Both image and curve fitting fan out by default *in escalation mode* —
+# attempt 0 runs alone and is fast-accepted when strong, so the extra cost is
+# paid only when the first attempt is weak. Image fans out because of run-to-
+# run variance; curve fitting because, with no domain skill to pin the
+# technique, a weak fit has high plan variance and independent candidates can
+# recover it (the agent suppresses the fan-out to 1 when a skill IS active —
+# the candidates would just converge on the mandated model). Agents absent
+# from this dict default to a single attempt. Deterministic policy in code
+# (not prompt prose) — an explicit tool param still overrides exactly.
 _DEFAULT_N_CANDIDATES_BY_AGENT_CLASS = {
     "ImageAnalysisAgent": 3,
+    "CurveFittingAgent": 3,
 }
 
 
@@ -221,6 +230,51 @@ def _resolve_candidate_escalation(agent: Any, requested: Any) -> bool:
     except (TypeError, ValueError):
         return False
     return "candidate_escalation" in params
+
+
+_GLOB_MAGIC = ("*", "?", "[")
+
+
+def _is_glob(data_path) -> bool:
+    """True when data_path is a glob PATTERN rather than an existing path.
+
+    Strictly a fallback test: an existing file or directory (even one whose
+    name literally contains a bracket) is never treated as a pattern, so
+    directory / single-file inputs behave exactly as before.
+    """
+    if not isinstance(data_path, str):
+        return False
+    try:
+        if Path(data_path).exists():
+            return False
+    except OSError:  # noqa: PERF203 - absurdly long string is not a path
+        return False
+    return any(c in data_path for c in _GLOB_MAGIC)
+
+
+def _resolve_glob_files(pattern: str) -> tuple[list[Path], list[Path]]:
+    """Expand a glob into (data_files, all_files).
+
+    ``data_files`` are the matched non-metadata files; ``all_files`` adds the
+    stem-matched JSON sidecars sitting beside them (which the pattern itself
+    typically does not match, e.g. ``series_*.txt``), so sidecar-based series
+    metadata keeps working for a globbed subset of a directory.
+    """
+    matched = sorted((Path(f) for f in glob.glob(pattern) if os.path.isfile(f)),
+                     key=lambda p: p.name)
+    data_files = [
+        f for f in matched
+        if f.suffix.lower() != ".json"
+        and "metadata" not in f.name.lower()
+        and f.name.lower() not in ("info.txt", "description.txt",
+                                   "readme.txt", "readme.md")
+    ]
+    all_files = list(data_files)
+    for f in data_files:
+        sidecar = f.with_suffix(".json")
+        if sidecar.is_file():
+            all_files.append(sidecar)
+    return data_files, all_files
 
 
 def _detect_sidecar_jsons(
@@ -603,6 +657,18 @@ def _extract_series_from_sidecars(
 
     return series_meta, per_file_meta
 
+
+
+def _effective_full_result(record: dict) -> dict:
+    """The record's full_result with the latest literature-refined
+    interpretation swapped in when one exists (refine_interpretation,
+    issue #323). Returns a copy; the record is never mutated."""
+    full_result = record.get("full_result") or {}
+    revisions = record.get("interpretation_revisions") or []
+    if revisions and full_result:
+        full_result = dict(full_result)
+        full_result["detailed_analysis"] = revisions[-1]["revised_analysis"]
+    return full_result
 
 class AnalysisOrchestratorTools:
     """
@@ -1106,32 +1172,55 @@ class AnalysisOrchestratorTools:
             (e.g. ``spec_5K.json`` ↔ ``spec_5K.csv``) are reported as
             per-file sidecar metadata in ``sidecar_json_files``, separate
             from global ``metadata_files``.
+
+            ``data_path`` may also be a glob PATTERN (e.g.
+            ``/data/series_*C.txt``) selecting ONE dataset out of a directory
+            that holds several; it is examined exactly like a directory
+            restricted to the matched files.
             """
             print(f"  ⚡ Tool: Examining data at {data_path}...")
-            
+
             path = Path(data_path)
-            if not path.exists():
+            is_glob_input = _is_glob(data_path)
+            if not is_glob_input and not path.exists():
                 return json.dumps({
                     "status": "error",
                     "message": f"File not found: {data_path}"
                 })
-            
+
             result = {
                 "status": "success",
                 "path": str(path.absolute()),
             }
-            
+
             try:
                 # ============================================================
-                # DIRECTORY: Multiple files (series)
+                # DIRECTORY or GLOB PATTERN: Multiple files (series)
                 # ============================================================
-                if path.is_dir():
-                    files = list(path.iterdir())
-                    files = [f for f in files if f.is_file() and not f.name.startswith('.')]
-                    
+                if path.is_dir() or is_glob_input:
+                    if is_glob_input:
+                        _dfiles, files = _resolve_glob_files(data_path)
+                        if not _dfiles:
+                            return json.dumps({
+                                "status": "error",
+                                "message": (f"No data files match the pattern "
+                                            f"'{data_path}'.")
+                            })
+                        result["is_pattern"] = True
+                        result["pattern"] = data_path
+                        result["pattern_hint"] = (
+                            f"This pattern selects {len(_dfiles)} file(s) out of "
+                            f"{Path(data_path).parent}. Pass the pattern itself as "
+                            "`data_path` to run_analysis — NOT the parent directory, "
+                            "which may hold other datasets."
+                        )
+                    else:
+                        files = list(path.iterdir())
+                        files = [f for f in files if f.is_file() and not f.name.startswith('.')]
+
                     result["is_directory"] = True
                     result["file_count"] = len(files)
-                    
+
                     if not files:
                         result["status"] = "error"
                         result["message"] = "Directory is empty"
@@ -1476,7 +1565,11 @@ class AnalysisOrchestratorTools:
             parameters={
                 "data_path": {
                     "type": "string",
-                    "description": "Path to the data file to examine"
+                    "description": (
+                        "Path to the data file or directory to examine. May also "
+                        "be a glob PATTERN (e.g. '/data/series_*C.txt') selecting "
+                        "one dataset out of a directory holding several."
+                    )
                 }
             },
             required=["data_path"]
@@ -2091,11 +2184,13 @@ class AnalysisOrchestratorTools:
             task_mode: str = None,
             prior_analysis_paths: List[str] = None,
             reuse_locked_script: bool = False,
+            profile: str = None,
             literature_file: str = None,
             r2_threshold: float = None,
             max_verification_iterations: int = None,
             starting_annealing_level: int = None,
             n_candidates: int = None,
+            executor_timeout: int = None,
         ) -> str:
             """
             Execute analysis with the selected or specified agent.
@@ -2179,6 +2274,13 @@ class AnalysisOrchestratorTools:
                     _data = [f for f in _all if f.suffix.lower() != ".json"]
                     _smap, _ = _detect_sidecar_jsons(_data, _all)
                     has_sidecars = bool(_smap)
+                elif _is_glob(data_path):
+                    # A glob selects one dataset out of a directory holding
+                    # several (e.g. one in-situ series per pattern); its files'
+                    # sidecars supply metadata exactly as in the directory case.
+                    _data, _all = _resolve_glob_files(data_path)
+                    _smap, _ = _detect_sidecar_jsons(_data, _all)
+                    has_sidecars = bool(_smap)
                 if has_sidecars:
                     self.orch.current_metadata = {}
                 else:
@@ -2206,43 +2308,60 @@ class AnalysisOrchestratorTools:
                         })
             
             try:
-                # === Handle directory input - filter out metadata files ===
+                # === Handle directory / glob input - filter out metadata files ===
                 path = Path(data_path)
                 actual_data_input = data_path  # Default: pass as-is
-                
-                if path.is_dir():
-                    # Get all files excluding metadata
-                    all_files = [f for f in path.iterdir() if f.is_file() and not f.name.startswith('.')]
-                    
-                    # Filter out metadata files
-                    data_files = []
-                    for f in all_files:
-                        is_metadata = (
-                            f.suffix.lower() == '.json' or
-                            'metadata' in f.name.lower() or
-                            f.name.lower() in ['info.txt', 'description.txt', 'readme.txt', 'readme.md']
-                        )
-                        if not is_metadata:
-                            data_files.append(f)
-                    
-                    if not data_files:
-                        return json.dumps({
-                            "status": "error",
-                            "message": "No data files found in directory (only metadata files present)"
-                        })
-                    
+                is_glob_input = _is_glob(data_path)
+                all_files: list[Path] = []
+                data_files: list[Path] = []
+
+                if path.is_dir() or is_glob_input:
+                    if is_glob_input:
+                        # A glob names ONE dataset inside a directory that holds
+                        # several (distinct in-situ series in a single upload
+                        # folder); only its matched files are analyzed.
+                        data_files, all_files = _resolve_glob_files(data_path)
+                        if not data_files:
+                            return json.dumps({
+                                "status": "error",
+                                "message": (f"No data files match the pattern "
+                                            f"'{data_path}'.")
+                            })
+                        print(f"    Pattern '{Path(data_path).name}' matched "
+                              f"{len(data_files)} data file(s)")
+                    else:
+                        # Get all files excluding metadata
+                        all_files = [f for f in path.iterdir() if f.is_file() and not f.name.startswith('.')]
+
+                        # Filter out metadata files
+                        data_files = []
+                        for f in all_files:
+                            is_metadata = (
+                                f.suffix.lower() == '.json' or
+                                'metadata' in f.name.lower() or
+                                f.name.lower() in ['info.txt', 'description.txt', 'readme.txt', 'readme.md']
+                            )
+                            if not is_metadata:
+                                data_files.append(f)
+
+                        if not data_files:
+                            return json.dumps({
+                                "status": "error",
+                                "message": "No data files found in directory (only metadata files present)"
+                            })
+
+                        print(f"    Found {len(data_files)} data files (excluded metadata)")
+
                     # Sort for consistent ordering
                     data_files = sorted(data_files, key=lambda x: x.name)
-                    
-                    print(f"    Found {len(data_files)} data files (excluded metadata)")
-                    
+
                     # Pass as list of file paths for series analysis
                     actual_data_input = [str(f) for f in data_files]
-                    
+
                     # If only one file, pass as string (single spectrum mode)
                     if len(actual_data_input) == 1:
                         actual_data_input = actual_data_input[0]
-                        print(f"    Single file in directory, using single spectrum mode")
+                        print(f"    Single file, using single spectrum mode")
                     else:
                         print(f"    Series mode: passing {len(actual_data_input)} files")
                         for i, fp in enumerate(actual_data_input[:3]):
@@ -2267,7 +2386,7 @@ class AnalysisOrchestratorTools:
                         self.logger.warning(f"Failed to parse series_metadata: {e}")
 
                 # === Try to extract series metadata from sidecar JSON files ===
-                if is_series and not has_series_meta and path.is_dir():
+                if is_series and not has_series_meta and (path.is_dir() or is_glob_input):
                     sidecar_map, _global_jsons = _detect_sidecar_jsons(
                         data_files, all_files
                     )
@@ -2522,7 +2641,9 @@ class AnalysisOrchestratorTools:
                 # NOTE: Code-executing agents may prompt the user
                 # for sandbox approval and raise RuntimeError if declined.
                 try:
-                    agent = self.orch.create_agent_for_analysis(agent_id, str(analysis_output_dir))
+                    agent = self.orch.create_agent_for_analysis(
+                        agent_id, str(analysis_output_dir),
+                        executor_timeout=executor_timeout)
                 except RuntimeError as e:
                     # Handle sandbox rejection or other init failures
                     error_msg = str(e)
@@ -2611,6 +2732,13 @@ class AnalysisOrchestratorTools:
                     analyze_kwargs["prior_analysis_paths"] = prior_analysis_paths
                 if reuse_locked_script:
                     analyze_kwargs["reuse_locked_script"] = True
+                if profile:
+                    # Operating profile (#346): forward only to agents whose
+                    # analyze() accepts it (all three do; introspection keeps
+                    # this robust for custom agents).
+                    import inspect as _inspect
+                    if "profile" in _inspect.signature(agent.analyze).parameters:
+                        analyze_kwargs["profile"] = profile
                 if literature_file:
                     analyze_kwargs["literature_file"] = literature_file
                 if r2_threshold is not None:
@@ -2628,8 +2756,8 @@ class AnalysisOrchestratorTools:
                 if max_verification_iterations is not None:
                     # Thoroughness / turnaround override. 0 bypasses LLM
                     # verification (fast/in-situ), higher = more refinement
-                    # (thorough/post-experiment). Only forward to agents whose
-                    # analyze() accepts it (currently CurveFitting).
+                    # (thorough/post-experiment). Forwarded by signature
+                    # introspection (all three analysis agents accept it).
                     import inspect as _inspect
                     if "max_verification_iterations" in _inspect.signature(agent.analyze).parameters:
                         analyze_kwargs["max_verification_iterations"] = int(max_verification_iterations)
@@ -2696,7 +2824,12 @@ class AnalysisOrchestratorTools:
                 self.orch.analysis_results.append(analysis_record)
                 
                 # === Format response ===
-                if result.get("status") == "success":
+                # "partial" is hyperspectral's salvage outcome (approximate /
+                # withheld maps with honest caveats) — a usable, degraded
+                # result. It gets the full success-shaped payload with its
+                # caveats attached, NOT the error branch (which used to
+                # surface it as an error with an empty error object).
+                if result.get("status") in ("success", "partial"):
                     # Find main visualization
                     viz_path = None
                     for candidate in analysis_output_dir.rglob("*_analysis.png"):
@@ -2713,7 +2846,7 @@ class AnalysisOrchestratorTools:
                                 break
 
                     response = {
-                        "status": "success",
+                        "status": result.get("status"),
                         "analysis_id": analysis_id,
                         "agent_used": self.AGENT_NAMES.get(agent_id),
                         "output_directory": str(analysis_output_dir),
@@ -2723,6 +2856,17 @@ class AnalysisOrchestratorTools:
                         "note": f"All outputs saved to: {analysis_output_dir}",
                         "next_steps": "Use assess_novelty to check literature for these claims, or get_recommendations for follow-up experiments.",
                     }
+                    if result.get("status") == "partial":
+                        response["confidence"] = result.get("confidence")
+                        response["warnings"] = result.get("warnings") or []
+                        if result.get("degraded_outputs"):
+                            response["degraded_outputs"] = result[
+                                "degraded_outputs"]
+                        response["note"] = (
+                            "PARTIAL result: some outputs are approximate or "
+                            "were withheld (see warnings). "
+                            + response["note"]
+                        )
                     if viz_path:
                         response["visualization_path"] = viz_path
                     if result.get("tier2_results"):
@@ -2803,7 +2947,14 @@ class AnalysisOrchestratorTools:
             parameters={
                 "data_path": {
                     "type": "string",
-                    "description": "Path to data file (uses current if not specified)"
+                    "description": (
+                        "Path to a data file, a directory (analyzed as a series), "
+                        "or a glob PATTERN like '/data/series_*C.txt' selecting one "
+                        "dataset out of a directory that holds several. When you were "
+                        "given a pattern, pass it VERBATIM — substituting its parent "
+                        "directory would pull in the other datasets. Uses current if "
+                        "not specified."
+                    )
                 },
                 "agent_id": {
                     "type": "integer",
@@ -2828,8 +2979,13 @@ class AnalysisOrchestratorTools:
                     "description": (
                         "Tactical guidance to steer the analysis "
                         "(e.g. 'focus on the Ti L-edge around 460 eV', "
-                        "'pay attention to peaks between 280-300 nm'). "
-                        "Supported by CurveFitting and Hyperspectral agents."
+                        "'pay attention to peaks between 280-300 nm') AND/OR "
+                        "figure-presentation preferences, which reach the "
+                        "generated plotting code (e.g. 'place the legend "
+                        "outside the axes — it covers the data', 'use a log "
+                        "intensity scale'). Route any user request about how "
+                        "plots should LOOK through this parameter. Supported "
+                        "by CurveFitting, Image, and Hyperspectral agents."
                     )
                 },
                 "auxiliary_data": {
@@ -2913,7 +3069,10 @@ class AnalysisOrchestratorTools:
                         "CurveFitting agent only. Set to 'identification' when the user "
                         "is asking the agent to help identify what material or phase the "
                         "spectrum is from (no sample identity known), rather than to fit "
-                        "and interpret a known material. In identification mode the planner "
+                        "and interpret a known material. Identity unknown means use "
+                        "identification mode even when the elemental composition IS known "
+                        "(e.g. from EDX/metadata) — element hints constrain candidates, "
+                        "they do not name the material. In identification mode the planner "
                         "uses a generic flexible model and the interpreter enumerates "
                         "ranked candidate materials with discriminating peaks instead of "
                         "asserting a single answer. Leave unset (defaults to 'fitting') "
@@ -2971,6 +3130,27 @@ class AnalysisOrchestratorTools:
                         "agent decides how to use the prior run as reference."
                     )
                 },
+                "profile": {
+                    "type": "string",
+                    "enum": ["thorough", "realtime"],
+                    "description": (
+                        "Operating profile. Omit (or 'thorough') for the normal "
+                        "full-quality analysis. 'realtime' is the per-frame "
+                        "in-situ mode for curve data: it executes the locked "
+                        "script from `prior_analysis_paths` with ZERO LLM calls "
+                        "— requires `prior_analysis_paths` + "
+                        "`reuse_locked_script=true`, and the anchor frame must "
+                        "have been analyzed thoroughly first. The result carries "
+                        "`reuse_validity` with the gate verdict plus a `drift` "
+                        "field ('none'/'suspected') from a fingerprint "
+                        "comparison against the anchor frame — 'suspected' "
+                        "means the DATA changed (e.g. a phase transition) even "
+                        "if the fit still passes; recommend a thorough "
+                        "re-analysis of such frames. Use for high-cadence "
+                        "measurement streams; interpretation is deferred to a "
+                        "post-experiment sweep."
+                    )
+                },
                 "literature_file": {
                     "type": "string",
                     "description": (
@@ -2997,22 +3177,39 @@ class AnalysisOrchestratorTools:
                         "Leave unset for standard analyses."
                     )
                 },
+                "executor_timeout": {
+                    "type": "integer",
+                    "description": (
+                        "All analysis agents. Per-run script-execution timeout "
+                        "in seconds (default 600; the adaptive escalation "
+                        "ladder retries a timed-out script at 2x up to 1800 s "
+                        "before any LLM correction). RAISE it when a previous "
+                        "run of the same data failed with 'Script execution "
+                        "timed out' or when the dataset is very large and a "
+                        "single fit legitimately needs longer; LOWER it (e.g. "
+                        "30-60) for real-time/quick-look turnaround where a "
+                        "slow fit should fail fast. Leave unset otherwise."
+                    )
+                },
                 "max_verification_iterations": {
                     "type": "integer",
                     "description": (
-                        "CurveFitting agent only. Controls how thorough the "
-                        "fit-verification/refinement loop is — the speed-vs-rigor "
+                        "All analysis agents. Controls how thorough the "
+                        "verification/refinement loop is — the speed-vs-rigor "
                         "knob. Set it ONLY when the user asks about turnaround or "
                         "checking depth; leave unset for the standard (thorough) "
                         "default. Map the user's intent: a fast / quick / in-situ / "
                         "real-time / 'good enough' turnaround → 1 (a single check, "
                         "no refinement loop); 'skip/bypass/no verification' → 0 "
-                        "(accept the first good fit with no LLM verification at "
-                        "all); an explicit count (e.g. 'two verification steps') → "
-                        "that integer; thorough / careful / publication / "
-                        "post-experiment analysis → leave unset (defaults to 7). "
-                        "Often paired with r2_threshold (e.g. 'use R²=0.98 and a "
-                        "single verification step')."
+                        "(accept the first successful result with no verification "
+                        "or retry loop at all; a failed result still enters the "
+                        "recovery path); an explicit count (e.g. 'two verification "
+                        "steps') → that integer; thorough / careful / publication / "
+                        "post-experiment analysis → leave unset (defaults: 7 for "
+                        "curve/image verification passes, 4 retries for "
+                        "hyperspectral codegen). Often paired with r2_threshold "
+                        "for curve fits (e.g. 'use R²=0.98 and a single "
+                        "verification step')."
                     )
                 },
                 "starting_annealing_level": {
@@ -3042,15 +3239,18 @@ class AnalysisOrchestratorTools:
                         "an LLM judge compares the finished attempts "
                         "(verification scores/R² + output visualizations) and "
                         "locks the winner — reduces run-to-run variance. Leave "
-                        "UNSET for the per-agent default (image analysis runs "
-                        "3 automatically; curve fitting and others run 1). Set "
-                        "ONLY when the user explicitly asks for more/fewer "
-                        "parallel attempts (e.g. 'try 5 candidates' → 5; "
-                        "'single attempt / cheapest run' → 1). When UNSET, the "
-                        "image default runs in escalation mode (the first "
+                        "UNSET for the per-agent default: image analysis and "
+                        "curve fitting auto-run in ESCALATION mode (the first "
                         "attempt is accepted immediately if strong; the rest "
-                        "launch only if it is weak); an explicit value forces "
-                        "exactly N parallel attempts."
+                        "launch only if it is weak — so the extra cost is paid "
+                        "only on a weak first attempt). Curve fitting suppresses "
+                        "this to a single fit when a domain skill is active (the "
+                        "candidates would converge on the mandated model); other "
+                        "agents run 1. Set ONLY when the user explicitly asks "
+                        "for more/fewer parallel attempts (e.g. 'try 5 "
+                        "candidates' → 5; 'single attempt / cheapest run' → 1); "
+                        "an explicit value forces exactly N parallel attempts "
+                        "(no escalation, and not skill-suppressed)."
                     )
                 }
             },
@@ -3126,7 +3326,12 @@ class AnalysisOrchestratorTools:
                         "agent_name": r.get("agent_name"),
                         "status": r.get("status"),
                         "output_directory": r.get("output_directory"),
-                        "has_novelty_assessment": r.get("novelty_assessment") is not None
+                        "has_novelty_assessment": r.get("novelty_assessment") is not None,
+                        # discoverability: downstream consumers already prefer
+                        # the latest revision; this flag lets the agent SEE
+                        # that a literature-refined interpretation exists
+                        "interpretation_revisions": len(r.get("interpretation_revisions") or []),
+                        "novelty_assessment_stale": bool((r.get("novelty_assessment") or {}).get("stale"))
                     }
                     for r in self.orch.analysis_results
                 ]
@@ -3319,6 +3524,8 @@ class AnalysisOrchestratorTools:
                 
                 # Get the stored analysis result
                 full_result = record.get("full_result")
+                if full_result is not None:
+                    full_result = _effective_full_result(record)
                 if full_result is None:
                     return json.dumps({
                         "status": "error",
@@ -3345,7 +3552,8 @@ class AnalysisOrchestratorTools:
                     "analysis_id": record.get("analysis_id"),
                     "recommendations": result.get("measurement_recommendations", []),
                     "analysis_integration": result.get("analysis_integration", ""),
-                    "novelty_informed": novelty_assessment is not None
+                    "novelty_informed": novelty_assessment is not None,
+                    "novelty_assessment_stale": bool((novelty_assessment or {}).get("stale"))
                 }
                 
                 # Add novelty-specific recommendations if available
@@ -3386,6 +3594,189 @@ class AnalysisOrchestratorTools:
                 }
             },
             required=[]
+        )
+
+        # =====================================================================
+        # 10a2. RECONCILE SERIES — couple a profile-fitting pass with an ID pass
+        # =====================================================================
+        def reconcile_series(profile_analysis: int = None,
+                             identification_analysis: int = None,
+                             profile_id: str = None,
+                             identification_id: str = None,
+                             tol: float = None,
+                             regime_window_frac: float = 0.33,
+                             crossover_threshold: float = 0.5) -> str:
+            """Reconcile two PRIOR series analyses of the same frames: a
+            profile-fitting pass (peak/line fitting — HOW the structure
+            evolves; fits a lineshape model but is database-independent, it
+            needs no reference) and an identification pass (WHICH phases, by
+            reference matching). Attributes the fitted feature-evolution
+            trends to the identified labels and cross-checks the transition
+            the two find independently. Technique-agnostic — works for any
+            series where one pass fits peaks and the other identifies.
+            Reference each prior analysis by index (position in history) or
+            analysis_id."""
+            print("  ⚡ Tool: Reconciling profile-fit + identification series...")
+            from scilink.skills._shared._reconcile import reconcile_analysis_dirs
+
+            def _find(idx, aid, role):
+                if aid:
+                    rec = next((r for r in self.orch.analysis_results
+                                if r.get("analysis_id") == aid), None)
+                    if rec is None:
+                        raise ValueError(f"{role} analysis id not found: {aid}")
+                    return rec
+                if idx is None:
+                    raise ValueError(f"provide {role} analysis by index or id")
+                return self.orch.analysis_results[idx]
+
+            if not self.orch.analysis_results:
+                return json.dumps({"status": "error",
+                                   "message": "No analyses yet. Run the "
+                                   "profile-fitting and identification passes "
+                                   "first, then reconcile."})
+            try:
+                prof = _find(profile_analysis, profile_id, "profile")
+                idr = _find(identification_analysis, identification_id, "identification")
+                fig = str(self.orch.results_dir / "reconciled_series.png")
+                report = str(self.orch.results_dir / "reconciled_series_report.html")
+                svar = ((getattr(self.orch, "current_metadata", None) or {}).get("series_variable")
+                        or (getattr(self.orch, "current_metadata", None) or {}).get("variable")
+                        or "series variable")
+                r = reconcile_analysis_dirs(
+                    prof.get("output_directory"), idr.get("output_directory"),
+                    output_figure=fig, output_report=report,
+                    series_variable=str(svar),
+                    tol=(float(tol) if tol is not None else None),
+                    regime_window_frac=float(regime_window_frac),
+                    crossover_threshold=float(crossover_threshold))
+                r["status"] = "success"
+                # Persist the result so finalize_reconcile_report can re-render
+                # the report with the LLM's interpretation WITHOUT recomputing.
+                # (Persist BEFORE attaching the figure bytes so the cache stays
+                # lean — finalize does not need the base64.)
+                r["series_variable"] = str(svar)
+                try:
+                    (self.orch.results_dir / "reconciled_series_result.json").write_text(
+                        json.dumps(r, default=str))
+                except Exception:
+                    pass
+                # Attach the reconciled figure so the orchestrator LLM sees the
+                # plot (providers that render tool-result images) before it
+                # writes the interpretation — figure-grounded, not number-only.
+                try:
+                    figpath = r.get("figure") or fig
+                    if figpath and Path(figpath).is_file():
+                        import base64 as _b64
+                        r["image_base64"] = _b64.b64encode(
+                            Path(figpath).read_bytes()).decode()
+                except Exception:
+                    pass
+                # The report currently carries only the computed numbers + the
+                # deterministic note — no synthesis, unlike the component
+                # profile-fitting and identification reports. Ask the LLM to
+                # supply one and finalize, so the coupled report is not the only
+                # one missing an interpretation.
+                r["next_step"] = (
+                    "Write a 2-4 sentence scientific interpretation of this "
+                    "reconciliation — what transforms into what, whether the two "
+                    "independent transition estimates corroborate each other "
+                    "(agreement verdict above), and any caveat the numbers imply "
+                    "(a divergent verdict, an unidentified regime, a possible "
+                    "multi-step process) — then call finalize_reconcile_report("
+                    "interpretation=...) to embed it as the report's Interpretation "
+                    "section. That report is the coupled deliverable to surface.")
+                return json.dumps(r, default=str)
+            except Exception as e:
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=reconcile_series,
+            name="reconcile_series",
+            description=(
+                "Couple two PRIOR series analyses of the same frames — a "
+                "profile-fitting pass (peak/line fitting) and an identification "
+                "pass — into the combined view: phase/species-labeled "
+                "feature-evolution trends with a cross-validated transition. "
+                "Run BOTH passes first (run_analysis with the profile-fitting "
+                "skill, then with the identification skill), then call this. "
+                "The fitted trends are database-independent (they work even "
+                "where identification cannot name a phase — organics, novel "
+                "products); a regime the ID pass could not name stays honestly "
+                "'unidentified'. Agreement of the two transitions is "
+                "corroboration; divergence is a flag. Reference each analysis "
+                "by index or analysis_id. Produces a self-contained HTML "
+                "report (transition summary, phase labels, embedded figure, "
+                "tracked-feature table) and a figure; their paths are in the "
+                "returned 'report' / 'figure' fields. The report carries the "
+                "computed numbers but no synthesis yet — after this returns, "
+                "write a short interpretation and call finalize_reconcile_report "
+                "to embed it, then surface that report as the coupled deliverable."
+            ),
+            parameters={
+                "profile_analysis": {"type": "integer", "description": "History index of the profile-fitting (peak/line-fit) pass."},
+                "identification_analysis": {"type": "integer", "description": "History index of the identification pass."},
+                "profile_id": {"type": "string", "description": "analysis_id of the profile-fitting pass (alternative to index)."},
+                "identification_id": {"type": "string", "description": "analysis_id of the identification pass (alternative to index)."},
+                "tol": {"type": "number", "description": "Feature-tracking position tolerance in the data's x-units (2θ° / ppm / eV). Omit to auto-scale from the peak spacing (recommended — no technique-specific default). Set explicitly to RAISE for features that drift a lot across the series, or LOWER to keep close features apart."},
+                "regime_window_frac": {"type": "number", "description": "Fraction of frames at each end used to classify start- vs end-phase features (default 0.33). LOWER when endpoint frames are pure; RAISE toward 0.5 for a gradual transformation."},
+                "crossover_threshold": {"type": "number", "description": "End-phase weight-share level defining the transition (default 0.5 ≈ 50% conversion). Change only to mark a different conversion fraction."},
+            },
+            required=[]
+        )
+
+        # =====================================================================
+        # 10a3. FINALIZE RECONCILE REPORT — embed the LLM synthesis
+        # =====================================================================
+        def finalize_reconcile_report(interpretation: str) -> str:
+            """Embed a scientific interpretation into the most recent reconcile
+            report. Call this AFTER reconcile_series, passing your own synthesis
+            of the coupled result (what transforms into what, whether the two
+            transition estimates corroborate, any caveat). Re-renders the report
+            in place with an Interpretation section — no recomputation — so the
+            coupled deliverable reads like the component reports, which carry a
+            narrative rather than only numbers."""
+            print("  ⚡ Tool: Finalizing reconcile report with interpretation...")
+            from scilink.skills._shared._reconcile import render_reconcile_report
+            try:
+                cache = self.orch.results_dir / "reconciled_series_result.json"
+                if not cache.is_file():
+                    return json.dumps({"status": "error", "message":
+                                       "No reconcile result to finalize. Run "
+                                       "reconcile_series first."})
+                result = json.loads(cache.read_text())
+                report_path = result.get("report") or str(
+                    self.orch.results_dir / "reconciled_series_report.html")
+                render_reconcile_report(
+                    result, report_path,
+                    series_variable=result.get("series_variable", "series variable"),
+                    interpretation=interpretation)
+                return json.dumps({"status": "success", "report": report_path,
+                                   "message": "Interpretation embedded; this "
+                                   "report is the coupled deliverable to surface "
+                                   "to the user."})
+            except Exception as e:
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=finalize_reconcile_report,
+            name="finalize_reconcile_report",
+            description=(
+                "Embed your scientific interpretation into the reconcile report "
+                "produced by reconcile_series. Call this immediately after "
+                "reconcile_series with a 2-4 sentence synthesis of the coupled "
+                "result — what transforms into what, whether the two independent "
+                "transition estimates corroborate (the agreement verdict), and "
+                "any caveat (divergence, an unidentified regime, a possible "
+                "multi-step process). Re-renders the report in place with an "
+                "Interpretation section so the coupled deliverable carries a "
+                "narrative like the component reports do. The transition numbers "
+                "stay computed — this narrates them, it does not change them."
+            ),
+            parameters={
+                "interpretation": {"type": "string", "description": "Your 2-4 sentence scientific synthesis of the reconciled result. Narrate the computed transition/agreement; do not invent numbers."},
+            },
+            required=["interpretation"]
         )
 
         # =====================================================================
@@ -3483,6 +3874,444 @@ class AnalysisOrchestratorTools:
             required=["query"]
         )
 
+
+        # =====================================================================
+        # REFINE INTERPRETATION (issue #323 — Channel B; feature-conditioned
+        # literature. Curve + image + hyperspectral — feature surfacing per
+        # issue #327 phase 2.)
+        # =====================================================================
+        def refine_interpretation(analysis_id: str = None, analysis_index: int = -1,
+                                  focus: str = None) -> str:
+            """
+            Post-analysis, feature-conditioned literature refinement (Channel B).
+            Searches the literature FROM the fitted features (peak positions,
+            trends) of a completed analysis and revises its interpretation
+            against what is published. Append-only: the original interpretation
+            is preserved; revisions accumulate on the analysis record.
+            """
+            print(f"  ⚡ Tool: Refining interpretation against feature-conditioned literature...")
+
+            if not self.orch.futurehouse_api_key:
+                return json.dumps({
+                    "status": "error",
+                    "message": "No FutureHouse/Edison API Key provided in Orchestrator initialization."
+                })
+
+            # 1. Retrieve the analysis record (same contract as assess_novelty).
+            record = None
+            record_index = None
+            if analysis_id:
+                for i, r in enumerate(self.orch.analysis_results):
+                    if r.get("analysis_id") == analysis_id:
+                        record, record_index = r, i
+                        break
+                if record is None:
+                    return json.dumps({"status": "error",
+                                       "message": f"Analysis ID not found: {analysis_id}"})
+            else:
+                if not self.orch.analysis_results:
+                    return json.dumps({"status": "error",
+                                       "message": "No analysis history available."})
+                record_index = (analysis_index if analysis_index >= 0
+                                else len(self.orch.analysis_results) + analysis_index)
+                record = self.orch.analysis_results[record_index]
+
+            full_result = record.get("full_result") or {}
+            detailed = (full_result.get("detailed_analysis")
+                        or full_result.get("full_analysis") or "")
+            if not detailed.strip():
+                return json.dumps({"status": "error",
+                                   "message": "Analysis record has no interpretation text to refine."})
+
+            # 2. Surface the measured features.
+            # Curve: series runs are trend-conditioned — once a parameter trend
+            # exists, static per-spectrum peaks barely matter (issue #323 §5.2).
+            features = {}
+            for key in ("model_type", "fit_quality"):
+                if full_result.get(key):
+                    features[key] = full_result[key]
+            trends = full_result.get("parameter_trends")
+            if trends:
+                features["parameter_trends"] = trends
+                if full_result.get("flagged_spectra_analysis"):
+                    features["flagged_spectra_analysis"] = full_result["flagged_spectra_analysis"]
+                locked = (full_result.get("summary") or {}).get("locked_model") if isinstance(full_result.get("summary"), dict) else None
+                if locked:
+                    features["locked_model"] = locked
+            elif full_result.get("fitting_parameters"):
+                features["fitting_parameters"] = full_result["fitting_parameters"]
+            # Image + hyperspectral: both now surface extracted_features at the
+            # top level of the result (issue #327 phase 2) — this is what lifts
+            # the tool from "curve fitting v1" to all three modalities.
+            if full_result.get("extracted_features"):
+                features["extracted_features"] = full_result["extracted_features"]
+            if not features:
+                return json.dumps({"status": "error",
+                                   "message": "No fitted features surfaced on this record — nothing to condition the search on."})
+            features_text = json.dumps(features, default=str)[:4000]
+
+            # 3. Feature → query builder: an LLM micro-call, because feature
+            # MEANING is technique-dependent (peaks at 1349/1582 cm^-1 only
+            # read as D/G bands with domain context). Falls back to a plain
+            # template on any failure.
+            focus_line = f"\nUser focus: {focus}" if focus else ""
+            builder_prompt = (
+                "You are building ONE focused scientific-literature search query.\n"
+                "A spectral/curve fit produced these measured features:\n"
+                f"{features_text}\n"
+                f"Experimental context: {json.dumps(getattr(self.orch, 'current_metadata', None) or {}, default=str)[:800]}"
+                f"{focus_line}\n\n"
+                "Write a single natural-language query (<= 40 words) that asks what "
+                "materials/phases/processes are reported for these SPECIFIC measured "
+                "features (positions, widths, trends) — not a generic method query. "
+                "Return ONLY the query text."
+            )
+            try:
+                q_resp = self._internal_model().generate_content(contents=[builder_prompt])
+                query = (q_resp.text or "").strip().strip('"')
+                assert 10 < len(query) < 400
+            except Exception:
+                query = f"Interpretation of measured features: {features_text[:200]}"
+            print(f"  🔍 Feature-conditioned query: {query[:100]}")
+
+            # 4. Literature search (CROW backend — "what is reported for these
+            # features", not the novelty question).
+            try:
+                lit_agent = FittingModelLiteratureAgent(
+                    api_key=self.orch.futurehouse_api_key, max_wait_time=3000
+                )
+                result = lit_agent.query_for_models(query)
+            except Exception as e:
+                logging.error(f"refine_interpretation literature error: {e}", exc_info=True)
+                return json.dumps({"status": "error", "message": str(e)})
+            if result.get("status") != "success":
+                return json.dumps({"status": result.get("status", "error"),
+                                   "message": result.get("message", "Literature search did not succeed")})
+            content = result.get("formatted_answer", "") or ""
+
+            # Persist the search output (inspectable, same shape as search_literature).
+            query_hash = hashlib.md5(query.encode("utf-8")).hexdigest()[:8]
+            lit_path = self.orch.base_dir / f"interpretation_lit_{query_hash}.md"
+            with open(lit_path, "w") as f:
+                f.write(f"# Feature-Conditioned Literature (Channel B)\n\n"
+                        f"**Analysis:** {record.get('analysis_id')}\n"
+                        f"**Query:** {query}\n\n{content}")
+
+            # 5. Tier-A refinement: text-in/text-out — revise the existing
+            # interpretation against the literature. No pixel/state re-invoke.
+            refine_prompt = (
+                "You are revising the interpretation of a completed analysis "
+                "against literature that was searched from its MEASURED features.\n\n"
+                f"## Current interpretation\n{detailed[:6000]}\n\n"
+                f"## Measured features\n{features_text}\n\n"
+                f"## Feature-conditioned literature\n{content[:8000]}\n\n"
+                "Rewrite the interpretation: keep every conclusion the data still "
+                "supports, revise or qualify what the literature contradicts, and "
+                "add what it newly explains (cite the literature inline where used). "
+                "Where the literature identifies the material/phase from these "
+                "features, say so explicitly. Do not soften data-supported "
+                "conclusions merely because the literature is silent. Return ONLY "
+                "the revised interpretation text."
+            )
+            try:
+                r_resp = self._internal_model().generate_content(contents=[refine_prompt])
+                revised = (r_resp.text or "").strip()
+                if not revised:
+                    raise ValueError("empty refinement")
+            except Exception as e:
+                return json.dumps({"status": "error",
+                                   "message": f"Literature saved to {lit_path} but refinement failed: {e}"})
+
+            # Append the revised interpretation to the same document so the
+            # revision is human-readable on disk, not only in session state.
+            with open(lit_path, "a") as f:
+                f.write("\n\n---\n\n## Literature-Refined Interpretation\n\n" + revised)
+
+            # Companion HTML next to the agent's original report (append-only:
+            # a separate document, mirroring how assess_novelty writes its own
+            # doc rather than rewriting the analysis). Best-effort.
+            report_html = None
+            out_dir = record.get("output_directory")
+            if out_dir and Path(out_dir).is_dir():
+                try:
+                    import html as _html
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    report_html = Path(out_dir) / f"Interpretation_Revision_{ts}.html"
+                    paras = "".join(f"<p>{_html.escape(x)}</p>"
+                                    for x in revised.split("\n\n") if x.strip())
+                    # Same fixed palette as the agent's CurveFitting report so
+                    # the two render identically in the UI's light AND dark
+                    # modes (the report theme is deliberately self-contained,
+                    # not inherited from the embedder).
+                    report_html.write_text(
+                        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+                        "<meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+                        "<title>Literature-Refined Interpretation</title><style>"
+                        "body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;"
+                        " line-height: 1.6; color: #333; max-width: 1400px; margin: 0 auto;"
+                        " padding: 20px; background-color: #f4f4f9; }"
+                        ".container { background-color: #fff; padding: 40px; border-radius: 8px;"
+                        " box-shadow: 0 2px 10px rgba(0,0,0,0.1); }"
+                        "h1 { color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; }"
+                        ".metadata-box { background-color: #ecf0f1; padding: 15px; border-radius: 5px;"
+                        " border-left: 5px solid #3498db; margin-bottom: 20px; }"
+                        ".analysis-text { white-space: pre-wrap; background-color: #fafafa;"
+                        " padding: 20px; border-radius: 5px; border: 1px solid #eee; margin-top: 15px; }"
+                        ".footer { margin-top: 50px; text-align: center; color: #7f8c8d; font-size: 0.8em; }"
+                        "</style></head><body><div class='container'>"
+                        "<h1>Literature-Refined Interpretation</h1>"
+                        "<div class='metadata-box'>"
+                        f"<b>Analysis:</b> {_html.escape(str(record.get('analysis_id')))}<br>"
+                        f"<b>Query:</b> {_html.escape(query)}<br>"
+                        f"<b>Literature:</b> {_html.escape(lit_path.name)}</div>"
+                        f"<div class='analysis-text'>{paras}</div>"
+                        "<div class='footer'>Post-fit revision (feature-conditioned "
+                        "literature); the original report is unchanged.</div>"
+                        "</div></body></html>")
+                except Exception as e:
+                    logging.warning(f"Companion revision HTML failed: {e}")
+                    report_html = None
+
+            # Revise the scientific claims to match the new interpretation
+            # (optional per plan — skipped on any parse failure). Without
+            # this, a post-revision novelty re-run would re-assess claims
+            # anchored to the superseded reading.
+            revised_claims = None
+            orig_claims = full_result.get("scientific_claims") or []
+            if orig_claims:
+                claims_prompt = (
+                    "An analysis interpretation was revised against literature. "
+                    "Update its scientific claims to match the REVISED interpretation: "
+                    "keep claims still supported, revise ones the new reading changes, "
+                    "drop invalidated ones, add clearly warranted new ones.\n\n"
+                    f"## Revised interpretation\n{revised[:6000]}\n\n"
+                    f"## Original claims (JSON)\n{json.dumps(orig_claims)[:4000]}\n\n"
+                    "Return ONLY a JSON array with the SAME schema per claim "
+                    "(claim, has_anyone_question, keywords, scientific_impact)."
+                )
+                try:
+                    c_resp = self._internal_model().generate_content(contents=[claims_prompt])
+                    raw = (c_resp.text or "").strip()
+                    m = re.search(r"\[.*\]", raw, re.DOTALL)
+                    parsed = json.loads(m.group(0)) if m else None
+                    if (isinstance(parsed, list) and parsed
+                            and all(isinstance(c, dict) and c.get("claim") for c in parsed)):
+                        revised_claims = parsed
+                except Exception as e:
+                    logging.warning(f"Claims revision skipped (parse failure): {e}")
+
+            # 6. Append-only storage (mirrors novelty_assessment attach).
+            revision = {
+                "timestamp": datetime.now().isoformat(),
+                "query": query,
+                "literature_file": str(lit_path),
+                "revised_analysis": revised,
+            }
+            if revised_claims:
+                revision["revised_claims"] = revised_claims
+            if report_html:
+                revision["report_html"] = str(report_html)
+            self.orch.analysis_results[record_index].setdefault(
+                "interpretation_revisions", []).append(revision)
+
+            # Ripple: a prior novelty assessment was made against claims that
+            # predate this revision — mark it stale so consumers and the agent
+            # know it needs a re-run to be current.
+            novelty_stale = False
+            prior_novelty = self.orch.analysis_results[record_index].get("novelty_assessment")
+            if prior_novelty:
+                prior_novelty["stale"] = True
+                prior_novelty["staled_by_revision"] = revision["timestamp"]
+                novelty_stale = True
+
+            print(f"  ✅ Interpretation refined ({len(revised)} chars). Literature: {lit_path.name}")
+            return json.dumps({
+                "status": "success",
+                "analysis_id": record.get("analysis_id"),
+                "query": query,
+                "literature_file": str(lit_path),
+                "revised_interpretation_preview": revised[:600],
+                "report_html": str(report_html) if report_html else None,
+                "claims_revised": bool(revised_claims),
+                "prior_novelty_assessment_stale": novelty_stale,
+                "note": "Original interpretation preserved; revision appended to the record."
+                        + (" A prior novelty assessment predates this revision — "
+                           "re-run assess_novelty to update it." if novelty_stale else "")
+            })
+
+        self._register_tool(
+            func=refine_interpretation,
+            name="refine_interpretation",
+            description=(
+                "Refine a completed analysis's interpretation against literature searched "
+                "from its FITTED features (peak positions/widths, parameter trends) — the "
+                "post-fit counterpart of search_literature. Call AFTER run_analysis when the "
+                "interpretation would materially benefit from published context. Strongly "
+                "recommended after identification-mode runs (they are literature-free in-run; "
+                "this step is what identifies the material from the fitted bands). Append-only: "
+                "the original interpretation is preserved."
+            ),
+            parameters={
+                "analysis_id": {"type": "string",
+                                "description": "ID of the completed analysis (default: most recent)."},
+                "analysis_index": {"type": "integer",
+                                   "description": "Alternative: index into the analysis history (default -1, most recent)."},
+                "focus": {"type": "string",
+                          "description": "Optional steer for the literature query (e.g., 'candidate phases for the 742 cm-1 band')."},
+            },
+            required=[]
+        )
+
+        # =====================================================================
+        # RE-ENTER INTERPRETATION (issue #322 — synthesis re-entry with a
+        # human/orchestrator critique; the non-literature sibling of
+        # refine_interpretation, built on SynthesisReEntryController.)
+        # =====================================================================
+        def reenter_interpretation(critique: str, analysis_id: str = None,
+                                   analysis_index: int = -1) -> str:
+            """
+            Re-run ONLY the interpretation of a completed analysis with an
+            injected critique — no per-unit re-analysis, no literature search.
+            Append-only: the original interpretation is preserved; revisions
+            accumulate on the analysis record.
+            """
+            print(f"  ⚡ Tool: Re-entering interpretation with critique...")
+
+            if not critique or not str(critique).strip():
+                return json.dumps({"status": "error",
+                                   "message": "A non-empty critique is required."})
+
+            # 1. Retrieve the analysis record (same contract as assess_novelty /
+            # refine_interpretation).
+            record = None
+            record_index = None
+            if analysis_id:
+                for i, r in enumerate(self.orch.analysis_results):
+                    if r.get("analysis_id") == analysis_id:
+                        record, record_index = r, i
+                        break
+                if record is None:
+                    return json.dumps({"status": "error",
+                                       "message": f"Analysis ID not found: {analysis_id}"})
+            else:
+                if not self.orch.analysis_results:
+                    return json.dumps({"status": "error",
+                                       "message": "No analysis history available."})
+                record_index = (analysis_index if analysis_index >= 0
+                                else len(self.orch.analysis_results) + analysis_index)
+                record = self.orch.analysis_results[record_index]
+
+            full_result = record.get("full_result") or {}
+            detailed = (full_result.get("detailed_analysis")
+                        or full_result.get("full_analysis") or "")
+            if not detailed.strip():
+                return json.dumps({"status": "error",
+                                   "message": "Analysis record has no interpretation text to revise."})
+
+            # 2. Build the payload + surfaced features, and revise via the
+            # shared Tier-A re-entry controller (one mechanism for all
+            # critique producers — see analysis_qc_unification_plan.md §4).
+            from ._critique import CritiquePayload
+            from .base_agent import BaseAnalysisAgent, LLMAgentMixin
+            from .controllers.base_controllers import SynthesisReEntryController
+
+            payload = CritiquePayload(source="human", critique=str(critique))
+            features = BaseAnalysisAgent.surface_features_for_reentry(full_result)
+            features_block = (json.dumps(features, indent=2, default=str)[:4000]
+                              if features else "")
+
+            class _Parse(LLMAgentMixin):
+                def __init__(self):
+                    self.logger = logging.getLogger("reenter_interpretation")
+
+            controller = SynthesisReEntryController(
+                model=self._internal_model(),
+                logger=logging.getLogger("reenter_interpretation"),
+                generation_config=None,
+                safety_settings=None,
+                parse_fn=_Parse()._parse_llm_response,
+            )
+            # Use the CURRENT effective interpretation (latest revision if one
+            # exists) so successive critiques compose instead of each starting
+            # from the original text.
+            effective = dict(full_result)
+            prior_revs = record.get("interpretation_revisions") or []
+            if prior_revs and prior_revs[-1].get("revised_analysis"):
+                effective["detailed_analysis"] = prior_revs[-1]["revised_analysis"]
+                if prior_revs[-1].get("revised_claims"):
+                    effective["scientific_claims"] = prior_revs[-1]["revised_claims"]
+
+            revision, error = controller.revise(
+                effective, payload, features_block=features_block,
+                system_info=self.orch.current_metadata
+                if isinstance(getattr(self.orch, "current_metadata", None), dict)
+                else None,
+            )
+            if error:
+                return json.dumps({"status": "error",
+                                   "message": f"Re-entry failed: {error}"})
+
+            # 3. Append-only storage (same shape as refine_interpretation so
+            # _effective_full_result overlays both kinds uniformly) + novelty
+            # staleness ripple.
+            entry = {
+                "timestamp": datetime.now().isoformat(),
+                "source": payload.source,
+                "critique": payload.critique,
+                "revised_analysis": revision["detailed_analysis"],
+                "revision_summary": revision.get("revision_summary", ""),
+            }
+            claims = revision.get("scientific_claims") or []
+            if (isinstance(claims, list) and claims
+                    and all(isinstance(c, dict) and c.get("claim") for c in claims)):
+                entry["revised_claims"] = claims
+            self.orch.analysis_results[record_index].setdefault(
+                "interpretation_revisions", []).append(entry)
+
+            novelty_stale = False
+            prior_novelty = self.orch.analysis_results[record_index].get("novelty_assessment")
+            if prior_novelty:
+                prior_novelty["stale"] = True
+                prior_novelty["staled_by_revision"] = entry["timestamp"]
+                novelty_stale = True
+
+            print(f"  ✅ Interpretation revised ({len(entry['revised_analysis'])} chars).")
+            return json.dumps({
+                "status": "success",
+                "analysis_id": record.get("analysis_id"),
+                "revision_summary": entry["revision_summary"],
+                "revised_interpretation_preview": entry["revised_analysis"][:600],
+                "claims_revised": "revised_claims" in entry,
+                "prior_novelty_assessment_stale": novelty_stale,
+                "note": "Original interpretation preserved; revision appended to the record."
+                        + (" A prior novelty assessment predates this revision — "
+                           "re-run assess_novelty to update it." if novelty_stale else "")
+            })
+
+        self._register_tool(
+            func=reenter_interpretation,
+            name="reenter_interpretation",
+            description=(
+                "Revise a completed analysis's interpretation using a critique or extra "
+                "context (from the user or your own review) WITHOUT re-running the "
+                "analysis and WITHOUT a literature search — the cheap way to fix or "
+                "sharpen conclusions when the fits/segmentations are fine but the "
+                "reading of them should change. Successive calls compose (each revises "
+                "the latest revision). Append-only: the original interpretation is "
+                "preserved. For literature-driven revision use refine_interpretation "
+                "instead."
+            ),
+            parameters={
+                "critique": {"type": "string",
+                             "description": "The critique/context to revise against (e.g., 'the trend has a break at 270 K — treat it as two regimes', or the user's correction)."},
+                "analysis_id": {"type": "string",
+                                "description": "ID of the completed analysis (default: most recent)."},
+                "analysis_index": {"type": "integer",
+                                   "description": "Alternative: index into the analysis history (default -1, most recent)."},
+            },
+            required=["critique"]
+        )
+
         # =====================================================================
         # 11. ASSESS NOVELTY
         # =====================================================================
@@ -3520,9 +4349,17 @@ class AnalysisOrchestratorTools:
                 record_index = analysis_index if analysis_index >= 0 else len(self.orch.analysis_results) + analysis_index
                 record = self.orch.analysis_results[record_index]
 
-            # 2. Extract Claims
+            # 2. Extract Claims — prefer the latest revision's revised claims
+            # (refine_interpretation, issue #323): assessing superseded claims
+            # would produce verdicts about assertions the analysis no longer
+            # makes.
             full_result = record.get("full_result", {})
-            claims = full_result.get("scientific_claims", [])
+            revisions = record.get("interpretation_revisions") or []
+            claims, claims_source = full_result.get("scientific_claims", []), "original"
+            for rev in reversed(revisions):
+                if rev.get("revised_claims"):
+                    claims, claims_source = rev["revised_claims"], "latest_revision"
+                    break
             
             if not claims:
                 return json.dumps({
@@ -3601,6 +4438,9 @@ class AnalysisOrchestratorTools:
             # 5. Build novelty assessment object
             novelty_assessment = {
                 "timestamp": datetime.now().isoformat(),
+                # ripple bookkeeping: which revision state these verdicts cover
+                "assessed_at_revision": len(record.get("interpretation_revisions") or []),
+                "claims_source": claims_source,
                 "assessments": scored_results,
                 "high_novelty_claims": high_novelty_claims,
                 "summary_stats": {
@@ -3700,8 +4540,9 @@ class AnalysisOrchestratorTools:
                 record_index = analysis_index if analysis_index >= 0 else len(self.orch.analysis_results) + analysis_index
                 record = self.orch.analysis_results[record_index]
 
-            # 2. Extract analysis text
-            full_result = record.get("full_result") or {}
+            # 2. Extract analysis text (latest literature-refined
+            # interpretation preferred — issue #323)
+            full_result = _effective_full_result(record)
             analysis_text = (
                 full_result.get("detailed_analysis")
                 or full_result.get("full_analysis")
@@ -4356,7 +5197,7 @@ class AnalysisOrchestratorTools:
             for aid in source_ids:
                 for record in self.orch.analysis_results:
                     if record.get("analysis_id") == aid:
-                        full_result = record.get("full_result", {})
+                        full_result = _effective_full_result(record)
                         parts = [f"### Analysis: {aid}"]
 
                         da = full_result.get("detailed_analysis", "")
@@ -4757,6 +5598,46 @@ class AnalysisOrchestratorTools:
             },
             required=["paths"]
         )
+
+    def _internal_model(self):
+        """Tool-free sibling of the orchestrator's model for INTERNAL LLM calls.
+
+        The orchestrator's chat wrapper binds its system prompt and the full
+        tool schemas at construction (LiteLLM path,
+        analysis_orchestrator.py:701-706). An internal call made from inside a
+        tool function therefore behaves like the chat agent — the model may
+        answer with a *tool call*, leaving ``.text`` empty and failing the
+        parse ("Empty response from LLM"). Discovered live via the
+        reenter_interpretation routing test; refine_interpretation's three
+        internal calls had the same latent failure on the LiteLLM path (the
+        proxy path constructs its wrapper without bound tools, masking it).
+
+        Returns a plain generator with the same model/key/base_url and no
+        tools or system instruction. Cached; degrades to the bound model if
+        construction fails (better a maybe-empty response than a crashed tool).
+        """
+        cached = getattr(self, "_internal_model_cache", None)
+        if cached is not None:
+            return cached
+        base = self.orch.model
+        try:
+            if getattr(self.orch, "use_openai", False):
+                from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+                m = OpenAIAsGenerativeModel(
+                    model=base.model, api_key=base.api_key,
+                    base_url=getattr(base, "base_url", None),
+                )
+            else:
+                from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
+                m = LiteLLMGenerativeModel(
+                    model=base.model, api_key=getattr(base, "api_key", None),
+                    base_url=getattr(base, "base_url", None),
+                )
+        except Exception as e:  # noqa: BLE001 - degrade, don't crash the tool
+            logging.warning(f"_internal_model fallback to bound model: {e}")
+            m = base
+        self._internal_model_cache = m
+        return m
 
     def _register_tool(
         self,

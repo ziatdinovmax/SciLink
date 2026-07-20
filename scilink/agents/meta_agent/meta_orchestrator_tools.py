@@ -13,8 +13,30 @@ refactor".
 
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import Any, Callable, Dict
+
+
+def _handoff(text: str) -> str:
+    """Bold a meta -> specialist handoff banner on a real terminal so the
+    delegation transition stands out; plain on non-tty (captured/redirected
+    output, e.g. the UI, which styles the banner itself in `_log_to_html`)."""
+    return f"\033[1;33m{text}\033[0m" if sys.stdout.isatty() else text
+
+
+def _task_summary(task: str, n: int = 80) -> str:
+    """One-line preview of a delegated task for the handoff banner.
+
+    The banner styles its whole line (bold on the terminal, a band in the UI).
+    A task is often multi-line — a one-line instruction followed by structured
+    detail such as a 'Primary data file: <path>' line — and the raw ``task[:80]``
+    used to carry those newlines into the banner, so the styling bled across the
+    blank line onto the next line in the terminal. Collapse to the first
+    non-blank line, truncated, with an ellipsis when anything was dropped."""
+    first = next((ln.strip() for ln in (task or "").splitlines() if ln.strip()), "")
+    dropped = len(first) > n or len((task or "").strip().splitlines()) > 1
+    return first[:n] + ("…" if dropped else "")
 
 
 # ── Upload inspection ────────────────────────────────────────────────
@@ -263,9 +285,13 @@ class MetaOrchestratorTools:
         # -- delegate_to_analysis -------------------------------------------
         def delegate_to_analysis(task: str, context: dict = None,
                                  context_from: list = None,
-                                 label: str = None) -> str:
-            print(f"  🧪 Delegating to analysis specialist: {task[:80]}...")
-            return self.orch._delegate("analysis", task, context, context_from, label)
+                                 label: str = None,
+                                 data_path: str = None,
+                                 metadata: str = None) -> str:
+            print("  " + _handoff(f"🧪 Delegating to analysis specialist: {_task_summary(task)}"))
+            return self.orch._delegate("analysis", task, context, context_from,
+                                       label, data_path=data_path,
+                                       metadata=metadata)
 
         self._register_tool(
             func=delegate_to_analysis,
@@ -286,7 +312,15 @@ class MetaOrchestratorTools:
                 "their absolute paths and their role (subtract / divide-by / "
                 "mask-with) in `task` (or `context`); the specialist passes them "
                 "through `run_analysis`'s `auxiliary_data`/`auxiliary_label` so "
-                "the generated code can use them as numerical operands."
+                "the generated code can use them as numerical operands. "
+                "For an ENSEMBLE / best-of-N request — several INDEPENDENT "
+                "analysis trajectories over the SAME single dataset, compared by "
+                "a judge (NOT several different datasets — that is "
+                "`delegate_to_analyses`) — keep it ONE delegation and state the "
+                "candidate count in `task` (e.g. 'run as best-of-3: 3 "
+                "independent candidate analyses'); the specialist maps that to "
+                "`run_analysis`'s `n_candidates`. Curve fitting, image, and "
+                "hyperspectral all support this."
             ),
             parameters={
                 "task": {
@@ -321,6 +355,26 @@ class MetaOrchestratorTools:
                         "restatement of the task."
                     ),
                 },
+                "data_path": {
+                    "type": "string",
+                    "description": (
+                        "Absolute path of THIS delegation's primary dataset "
+                        "(also stated in `task`). ALWAYS provide it when the "
+                        "task analyzes a dataset: it lets a later "
+                        "`fuse_delegations` that mixes this delegation with "
+                        "others re-run the complementarity gate — without it "
+                        "an incremental fusion demotes to ungated (no "
+                        "computed reconciliation)."
+                    ),
+                },
+                "metadata": {
+                    "type": "string",
+                    "description": (
+                        "Optional: metadata JSON path or short inline "
+                        "description of the dataset (feeds a later fusion's "
+                        "complementarity re-gate)."
+                    ),
+                },
             },
             required=["task", "label"],
         )
@@ -329,7 +383,7 @@ class MetaOrchestratorTools:
         def delegate_to_planning(task: str, context: dict = None,
                                  context_from: list = None,
                                  label: str = None) -> str:
-            print(f"  📋 Delegating to planning specialist: {task[:80]}...")
+            print("  " + _handoff(f"📋 Delegating to planning specialist: {_task_summary(task)}"))
             return self.orch._delegate("planning", task, context, context_from, label)
 
         self._register_tool(
@@ -421,23 +475,32 @@ class MetaOrchestratorTools:
         )
 
         # -- delegate_to_analyses (parallel fan-out, full-mesh aux) ----------
-        def delegate_to_analyses(branches: list) -> str:
+        def delegate_to_analyses(branches: list,
+                                 figure_style: str = None) -> str:
             print(f"  🔀 Parallel analysis over {len(branches or [])} dataset(s)...")
-            return self.orch._run_fanout(branches)
+            return self.orch._run_fanout(branches, figure_style=figure_style)
 
         self._register_tool(
             func=delegate_to_analyses,
             name="delegate_to_analyses",
             description=(
                 "Run SEVERAL analysis branches CONCURRENTLY over complementary "
-                "datasets, each branch seeing the others as auxiliary operands "
-                "(full mesh), then fuse with `fuse_delegations`. Use this — NOT "
+                "datasets, then fuse with `fuse_delegations`. Branches run "
+                "INDEPENDENTLY by default (fusion reconciles their reduced "
+                "results — independence is what makes cross-dataset agreement "
+                "meaningful); a CO-REGISTERED set (gate join_type) additionally "
+                "wires the companions in as auxiliary operands, and a branch "
+                "may opt into a steering hint via `steer`. Use this — NOT "
                 "repeated `delegate_to_analysis` — when the user has 2+ datasets "
                 "that are complementary measurements of ONE system and you want "
                 "each analysis informed by the others plus a final cross-dataset "
                 "synthesis. A complementarity GATE runs first and PRUNES to the "
                 "genuinely-complementary subset: a redundant or unrelated set is "
-                "declined (analyze those independently instead). In AUTOPILOT the "
+                "declined (analyze those independently instead). This is for "
+                "multiple DIFFERENT complementary datasets — NOT for several "
+                "independent trajectories over ONE dataset; for that ensemble / "
+                "best-of-N, use a single `delegate_to_analysis` and state the "
+                "candidate count in its `task`. In AUTOPILOT the "
                 "user is asked to confirm before launching; branches always run "
                 "AUTONOMOUSLY (no per-branch approval pauses — concurrent prompts "
                 "can't interleave). Each branch's `task` must be a complete, "
@@ -454,10 +517,23 @@ class MetaOrchestratorTools:
                         "properties": {
                             "data_path": {"type": "string",
                                           "description": "Absolute path to THIS branch's "
-                                                         "primary dataset."},
+                                                         "primary dataset. Branches MAY "
+                                                         "share one path (a directory "
+                                                         "holding several measurement "
+                                                         "series): each series is its own "
+                                                         "branch, distinguished by its "
+                                                         "task — never merge distinct "
+                                                         "datasets into one branch."},
                             "task": {"type": "string",
                                      "description": "Complete, self-contained analysis "
                                                     "instruction for this dataset."},
+                            "pattern": {"type": "string",
+                                        "description": "Filename glob selecting THIS "
+                                                       "branch's files when data_path is "
+                                                       "a directory with several datasets "
+                                                       "(e.g. 'sample_*C.txt'). ALWAYS "
+                                                       "provide it when branches share a "
+                                                       "directory."},
                             "label": {"type": "string",
                                       "description": "Short 2-5 word UI label (the data "
                                                      "type, e.g. 'STEM image')."},
@@ -465,10 +541,34 @@ class MetaOrchestratorTools:
                                          "description": "Optional: path to a metadata JSON "
                                                         "or inline description (also feeds "
                                                         "the complementarity gate)."},
+                            "steer": {"type": "boolean",
+                                      "description": "Explicit opt-in (default false): give "
+                                                     "THIS branch a change-point hint from "
+                                                     "each companion SERIES (cheap "
+                                                     "unsupervised reduction) as an "
+                                                     "additive-only hypothesis — useful when "
+                                                     "the branch risks fitting the wrong "
+                                                     "model order. TRADE: steering spends "
+                                                     "the branch's independence; fusion is "
+                                                     "told (informed_by) and discounts its "
+                                                     "agreement with the steering companion "
+                                                     "as partly by construction. Opt in only "
+                                                     "when guidance is worth that cost."},
                         },
                         "required": ["data_path", "task", "label"],
                     },
                     "description": "The analysis branches to run in parallel (>= 2).",
+                },
+                "figure_style": {
+                    "type": "string",
+                    "description": (
+                        "Optional figure-presentation preference applied to "
+                        "EVERY branch's figures AND the fusion figure (e.g. "
+                        "'place legends outside the axes — never on top of "
+                        "data', 'use colorblind-safe colors'). Set it when "
+                        "the user expresses any preference about how plots "
+                        "should look; leave unset otherwise."
+                    ),
                 },
             },
             required=["branches"],
@@ -476,7 +576,7 @@ class MetaOrchestratorTools:
 
         # -- fuse_delegations -----------------------------------------------
         def fuse_delegations(delegation_indices: list, focus: str = None) -> str:
-            print(f"  🧬 Fusing delegations {delegation_indices}...")
+            print("  " + _handoff(f"🧬 Fusing delegations {delegation_indices}..."))
             return self.orch._fuse_delegations(delegation_indices, focus)
 
         self._register_tool(
@@ -844,14 +944,94 @@ class MetaOrchestratorTools:
             required=[],
         )
 
+        # ----- materialize_sidecars (manifest -> per-file sidecar JSONs) -------
+        # Conditions supplied as a free-text manifest reach the specialist only as
+        # prose unless turned into per-file sidecars; this writes <stem>.json next
+        # to each data file so the analysis feature table gets a column per
+        # condition. Deterministic, additive, and NEVER overwrites an existing
+        # sidecar (so genuine per-file metadata can't be clobbered).
+        def materialize_sidecars(conditions, data_dir: str = None) -> str:
+            if isinstance(conditions, str):
+                try:
+                    conditions = json.loads(conditions)
+                except Exception:
+                    return json.dumps({"status": "error", "message":
+                                       "conditions must be a JSON object {filename: {key: value}}"})
+            if not isinstance(conditions, dict) or not conditions:
+                return json.dumps({"status": "error", "message":
+                                   "conditions must be a non-empty {filename: {key: value}} mapping"})
+            base = Path(data_dir) if data_dir else None
+            written, skipped, unresolved = [], [], []
+            for fname, cond in conditions.items():
+                if not isinstance(cond, dict):
+                    unresolved.append(f"{fname} (conditions not an object)")
+                    continue
+                p = Path(fname)
+                cands = [p] if p.is_absolute() else (
+                    ([base / fname] if base is not None else []) + [Path.cwd() / fname])
+                target = next((c for c in cands if c.is_file()), None)
+                if target is None:
+                    unresolved.append(str(fname))
+                    continue
+                sidecar = target.with_suffix(".json")
+                if sidecar.exists():                       # never clobber real metadata
+                    skipped.append(str(sidecar))
+                    continue
+                scalars = {k: v for k, v in cond.items()
+                           if isinstance(v, (int, float, str, bool))}
+                sidecar.write_text(json.dumps(scalars, indent=2))
+                written.append(str(sidecar))
+            return json.dumps({
+                "status": "success" if written or skipped else "error",
+                "sidecars_written": len(written), "paths": written,
+                "skipped_existing": skipped, "unresolved": unresolved,
+            })
+
+        self._register_tool(
+            func=materialize_sidecars,
+            name="materialize_sidecars",
+            description=(
+                "Write per-file sidecar metadata JSONs from a conditions MANIFEST the "
+                "user supplied as free text (a .txt/.csv/README mapping each data file "
+                "to its experimental conditions, e.g. 'filename, temperature, pH'). Pass "
+                "`conditions` as a JSON object {data_filename: {condition_key: value, "
+                "...}} that you read from the manifest, plus `data_dir` (the folder "
+                "holding the data files). It writes <stem>.json next to each data file so "
+                "the analysis specialist's feature table gains one COLUMN per condition — "
+                "conditions quoted only in the delegation task text do NOT become feature "
+                "columns (which downstream optimization needs as inputs). Use this BEFORE "
+                "delegating whenever per-file conditions arrive as a manifest and the data "
+                "files have no matching sidecar JSONs. It never overwrites an existing "
+                "sidecar, and only records conditions — it never transforms data."
+            ),
+            parameters={
+                "conditions": {
+                    "type": "object",
+                    "description": (
+                        "{data_filename: {condition_key: value}} read from the manifest; "
+                        "values are scalars (numbers or strings). Filenames may be bare "
+                        "(resolved against data_dir) or absolute."
+                    ),
+                },
+                "data_dir": {
+                    "type": "string",
+                    "description": "Absolute path to the folder holding the data files "
+                                   "(used to resolve bare filenames).",
+                },
+            },
+            required=["conditions"],
+        )
+
         # ----- prepare_inputs (lossless data/metadata split) ------------------
         # The meta's ONLY code-generation surface, restricted to LOSSLESS file
         # repackaging before delegation: split a single combined data+metadata
         # file into a data file + a metadata JSON. Round-trip verified; NEVER
         # used for analysis/computation — that is always delegated.
         def prepare_inputs(path) -> str:
+            import hashlib as _hashlib
             from ...utils.file_prep import (prepare_inputs as _split_file,
-                                            prepare_inputs_batch as _split_batch)
+                                            prepare_inputs_batch as _split_batch,
+                                            stage_pairs_flat as _stage_flat)
             from ...executors import ScriptExecutor, require_sandbox_approval
             paths = [path] if isinstance(path, str) else list(path or [])
             if not paths:
@@ -888,6 +1068,22 @@ class MetaOrchestratorTools:
                 result = _split_batch(pths, model=self.orch.model, executor=executor,
                                       output_dir=out_dir, probes=probes,
                                       logger=self.logger, max_retries=2)
+                # Stage the verified pairs into ONE flat, stem-matched directory so
+                # the specialist can consume the whole batch as a series directory
+                # (run_analysis pairs each data file with its <stem>.json sidecar).
+                # Without this the model is left with scattered per-file subfolders
+                # and resorts to passing a path LIST, which the series loader rejects.
+                if result.get("status") in ("success", "partial"):
+                    try:
+                        key = _hashlib.sha1(
+                            "|".join(sorted(str(p) for p in pths)).encode()
+                        ).hexdigest()[:8]
+                        staged = _stage_flat(result.get("results", []),
+                                             out_dir / f"series_{key}")
+                        if staged["n"] > 1:
+                            result["prepared_dir"] = staged["staged_dir"]
+                    except Exception as e:  # noqa: BLE001
+                        self.logger.warning(f"Flat staging skipped: {e}")
             return json.dumps(result, default=str)
 
         self._register_tool(
@@ -899,8 +1095,12 @@ class MetaOrchestratorTools:
                 "clean (data, metadata) pairs. Single file → returns data_path + "
                 "metadata_path. Pass a LIST of paths to split several SAME-TYPE files "
                 "in ONE call → returns a per-file 'results' list + a 'summary'; thread "
-                "the pairs into ONE batched delegation (never loop one delegation per "
-                "file). In batch mode a single split is generated and reused across "
+                "the pairs into ONE batched delegation. When >=2 files split, the result "
+                "also has a 'prepared_dir' — one flat folder of the cleaned data files "
+                "each beside its stem-matched sidecar JSON; pass that 'prepared_dir' "
+                "DIRECTORY as the delegation's data (do NOT pass the per-file data paths "
+                "as a list — the series loader takes a directory), and never loop one "
+                "delegation per file. In batch mode a single split is generated and reused across "
                 "structurally identical files (each still round-trip verified), so it "
                 "is cheaper and yields a uniform schema; a file that doesn't match "
                 "falls back to its own split. Use after inspect_uploads when a probe "

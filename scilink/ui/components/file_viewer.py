@@ -82,7 +82,14 @@ def render_file_preview(file_path: Path) -> None:
             arr = np.load(file_path)
             st.markdown(f"**shape:** `{arr.shape}` &nbsp; **dtype:** `{arr.dtype}`")
             if arr.ndim <= 2 and max(arr.shape) <= 2048:
-                st.image(arr, clamp=True)
+                # Normalize to [0,1] before display — raw arrays (e.g. int32
+                # microscopy with values far outside 0-255) otherwise saturate
+                # to a blank/white image under st.image's clamp. Mirrors the
+                # TIFF preview path above.
+                disp = arr.astype("float64")
+                if disp.max() > disp.min():
+                    disp = (disp - disp.min()) / (disp.max() - disp.min())
+                st.image(disp, clamp=True)
             else:
                 st.text(f"min={arr.min():.4g}  max={arr.max():.4g}  mean={arr.mean():.4g}")
         except Exception as exc:

@@ -43,7 +43,13 @@ calibrated sizing for free — so prefer it over hand-calling `blob_log`. **Set
 `polarity` from the image** (dark vs. bright objects) and **tune `threshold_rel`
 from the overlay** (LoG over-detects at a default threshold; raise it until the
 count matches what you see). For **well-separated** objects, Otsu + connected
-components. For **touching** objects, SAM.
+components. For **touching** objects, classical splitting comes FIRST: round /
+blob-like cores → `log_blob_detect`; clear contrast or a visible boundary
+between neighbours → distance-transform watershed. Reserve **SAM only for the
+touching case where NO boundary feature is extractable** (and for the
+crop-then-SAM regimes below) — it is the heavy last resort, not the default for
+"touching". A high-contrast, near-monodisperse field (e.g. dark nanoparticles on
+a light substrate with thin bright gaps) is the classical case, not a SAM case.
 
 A second registered tool, **`scale_matched_blob_detect`**, addresses ONE specific
 FAILURE MODE — when detection **OVER-detects on a speckled / noisy background**:
@@ -155,21 +161,28 @@ When the foundational checks above rule out classical methods —
 i.e. objects genuinely touch with no boundary feature you can extract —
 connected component labeling on a binary mask will merge all touching
 pixels into one object, so the pipeline must include a dedicated
-splitting step. Within this case, in order of preference:
+splitting step. Order the splitting method by object **shape**, not by
+reaching for the heaviest model first:
 
-1. **SAM instance segmentation**: Use `run_sam_analysis` from
-   `scilink.skills._shared.sam`. SAM detects individual object instances
-   directly, even when they overlap, without requiring thresholding or
-   binary masks. Works for any object shape. Tune via `sam_parameters`
-   preset and `min_area` / `pruning_iou_threshold`. Avoid Gaussian blur
-   before SAM unless noise is very high.
+1. **Watershed splitting (roughly convex objects — the common case)**:
+   Create a binary mask (any method) → distance transform → find markers
+   (local maxima of the distance transform) → watershed on the inverted
+   distance transform. This splits touching convex objects (discs,
+   spheres, droplets, nanoparticles) by shape alone — it needs no
+   intensity boundary between them and no learned model, so it is the
+   first choice whenever the objects are approximately convex. Key
+   parameter: `min_distance` in `peak_local_max` should approximate the
+   object radius.
 
-2. **Watershed splitting**: Create binary mask (any method) → distance
-   transform → find markers (local maxima of distance transform) →
-   watershed on inverted distance transform. Use when objects are
-   roughly convex and SAM produces poor results (over-merged or
-   over-split for the size scale). Key parameter: `min_distance` in
-   `peak_local_max` should approximate the object radius.
+2. **SAM instance segmentation (irregular / arbitrary shapes, or when
+   watershed over-/under-splits)**: Use `run_sam_analysis` from
+   `scilink.skills._shared.sam`. SAM detects individual instances
+   directly, even when they overlap, without thresholding or binary
+   masks, and handles arbitrary shapes a distance transform cannot. It is
+   the heavy last resort — reach for it when the objects are NOT convex
+   enough for watershed, not as the default for "touching". Tune via
+   `sam_parameters` preset and `min_area` / `pruning_iou_threshold`.
+   Avoid Gaussian blur before SAM unless noise is very high.
 
 3. **Instance detection**: Detect individual objects directly from
    the image without relying on a binary mask. For elliptical objects:

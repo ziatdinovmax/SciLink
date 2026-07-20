@@ -296,9 +296,13 @@ def _run_deterministic_syntax_check(
 def _has_runnable_content(text: str) -> bool:
     """Whether a proposed input file has any non-comment, non-blank line.
 
-    Engine-neutral: ``#`` and ``!`` are the comment markers across the engines
-    we target (LAMMPS, VASP). A whole-file fix that is only comments/blank is a
-    no-op deck — running it does nothing — so it is not a real fix.
+    Scoped to the engines on the executor path today (LAMMPS, VASP), whose
+    comment markers are ``#`` and ``!``. This is NOT fully engine-neutral: a
+    GROMACS ``.top`` comments with ``;`` and treats ``#include`` / ``#ifdef`` as
+    directives (runnable, not comments), so this heuristic would misjudge one —
+    handle those markers here before putting a GROMACS-style engine on the
+    executor path. A whole-file fix that is only comments/blank is a no-op deck —
+    running it does nothing — so it is not a real fix.
     """
     return any(
         s and not s.startswith(("#", "!"))
@@ -569,7 +573,14 @@ class InputValidator(_CriticBase):
         engine_label = (skill or "the engine").upper()
         try:
             from ..lit_agents.literature_agent import IncarLiteratureAgent
-            agent = IncarLiteratureAgent(api_key=self.futurehouse_api_key)
+            agent = IncarLiteratureAgent(
+                api_key=self.futurehouse_api_key,
+                # 50-min ceiling, matching every other literature call site
+                # (Edison CROW jobs routinely take 20-30 min; the class
+                # default of 300s timed out on essentially every real query,
+                # silently disabling INCAR literature validation).
+                max_wait_time=3000,
+            )
             result = agent.validate_inputs(
                 input_files_text=_format_input_files(input_files),
                 system_description=system_description,

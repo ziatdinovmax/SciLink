@@ -1312,7 +1312,9 @@ Provide a brief summary of what the results mean and any actions needed.
             name=c.get("name", ""), smiles=c["smiles"], count=int(c["count"]),
             charge=float(c.get("charge", 0.0))) for c in components]
         return ParameterizedSystem(
-            backend=ff_kwargs.get("force_field", "openff-2.2.0"),
+            # Match build_interchange's own default so provenance is the full
+            # .offxml name whether or not the caller overrode the force field.
+            backend=ff_kwargs.get("force_field", "openff-2.2.0.offxml"),
             source_format="interchange",
             n_atoms=int(res["n_atoms"]), total_charge=float(res["total_charge"]),
             components=comps, coordinates_file=coordinates_file,
@@ -1512,7 +1514,7 @@ Provide a brief summary of what the results mean and any actions needed.
             if min(middle_bins) < max(middle_bins) * 0.1:
                 return True
             return False
-        except:
+        except Exception:
             return False
 
     def _detect_gas_phase(self, universe):
@@ -1524,7 +1526,7 @@ Provide a brief summary of what the results mean and any actions needed.
                 density = (n_atoms * 12) / (volume * 0.6022)
                 if density < 0.1:
                     return True
-            except:
+            except Exception:
                 pass
         return False
 
@@ -2767,7 +2769,7 @@ Data file type IDs to map: {', '.join(str(t) for t in type_ids)}
                 from ase.data import atomic_masses, atomic_numbers
                 target_mass = atomic_masses[atomic_numbers[element]]
                 mass_match = abs(mass - target_mass) < 1.0
-            except:
+            except Exception:
                 mass_match = False
             if element_match or mass_match:
                 score = 0

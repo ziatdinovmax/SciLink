@@ -372,7 +372,14 @@ These are heuristics, not rigid rules. Use your expert judgment to synthesize th
         * For *very clean data* (e.g., `1st Percentile` is close to the median), you might use a *lower* percentile (e.g., 1.0-2.0).
         * For *very noisy data* (e.g., a high `Data Std` relative to `Data Mean`), you might use a *higher* percentile (e.g., 10.0-15.0) to be more aggressive in removing the noisy baseline.
 
-5.  **`reasoning` (str):**
+5.  **`spatial_bin_factor` (int) — the SIZE GUARD:**
+    * Downstream decomposition and per-pixel fitting scale with pixels x bands; an oversized cube burns hours of compute without adding science for spatially smooth samples. Judge from the `shape` in the statistics:
+        * up to ~20 million values -> `1` (no binning);
+        * ~20-100 million values -> `2` (2x2 mean-binning of the spatial axes);
+        * above ~100 million values -> `4`.
+    * Override toward `1` only when the objective / `system_info` genuinely needs single-pixel spatial resolution (e.g., atomic-resolution mapping, few-pixel features) — and say so in `reasoning`. Spectra are never binned, only the two spatial axes.
+
+6.  **`reasoning` (str):**
     * Briefly explain your choices *based on the statistics and context*.
 
 You MUST output a valid JSON object with these keys:
@@ -381,6 +388,7 @@ You MUST output a valid JSON object with these keys:
   "despike_kernel_size": "[integer, e.g., 3]",
   "apply_masking": "[true/false]",
   "mask_threshold_percentile": "[float, e.g., 5.0]",
+  "spatial_bin_factor": "[integer: 1, 2, or 4]",
   "reasoning": "[Your string explanation]"
 }
 """
@@ -1119,7 +1127,7 @@ Follow these steps:
     * **Different length scales** (a local probe + a bulk-average technique): reconcile the local observations with the bulk averages — do the phases, composition, or defects seen locally explain the bulk signal (e.g. XRD phases vs. TEM structure, XPS vs. EDX composition, local strain vs. peak broadening)?
     * **Complementary observables of the same sample** (e.g. Raman vs. IR selection rules): check MUTUAL CONSISTENCY — do they point to the same phase / composition / structure?
 
-2.  **Formulate the reconciled narrative ('detailed_analysis').** Build a coherent account supported by the COMBINED evidence. CRITICAL — the evidence is the final authority: assert a cross-dataset correlation, coincidence, or causal link ONLY where the provided findings actually support it. If the datasets do not correlate or constrain one another, say so plainly — "the techniques are mutually consistent but capture independent aspects" or "no significant cross-dataset correlation was found" is a valid and valuable conclusion. NEVER invent a correlation or a shared feature to force a unified story; a manufactured correlation is worse than reporting its absence.
+2.  **Formulate the reconciled narrative ('detailed_analysis').** Build a coherent account supported by the COMBINED evidence. CRITICAL — the evidence is the final authority: assert a cross-dataset correlation, coincidence, or causal link ONLY where the provided findings actually support it. If the datasets do not correlate or constrain one another, say so plainly — "the techniques are mutually consistent but capture independent aspects" or "no significant cross-dataset correlation was found" is a valid and valuable conclusion. NEVER invent a correlation or a shared feature to force a unified story; a manufactured correlation is worse than reporting its absence. The same discipline applies to DISCREPANCIES: when techniques disagree on a shared observable, a mundane instrumental or measurement-condition explanation is a first-class candidate alongside any mechanistic one, and a mechanistic interpretation may lead only where the evidence positively discriminates in its favor.
 
 3.  **Generate synthesized claims** that genuinely depend on MORE THAN ONE dataset. Do not relabel a single-dataset finding as a synthesis.
 
@@ -1264,6 +1272,15 @@ Depending on the analysis method used in the current iteration, you will receive
    * *Observation (skip-decomposition mode):* The user's objective specifies a per-pixel quantitative measurement.
    * *Action:* Define a target with `type: "custom_code"`. Describe the *math* needed (e.g., "Fit a Gaussian to model the peak shift around 0.6 eV").
    * *Tip:* The custom code sandbox provides `lmfit` in addition to `numpy`/`scipy`/`sklearn`. Use `lmfit` for multi-peak or complex fitting scenarios — it offers built-in models (GaussianModel, LorentzianModel, VoigtModel), parameter constraints, and composite models via the `+` operator. For simple single-peak fits on large datasets, raw `curve_fit` is faster due to lower per-pixel overhead.
+   * *SIZE GUARD — scale every target to the pixel count:* the sandbox is single-process, so a per-pixel iterative fit (~2-5 ms each) over a full frame costs ~4-40 minutes per 100k pixels and can exceed the execution timeout. State in the target's description WHICH pixels the fit touches. Above ~50k pixels, the target must specify a reduction: restrict fitting to the scientifically relevant mask/region, or go coarse-to-fine (fit a spatially binned map first, refine only where structure appears), or use a vectorized/linearized estimator instead of per-pixel iterative fits.
+
+4. **LARGE-DATA GATE — decomposition-first staging (above ~50k pixels):**
+   Commit each decision to ONE of four verdicts, using the decomposition evidence in front of you:
+   * **fit-within-dilated-mask** — the signal of interest is spatially LOCALIZED in a component's abundance map: set `"fit_scope": "component_mask"` and `"mask_component_index": <component NUMBER as labeled in the decomposition plots — "Component 2" means 2>` on the target. The pipeline builds the mask from that component's high-abundance region WITH a dilation halo (mask-boundary physics lives at the edges) and scopes the generated code to it.
+   * **fit-global-then-decide** — a WEAK feature may be present everywhere (uniform signals give decomposition no spatial contrast to separate): describe a target whose code fits the MEAN spectrum first (one cheap fit) and maps per-pixel only where that detection justifies it.
+   * **fit-everywhere** — only when the objective genuinely needs full-frame per-pixel parameters; then apply the size-guard tactics (vectorize, coarse-to-fine).
+   * **decomposition-only (STOP)** — permitted ONLY when the components are clean AND the residuals are unstructured AND the objective names no per-pixel quantity. A STRUCTURED residual (derivative shapes, coherent spatial patterns, high residual autocorrelation) is the signature of continuous parameter variation or a weak everywhere-signal — physics decomposition CANNOT model — and mandates a fitting target even when every component looks clean.
+   The gate is ASYMMETRIC: use decomposition evidence freely to ADD scope (nominate a component, a mask, a global-first plan), but RESTRICT scope or STOP only under the residual-certified conditions above. A user objective explicitly requesting per-pixel quantities ALWAYS overrides the gate.
 
 ---
 
@@ -1273,12 +1290,15 @@ You MUST output a valid JSON object.
 **STRICT TYPE RULES:**
 * All refinement targets have `"type": "custom_code"`.
 * For `custom_code` targets: `value = null` (the description field is what matters).
+* Optional scoping fields on a `custom_code` target (the LARGE-DATA GATE): `"fit_scope"`: `"full_frame"` (default) or `"component_mask"`; when `"component_mask"`, also set `"mask_component_index"` (the component NUMBER as labeled in the decomposition plots, i.e. "Component N" -> N; its high-abundance region defines the fitting mask).
 * Targets of other types (e.g. legacy `"spatial"` or `"spectral"`) are NOT supported and will be ignored by the downstream pipeline. Do not emit them.
 
 **Required outputs (objective-aware QC enforcement):**
 When the user's objective explicitly names one or more scalar quantities that should be extracted per pixel (e.g. "peak position", "FWHM", "integrated area", "binding energy", "edge onset"), list the EXACT Snake_Case map keys you intend the generated code to produce for those quantities in the optional `required_outputs` field on the target. The downstream code-generation prompt will be told those keys are mandatory, and the dynamic-analysis run will retry (and ultimately fail the task) if any named output is missing from the returned `maps` dict OR fails its visual quality check. Leave `required_outputs` as an empty list when the user's objective is exploratory or when you are selecting features at your own initiative.
 
 Example: if the objective says *"extract the peak position (in eV) of the dominant feature at every pixel"*, the target should set `"required_outputs": ["Peak_Position"]`. The generated code's `maps` dict must then include a key named exactly `Peak_Position`.
+
+**Demand outputs at the scope the evidence supports.** A required output is a promise the data must be able to keep: every retry it fails burns the branch's budget. Before requiring a PER-PIXEL map of a feature, check the decomposition evidence in front of you — if the feature is WEAK (near the noise floor in the components/flux evidence) or LOCALIZED (a compact abundance footprint), the defensible demand is the REGION-INTEGRATED quantity (one fit over the footprint's summed spectrum: position, width, ratio with uncertainties), with the per-pixel map requested in the description as best-effort, NOT in `required_outputs`. Require native-resolution per-pixel maps only for features the evidence shows are strong at the single-pixel level. A user objective phrased per-pixel does not override physics: deliver the region-level quantity as the required output and let the honest-null / resolution-ladder machinery handle the per-pixel question.
 
 **Example 1: STOP (Decomposition Artifact)**
 {
@@ -1534,19 +1554,240 @@ Determine if this result captures a REAL physical signal, even if that signal is
 In spectroscopy, some features (like impurities) only exist in small regions.
 If the Histogram shows a large pile-up at zero/bounds (background) BUT there is a distinct, smaller population distribution elsewhere, **THIS IS VALID.**
 
+### CRITICAL: HANDLING HOMOGENEOUS RESULTS
+A uniform or single-valued map is NOT, by itself, a failure. The measured
+quantity or feature can be genuinely homogeneous — e.g. a uniform film or
+coating, a sample that fills the field of view, or a property that is
+constant across the region. In those cases a near-uniform map (or a presence
+mask that is all-present / all-absent) is the physically CORRECT result.
+Spatial contrast is not required for validity. Reject uniformity ONLY when the
+single value is a trivial collapse that means the algorithm extracted nothing
+where signal was expected (see Failure Criterion 2).
+
 ### FAILURE CRITERIA (Reject ONLY if these are true):
 1. **Total Noise:** The map is pure 'static' (salt-and-pepper) with ZERO recognizable structure.
-2. **Total Algorithm Failure:** The histogram is a **SINGLE** sharp spike (Dirac delta) containing 100% of the data.
-3. **Complete Rail-Gazing:** The data is piled up at the min/max edges with **NO secondary distribution** visible.
+2. **Trivial Collapse:** The map is uniform AT A TRIVIAL VALUE that means no signal was extracted (e.g. exactly 0 / exactly a clip bound everywhere) AND the feature is one that should vary or appear somewhere — i.e. the algorithm produced nothing, not a real homogeneous measurement. A uniform map at a NON-trivial, physically plausible value (a real thickness, a real concentration, all-present where the sample fills the frame) is NOT this — accept it.
+3. **Complete Rail-Gazing:** The data is piled up at the min/max edges with **NO secondary distribution** visible AND no physical reason for the field to be homogeneous.
 
 ### SUCCESS CRITERIA (Accept if present):
 - **Structure:** Does the map show ANY structured domains, even if they are small?
 - **Population:** Is there a visible distribution (bell curve, tail, or cluster) separate from the background spike?
+- **Plausible homogeneity:** Is the map uniform (or near-uniform) at a physically meaningful value consistent with a homogeneous sample or a feature that fills/is-absent-from the field? That is a valid measurement, not a failure.
 
 ### OUTPUT FORMAT
 Return a JSON object with:
 - 'valid': boolean
 - 'critique': string (Briefly explain decision)
+"""
+
+
+SPECTROSCOPY_RESULT_REVIEW_INSTRUCTIONS = """
+You are a senior scientist doing a SINGLE combined review of one automated
+per-pixel result the user explicitly asked for. Judge BOTH in one decision:
+  (A) SIGNAL — does this capture a real extracted signal, not pure noise or a
+      trivial collapse (uniform at exactly 0 / a clip bound where something was
+      expected)?
+  (B) SOUNDNESS — is the METHOD appropriate and the VALUE physically plausible
+      given what the data actually shows?
+Reason from the physics, the data, and the evidence below — NEVER from a
+pre-expected number.
+
+### OBJECTIVE
+{objective}
+
+### DATA CONTEXT (metadata)
+{metadata}
+
+### METHOD — the generated code that produced this result
+```python
+{method}
+```
+
+### RESULT
+{result_summary}
+You are also shown the result dashboard (map + histogram) and a representative
+mean spectrum of the data.
+
+### TOOLS USED BY THE METHOD
+The generated code called these vetted, purpose-built helper tools — here is
+what each already handles robustly (window selection, flux gating,
+measurability, …):
+{tool_descriptions}
+
+{tool_scrutiny}
+
+{attempt_history}
+
+### KEY PRINCIPLES
+- Trust the DATA over the objective's geometric framing. A uniform or
+  full-field result is VALID when the signal genuinely fills the field: if the
+  tool evidence shows a coherent, high-SNR feature present in most/all pixels
+  (e.g. a measurable edge in ~all pixels), a uniform map or an all-present mask
+  is the CORRECT result even if the objective calls the sample a localized
+  coupon "on an otherwise empty field." Reject uniformity ONLY as a trivial
+  collapse (uniform at exactly 0 / a clip bound — nothing extracted).
+- The RESULT states a valid coverage (fraction of the field with a real, finite
+  non-zero value). Reconcile it with the morphology the OBJECTIVE and the data
+  imply — do NOT apply a fixed coverage threshold. Low coverage is CORRECT for a
+  feature that is genuinely localized (defects, dopants/impurities, a small
+  domain, a phase boundary, a sparse population) — do not reject those. It is a
+  masking/segmentation COLLAPSE only when the feature was expected to fill a
+  region (film / continuous layer / coupon), OR the field-MEAN spectrum clearly
+  shows the signal, yet the map retained just a few scattered pixels — i.e. a
+  real signal was dropped. Judge coverage against what is physically expected,
+  either way; the number is evidence, not a verdict.
+- A merely SURPRISING value is not a flaw if the method is sound and the data
+  and tool evidence support it. Do not suppress genuine findings.
+- A sample-description prior (how the sample was supposedly prepared and what
+  magnitude that implies) is context, not evidence: when methodologically
+  independent attempts converge on the same measured value that the prior
+  calls implausible, accept the sound measurement and state the discrepancy
+  with the sample description, rather than rejecting on the prior alone.
+- Any flux / photon-statistics / SNR argument MUST cite the MEASURED FLUX BY
+  BAND numbers in the RESULT (deterministic, computed from the data) — never
+  a visual estimate from the plotted spectrum, whose linear scale makes
+  usable count levels look like zero. Disputing a vetted tool's
+  measurability/SNR gate requires showing those numbers contradict it.
+- Reject ONLY when you can name a SPECIFIC methodological/physical flaw AND the
+  direction of the fix (which estimator / window / step to use instead).
+
+### OUTPUT FORMAT
+Return a JSON object:
+- 'valid': boolean (true = accept; false = clear flaw)
+- 'critique': string (if false: name the specific flaw and corrective direction)
+"""
+
+
+NOT_MEASURABLE_JUDGE_INSTRUCTIONS = """You are a skeptical spectroscopist judging a NULL DETERMINATION. Generated \
+analysis code declined to map a per-pixel feature, declaring it NOT \
+MEASURABLE in this dataset, with the evidence below. Decide whether the \
+declaration is scientifically defensible or an evasion of a hard but real fit.
+
+ACCEPT only when the evidence is NUMERIC and decisive AND survives these \
+checks:
+1. ARITHMETIC CONSISTENCY — recompute the claim from its own numbers. The \
+correct noise reference for an N-spectrum average is sigma_pixel/sqrt(N), \
+NOT the per-pixel sigma; if the declaration's own figures imply a detection \
+(e.g. it states a mean-spectrum SNR at or above its own threshold, or its \
+prominence exceeds a few times sigma_pixel/sqrt(N)), REJECT — the code \
+applied the wrong statistics.
+2. LOCALIZATION — a feature confined to a small region is diluted \
+~(region/frame) in the field mean AND in the field-integrated flux table; \
+the declaration must show the feature also fails in a BRIGHT-REGION mean \
+(top few % of pixels by intensity). A field-mean-only null on possibly \
+localized data is not decisive: REJECT.
+3. FLUX TABLE — the deterministic MEASURED FLUX BY BAND must be consistent \
+with the claimed absence for spatially extended features (remembering it \
+cannot rule out localized ones — see check 2).
+REJECT also when the evidence is vague, non-numeric, or the feature could \
+plausibly be recovered by a better method (masking, denoising, narrower \
+window) — rejection sends the task back for another attempt.
+
+Respond in valid JSON with EXACTLY these keys:
+{
+  "defensible": true | false,
+  "critique": "<if false: what the evidence misses / what to try instead; else a one-line confirmation>"
+}
+"""
+
+
+SPECTROSCOPY_SALVAGE_JUDGE_INSTRUCTIONS = """
+You are a senior scientist making a FINAL salvage decision. Automated extraction
+did NOT fully pass verification after all retries. You are shown the BEST partial
+result produced (a representative dashboard, the method code, a representative
+mean spectrum, and the tools it used). Judge FROM THE PHYSICS AND THE DATA
+whether this partial result is a physically DEFENSIBLE approximate answer worth
+reporting WITH EXPLICIT CAVEATS, or is physically meaningless (trivial collapse
+to zero, pure noise, or a clear artifact) and must be withheld.
+
+Presenting an APPROXIMATE / uncertain result is acceptable — provided its
+limitations and uncertainty are stated honestly. Withhold ONLY if there is no
+real signal to report.
+
+LOCALIZED SIGNALS: a signal confined to a small region is diluted by the
+area ratio in ANY field-level statistic — a flat field-mean spectrum or
+band-flux table is NOT evidence of absence when the spatial evidence below
+(component footprints, dashboards) shows a compact feature. Judge such a
+signal at ITS OWN scale: the statistic over the detected footprint, or over
+the brightest pixels at a comparable area fraction — never a fixed large
+percentage of the frame. Your caveat must NAME the region statistic your
+verdict rests on (e.g. "footprint-mean over the 0.2%-area component"), so a
+field-mean-only justification is never presented as a physics conclusion.
+
+### SPATIAL FOOTPRINT EVIDENCE (from the run's own decomposition)
+{spatial_evidence}
+
+### OBJECTIVE
+{objective}
+
+### DATA CONTEXT (metadata)
+{metadata}
+
+### METHOD (generated code)
+```python
+{method}
+```
+
+### TOOLS USED BY THE METHOD
+{tool_descriptions}
+
+### PARTIAL RESULT
+{result_summary}
+
+### OUTPUT FORMAT
+Return a JSON object:
+- 'present': boolean (true = report it as approximate with caveats; false = withhold, no real signal)
+- 'confidence': "low" or "medium" (never "high" — this is a salvage of an unverified result)
+- 'caveat': ONE honest sentence stating the key limitation / uncertainty a reader MUST know
+"""
+
+
+SPECTROSCOPY_PHYSICS_SANITY_INSTRUCTIONS = """
+You are a senior scientist doing a PHYSICAL-SOUNDNESS review of one automated
+per-pixel result. Visual quality was already checked separately — your job is
+different: judge whether the METHOD is appropriate and the RESULT is physically
+plausible given what the data actually shows. Reason from the physics and the
+data, NEVER from a pre-expected number.
+
+### OBJECTIVE
+{objective}
+
+### DATA CONTEXT (metadata)
+{metadata}
+
+### METHOD — the generated code that produced this result
+```python
+{method}
+```
+
+### RESULT
+{result_summary}
+You are also shown the result dashboard (map + histogram) and a representative
+mean spectrum of the data.
+
+### YOUR TASK
+Decide if there is a CLEAR methodological or physical flaw that makes this
+result wrong. Typical real flaws:
+- the method uses an estimator that is BIASED for this data — e.g. a global
+  fit over a spectral region where the signal saturates / clips / violates the
+  model's assumptions, and the result reflects that bias;
+- the reported value is contradicted by a feature plainly visible in the
+  spectrum (e.g. a strong absorption edge/step or peak whose size is
+  inconsistent with the value by a large factor);
+- the method skips a step the physics/objective requires (e.g. no flat-field
+  normalization when an I0 is provided).
+
+Be CONSERVATIVE — default to VALID:
+- A merely SURPRISING value is NOT a flaw if the method is sound and the data
+  supports it. Do not suppress genuine findings.
+- Do not flag stylistic or minor issues, or values you simply cannot verify.
+- Reject ONLY when you can name the specific methodological/physical flaw AND
+  the direction of the fix (which estimator / window / step to use instead).
+
+### OUTPUT FORMAT
+Return a JSON object:
+- 'valid': boolean (true = physically sound enough to accept; false = clear flaw)
+- 'critique': string (if false: name the specific flaw and the corrective direction)
 """
 
 
@@ -2255,6 +2496,10 @@ plan as specified and let the retry pipeline handle actual runtime failures.
    level) alongside the raw residual, use a log or sqrt y-scale on the main panel,
    and/or add a zoomed sub-panel over each region where the residual is largest, so
    localized/systematic misfit is actually visible.
+   A zoomed sub-panel must NOT shrink the main Data-and-Fit panel — the primary panel
+   always shows the FULL fitted domain. (With `plt.subplots(..., sharex=True)` a
+   `set_xlim` on the zoom axis silently truncates EVERY panel; give the zoom panel its
+   own non-shared x-axis, or reset the main panel's xlim to the full domain afterwards.)
    If you applied any preprocessing, ALSO plot the raw data faintly (light grey,
    low alpha) so the reviewer can confirm preprocessing did not distort the
    fitted features.
@@ -2271,6 +2516,22 @@ NOT any material/phase name, NOT any model name)
    model evaluated at the SAME x-points as `data.npy` (length N). The reviewer uses
    it to compute residual diagnostics (residual = data_y − fit). If you masked or
    excluded any points, still evaluate the model at all N x-points so lengths match.
+
+**Absent components are measurements, not gaps.** When a planned component is
+not present at this unit (a band vanished on heating, a phase peak gone above
+a transition), do NOT drop it from `parameters` and do NOT report NaN for
+everything. Report by parameter type: its AMPLITUDE-LIKE parameters (area,
+amplitude, intensity, height, step) as a MEASUREMENT — refit with the
+component's shape parameters FROZEN at their planned/last-fitted values
+and only its amplitude free, and report that amplitude (a real near-zero
+number, valid for any component form: peak, step, decay, oscillation)
+with its covariance error in the matching `_err` key (for localized peaks
+the baseline-subtracted window integral is an acceptable fast path); its INTENSIVE parameters
+(center, width, eta) as null (a nonexistent peak has no position — a fake 0
+would poison position trends); and add `"<component>_absent": true`. This
+keeps trend/sigmoid fits over a series anchored by their lower plateau
+instead of losing exactly the points that prove the transition completed.
+
 7. Print results as JSON:
 ```python
 results = {{
@@ -2287,6 +2548,11 @@ print(f"FIT_RESULTS_JSON:{{json.dumps(results)}}")
 
 
 FITTING_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed script.
+The corrected script must keep the full results contract of the original
+instructions — including reporting ABSENT planned components as
+measurements (extensive parameters as windowed residual integrals with
+`_err`, intensive parameters null, plus `"<component>_absent": true`),
+never as missing keys.
 
 **Plan:** {analysis_approach} | **Model:** {physical_model}
 
@@ -2306,6 +2572,7 @@ FITTING_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed script.
 *(NumPy 2.x: aliases removed in NumPy 2.0 raise `AttributeError` — use `np.trapezoid` not `np.trapz`; prefer `scipy.integrate.trapezoid` for integration.)*
 
 **CRITICAL:** Fix only the execution error. Do NOT change the fitting model, its parameters, the fit domain/window, or the overall analysis approach — and never narrow the window or truncate the data to raise R². The model is locked for series consistency.
+**Narrow exception — timeout errors ONLY:** if the error says the script timed out, the script is too slow, not wrong. You may change the COMPUTATIONAL strategy — vectorize loops, reduce optimizer restarts/iterations, replace brute-force search with an efficient optimizer — but every rule above still holds: same model, same parameters, same fit domain/window, and ALL of the data.
 
 **I/O contract (do not deviate):** the data is `data.npy` in the current working directory — load it with `np.load` (do NOT look for .csv/.txt/.dat or glob for other files); save the plot to `visualization.png`; print one line `FIT_RESULTS_JSON:{{...}}` with the fit results. Missing any of these fails the run. Also keep saving `fit.npy` (1-D fitted curve at the `data.npy` x-points, length N) if the script you are fixing already did — it feeds the reviewer's residual diagnostics.
 
@@ -2317,6 +2584,10 @@ use "Data"/"Fit"/"Component N"/"Residuals" only — no material names, no peak a
 
 
 PLAN_CONFORMANCE_CHECK_INSTRUCTIONS = """You are verifying that a Python script correctly implements a scientific analysis plan.
+(Contract note: a script that reports a planned-but-absent component with
+near-zero extensive parameters, null intensive parameters, and an
+`_absent: true` flag is FOLLOWING the results contract — do not flag that
+as dropping a planned component.)
 
 **ANALYSIS PLAN (authoritative specification):**
 - Approach: {analysis_approach}
@@ -2402,6 +2673,14 @@ If you identify problems, return:
 }}}}
 Include series_analysis_plan only if this is a series with regimes that need revision.
 Only flag genuine problems — do not redesign a reasonable plan.
+
+An explicit requirement in the stated objective (e.g. a region to exclude, a parameter
+to report) is a constraint, not an assumption to second-guess. If the data make such a
+requirement look hard to satisfy — a feature you cannot clearly see, a region that looks
+ambiguous — flag it and propose a more robust way to meet it; do NOT remove the
+requirement from the model, parameters, or strategy. The user saw something you may not.
+Drop a requirement only if it is physically impossible on this data, and then say so
+explicitly in `issues`.
 """
 
 
@@ -2457,6 +2736,16 @@ baseline structure, noise level)?
 - Is there structure in the residuals that suggests model inadequacy \
 (systematic misfit, unmodeled shoulder, baseline drift, unexpected oscillation)?
 - Given parameter uncertainties, how well-constrained are the physical claims you could make?
+
+CLAIM-ANCHORED RESIDUAL CHECK: any structural claim that names a specific \
+feature (a doublet/splitting at X, a shoulder, a secondary phase peak) must be \
+checked against the residuals AT THAT LOCATION before you state it. A \
+multi-component fit whose residual shows a large systematic feature BETWEEN \
+its claimed components (e.g. a positive spike where the data actually peaks, \
+flanked by the model's two centers) is evidence the splitting is a fit \
+artifact, not a resolved structure — report "no resolved splitting; residual \
+lineshape excess" instead. Global R² cannot arbitrate this: a wrong \
+decomposition of one band barely moves R² when a strong baseline dominates.
 
 Frame your Stage 1 answer as if you had to recommend a model yourself from this evidence.
 """
@@ -2811,14 +3100,19 @@ Update an existing skill with new knowledge while preserving what is already cor
    (`error_lessons` error→fix pairs) → validation pitfalls/sanity-checks and analysis cautions; \
    `user_correction` (`user_feedback`) → planning constraints/preferences and validation \
    acceptance criteria (treat human corrections as high-priority ground truth).
-4. Do NOT remove existing content unless the new knowledge explicitly contradicts it.
+4. Be ADDITIVE: the existing skill already routes real analyses, and every existing rule, \
+   constraint, and section is load-bearing — removing or weakening one regresses working \
+   behavior. Remove or weaken existing guidance ONLY when the new knowledge explicitly \
+   contradicts it.
 5. When there is a conflict, prefer the newer knowledge but note the discrepancy briefly.
 6. If the new knowledge materially changes the skill's purpose, update the description; \
    otherwise leave it intact.
 7. Keep prose tight. The skill is read into LLM context every time.
 
-Return a JSON object with the SAME keys as the existing skill (description, overview, planning, \
-analysis, interpretation, validation) reflecting the merged skill content.
+Return a JSON object with the SAME keys as the existing skill — description plus EVERY section \
+key the existing skill has (any of: overview, planning, analysis, implementation, interpretation, \
+validation) — reflecting the merged skill content. Omitting a key the existing skill has would \
+DELETE that section.
 
 Output ONLY the JSON object. Do not wrap in code blocks. Do not include any prose outside the JSON."""
 
@@ -3059,7 +3353,8 @@ that fails.
 When a registered tool already does the hard step (e.g. `run_fft_nmf_analysis`
 with a window size tuned to the spatial scale of the features of interest
 for disorder / defect / multi-phase analysis, or `run_sam_analysis` for
-instance segmentation), a single tool call followed by a simple post-
+instance segmentation of touching/overlapping objects that classical
+detection and splitting cannot separate), a single tool call followed by a simple post-
 processing step is already a complete pipeline. Do not pad it with
 additional processing steps for the sake of thoroughness — the tool
 output plus a focused interpretation is the deliverable.
@@ -3272,7 +3567,11 @@ Judge primarily from the visualizations against the original image:
    capture? Missed objects do not appear as errors — a clean overlay can still
    be badly incomplete. Actively scan the original image for clearly-visible
    targets a candidate failed to mark, and weight under-detection exactly as
-   seriously as over-detection.
+   seriously as over-detection. For DENSE atom-column detection, judge from the
+   zoom-in overlay panels and the reported NN/heatmap metrics (a spike of short
+   NN distances = duplicates; coverage gaps = misses) — NOT from a count-vs-
+   expected ratio, which is only order-of-magnitude for multi-sublattice
+   materials, so a moderate ratio (~1.3x) is not over-detection.
 2. **Correctness**: does the output correspond to real structures (not noise,
    artifacts, or hallucinated features)? Do reported values match visual
    estimates from the image?
@@ -3344,6 +3643,14 @@ If you identify problems, return:
 Include `series_analysis_plan` only if the image is part of a series with regimes.
 Each regime must have its own pipeline and features. Every image index must appear in exactly one regime.
 Only flag genuine problems that would cause incorrect results — do not redesign a reasonable plan.
+
+An explicit requirement in the stated objective (e.g. a region to exclude, a quantity to
+report) is a constraint, not an assumption to second-guess. If the image makes such a
+requirement look hard to satisfy — a boundary that looks subtle or absent, a feature you
+cannot clearly see — flag it and propose a more robust way to meet it; do NOT remove the
+requirement from the pipeline, features, or quality criteria. The user saw something you
+may not (and your view here may be a downsampled thumbnail). Drop a requirement only if it
+is physically impossible on this data, and then say so explicitly in `issues`.
 """
 
 
@@ -3398,6 +3705,17 @@ original image, and the second MUST show a segmentation overlay (original image 
 colored semi-transparent masks and contour boundaries for each detected object). For \
 multi-channel images, show each channel as a separate grayscale subplot (do not try to \
 display a 2-channel array directly with imshow). \
+**`visualization.png` MUST contain the actual headline result figure.** If a registered tool \
+returns a `figure_bytes` that IS the result (e.g. a polarization/defect/QC map), write those \
+bytes directly to `visualization.png` (or embed them as panels in it). NEVER save the result to \
+a separate file and leave a placeholder panel in its place (e.g. a subplot titled "see \
+other_file.png") — only `visualization.png` is embedded in the report and shown to the verifier; \
+a placeholder there means the result is lost. \
+**To give the verifier SEVERAL full-resolution views** (multiple candidate settings to compare, \
+several regions, or before/after panels), save each as its own `verifier_panel_<name>.png` in the \
+working directory — the verifier receives each `verifier_panel_*.png` as a SEPARATE full-resolution \
+image. Do NOT stitch many views into one figure for the verifier: a single multi-panel montage is \
+downsized by the model's per-image cap until each panel loses judgeable detail. \
 All visualizations must be saved to the current working directory. Use `dpi=100`.
 4. Save key output arrays to the current working directory as `.npy` files. \
 At minimum save the primary detection/segmentation result (label map, binary \
@@ -3414,7 +3732,7 @@ The standard fields are:
 ```python
 results = {{{{
     "analysis_type": "description of what was done",
-    "extracted_features": {{{{"feature_name": value, ...}}}},
+    "extracted_features": {{{{"feature_name": value, ...}}}},  # a value with a known uncertainty (tool std/err output, fit sigma) gets its OWN numeric "<feature_name>_err" entry — never bury an uncertainty in a prose note
     "quality_metrics": {{{{"metric_name": value, ...}}}},
     "summary": "Key finding in one sentence",
     "saved_arrays": {{{{...}}}}
@@ -3486,7 +3804,19 @@ Check the image shape — it may have 2 or more channels that are not RGB. Acces
 via `image[:,:,0]`, `image[:,:,1]`, etc. Do not assume grayscale or RGB.
 2. Implement the refined analysis pipeline.
 3. Save visualization(s): `visualization.png` showing original image alongside \
-key analysis results. Use subplots with clear labels. All visualizations must be saved \
+key analysis results. Use subplots with clear labels. \
+**`visualization.png` MUST contain the actual headline result figure.** If a registered tool \
+returns a `figure_bytes` that IS the result (e.g. a polarization/defect/QC map), write those \
+bytes directly to `visualization.png` (or embed them as panels in it). NEVER save the result to \
+a separate file and leave a placeholder panel in its place (e.g. a subplot titled "see \
+other_file.png") — only `visualization.png` is embedded in the report and shown to the verifier; \
+a placeholder there means the result is lost. \
+**To give the verifier SEVERAL full-resolution views** (multiple candidate settings to compare, \
+several regions, or before/after panels), save each as its own `verifier_panel_<name>.png` in the \
+working directory — the verifier receives each `verifier_panel_*.png` as a SEPARATE full-resolution \
+image. Do NOT stitch many views into one figure for the verifier: a single multi-panel montage is \
+downsized by the model's per-image cap until each panel loses judgeable detail. \
+All visualizations must be saved \
 to the current working directory. Use `dpi=100`.
 4. Save key output arrays to the current working directory as `.npy` files. \
 At minimum save the primary detection/segmentation result.
@@ -3500,7 +3830,7 @@ The standard fields are:
 ```python
 results = {{{{
     "analysis_type": "description of what was done",
-    "extracted_features": {{{{"feature_name": value, ...}}}},
+    "extracted_features": {{{{"feature_name": value, ...}}}},  # a value with a known uncertainty (tool std/err output, fit sigma) gets its OWN numeric "<feature_name>_err" entry — never bury an uncertainty in a prose note
     "quality_metrics": {{{{"metric_name": value, ...}}}},
     "summary": "Key finding in one sentence",
     "saved_arrays": {{{{...}}}}
@@ -3530,6 +3860,10 @@ IMAGE_ANALYSIS_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed image analysi
 
 **CRITICAL:** Fix only the execution error. Do NOT change the analysis pipeline, feature \
 extraction approach, or the overall analysis strategy. The approach is locked for series consistency.
+**Narrow exception — timeout errors ONLY:** if the error says the script timed out, the script is \
+too slow, not wrong. You may change the COMPUTATIONAL strategy — vectorize loops, reduce iteration \
+counts, use coarser internal search grids — but the pipeline, the extracted features, and the full \
+image extent must not change.
 
 **Response:** Return only `{{"diagnosis": "...", "script": "..."}}`
 """

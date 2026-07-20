@@ -343,7 +343,8 @@ def _scaled_peaklist(pl: "_PeakList", scale: float) -> "_PeakList":
     )
 
 
-def _fit_lattice_scale(exp_pl, sim_pl, tol_deg, scale_search, min_matches: int = 2) -> float:
+def _fit_lattice_scale(exp_pl, sim_pl, tol_deg, scale_search, min_matches: int = 2,
+                       weight_by: str = "exp") -> float:
     """Find the single lattice scale that best aligns the simulated peaks to the
     experimental ones (intensity-weighted matched coverage). Bounded to a few %
     so a wrong phase can't be force-aligned.
@@ -352,12 +353,23 @@ def _fit_lattice_scale(exp_pl, sim_pl, tol_deg, scale_search, min_matches: int =
     — a real DFT-relaxed phase snaps *multiple* reflections into place at the
     right scale, whereas a wrong phase produces at most a lone coincidental
     alignment that must not be allowed to drive the scale (which would erode
-    discrimination). Falls back to 1.0 (no scaling) otherwise."""
+    discrimination). Falls back to 1.0 (no scaling) otherwise.
+
+    ``weight_by`` — which intensity weights a match. ``'exp'`` (single-phase
+    default: downweights sim lines landing on weak noise peaks). ``'sim'`` for
+    the MIXTURE per-phase pre-fit: a minority phase's true lines are weak in
+    the mixture, so exp-weighting lets a few strong lines of the MAJORITY
+    phase pull the minority's scale off its own exact matches (observed: NaCl
+    in a 70/30 Si mix stretched 3.8% onto Si lines, deactivating it in the
+    joint MILP). The candidate's own relative intensities are
+    fraction-independent — the right anchor when other phases share the
+    pattern."""
     lo, hi, step = scale_search
     scales = np.arange(lo, hi + step / 2.0, step)
     sim_pos = np.asarray(sim_pl.positions)
     exp_pos = np.asarray(exp_pl.positions)
     exp_w = np.sqrt(np.asarray(exp_pl.intensities_norm))
+    sim_w = np.sqrt(np.asarray(sim_pl.intensities_norm))
 
     def _eval(a: float):
         sp = _apply_lattice_scale(sim_pos, a)
@@ -372,7 +384,8 @@ def _fit_lattice_scale(exp_pl, sim_pl, tol_deg, scale_search, min_matches: int =
             if res[j] <= tol_deg:
                 used.add(j)
                 n += 1
-                score += w * (1.0 - res[j] / tol_deg)
+                weight = w if weight_by == "exp" else float(sim_w[j])
+                score += weight * (1.0 - res[j] / tol_deg)
         return score, n
 
     base_score, _ = _eval(1.0)
@@ -877,7 +890,11 @@ def score_xrd_match_multiphase(
     if fit_lattice_scale:
         for i, pl in enumerate(sim_pls):
             if pl.n:
-                a = _fit_lattice_scale(exp_pl, pl, tol_deg, lattice_scale_search)
+                # weight_by='sim': in a mixture the exp-intensity weighting
+                # would pull a minority phase's scale onto the majority
+                # phase's strong lines (see _fit_lattice_scale docstring).
+                a = _fit_lattice_scale(exp_pl, pl, tol_deg,
+                                       lattice_scale_search, weight_by="sim")
                 per_phase_scale[i] = a
                 sim_pls[i] = _scaled_peaklist(pl, a)
 

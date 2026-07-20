@@ -5,7 +5,8 @@ import logging
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Union
+from types import SimpleNamespace
 import PIL.Image as PIL_Image
 
 from ...auth import get_internal_proxy_key
@@ -14,6 +15,8 @@ from .bo_tools import get_optimizer
 from .instruct import (
     BO_CONFIG_SOO_PROMPT,
     BO_CONFIG_MOO_PROMPT,
+    BO_MULTIFIDELITY_ADDENDUM,
+    BO_HIGHD_ADDENDUM,
     BO_VISUAL_INSPECTION_PROMPT,
     BO_VISUAL_INSPECTION_MOO_PROMPT,
     BO_CONSTRAINED_BATCH_PROMPT,
@@ -119,7 +122,7 @@ def _compute_budget_context(experimental_budget: Optional[int], history: List[Di
     }
 
 
-class BOAgent(BaseAgent):
+class OptimizationAgent(BaseAgent):
     """
     Autonomous Agent for Bayesian Optimization (BO) designed for "Stop-and-Go" experimental loops.
 
@@ -237,7 +240,9 @@ class BOAgent(BaseAgent):
         history.append(entry)
         with open(self.history_file, 'w') as f: json.dump(history, f, indent=2)
 
-    def _validate_config(self, config: Dict) -> Dict:
+    def _validate_config(self, config: Dict, fidelity_declared: bool = False,
+                         extra_surrogates: Optional[set] = None,
+                         extra_acquisitions: Optional[set] = None) -> Dict:
         clean = config.copy()
         m_conf = clean.get("model_config", {})
         if m_conf.get("kernel") not in ["matern_2.5", "matern_1.5", "matern_0.5", "rbf"]:
@@ -249,11 +254,32 @@ class BOAgent(BaseAgent):
         if m_conf.get("input_transform", "none") not in ["none", "warp"]:
             logging.warning(f"Invalid input_transform '{m_conf.get('input_transform')}', defaulting to 'none'")
             m_conf["input_transform"] = "none"
-        if m_conf.get("surrogate", "single_task") not in ["single_task", "mixed", "dkl"]:
+        # Multi-fidelity surrogate/acquisition are baseline but only valid when a
+        # fidelity column is declared (the fidelity_config data signal).
+        allowed_surrogates = ["single_task", "mixed", "dkl", "saas"]
+        if fidelity_declared:
+            allowed_surrogates.append("single_task_multi_fidelity")
+        # Skill-contributed surrogates are selectable only while their skill is
+        # active (their keys arrive via extra_surrogates).
+        allowed_surrogates += list(extra_surrogates or set())
+        if m_conf.get("surrogate", "single_task") not in allowed_surrogates:
             logging.warning(
                 f"Invalid surrogate '{m_conf.get('surrogate')}', defaulting to 'single_task'"
             )
             m_conf["surrogate"] = "single_task"
+        # `mf_kg` requires the multi-fidelity surrogate and a declared fidelity.
+        acq = clean.get("acquisition_strategy", {})
+        if acq.get("type") == "mf_kg" and not (
+            fidelity_declared and m_conf.get("surrogate") == "single_task_multi_fidelity"
+        ):
+            logging.warning("'mf_kg' requires single_task_multi_fidelity + a fidelity column; defaulting to 'log_ei'.")
+            acq["type"] = "log_ei"
+        # Skill-contributed acquisitions are valid only while their skill is
+        # active; an unknown/inactive one falls back to the default.
+        core_acqs = {"log_ei", "ucb", "thompson", "max_variance", "pareto", "weighted", "mf_kg"}
+        if acq.get("type") and acq["type"] not in core_acqs | set(extra_acquisitions or set()):
+            logging.warning(f"Acquisition '{acq['type']}' not available; defaulting to 'log_ei'.")
+            acq["type"] = "log_ei"
         # Pairwise compatibility — warn but do not auto-substitute. Strategy LLM
         # is expected to obey the prompt; the runtime factory will silently fall
         # back where physically required (e.g., warp ignored under 'mixed').
@@ -726,6 +752,222 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         return None, None, f"Failed after {max_retries} attempts. Last error: {last_error}"
 
     # =====================================================================
+    # Skill seam + per-stage prompt builders
+    #
+    # These are the foundation-agent specialization points (issue #196): the
+    # pipeline carries technique-independent baseline prompts, and a skill
+    # injects per-section guidance through `_skill_context`. Until the skill
+    # subsystem is wired in (PR 2), `_skill_context` returns "" and every
+    # builder reproduces the baseline prompt BYTE-FOR-BYTE — guarded by the
+    # offline snapshot test (tests/test_bo_prompt_snapshot.py).
+    # =====================================================================
+
+    SKILL_DOMAIN = "optimization"
+
+    def _load_skills_to_state(self, skill: Union[str, List[str], None]) -> Dict[str, Any]:
+        """Load one or more optimization skills and return a state-dict fragment.
+
+        Mirrors the analysis-side helper shape (``skill_name`` / ``skill_sections``
+        / ``skills_loaded``) without unifying base classes (D4): a local helper
+        keeps duplication low while the three orchestrators stay independent.
+        Skills that fail to load are warned and dropped.
+        """
+        from ...skills.loader import load_skill
+
+        if skill is None or skill == "":
+            inputs: List[str] = []
+        elif isinstance(skill, str):
+            inputs = [skill]
+        else:
+            inputs = list(skill)
+
+        loaded: List[Dict[str, Any]] = []
+        seen: set = set()
+        for s in inputs:
+            try:
+                parsed = load_skill(s, domain=self.SKILL_DOMAIN)
+            except FileNotFoundError:
+                logging.warning(f"   Skill '{s}' not found — skipping.")
+                continue
+            if parsed["name"] in seen:
+                continue
+            seen.add(parsed["name"])
+            loaded.append(parsed)
+            logging.info(f"   📖 Optimization skill loaded: {parsed['name']}")
+
+        first = loaded[0] if loaded else None
+        return {
+            "skill_name": first["name"] if first else None,
+            "skill_sections": first,
+            "skills_loaded": loaded,
+        }
+
+    def _resolve_skills(self, skill: Union[str, List[str], None], is_moo: bool) -> Dict[str, Any]:
+        """Decide which skills to activate for a run.
+
+        Skills are *specializations beyond the baseline*. Standard single- and
+        multi-objective BO (the kernel/noise/acquisition/surrogate menus and
+        inspection) is baseline competency carried by the agent's own prompts —
+        it is NOT skill-gated. So only an explicitly-requested ``skill`` (or, in
+        future, an agent-selected one) activates here; with none, the run uses
+        the baseline. ``is_moo`` is accepted for signature stability but does not
+        auto-load anything."""
+        if skill:
+            return self._load_skills_to_state(skill)
+        return {"skill_name": None, "skill_sections": None, "skills_loaded": []}
+
+    def _optimization_components(self):
+        """Resolve skill-contributed engine components (custom surrogates /
+        acquisitions shipped as bundle .py helpers) from the active skills.
+        Returns (surrogate_components, acquisition_components) dicts keyed by the
+        registry key the LLM selects. Empty when no component-skill is active."""
+        from ...skills._shared._opt_components import (
+            get_surrogate_components, get_acquisition_components,
+        )
+        names = [s["name"] for s in getattr(self, "state", {}).get("skills_loaded", [])]
+        return (get_surrogate_components(names, agent="bo"),
+                get_acquisition_components(names, agent="bo"))
+
+    def _skill_context(self, section: str) -> str:
+        """Return the active skills' guidance for one pipeline section, spliced
+        into the per-stage prompt by the builders.
+
+        Sections follow the optimization vocabulary (overview / setup /
+        surrogate / acquisition / diagnostics / interpretation / implementation).
+        Returns "" when no active skill carries that section, so an empty skill
+        set reproduces the baseline prompt byte-for-byte.
+        """
+        loaded = getattr(self, "state", {}).get("skills_loaded", []) if isinstance(getattr(self, "state", {}), dict) else []
+        parts = []
+        for sk in loaded:
+            content = (sk.get(section) or "").strip()
+            if content:
+                parts.append(
+                    f"**Domain Skill — {sk.get('name', 'skill')} ({section}):**\n{content}"
+                )
+        if not parts:
+            return ""
+        return "\n\n" + "\n\n".join(parts)
+
+    def _build_strategy_prompt(self, *, is_moo: bool, objective_text: str,
+                               target_directions: Optional[Dict[str, str]],
+                               target_cols: List[str], batch_size: int,
+                               trend_context: str, df,
+                               budget_ctx: Dict[str, Any], input_cols: List[str],
+                               cat_dims: Optional[List[int]],
+                               physical_constraints: Optional[str],
+                               strategy_hint: Optional[str],
+                               fidelity_config: Optional[Dict[str, Any]] = None) -> List:
+        """Assemble the strategy-configuration prompt (kernel / noise / surrogate
+        / acquisition selection). Baseline template + the multi-fidelity addendum
+        when a fidelity column is declared + optional skill guidance."""
+        prompt_tmpl = BO_CONFIG_MOO_PROMPT if is_moo else BO_CONFIG_SOO_PROMPT
+        # Surface multi-fidelity options only when a fidelity column is declared
+        # (baseline capability, data-signal gated like `mixed`/cat_dims).
+        if fidelity_config and fidelity_config.get("fidelity_col") is not None:
+            prompt_tmpl = prompt_tmpl + BO_MULTIFIDELITY_ADDENDUM
+        # Surface SAAS (baseline high-D surrogate) when the input space is large.
+        if not is_moo and len(input_cols) >= 8:
+            prompt_tmpl = prompt_tmpl + BO_HIGHD_ADDENDUM.format(n_dims=len(input_cols))
+        prompt_parts = [
+            prompt_tmpl,
+            f"Objective: {objective_text}",
+            *(
+                [f"Optimization direction: {', '.join(f'{c} → {d}' for c, d in target_directions.items() if c in target_cols)}"]
+                if target_directions and any(
+                    target_directions.get(c) == "minimize" for c in target_cols
+                ) else []
+            ),
+            f"Constraint: Fixed Batch Size = {batch_size}",
+            f"Meta-Data Trend: {trend_context}",
+            f"Data Summary:\n{df.describe().to_markdown()}"
+        ]
+
+        # Budget context for strategy LLM
+        prompt_parts.append(
+            f"\n**Experimental Budget:**\n{budget_ctx['budget_guidance']}\n"
+            f"Steps completed so far: {budget_ctx['steps_completed']}. "
+            f"Data points in dataset: {len(df)}."
+        )
+
+        # Surrogate-relevant context (input shape, categorical presence)
+        n_cat = len(cat_dims) if cat_dims else 0
+        n_cont = len(input_cols) - n_cat
+        if cat_dims:
+            cat_names = [input_cols[i] for i in cat_dims]
+            surrogate_ctx = (
+                f"\n**Input Shape:** {len(input_cols)} input(s): "
+                f"{n_cont} continuous, {n_cat} categorical "
+                f"({', '.join(cat_names)}). "
+                f"Categorical columns are integer-encoded in the data."
+            )
+        else:
+            surrogate_ctx = (
+                f"\n**Input Shape:** {len(input_cols)} continuous input(s). "
+                f"No categorical inputs declared."
+            )
+        prompt_parts.append(surrogate_ctx)
+
+        # Skill seam: surrogate + acquisition guidance (empty until PR 2, so
+        # the guards keep the baseline prompt byte-identical).
+        skill_surrogate = self._skill_context("surrogate")
+        if skill_surrogate:
+            prompt_parts.append(skill_surrogate)
+        skill_acquisition = self._skill_context("acquisition")
+        if skill_acquisition:
+            prompt_parts.append(skill_acquisition)
+
+        # Inform strategy LLM about constraints (for better acq strategy selection)
+        if physical_constraints:
+            prompt_parts.append(
+                f"\n**Physical Constraints (informational for strategy selection):**\n"
+                f"{physical_constraints}\n"
+                f"Note: A separate step will handle constraint-aware batch design. "
+                f"Focus on selecting the best kernel, noise, and acquisition strategy."
+            )
+
+        if strategy_hint:
+            prompt_parts.append(
+                f"\n**User Strategy Hint:**\n{strategy_hint}\n"
+                f"The user has requested specific strategy preferences. "
+                f"Respect this hint when selecting kernel, noise, and acquisition, "
+                f"unless it directly conflicts with budget constraints."
+            )
+        return prompt_parts
+
+    def _build_inspection_prompt(self, *, is_moo: bool, model_cfg: Dict[str, Any],
+                                 acq_cfg: Dict[str, Any],
+                                 sensitivity_data: Dict[str, Any]) -> str:
+        """Assemble the visual-inspection prompt. Baseline checklist + active
+        config + (SOO) Sobol indices + optional skill `diagnostics` guidance."""
+        visual_prompt = BO_VISUAL_INSPECTION_MOO_PROMPT if is_moo else BO_VISUAL_INSPECTION_PROMPT
+        # Anchor the inspector to the currently active config. The output
+        # spec already asks for "suggested_adjustments" — listing the active
+        # config alongside is enough context; no instruction needed.
+        active_cfg_lines = [
+            f"  Surrogate: {model_cfg.get('surrogate', 'single_task')}",
+            f"  Kernel: {model_cfg.get('kernel', 'matern_2.5')}",
+            f"  Noise: {model_cfg.get('noise', 'min_noise_low')}",
+            f"  Input transform: {model_cfg.get('input_transform', 'none')}",
+            f"  Acquisition: {acq_cfg.get('type', 'log_ei')}",
+        ]
+        acq_params = acq_cfg.get("params") or {}
+        if acq_params:
+            active_cfg_lines.append(f"  Acquisition params: {acq_params}")
+        visual_prompt += "\n\nCURRENT STRATEGY:\n" + "\n".join(active_cfg_lines)
+        if sensitivity_data:
+            sobol_text = "\n".join(f"  {k}: {v}" for k, v in sensitivity_data.items())
+            visual_prompt += (
+                f"\n\nACTUAL SOBOL INDEX VALUES (use these exact numbers, "
+                f"do not estimate from the bar chart):\n{sobol_text}"
+            )
+        # Skill seam: diagnostics guidance (empty until PR 2 → byte-identical).
+        skill_diag = self._skill_context("diagnostics")
+        if skill_diag:
+            visual_prompt += skill_diag
+        return visual_prompt
+
+    # =====================================================================
     # Main Optimization Loop
     # =====================================================================
 
@@ -742,7 +984,9 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                              plot_acq: bool = True,
                              fixed_noise_std: Optional[float] = None,
                              cat_dims: Optional[List[int]] = None,
-                             dkl_config: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+                             dkl_config: Optional[Dict[str, int]] = None,
+                             fidelity_config: Optional[Dict[str, Any]] = None,
+                             skill: Union[str, List[str], None] = None) -> Dict[str, Any]:
         """
         Run one iteration of the Bayesian Optimization loop.
         
@@ -794,14 +1038,72 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         """
         if output_dir is None:
             output_dir = str(self.output_dir)
-        
+
         Path(output_dir).mkdir(exist_ok=True, parents=True)
-        
+
         # Initialize state
         self._init_state(objective=objective_text, data_path=data_path)
-        
-        # 1. Load Data
-        minimize_mask = []
+
+        # Resolve + activate skills for this run (foundation-agent
+        # specialization, issue #196). Skills are specializations beyond the
+        # baseline (e.g. multi-fidelity); standard single-/multi-objective BO is
+        # baseline competency and is NOT skill-gated. Only an explicit `skill`
+        # activates here. `_skill_context` reads state["skills_loaded"] when the
+        # stage builders assemble their prompts.
+        is_moo = len(target_cols) > 1
+        skills_frag = self._resolve_skills(skill, is_moo)
+        self.state["skills_loaded"] = skills_frag["skills_loaded"]
+        if skills_frag["skills_loaded"]:
+            print(f"  - 🧩 Active optimization skill(s): "
+                  f"{[s['name'] for s in skills_frag['skills_loaded']]}")
+
+        # The run-context threads state across the pipeline stages below.
+        # run_optimization_loop is the driver; each _stage_* method reads and
+        # writes ``c``. This makes the OptimizationAgent pipeline explicit
+        # (issue #196): load -> configure -> fit -> recommend -> constrained
+        # batch -> diagnostics -> inspect -> record -> output.
+        c = SimpleNamespace(
+            data_path=data_path, objective_text=objective_text,
+            input_cols=input_cols, input_bounds=input_bounds,
+            target_cols=target_cols, target_directions=target_directions,
+            output_dir=output_dir, batch_size=batch_size,
+            experimental_budget=experimental_budget,
+            physical_constraints=physical_constraints, strategy_hint=strategy_hint,
+            save_acq=save_acq, plot_acq=plot_acq, fixed_noise_std=fixed_noise_std,
+            cat_dims=cat_dims, dkl_config=dkl_config, fidelity_config=fidelity_config,
+            minimize_mask=[], constrained_metadata=None,
+            acq_plot_path=None, acq_data_path=None,
+        )
+
+        err = self._stage_load_data(c)
+        if err:
+            return err
+        err = self._stage_configure_strategy(c)
+        if err:
+            return err
+        self._stage_fit(c)
+        self._stage_recommend(c)
+        self._stage_constrained_batch(c)
+        self._stage_diagnostics(c)
+        self._stage_inspect(c)
+        self._stage_record(c)
+        return self._stage_output(c)
+
+
+    # ------------------------------------------------------------------ #
+    #  Pipeline stages (threaded by the run-context ``c``). PR 1 of the
+    #  OptimizationAgent foundationalization (issue #196): the stages were
+    #  extracted verbatim from run_optimization_loop; behavior is unchanged
+    #  (offline prompt snapshot + live smoke guard this).
+    # ------------------------------------------------------------------ #
+
+    def _stage_load_data(self, c):
+        """Stage 1: load + validate data, negate minimize targets, retry
+        detection, budget context. Returns an error dict on failure, else None."""
+        data_path = c.data_path
+        input_cols, target_cols = c.input_cols, c.target_cols
+        target_directions = c.target_directions
+        minimize_mask = c.minimize_mask
         try:
             df = pd.read_excel(data_path) if data_path.endswith('.xlsx') else pd.read_csv(data_path)
             for col in input_cols + target_cols:
@@ -837,10 +1139,10 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                 json.dump(history, f, indent=2)
 
         # Compute budget context
-        budget_ctx = _compute_budget_context(experimental_budget, history)
-        self.state["experimental_budget"] = experimental_budget
-        self.state["cat_dims"] = list(cat_dims) if cat_dims else None
-        
+        budget_ctx = _compute_budget_context(c.experimental_budget, history)
+        self.state["experimental_budget"] = c.experimental_budget
+        self.state["cat_dims"] = list(c.cat_dims) if c.cat_dims else None
+
         if budget_ctx["budget_phase"] != "unlimited":
             print(
                 f"  - 💰 Budget: {budget_ctx['budget_total']} iterations remaining "
@@ -848,7 +1150,16 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                 f"{budget_ctx['budget_fraction_remaining']:.0%} of campaign left)"
             )
 
-        # 2. Configure Strategy (LLM)
+        c.df, c.X, c.y = df, X, y
+        c.is_moo = is_moo
+        c.history = history
+        c.budget_ctx = budget_ctx
+        return None
+
+    def _stage_configure_strategy(self, c):
+        """Stage 2: build the strategy prompt, call the LLM, validate the
+        config. Returns an error dict on JSON failure, else None."""
+        history = c.history
         if history:
             trend_parts = []
             for h in history[-5:]:
@@ -870,72 +1181,32 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             )
         else:
             trend_context = "No history."
-        
-        prompt_tmpl = BO_CONFIG_MOO_PROMPT if is_moo else BO_CONFIG_SOO_PROMPT
-        prompt_parts = [
-            prompt_tmpl,
-            f"Objective: {objective_text}",
-            *(
-                [f"Optimization direction: {', '.join(f'{c} → {d}' for c, d in target_directions.items() if c in target_cols)}"]
-                if target_directions and any(
-                    target_directions.get(c) == "minimize" for c in target_cols
-                ) else []
-            ),
-            f"Constraint: Fixed Batch Size = {batch_size}",
-            f"Meta-Data Trend: {trend_context}",
-            f"Data Summary:\n{df.describe().to_markdown()}"
-        ]
-        
-        # Budget context for strategy LLM
-        prompt_parts.append(
-            f"\n**Experimental Budget:**\n{budget_ctx['budget_guidance']}\n"
-            f"Steps completed so far: {budget_ctx['steps_completed']}. "
-            f"Data points in dataset: {len(df)}."
+
+        prompt_parts = self._build_strategy_prompt(
+            is_moo=c.is_moo, objective_text=c.objective_text,
+            target_directions=c.target_directions, target_cols=c.target_cols,
+            batch_size=c.batch_size, trend_context=trend_context, df=c.df,
+            budget_ctx=c.budget_ctx, input_cols=c.input_cols, cat_dims=c.cat_dims,
+            physical_constraints=c.physical_constraints, strategy_hint=c.strategy_hint,
+            fidelity_config=c.fidelity_config,
         )
 
-        # Surrogate-relevant context (input shape, categorical presence)
-        n_cat = len(cat_dims) if cat_dims else 0
-        n_cont = len(input_cols) - n_cat
-        if cat_dims:
-            cat_names = [input_cols[i] for i in cat_dims]
-            surrogate_ctx = (
-                f"\n**Input Shape:** {len(input_cols)} input(s): "
-                f"{n_cont} continuous, {n_cat} categorical "
-                f"({', '.join(cat_names)}). "
-                f"Categorical columns are integer-encoded in the data."
-            )
-        else:
-            surrogate_ctx = (
-                f"\n**Input Shape:** {len(input_cols)} continuous input(s). "
-                f"No categorical inputs declared."
-            )
-        prompt_parts.append(surrogate_ctx)
-        
-        # Inform strategy LLM about constraints (for better acq strategy selection)
-        if physical_constraints:
-            prompt_parts.append(
-                f"\n**Physical Constraints (informational for strategy selection):**\n"
-                f"{physical_constraints}\n"
-                f"Note: A separate step will handle constraint-aware batch design. "
-                f"Focus on selecting the best kernel, noise, and acquisition strategy."
-            )
-        
-        if strategy_hint:
-            prompt_parts.append(
-                f"\n**User Strategy Hint:**\n{strategy_hint}\n"
-                f"The user has requested specific strategy preferences. "
-                f"Respect this hint when selecting kernel, noise, and acquisition, "
-                f"unless it directly conflicts with budget constraints."
-            )
-
-        print(f"  - 🤖 BO Agent: Configuring strategy (Batch={batch_size})...")
+        print(f"  - 🤖 BO Agent: Configuring strategy (Batch={c.batch_size})...")
         resp = self.model.generate_content(prompt_parts, generation_config=self.generation_config)
         raw_config, parse_error = parse_json_from_response(resp)
         if parse_error:
             return {"error": f"JSON Error: {parse_error}"}
 
-        valid_config = self._validate_config(raw_config)
-        valid_config["batch_size"] = int(batch_size)
+        fidelity_declared = bool(c.fidelity_config and c.fidelity_config.get("fidelity_col") is not None)
+        # Skill-contributed engine components (custom surrogates/acquisitions) for
+        # the active skills — gate validation by them and pass them to the fit.
+        c.surrogate_components, c.acquisition_components = self._optimization_components()
+        valid_config = self._validate_config(
+            raw_config, fidelity_declared=fidelity_declared,
+            extra_surrogates=set(c.surrogate_components),
+            extra_acquisitions=set(c.acquisition_components),
+        )
+        valid_config["batch_size"] = int(c.batch_size)
 
         # Store current config in state
         self.state["current_config"] = valid_config
@@ -954,30 +1225,42 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             print(f"       Acq params: {acq_params}")
         print(f"       Rationale: {rationale}")
 
-        # 3. Fit Model
-        optimizer = get_optimizer(is_moo=is_moo)
+        c.trend_context = trend_context
+        c.valid_config = valid_config
+        c.model_cfg = model_cfg
+        c.acq_cfg = acq_cfg
+        return None
+
+    def _stage_fit(self, c):
+        """Stage 3: fit the surrogate."""
+        optimizer = get_optimizer(is_moo=c.is_moo)
         optimizer.fit(
-            X, y,
-            bounds=input_bounds,
-            model_config=valid_config["model_config"],
-            feature_names=input_cols,
-            fixed_noise_std=fixed_noise_std,
-            cat_dims=cat_dims,
-            dkl_config=dkl_config,
+            c.X, c.y,
+            bounds=c.input_bounds,
+            model_config=c.valid_config["model_config"],
+            feature_names=c.input_cols,
+            fixed_noise_std=c.fixed_noise_std,
+            cat_dims=c.cat_dims,
+            dkl_config=c.dkl_config,
+            fidelity_config=c.fidelity_config,
+            surrogate_components=getattr(c, "surrogate_components", None),
+            acquisition_components=getattr(c, "acquisition_components", None),
         )
-        if fixed_noise_std is not None:
+        if c.fixed_noise_std is not None:
             # Echo the override back into the config so downstream history /
             # trend summaries reflect the noise that was actually used, not
             # the LLM's choice that got bypassed.
-            valid_config["model_config"]["noise"] = f"fixed_std={fixed_noise_std}"
+            c.valid_config["model_config"]["noise"] = f"fixed_std={c.fixed_noise_std}"
+        c.optimizer = optimizer
 
-        # 4. Recommend (Unconstrained)
-        acq_conf = valid_config.get("acquisition_strategy", {})
-        strategy_name = acq_conf.get("type", "pareto" if is_moo else "log_ei")
-        
+    def _stage_recommend(self, c):
+        """Stage 4: unconstrained acquisition recommendation."""
+        acq_conf = c.valid_config.get("acquisition_strategy", {})
+        strategy_name = acq_conf.get("type", "pareto" if c.is_moo else "log_ei")
+
         print(f"  - 🚀 Optimizing {strategy_name}...")
-        next_x_batch = optimizer.recommend(
-            n_candidates=batch_size,
+        next_x_batch = c.optimizer.recommend(
+            n_candidates=c.batch_size,
             strategy=strategy_name,
             params=acq_conf.get("params", {})
         )
@@ -985,28 +1268,37 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         # Build unconstrained recommendations (used as reference and fallback)
         unconstrained_recommendations = []
         for row in next_x_batch:
-            unconstrained_recommendations.append({k: float(v) for k, v in zip(input_cols, row)})
+            unconstrained_recommendations.append({k: float(v) for k, v in zip(c.input_cols, row)})
 
-        # 4b. Constrained Batch Planning
-        constrained_metadata = None
-        
-        if physical_constraints:
+        c.strategy_name = strategy_name
+        c.next_x_batch = next_x_batch
+        c.unconstrained_recommendations = unconstrained_recommendations
+
+    def _stage_constrained_batch(self, c):
+        """Stage 4b: constraint-aware batch design (when physical_constraints
+        given), else pass through the unconstrained recommendations."""
+        input_cols, target_cols = c.input_cols, c.target_cols
+        X, y = c.X, c.y
+        optimizer = c.optimizer
+        minimize_mask = c.minimize_mask
+
+        if c.physical_constraints:
             print(f"  - 📐 Physical constraints detected. Generating acquisition landscape...")
-            
+
             acq_summary = self._summarize_acquisition_landscape(
                 optimizer=optimizer,
                 input_cols=input_cols,
-                input_bounds=input_bounds,
-                is_moo=is_moo
+                input_bounds=c.input_bounds,
+                is_moo=c.is_moo
             )
-            
+
             # Get current best for context (un-negate for display)
             def _unnegate_target_val(col_name, val):
                 """Restore original sign for minimization targets."""
                 idx = target_cols.index(col_name) if col_name in target_cols else -1
                 return -val if idx in minimize_mask else val
 
-            if is_moo:
+            if c.is_moo:
                 current_best = {}
                 current_best_value = {}
                 try:
@@ -1030,71 +1322,81 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
 
             # df still has original values (only y array was negated),
             # so df.describe() shows natural units for LLM display
-            data_summary_str = df.describe().to_markdown()
+            data_summary_str = c.df.describe().to_markdown()
 
             constrained_recs, constrained_metadata, constraint_error = self._plan_constrained_batch(
-                objective_text=objective_text,
+                objective_text=c.objective_text,
                 input_cols=input_cols,
-                input_bounds=input_bounds,
-                batch_size=batch_size,
+                input_bounds=c.input_bounds,
+                batch_size=c.batch_size,
                 acq_summary=acq_summary,
-                physical_constraints=physical_constraints,
-                unconstrained_recommendations=unconstrained_recommendations,
+                physical_constraints=c.physical_constraints,
+                unconstrained_recommendations=c.unconstrained_recommendations,
                 data_summary_str=data_summary_str,
                 current_best=current_best,
                 current_best_value=current_best_value,
-                budget_ctx=budget_ctx,
-                is_moo=is_moo,
+                budget_ctx=c.budget_ctx,
+                is_moo=c.is_moo,
                 pareto_front=pareto_front
             )
-            
+
             if constraint_error:
                 print(f"  - ⚠️  Constrained planning failed: {constraint_error}")
                 print(f"  - ↩️  Falling back to unconstrained recommendations")
-                recommendations = unconstrained_recommendations
+                recommendations = c.unconstrained_recommendations
             else:
                 recommendations = constrained_recs
-                next_x_batch = np.array([
-                    [rec[col] for col in input_cols] 
+                c.next_x_batch = np.array([
+                    [rec[col] for col in input_cols]
                     for rec in recommendations
                 ])
                 print(f"  - ✅ Using constrained batch ({len(recommendations)} experiments)")
+            c.constrained_metadata = constrained_metadata
         else:
-            recommendations = unconstrained_recommendations
+            recommendations = c.unconstrained_recommendations
 
-        # 5. Diagnostics
+        c.recommendations = recommendations
+
+    def _stage_diagnostics(self, c):
+        """Stage 5: diagnostics plot + sensitivity, and (SOO) acquisition
+        plot/data artifacts."""
+        history = c.history
+        df = c.df
+        optimizer = c.optimizer
+        output_dir = c.output_dir
+
         step_num = len(history) + 1
         n_initial = history[0]["data_points"] if history and "data_points" in history[0] else len(df)
         plot_path = f"{output_dir}/step_{step_num}.png"
         sensitivity_data = {}
-        if is_moo:
+        if c.is_moo:
             optimizer.generate_diagnostics(save_path=plot_path)
         else:
-            sensitivity_data = optimizer.generate_diagnostics(next_x_batch, df[target_cols[0]].values.tolist(), save_path=plot_path, n_initial=n_initial) or {}
+            sensitivity_data = optimizer.generate_diagnostics(c.next_x_batch, df[c.target_cols[0]].values.tolist(), save_path=plot_path, n_initial=n_initial) or {}
 
         # 5b. Acquisition Function Plot & Data (SOO only)
         acq_plot_path = None
         acq_data_path = None
-        
-        if not is_moo and plot_acq:
+
+        if not c.is_moo and c.plot_acq:
             print("  - 📊 BO Agent: Plotting acquisition function...")
             try:
                 acq_plot_path = f"{output_dir}/acq_step_{step_num}.png"
                 optimizer.plot_acquisition(
-                    candidate_x=next_x_batch,
+                    candidate_x=c.next_x_batch,
                     save_path=acq_plot_path
                 )
                 print(f"  - 💾 Acquisition plot saved: {acq_plot_path}")
             except RuntimeError as e:
                 logging.warning(f"Could not plot acquisition function: {e}")
                 acq_plot_path = None
-        
-        if not is_moo and save_acq:
+
+        if not c.is_moo and c.save_acq:
             print("  - 💾 BO Agent: Saving acquisition function data...")
             try:
                 acq_data_path = f"{output_dir}/acq_data_step_{step_num}.npz"
                 acq_meta = optimizer.save_acquisition_data(
-                    candidate_x=next_x_batch,
+                    candidate_x=c.next_x_batch,
                     save_path=acq_data_path
                 )
                 print(f"  - 💾 Acquisition data saved: {acq_data_path} "
@@ -1103,102 +1405,108 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                 logging.warning(f"Could not save acquisition data: {e}")
                 acq_data_path = None
 
-        # 6. Inspection
+        c.step_num = step_num
+        c.n_initial = n_initial
+        c.plot_path = plot_path
+        c.sensitivity_data = sensitivity_data
+        c.acq_plot_path = acq_plot_path
+        c.acq_data_path = acq_data_path
+
+    def _stage_inspect(self, c):
+        """Stage 6: LLM visual inspection of the diagnostics plot."""
         print("  - 👀 BO Agent: Inspecting visuals...")
-        visual_prompt = BO_VISUAL_INSPECTION_MOO_PROMPT if is_moo else BO_VISUAL_INSPECTION_PROMPT
-        # Anchor the inspector to the currently active config. The output
-        # spec already asks for "suggested_adjustments" — listing the active
-        # config alongside is enough context; no instruction needed.
-        active_cfg_lines = [
-            f"  Surrogate: {model_cfg.get('surrogate', 'single_task')}",
-            f"  Kernel: {model_cfg.get('kernel', 'matern_2.5')}",
-            f"  Noise: {model_cfg.get('noise', 'min_noise_low')}",
-            f"  Input transform: {model_cfg.get('input_transform', 'none')}",
-            f"  Acquisition: {acq_cfg.get('type', 'log_ei')}",
-        ]
-        acq_params = acq_cfg.get("params") or {}
-        if acq_params:
-            active_cfg_lines.append(f"  Acquisition params: {acq_params}")
-        visual_prompt += "\n\nCURRENT STRATEGY:\n" + "\n".join(active_cfg_lines)
-        if sensitivity_data:
-            sobol_text = "\n".join(f"  {k}: {v}" for k, v in sensitivity_data.items())
-            visual_prompt += (
-                f"\n\nACTUAL SOBOL INDEX VALUES (use these exact numbers, "
-                f"do not estimate from the bar chart):\n{sobol_text}"
-            )
+        visual_prompt = self._build_inspection_prompt(
+            is_moo=c.is_moo, model_cfg=c.model_cfg, acq_cfg=c.acq_cfg,
+            sensitivity_data=c.sensitivity_data,
+        )
         try:
-            img = PIL_Image.open(plot_path)
+            img = PIL_Image.open(c.plot_path)
             insp_resp = self.model.generate_content([visual_prompt, img], generation_config=self.generation_config)
             inspection, _ = parse_json_from_response(insp_resp)
         except Exception as e:
             inspection = {"status": "skipped", "reason": str(e)}
+        c.inspection = inspection
 
-        # 7. Save History
+    def _stage_record(self, c):
+        """Stage 7: persist the step to bo_history.json."""
         log_entry = {
-            "step": step_num,
-            "data_points": len(df),
-            "config": valid_config,
-            "recommendation_batch": recommendations,
-            "inspection": inspection,
-            "budget": budget_ctx,
+            "step": c.step_num,
+            "data_points": len(c.df),
+            "config": c.valid_config,
+            "recommendation_batch": c.recommendations,
+            "inspection": c.inspection,
+            "budget": c.budget_ctx,
         }
         # Include acquisition paths in history when available
-        if acq_plot_path or acq_data_path:
+        if c.acq_plot_path or c.acq_data_path:
             log_entry["acquisition"] = {
-                "strategy": strategy_name,
-                "plot_path": acq_plot_path,
-                "data_path": acq_data_path,
+                "strategy": c.strategy_name,
+                "plot_path": c.acq_plot_path,
+                "data_path": c.acq_data_path,
             }
         # Include constrained planning metadata in history
-        if constrained_metadata:
-            log_entry["constrained_planning"] = constrained_metadata
-        if physical_constraints:
-            log_entry["physical_constraints"] = physical_constraints
-            
+        if c.constrained_metadata:
+            log_entry["constrained_planning"] = c.constrained_metadata
+        if c.physical_constraints:
+            log_entry["physical_constraints"] = c.physical_constraints
+
         self._save_history(log_entry)
 
-        # 8. Output
-        if batch_size > 1:
-            batch_csv = f"{output_dir}/batch_step_{step_num}.csv"
-            pd.DataFrame(recommendations).to_csv(batch_csv, index=False)
+    def _stage_output(self, c):
+        """Stage 8: assemble the result dict, log the action, return."""
+        if c.batch_size > 1:
+            batch_csv = f"{c.output_dir}/batch_step_{c.step_num}.csv"
+            pd.DataFrame(c.recommendations).to_csv(batch_csv, index=False)
             print(f"  - 💾 Batch saved: {batch_csv}")
 
         result = {
             "status": "success",
-            "next_parameters": recommendations[0] if batch_size == 1 else recommendations,
-            "strategy": valid_config,
-            "plot_path": plot_path,
-            "inspection": inspection,
-            "budget": budget_ctx,
+            "next_parameters": c.recommendations[0] if c.batch_size == 1 else c.recommendations,
+            "strategy": c.valid_config,
+            "plot_path": c.plot_path,
+            "inspection": c.inspection,
+            "budget": c.budget_ctx,
         }
-        if acq_plot_path:
-            result["acq_plot_path"] = acq_plot_path
-        if acq_data_path:
-            result["acq_data_path"] = acq_data_path
+        if c.acq_plot_path:
+            result["acq_plot_path"] = c.acq_plot_path
+        if c.acq_data_path:
+            result["acq_data_path"] = c.acq_data_path
         # Include constrained planning info in result
-        if constrained_metadata:
-            result["constrained_planning"] = constrained_metadata
-        if physical_constraints:
+        if c.constrained_metadata:
+            result["constrained_planning"] = c.constrained_metadata
+        if c.physical_constraints:
             result["constraint_aware"] = True
-        
+
         # Log this action to state
         self._log_action(
             action="run_optimization_loop",
             input_ctx={
-                "data_path": data_path,
-                "input_cols": input_cols,
-                "target_cols": target_cols,
-                "batch_size": batch_size,
-                "experimental_budget": experimental_budget,
-                "budget_phase": budget_ctx["budget_phase"],
-                "physical_constraints": physical_constraints is not None,
-                "save_acq": save_acq,
-                "plot_acq": plot_acq,
-                "cat_dims": list(cat_dims) if cat_dims else None,
-                "surrogate": valid_config.get("model_config", {}).get("surrogate", "single_task"),
+                "data_path": c.data_path,
+                "input_cols": c.input_cols,
+                "target_cols": c.target_cols,
+                "batch_size": c.batch_size,
+                "experimental_budget": c.experimental_budget,
+                "budget_phase": c.budget_ctx["budget_phase"],
+                "physical_constraints": c.physical_constraints is not None,
+                "save_acq": c.save_acq,
+                "plot_acq": c.plot_acq,
+                "cat_dims": list(c.cat_dims) if c.cat_dims else None,
+                "surrogate": c.valid_config.get("model_config", {}).get("surrogate", "single_task"),
             },
             result=result,
-            rationale=valid_config.get("rationale")
+            rationale=c.valid_config.get("rationale")
         )
-        
+
         return result
+
+
+class BOAgent(OptimizationAgent):
+    """Back-compat alias for :class:`OptimizationAgent`.
+
+    The optimization modality foundationalized from ``BOAgent`` into
+    ``OptimizationAgent`` (issue #196). This subclass keeps the old import path
+    and constructor working unchanged for existing callers; no deprecation
+    warning yet (added in a later PR once callers migrate).
+    """
+    pass
+

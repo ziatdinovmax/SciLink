@@ -52,6 +52,42 @@ def _sidecar_conditions(data_path: Optional[str]) -> Dict[str, Any]:
     return {k: v for k, v in cond.items() if isinstance(v, (int, float, str))}
 
 
+def _series_conditions(series_meta: Any, index: Any,
+                       data_path: Optional[str]) -> Dict[str, Any]:
+    """Per-unit conditions from the run's top-level ``series_metadata`` — the
+    control variable(s) when conditions are supplied as a manifest / series list
+    rather than per-file sidecar JSONs. Each block is
+    ``{"variable", "values", "unit"}`` where ``values`` is either a list aligned
+    to the spectrum ``index`` or a ``{filename-or-stem: value}`` map; the primary
+    block is joined together with any ``secondary_variables`` (grid designs).
+    Returns ``{}`` on anything unexpected — a malformed block must not break the
+    run, and sidecar conditions (read separately) take precedence over these."""
+    if not isinstance(series_meta, dict):
+        return {}
+    blocks = [series_meta]
+    sec = series_meta.get("secondary_variables")
+    if isinstance(sec, list):
+        blocks.extend(sec)
+    name = Path(data_path).name if data_path else None
+    stem = Path(data_path).stem if data_path else None
+    out: Dict[str, Any] = {}
+    for b in blocks:
+        if not isinstance(b, dict):
+            continue
+        var, vals = b.get("variable"), b.get("values")
+        if not isinstance(var, str) or vals is None:
+            continue
+        val = None
+        if isinstance(vals, dict):
+            val = vals.get(name, vals.get(stem))
+        elif isinstance(vals, (list, tuple)):
+            if isinstance(index, int) and 0 <= index < len(vals):
+                val = vals[index]
+        if isinstance(val, (int, float, str)):
+            out[var] = val
+    return out
+
+
 def _curve_fit_rows(output_dir: Path) -> List[Dict[str, Any]]:
     """One row per spectrum from a curve-fitting run's series_fit_results.json."""
     sfr = output_dir / "series_fit_results.json"
@@ -61,12 +97,19 @@ def _curve_fit_rows(output_dir: Path) -> List[Dict[str, Any]]:
         data = json.loads(sfr.read_text())
     except Exception:  # noqa: BLE001
         return []
+    series_meta = data.get("series_metadata")
     rows: List[Dict[str, Any]] = []
     for r in data.get("results", []):
         if not isinstance(r, dict) or not r.get("success"):
             continue
         row: Dict[str, Any] = {"unit": r.get("name") or f"index_{r.get('index')}"}
-        row.update(_sidecar_conditions(r.get("data_path")))
+        # A per-file sidecar is the authoritative, complete per-unit condition
+        # record; fall back to the coarser series_metadata ONLY for units without
+        # one. Using it as a strict fallback (not an additive layer) avoids
+        # double-counting the same control variable under different names — e.g.
+        # sidecar 'temperature_C' alongside a series 'temperature' column.
+        row.update(_sidecar_conditions(r.get("data_path"))
+                   or _series_conditions(series_meta, r.get("index"), r.get("data_path")))
         row.update(_flatten_scalars(r.get("parameters")))
         row.update(_flatten_scalars(r.get("fit_quality"), "fit_"))
         rows.append(row)
@@ -84,12 +127,16 @@ def _image_series_rows(output_dir: Path) -> List[Dict[str, Any]]:
         data = json.loads(sar.read_text())
     except Exception:  # noqa: BLE001
         return []
+    series_meta = data.get("series_metadata")
     rows: List[Dict[str, Any]] = []
     for r in data.get("results", []):
         if not isinstance(r, dict) or not r.get("success"):
             continue
         row: Dict[str, Any] = {"unit": r.get("name") or f"index_{r.get('index')}"}
-        row.update(_sidecar_conditions(r.get("data_path")))
+        # Sidecar is authoritative per unit; series_metadata is a strict fallback
+        # for units lacking one (see _curve_fit_rows for the rationale).
+        row.update(_sidecar_conditions(r.get("data_path"))
+                   or _series_conditions(series_meta, r.get("index"), r.get("data_path")))
         row.update(_flatten_scalars(r.get("extracted_features")))
         row.update(_flatten_scalars(r.get("quality_metrics"), "quality_"))
         rows.append(row)
