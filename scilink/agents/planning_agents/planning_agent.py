@@ -1131,6 +1131,62 @@ class PlanningAgent(BaseAgent):
         
         return self.state
     
+    def _recritique_revision(self,
+                             new_plan: Dict[str, Any],
+                             prior_plan: Dict[str, Any],
+                             revision_request: str,
+                             skill_context: Optional[str] = None,
+                             images: Optional[List[Any]] = None) -> Dict[str, Any]:
+        """
+        Resolution-check re-critique after a plan revision, so the recorded
+        caveats describe the CURRENT plan — the refinement LLM echoes the old
+        ``critic_findings`` into the revised JSON, which otherwise persists
+        stale (possibly already-fixed) caveats into reports and warnings.
+
+        Pops the echoed caveats, then re-runs the advisory critic with the
+        before/request/after picture (drop resolved, keep unresolved, flag
+        new). Annotation only — never modifies the plan and never triggers
+        further action, so the advisory-only contract is untouched. Fails
+        open like the critic itself. Evidence here is the revision context
+        (prior plan + findings + request); the original retrieval context is
+        not persisted across calls.
+        """
+        if new_plan.get("error") or not new_plan.get("proposed_experiments"):
+            return new_plan
+
+        prior_findings = prior_plan.get("critic_findings")
+        new_plan.pop("critic_findings", None)  # discard echoed-stale caveats
+
+        try:
+            verdict = critique_plan(
+                self.state["objective"], new_plan, self.model,
+                self.generation_config,
+                images=images,
+                skill_context=skill_context,
+                prior_plan=prior_plan,
+                prior_findings=prior_findings,
+                human_feedback=revision_request,
+            )
+        except Exception as e:
+            # critique_plan fails open internally; this guard keeps the
+            # revision alive even if the call itself dies.
+            logging.error(f"Revision re-critique failed open: {e}")
+            verdict = {"findings": []}
+        findings = verdict.get("findings", [])
+        if findings:
+            _order = {"critical": 0, "minor": 1}
+            findings = sorted(findings,
+                              key=lambda f: _order.get(f.get("severity"), 1))
+            new_plan["critic_findings"] = findings
+            if self.state.get("plan_history"):
+                self.state["plan_history"][-1]["critic_findings"] = findings
+        elif self.state.get("plan_history"):
+            # the snapshot appended before this call carries the echoed copy
+            self.state["plan_history"][-1].pop("critic_findings", None)
+
+        self.state["current_plan"] = new_plan
+        return new_plan
+
     def refine_plan(self,
                     results: Any,
                     enable_human_feedback: bool = True,
@@ -1268,6 +1324,15 @@ Select the most appropriate strategy:
         self.state["plan_history"].append(new_plan.copy())
         self.state["current_plan"] = new_plan
 
+        # Resolution-check re-critique so caveats describe the revised plan.
+        new_plan = self._recritique_revision(
+            new_plan, prior_plan=current_plan,
+            revision_request=("Plan revised in response to experimental "
+                             f"results:\n{consolidated_feedback[:2000]}"),
+            skill_context=skill_refine_context,
+            images=loaded_images or None,
+        )
+
         self._log_action(
             action="refine_plan_reasoning",
             input_ctx={
@@ -1295,6 +1360,7 @@ Select the most appropriate strategy:
                     "phase": "science_iteration", 
                     "feedback": human_feedback
                 })
+                prior_plan = new_plan
                 new_plan = refine_plan_with_feedback(
                     original_result=new_plan,
                     feedback=human_feedback,
@@ -1308,6 +1374,11 @@ Select the most appropriate strategy:
                 new_plan["stage"] = "Human Refined (Science)"
                 self.state["plan_history"].append(new_plan.copy())
                 self.state["current_plan"] = new_plan
+                new_plan = self._recritique_revision(
+                    new_plan, prior_plan=prior_plan,
+                    revision_request=human_feedback,
+                    skill_context=skill_refine_context,
+                )
                 print("✅ Strategic revision updated.")
 
         self._log_action(
@@ -1396,6 +1467,14 @@ Select the most appropriate strategy:
         self.state["plan_history"].append(new_plan.copy())
         self.state["current_plan"] = new_plan
 
+        # Resolution-check re-critique: a constraint adjustment often resolves
+        # a recorded caveat — the caveat channel must reflect the CURRENT plan.
+        new_plan = self._recritique_revision(
+            new_plan, prior_plan=current_plan,
+            revision_request=constraint_description,
+            skill_context=skill_constraint_context,
+        )
+
         self._log_action(
             action="adjust_plan_for_constraints",
             input_ctx={"constraint": constraint_description[:200]},
@@ -1419,6 +1498,7 @@ Select the most appropriate strategy:
                     "phase": "constraint_adjustment",
                     "feedback": human_feedback
                 })
+                prior_plan = new_plan
                 new_plan = refine_plan_with_feedback(
                     original_result=new_plan,
                     feedback=human_feedback,
@@ -1431,6 +1511,11 @@ Select the most appropriate strategy:
                 new_plan["stage"] = "Human Refined (Constraint)"
                 self.state["plan_history"].append(new_plan.copy())
                 self.state["current_plan"] = new_plan
+                new_plan = self._recritique_revision(
+                    new_plan, prior_plan=prior_plan,
+                    revision_request=human_feedback,
+                    skill_context=skill_constraint_context,
+                )
                 print("✅ Constraint adjustment updated.")
 
         self.state["status"] = "constraint_adjusted"

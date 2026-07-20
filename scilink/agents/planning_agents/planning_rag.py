@@ -241,7 +241,7 @@ def critique_plan(objective: str,
         if pl:
             revision_parts.append("CAVEATS PREVIOUSLY RAISED on the prior plan:\n" + pl)
     if human_feedback:
-        revision_parts.append(f'HUMAN REVISION REQUEST:\n"{human_feedback}"')
+        revision_parts.append(f'REVISION REQUEST:\n"{human_feedback}"')
 
     if revision_parts:
         prior_section = (
