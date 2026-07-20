@@ -103,6 +103,27 @@ def _build_optimization_skill_description() -> str:
     return " ".join(parts)
 
 
+def resolve_n_candidates(requested, planner_state) -> int:
+    """
+    Best-of-N default policy for ``generate_initial_plan`` (issue #377).
+
+    An explicit request always wins (clamped 1-4; pass 1 for a single plan).
+    When the caller omits it, a campaign's FIRST plan defaults to best-of-3 —
+    two rounds of live meta testing showed the opt-in default never fired
+    because upstream routing narrows the objective before delegating, so
+    "raise N when open-ended" prompt guidance never triggered. Any later
+    plan in the campaign defaults to 1: follow-ups iterate on a committed
+    strategy, and the runner-up fallback already covers plan replacement.
+    """
+    if requested is not None:
+        try:
+            return max(1, min(int(requested), 4))
+        except (TypeError, ValueError):
+            return 1
+    is_first_plan = not (planner_state or {}).get("current_plan")
+    return 3 if is_first_plan else 1
+
+
 class OrchestratorTools:
     """
     Manages tool definitions, schemas, and execution for the OrchestratorAgent.
@@ -677,7 +698,7 @@ class OrchestratorTools:
             skill: str = None,
             literature_context: str = None,
             molecule_context: str = None,
-            n_candidates: int = 1
+            n_candidates: int = None
         ):
             """
             Generates experimental plan (science strategy only, no code).
@@ -795,10 +816,11 @@ class OrchestratorTools:
             ext_ctx = "\n\n".join(external_context_parts) if external_context_parts else None
 
             try:
-                try:
-                    n_cand = max(1, min(int(n_candidates or 1), 4))
-                except (TypeError, ValueError):
-                    n_cand = 1
+                n_cand = resolve_n_candidates(
+                    n_candidates, self.orch.planner.state)
+                if n_candidates is None and n_cand > 1:
+                    print(f"    🧭 New campaign — defaulting to best-of-{n_cand} "
+                          "candidate plans (pass n_candidates=1 for a single plan).")
                 plan = self.orch.planner.generate_plan(
                     objective=obj,
                     knowledge_paths=knowledge_list,
@@ -916,20 +938,17 @@ class OrchestratorTools:
                 "n_candidates": {
                     "type": "integer",
                     "description": (
-                        "Best-of-N width (1-4, default 1 = single plan, "
-                        "unchanged behavior). RAISE to explore multiple "
-                        "DISTINCT strategic approaches when the objective is "
-                        "open-ended, the evidence is rich, or the user asks "
-                        "for alternatives — an LLM judge picks the best and "
-                        "the human can override. Keep at 1 for follow-up "
-                        "iterations, thin evidence, or narrowly-specified "
-                        "objectives. A cap, not a quota: generation stops "
-                        "early when the evidence supports no further "
-                        "distinct approach. When raising it, keep "
-                        "specific_objective about ONE scientific goal — do "
-                        "NOT ask for multiple plans/strategies in the "
-                        "objective text; this parameter provides the "
-                        "multiplicity."
+                        "Best-of-N width (1-4). OMITTED: a campaign's FIRST "
+                        "plan defaults to best-of-3 (distinct candidate "
+                        "strategies, LLM judge picks, human can override); "
+                        "later plans default to 1. Pass 1 explicitly when "
+                        "the user wants a single plan; pass 2-4 to set the "
+                        "width. A cap, not a quota: generation stops early "
+                        "when the evidence supports no further distinct "
+                        "approach. Keep specific_objective about ONE "
+                        "scientific goal — do NOT ask for multiple "
+                        "plans/strategies in the objective text; this "
+                        "parameter provides the multiplicity."
                     ),
                 },
             },

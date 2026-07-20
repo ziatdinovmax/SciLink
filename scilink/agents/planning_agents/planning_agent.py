@@ -458,9 +458,12 @@ class PlanningAgent(BaseAgent):
                 mechanistic approach — an LLM judge picks one, and (in
                 interactive modes) the human may override before the usual
                 plan review. A cap, not a quota: generation stops early when
-                the evidence supports no further distinct approach. RAISE for
-                breadth on open-ended objectives; keep 1 for follow-up
-                iterations and thin evidence.
+                the evidence supports no further distinct approach. Note that
+                even a narrowly-specified objective usually admits multiple
+                strategies — the meaningful reason to stay at 1 is a strategy
+                already being committed (follow-up iterations), not objective
+                specificity. (The orchestrator tool layer applies exactly that
+                policy: campaign-first plans default to 3.)
             candidate_report_dir: Directory for per-candidate HTML reports
                 (persisted; referenced from the selection cards). Only used
                 when n_candidates > 1.

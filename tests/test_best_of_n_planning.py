@@ -262,6 +262,19 @@ def test_candidate_html_reports_written(tmp_path, no_verify_no_critic):
         str(report_dir / "candidate_1.html"), str(report_dir / "candidate_2.html")]
 
 
+def test_resolve_n_candidates_default_policy():
+    """First plan of a campaign defaults to best-of-3; follow-ups to 1;
+    explicit values always win (clamped); junk degrades to 1."""
+    from scilink.agents.planning_agents.orchestrator_tools import resolve_n_candidates
+    assert resolve_n_candidates(None, {}) == 3
+    assert resolve_n_candidates(None, None) == 3
+    assert resolve_n_candidates(None, {"current_plan": {"stage": "x"}}) == 1
+    assert resolve_n_candidates(1, {}) == 1          # explicit single plan wins
+    assert resolve_n_candidates(4, {"current_plan": {}}) == 4
+    assert resolve_n_candidates(7, {}) == 4          # clamp
+    assert resolve_n_candidates("junk", {}) == 1     # degrade, never crash
+
+
 def test_all_authors_get_one_of_n_note(tmp_path, no_verify_no_critic):
     """EVERY author (candidate 1 included) is told it writes ONE of N —
     otherwise an objective phrased 'explore several alternatives' makes the

@@ -399,13 +399,13 @@ class MetaOrchestratorTools:
                 "suggested_followups, warnings, delegation_index). `task` must "
                 "be a complete, self-contained instruction. The specialist "
                 "supports best-of-N plan generation (an LLM judge picks among "
-                "distinct candidate strategies): when the user asks for "
-                "alternatives or the design goal is open-ended, add the "
-                "instruction 'use n_candidates=N on generate_initial_plan' "
-                "(N up to 4) to the task — but keep the scientific goal "
-                "itself SINGULAR (never phrase the objective as 'propose N "
-                "strategies'; the tool parameter provides the multiplicity). "
-                "Omit for narrow or follow-up tasks."
+                "distinct candidate strategies) and DEFAULTS to best-of-3 for "
+                "a campaign's first plan. Only add an explicit "
+                "'use n_candidates=N on generate_initial_plan' instruction "
+                "when the user wants a specific width — including N=1 for a "
+                "single plan. Keep the scientific goal itself SINGULAR "
+                "(never phrase the objective as 'propose N strategies'; the "
+                "tool parameter provides the multiplicity)."
             ),
             parameters={
                 "task": {
