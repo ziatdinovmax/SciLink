@@ -133,6 +133,16 @@ You MUST respond with a single JSON object containing a key "proposed_experiment
 """
 
 
+HYPOTHESIS_BESTOFN_AUTHOR_NOTE = """## ⚠️ BEST-OF-N AUTHORING NOTE
+You are authoring ONE candidate in a multi-candidate (best-of-N) process:
+alternative strategies are handled by SEPARATE candidate plans and compared
+by a judge afterwards. If the objective asks to explore multiple distinct
+strategies or alternatives, that request is satisfied by the process — NOT by
+this plan. Propose exactly ONE strategy: a single coherent experiment plan
+built around one mechanistic approach. Do NOT pack multiple alternative
+strategies into this plan."""
+
+
 HYPOTHESIS_DISTINCTNESS_CONDITIONING = """## ⚠️ PRIOR CANDIDATE HYPOTHESES (already proposed for this objective)
 {prior_hypotheses}
 

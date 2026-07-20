@@ -262,6 +262,29 @@ def test_candidate_html_reports_written(tmp_path, no_verify_no_critic):
         str(report_dir / "candidate_1.html"), str(report_dir / "candidate_2.html")]
 
 
+def test_all_authors_get_one_of_n_note(tmp_path, no_verify_no_critic):
+    """EVERY author (candidate 1 included) is told it writes ONE of N —
+    otherwise an objective phrased 'explore several alternatives' makes the
+    first author pack all strategies into one plan (observed live). Absent
+    entirely at n_candidates=1."""
+    model = ScriptedModel([
+        plan_json("P1", "H1"),
+        plan_json("P2", "H2"),
+        judge_json(1, 2),
+    ])
+    agent = make_agent(tmp_path, model)
+    agent.generate_plan("explore several alternative strategies for X",
+                        enable_human_feedback=False, n_candidates=2)
+    gen1, gen2, _ = model.calls
+    assert "BEST-OF-N AUTHORING NOTE" in gen1
+    assert "BEST-OF-N AUTHORING NOTE" in gen2
+
+    model2 = ScriptedModel([plan_json("Solo", "H")])
+    agent2 = make_agent(tmp_path / "b", model2)
+    agent2.generate_plan("obj", enable_human_feedback=False)
+    assert "BEST-OF-N AUTHORING NOTE" not in model2.calls[0]
+
+
 def test_constraints_reach_all_authors_and_judge(tmp_path, no_verify_no_critic):
     """Lab constraints (additional_context) must reach EVERY candidate's
     authoring prompt AND the judge — feasibility is judged against them."""

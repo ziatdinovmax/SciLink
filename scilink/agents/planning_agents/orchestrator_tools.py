@@ -925,7 +925,11 @@ class OrchestratorTools:
                         "iterations, thin evidence, or narrowly-specified "
                         "objectives. A cap, not a quota: generation stops "
                         "early when the evidence supports no further "
-                        "distinct approach."
+                        "distinct approach. When raising it, keep "
+                        "specific_objective about ONE scientific goal — do "
+                        "NOT ask for multiple plans/strategies in the "
+                        "objective text; this parameter provides the "
+                        "multiplicity."
                     ),
                 },
             },

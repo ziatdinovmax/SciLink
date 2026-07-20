@@ -16,7 +16,8 @@ from .instruct import (
     HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK,
     TEA_INSTRUCTIONS_FALLBACK,
     HYPOTHESIS_DISTINCTNESS_CONDITIONING,
-    HYPOTHESIS_BEST_OF_N_SELECTION_INSTRUCTIONS
+    HYPOTHESIS_BEST_OF_N_SELECTION_INSTRUCTIONS,
+    HYPOTHESIS_BESTOFN_AUTHOR_NOTE
 )
 
 
@@ -419,6 +420,15 @@ def generate_plan_candidates(objective: str,
     (``{"retrieved_context", "primary_data"}``) all candidates were authored
     against.
     """
+    # Every author — candidate 1 included — is told it is writing ONE of N.
+    # Without this, an objective phrased as "explore several alternatives"
+    # makes the (otherwise unconditioned) first author pack all the
+    # alternative strategies into a single plan, which then wins at the
+    # judge on scope-matching (observed live via the meta delegation path).
+    author_ctx = (f"{additional_context}\n\n{HYPOTHESIS_BESTOFN_AUTHOR_NOTE}"
+                  if additional_context else HYPOTHESIS_BESTOFN_AUTHOR_NOTE) \
+        if n_candidates > 1 else additional_context
+
     first, author_context = perform_science_rag(
         objective=objective,
         instructions=HYPOTHESIS_GENERATION_INSTRUCTIONS,
@@ -429,7 +439,7 @@ def generate_plan_candidates(objective: str,
         primary_data_set=primary_data_set,
         image_paths=image_paths,
         image_descriptions=image_descriptions,
-        additional_context=additional_context,
+        additional_context=author_ctx,
         external_context=external_context,
         skill_context=skill_context,
         return_context=True,
@@ -454,8 +464,9 @@ def generate_plan_candidates(objective: str,
         conditioning = HYPOTHESIS_DISTINCTNESS_CONDITIONING.format(
             prior_hypotheses=prior
         )
-        add_ctx = (f"{additional_context}\n\n{conditioning}"
-                   if additional_context else conditioning)
+        note_and_conditioning = f"{HYPOTHESIS_BESTOFN_AUTHOR_NOTE}\n\n{conditioning}"
+        add_ctx = (f"{additional_context}\n\n{note_and_conditioning}"
+                   if additional_context else note_and_conditioning)
         # No fallback_instructions here: within the pinned tier, a decline is
         # a decline — the early stop, not a trigger to change tiers mid-run.
         res = run_rag(
