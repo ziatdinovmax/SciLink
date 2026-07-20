@@ -288,7 +288,14 @@ def _find_code_review_files() -> list[tuple[str, str]]:
 
 
 def _find_new_html_reports() -> list[str]:
-    """Return HTML report paths in the session dir not yet shown."""
+    """Return HTML report paths in the session dir not yet shown.
+
+    Best-of-N candidate reports (``plan_candidates/``) are deliberately
+    excluded from the chat message: they are side artifacts reviewed at the
+    selection prompt and browsable in the File Explorer, and stacking N of
+    them next to the winner's ``plan.html`` buries the actual deliverable.
+    They are still marked known so they never leak into a later message.
+    """
     session_dir = st.session_state.session_dir
     if session_dir is None:
         return []
@@ -297,6 +304,8 @@ def _find_new_html_reports() -> list[str]:
         s = str(p)
         if s not in st.session_state.known_images:  # reuse the same set
             st.session_state.known_images.add(s)
+            if p.parent.name == "plan_candidates":
+                continue
             new.append(s)
     return new
 

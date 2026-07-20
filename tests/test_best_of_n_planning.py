@@ -370,6 +370,33 @@ def test_cli_block_roundtrips_through_ui_parser(capsys):
     assert parse("REQUESTING FEEDBACK\nReview the plan", prompt) is None
 
 
+def test_candidate_reports_excluded_from_chat_sweep(tmp_path):
+    """plan.html reaches the chat message; plan_candidates/*.html do not
+    (side artifacts — selection prompt + File Explorer), but are marked
+    known so they never leak into a later message."""
+    src = Path(__file__).resolve().parents[1] / "scilink" / "ui" / "app.py"
+    tree = ast.parse(src.read_text())
+    fn = next(n for n in tree.body
+              if isinstance(n, ast.FunctionDef)
+              and n.name == "_find_new_html_reports")
+    session = tmp_path / "planning_session_x"
+    (session / "plan_candidates").mkdir(parents=True)
+    (session / "plan.html").write_text("<html>winner</html>")
+    for i in (1, 2, 3):
+        (session / "plan_candidates" / f"candidate_{i}.html").write_text("<html>c</html>")
+
+    known = set()
+    st_stub = SimpleNamespace(session_state=SimpleNamespace(
+        session_dir=str(session), known_images=known))
+    ns = {"st": st_stub, "Path": Path}
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), str(src), "exec"), ns)
+    new = ns["_find_new_html_reports"]()
+
+    assert [Path(p).name for p in new] == ["plan.html"]
+    assert len(known) == 4  # all four marked seen
+    assert ns["_find_new_html_reports"]() == []  # nothing leaks later
+
+
 def test_stale_buffer_takes_latest_block(capsys):
     """Two successive reviews in one session buffer -> parser reads the last."""
     c2 = [json.loads(plan_json(f"Old {i}", f"HO{i}")) for i in (1, 2)]
