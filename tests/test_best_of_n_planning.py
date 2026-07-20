@@ -262,6 +262,26 @@ def test_candidate_html_reports_written(tmp_path, no_verify_no_critic):
         str(report_dir / "candidate_1.html"), str(report_dir / "candidate_2.html")]
 
 
+def test_constraints_reach_all_authors_and_judge(tmp_path, no_verify_no_critic):
+    """Lab constraints (additional_context) must reach EVERY candidate's
+    authoring prompt AND the judge — feasibility is judged against them."""
+    model = ScriptedModel([
+        plan_json("P1", "H1"),
+        plan_json("P2", "H2"),
+        judge_json(1, 2),
+    ])
+    agent = make_agent(tmp_path, model)
+    agent.generate_plan(
+        "obj", enable_human_feedback=False, n_candidates=2,
+        additional_context={"Laboratory Equipment Constraints":
+                            "All experiments run on an Opentrons Flex 2 with "
+                            "96-well plates."})
+    gen1, gen2, judge = model.calls
+    assert all("Opentrons Flex 2" in p for p in (gen1, gen2, judge))
+    # and on the judge it arrives as evidence, not as authoring instructions
+    assert "Additional Context" in judge
+
+
 # ------------------------------------------------- CLI -> UI parser contract
 
 def _load_ui_parser():

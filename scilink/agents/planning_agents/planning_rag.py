@@ -492,6 +492,7 @@ def judge_plan_candidates(objective: str,
                           primary_data: Optional[str] = None,
                           images: Optional[List[Any]] = None,
                           image_descriptions: Optional[List[str]] = None,
+                          additional_context: Optional[str] = None,
                           skill_context: Optional[str] = None,
                           fallback_tier: bool = False) -> Dict[str, Any]:
     """
@@ -523,6 +524,10 @@ def judge_plan_candidates(objective: str,
     evidence_parts = []
     if primary_data:
         evidence_parts.append(f"## 📊 Primary Experimental Data:\n{primary_data}")
+    if additional_context:
+        # Lab constraints / equipment live here — feasibility is judged
+        # against this, so it must reach the judge, not just the authors.
+        evidence_parts.append(f"## Additional Context:\n{additional_context}")
     if retrieved_context:
         evidence_parts.append(f"## Retrieved Context (KB + literature):\n{retrieved_context}")
     if skill_context:

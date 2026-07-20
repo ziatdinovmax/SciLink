@@ -584,6 +584,7 @@ class PlanningAgent(BaseAgent):
                     primary_data=author_context.get("primary_data"),
                     images=all_image_paths or None,
                     image_descriptions=image_descriptions,
+                    additional_context=ctx_string,
                     skill_context=skill_planning_context,
                     fallback_tier=(tier == "fallback"),
                 )
