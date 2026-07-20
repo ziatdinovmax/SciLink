@@ -47,8 +47,13 @@ def init_session_state() -> None:
         "pending_auto_load_metadata": None,
         "cfg_consent": False,
         "selected_preview_file": None,
-        # Mode selection (None until chosen on welcome screen)
-        "app_mode": None,
+        # Mode selection. Initialized to the real default ("meta" — mission
+        # control) rather than None: the sidebar renders BEFORE the main
+        # body's None->meta assignment, so a None here made the first page
+        # load hide the mode-gated sidebar sections (embedding model/API key
+        # for plan+meta, the meta's two-level autonomy list) and point
+        # resume-session discovery at the analyze fallback.
+        "app_mode": "meta",
         # Planning mode state
         "planning_objective": "",
         # Meta mode state
