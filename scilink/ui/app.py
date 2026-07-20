@@ -372,8 +372,10 @@ def _parse_plan_candidate_review(context: str, prompt: str):
     for m in re.finditer(r"── Candidate (\d+): (.+?) ──(.*)", block):
         idx = int(m.group(1))
         name = m.group(2).strip()
-        if len(name) > 60:
-            name = name[:57] + "…"
+        # Generous cap: experiment names are the radio's primary signal and
+        # the row has the full content width — clip only pathological ones.
+        if len(name) > 120:
+            name = name[:117] + "…"
         cands[idx] = f"Candidate {idx} — {name}"
         if "judge pick" in m.group(3).lower():
             pick = idx

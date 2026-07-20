@@ -352,6 +352,18 @@ def test_cli_block_roundtrips_through_ui_parser(capsys):
     assert [c["idx"] for c in cands] == [1, 2, 3]
     assert cands[0]["label"].startswith("Candidate 1 — Plan 1")
 
+    # long names survive un-truncated up to the generous cap (the radio row
+    # has full content width; 60-char clipping hid the distinguishing part)
+    long_name = "Two-Stage Selective Li Recovery from Permian Produced Water " \
+                "via Ion-Sieve Sorption with Staged Elution"
+    cands2 = [json.loads(plan_json(long_name, "H1")),
+              json.loads(plan_json("Short", "H2"))]
+    display_plan_candidates(cands2, {"scores": [], "reasoning": ""}, selected=1)
+    block2 = capsys.readouterr().out
+    parsed2 = parse(block2, "accept plan candidate 1")
+    assert parsed2 is not None
+    assert long_name in parsed2[0][0]["label"]
+
     # disjoint gating: the analysis best-of-N prompt must NOT match this parser
     assert parse(block, "accept candidate 2") is None
     # and a non-candidate buffer must not match either
