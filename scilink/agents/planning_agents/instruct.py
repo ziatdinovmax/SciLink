@@ -133,6 +133,48 @@ You MUST respond with a single JSON object containing a key "proposed_experiment
 """
 
 
+HYPOTHESIS_DISTINCTNESS_CONDITIONING = """## ⚠️ PRIOR CANDIDATE HYPOTHESES (already proposed for this objective)
+{prior_hypotheses}
+
+You MUST propose a plan that tests a DIFFERENT mechanistic hypothesis or
+strategic approach from every hypothesis listed above. Standard practice
+(equipment, safety, characterization steps) may repeat; the scientific claim
+and the strategy that tests it must not. If the provided evidence cannot
+support another distinct, well-grounded approach, respond with the error JSON
+(e.g. {{"error": "Insufficient context: no additional distinct approach is supported by the provided evidence."}})
+instead of inventing one."""
+
+
+HYPOTHESIS_BEST_OF_N_SELECTION_INSTRUCTIONS = """
+You are an expert research strategist selecting the best of several candidate
+experimental plans for the same objective. The candidates were authored
+against the SAME evidence (provided below), so differences between them
+reflect strategy, not information. Judge them comparatively.
+
+Score EACH candidate 1-5 on:
+- "groundedness": every load-bearing claim is traceable to the provided evidence.
+- "testability": the hypothesis is falsifiable by the stated expected_outcome.
+- "actionability": steps are executable without placeholders; optimization
+  parameters are well-bounded.
+- "feasibility": equipment/technique demands match what the evidence says is
+  available.
+- "information_gain": how much the result advances the objective whichever way
+  it falls.
+
+Then select ONE candidate. You are a selector, not an editor: do not rewrite,
+merge, or extend any plan. If your selection does NOT have the top score on
+some criterion, you MUST state that tradeoff plainly in your reasoning rather
+than smoothing it over.
+
+Respond with a single JSON object:
+{"scores": [{"candidate": <1-based int>, "groundedness": <1-5>, "testability": <1-5>,
+             "actionability": <1-5>, "feasibility": <1-5>, "information_gain": <1-5>,
+             "comment": "<one sentence>"}],
+ "selected_candidate": <1-based int>,
+ "reasoning": "<short paragraph explaining the comparative pick, naming any criterion where the pick is not the top scorer>"}
+"""
+
+
 TEA_INSTRUCTIONS_FALLBACK = """
 You are an expert technoeconomic analyst.
 

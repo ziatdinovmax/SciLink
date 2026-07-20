@@ -346,6 +346,46 @@ def _parse_bestofn_review(context: str, prompt: str):
     return ordered, pick
 
 
+def _parse_plan_candidate_review(context: str, prompt: str):
+    """Parse the best-of-N PLAN candidate review from captured stdout.
+
+    Sibling of ``_parse_bestofn_review`` for plan mode: gated on its own
+    marker strings ("accept plan candidate" in the prompt, "PLAN CANDIDATES"
+    in the buffer) so neither parser can hijack the other's review, and with
+    its own card grammar — plan candidates carry judge scores, not the
+    ``metric=value`` scalar the analysis regex expects. Returns
+    ``(candidates, judge_pick)`` with ``candidates`` a list of
+    ``{"idx": int, "label": str}``, or ``None`` to fall back to the generic
+    text box (graceful degradation on any parse miss). The full summary cards
+    themselves render via the existing context box; this parser only powers
+    the radio selector. Reply contract matches ``get_candidate_selection``:
+    bare digit to override, "" to accept the judge's pick.
+    """
+    if not prompt or "accept plan candidate" not in prompt:
+        return None
+    if not context or "PLAN CANDIDATES" not in context:
+        return None
+    import re
+    block = context[context.rfind("PLAN CANDIDATES"):]
+    cands: dict[int, str] = {}
+    pick = None
+    for m in re.finditer(r"── Candidate (\d+): (.+?) ──(.*)", block):
+        idx = int(m.group(1))
+        name = m.group(2).strip()
+        if len(name) > 60:
+            name = name[:57] + "…"
+        cands[idx] = f"Candidate {idx} — {name}"
+        if "judge pick" in m.group(3).lower():
+            pick = idx
+    if not cands:
+        return None
+    if pick is None:
+        pm = re.search(r"accept plan candidate (\d+)", prompt)
+        pick = int(pm.group(1)) if pm else min(cands)
+    ordered = [{"idx": i, "label": cands[i]} for i in sorted(cands)]
+    return ordered, pick
+
+
 def _run_agent_chat(task: ChatTask, agent, user_input: str) -> None:
     """Target for the background thread."""
     import logging
@@ -831,6 +871,8 @@ else:
                 # render a radio selector (scales to any N, unlike one button
                 # per candidate). None -> falls through to the generic text box.
                 _bestofn_data = _parse_bestofn_review(req.context or "", _prompt)
+                # Plan-mode best-of-N: same radio UX, its own parser/markers.
+                _plan_cand_data = _parse_plan_candidate_review(req.context or "", _prompt)
                 # (_is_fanout_confirm computed above, before the context render)
                 if "Context" in _prompt or "MISSING METADATA" in _ctx_tail:
                     _input_label = "Describe your data (optional):"
@@ -929,6 +971,44 @@ else:
                     with col_pick:
                         if st.button(f"Accept judge's pick (Candidate {_pick})",
                                      type="secondary", width="stretch"):
+                            req.response = ""
+                            req.event.set()
+                            st.session_state.pop("_feedback_preview_images", None)
+                            st.session_state.pop("_code_review_files", None)
+                            st.rerun(scope="app")
+                # Plan best-of-N selection: radio over candidate plans. The
+                # summary cards are already visible in the context box above;
+                # full per-candidate HTML reports live in plan_candidates/.
+                # Sends a bare digit (override) or "" (accept judge's pick) —
+                # the get_candidate_selection contract.
+                elif _plan_cand_data:
+                    _pcands, _ppick = _plan_cand_data
+                    _popts = [c["idx"] for c in _pcands]
+                    _plabels = {c["idx"]: c["label"] for c in _pcands}
+                    _pdefault = _popts.index(_ppick) if _ppick in _popts else 0
+                    _pchoice = st.radio(
+                        "Select the plan candidate to proceed with:",
+                        _popts, index=_pdefault,
+                        format_func=lambda i: _plabels.get(i, f"Candidate {i}"),
+                        key="plan_cand_choice",
+                    )
+                    st.markdown(
+                        '<span class="bestofn-actions-anchor"></span>',
+                        unsafe_allow_html=True,
+                    )
+                    col_puse, col_ppick = st.columns(2)
+                    with col_puse:
+                        if st.button("Use selected plan", type="primary",
+                                     width="stretch"):
+                            req.response = str(_pchoice)
+                            req.event.set()
+                            st.session_state.pop("_feedback_preview_images", None)
+                            st.session_state.pop("_code_review_files", None)
+                            st.rerun(scope="app")
+                    with col_ppick:
+                        if st.button(f"Accept judge's pick (Candidate {_ppick})",
+                                     type="secondary", width="stretch",
+                                     key="plan_cand_accept"):
                             req.response = ""
                             req.event.set()
                             st.session_state.pop("_feedback_preview_images", None)

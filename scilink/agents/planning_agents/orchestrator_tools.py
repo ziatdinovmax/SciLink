@@ -676,7 +676,8 @@ class OrchestratorTools:
             additional_context: str = None,
             skill: str = None,
             literature_context: str = None,
-            molecule_context: str = None
+            molecule_context: str = None,
+            n_candidates: int = 1
         ):
             """
             Generates experimental plan (science strategy only, no code).
@@ -794,6 +795,10 @@ class OrchestratorTools:
             ext_ctx = "\n\n".join(external_context_parts) if external_context_parts else None
 
             try:
+                try:
+                    n_cand = max(1, min(int(n_candidates or 1), 4))
+                except (TypeError, ValueError):
+                    n_cand = 1
                 plan = self.orch.planner.generate_plan(
                     objective=obj,
                     knowledge_paths=knowledge_list,
@@ -802,7 +807,10 @@ class OrchestratorTools:
                     enable_human_feedback=self._get_human_feedback_enabled(),
                     reset_state=False,
                     skill=effective_skill,
-                    external_context=ext_ctx
+                    external_context=ext_ctx,
+                    n_candidates=n_cand,
+                    candidate_report_dir=(str(self._output_dir() / "plan_candidates")
+                                          if n_cand > 1 else None)
                 )
 
                 # Store skill on orchestrator for downstream tools
@@ -853,6 +861,17 @@ class OrchestratorTools:
                 }
                 if saved_extras:
                     result["external_results_files"] = saved_extras
+                pc = (self.orch.planner.state or {}).get("plan_candidates")
+                if n_cand > 1 and pc:
+                    result["best_of_n"] = {
+                        "requested": n_cand,
+                        "produced": len(pc.get("candidates", [])),
+                        "selected_candidate": pc.get("selected_index"),
+                        "human_override": pc.get("human_override", False),
+                        "tier": pc.get("tier"),
+                        "judge_reasoning": (pc.get("judge") or {}).get("reasoning", ""),
+                        "candidate_reports": pc.get("reports", []),
+                    }
                 return json.dumps(result)
                 
             except Exception as e:
@@ -893,7 +912,22 @@ class OrchestratorTools:
                     ),
                 },
                 "literature_context": {"type": "string", "description": "File path or text from search_literature() tool. Provides external scientific literature context."},
-                "molecule_context": {"type": "string", "description": "File path or text from query_molecules() tool. Provides molecular design / synthesis context."}
+                "molecule_context": {"type": "string", "description": "File path or text from query_molecules() tool. Provides molecular design / synthesis context."},
+                "n_candidates": {
+                    "type": "integer",
+                    "description": (
+                        "Best-of-N width (1-4, default 1 = single plan, "
+                        "unchanged behavior). RAISE to explore multiple "
+                        "DISTINCT strategic approaches when the objective is "
+                        "open-ended, the evidence is rich, or the user asks "
+                        "for alternatives — an LLM judge picks the best and "
+                        "the human can override. Keep at 1 for follow-up "
+                        "iterations, thin evidence, or narrowly-specified "
+                        "objectives. A cap, not a quota: generation stops "
+                        "early when the evidence supports no further "
+                        "distinct approach."
+                    ),
+                },
             },
             required=[]
         )

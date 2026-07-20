@@ -108,6 +108,87 @@ def display_plan_summary(result: Dict[str, Any]) -> None:
     print("\n" + "="*80)
 
 
+def display_plan_candidates(candidates: List[Dict[str, Any]],
+                            judge: Dict[str, Any],
+                            selected: int,
+                            report_paths: Optional[List[str]] = None,
+                            pick_caveats: Optional[List[str]] = None) -> None:
+    """
+    Print the best-of-N candidate summary cards for human review.
+
+    Extractive by design: every line comes verbatim from fields the plan JSON
+    already carries (name / hypothesis / expected_outcome / justification) plus
+    the judge's scores — no extra LLM call, so a card cannot drift from the
+    plan it describes. This ONE stdout block serves both surfaces: the CLI
+    user reads it directly, and the UI parser splits it into cards + a radio
+    (gated on the "PLAN CANDIDATES" header and the card markers below — keep
+    them stable).
+    """
+    scores_by_idx = {s.get("candidate"): s for s in judge.get("scores", [])
+                     if isinstance(s, dict)}
+
+    print("\n" + "=" * 80)
+    print(f"🧭 PLAN CANDIDATES — {len(candidates)} distinct strategies "
+          f"(judge pick: Candidate {selected})")
+    print("=" * 80)
+
+    for i, cand in enumerate(candidates, 1):
+        exp = (cand.get("proposed_experiments") or [{}])[0]
+        marker = "  ← judge pick" if i == selected else ""
+        print(f"\n── Candidate {i}: {exp.get('experiment_name', 'Unnamed')} ──{marker}")
+        print(f"🎯 Hypothesis: {exp.get('hypothesis', 'N/A')}")
+        print(f"📈 Expected outcome: {exp.get('expected_outcome', 'N/A')}")
+        print(f"💡 Justification: {exp.get('justification', 'N/A')}")
+        s = scores_by_idx.get(i)
+        if s:
+            print("🧑‍⚖️ Judge: "
+                  f"groundedness {s.get('groundedness', '?')}/5 · "
+                  f"testability {s.get('testability', '?')}/5 · "
+                  f"actionability {s.get('actionability', '?')}/5 · "
+                  f"feasibility {s.get('feasibility', '?')}/5 · "
+                  f"info-gain {s.get('information_gain', '?')}/5")
+            if s.get("comment"):
+                print(f"   {s['comment']}")
+        if report_paths and i <= len(report_paths):
+            print(f"📄 Full plan: {report_paths[i - 1]}")
+
+    if judge.get("reasoning"):
+        print(f"\n🧑‍⚖️ JUDGE REASONING:\n  {judge['reasoning']}")
+    if pick_caveats:
+        print(f"\n⚠️  Caveats on the pick (Candidate {selected}):")
+        for c in pick_caveats:
+            print(f"  • {c}")
+    print("\n" + "=" * 80)
+
+
+def get_candidate_selection(n_candidates: int, judge_pick: int) -> int:
+    """
+    Stage-1 selection prompt: accept the judge's pick (ENTER) or override by
+    index. Selection only — free-text refinement belongs to the existing
+    stage-2 plan-approval prompt, which runs on whichever candidate wins here.
+
+    The prompt string carries the "accept plan candidate <pick>" marker the UI
+    parser gates on; the reply contract is the analysis best-of-N one (bare
+    digit, or empty for the pick). Anything unparseable falls back to the
+    judge's pick — never blocks.
+    """
+    print("\n" + "-" * 60)
+    print("📝 SELECT A PLAN CANDIDATE")
+    print("-" * 60)
+    print(f"• Press [ENTER] to accept the judge's pick (Candidate {judge_pick}).")
+    print(f"• Or type a candidate number (1-{n_candidates}) to choose a "
+          "different plan.")
+
+    reply = input(f"\n> Selection (ENTER to accept plan candidate {judge_pick}): ").strip()
+
+    if reply.isdigit() and 1 <= int(reply) <= n_candidates:
+        return int(reply)
+    if reply:
+        print(f"  - ℹ️  '{reply}' is not a candidate number — keeping the "
+              f"judge's pick (Candidate {judge_pick}).")
+    return judge_pick
+
+
 def get_user_feedback() -> Optional[str]:
     """
     Pauses execution to get user input via the CLI. 
