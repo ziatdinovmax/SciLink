@@ -47,9 +47,9 @@ class SpectralUnmixer:
         spectra_matrix = hspy_data.reshape((h * w, e))
         
         # 2. FILTER (Internal Masking)
-        # Identify pixels that have actual data (sum > small epsilon)
-        pixel_sums = np.sum(spectra_matrix, axis=1)
-        valid_pixel_mask = pixel_sums > 1e-6 
+        # Identify pixels that have actual data without assuming a sign or scale.
+        pixel_magnitudes = np.sum(np.abs(spectra_matrix), axis=1)
+        valid_pixel_mask = pixel_magnitudes > 0
         
         # Create a subset containing ONLY valid pixels
         spectra_to_fit = spectra_matrix[valid_pixel_mask]
@@ -64,7 +64,7 @@ class SpectralUnmixer:
         l1_norms_subset = None
         if self.normalize:
             # Calculate norms only for the valid subset
-            l1_norms_subset = np.sum(spectra_to_fit, axis=1, keepdims=True)
+            l1_norms_subset = np.sum(np.abs(spectra_to_fit), axis=1, keepdims=True)
             l1_norms_subset[l1_norms_subset == 0] = 1 
             spectra_to_fit = spectra_to_fit / l1_norms_subset
 
