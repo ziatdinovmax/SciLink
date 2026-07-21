@@ -264,7 +264,7 @@ def test_candidate_html_reports_written(tmp_path, no_verify_no_critic):
 
 def test_selection_profile_reaches_judge(tmp_path, no_verify_no_critic):
     """The judge prompt carries the LAB weighting by default and the
-    DISCOVERY weighting when requested; candidates/authors are unaffected
+    IDEATION weighting when requested; candidates/authors are unaffected
     (profile changes the pick's weighting, not generation)."""
     def responses():
         return [plan_json("P1", "H1"), plan_json("P2", "H2"), judge_json(1, 2)]
@@ -274,18 +274,18 @@ def test_selection_profile_reaches_judge(tmp_path, no_verify_no_critic):
     agent.generate_plan("obj", enable_human_feedback=False, n_candidates=2)
     judge_prompt = model.calls[-1]
     assert "SELECTION WEIGHTING — LAB PROFILE" in judge_prompt
-    assert "DISCOVERY PROFILE" not in judge_prompt
+    assert "IDEATION PROFILE" not in judge_prompt
     assert all("SELECTION WEIGHTING" not in c for c in model.calls[:-1])
 
     model2 = ScriptedModel(responses())
     agent2 = make_agent(tmp_path / "disc", model2)
     agent2.generate_plan("obj", enable_human_feedback=False, n_candidates=2,
-                         selection_profile="discovery")
-    assert "SELECTION WEIGHTING — DISCOVERY PROFILE" in model2.calls[-1]
-    assert agent2.state["plan_candidates"]["profile"] == "discovery"
-    # discovery also relaxes AUTHOR-side derivability — every author prompt
+                         selection_profile="ideation")
+    assert "SELECTION WEIGHTING — IDEATION PROFILE" in model2.calls[-1]
+    assert agent2.state["plan_candidates"]["profile"] == "ideation"
+    # ideation also relaxes AUTHOR-side derivability — every author prompt
     # carries the grounding-latitude override; lab authors never see it
-    assert all("DISCOVERY MODE — GROUNDING LATITUDE" in c
+    assert all("IDEATION MODE — GROUNDING LATITUDE" in c
                for c in model2.calls[:-1])
     assert all("GROUNDING LATITUDE" not in c for c in model.calls)
 

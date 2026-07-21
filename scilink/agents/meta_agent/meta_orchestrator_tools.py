@@ -407,7 +407,7 @@ class MetaOrchestratorTools:
                 "(never phrase the objective as 'propose N strategies'; the "
                 "tool parameter provides the multiplicity). When the user is "
                 "brainstorming/ideating rather than planning an executable "
-                "run, add 'use selection_profile=discovery' to the task so "
+                "run, add 'use selection_profile=ideation' to the task so "
                 "the candidate judge weights novelty over feasibility."
             ),
             parameters={

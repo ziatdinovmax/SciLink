@@ -19,8 +19,8 @@ from .instruct import (
     HYPOTHESIS_BEST_OF_N_SELECTION_INSTRUCTIONS,
     HYPOTHESIS_BESTOFN_AUTHOR_NOTE,
     BESTOFN_SELECTION_PROFILE_LAB,
-    BESTOFN_SELECTION_PROFILE_DISCOVERY,
-    DISCOVERY_AUTHOR_OVERRIDE
+    BESTOFN_SELECTION_PROFILE_IDEATION,
+    IDEATION_AUTHOR_OVERRIDE
 )
 
 
@@ -433,15 +433,15 @@ def generate_plan_candidates(objective: str,
                   if additional_context else HYPOTHESIS_BESTOFN_AUTHOR_NOTE) \
         if n_candidates > 1 else additional_context
 
-    # Discovery profile relaxes the derivability rule at AUTHORING time: the
+    # Ideation profile relaxes the derivability rule at AUTHORING time: the
     # override rides the instruction block itself (adjacent to the safety
     # rule it supersedes). Lab profile authors exactly as before — the
     # benchmark showed the strict derivability discipline structurally caps
     # rediscovery when the key inspiration is absent from the context.
     author_instructions = HYPOTHESIS_GENERATION_INSTRUCTIONS
-    if selection_profile == "discovery":
+    if selection_profile == "ideation":
         author_instructions = (HYPOTHESIS_GENERATION_INSTRUCTIONS
-                               + DISCOVERY_AUTHOR_OVERRIDE)
+                               + IDEATION_AUTHOR_OVERRIDE)
 
     first, author_context = perform_science_rag(
         objective=objective,
@@ -587,11 +587,11 @@ def judge_plan_candidates(objective: str,
 
     # Selection profile: same criteria and scores either way (the human sees
     # an identical card format); only the WEIGHTING of the pick changes.
-    # "lab" codifies the execution-first behavior; "discovery" weights
+    # "lab" codifies the execution-first behavior; "ideation" weights
     # information gain first — benchmark evidence showed the lab weighting
     # leaves the boldest (most rediscovery-shaped) candidate unpicked.
-    profile_note = (BESTOFN_SELECTION_PROFILE_DISCOVERY
-                    if selection_profile == "discovery"
+    profile_note = (BESTOFN_SELECTION_PROFILE_IDEATION
+                    if selection_profile == "ideation"
                     else BESTOFN_SELECTION_PROFILE_LAB)
 
     prompt = (

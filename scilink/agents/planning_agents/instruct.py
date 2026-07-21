@@ -185,8 +185,8 @@ Respond with a single JSON object:
 """
 
 
-DISCOVERY_AUTHOR_OVERRIDE = """
-## DISCOVERY MODE — GROUNDING LATITUDE (overrides the Safety Rule above)
+IDEATION_AUTHOR_OVERRIDE = """
+## IDEATION MODE — GROUNDING LATITUDE (overrides the Safety Rule above)
 This run is research ideation. The provided context may deliberately lack
 the key inspiration. Instead of declining for insufficient context: ground
 your plan in the context where possible, and where the decisive mechanism
@@ -207,8 +207,8 @@ Prefer the candidate most likely to produce a clean, interpretable result
 on the stated platform."""
 
 
-BESTOFN_SELECTION_PROFILE_DISCOVERY = """
-## SELECTION WEIGHTING — DISCOVERY PROFILE
+BESTOFN_SELECTION_PROFILE_IDEATION = """
+## SELECTION WEIGHTING — IDEATION PROFILE
 This is research ideation: the goal is the most scientifically valuable
 hypothesis, not tomorrow's protocol. Weight information_gain and
 mechanistic novelty most heavily when selecting: prefer the candidate
@@ -957,7 +957,7 @@ SAMPLE FILENAMES (first 20): {filenames}
 
 QUESTION: {query}
 
-The script below provides imports, file discovery, and reader functions.
+The script below provides imports, file ideation, and reader functions.
 Complete ONLY the TODO section (query logic).
 
 ```
@@ -991,7 +991,7 @@ SAMPLE FILENAMES (first 20): {filenames}
 QUERY: {query}
 TOP-K to retain: {top_k}
 
-The script below provides imports, file discovery, and reader functions.
+The script below provides imports, file ideation, and reader functions.
 Complete ONLY the TODO section.
 
 ```

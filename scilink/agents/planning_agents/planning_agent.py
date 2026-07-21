@@ -471,7 +471,7 @@ class PlanningAgent(BaseAgent):
             selection_profile: How the best-of-N judge WEIGHTS its pick
                 (criteria and scores are identical either way). "lab"
                 (default): feasibility/actionability first — the plan must
-                run on the available platform. "discovery": information
+                run on the available platform. "ideation": information
                 gain/novelty first, feasibility as tiebreaker — for research
                 ideation rather than executable campaign planning.
 
