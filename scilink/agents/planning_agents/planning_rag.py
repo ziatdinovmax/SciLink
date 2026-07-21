@@ -17,7 +17,9 @@ from .instruct import (
     TEA_INSTRUCTIONS_FALLBACK,
     HYPOTHESIS_DISTINCTNESS_CONDITIONING,
     HYPOTHESIS_BEST_OF_N_SELECTION_INSTRUCTIONS,
-    HYPOTHESIS_BESTOFN_AUTHOR_NOTE
+    HYPOTHESIS_BESTOFN_AUTHOR_NOTE,
+    BESTOFN_SELECTION_PROFILE_LAB,
+    BESTOFN_SELECTION_PROFILE_DISCOVERY
 )
 
 
@@ -505,7 +507,8 @@ def judge_plan_candidates(objective: str,
                           image_descriptions: Optional[List[str]] = None,
                           additional_context: Optional[str] = None,
                           skill_context: Optional[str] = None,
-                          fallback_tier: bool = False) -> Dict[str, Any]:
+                          fallback_tier: bool = False,
+                          selection_profile: str = "lab") -> Dict[str, Any]:
     """
     Comparative LLM judge over best-of-N plan candidates.
 
@@ -570,8 +573,17 @@ def judge_plan_candidates(objective: str,
             "do not penalize candidates for the missing knowledge base.\n"
         )
 
+    # Selection profile: same criteria and scores either way (the human sees
+    # an identical card format); only the WEIGHTING of the pick changes.
+    # "lab" codifies the execution-first behavior; "discovery" weights
+    # information gain first — benchmark evidence showed the lab weighting
+    # leaves the boldest (most rediscovery-shaped) candidate unpicked.
+    profile_note = (BESTOFN_SELECTION_PROFILE_DISCOVERY
+                    if selection_profile == "discovery"
+                    else BESTOFN_SELECTION_PROFILE_LAB)
+
     prompt = (
-        f"{HYPOTHESIS_BEST_OF_N_SELECTION_INSTRUCTIONS}\n"
+        f"{HYPOTHESIS_BEST_OF_N_SELECTION_INSTRUCTIONS}\n{profile_note}\n"
         f"## OBJECTIVE:\n{objective}\n{tier_note}\n"
         f"## EVIDENCE ALL CANDIDATES WERE AUTHORED AGAINST:\n"
         + ("\n\n".join(evidence_parts) if evidence_parts

@@ -185,6 +185,27 @@ Respond with a single JSON object:
 """
 
 
+BESTOFN_SELECTION_PROFILE_LAB = """
+## SELECTION WEIGHTING — LAB PROFILE
+This campaign is headed for actual execution. Weight feasibility and
+actionability most heavily when selecting: a plan that cannot run on the
+available equipment, or whose steps are not directly executable, cannot
+generate any information regardless of how interesting its hypothesis is.
+Prefer the candidate most likely to produce a clean, interpretable result
+on the stated platform."""
+
+
+BESTOFN_SELECTION_PROFILE_DISCOVERY = """
+## SELECTION WEIGHTING — DISCOVERY PROFILE
+This is research ideation: the goal is the most scientifically valuable
+hypothesis, not tomorrow's protocol. Weight information_gain and
+mechanistic novelty most heavily when selecting: prefer the candidate
+whose result would advance understanding most — whichever way it falls —
+even if it is operationally more demanding. Feasibility is a tiebreaker,
+not a veto; only rule a candidate out on feasibility if it is
+fundamentally unexecutable, and say so plainly."""
+
+
 TEA_INSTRUCTIONS_FALLBACK = """
 You are an expert technoeconomic analyst.
 

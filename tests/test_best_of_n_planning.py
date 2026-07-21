@@ -262,6 +262,29 @@ def test_candidate_html_reports_written(tmp_path, no_verify_no_critic):
         str(report_dir / "candidate_1.html"), str(report_dir / "candidate_2.html")]
 
 
+def test_selection_profile_reaches_judge(tmp_path, no_verify_no_critic):
+    """The judge prompt carries the LAB weighting by default and the
+    DISCOVERY weighting when requested; candidates/authors are unaffected
+    (profile changes the pick's weighting, not generation)."""
+    def responses():
+        return [plan_json("P1", "H1"), plan_json("P2", "H2"), judge_json(1, 2)]
+
+    model = ScriptedModel(responses())
+    agent = make_agent(tmp_path / "lab", model)
+    agent.generate_plan("obj", enable_human_feedback=False, n_candidates=2)
+    judge_prompt = model.calls[-1]
+    assert "SELECTION WEIGHTING — LAB PROFILE" in judge_prompt
+    assert "DISCOVERY PROFILE" not in judge_prompt
+    assert all("SELECTION WEIGHTING" not in c for c in model.calls[:-1])
+
+    model2 = ScriptedModel(responses())
+    agent2 = make_agent(tmp_path / "disc", model2)
+    agent2.generate_plan("obj", enable_human_feedback=False, n_candidates=2,
+                         selection_profile="discovery")
+    assert "SELECTION WEIGHTING — DISCOVERY PROFILE" in model2.calls[-1]
+    assert agent2.state["plan_candidates"]["profile"] == "discovery"
+
+
 def test_resolve_n_candidates_default_policy():
     """First plan of a campaign defaults to best-of-3; follow-ups to 1;
     explicit values always win (clamped); junk degrades to 1."""

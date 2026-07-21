@@ -420,7 +420,8 @@ class PlanningAgent(BaseAgent):
                     skill: Optional[str] = None,
                     external_context: Optional[str] = None,
                     n_candidates: int = 1,
-                    candidate_report_dir: Optional[str] = None) -> Dict[str, Any]:
+                    candidate_report_dir: Optional[str] = None,
+                    selection_profile: str = "lab") -> Dict[str, Any]:
         """
         Generate experimental plan (science only, no implementation code/protocol).
 
@@ -467,6 +468,12 @@ class PlanningAgent(BaseAgent):
             candidate_report_dir: Directory for per-candidate HTML reports
                 (persisted; referenced from the selection cards). Only used
                 when n_candidates > 1.
+            selection_profile: How the best-of-N judge WEIGHTS its pick
+                (criteria and scores are identical either way). "lab"
+                (default): feasibility/actionability first — the plan must
+                run on the available platform. "discovery": information
+                gain/novelty first, feasibility as tiebreaker — for research
+                ideation rather than executable campaign planning.
 
         Returns:
             Dict containing the experimental plan with keys:
@@ -590,6 +597,7 @@ class PlanningAgent(BaseAgent):
                     additional_context=ctx_string,
                     skill_context=skill_planning_context,
                     fallback_tier=(tier == "fallback"),
+                    selection_profile=selection_profile,
                 )
                 bestofn_selected = bestofn_judge["selected_candidate"]
                 print(f"  - 🧑‍⚖️ Judge pick: Candidate {bestofn_selected}")
@@ -616,6 +624,7 @@ class PlanningAgent(BaseAgent):
                 "selected_index": bestofn_selected or 1,
                 "human_override": False,
                 "tier": tier,
+                "profile": selection_profile,
                 "reports": bestofn_reports,
             }
         else:

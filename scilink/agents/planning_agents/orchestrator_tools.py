@@ -698,7 +698,8 @@ class OrchestratorTools:
             skill: str = None,
             literature_context: str = None,
             molecule_context: str = None,
-            n_candidates: int = None
+            n_candidates: int = None,
+            selection_profile: str = "lab"
         ):
             """
             Generates experimental plan (science strategy only, no code).
@@ -832,7 +833,10 @@ class OrchestratorTools:
                     external_context=ext_ctx,
                     n_candidates=n_cand,
                     candidate_report_dir=(str(self._output_dir() / "plan_candidates")
-                                          if n_cand > 1 else None)
+                                          if n_cand > 1 else None),
+                    selection_profile=(selection_profile
+                                       if selection_profile in ("lab", "discovery")
+                                       else "lab")
                 )
 
                 # Store skill on orchestrator for downstream tools
@@ -949,6 +953,23 @@ class OrchestratorTools:
                         "scientific goal — do NOT ask for multiple "
                         "plans/strategies in the objective text; this "
                         "parameter provides the multiplicity."
+                    ),
+                },
+                "selection_profile": {
+                    "type": "string",
+                    "enum": ["lab", "discovery"],
+                    "description": (
+                        "How the best-of-N judge weights its pick. 'lab' "
+                        "(default): feasibility/actionability first — use "
+                        "when the plan will actually be executed on stated "
+                        "equipment. 'discovery': information gain and "
+                        "mechanistic novelty first, feasibility only as a "
+                        "tiebreaker — SWITCH to this when the user is "
+                        "brainstorming, ideating, or asking for the most "
+                        "scientifically interesting direction rather than "
+                        "tomorrow's runnable protocol. Same candidates and "
+                        "scores either way; only the pick's weighting "
+                        "changes, and the human can still override."
                     ),
                 },
             },

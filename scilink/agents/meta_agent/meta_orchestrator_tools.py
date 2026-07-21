@@ -405,7 +405,10 @@ class MetaOrchestratorTools:
                 "when the user wants a specific width — including N=1 for a "
                 "single plan. Keep the scientific goal itself SINGULAR "
                 "(never phrase the objective as 'propose N strategies'; the "
-                "tool parameter provides the multiplicity)."
+                "tool parameter provides the multiplicity). When the user is "
+                "brainstorming/ideating rather than planning an executable "
+                "run, add 'use selection_profile=discovery' to the task so "
+                "the candidate judge weights novelty over feasibility."
             ),
             parameters={
                 "task": {
