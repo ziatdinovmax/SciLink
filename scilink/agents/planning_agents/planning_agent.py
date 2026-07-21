@@ -472,8 +472,12 @@ class PlanningAgent(BaseAgent):
                 (criteria and scores are identical either way). "lab"
                 (default): feasibility/actionability first — the plan must
                 run on the available platform. "ideation": information
-                gain/novelty first, feasibility as tiebreaker — for research
-                ideation rather than executable campaign planning.
+                gain/novelty first, feasibility as tiebreaker, plus
+                author-side grounding latitude — for research ideation
+                rather than executable campaign planning. Applies only when
+                n_candidates >= 2: the single-plan path ignores the profile
+                entirely (documented behavior — ideation is a property of
+                the multi-candidate process).
 
         Returns:
             Dict containing the experimental plan with keys:

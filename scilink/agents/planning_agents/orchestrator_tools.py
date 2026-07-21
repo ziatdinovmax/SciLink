@@ -968,8 +968,13 @@ class OrchestratorTools:
                         "brainstorming, ideating, or asking for the most "
                         "scientifically interesting direction rather than "
                         "tomorrow's runnable protocol. Same candidates and "
-                        "scores either way; only the pick's weighting "
-                        "changes, and the human can still override."
+                        "scores either way; only the authoring latitude and "
+                        "the pick's weighting change, and the human can "
+                        "still override. NOTE: ideation requires "
+                        "n_candidates >= 2 — with a single plan there is "
+                        "nothing to select and the profile has no effect, "
+                        "so never pass n_candidates=1 together with "
+                        "ideation."
                     ),
                 },
             },

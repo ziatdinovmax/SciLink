@@ -290,6 +290,20 @@ def test_selection_profile_reaches_judge(tmp_path, no_verify_no_critic):
     assert all("GROUNDING LATITUDE" not in c for c in model.calls)
 
 
+def test_ideation_profile_is_noop_at_n1(tmp_path, no_verify_no_critic):
+    """DOCUMENTED behavior: ideation requires n_candidates >= 2. The
+    single-plan path ignores the profile entirely — no grounding-latitude
+    override, no weighting note, byte-identical to the pre-profile path."""
+    model = ScriptedModel([plan_json("Solo", "H")])
+    agent = make_agent(tmp_path, model)
+    agent.generate_plan("obj", enable_human_feedback=False, n_candidates=1,
+                        selection_profile="ideation")
+    assert len(model.calls) == 1
+    assert "GROUNDING LATITUDE" not in model.calls[0]
+    assert "SELECTION WEIGHTING" not in model.calls[0]
+    assert "plan_candidates" not in agent.state
+
+
 def test_resolve_n_candidates_default_policy():
     """First plan of a campaign defaults to best-of-3; follow-ups to 1;
     explicit values always win (clamped); junk degrades to 1."""
