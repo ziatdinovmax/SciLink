@@ -19,7 +19,8 @@ from .instruct import (
     HYPOTHESIS_BEST_OF_N_SELECTION_INSTRUCTIONS,
     HYPOTHESIS_BESTOFN_AUTHOR_NOTE,
     BESTOFN_SELECTION_PROFILE_LAB,
-    BESTOFN_SELECTION_PROFILE_DISCOVERY
+    BESTOFN_SELECTION_PROFILE_DISCOVERY,
+    DISCOVERY_AUTHOR_OVERRIDE
 )
 
 
@@ -402,7 +403,8 @@ def generate_plan_candidates(objective: str,
                              image_descriptions: Optional[List[str]] = None,
                              additional_context: Optional[str] = None,
                              external_context: Optional[str] = None,
-                             skill_context: Optional[str] = None
+                             skill_context: Optional[str] = None,
+                             selection_profile: str = "lab"
                              ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], str]:
     """
     Sequential, diversity-conditioned best-of-N candidate generation.
@@ -431,9 +433,19 @@ def generate_plan_candidates(objective: str,
                   if additional_context else HYPOTHESIS_BESTOFN_AUTHOR_NOTE) \
         if n_candidates > 1 else additional_context
 
+    # Discovery profile relaxes the derivability rule at AUTHORING time: the
+    # override rides the instruction block itself (adjacent to the safety
+    # rule it supersedes). Lab profile authors exactly as before — the
+    # benchmark showed the strict derivability discipline structurally caps
+    # rediscovery when the key inspiration is absent from the context.
+    author_instructions = HYPOTHESIS_GENERATION_INSTRUCTIONS
+    if selection_profile == "discovery":
+        author_instructions = (HYPOTHESIS_GENERATION_INSTRUCTIONS
+                               + DISCOVERY_AUTHOR_OVERRIDE)
+
     first, author_context = perform_science_rag(
         objective=objective,
-        instructions=HYPOTHESIS_GENERATION_INSTRUCTIONS,
+        instructions=author_instructions,
         task_name="Candidate Plan 1",
         kb_docs=kb_docs,
         model=model,
@@ -455,7 +467,7 @@ def generate_plan_candidates(objective: str,
     if tier == "fallback":
         print("  - ℹ️  Fallback tier pinned for all candidates in this run.")
 
-    instructions = (HYPOTHESIS_GENERATION_INSTRUCTIONS if tier == "strict"
+    instructions = (author_instructions if tier == "strict"
                     else HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK)
 
     for k in range(2, n_candidates + 1):

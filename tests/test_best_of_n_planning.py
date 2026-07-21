@@ -283,6 +283,11 @@ def test_selection_profile_reaches_judge(tmp_path, no_verify_no_critic):
                          selection_profile="discovery")
     assert "SELECTION WEIGHTING — DISCOVERY PROFILE" in model2.calls[-1]
     assert agent2.state["plan_candidates"]["profile"] == "discovery"
+    # discovery also relaxes AUTHOR-side derivability — every author prompt
+    # carries the grounding-latitude override; lab authors never see it
+    assert all("DISCOVERY MODE — GROUNDING LATITUDE" in c
+               for c in model2.calls[:-1])
+    assert all("GROUNDING LATITUDE" not in c for c in model.calls)
 
 
 def test_resolve_n_candidates_default_policy():

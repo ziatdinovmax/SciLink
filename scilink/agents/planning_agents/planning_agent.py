@@ -582,6 +582,7 @@ class PlanningAgent(BaseAgent):
                 additional_context=ctx_string,
                 external_context=external_context,
                 skill_context=skill_planning_context,
+                selection_profile=selection_profile,
             )
             if len(candidates) > 1:
                 print(f"\n--- Judging {len(candidates)} Candidate Plans ---")

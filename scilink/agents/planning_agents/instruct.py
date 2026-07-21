@@ -185,6 +185,18 @@ Respond with a single JSON object:
 """
 
 
+DISCOVERY_AUTHOR_OVERRIDE = """
+## DISCOVERY MODE — GROUNDING LATITUDE (overrides the Safety Rule above)
+This run is research ideation. The provided context may deliberately lack
+the key inspiration. Instead of declining for insufficient context: ground
+your plan in the context where possible, and where the decisive mechanism
+is not in the context you MAY introduce one from general scientific
+knowledge — choose the boldest hypothesis you can rigorously defend, and
+mark context-external elements as (speculative) in the justification.
+Never fabricate specific numeric claims or attribute them to unnamed
+sources."""
+
+
 BESTOFN_SELECTION_PROFILE_LAB = """
 ## SELECTION WEIGHTING — LAB PROFILE
 This campaign is headed for actual execution. Weight feasibility and
