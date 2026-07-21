@@ -1220,7 +1220,12 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "prior_knowledge": prior_knowledge or [],
                 "literature_context": literature_context,
                 "result_json": None,
-                "error_dict": None,
+                # Carry the iteration pipeline's failure forward so the caller
+                # sees the ORIGINAL error (e.g. the decomposition exception),
+                # not the derivative "No iteration results found for
+                # synthesis" it used to be masked by (#381). The synthesis
+                # controllers all no-op on a pre-set error_dict.
+                "error_dict": iteration_state.get("error_dict"),
                 **skill_state,
                 **auxiliary_state
             }
