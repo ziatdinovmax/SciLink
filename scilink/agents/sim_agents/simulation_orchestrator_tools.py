@@ -856,6 +856,155 @@ class SimulationOrchestratorTools:
         )
 
         # =====================================================================
+        # 10b. RUN SIMULATION (engine-neutral one-shot, WITH execution)
+        # =====================================================================
+        def run_simulation(description: str, run_command: str = None,
+                           scale: str = None, software: str = None,
+                           max_refinement_cycles: int = 4,
+                           max_run_cycles: int = 3,
+                           run_timeout: int = 3600) -> str:
+            from .simulation_pipeline import run_complete_workflow
+
+            # 1. Route (scale, engine) if not supplied — reuse a prior routing
+            #    decision so we don't re-route every call. Engine-neutral: any
+            #    engine the router picks flows through run_complete_workflow.
+            if not (scale and software):
+                decision = getattr(self.orch, "routing_decision", None)
+                if not decision:
+                    from .simulation_router import SimulationRouter
+                    decision = SimulationRouter(model=self.orch.model).route(
+                        user_goal=description)
+                    self.orch.routing_decision = decision
+                scale = scale or decision.get("scale")
+                software = software or decision.get("engine")
+
+            # 2. run_command: user-provided > the engine skill's declared default
+            #    (`default_run_command`) > None. The engine's own launch command
+            #    lives in its skill bundle — never hardcoded here.
+            rc_source = "user" if run_command else None
+            if run_command is None and software:
+                try:
+                    from ...skills._shared._registry import get_tool_function
+                    get_rc = get_tool_function("default_run_command",
+                                               active_skills=[software])
+                    run_command = get_rc()
+                    rc_source = "skill" if run_command else None
+                except Exception:
+                    run_command = None
+
+            # 3. Executor: local when a run_command is available and no HPC
+            #    connection is attached. (HPC-submission via hpc_connection is a
+            #    follow-up; with no executor the workflow still generates +
+            #    validates inputs, it just does not run them.)
+            executor = None
+            if run_command and getattr(self.orch, "hpc_connection", None) is None:
+                from .refinement import LocalExecutor
+                executor = LocalExecutor(timeout=run_timeout)
+
+            slug = self._make_slug(description)
+            workdir = self.orch.structures_dir / slug
+            workdir.mkdir(parents=True, exist_ok=True)
+
+            try:
+                result = run_complete_workflow(
+                    description,
+                    scale=scale, software=software,
+                    output_dir=str(workdir),
+                    api_key=self.orch.api_key, base_url=self.orch.base_url,
+                    model_name=self.orch.model_name,
+                    futurehouse_api_key=self.orch.futurehouse_api_key,
+                    mp_api_key=self.orch.mp_api_key,
+                    max_refinement_cycles=max_refinement_cycles,
+                    max_run_cycles=max_run_cycles,
+                    executor=executor, run_command=run_command,
+                )
+            except Exception as e:
+                return json.dumps({
+                    "status": "error", "scale": scale, "engine": software,
+                    "message": f"Simulation workflow failed: {e}",
+                })
+
+            final_status = result.get("final_status")
+            structure_gen = result.get("structure_generation", {}) or {}
+            structure_path = Path(
+                structure_gen.get("final_structure_path")
+                or (workdir / "structure.extxyz")
+            )
+            if structure_path.exists():
+                self.orch.generated_structures.append({
+                    "slug": slug, "description": description,
+                    "structure_dir": str(workdir),
+                    "structure_path": str(structure_path),
+                    "scale": scale, "engine": software,
+                    "created_at": datetime.now().isoformat(),
+                })
+
+            refinement = result.get("refinement") or {}
+            executed = executor is not None
+            return json.dumps({
+                "status": final_status if final_status else "error",
+                "scale": scale, "engine": software,
+                "executed": executed,
+                "run_command_source": rc_source,
+                "refinement_status": refinement.get("status"),
+                "output_directory": str(workdir),
+                "note": (
+                    None if executed else
+                    "No run_command available (no engine binary on PATH and none "
+                    "supplied) — generated and validated inputs only, did NOT "
+                    "run. Pass run_command to execute."
+                ),
+            })
+
+        self._register_tool(
+            func=run_simulation,
+            name="run_simulation",
+            description=(
+                "Engine-neutral one-shot: build + validate the structure, "
+                "generate engine inputs, and RUN + refine the simulation — for "
+                "any scale/engine (periodic DFT, classical MD, MLIP-MD). Routes "
+                "(scale, engine) from the description when not given. Executes "
+                "locally via the engine's own run command (from its skill "
+                "bundle); pass `run_command` to override or if the skill's binary "
+                "isn't found. Use this when the user wants the simulation "
+                "actually RUN, not just its inputs prepared. Returns JSON "
+                "(status, scale, engine, executed, refinement_status, "
+                "output_directory)."
+            ),
+            parameters={
+                "description": {
+                    "type": "string",
+                    "description": "Natural-language system + goal to simulate.",
+                },
+                "run_command": {
+                    "type": "string",
+                    "description": (
+                        "Optional run-command template with a `{script}` "
+                        "placeholder (e.g. 'lmp -in {script}'). Overrides the "
+                        "engine skill's default; supply this if the default "
+                        "binary is missing or fails."
+                    ),
+                },
+                "scale": {
+                    "type": "string",
+                    "description": ("Optional scale override "
+                                    "('periodic_dft' | 'molecular_dynamics'); "
+                                    "routed from the description if omitted."),
+                },
+                "software": {
+                    "type": "string",
+                    "description": ("Optional engine override "
+                                    "('vasp' | 'lammps'); routed if omitted."),
+                },
+                "max_run_cycles": {
+                    "type": "integer",
+                    "description": "Max run → assess → fix cycles per phase (default 3).",
+                },
+            },
+            required=["description"],
+        )
+
+        # =====================================================================
         # 3. REFINE STRUCTURE
         # =====================================================================
         def refine_structure(structure_path: str, original_request: str) -> str:

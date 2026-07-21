@@ -220,3 +220,36 @@ dcnn_trained/
 
 # macOS
 .DS_Store
+
+# ── SciLink simulation additions ─────────────────────────────────────
+# Engine run artifacts — outputs, never source (multi-MB; bloat history).
+# VASP
+CHG
+CHGCAR
+WAVECAR
+CONTCAR
+DOSCAR
+EIGENVAL
+IBZKPT
+OSZICAR
+OUTCAR
+PCDAT
+REPORT
+XDATCAR
+vasprun.xml
+POTCAR
+# Quantum ESPRESSO
+espresso.pw[io]
+# MD / LAMMPS
+*.lammpstrj
+*.restart[0-9]
+log.lammps
+# Large binary data drops
+*.npy
+*.npz
+# Session / workflow output directories from example + smoke runs
+*_session_*/
+*_smoke_*/
+*_series_*/
+simulation_workflow_output/
+composition_series_output/

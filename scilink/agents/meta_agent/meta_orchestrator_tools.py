@@ -613,27 +613,77 @@ class MetaOrchestratorTools:
             required=["delegation_indices"],
         )
 
-        # -- delegate_to_simulation: DEFERRED lazy seam, intentionally NOT built
-        #
-        # v1 covers analysis + planning only. When simulation delegation is
-        # added, register a tool whose body does a GUARDED import INSIDE the
-        # function — never at module scope, because scilink.agents.sim_agents
-        # hard-imports `ase`, an optional dependency, and the meta-agent module
-        # must stay importable without ASE:
-        #
-        #   def delegate_to_simulation(task, context=None):
-        #       try:
-        #           from ..sim_agents.simulation_orchestrator import (
-        #               SimulationOrchestratorAgent, SimulationMode)
-        #       except ImportError as e:
-        #           return json.dumps({"status": "error",
-        #               "message": "Simulation support requires the optional "
-        #               "[sim] extra (pip install scilink[sim]).",
-        #               "detail": str(e)})
-        #       return self.orch._delegate("simulation", task, context)
-        #
-        # MetaOrchestratorAgent._delegate / _get_*_child would gain a
-        # "simulation" branch using a self.orch.simulation_dir sub-directory.
+        # -- delegate_to_simulation -----------------------------------------
+        def delegate_to_simulation(task: str, context: dict = None,
+                                   context_from: list = None,
+                                   label: str = None) -> str:
+            # Guarded import INSIDE the function: scilink.agents.sim_agents
+            # hard-imports the optional `ase` dependency, and the meta module
+            # must stay importable without it. Return a clean error if the
+            # [sim] extra is absent rather than crashing the meta.
+            try:
+                from ..sim_agents.simulation_orchestrator import (  # noqa: F401
+                    SimulationOrchestratorAgent,
+                )
+            except ImportError as e:
+                return json.dumps({
+                    "status": "error",
+                    "message": ("Simulation support requires the optional [sim] "
+                                "extra (pip install scilink[sim])."),
+                    "detail": str(e),
+                })
+            print(f"  ⚛️  Delegating to simulation specialist: {task[:80]}...")
+            return self.orch._delegate("simulation", task, context,
+                                       context_from, label)
+
+        self._register_tool(
+            func=delegate_to_simulation,
+            name="delegate_to_simulation",
+            description=(
+                "Delegate a computational-simulation task to the simulation "
+                "specialist (periodic DFT, classical molecular dynamics, and "
+                "ML-potential-driven MD). From a natural-language goal it "
+                "autonomously builds and validates an atomic structure, "
+                "generates and runs engine inputs (VASP, LAMMPS), and refines "
+                "them — no input data file required. The specialist runs "
+                "autonomously and returns a structured JSON result (status, "
+                "summary, key_findings, files_produced, structures, "
+                "suggested_followups, warnings, delegation_index). `task` must "
+                "be a complete, self-contained instruction (system + goal); the "
+                "specialist derives the chemistry, force field, and parameters "
+                "itself. To start from an existing structure or an upstream "
+                "result, name its absolute path in `task`/`context`."
+            ),
+            parameters={
+                "task": {
+                    "type": "string",
+                    "description": ("Complete, self-contained simulation "
+                                    "instruction (system + goal)."),
+                },
+                "context": {
+                    "type": "object",
+                    "description": ("Optional upstream findings / file paths "
+                                    "(e.g. a structure path, or analysis "
+                                    "key_findings) to inform the task."),
+                },
+                "context_from": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": ("delegation_index numbers of earlier "
+                                    "delegations whose findings you threaded "
+                                    "into `context` — records provenance."),
+                },
+                "label": {
+                    "type": "string",
+                    "description": ("REQUIRED short label for the UI delegation "
+                                    "tree — a 2-5 word noun phrase naming the "
+                                    "system/method (e.g. 'Zn(OTf)2 MD', 'Si DFT "
+                                    "relaxation', 'MACE-MD water'). NOT a "
+                                    "sentence or a restatement of the task."),
+                },
+            },
+            required=["task", "label"],
+        )
 
         # -- summarize_session_state ----------------------------------------
         def summarize_session_state() -> str:

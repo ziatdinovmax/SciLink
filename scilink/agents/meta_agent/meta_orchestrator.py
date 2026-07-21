@@ -85,8 +85,12 @@ and weave their results into one coherent response for the user.
 
 __SPECIALIST_CAPABILITIES__
 
-Computational simulation (DFT / MD) is NOT available in this build — do not
-attempt to delegate simulation work.
+Computational simulation — building atomic structures, generating and
+validating engine inputs, and RUNNING + refining DFT / classical-MD / MLIP
+simulations — is `delegate_to_simulation`, listed in SPECIALIST CAPABILITIES
+above when available (it needs the `scilink[sim]` extra; if it is absent from
+that inventory, simulation is unavailable in this build and you should say so
+rather than fabricate a result).
 
 **INSPECTING UPLOADED FILES:**
 - When the user refers to uploaded files — or points you at a folder — call
@@ -228,10 +232,10 @@ attempt to delegate simulation work.
   just because the dataset fan-out doesn't apply.
 
 **THE DELEGATION CONTRACT:**
-- `delegate_to_analysis(task, context)` and `delegate_to_planning(task,
-  context)` run the specialist and return a structured JSON result: status,
-  summary, key_findings, files_produced, suggested_followups, warnings,
-  delegation_index.
+- `delegate_to_analysis(task, context)`, `delegate_to_planning(task, context)`,
+  and `delegate_to_simulation(task, context)` run the specialist and return a
+  structured JSON result: status, summary, key_findings, files_produced,
+  suggested_followups, warnings, delegation_index.
 - The specialist runs in the SAME autonomy mode as you. In autopilot mode it
   pauses at its decision points for the user to approve or edit plans and
   outputs (via its own human-feedback prompts) — that is expected and good;
@@ -417,6 +421,7 @@ class MetaOrchestratorAgent:
         self.checkpoint_path = self.base_dir / "checkpoint.json"
         self.analysis_dir = self.base_dir / "analysis"
         self.planning_dir = self.base_dir / "planning"
+        self.simulation_dir = self.base_dir / "simulation"
         # Fan-out workers (ephemeral, one isolated analysis session per branch)
         # and fused cross-dataset reports live in their own sub-trees, distinct
         # from the persistent analysis/ and planning/ children. See fanout.py.
@@ -608,6 +613,43 @@ class MetaOrchestratorAgent:
             # Share skills / custom tools / MCP servers registered on the meta.
             self._propagate_extensions_to_child(self._children["planning"])
         return self._children["planning"]
+
+    def _get_simulation_child(self):
+        """Lazily create (or restore) the persistent simulation child.
+
+        Structure-centric, so unlike planning it needs no data_dir at
+        construction — a simulate session starts from a natural-language goal,
+        not a data file. Built in the CO_PILOT resting mode; each delegation's
+        run_task sets the autonomy for that call to match the meta's. The
+        ``simulation_orchestrator`` import is done HERE (inside the method),
+        not at module scope, because ``scilink.agents.sim_agents`` hard-imports
+        the optional ``ase`` dependency and the meta module must stay importable
+        without it; ``delegate_to_simulation`` guards the ImportError.
+        """
+        if "simulation" not in self._children:
+            from ..sim_agents.simulation_orchestrator import (
+                SimulationOrchestratorAgent, SimulationMode,
+            )
+            restore = (self.simulation_dir / "checkpoint.json").exists()
+            self.logger.info(
+                f"🧩 {'Restoring' if restore else 'Creating'} simulation child "
+                f"at {self.simulation_dir}"
+            )
+            self._children["simulation"] = SimulationOrchestratorAgent(
+                base_dir=str(self.simulation_dir),
+                api_key=self.api_key,
+                model_name=self.model_name,
+                base_url=self.base_url,
+                futurehouse_api_key=self.futurehouse_api_key,
+                restore_checkpoint=restore,
+                simulation_mode=SimulationMode.CO_PILOT,
+                # mp_api_key not threaded from the meta (its constructor has
+                # none); MPRester falls back to the MP_API_KEY env var when a
+                # crystal-from-Materials-Project structure is requested.
+            )
+            self._children["simulation"]._agent_label = "Simulation specialist"
+            self._propagate_extensions_to_child(self._children["simulation"])
+        return self._children["simulation"]
 
     # =========================================================================
     # Shared extensions: skills, custom tools, MCP servers
@@ -891,6 +933,26 @@ class MetaOrchestratorAgent:
         except Exception as e:  # noqa: BLE001
             self.logger.warning(f"planning capability probe failed: {e}")
 
+        # Simulation is optional (needs the `ase`-backed `scilink[sim]` extra).
+        # The probe constructs the sim child, which hard-imports `ase`; if that
+        # is absent the ImportError is swallowed here and the section is simply
+        # omitted, so the routing inventory honestly reflects what this build
+        # can do — matching the guarded `delegate_to_simulation` tool.
+        try:
+            simulation = self._get_simulation_child()
+            s_tools = _tool_lines(
+                getattr(getattr(simulation, "tools", None), "openai_schemas", []))
+            sections.append(
+                "`delegate_to_simulation` — RUN computational simulations end "
+                "to end (periodic DFT, classical MD, MLIP-driven MD): build the "
+                "atomic structure, generate + validate engine inputs, execute, "
+                "and refine on error/quality. Structure-centric — starts from a "
+                "natural-language system + goal, no data file. Tools:\n"
+                f"{s_tools}"
+            )
+        except Exception as e:  # noqa: BLE001
+            self.logger.warning(f"simulation capability probe skipped: {e}")
+
         if not sections:
             raise RuntimeError("no specialist capabilities could be read")
         return (
@@ -952,6 +1014,12 @@ class MetaOrchestratorAgent:
         elif mode == "planning":
             from ..planning_agents.planning_orchestrator import AutonomyLevel
             get_child, autonomy_enum = self._get_planning_child, AutonomyLevel
+        elif mode == "simulation":
+            # Guarded import (optional `ase`): the delegate_to_simulation tool
+            # already returned a clean error if the [sim] extra is missing, so
+            # reaching here means the import succeeds.
+            from ..sim_agents.simulation_orchestrator import SimulationMode
+            get_child, autonomy_enum = self._get_simulation_child, SimulationMode
         else:
             return json.dumps({
                 "status": "error",
