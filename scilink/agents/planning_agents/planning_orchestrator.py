@@ -229,6 +229,17 @@ for each:
   search_literature(objective="...", search_type="hypothesis_context") → plan_lit_path
   generate_initial_plan(..., literature_context=plan_lit_path)
 
+Several search types can be requested at once (comma-separated) and run in
+parallel, costing roughly the wait of a single search. For IDEATION sessions
+— brainstorming, exploring approaches, "what are interesting directions" —
+pair grounding with cross-domain retrieval and select the ideation profile:
+  search_literature(objective="...", search_type="hypothesis_context,cross_domain")
+  generate_initial_plan(..., literature_context=..., selection_profile="ideation")
+Literature of any type reduces constraint COVERAGE — plans stay on-topic but
+omit individual requirements. When the objective carries hard equipment or
+process constraints, pass them as additional_context (each is then mapped to a
+named step) rather than withholding the literature.
+
 For refinement, reuse existing literature or run a new search as needed.
 
 **MOLECULAR DESIGN WORKFLOW:**

@@ -133,6 +133,99 @@ You MUST respond with a single JSON object containing a key "proposed_experiment
 """
 
 
+HYPOTHESIS_BESTOFN_AUTHOR_NOTE = """## ⚠️ BEST-OF-N AUTHORING NOTE
+You are authoring ONE candidate in a multi-candidate (best-of-N) process:
+alternative strategies are handled by SEPARATE candidate plans and compared
+by a judge afterwards. If the objective asks to explore multiple distinct
+strategies or alternatives, that request is satisfied by the process — NOT by
+this plan. Propose exactly ONE strategy: a single coherent experiment plan
+built around one mechanistic approach. Do NOT pack multiple alternative
+strategies into this plan."""
+
+
+HYPOTHESIS_DISTINCTNESS_CONDITIONING = """## ⚠️ PRIOR CANDIDATE HYPOTHESES (already proposed for this objective)
+{prior_hypotheses}
+
+You MUST propose a plan that tests a DIFFERENT mechanistic hypothesis or
+strategic approach from every hypothesis listed above. Standard practice
+(equipment, safety, characterization steps) may repeat; the scientific claim
+and the strategy that tests it must not. If the provided evidence cannot
+support another distinct, well-grounded approach, respond with the error JSON
+(e.g. {{"error": "Insufficient context: no additional distinct approach is supported by the provided evidence."}})
+instead of inventing one."""
+
+
+HYPOTHESIS_BEST_OF_N_SELECTION_INSTRUCTIONS = """
+You are an expert research strategist selecting the best of several candidate
+experimental plans for the same objective. The candidates were authored
+against the SAME evidence (provided below), so differences between them
+reflect strategy, not information. Judge them comparatively.
+
+Score EACH candidate 1-5 on:
+- "groundedness": every load-bearing claim is traceable to the provided evidence.
+- "testability": the hypothesis is falsifiable by the stated expected_outcome.
+- "actionability": steps are executable without placeholders; optimization
+  parameters are well-bounded.
+- "feasibility": equipment/technique demands match what the evidence says is
+  available.
+- "information_gain": how much the result advances the objective whichever way
+  it falls.
+
+Then select ONE candidate. You are a selector, not an editor: do not rewrite,
+merge, or extend any plan. If your selection does NOT have the top score on
+some criterion, you MUST state that tradeoff plainly in your reasoning rather
+than smoothing it over.
+
+Respond with a single JSON object:
+{"scores": [{"candidate": <1-based int>, "groundedness": <1-5>, "testability": <1-5>,
+             "actionability": <1-5>, "feasibility": <1-5>, "information_gain": <1-5>,
+             "comment": "<one sentence>"}],
+ "selected_candidate": <1-based int>,
+ "reasoning": "<short paragraph explaining the comparative pick, naming any criterion where the pick is not the top scorer>"}
+"""
+
+
+CONSTRAINT_COVERAGE_NOTE = """
+## MANDATORY CONSTRAINT COVERAGE
+Every hard constraint stated above must be addressed by a named experimental
+step that says which constraint it satisfies. An unaddressed constraint is a
+failed plan, however scientifically interesting the rest of it is.
+"""
+
+
+IDEATION_AUTHOR_OVERRIDE = """
+## IDEATION MODE — GROUNDING LATITUDE (overrides the Safety Rule above)
+This run is research ideation. The provided context may deliberately lack
+the key inspiration. Instead of declining for insufficient context: ground
+your plan in the context where possible, and where the decisive mechanism
+is not in the context you MAY introduce one from general scientific
+knowledge — choose the boldest hypothesis you can rigorously defend, and
+mark context-external elements as (speculative) in the justification.
+Never fabricate specific numeric claims or attribute them to unnamed
+sources."""
+
+
+BESTOFN_SELECTION_PROFILE_LAB = """
+## SELECTION WEIGHTING — LAB PROFILE
+This campaign is headed for actual execution. Weight feasibility and
+actionability most heavily when selecting: a plan that cannot run on the
+available equipment, or whose steps are not directly executable, cannot
+generate any information regardless of how interesting its hypothesis is.
+Prefer the candidate most likely to produce a clean, interpretable result
+on the stated platform."""
+
+
+BESTOFN_SELECTION_PROFILE_IDEATION = """
+## SELECTION WEIGHTING — IDEATION PROFILE
+This is research ideation: the goal is the most scientifically valuable
+hypothesis, not tomorrow's protocol. Weight information_gain and
+mechanistic novelty most heavily when selecting: prefer the candidate
+whose result would advance understanding most — whichever way it falls —
+even if it is operationally more demanding. Feasibility is a tiebreaker,
+not a veto; only rule a candidate out on feasibility if it is
+fundamentally unexecutable, and say so plainly."""
+
+
 TEA_INSTRUCTIONS_FALLBACK = """
 You are an expert technoeconomic analyst.
 

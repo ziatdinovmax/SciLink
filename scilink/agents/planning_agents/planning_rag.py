@@ -14,7 +14,14 @@ from .instruct import (
     HYPOTHESIS_GENERATION_INSTRUCTIONS,
     TEA_INSTRUCTIONS,
     HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK,
-    TEA_INSTRUCTIONS_FALLBACK
+    TEA_INSTRUCTIONS_FALLBACK,
+    HYPOTHESIS_DISTINCTNESS_CONDITIONING,
+    HYPOTHESIS_BEST_OF_N_SELECTION_INSTRUCTIONS,
+    HYPOTHESIS_BESTOFN_AUTHOR_NOTE,
+    BESTOFN_SELECTION_PROFILE_LAB,
+    BESTOFN_SELECTION_PROFILE_IDEATION,
+    IDEATION_AUTHOR_OVERRIDE,
+    CONSTRAINT_COVERAGE_NOTE
 )
 
 
@@ -239,7 +246,7 @@ def critique_plan(objective: str,
         if pl:
             revision_parts.append("CAVEATS PREVIOUSLY RAISED on the prior plan:\n" + pl)
     if human_feedback:
-        revision_parts.append(f'HUMAN REVISION REQUEST:\n"{human_feedback}"')
+        revision_parts.append(f'REVISION REQUEST:\n"{human_feedback}"')
 
     if revision_parts:
         prior_section = (
@@ -323,7 +330,8 @@ def perform_science_rag(objective: str,
                         additional_context: Optional[str] = None,
                         external_context: Optional[str] = None,
                         skill_context: Optional[str] = None,
-                        return_context: bool = False) -> Any:
+                        return_context: bool = False,
+                        mode_key: Optional[str] = None) -> Any:
     """
     Executes the Scientific/TEA RAG loop over the Docs KnowledgeBase.
 
@@ -354,6 +362,15 @@ def perform_science_rag(objective: str,
         except Exception as e:
             print(f"  - ⚠️ Warning: Failed to parse primary data set: {e}")
 
+    # Literature context crowds out the less glamorous constraints: plans stay
+    # on-topic but silently drop individual requirements, and the misses are
+    # omissions rather than violations. Demanding an explicit constraint->step
+    # mapping restores coverage at no measurable cost to plan quality. Scoped
+    # to the condition it was measured in — constraints AND literature both
+    # present; a constraints-only run already complies.
+    if additional_context and external_context:
+        additional_context = f"{additional_context}\n{CONSTRAINT_COVERAGE_NOTE}"
+
     # --- Select the fallback instruction set matching the planning task ---
     fallback_instructions = None
     if instructions == HYPOTHESIS_GENERATION_INSTRUCTIONS:
@@ -376,6 +393,7 @@ def perform_science_rag(objective: str,
         fallback_instructions=fallback_instructions,
         task_name=task_name,
         return_context=return_context,
+        mode_key=mode_key,
     )
 
     if return_context:
@@ -383,6 +401,243 @@ def perform_science_rag(objective: str,
         return result, {"retrieved_context": retrieved_context,
                         "primary_data": primary_data_str}
     return rag_out
+
+
+def generate_plan_candidates(objective: str,
+                             kb_docs: Any,
+                             model: Any,
+                             generation_config: Any,
+                             n_candidates: int,
+                             primary_data_set: Optional[Dict[str, str]] = None,
+                             image_paths: Optional[List[str]] = None,
+                             image_descriptions: Optional[List[str]] = None,
+                             additional_context: Optional[str] = None,
+                             external_context: Optional[str] = None,
+                             skill_context: Optional[str] = None,
+                             selection_profile: str = "lab"
+                             ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], str]:
+    """
+    Sequential, diversity-conditioned best-of-N candidate generation.
+
+    Candidate 1 runs the normal science RAG (with its fallback swap); its
+    instruction tier — "strict" or "fallback" — is then pinned for the whole
+    run, so a fallback run authors ALL candidates under the fallback
+    instructions and a strict run never silently mixes in general-knowledge
+    plans. Each later candidate sees the prior candidates' hypothesis
+    sentences plus the distinctness conditioning, and may DECLINE (error JSON)
+    when the evidence supports no further distinct approach — so
+    ``n_candidates`` is a cap, not a quota.
+
+    ``selection_profile="ideation"`` has author-side effect only in STRICT
+    runs: a fallback run swaps in the fallback instructions for every
+    candidate, which already license general knowledge, so
+    ``IDEATION_AUTHOR_OVERRIDE`` does not apply there and only the judge
+    weighting differs.
+
+    Returns ``(candidates, author_context, tier)`` where ``candidates`` holds
+    only successful (non-declined) plans, in generation order, and
+    ``author_context`` is the shared grounding evidence
+    (``{"retrieved_context", "primary_data"}``) all candidates were authored
+    against.
+    """
+    # Every author — candidate 1 included — is told it is writing ONE of N.
+    # Without this, an objective phrased as "explore several alternatives"
+    # makes the (otherwise unconditioned) first author pack all the
+    # alternative strategies into a single plan, which then wins at the
+    # judge on scope-matching (observed live via the meta delegation path).
+    author_ctx = (f"{additional_context}\n\n{HYPOTHESIS_BESTOFN_AUTHOR_NOTE}"
+                  if additional_context else HYPOTHESIS_BESTOFN_AUTHOR_NOTE) \
+        if n_candidates > 1 else additional_context
+
+    # Ideation profile relaxes the derivability rule at AUTHORING time: the
+    # override rides the instruction block itself (adjacent to the safety
+    # rule it supersedes). Lab profile authors exactly as before — the
+    # benchmark showed the strict derivability discipline structurally caps
+    # rediscovery when the key inspiration is absent from the context.
+    author_instructions = HYPOTHESIS_GENERATION_INSTRUCTIONS
+    if selection_profile == "ideation":
+        author_instructions = (HYPOTHESIS_GENERATION_INSTRUCTIONS
+                               + IDEATION_AUTHOR_OVERRIDE)
+
+    first, author_context = perform_science_rag(
+        objective=objective,
+        instructions=author_instructions,
+        task_name="Candidate Plan 1",
+        kb_docs=kb_docs,
+        model=model,
+        generation_config=generation_config,
+        primary_data_set=primary_data_set,
+        image_paths=image_paths,
+        image_descriptions=image_descriptions,
+        additional_context=author_ctx,
+        external_context=external_context,
+        skill_context=skill_context,
+        return_context=True,
+        mode_key="_rag_mode",
+    )
+    tier = first.pop("_rag_mode", "strict") if isinstance(first, dict) else "strict"
+    candidates = [first]
+    if first.get("error") or not first.get("proposed_experiments"):
+        return candidates, author_context, tier
+
+    if tier == "fallback":
+        print("  - ℹ️  Fallback tier pinned for all candidates in this run.")
+
+    instructions = (author_instructions if tier == "strict"
+                    else HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK)
+
+    for k in range(2, n_candidates + 1):
+        prior = "\n".join(
+            f"{i}. {c['proposed_experiments'][0].get('hypothesis', 'N/A')}"
+            for i, c in enumerate(candidates, 1)
+        )
+        conditioning = HYPOTHESIS_DISTINCTNESS_CONDITIONING.format(
+            prior_hypotheses=prior
+        )
+        note_and_conditioning = f"{HYPOTHESIS_BESTOFN_AUTHOR_NOTE}\n\n{conditioning}"
+        add_ctx = (f"{additional_context}\n\n{note_and_conditioning}"
+                   if additional_context else note_and_conditioning)
+        # No fallback_instructions here: within the pinned tier, a decline is
+        # a decline — the early stop, not a trigger to change tiers mid-run.
+        res = run_rag(
+            query=objective,
+            instructions=instructions,
+            kb=kb_docs,
+            model=model,
+            generation_config=generation_config,
+            images=image_paths,
+            image_descriptions=image_descriptions,
+            external_context=external_context,
+            additional_context=add_ctx,
+            primary_data_str=author_context.get("primary_data"),
+            skill_context=skill_context,
+            fallback_instructions=None,
+            task_name=f"Candidate Plan {k}",
+        )
+        if not isinstance(res, dict) or res.get("error") or not res.get("proposed_experiments"):
+            reason = (res or {}).get("error", "no experiments returned") \
+                if isinstance(res, dict) else "unparseable response"
+            print(f"  - 🛑 Candidate {k} declined ({reason}) — "
+                  f"stopping at {len(candidates)} distinct candidate(s).")
+            break
+        candidates.append(res)
+
+    return candidates, author_context, tier
+
+
+def judge_plan_candidates(objective: str,
+                          candidates: List[Dict[str, Any]],
+                          model: Any,
+                          generation_config: Any,
+                          retrieved_context: Optional[str] = None,
+                          primary_data: Optional[str] = None,
+                          images: Optional[List[Any]] = None,
+                          image_descriptions: Optional[List[str]] = None,
+                          additional_context: Optional[str] = None,
+                          skill_context: Optional[str] = None,
+                          fallback_tier: bool = False,
+                          selection_profile: str = "lab") -> Dict[str, Any]:
+    """
+    Comparative LLM judge over best-of-N plan candidates.
+
+    A selector, not an editor: scores each candidate on five criteria against
+    the SAME evidence the authors saw and picks one; it emits no caveats (the
+    advisory critic owns that channel) and never modifies a plan. Fails open
+    to candidate 1 — a judge crash must not block planning — with the failure
+    recorded in the returned dict.
+
+    Returns ``{"scores": [...], "selected_candidate": <1-based>,
+    "reasoning": str}`` (+ ``"error"`` if the judge failed).
+    """
+    fail_open = {"scores": [], "selected_candidate": 1,
+                 "reasoning": "Judge unavailable — defaulted to candidate 1."}
+    if len(candidates) < 2:
+        return {"scores": [], "selected_candidate": 1,
+                "reasoning": "Single candidate — no comparison needed."}
+
+    cand_blocks = []
+    for i, cand in enumerate(candidates, 1):
+        cand_blocks.append(
+            f"### CANDIDATE {i}\n"
+            + json.dumps({"proposed_experiments":
+                          cand.get("proposed_experiments", [])}, indent=2)
+        )
+
+    evidence_parts = []
+    if primary_data:
+        evidence_parts.append(f"## 📊 Primary Experimental Data:\n{primary_data}")
+    if additional_context:
+        # Lab constraints / equipment live here — feasibility is judged
+        # against this, so it must reach the judge, not just the authors.
+        evidence_parts.append(f"## Additional Context:\n{additional_context}")
+    if retrieved_context:
+        evidence_parts.append(f"## Retrieved Context (KB + literature):\n{retrieved_context}")
+    if skill_context:
+        evidence_parts.append(skill_context)
+
+    loaded_images = []
+    if images and _PIL_Image:
+        for img in images:
+            if isinstance(img, str):
+                try:
+                    loaded_images.append(_PIL_Image.open(img))
+                except Exception as e:
+                    print(f"    - ⚠️ Judge could not load image {img}: {e}")
+            else:
+                loaded_images.append(img)
+    if loaded_images:
+        note = "## Provided Images: (See attached)"
+        if image_descriptions:
+            note += f"\n## Image Descriptions:\n{json.dumps(image_descriptions, indent=2)}"
+        evidence_parts.append(note)
+
+    tier_note = ""
+    if fallback_tier:
+        tier_note = (
+            "\nNOTE: ALL candidates were authored in fallback mode (general "
+            "scientific knowledge; the local knowledge base lacked specific "
+            "context). Judge groundedness against the evidence that IS "
+            "provided (data, literature, images) and general plausibility — "
+            "do not penalize candidates for the missing knowledge base.\n"
+        )
+
+    # Selection profile: same criteria and scores either way (the human sees
+    # an identical card format); only the WEIGHTING of the pick changes.
+    # "lab" codifies the execution-first behavior; "ideation" weights
+    # information gain first — benchmark evidence showed the lab weighting
+    # leaves the boldest (most rediscovery-shaped) candidate unpicked.
+    profile_note = (BESTOFN_SELECTION_PROFILE_IDEATION
+                    if selection_profile == "ideation"
+                    else BESTOFN_SELECTION_PROFILE_LAB)
+
+    prompt = (
+        f"{HYPOTHESIS_BEST_OF_N_SELECTION_INSTRUCTIONS}\n{profile_note}\n"
+        f"## OBJECTIVE:\n{objective}\n{tier_note}\n"
+        f"## EVIDENCE ALL CANDIDATES WERE AUTHORED AGAINST:\n"
+        + ("\n\n".join(evidence_parts) if evidence_parts
+           else "(no shared evidence beyond the objective)")
+        + "\n\n## THE CANDIDATES:\n" + "\n\n".join(cand_blocks)
+    )
+
+    try:
+        prompt_parts = [prompt]
+        prompt_parts.extend(loaded_images)
+        response = model.generate_content(prompt_parts,
+                                          generation_config=generation_config)
+        verdict, err = parse_json_from_response(response)
+        if err or not isinstance(verdict, dict):
+            logging.error(f"Best-of-N judge parse failure: {err}")
+            return {**fail_open, "error": str(err)}
+        sel = verdict.get("selected_candidate")
+        if not isinstance(sel, int) or not (1 <= sel <= len(candidates)):
+            logging.error(f"Best-of-N judge returned invalid selection: {sel}")
+            return {**fail_open, "error": f"invalid selected_candidate: {sel}"}
+        return {"scores": verdict.get("scores", []),
+                "selected_candidate": sel,
+                "reasoning": verdict.get("reasoning", "")}
+    except Exception as e:
+        logging.error(f"Best-of-N judge failed: {e}")
+        return {**fail_open, "error": str(e)}
 
 
 def normalize_code(code: str) -> str:

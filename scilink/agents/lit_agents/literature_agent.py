@@ -373,6 +373,36 @@ class LiteratureSearchAgent:
         )
         return self._execute_crow_task(formatted_query, task_type="Hypothesis")
 
+    def search_for_cross_domain(self, objective: str) -> Dict[str, Any]:
+        """
+        Formats a query for INSPIRATION retrieval: mechanisms and design
+        principles from adjacent or unrelated fields that could TRANSFER to
+        this problem.
+
+        Deliberately not a topical review. ``search_for_hypothesis_context``
+        retrieves the problem's own subfield — which grounds a plan but also
+        anchors it to established approaches. This one asks for analogies
+        whose mechanism might carry over, which is where a genuinely new
+        mechanistic idea usually comes from.
+
+        Intended for ideation. Benchmarking showed cross-domain context
+        raises idea novelty and non-obviousness, but degrades adherence to
+        hard equipment/process constraints — so pair it with grounding
+        retrieval, and prefer grounding alone when a plan must satisfy
+        stated constraints.
+        """
+        formatted_query = (
+            "Survey mechanisms and design principles from ADJACENT and "
+            "UNRELATED domains that could TRANSFER to the problem below. Do "
+            "NOT provide a topical review of the problem's own subfield "
+            "methods. For each analogous system (a different chemistry, "
+            "biology, or engineering field achieving a similar function), "
+            "describe the underlying mechanism and explain why it might "
+            "transfer. Emphasize unconventional and emerging approaches.\n\n"
+            f"PROBLEM: {objective}"
+        )
+        return self._execute_crow_task(formatted_query, task_type="CrossDomain")
+
     def search_for_fitting_models(self, objective: str) -> Dict[str, Any]:
         """
         Formats a query specifically for finding mathematical equations.

@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import copy
 import json
 import logging
 import shutil
@@ -40,14 +41,22 @@ from .planning_rag import (
     refine_plan_with_feedback,
     refine_code_with_feedback,
     verify_plan_relevance,
-    critique_plan
+    critique_plan,
+    generate_plan_candidates,
+    judge_plan_candidates
 )
 
 from ...skills.loader import load_skill
 
 from scilink.parsers import ingest_files, extract_images
 
-from .user_interface import display_plan_summary, get_user_feedback
+from .user_interface import (
+    display_plan_summary,
+    get_user_feedback,
+    display_plan_candidates,
+    get_candidate_selection,
+    format_caveats
+)
 
 from .html_generator import HTMLReportGenerator
 
@@ -409,7 +418,10 @@ class PlanningAgent(BaseAgent):
                     enable_human_feedback: bool = True,
                     reset_state: bool = False,
                     skill: Optional[str] = None,
-                    external_context: Optional[str] = None) -> Dict[str, Any]:
+                    external_context: Optional[str] = None,
+                    n_candidates: int = 1,
+                    candidate_report_dir: Optional[str] = None,
+                    selection_profile: str = "lab") -> Dict[str, Any]:
         """
         Generate experimental plan (science only, no implementation code/protocol).
 
@@ -441,6 +453,31 @@ class PlanningAgent(BaseAgent):
             external_context: Pre-fetched external context (e.g. from
                 orchestrator's search_literature/query_molecules tools).
                 When provided, skips internal literature search.
+            n_candidates: Best-of-N width (clamped 1-4). At 1 (default) the
+                single-plan path runs unchanged. Above 1, candidates are
+                generated sequentially — each conditioned to test a DIFFERENT
+                mechanistic approach — an LLM judge picks one, and (in
+                interactive modes) the human may override before the usual
+                plan review. A cap, not a quota: generation stops early when
+                the evidence supports no further distinct approach. Note that
+                even a narrowly-specified objective usually admits multiple
+                strategies — the meaningful reason to stay at 1 is a strategy
+                already being committed (follow-up iterations), not objective
+                specificity. (The orchestrator tool layer applies exactly that
+                policy: campaign-first plans default to 3.)
+            candidate_report_dir: Directory for per-candidate HTML reports
+                (persisted; referenced from the selection cards). Only used
+                when n_candidates > 1.
+            selection_profile: How the best-of-N judge WEIGHTS its pick
+                (criteria and scores are identical either way). "lab"
+                (default): feasibility/actionability first — the plan must
+                run on the available platform. "ideation": information
+                gain/novelty first, feasibility as tiebreaker, plus
+                author-side grounding latitude — for research ideation
+                rather than executable campaign planning. Applies only when
+                n_candidates >= 2: the single-plan path ignores the profile
+                entirely (documented behavior — ideation is a property of
+                the multi-candidate process).
 
         Returns:
             Dict containing the experimental plan with keys:
@@ -531,32 +568,102 @@ class PlanningAgent(BaseAgent):
 
         # RAG for science plan
         print(f"\n--- Generating Experimental Strategy ---")
-        res, author_context = perform_science_rag(
-            objective=objective,
-            instructions=HYPOTHESIS_GENERATION_INSTRUCTIONS,
-            task_name="Experimental Plan",
-            kb_docs=self.kb_docs,
-            model=self.model,
-            generation_config=self.generation_config,
-            primary_data_set=primary_data_set,
-            image_paths=all_image_paths,
-            image_descriptions=image_descriptions,
-            additional_context=ctx_string,
-            external_context=external_context,
-            skill_context=skill_planning_context,
-            return_context=True
-        )
+        n_candidates = max(1, min(int(n_candidates or 1), 4))
+        bestofn_candidates = None
+        bestofn_judge = None
+        bestofn_selected = None
+        bestofn_reports = []
+        if n_candidates > 1:
+            candidates, author_context, tier = generate_plan_candidates(
+                objective=objective,
+                kb_docs=self.kb_docs,
+                model=self.model,
+                generation_config=self.generation_config,
+                n_candidates=n_candidates,
+                primary_data_set=primary_data_set,
+                image_paths=all_image_paths,
+                image_descriptions=image_descriptions,
+                additional_context=ctx_string,
+                external_context=external_context,
+                skill_context=skill_planning_context,
+                selection_profile=selection_profile,
+            )
+            if len(candidates) > 1:
+                print(f"\n--- Judging {len(candidates)} Candidate Plans ---")
+                bestofn_judge = judge_plan_candidates(
+                    objective=objective,
+                    candidates=candidates,
+                    model=self.model,
+                    generation_config=self.generation_config,
+                    retrieved_context=author_context.get("retrieved_context"),
+                    primary_data=author_context.get("primary_data"),
+                    images=all_image_paths or None,
+                    image_descriptions=image_descriptions,
+                    additional_context=ctx_string,
+                    skill_context=skill_planning_context,
+                    fallback_tier=(tier == "fallback"),
+                    selection_profile=selection_profile,
+                )
+                bestofn_selected = bestofn_judge["selected_candidate"]
+                print(f"  - 🧑‍⚖️ Judge pick: Candidate {bestofn_selected}")
+                # Persisted per-candidate reports (referenced from the
+                # selection cards; kept for runner-up fallback and audit).
+                if candidate_report_dir:
+                    Path(candidate_report_dir).mkdir(parents=True, exist_ok=True)
+                    for ci, cand in enumerate(candidates, 1):
+                        rp = Path(candidate_report_dir) / f"candidate_{ci}.html"
+                        try:
+                            HTMLReportGenerator(self.state).generate_single_plan(
+                                cand, str(rp), title=f"Plan Candidate {ci}")
+                            bestofn_reports.append(str(rp))
+                        except Exception as e:
+                            logging.warning(f"Candidate report {ci} failed: {e}")
+            else:
+                print("  - ℹ️  Only one distinct candidate produced — "
+                      "proceeding as a single-plan run.")
+            bestofn_candidates = candidates
+            res = copy.deepcopy(candidates[(bestofn_selected or 1) - 1])
+            self.state["plan_candidates"] = {
+                "candidates": bestofn_candidates,
+                "judge": bestofn_judge,
+                "selected_index": bestofn_selected or 1,
+                "human_override": False,
+                "tier": tier,
+                "profile": selection_profile,
+                "reports": bestofn_reports,
+            }
+        else:
+            res, author_context = perform_science_rag(
+                objective=objective,
+                instructions=HYPOTHESIS_GENERATION_INSTRUCTIONS,
+                task_name="Experimental Plan",
+                kb_docs=self.kb_docs,
+                model=self.model,
+                generation_config=self.generation_config,
+                primary_data_set=primary_data_set,
+                image_paths=all_image_paths,
+                image_descriptions=image_descriptions,
+                additional_context=ctx_string,
+                external_context=external_context,
+                skill_context=skill_planning_context,
+                return_context=True
+            )
 
         if external_context:
             res["literature_search"] = external_context
 
         self._log_action(
-            action="perform_science_rag",
+            action=("generate_plan_candidates" if n_candidates > 1
+                    else "perform_science_rag"),
             input_ctx={
                 "objective": objective,
                 "knowledge_paths": knowledge_paths,
                 "has_primary_data": primary_data_set is not None,
-                "has_external_context": bool(external_context)
+                "has_external_context": bool(external_context),
+                **({"n_candidates": n_candidates,
+                    "n_produced": len(bestofn_candidates),
+                    "judge_pick": bestofn_selected}
+                   if n_candidates > 1 else {})
             },
             result=res,
             rationale=res.get("proposed_experiments", [{}])[0].get("justification") if res.get("proposed_experiments") else None
@@ -568,74 +675,115 @@ class PlanningAgent(BaseAgent):
         self.state["plan_history"].append(res.copy())
         self.state["current_plan"] = res
         
-        # 1) Objective-conformance check (enforcing). A non-conforming plan is
-        # automatically adjusted — the proven self-correction loop, unchanged.
-        if not res.get("error"):
-            is_relevant, critique = verify_plan_relevance(objective, res, self.model, self.generation_config)
+        def _conform_and_critique(res):
+            # 1) Objective-conformance check (enforcing). A non-conforming plan is
+            # automatically adjusted — the proven self-correction loop, unchanged.
+            if not res.get("error"):
+                is_relevant, critique = verify_plan_relevance(objective, res, self.model, self.generation_config)
 
-            if not is_relevant:
-                print(f"\n🔄 Self-correction triggered: {critique}")
-                res = refine_plan_with_feedback(
-                    original_result=res,
-                    feedback=f"CRITICAL: {critique}",
-                    objective=objective,
-                    model=self.model,
-                    generation_config=self.generation_config,
-                    skill_context=skill_planning_context
+                if not is_relevant:
+                    print(f"\n🔄 Self-correction triggered: {critique}")
+                    res = refine_plan_with_feedback(
+                        original_result=res,
+                        feedback=f"CRITICAL: {critique}",
+                        objective=objective,
+                        model=self.model,
+                        generation_config=self.generation_config,
+                        skill_context=skill_planning_context
+                    )
+
+                    res["iteration"] = current_iter
+                    res["stage"] = "Auto-Corrected"
+                    self.state["plan_history"].append(res.copy())
+                    self.state["current_plan"] = res
+
+                    self._log_action(
+                        action="self_correction",
+                        input_ctx={"critique": critique},
+                        result=res,
+                        rationale=f"Auto-corrected due to: {critique}"
+                    )
+
+            # 2) Advisory critic (separate call, AFTER conformance + any adjustment).
+            # Checks PHYSICAL REALISM and INTERNAL CONSISTENCY of the final plan and
+            # records caveats — it NEVER rewrites the plan. Findings surface as
+            # "Caveats & Potential Limitations" for the human (CO_PILOT / AUTOPILOT)
+            # at the feedback prompt, or as run_task `warnings` (AUTONOMOUS / meta).
+            # Auto-applying critic findings was shown to rescope plans unreliably, so
+            # acting on them is left to an explicit human/consumer decision.
+            if not res.get("error"):
+                verdict = critique_plan(
+                    objective, res, self.model, self.generation_config,
+                    retrieved_context=author_context.get("retrieved_context"),
+                    primary_data=author_context.get("primary_data"),
+                    images=all_image_paths or None,
+                    image_descriptions=image_descriptions,
+                    additional_context=ctx_string,
+                    skill_context=skill_planning_context,
                 )
+                findings = verdict.get("findings", [])
+                if findings:
+                    # Order critical-first so the caveats list and warnings lead with
+                    # the most material concerns. Record on the plan (no rewrite).
+                    _order = {"critical": 0, "minor": 1}
+                    findings = sorted(findings, key=lambda f: _order.get(f.get("severity"), 1))
+                    res["critic_findings"] = findings
+                    self.state["current_plan"] = res
+                    # Stamp onto the latest history snapshot too so the HTML report
+                    # (which renders plan_history, not current_plan) shows the caveats.
+                    if self.state.get("plan_history"):
+                        self.state["plan_history"][-1]["critic_findings"] = findings
+                    n_crit = sum(1 for f in findings if f.get("severity") == "critical")
+                    print(f"\n⚠️  Critic noted {len(findings)} caveat(s)"
+                          f"{f' ({n_crit} significant)' if n_crit else ''} "
+                          "— recorded under Caveats & Potential Limitations (plan unchanged).")
+                    self._log_action(
+                        action="critic_review",
+                        input_ctx={"findings": findings},
+                        result=res,
+                        rationale="Advisory caveats recorded; plan not modified."
+                    )
+            return res
 
+        res = _conform_and_critique(res)
+
+        # Stage-1 best-of-N selection: candidate cards + judge pick + the
+        # pick's caveats, then accept-or-override. Selection only — free-text
+        # refinement stays with the stage-2 prompt below, on whichever
+        # candidate wins here. The critic stays advisory throughout: caveats
+        # are DISPLAYED at this prompt, never acted on automatically, and a
+        # critical finding never auto-switches the selection.
+        if (bestofn_candidates and len(bestofn_candidates) > 1
+                and enable_human_feedback and not res.get("error")):
+            display_plan_candidates(
+                bestofn_candidates, bestofn_judge or {}, bestofn_selected,
+                report_paths=bestofn_reports,
+                pick_caveats=format_caveats(res.get("critic_findings")),
+            )
+            choice = get_candidate_selection(len(bestofn_candidates), bestofn_selected)
+            if choice != bestofn_selected:
+                print(f"  - 👤 Human override: Candidate {choice} "
+                      f"(judge picked {bestofn_selected}).")
+                self.state["plan_candidates"]["selected_index"] = choice
+                self.state["plan_candidates"]["human_override"] = True
+                res = copy.deepcopy(bestofn_candidates[choice - 1])
+                if external_context:
+                    res["literature_search"] = external_context
                 res["iteration"] = current_iter
-                res["stage"] = "Auto-Corrected"
+                res["stage"] = "Science Draft (human-selected candidate)"
                 self.state["plan_history"].append(res.copy())
                 self.state["current_plan"] = res
-
                 self._log_action(
-                    action="self_correction",
-                    input_ctx={"critique": critique},
+                    action="bestofn_human_override",
+                    input_ctx={"judge_pick": bestofn_selected, "human_pick": choice},
                     result=res,
-                    rationale=f"Auto-corrected due to: {critique}"
+                    rationale="Human overrode the judge's candidate selection."
                 )
+                bestofn_selected = choice
+                # Lazy-critique invariant: every plan that becomes
+                # current_plan has been conformance-checked and critiqued.
+                res = _conform_and_critique(res)
 
-        # 2) Advisory critic (separate call, AFTER conformance + any adjustment).
-        # Checks PHYSICAL REALISM and INTERNAL CONSISTENCY of the final plan and
-        # records caveats — it NEVER rewrites the plan. Findings surface as
-        # "Caveats & Potential Limitations" for the human (CO_PILOT / AUTOPILOT)
-        # at the feedback prompt, or as run_task `warnings` (AUTONOMOUS / meta).
-        # Auto-applying critic findings was shown to rescope plans unreliably, so
-        # acting on them is left to an explicit human/consumer decision.
-        if not res.get("error"):
-            verdict = critique_plan(
-                objective, res, self.model, self.generation_config,
-                retrieved_context=author_context.get("retrieved_context"),
-                primary_data=author_context.get("primary_data"),
-                images=all_image_paths or None,
-                image_descriptions=image_descriptions,
-                additional_context=ctx_string,
-                skill_context=skill_planning_context,
-            )
-            findings = verdict.get("findings", [])
-            if findings:
-                # Order critical-first so the caveats list and warnings lead with
-                # the most material concerns. Record on the plan (no rewrite).
-                _order = {"critical": 0, "minor": 1}
-                findings = sorted(findings, key=lambda f: _order.get(f.get("severity"), 1))
-                res["critic_findings"] = findings
-                self.state["current_plan"] = res
-                # Stamp onto the latest history snapshot too so the HTML report
-                # (which renders plan_history, not current_plan) shows the caveats.
-                if self.state.get("plan_history"):
-                    self.state["plan_history"][-1]["critic_findings"] = findings
-                n_crit = sum(1 for f in findings if f.get("severity") == "critical")
-                print(f"\n⚠️  Critic noted {len(findings)} caveat(s)"
-                      f"{f' ({n_crit} significant)' if n_crit else ''} "
-                      "— recorded under Caveats & Potential Limitations (plan unchanged).")
-                self._log_action(
-                    action="critic_review",
-                    input_ctx={"findings": findings},
-                    result=res,
-                    rationale="Advisory caveats recorded; plan not modified."
-                )
-        
         # Human feedback on strategy
         human_feedback = None
         if enable_human_feedback and res.get("proposed_experiments") and not res.get("error"):
@@ -1000,6 +1148,62 @@ class PlanningAgent(BaseAgent):
         
         return self.state
     
+    def _recritique_revision(self,
+                             new_plan: Dict[str, Any],
+                             prior_plan: Dict[str, Any],
+                             revision_request: str,
+                             skill_context: Optional[str] = None,
+                             images: Optional[List[Any]] = None) -> Dict[str, Any]:
+        """
+        Resolution-check re-critique after a plan revision, so the recorded
+        caveats describe the CURRENT plan — the refinement LLM echoes the old
+        ``critic_findings`` into the revised JSON, which otherwise persists
+        stale (possibly already-fixed) caveats into reports and warnings.
+
+        Pops the echoed caveats, then re-runs the advisory critic with the
+        before/request/after picture (drop resolved, keep unresolved, flag
+        new). Annotation only — never modifies the plan and never triggers
+        further action, so the advisory-only contract is untouched. Fails
+        open like the critic itself. Evidence here is the revision context
+        (prior plan + findings + request); the original retrieval context is
+        not persisted across calls.
+        """
+        if new_plan.get("error") or not new_plan.get("proposed_experiments"):
+            return new_plan
+
+        prior_findings = prior_plan.get("critic_findings")
+        new_plan.pop("critic_findings", None)  # discard echoed-stale caveats
+
+        try:
+            verdict = critique_plan(
+                self.state["objective"], new_plan, self.model,
+                self.generation_config,
+                images=images,
+                skill_context=skill_context,
+                prior_plan=prior_plan,
+                prior_findings=prior_findings,
+                human_feedback=revision_request,
+            )
+        except Exception as e:
+            # critique_plan fails open internally; this guard keeps the
+            # revision alive even if the call itself dies.
+            logging.error(f"Revision re-critique failed open: {e}")
+            verdict = {"findings": []}
+        findings = verdict.get("findings", [])
+        if findings:
+            _order = {"critical": 0, "minor": 1}
+            findings = sorted(findings,
+                              key=lambda f: _order.get(f.get("severity"), 1))
+            new_plan["critic_findings"] = findings
+            if self.state.get("plan_history"):
+                self.state["plan_history"][-1]["critic_findings"] = findings
+        elif self.state.get("plan_history"):
+            # the snapshot appended before this call carries the echoed copy
+            self.state["plan_history"][-1].pop("critic_findings", None)
+
+        self.state["current_plan"] = new_plan
+        return new_plan
+
     def refine_plan(self,
                     results: Any,
                     enable_human_feedback: bool = True,
@@ -1137,6 +1341,15 @@ Select the most appropriate strategy:
         self.state["plan_history"].append(new_plan.copy())
         self.state["current_plan"] = new_plan
 
+        # Resolution-check re-critique so caveats describe the revised plan.
+        new_plan = self._recritique_revision(
+            new_plan, prior_plan=current_plan,
+            revision_request=("Plan revised in response to experimental "
+                             f"results:\n{consolidated_feedback[:2000]}"),
+            skill_context=skill_refine_context,
+            images=loaded_images or None,
+        )
+
         self._log_action(
             action="refine_plan_reasoning",
             input_ctx={
@@ -1164,6 +1377,7 @@ Select the most appropriate strategy:
                     "phase": "science_iteration", 
                     "feedback": human_feedback
                 })
+                prior_plan = new_plan
                 new_plan = refine_plan_with_feedback(
                     original_result=new_plan,
                     feedback=human_feedback,
@@ -1177,6 +1391,11 @@ Select the most appropriate strategy:
                 new_plan["stage"] = "Human Refined (Science)"
                 self.state["plan_history"].append(new_plan.copy())
                 self.state["current_plan"] = new_plan
+                new_plan = self._recritique_revision(
+                    new_plan, prior_plan=prior_plan,
+                    revision_request=human_feedback,
+                    skill_context=skill_refine_context,
+                )
                 print("✅ Strategic revision updated.")
 
         self._log_action(
@@ -1265,6 +1484,14 @@ Select the most appropriate strategy:
         self.state["plan_history"].append(new_plan.copy())
         self.state["current_plan"] = new_plan
 
+        # Resolution-check re-critique: a constraint adjustment often resolves
+        # a recorded caveat — the caveat channel must reflect the CURRENT plan.
+        new_plan = self._recritique_revision(
+            new_plan, prior_plan=current_plan,
+            revision_request=constraint_description,
+            skill_context=skill_constraint_context,
+        )
+
         self._log_action(
             action="adjust_plan_for_constraints",
             input_ctx={"constraint": constraint_description[:200]},
@@ -1288,6 +1515,7 @@ Select the most appropriate strategy:
                     "phase": "constraint_adjustment",
                     "feedback": human_feedback
                 })
+                prior_plan = new_plan
                 new_plan = refine_plan_with_feedback(
                     original_result=new_plan,
                     feedback=human_feedback,
@@ -1300,6 +1528,11 @@ Select the most appropriate strategy:
                 new_plan["stage"] = "Human Refined (Constraint)"
                 self.state["plan_history"].append(new_plan.copy())
                 self.state["current_plan"] = new_plan
+                new_plan = self._recritique_revision(
+                    new_plan, prior_plan=prior_plan,
+                    revision_request=human_feedback,
+                    skill_context=skill_constraint_context,
+                )
                 print("✅ Constraint adjustment updated.")
 
         self.state["status"] = "constraint_adjusted"
