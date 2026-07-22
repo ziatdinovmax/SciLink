@@ -185,6 +185,14 @@ Respond with a single JSON object:
 """
 
 
+CONSTRAINT_COVERAGE_NOTE = """
+## MANDATORY CONSTRAINT COVERAGE
+Every hard constraint stated above must be addressed by a named experimental
+step that says which constraint it satisfies. An unaddressed constraint is a
+failed plan, however scientifically interesting the rest of it is.
+"""
+
+
 IDEATION_AUTHOR_OVERRIDE = """
 ## IDEATION MODE — GROUNDING LATITUDE (overrides the Safety Rule above)
 This run is research ideation. The provided context may deliberately lack

@@ -20,7 +20,8 @@ from .instruct import (
     HYPOTHESIS_BESTOFN_AUTHOR_NOTE,
     BESTOFN_SELECTION_PROFILE_LAB,
     BESTOFN_SELECTION_PROFILE_IDEATION,
-    IDEATION_AUTHOR_OVERRIDE
+    IDEATION_AUTHOR_OVERRIDE,
+    CONSTRAINT_COVERAGE_NOTE
 )
 
 
@@ -361,6 +362,15 @@ def perform_science_rag(objective: str,
         except Exception as e:
             print(f"  - ⚠️ Warning: Failed to parse primary data set: {e}")
 
+    # Literature context crowds out the less glamorous constraints: plans stay
+    # on-topic but silently drop individual requirements, and the misses are
+    # omissions rather than violations. Demanding an explicit constraint->step
+    # mapping restores coverage at no measurable cost to plan quality. Scoped
+    # to the condition it was measured in — constraints AND literature both
+    # present; a constraints-only run already complies.
+    if additional_context and external_context:
+        additional_context = f"{additional_context}\n{CONSTRAINT_COVERAGE_NOTE}"
+
     # --- Select the fallback instruction set matching the planning task ---
     fallback_instructions = None
     if instructions == HYPOTHESIS_GENERATION_INSTRUCTIONS:
@@ -417,6 +427,12 @@ def generate_plan_candidates(objective: str,
     sentences plus the distinctness conditioning, and may DECLINE (error JSON)
     when the evidence supports no further distinct approach — so
     ``n_candidates`` is a cap, not a quota.
+
+    ``selection_profile="ideation"`` has author-side effect only in STRICT
+    runs: a fallback run swaps in the fallback instructions for every
+    candidate, which already license general knowledge, so
+    ``IDEATION_AUTHOR_OVERRIDE`` does not apply there and only the judge
+    weighting differs.
 
     Returns ``(candidates, author_context, tier)`` where ``candidates`` holds
     only successful (non-declined) plans, in generation order, and

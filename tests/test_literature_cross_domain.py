@@ -9,7 +9,8 @@ Contract pinned here (from the benchmarking that motivated the feature):
   Edison call is minutes of waiting, so serial pairs double the user's wait);
 - merged output is LABELLED per source, so candidates can tell established
   results (usable as constraints) from analogies (mechanism inspiration);
-- a cross-domain result carries the constraint-compliance caveat;
+- ANY literature result carries the constraint-coverage caveat (the loss was
+  measured for grounding-only retrieval too, so it is not cross-domain-specific);
 - single-type behaviour is unchanged.
 
 No network: the literature agent is a scripted stub.
@@ -115,7 +116,6 @@ def test_single_type_unchanged(tool):
     assert out["searches_run"] == ["hypothesis_context"]
     assert [k for k, _ in lit.calls] == ["hypothesis_context"]
     assert lit.max_concurrent == 1
-    assert "caveat" not in out          # caveat is cross-domain-only
 
 
 def test_multi_type_runs_in_parallel_and_labels_sections(tool):
@@ -138,11 +138,17 @@ def test_multi_type_runs_in_parallel_and_labels_sections(tool):
     assert "CONTENT::hypothesis_context" in text and "CONTENT::cross_domain" in text
 
 
-def test_cross_domain_carries_constraint_caveat(tool):
+@pytest.mark.parametrize("types", ["hypothesis_context", "cross_domain",
+                                   "hypothesis_context,cross_domain"])
+def test_constraint_coverage_caveat_is_literature_general(tool, types):
+    """The coverage loss was measured for grounding-only literature too, so
+    the caveat must not be cross-domain-specific — and it must point at the
+    remedy (map constraints to steps) rather than at withholding literature."""
     func, *_ = tool
-    out = json.loads(func("obj", "cross_domain"))
-    assert "caveat" in out
+    out = json.loads(func("obj", types))
     assert "constraint" in out["caveat"].lower()
+    assert "additional_context" in out["caveat"]
+    assert "avoid" not in out["caveat"].lower()
 
 
 def test_partial_failure_keeps_the_successful_half(tool, tmp_path, monkeypatch):
@@ -177,5 +183,8 @@ def test_tool_description_states_when_to_use_and_when_not(tool):
     st = params["search_type"]["description"]
     assert "cross_domain" in st
     assert "IDEATION" in st
-    assert "AVOID" in st and "constraint" in st.lower()
+    # cross_domain must NOT be singled out as constraint-hostile: the coverage
+    # loss was measured for grounding-only retrieval too, and the remedy is
+    # constraint->step mapping, not withholding a search type.
+    assert "AVOID" not in st
     assert "parallel" in desc.lower() or "CONCURRENTLY" in desc

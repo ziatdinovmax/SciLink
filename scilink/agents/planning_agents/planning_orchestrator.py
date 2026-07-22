@@ -235,8 +235,10 @@ parallel, costing roughly the wait of a single search. For IDEATION sessions
 pair grounding with cross-domain retrieval and select the ideation profile:
   search_literature(objective="...", search_type="hypothesis_context,cross_domain")
   generate_initial_plan(..., literature_context=..., selection_profile="ideation")
-Do NOT add cross_domain when the plan must satisfy hard equipment or process
-constraints: it raises novelty but measurably reduces constraint compliance.
+Literature of any type reduces constraint COVERAGE — plans stay on-topic but
+omit individual requirements. When the objective carries hard equipment or
+process constraints, pass them as additional_context (each is then mapped to a
+named step) rather than withholding the literature.
 
 For refinement, reuse existing literature or run a new search as needed.
 

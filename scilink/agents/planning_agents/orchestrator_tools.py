@@ -636,11 +636,14 @@ class OrchestratorTools:
                 }
                 if failed:
                     out["failed_searches"] = failed
-                if "cross_domain" in ok:
-                    out["caveat"] = ("Cross-domain context raises idea novelty but was "
-                                     "measured to degrade adherence to hard constraints. "
-                                     "Prefer hypothesis_context alone when the plan must "
-                                     "satisfy stated equipment/process constraints.")
+                if ok:
+                    out["caveat"] = ("Literature context of any type was measured to "
+                                     "reduce constraint COVERAGE — plans stay on-topic "
+                                     "but silently omit individual requirements. When "
+                                     "the objective carries hard equipment/process "
+                                     "constraints, pass them as additional_context so "
+                                     "each is mapped to a named step; do not withhold "
+                                     "the literature.")
                 return json.dumps(out)
 
             except Exception as e:
@@ -669,10 +672,8 @@ class OrchestratorTools:
                         "the grounding a runnable plan needs. "
                         "'cross_domain': mechanisms from ADJACENT/UNRELATED fields "
                         "that could transfer — use for IDEATION (pair it with "
-                        "hypothesis_context: 'hypothesis_context,cross_domain'), and "
-                        "AVOID it when the plan must honour hard equipment or process "
-                        "constraints, where it was measured to reduce constraint "
-                        "compliance. 'economic_data' (TEA); 'fitting_models' "
+                        "hypothesis_context: 'hypothesis_context,cross_domain'). "
+                        "'economic_data' (TEA); 'fitting_models' "
                         "(curve fitting)."
                     ),
                 }

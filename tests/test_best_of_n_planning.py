@@ -451,3 +451,50 @@ def test_stale_buffer_takes_latest_block(capsys):
     cands, pick = parse(buffer, "accept plan candidate 3")
     assert len(cands) == 3 and pick == 3
     assert cands[0]["label"] == "Candidate 1 — New 1"
+
+
+# --------------------------------------------------- constraint coverage
+
+def _capture_ctx(monkeypatch):
+    """Capture the additional_context that reaches the RAG engine."""
+    from scilink.agents.planning_agents import planning_rag as pr
+    seen = {}
+
+    def fake_run_rag(**kw):
+        seen["additional_context"] = kw.get("additional_context")
+        return {"plan": "x"}
+
+    monkeypatch.setattr(pr, "run_rag", fake_run_rag)
+    return pr, seen
+
+
+def test_coverage_note_injected_only_with_literature_and_constraints(monkeypatch):
+    """Literature degrades constraint COVERAGE (omissions, not violations), so
+    the constraint->step mapping demand rides along whenever both are present —
+    and stays out of the prompt otherwise, which is the condition it was
+    measured in."""
+    pr, seen = _capture_ctx(monkeypatch)
+    cases = {
+        ("constraints", "lit"): True,
+        ("constraints", None): False,
+        (None, "lit"): False,
+        (None, None): False,
+    }
+    for (add, ext), expected in cases.items():
+        seen.clear()
+        pr.perform_science_rag(
+            objective="o", instructions="i", task_name="t", kb_docs=None,
+            model=None, generation_config=None,
+            additional_context=add, external_context=ext)
+        got = pr.CONSTRAINT_COVERAGE_NOTE in (seen["additional_context"] or "")
+        assert got is expected, f"add={add!r} ext={ext!r}: coverage note {got}"
+
+
+def test_coverage_note_preserves_the_original_context(monkeypatch):
+    """The note is additive — the caller's constraints must survive verbatim."""
+    pr, seen = _capture_ctx(monkeypatch)
+    pr.perform_science_rag(
+        objective="o", instructions="i", task_name="t", kb_docs=None,
+        model=None, generation_config=None,
+        additional_context="max 2 mL/well, aqueous only", external_context="lit")
+    assert "max 2 mL/well, aqueous only" in seen["additional_context"]
