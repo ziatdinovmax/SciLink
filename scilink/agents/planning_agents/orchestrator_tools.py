@@ -559,47 +559,89 @@ class OrchestratorTools:
                     "message": "Literature search not available (no FutureHouse API key configured)"
                 })
 
-            valid_types = ("hypothesis_context", "economic_data", "fitting_models")
-            if search_type not in valid_types:
+            search_methods = {
+                "hypothesis_context": self.orch.lit_agent.search_for_hypothesis_context,
+                "cross_domain": self.orch.lit_agent.search_for_cross_domain,
+                "economic_data": self.orch.lit_agent.search_for_economic_data,
+                "fitting_models": self.orch.lit_agent.search_for_fitting_models,
+            }
+            # Multiple types run CONCURRENTLY: each Edison call is minutes of
+            # waiting, so a serial pair doubles the user's wait for no reason.
+            types = [t.strip() for t in str(search_type).split(",") if t.strip()]
+            bad = [t for t in types if t not in search_methods]
+            if bad or not types:
                 return json.dumps({
                     "status": "error",
-                    "message": f"Invalid search_type '{search_type}'. Must be one of: {', '.join(valid_types)}"
+                    "message": (f"Invalid search_type '{search_type}'. Use one or more "
+                                f"(comma-separated) of: {', '.join(search_methods)}")
                 })
 
-            print(f"  ⚡ Tool: Searching literature ({search_type}) for '{objective[:80]}...'")
+            label = "+".join(types)
+            print(f"  ⚡ Tool: Searching literature ({label}) for '{objective[:80]}...'"
+                  + (" [parallel]" if len(types) > 1 else ""))
 
             try:
                 clean_query = optimize_search_query(
                     objective=objective, model=self.orch.planner.model
                 )
 
-                search_methods = {
-                    "hypothesis_context": self.orch.lit_agent.search_for_hypothesis_context,
-                    "economic_data": self.orch.lit_agent.search_for_economic_data,
-                    "fitting_models": self.orch.lit_agent.search_for_fitting_models,
-                }
-                lit_res = search_methods[search_type](clean_query)
+                if len(types) == 1:
+                    results = {types[0]: search_methods[types[0]](clean_query)}
+                else:
+                    from concurrent.futures import ThreadPoolExecutor
+                    with ThreadPoolExecutor(max_workers=len(types)) as ex:
+                        futures = {t: ex.submit(search_methods[t], clean_query)
+                                   for t in types}
+                        results = {t: f.result() for t, f in futures.items()}
 
-                if lit_res['status'] != 'success':
+                ok = {t: r for t, r in results.items() if r.get("status") == "success"}
+                if not ok:
+                    first = next(iter(results.values()))
                     return json.dumps({
-                        "status": lit_res['status'],
-                        "message": lit_res.get('message', 'Literature search did not succeed')
+                        "status": first.get("status", "error"),
+                        "message": first.get("message", "Literature search did not succeed")
                     })
 
-                # Save to file (distinct per search_type to avoid overwrites)
-                lit_path = self._output_dir() / f"literature_search_{search_type}.md"
+                # Sections are LABELLED, not concatenated: candidates must be
+                # able to tell established results in this field (usable as
+                # constraints) from cross-domain analogies (usable as
+                # mechanism inspiration, but not established here).
+                SECTION = {
+                    "hypothesis_context": "## ESTABLISHED IN THIS FIELD (known methods, "
+                                          "parameter ranges, failure modes)",
+                    "cross_domain": "## TRANSFERABLE MECHANISMS FROM OTHER DOMAINS "
+                                    "(analogies — NOT established results in this field)",
+                    "economic_data": "## ECONOMIC CONTEXT",
+                    "fitting_models": "## MODELS AND EQUATIONS",
+                }
+                parts = [f"{SECTION.get(t, '## ' + t.upper())}\n{ok[t]['content']}"
+                         for t in types if t in ok]
+                content = "\n\n".join(parts)
+
+                lit_path = self._output_dir() / f"literature_search_{label}.md"
                 with open(lit_path, 'w') as f:
-                    f.write(f"# Literature Search Results ({search_type})\n\n")
-                    f.write(lit_res['content'])
+                    f.write(f"# Literature Search Results ({label})\n\n")
+                    f.write(content)
 
-                print(f"  ✅ Literature search completed. Saved to {lit_path.name}")
+                failed = [t for t in types if t not in ok]
+                print(f"  ✅ Literature search completed ({len(ok)}/{len(types)}). "
+                      f"Saved to {lit_path.name}")
 
-                return json.dumps({
+                out = {
                     "status": "success",
+                    "searches_run": list(ok),
                     "file_path": str(lit_path),
-                    "content_preview": lit_res['content'][:500] + "..." if len(lit_res['content']) > 500 else lit_res['content'],
-                    "hint": "Pass file_path as literature_context to generate_initial_plan()"
-                })
+                    "content_preview": content[:500] + "..." if len(content) > 500 else content,
+                    "hint": "Pass file_path as literature_context to generate_initial_plan()",
+                }
+                if failed:
+                    out["failed_searches"] = failed
+                if "cross_domain" in ok:
+                    out["caveat"] = ("Cross-domain context raises idea novelty but was "
+                                     "measured to degrade adherence to hard constraints. "
+                                     "Prefer hypothesis_context alone when the plan must "
+                                     "satisfy stated equipment/process constraints.")
+                return json.dumps(out)
 
             except Exception as e:
                 logging.error(f"Literature search error: {e}", exc_info=True)
@@ -611,14 +653,28 @@ class OrchestratorTools:
             description=(
                 "Searches scientific literature via FutureHouse Edison API. "
                 "Call BEFORE generate_initial_plan() to enrich the plan with external context. "
-                "Pass the returned file_path as literature_context to generate_initial_plan()."
+                "Pass the returned file_path as literature_context to generate_initial_plan(). "
+                "Several search types can be requested at once as a comma-separated "
+                "list — they run CONCURRENTLY and are merged into one labelled "
+                "document, so two searches cost roughly the wait of one."
             ),
             parameters={
                 "objective": {"type": "string", "description": "Research objective or question to search for"},
                 "search_type": {
                     "type": "string",
-                    "description": "Type of search: 'hypothesis_context' (default, for planning), 'economic_data' (for TEA), or 'fitting_models' (for curve fitting)",
-                    "enum": ["hypothesis_context", "economic_data", "fitting_models"]
+                    "description": (
+                        "One type, or several comma-separated (run in parallel). "
+                        "'hypothesis_context' (default): established methods, "
+                        "parameter ranges and pitfalls in the problem's own field — "
+                        "the grounding a runnable plan needs. "
+                        "'cross_domain': mechanisms from ADJACENT/UNRELATED fields "
+                        "that could transfer — use for IDEATION (pair it with "
+                        "hypothesis_context: 'hypothesis_context,cross_domain'), and "
+                        "AVOID it when the plan must honour hard equipment or process "
+                        "constraints, where it was measured to reduce constraint "
+                        "compliance. 'economic_data' (TEA); 'fitting_models' "
+                        "(curve fitting)."
+                    ),
                 }
             },
             required=["objective"]
