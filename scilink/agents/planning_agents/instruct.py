@@ -957,7 +957,7 @@ SAMPLE FILENAMES (first 20): {filenames}
 
 QUESTION: {query}
 
-The script below provides imports, file ideation, and reader functions.
+The script below provides imports, file discovery, and reader functions.
 Complete ONLY the TODO section (query logic).
 
 ```
@@ -991,7 +991,7 @@ SAMPLE FILENAMES (first 20): {filenames}
 QUERY: {query}
 TOP-K to retain: {top_k}
 
-The script below provides imports, file ideation, and reader functions.
+The script below provides imports, file discovery, and reader functions.
 Complete ONLY the TODO section.
 
 ```

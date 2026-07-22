@@ -686,7 +686,7 @@ class OrchestratorTools:
             Queries the FutureHouse Molecules agent for molecular design,
             synthesis planning, or cheminformatics tasks.
             Call this BEFORE generate_initial_plan() when the objective
-            involves molecular design or ideation.
+            involves molecular design or discovery.
             """
             if not self.orch.mol_agent:
                 return json.dumps({
@@ -737,7 +737,7 @@ class OrchestratorTools:
             description=(
                 "Queries the FutureHouse Molecules agent for molecular design, synthesis planning, "
                 "or cheminformatics. Call BEFORE generate_initial_plan() when the objective involves "
-                "molecule design or ideation. Pass the returned file_path as molecule_context."
+                "molecule design or discovery. Pass the returned file_path as molecule_context."
             ),
             parameters={
                 "objective": {"type": "string", "description": "Molecular design or synthesis objective"}
@@ -3976,7 +3976,7 @@ class OrchestratorTools:
             from difflib import get_close_matches
 
             # Direct path: an existing file/directory given by path is used
-            # as-is, without requiring knowledge-directory ideation.
+            # as-is, without requiring knowledge-directory discovery.
             p = Path(file_name).expanduser()
             if p.is_file() and p.suffix.lower() in QUERYABLE_EXTENSIONS:
                 return str(p.resolve()), None
@@ -4238,7 +4238,7 @@ class OrchestratorTools:
 
             # 1. Discover queryable files / directory databases. Informational
             #    only — an explicit `file_name` path is resolved directly below,
-            #    so ideation being empty is not an error when a path is given.
+            #    so discovery being empty is not an error when a path is given.
             queryable = _discover_queryable_files()
 
             # 2. Resolve target
@@ -4250,7 +4250,7 @@ class OrchestratorTools:
                 return json.dumps({
                     "status": "error",
                     "message": "No queryable data files or directories found by "
-                               "ideation. Pass the file's absolute path as `file_name`."
+                               "discovery. Pass the file's absolute path as `file_name`."
                 })
             elif len(queryable) == 1:
                 target = queryable[0]
@@ -4478,7 +4478,7 @@ class OrchestratorTools:
                 return json.dumps({"status": "error",
                                    "message": "Sandbox approval denied — screening cannot run."})
 
-            # Resolve to an absolute directory path (direct → fallback ideation).
+            # Resolve to an absolute directory path (direct → fallback discovery).
             direct = Path(database_path).expanduser()
             if direct.is_dir():
                 dir_path, dir_name = str(direct.resolve()), direct.name
