@@ -269,7 +269,29 @@ def _resample_ref_to_signal_axis(arr, ref_axis, energy_axis, e_):
     return np.interp(energy_axis, ra, rv)
 
 
-def _codegen_retry_feedback(failures: int, critique: str) -> str:
+def _exec_correction_feedback(script: str, error_tb: str) -> str:
+    """Mechanical-repair prompt block for an execution-level failure.
+
+    Unlike the QC critique feedback, this is NOT a scientific redesign
+    request: the analysis was never judged, the code just didn't run. The
+    repair must keep the analysis identical so the ladder's scientific
+    currency (annealing level, critique history) is not consumed by
+    syntax errors.
+    """
+    return (
+        "\n\n### ⚙️ MECHANICAL CORRECTION — the script below FAILED TO EXECUTE\n"
+        "```python\n" + (script or "(no code was returned)")[:6000] + "\n```\n"
+        "Error:\n```text\n" + (error_tb or "(no traceback)")[-2500:] + "\n```\n"
+        "Fix the execution error ONLY. Keep the analysis logic, estimators, "
+        "parameters, and returned outputs IDENTICAL — this is a repair, not "
+        "a redesign."
+    )
+
+
+def _codegen_retry_feedback(failures: int, critique: str,
+                            passed_names: list | None = None,
+                            prior_script: str | None = None,
+                            attempt_history: str = "") -> str:
     """Annealed retry guidance for the per-pixel code-gen loop.
 
     Flat retries (re-prompt at the same setting with "fix the math") cannot
@@ -286,6 +308,35 @@ def _codegen_retry_feedback(failures: int, critique: str) -> str:
         "\n\n### ❌ PREVIOUS ATTEMPT FAILED",
         f"Critique:\n```text\n{critique}\n```",
     ]
+    if passed_names:
+        block.append(
+            f"These outputs PASSED review in the failed attempt: "
+            f"{sorted(passed_names)}. Reproduce their estimators UNCHANGED — "
+            "identical logic and parameters — and modify only what the "
+            "critique targets. An output numerically identical to its "
+            "previously-passed version keeps its verdict without re-review, "
+            "so leaving working estimators untouched converges faster."
+        )
+    if attempt_history:
+        # The trajectory of EARLIER attempts (the latest failure is the
+        # Critique above). Knowing both walls prevents oscillation: fixing
+        # this critique by reintroducing an earlier attempt's failure mode
+        # (e.g. curing edge-pinning with a gate so strict coverage collapses)
+        # just burns the remaining budget.
+        block.append(attempt_history)
+    if prior_script:
+        # Warm-level anchor, mirroring the curve/image agents: adapt the
+        # previous script instead of regenerating from scratch, so working
+        # parts persist in the artifact itself. Omitted at the hot level,
+        # where a structurally different approach must not be anchored to
+        # the structure that failed.
+        block.append(
+            "### PREVIOUS SCRIPT — ADAPT IT, DO NOT REWRITE FROM SCRATCH\n"
+            "```python\n" + prior_script[:6000] + "\n```\n"
+            "Modify ONLY what the critique targets; keep the rest (data "
+            "handling, structure, and every estimator that passed review) "
+            "verbatim."
+        )
     if failures <= 1:
         block.append("Fix the logic/math to address this critique.")
     elif failures == 2:
@@ -354,11 +405,15 @@ def _retry_stage_label(failures: int) -> str:
 
 
 def _hs_attempt_entry(level: int, passed_fraction, qc_failures: list,
-                      recommended_action: str, error: str | None = None) -> dict:
+                      recommended_action: str, error: str | None = None,
+                      exec_corrections: int = 0) -> dict:
     """One dynamic-analysis attempt as a verification-record entry.
 
     ``qc_failures`` strings are "feature: critique" — split into the shared
     issues shape; a hard execution error becomes a single issue.
+    ``exec_corrections`` counts the in-attempt mechanical repairs of
+    execution errors (recorded so the history stays honest about what the
+    attempt actually cost; additive — consumers use ``.get``).
     """
     issues = []
     for f in qc_failures or []:
@@ -366,10 +421,12 @@ def _hs_attempt_entry(level: int, passed_fraction, qc_failures: list,
         issues.append({"location": loc.strip(), "problem": prob.strip() or loc.strip()})
     if error:
         issues.append({"location": "execution", "problem": str(error)[:500]})
+    entry_extra = {"exec_corrections": exec_corrections} if exec_corrections else {}
     return {
         "passed_fraction": passed_fraction,
         "annealing_level": level,
         "issues_found": issues,
+        **entry_extra,
         "recommended_action": recommended_action,
     }
 
@@ -400,15 +457,18 @@ def _render_band_flux_table(data, axis, axis_units: str, aux: dict | None = None
         header = "  ".join(f"{name:>14s}" for name in series)
         lines = [
             "### MEASURED FLUX BY BAND (deterministic — computed from the data)",
-            f"Field-mean counts per channel in equal {axis_units} bands:",
+            f"Field-mean signal per channel in equal {axis_units} bands:",
             f"{'band':>19s}  {header}",
         ]
         for b in range(n_bands):
             m = idx == b
             if not m.any():
                 continue
-            vals = "  ".join(f"{float(v[m].mean()):>14.1f}" for v in series.values())
-            lines.append(f"{edges[b]:>8.1f}-{edges[b + 1]:<10.1f}{vals}")
+            # %.5g, not fixed-point: a counts-mentality ".1f" renders every
+            # band of a tiny-native-scale signal (amperes, normalized units)
+            # as 0.0, making the table read as "no signal" on real data.
+            vals = "  ".join(f"{float(v[m].mean()):>14.5g}" for v in series.values())
+            lines.append(f"{edges[b]:>8.3g}-{edges[b + 1]:<10.3g}{vals}")
         lines.append(
             "These numbers OVERRIDE any visual estimate from the spectrum plot. "
             "Note analysis windows aggregate MANY channels, so usable SNR can be "
@@ -689,6 +749,7 @@ Your code will run in a restricted `exec()` sandbox.
 3. **Standard Math:** Use `np.exp`, `np.log`, etc., instead of the `math` library.
 4. **NumPy 2.x:** This sandbox runs NumPy 2.x, where aliases removed in NumPy 2.0 raise `AttributeError` — notably use `np.trapezoid` (NOT `np.trapz`); prefer `scipy.integrate.trapezoid` for integration.
 5. **Return Format:** You must return a dictionary, not a print statement or a plot.
+6. **Guard divisions:** any ratio/normalized map must NaN-mask pixels whose denominator is near zero RELATIVE to its own scale (e.g. |denominator| below a small fraction of its median magnitude — never a fixed absolute epsilon) instead of emitting unbounded values; a few division blowups destroy the map's statistics and fail QC.
 
 ### 4. YOUR GOAL
 Write a function `{signature}` that:
@@ -746,15 +807,45 @@ rejected and retried.
 ### REQUIRED RETURN FORMAT
 {{
     "maps": {{
-        "Feature_Name_1": np.ndarray, 
+        "Feature_Name_1": np.ndarray,
         "Feature_Name_2": np.ndarray
     }},
-    "units": {{                 
+    "units": {{
         "Feature_Name_1": "{axis_units}",
         "Feature_Name_2": "a.u."
-    }},    
+    }},
+    "scalars": {{
+        "Metric_Name": 0.0
+    }},
     "description": "Brief physics explanation"
 }}
+
+"scalars" is OPTIONAL: named GLOBAL numeric results the task asks for that are
+NOT per-pixel maps — a spatial correlation coefficient, a region-integrated
+quantity, a global fit parameter. Each value must be a single finite number;
+put its unit in "units" under the same name. Scalars are recorded in the run's
+feature table and reported alongside the maps — return a requested global
+number here, never as a constant-valued map.
+
+Also OPTIONAL — and strongly encouraged whenever you FIT a model per pixel:
+    "fit_examples": [
+        {{"pixel": [y, x], "fitted": np.ndarray, "axis": np.ndarray,
+          "label": "map max"}},
+        ...
+    ]
+5-9 representative pixels; "fitted" is YOUR model evaluated at that pixel;
+omit "fitted" for non-fit estimators. AXIS ALIGNMENT IS CRITICAL: the panel
+overlays "fitted" on the RAW spectrum, so if you reordered/sorted/sub-sliced
+the axis internally (e.g. ascending re-sort of a descending sweep), you MUST
+include "axis" — the exact axis values (same length as "fitted", in the SAME
+UNITS as the input axis argument) your curve is evaluated on — or return
+"fitted" index-aligned to the ORIGINAL axis argument. A mismatched ordering renders your correct fit mirror-flipped and
+it will be rejected for a contradiction that is pure bookkeeping. Choose
+informative pixels: spatially spread, the extremes of your primary map, and
+the best/worst fit-quality pixels when you compute a quality metric. These
+render as raw-spectrum-vs-model panels that the result reviewer inspects at
+pixel level and the scientist keeps with the outputs — honest examples
+(including a poor fit) build more trust than curated ones.
 
 ### RESPONSE FORMAT
 Return a JSON object with:
@@ -768,6 +859,175 @@ def _fmt(val, fmt=".4f"):
         return f"{val:{fmt}}"
     except (ValueError, TypeError):
         return "N/A"
+
+
+def _map_valid_coverage(result_map) -> tuple[float, int]:
+    """(coverage %, n_valid) — pixels carrying a real (finite, non-zero) value.
+
+    The non-zero test is EXACT-zero only, on purpose: an absolute epsilon here
+    (this used to be ``> 1e-9``) silently reports 0% coverage for physically
+    real data whose native scale is tiny (amperes-scale STS, normalized
+    signals), feeding the reviewer a phantom "reported collapse" — the same
+    absolute-threshold trap as the #381 unmixer mask. Exact zeros are what a
+    genuine masking/segmentation collapse produces; scale is not evidence.
+    """
+    _finite = np.isfinite(result_map)
+    _real = _finite & (np.abs(result_map) > 0)
+    n_valid = int(_real.sum())
+    return 100.0 * n_valid / max(result_map.size, 1), n_valid
+
+
+def _wrap_console_text(text: str, width: int = 70) -> list:
+    """Wrap text to the given width, preserving words (curve-agent style)."""
+    if not text:
+        return [""]
+    lines, current = [], ""
+    for word in str(text).split():
+        candidate = f"{current} {word}".strip()
+        if len(candidate) <= width:
+            current = candidate
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
+# The result reviewer is asked to "name the specific flaw and corrective
+# direction", and its critiques consistently carry a marker like
+# "Corrective direction:" / "CORRECTIVE DIRECTION:" before the fix part.
+_CORRECTIVE_SPLIT = re.compile(r"corrective\s+direction\s*:?\s*", re.IGNORECASE)
+
+
+def _log_structured_block(logger, header: str, fields: list,
+                          level: int = logging.WARNING):
+    """One header line + wrapped, labeled fields — the curve agent's
+    verification console style, shared by every long-form QC/judge message
+    (rejections, salvage verdicts, honest-null determinations, LLM decision
+    rationales). Console-only: callers keep passing the FULL text through
+    their functional channels. ``fields`` is a list of ``(label, text)``;
+    empty texts are skipped.
+    """
+    logger.log(level, f"    {header}")
+    for label, text in fields:
+        text = (text or "").strip()
+        if not text:
+            continue
+        lines = _wrap_console_text(text, width=65)
+        pad = " " * (len(label) + 2)
+        logger.log(level, f"       {label}: {lines[0]}")
+        for line in lines[1:]:
+            logger.log(level, f"       {pad}{line}")
+
+
+def _log_qc_rejection(logger, feature_name: str, critique: str, kind: str):
+    """Render one QC rejection as a structured, wrapped console block —
+    separate Problem / Fix fields split on the reviewer's own "Corrective
+    direction:" marker. Console-only: the FULL critique text still flows
+    untouched into the retry feedback, attempt entries, and records.
+    """
+    parts = _CORRECTIVE_SPLIT.split(critique or "", maxsplit=1)
+    problem = parts[0].strip()
+    fix = parts[1].strip() if len(parts) > 1 else ""
+    _log_structured_block(
+        logger, f"❌ {kind} rejected [{feature_name}]",
+        [("Problem", problem), ("Fix", fix)])
+
+
+_MAX_SCALARS_PER_TASK = 40
+_MAX_FIT_EXAMPLES = 9
+
+
+def _validate_fit_examples(result_dict: dict, h: int, w: int, e: int) -> list:
+    """Validate the optional ``fit_examples`` return channel.
+
+    Keeps entries with an in-bounds ``pixel`` and (when present) a ``fitted``
+    curve of the right length; anything malformed is dropped silently —
+    examples are an evidence channel, not a gated deliverable. Capped at
+    ``_MAX_FIT_EXAMPLES``.
+    """
+    raw = result_dict.get("fit_examples")
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out = []
+    for ex in raw:
+        if len(out) >= _MAX_FIT_EXAMPLES:
+            break
+        if not isinstance(ex, dict):
+            continue
+        px = ex.get("pixel")
+        try:
+            y, x = int(px[0]), int(px[1])
+        except Exception:  # noqa: BLE001 - malformed pixel, skip
+            continue
+        if not (0 <= y < h and 0 <= x < w):
+            continue
+        fitted = ex.get("fitted")
+        if fitted is not None:
+            try:
+                fitted = np.asarray(fitted, dtype=float).ravel()
+            except Exception:  # noqa: BLE001
+                fitted = None
+        # Optional per-example axis: the values "fitted" is evaluated on,
+        # for code that reordered/sub-sliced the axis internally. With it,
+        # the overlay is drawn in VALUE space and no index-alignment
+        # assumption is made (a fitted curve on an internally re-sorted
+        # axis otherwise renders mirror-flipped against a descending sweep).
+        ex_axis = ex.get("axis")
+        if ex_axis is not None and fitted is not None:
+            try:
+                ex_axis = np.asarray(ex_axis, dtype=float).ravel()
+            except Exception:  # noqa: BLE001
+                ex_axis = None
+            if ex_axis is not None and (ex_axis.size != fitted.size
+                                        or not np.all(np.isfinite(ex_axis))):
+                ex_axis = None
+        else:
+            ex_axis = None
+        # Without its own axis, "fitted" must be index-aligned to the full
+        # input axis (length e); a mismatched length is unrenderable.
+        if fitted is not None and ex_axis is None and fitted.size != e:
+            fitted = None
+        out.append({"pixel": (y, x), "fitted": fitted, "axis": ex_axis,
+                    "label": str(ex.get("label") or "")[:60]})
+    return out
+
+
+def _extract_scalar_records(result_dict: dict, raw_units) -> list:
+    """Validate the optional ``scalars`` return channel into meta records.
+
+    Returns ``[{name, units, description, scalar}, ...]`` for every entry that
+    is a single finite number (numpy scalars coerced); anything else — arrays,
+    strings, NaN/inf — is dropped silently rather than failing the attempt,
+    since scalars are a reporting channel, not a QC-gated deliverable. Capped
+    at ``_MAX_SCALARS_PER_TASK`` to keep the feature table a table.
+    """
+    scalars = result_dict.get("scalars")
+    if not isinstance(scalars, dict):
+        return []
+    records = []
+    for name, value in scalars.items():
+        if len(records) >= _MAX_SCALARS_PER_TASK:
+            break
+        try:
+            v = float(np.asarray(value).item())
+        except Exception:  # noqa: BLE001 - non-scalar entry, skip
+            continue
+        if not np.isfinite(v):
+            continue
+        unit = "a.u."
+        if isinstance(raw_units, dict):
+            unit = raw_units.get(name, "a.u.")
+        records.append({
+            "name": str(name),
+            "units": unit,
+            "description": ("Global (non-map) numeric deliverable returned "
+                            "via the task's `scalars` channel."),
+            "scalar": v,
+        })
+    return records
     
 def _sanitize_filename(text: str) -> str:
     """Helper to create safe filenames from labels."""
@@ -1133,19 +1393,12 @@ class GetInitialComponentParamsController:
                 n_components = result_json.get('estimated_components', 4)
                 selected_method = result_json.get('method', 'nmf').lower().strip()
                 reasoning = result_json.get('reasoning', 'No reasoning provided.')
-                self.logger.info(
-                    f"LLM initial estimate: run_decomposition={run_decomposition}, "
-                    f"method={selected_method}, {n_components} components. "
-                    f"Reasoning: {reasoning}"
-                )
-
-                print("\n" + "="*80)
-                print("🧠 LLM REASONING (GetInitialComponentParamsController)")
-                print(f"  Run decomposition: {run_decomposition}")
-                print(f"  Selected method: {selected_method.upper()}")
-                print(f"  Suggested n_components: {n_components}")
-                print(f"  Explanation: {reasoning}")
-                print("="*80 + "\n")
+                _log_structured_block(
+                    self.logger,
+                    f"🧠 LLM initial estimate: run_decomposition="
+                    f"{run_decomposition}, method={selected_method.upper()}, "
+                    f"{n_components} components",
+                    [("Reasoning", reasoning)], level=logging.INFO)
 
                 if not (isinstance(n_components, int) and 2 <= n_components <= 15):
                     self.logger.warning(f"Invalid LLM estimate {n_components}, using default 4.")
@@ -1390,13 +1643,10 @@ class GetFinalComponentSelectionController:
             else:
                 final_n_components = result_json.get('final_components', initial_estimate)
                 reasoning = result_json.get('reasoning', 'No reasoning provided.')
-                self.logger.info(f"LLM final decision: {final_n_components} components. Reasoning: {reasoning}")
-
-                print("\n" + "="*80)
-                print("🧠 LLM REASONING (GetFinalComponentSelectionController)")
-                print(f"  Final n_components: {final_n_components}")
-                print(f"  Explanation: {reasoning}")
-                print("="*80 + "\n")
+                _log_structured_block(
+                    self.logger,
+                    f"🧠 LLM final decision: {final_n_components} components",
+                    [("Reasoning", reasoning)], level=logging.INFO)
 
                 if not (isinstance(final_n_components, int) and final_n_components in component_range):
                     self.logger.warning(f"Invalid LLM final choice {final_n_components}, using initial estimate.")
@@ -1964,21 +2214,17 @@ refinement targets are meaningful here — do not request `spatial` or
             }
 
             step_label = "Analysis plan" if skip_mode else "Refinement decision"
-            self.logger.info(f"✅ LLM Step Complete: {step_label}: {state['refinement_decision']['reasoning']}")
-
-            print("\n" + "="*80)
-            print("🧠 LLM REASONING (SelectRefinementTargetController)")
-            if skip_mode:
-                print(f"  Analysis Plan Ready: {is_needed}")
-            else:
-                print(f"  Refinement Needed: {is_needed}")
-            print(f"  Custom Code Triggered: {requires_custom_code}")
-            print(f"  Explanation: {state['refinement_decision']['reasoning']}")
-            print(f"  Targets Found: {len(final_targets)}")
-            if final_targets:
-                for i, t in enumerate(final_targets):
-                    print(f"    Target {i+1} ({t.get('type')}): {t.get('description')}")
-            print("="*80 + "\n")
+            _fields = [("Reasoning", state['refinement_decision']['reasoning'])]
+            for i, t in enumerate(final_targets, 1):
+                _fields.append((f"Target {i} ({t.get('type')})",
+                                str(t.get('description') or '')))
+            _log_structured_block(
+                self.logger,
+                f"🧠 {step_label}: "
+                f"{'ready' if skip_mode else f'refinement_needed={is_needed}'}, "
+                f"custom_code={requires_custom_code}, "
+                f"{len(final_targets)} target(s)",
+                _fields, level=logging.INFO)
 
         except Exception as e:
             self.logger.error(f"❌ LLM Step Failed: Refinement selection: {e}", exc_info=True)
@@ -2046,13 +2292,17 @@ class BuildHolisticSynthesisPromptController:
                     desc = meta.get('description', 'N/A')
                     units = meta.get('units', 'a.u.')
                     stats = meta.get('stats', {})
-                    
+                    scalar = meta.get('scalar')
+
                     prompt_parts.append(f"\n   **Feature {idx}: {name}**")
                     prompt_parts.append(f"   - Physical Interpretation: {desc}")
                     prompt_parts.append(f"   - Units: {units}")
-                    
+
+                    if isinstance(scalar, (int, float)):
+                        # Global scalar deliverable — a single number, not a map.
+                        prompt_parts.append(f"   - Value: {scalar:.6g}")
                     # Crash Fix: Use .get(key, 0.0) to handle missing stats gracefully
-                    if stats:
+                    elif stats:
                         s_min = stats.get('min', 0.0)
                         s_max = stats.get('max', 0.0)
                         s_mean = stats.get('mean', 0.0)
@@ -2377,6 +2627,14 @@ class RunDynamicAnalysisController:
     """
     MAX_RETRIES = 5
     SUCCESS_THRESHOLD = 0.5  # If >50% of maps in a script pass QC, accept the run.
+    # Executions per LADDER attempt: 1 initial + N mechanical corrections for
+    # execution-level failures (unparsable response, syntax/runtime error,
+    # non-dict return) — curve/image parity, where script-level failures are
+    # repaired inside the attempt instead of spending verification budget.
+    # 3 (not the siblings' 5): each hyperspectral execution can cost up to
+    # executor_timeout (600 s), and mechanical repairs converge fast or not
+    # at all. Timeouts are deliberately excluded from mechanical retry.
+    MAX_EXEC_ATTEMPTS = 3
 
     # Engine plumbing (#327 phase 5). The retry ladder has 3 structural
     # rungs — first try / patch-or-question / abandon-family, expressed in
@@ -2716,8 +2974,14 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     self.logger.warning(f"Bank retrieval skipped: {e}")
             ctx.retries = 0
             ctx.best_attempt = {"req_passed": -1, "valid_count": -1,
-                                "images": [], "maps": [], "meta": []}
+                                "images": [], "maps": [], "meta": [],
+                                "scalar_meta": []}
             ctx.attempt_entries = []
+            # Per-task cache of review-passed arrays, for the identity-skip
+            # (reuse the verdict when a later attempt reproduces an output
+            # byte-identically) and the retry-prompt passed-outputs pin.
+            ctx.passed_reviews = {}
+            ctx.last_passed_names = []
             ctx.last_code = ""
             ctx.mean_spec_bytes = None
             ctx.session = {
@@ -2825,20 +3089,38 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
     def qc_check_accept(self, ctx: QCItemContext, verification: dict) -> bool:
         return bool(verification.get("task_success"))
 
+    def qc_iteration_banner(self, ctx, k: int, n: int):
+        """Suppress the engine's "Verification k/N" banner: hyperspectral QC
+        runs INSIDE the attempt, so at banner time verification has already
+        happened — the honest announcement is the retry-preparation line
+        logged by qc_refine below."""
+        return None
+
     def qc_refine(self, ctx: QCItemContext, verification: dict) -> dict:
         # Annealed retry: escalate from "patch the math" to "abandon the
         # method" as failures accumulate, so retries can leave a wrong-but-
         # self-consistent method basin instead of resampling it. See
         # _codegen_retry_feedback.
-        ctx.current_prompt = ctx.base_prompt + _codegen_retry_feedback(
-            ctx.retries, verification.get("error_msg") or "")
-        if ctx.retries >= 2:
-            self.logger.info(
-                f"    ↻ Retry annealing engaged (failure {ctx.retries}): "
-                "escalating from parameter-patch toward method-change."
-            )
         # Level of the NEXT attempt, for the engine's _produced_at_level stamp.
         ctx.annealing_level = _retry_annealing_level(ctx.retries)
+        # Warm retries anchor on the previous script (curve/image parity);
+        # hot retries regenerate freely. History excludes the latest failure
+        # (its critique is passed in full).
+        _anchor = (getattr(ctx, "last_code", None)
+                   if ctx.annealing_level < 2 else None)
+        _history = _render_attempt_history(
+            (getattr(ctx, "attempt_entries", None) or [])[:-1])
+        ctx.current_prompt = ctx.base_prompt + _codegen_retry_feedback(
+            ctx.retries, verification.get("error_msg") or "",
+            passed_names=getattr(ctx, "last_passed_names", None),
+            prior_script=_anchor,
+            attempt_history=_history)
+        _total = self.max_verification_iterations + 1
+        _stage = self._CONSTRAINT_ANNEALING_SCHEDULE[
+            min(ctx.annealing_level, len(self._CONSTRAINT_ANNEALING_SCHEDULE) - 1)]
+        self.logger.info(
+            f"    ↻ Preparing attempt {min(ctx.retries + 1, _total)}/{_total}: "
+            f"regenerating with critique feedback — {_stage}.")
         return {"prompt": ctx.current_prompt}
 
     def qc_refit(self, ctx: QCItemContext, verification: dict,
@@ -2921,13 +3203,17 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             })
 
             if not present:
-                self.logger.warning(
-                    f"    ⚖️  Salvage judge WITHHELD the partial result "
-                    f"(no physically defensible signal): {caveat}")
+                _log_structured_block(
+                    self.logger,
+                    "⚖️  Salvage judge WITHHELD the partial result "
+                    "(no physically defensible signal)",
+                    [("Caveat", caveat)])
             else:
-                self.logger.warning(
-                    f"    ⚖️  Salvage judge: presenting APPROXIMATE result "
-                    f"({conf} confidence) — {caveat}")
+                _log_structured_block(
+                    self.logger,
+                    f"⚖️  Salvage judge: APPROXIMATE result "
+                    f"({conf} confidence)",
+                    [("Caveat", caveat)])
                 self.logger.warning(
                     f"    ⛑️  Committing best partial attempt "
                     f"({best_attempt['req_passed']}/{len(required_outputs)} "
@@ -2937,12 +3223,16 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 for img_item in best_attempt["images"]:
                     tools.save_image_bytes(img_item['data'], output_dir, img_item['filename'], self.logger)
                     state.setdefault("analysis_images", []).append(img_item)
-                for m in best_attempt["meta"]:
+                # Scalars from the salvaged attempt carry the same honesty
+                # marker as its maps — they were computed by a task that
+                # never fully passed.
+                for m in best_attempt["meta"] + best_attempt.get("scalar_meta", []):
                     m["description"] = marker + m.get("description", "")
                     m["confidence"] = conf
                     m["salvage_caveat"] = caveat
                 ctx.session["all_valid_maps"].extend(best_attempt["maps"])
                 ctx.session["all_valid_meta"].extend(best_attempt["meta"])
+                ctx.session["all_valid_meta"].extend(best_attempt.get("scalar_meta", []))
 
         return {"record": self._build_target_record(ctx, task_success=False)}
 
@@ -3025,52 +3315,88 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             # so the except-path record never hits an unbound name.
             attempt_level = _retry_annealing_level(retries)
             total_maps_expected = 0
+            exec_corrections = 0
             ctx.mean_spec_bytes = None  # rendered lazily for the sanity check
 
-            # --- B. GENERATE CODE ---
-            self.logger.info(f"    (Attempt {retries+1}) Asking LLM to write code...")
-            response = self.model.generate_content(ctx.current_prompt, generation_config=self.generation_config)
-            result_json, _ = parse_codegen_response(response, field="code", logger=self.logger)
-            code_str = (result_json or {}).get("code", "")
-            ctx.last_code = code_str
+            # --- B/C/D. GENERATE + EXECUTE, with mechanical corrections ---
+            # Curve/image parity: execution-level failures (unparsable
+            # response, syntax/runtime error, non-dict return) are repaired
+            # in place with the traceback — no ladder budget spent, no
+            # annealing movement. Timeouts are EXCLUDED: rerunning
+            # near-identical too-slow code burns the full cap again, so they
+            # go to the ladder, whose critique feedback can restructure the
+            # method. QC rejections remain ladder currency as before.
+            code_str, result_dict, _mech_tb = "", None, ""
+            for _exec_try in range(self.MAX_EXEC_ATTEMPTS):
+                if _exec_try == 0:
+                    self.logger.info(f"    (Attempt {retries+1}) Asking LLM to write code...")
+                    _gen_prompt = ctx.current_prompt
+                else:
+                    exec_corrections = _exec_try
+                    self.logger.info(
+                        f"    🔧 Mechanical correction {_exec_try}/"
+                        f"{self.MAX_EXEC_ATTEMPTS - 1}: repairing the "
+                        f"execution error (ladder budget untouched)...")
+                    _gen_prompt = ctx.current_prompt + _exec_correction_feedback(
+                        code_str, _mech_tb)
+                response = self.model.generate_content(_gen_prompt, generation_config=self.generation_config)
+                result_json, _ = parse_codegen_response(response, field="code", logger=self.logger)
+                code_str = (result_json or {}).get("code", "")
+                ctx.last_code = code_str
 
-            # --- C. SANDBOX SETUP ---
-            local_scope = {}
-            global_scope = {
-                "np": np,
-                "scipy": __import__("scipy"),
-                "sklearn": __import__("sklearn"),
-                "lmfit": __import__("lmfit"),
-                "curve_fit": __import__("scipy.optimize", fromlist=["curve_fit"]).curve_fit,
-                "nnls": __import__("scipy.optimize", fromlist=["nnls"]).nnls,
-                "linregress": __import__("scipy.stats", fromlist=["linregress"]).linregress,
-                "find_peaks": __import__("scipy.signal", fromlist=["find_peaks"]).find_peaks,
-                "gaussian_filter": __import__("scipy.ndimage", fromlist=["gaussian_filter"]).gaussian_filter,
-            }
-            # Inject registered tools (from the _shared registry) for the
-            # hyperspectral agent + active skills, so generated code can
-            # optionally call them by name — same mechanism the image /
-            # curve agents use, not domain code hardcoded in this generic
-            # controller.
-            global_scope.update(_registry_tool_callables(state))
+                # Fresh sandbox per try so a failed exec's half-defined state
+                # never leaks into the repaired run.
+                local_scope = {}
+                global_scope = {
+                    "np": np,
+                    "scipy": __import__("scipy"),
+                    "sklearn": __import__("sklearn"),
+                    "lmfit": __import__("lmfit"),
+                    "curve_fit": __import__("scipy.optimize", fromlist=["curve_fit"]).curve_fit,
+                    "nnls": __import__("scipy.optimize", fromlist=["nnls"]).nnls,
+                    "linregress": __import__("scipy.stats", fromlist=["linregress"]).linregress,
+                    "find_peaks": __import__("scipy.signal", fromlist=["find_peaks"]).find_peaks,
+                    "gaussian_filter": __import__("scipy.ndimage", fromlist=["gaussian_filter"]).gaussian_filter,
+                }
+                # Inject registered tools (from the _shared registry) for the
+                # hyperspectral agent + active skills, so generated code can
+                # optionally call them by name — same mechanism the image /
+                # curve agents use, not domain code hardcoded in this generic
+                # controller.
+                global_scope.update(_registry_tool_callables(state))
 
-            # Execute Code
-            with ExecutionTimeout(seconds=self.executor_timeout):
-                exec(code_str, global_scope, local_scope)
+                try:
+                    if not code_str:
+                        raise ValueError(
+                            "Codegen response contained no runnable 'code' "
+                            "(the parser compile-checks scripts, so a syntax "
+                            "error also lands here). Raw response head:\n"
+                            + str(response)[:2000])
+                    with ExecutionTimeout(seconds=self.executor_timeout):
+                        exec(code_str, global_scope, local_scope)
 
-                if "analyze_feature" not in local_scope:
-                    raise ValueError("Function 'analyze_feature' was not found in generated code.")
+                        if "analyze_feature" not in local_scope:
+                            raise ValueError("Function 'analyze_feature' was not found in generated code.")
 
-                # --- D. RUN ON DATA ---
-                self.logger.info(f"    Executing generated code (timeout: {self.executor_timeout}s)...")
-                func = local_scope["analyze_feature"]
-                result_dict = _invoke_analyze_feature(
-                    func, optimal_data, state["energy_axis"], reconstruction,
-                    auxiliary=auxiliary_operands, fit_mask=fit_mask,
-                )
-
-            # Validation
-            if not isinstance(result_dict, dict): raise ValueError("Function return must be a dict.")
+                        self.logger.info(f"    Executing generated code (timeout: {self.executor_timeout}s)...")
+                        func = local_scope["analyze_feature"]
+                        result_dict = _invoke_analyze_feature(
+                            func, optimal_data, state["energy_axis"], reconstruction,
+                            auxiliary=auxiliary_operands, fit_mask=fit_mask,
+                        )
+                    if not isinstance(result_dict, dict):
+                        raise ValueError("Function return must be a dict.")
+                    break  # executed cleanly — proceed to QC
+                except TimeoutError:
+                    raise  # ladder currency, never mechanically retried
+                except Exception:
+                    _mech_tb = traceback.format_exc()
+                    if _exec_try >= self.MAX_EXEC_ATTEMPTS - 1:
+                        raise  # corrections exhausted → ladder failure
+                    _tail = _mech_tb.strip().splitlines()[-1][:200]
+                    self.logger.warning(
+                        f"    ⚙️ Execution failed: {_tail} — repairing in "
+                        f"place.")
 
             # Honest-null path (#358 follow-up): the generated code may
             # DECLARE the requested feature not measurable, with numeric
@@ -3083,10 +3409,12 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             if isinstance(_nm, dict) and not result_dict.get("maps"):
                 ok, critique = self._judge_not_measurable(_nm, ctx)
                 if ok:
-                    self.logger.warning(
-                        f"    ∅ Task {i}: NOT-MEASURABLE determination "
-                        f"accepted by the judge — {_nm.get('description')} "
-                        f"(evidence: {str(_nm.get('evidence'))[:200]})")
+                    _log_structured_block(
+                        self.logger,
+                        f"∅ Task {i}: NOT-MEASURABLE determination "
+                        f"accepted by the judge",
+                        [("Determination", str(_nm.get("description") or "")),
+                         ("Evidence", str(_nm.get("evidence") or "")[:400])])
                     ctx.not_measurable = dict(_nm)
                     ctx.attempt_entries.append({
                         "attempt": retries + 1,
@@ -3104,6 +3432,13 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     ctx.retries = retries + 1
                     return {"success": True, "task_success": True,
                             "not_measurable": dict(_nm)}
+                # Structured console render; the raise below keeps the FULL
+                # critique — it is the retry feedback the next attempt reads.
+                _log_structured_block(
+                    self.logger,
+                    f"∅ Task {i}: NOT-MEASURABLE declaration REJECTED "
+                    f"by the judge",
+                    [("Critique", critique)])
                 raise ValueError(
                     f"not_measurable declaration rejected by the judge: "
                     f"{critique}")
@@ -3124,6 +3459,34 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             total_maps_expected = len(maps_dict)
             raw_units = result_dict.get("units", "a.u.")
             desc = result_dict.get("description", "")
+
+            # Optional global scalar deliverables (correlation coefficients,
+            # region-integrated quantities, …). Staged SEPARATELY from maps:
+            # they carry no dashboard so they get no per-item QC, must not
+            # count toward the map success rate, and must never satisfy a
+            # required_outputs (map) name. They commit only when the attempt
+            # itself commits (success or salvage).
+            current_run_scalar_meta = _extract_scalar_records(result_dict, raw_units)
+
+            # Optional per-pixel fit examples: raw spectrum + model curve at
+            # representative pixels. Rendered once per attempt; shown to the
+            # combined reviewer (per-pixel pathologies — edge-pinned peaks,
+            # bound railing — are invisible in a map + histogram) and saved
+            # with the committed images for the scientist.
+            fit_panel_bytes = None
+            _fit_examples = _validate_fit_examples(
+                result_dict, h, w, int(optimal_data.shape[-1]))
+            if _fit_examples:
+                _a2 = resolve_axis_spec(state.get("system_info"))["axis_2"]
+                _axis_label = (f"{_a2.get('name', 'axis')} "
+                               f"({_a2.get('units', 'a.u.')})")
+                fit_panel_bytes = tools.create_fit_examples_panel(
+                    optimal_data, state["energy_axis"], _axis_label,
+                    _fit_examples, maps_dict, self.logger)
+                if fit_panel_bytes:
+                    self.logger.info(
+                        f"    🧷 Fit-examples panel: {len(_fit_examples)} "
+                        f"pixel(s) rendered.")
 
             for feature_name, result_map in maps_dict.items():
                 # Shape/NaN Check
@@ -3153,7 +3516,20 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 )
 
                 if dashboard_bytes:
-                    if feature_name in required_outputs:
+                    _prev_passed = ctx.passed_reviews.get(feature_name)
+                    if (_prev_passed is not None
+                            and np.array_equal(result_map, _prev_passed,
+                                               equal_nan=True)):
+                        # Identity-skip: this exact array already passed
+                        # review in an earlier attempt of THIS task —
+                        # identical artifact, identical verdict, no LLM
+                        # votes spent. Changed maps are always re-reviewed.
+                        is_valid, critique = True, ""
+                        self.logger.info(
+                            f"    ♻️ {feature_name}: numerically identical "
+                            f"to a previously passed version — review "
+                            f"verdict reused.")
+                    elif feature_name in required_outputs:
                         # Combined review (visual + physical + tool
                         # evidence) in ONE voted pass for the user-asked-
                         # for deliverables. Merges what were two gates so a
@@ -3178,15 +3554,13 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                         # masking/segmentation COLLAPSE the value stats
                         # alone don't reveal (a few dozen plausible-valued
                         # pixels look fine by range/mean).
-                        _finite = np.isfinite(result_map)
-                        _real = _finite & (np.abs(result_map) > 1e-9)
-                        _cov = 100.0 * float(_real.sum()) / max(result_map.size, 1)
+                        _cov, _n_valid = _map_valid_coverage(result_map)
                         summary = (
                             f"value range [{float(np.nanmin(result_map)):.4g}, "
                             f"{float(np.nanmax(result_map)):.4g}], mean "
                             f"{float(np.nanmean(result_map)):.4g} {current_unit}; "
                             f"valid coverage {_cov:.1f}% "
-                            f"({int(_real.sum())} of {result_map.size} pixels finite & non-zero)")
+                            f"({_n_valid} of {result_map.size} pixels finite & non-zero)")
                         if fit_mask is not None:
                             summary += (
                                 f" NOTE: the fit was SCOPED to a "
@@ -3204,11 +3578,15 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                             state.get("system_info"),
                             state.get("analysis_objective"),
                             feature_name, summary, tool_descriptions,
-                            attempt_history=_render_attempt_history(ctx.attempt_entries))
-                        if not is_valid:
-                            self.logger.warning(
-                                f"    🔎 Combined review rejected "
-                                f"{feature_name}: {critique}")
+                            attempt_history=_render_attempt_history(ctx.attempt_entries),
+                            # The plan's per-target instruction — it may declare
+                            # expected properties of this output (e.g. an
+                            # expected near-zero magnitude) the reviewer must
+                            # judge against instead of generic priors (#381
+                            # session: ZBC repeatedly rejected as "trivial
+                            # collapse" despite the plan declaring it near-zero).
+                            target_context=target_desc,
+                            fit_panel_bytes=fit_panel_bytes)
                     else:
                         # Diagnostic (non-required) map: lighter single
                         # visual QC — no method/physics gate needed.
@@ -3223,6 +3601,10 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                             f"{target_desc} ({feature_name}){_mask_note}")
 
                     if is_valid:
+                        # Remember the passed artifact for the identity-skip
+                        # on later attempts of this task.
+                        ctx.passed_reviews[feature_name] = np.array(
+                            result_map, copy=True)
                         # STAGE DATA (Do not commit to state yet)
                         current_run_valid_images.append({
                             "label": f"Custom Analysis: {feature_name}",
@@ -3241,8 +3623,21 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                             }
                         })
                     else:
-                        self.logger.warning(f"    ❌ Visual QC rejected {feature_name}: {critique}")
+                        _review_kind = ("Combined review"
+                                        if feature_name in required_outputs
+                                        else "Visual QC")
+                        _log_qc_rejection(self.logger, feature_name,
+                                          critique, _review_kind)
                         qc_failures.append(f"{feature_name}: {critique}")
+
+            # Task-level fit-examples panel rides the commit with the maps —
+            # saved for the scientist alongside the dashboards.
+            if fit_panel_bytes and current_run_valid_maps:
+                current_run_valid_images.append({
+                    "label": f"Fit Examples: Task {i}",
+                    "data": fit_panel_bytes,
+                    "filename": f"{iter_title}_T{i}_FitExamples_{timestamp}.jpeg",
+                })
 
             # --- F. SUCCESS DECISION (Threshold + Required-Outputs Logic) ---
             valid_count = len(current_run_valid_maps)
@@ -3267,6 +3662,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     "images": list(current_run_valid_images),
                     "maps": list(current_run_valid_maps),
                     "meta": list(current_run_valid_meta),
+                    "scalar_meta": list(current_run_scalar_meta),
                 }
 
             missing_required = [n for n in required_outputs if n not in valid_names]
@@ -3302,14 +3698,17 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     if "analysis_images" not in state: state["analysis_images"] = []
                     state["analysis_images"].append(img_item)
 
-                # 2. COMMIT Data
+                # 2. COMMIT Data (scalar deliverables ride the same commit:
+                # reported only when the attempt they came from is accepted)
                 ctx.session["all_valid_maps"].extend(current_run_valid_maps)
                 ctx.session["all_valid_meta"].extend(current_run_valid_meta)
+                ctx.session["all_valid_meta"].extend(current_run_scalar_meta)
 
                 # HS-1: record the successful attempt (any residual
                 # qc_failures are the maps a partial success dropped).
                 ctx.attempt_entries.append(_hs_attempt_entry(
-                    attempt_level, success_rate, qc_failures, ""))
+                    attempt_level, success_rate, qc_failures, "",
+                    exec_corrections=exec_corrections))
                 return {"success": True, "task_success": True,
                         "error_msg": None}
             else:
@@ -3317,9 +3716,27 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
 
         except Exception as e:
             error_msg = traceback.format_exc()
-            if "QC failures" in str(e): error_msg = str(e) # Clean message for LLM
+            _is_qc = ("QC failures" in str(e)
+                      or "Required outputs failed" in str(e)
+                      or "not_measurable declaration rejected" in str(e))
+            if _is_qc: error_msg = str(e)  # Clean message for LLM
 
-            self.logger.warning(f"    ❌ Attempt {retries+1} failed: {error_msg}")
+            # What DID pass this attempt — feeds the retry prompt's
+            # keep-the-working-estimators pin (qc_refine).
+            ctx.last_passed_names = [m["name"] for m in current_run_valid_meta]
+
+            # Console gets a one-line digest for QC/judge verdicts — the full
+            # critiques were already rendered (structured) above, and the
+            # complete text still travels to the retry feedback via
+            # error_msg. Non-QC failures keep the full traceback.
+            if _is_qc:
+                _head = (str(e).split(". QC critiques", 1)[0]
+                         .split(" by the judge:", 1)[0])
+                self.logger.warning(
+                    f"    ❌ Attempt {retries+1} failed: {_head} "
+                    f"(critiques above; full text passed to the retry)")
+            else:
+                self.logger.warning(f"    ❌ Attempt {retries+1} failed: {error_msg}")
             # HS-1: record the failed attempt with the escalation
             # stage that will be applied to the next one.
             ctx.attempt_entries.append(_hs_attempt_entry(
@@ -3329,6 +3746,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 qc_failures,
                 _retry_stage_label(retries + 1),
                 error=str(e),
+                exec_corrections=exec_corrections,
             ))
             ctx.retries = retries + 1
             return {"success": True, "task_success": False,
@@ -3424,11 +3842,14 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
     def _review_required_output_one(self, dashboard_bytes, code_str, mean_spec_bytes,
                                     system_info, objective, feature_desc,
                                     result_summary, tool_descriptions,
-                                    attempt_history: str = ""):
+                                    attempt_history: str = "",
+                                    target_context: str = "",
+                                    fit_panel_bytes: bytes | None = None):
         meta_str = (json.dumps(system_info, default=str)[:1500]
                     if system_info else "(none)")
         prompt = [SPECTROSCOPY_RESULT_REVIEW_INSTRUCTIONS.format(
             objective=objective or "(not specified)",
+            target_context=(target_context or "(not provided)")[:3000],
             metadata=meta_str,
             method=(code_str or "(unavailable)")[:6000],
             result_summary=f"Output '{feature_desc}': {result_summary}",
@@ -3441,6 +3862,12 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
         if mean_spec_bytes:
             prompt.append("Representative mean spectrum of the data:")
             prompt.append({"mime_type": "image/png", "data": mean_spec_bytes})
+        if fit_panel_bytes:
+            prompt.append(
+                "Per-pixel fit examples (raw spectrum + the code's model at "
+                "representative pixels) — judge whether the extraction is "
+                "sound AT PIXEL LEVEL, not only in aggregate:")
+            prompt.append({"mime_type": "image/jpeg", "data": fit_panel_bytes})
         resp = self.model.generate_content(
             prompt, generation_config=None, safety_settings=self.safety_settings,
         )
@@ -3450,7 +3877,9 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
     def _review_required_output(self, dashboard_bytes, code_str, mean_spec_bytes,
                                 system_info, objective, feature_desc,
                                 result_summary, tool_descriptions,
-                                attempt_history: str = "") -> tuple[bool, str]:
+                                attempt_history: str = "",
+                                target_context: str = "",
+                                fit_panel_bytes: bytes | None = None) -> tuple[bool, str]:
         """Combined visual + physical review for a REQUIRED output, in ONE voted
         pass. Replaces the separate visual-QC then physics-sanity gates for
         required deliverables: a single reviewer weighs the dashboard, the
@@ -3468,7 +3897,9 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     dashboard_bytes, code_str, mean_spec_bytes,
                     system_info, objective, feature_desc,
                     result_summary, tool_descriptions,
-                    attempt_history=attempt_history)
+                    attempt_history=attempt_history,
+                    target_context=target_context,
+                    fit_panel_bytes=fit_panel_bytes)
             except Exception as e:
                 self.logger.warning(f"Combined result review crashed: {e}")
                 return True, ""  # fail-open

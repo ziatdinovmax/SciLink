@@ -204,10 +204,22 @@ class CodegenQCEngine:
                     "iteration(s) — stopping with the best result so far.")
                 host.qc_final_verify(ctx)
                 return
-            logger.info(
-                f"   Verification {verification_iter + 1}/{max_iters} "
-                f"(annealing level {ctx.annealing_level})..."
-            )
+            # Hosts whose verification runs INSIDE the attempt (hyperspectral)
+            # can override this banner — printed here, between a finished
+            # attempt and the next one, "Verification k/N" reads as misplaced
+            # for them. Returning None suppresses it (the host logs its own
+            # line at the semantically right spot); hosts without the hook
+            # keep the default text byte-identically.
+            _banner = getattr(host, "qc_iteration_banner", None)
+            if _banner is not None:
+                _msg = _banner(ctx, verification_iter + 1, max_iters)
+                if _msg:
+                    logger.info(f"   {_msg}")
+            else:
+                logger.info(
+                    f"   Verification {verification_iter + 1}/{max_iters} "
+                    f"(annealing level {ctx.annealing_level})..."
+                )
 
             verification = host.qc_verify(ctx)
             if verification is None:

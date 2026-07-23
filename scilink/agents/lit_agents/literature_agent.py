@@ -8,9 +8,30 @@ from typing import Dict, Any, Optional
 
 try:
     from edison_client import EdisonClient, JobNames
-except ImportError:
-    logging.error("Error: edison_client is not installed. Please install it with 'pip install edison-client'")
-    raise
+    _EDISON_IMPORT_ERROR = None
+except Exception as _e:  # noqa: BLE001 - ImportError OR any transitive
+    # breakage inside the FutureHouse chain (edison-client -> ldp -> fhlmi;
+    # e.g. a mismatched fhlmi raising "No module named 'lmi.config'").
+    EdisonClient, JobNames = None, None
+    _EDISON_IMPORT_ERROR = _e
+    logging.warning(
+        "Literature stack unavailable (%s). Core analysis is unaffected; "
+        "literature tools will report this when invoked.", _e)
+
+
+def _require_edison():
+    """Fail at CONSTRUCTION, not import, when the optional literature stack
+    is broken or absent — a module-scope raise here used to brick the whole
+    agent initialization (UI startup) over an ancillary feature. Same
+    pattern as the meta agent's guarded `ase` import (see CLAUDE.md,
+    'guarded import inside the function')."""
+    if EdisonClient is None:
+        raise RuntimeError(
+            f"Literature features are unavailable: {_EDISON_IMPORT_ERROR}. "
+            "The literature stack is optional for core analysis. To enable "
+            "it, install a mutually consistent set: "
+            "pip install -U edison-client ldp fhlmi fhaviary"
+        )
 
 class OwlLiteratureAgent:
     """
@@ -31,6 +52,7 @@ class OwlLiteratureAgent:
         if not api_key:
             raise ValueError("API key not provided and FUTUREHOUSE_API_KEY environment variable is not set.")
         
+        _require_edison()
         self.client = EdisonClient(api_key=api_key)
         self.max_wait_time = max_wait_time
         logging.info("OWLLiteratureAgent initialized with max wait time of %d seconds.", max_wait_time)
@@ -135,6 +157,7 @@ class IncarLiteratureAgent:
         if not api_key:
             raise ValueError("API key required")
         
+        _require_edison()
         self.client = EdisonClient(api_key=api_key)
         self.max_wait_time = max_wait_time
         self.logger = logging.getLogger(__name__)
@@ -258,6 +281,7 @@ class FittingModelLiteratureAgent:
         if not api_key:
             raise ValueError("API key not provided and FUTUREHOUSE_API_KEY env variable is not set.")
         
+        _require_edison()
         self.client = EdisonClient(api_key=api_key)
         self.max_wait_time = max_wait_time
         self.logger = logging.getLogger(__name__)
@@ -321,6 +345,7 @@ class LiteratureSearchAgent:
         if not self.api_key:
             raise ValueError("API Key required for Literature Agent.")
         
+        _require_edison()
         self.client = EdisonClient(api_key=self.api_key)
         self.max_wait_time = max_wait_time
         self.logger = logging.getLogger("LitAgent")

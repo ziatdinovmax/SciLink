@@ -418,6 +418,33 @@ class RunSelfReflectionController:
         prompt_parts.append(f"{draft_text}")
         prompt_parts.append(f"\n\n### GENERATED CLAIMS:\n{json.dumps(claims, indent=2)}")
 
+        # 2b. Measurement metadata — lets the critic weigh instrument-level
+        # explanations (modulation broadening, drift over a long acquisition,
+        # axis conventions) against electronic-structure claims. Deliberately
+        # NOT added: the flux table (measurability is the upstream QC judges'
+        # jurisdiction), the QC attempt trajectory (double-jeopardy bias on
+        # already-accepted maps; salvage markers already reach the draft),
+        # and the objective (scope-fit belongs to synthesis and the meta).
+        sys_info = state.get("system_info")
+        if sys_info:
+            prompt_parts.append(
+                "\n\n### MEASUREMENT METADATA:\n"
+                + json.dumps(sys_info, default=str)[:1500])
+
+        # 2c. Recorded global scalars — the numbers actually delivered, so
+        # quoted values in the draft can be cross-checked against the record.
+        _scalars = []
+        for it in state.get("all_iteration_results") or []:
+            for m in (it or {}).get("custom_analysis_metadata_list") or []:
+                if isinstance(m, dict) and isinstance(m.get("scalar"), (int, float)):
+                    _scalars.append(
+                        f"- {m.get('name')} = {m['scalar']:.6g} "
+                        f"{m.get('units', '')}".rstrip())
+        if _scalars:
+            prompt_parts.append(
+                "\n\n### RECORDED GLOBAL SCALARS (the delivered numbers):\n"
+                + "\n".join(_scalars))
+
         # 3. Add Evidence (Images)
         # The critic needs to see the data to know if the text is lying.
         prompt_parts.append("\n\n### VISUAL EVIDENCE:")
@@ -431,6 +458,20 @@ class RunSelfReflectionController:
             if image_bytes:
                 prompt_parts.append(f"\n**{label}**")
                 prompt_parts.append({"mime_type": "image/jpeg", "data": image_bytes})
+
+        # 3b. Auxiliary companions (topography, reference channels): claims
+        # about registry/correlation with these are only checkable if the
+        # critic can see them.
+        for aux in state.get("auxiliary_items") or []:
+            label = aux.get("label") or "auxiliary"
+            summary = aux.get("summary") or ""
+            blob = aux.get("plot_bytes")
+            prompt_parts.append(
+                f"\n**Auxiliary: {label}**" + (f" — {summary}" if summary else ""))
+            if blob:
+                prompt_parts.append({
+                    "mime_type": aux.get("mime_type") or "image/jpeg",
+                    "data": blob})
 
         # 4. Run Model
         try:

@@ -29,17 +29,30 @@ def _normalize_to_uint8(img_array, p_low=0.5, p_high=99.5):
         hi = float(np.max(finite)) if finite.size else 0.0
         float_array = np.nan_to_num(float_array, nan=fill, posinf=hi, neginf=fill)
     lo, hi = np.percentile(float_array, [p_low, p_high])
-    if hi - lo > 1e-6:
+    # Exact-zero guards, not absolute epsilons: a physically real image whose
+    # native scale is tiny (STM topography in meters — full range ~1e-9) has
+    # hi - lo far below any fixed epsilon and was rendered solid black. Float
+    # division is happy with any nonzero range; only a truly constant image
+    # falls through to zeros.
+    if hi - lo > 0:
         normalized_array = np.clip((float_array - lo) / (hi - lo), 0.0, 1.0)
     else:                                    # flat image: fall back to min-max
         mn, mx = float(float_array.min()), float(float_array.max())
         normalized_array = ((float_array - mn) / (mx - mn)
-                            if mx - mn > 1e-6 else np.zeros_like(float_array))
+                            if mx - mn > 0 else np.zeros_like(float_array))
     return (normalized_array * 255).astype(np.uint8)
 
 
-def load_image(image_path):
-    """Load an image from file (PNG, JPG, TIF, .npy, or .h5/.hdf5/.nxs)."""
+def load_image(image_path, raw: bool = False):
+    """Load an image from file (PNG, JPG, TIF, .npy, or .h5/.hdf5/.nxs).
+
+    ``raw=False`` (default) returns a display-ready uint8 rendering
+    (percentile-normalized). ``raw=True`` returns the file's native values
+    untouched — REQUIRED when the array is a numerical operand (reference
+    division, correlation against another map): the display rendering
+    quantizes to 256 levels and discards the physical scale, which corrupts
+    any arithmetic done on it.
+    """
     try:
         _, ext = os.path.splitext(image_path)
         ext = ext.lower()
@@ -50,7 +63,7 @@ def load_image(image_path):
             else:
                 from scilink.utils.hdf5_utils import load_hdf5_signal
                 img_array = load_hdf5_signal(image_path)
-            return _normalize_to_uint8(img_array)
+            return img_array if raw else _normalize_to_uint8(img_array)
         elif ext in ('.tif', '.tiff'):
             # Scientific TIFFs (32-bit float, compressed, multi-page, BigTIFF)
             # are read most reliably by tifffile; OpenCV's TIFF path silently
@@ -67,7 +80,7 @@ def load_image(image_path):
                 img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
                 if img is None:
                     raise ValueError(f"Could not load image from {image_path}")
-            return _normalize_to_uint8(img)
+            return img if raw else _normalize_to_uint8(img)
         else:
             # Standard 8-bit formats (PNG/JPG/BMP). IMREAD_UNCHANGED preserves
             # bit depth and channel count.
@@ -80,6 +93,8 @@ def load_image(image_path):
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             elif img.ndim == 3 and img.shape[2] == 4:
                 img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
+            if raw:
+                return img
             # Float / high-bit-depth arrays must be normalized to uint8 so
             # downstream PIL/JPEG encoding works (mode 'F' has no JPEG path).
             return _normalize_to_uint8(img)

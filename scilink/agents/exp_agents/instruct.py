@@ -1298,6 +1298,12 @@ When the user's objective explicitly names one or more scalar quantities that sh
 
 Every `required_outputs` key MUST name a PER-PIXEL SCALAR — one number per pixel, returned as an (H, W) spatial map. The pipeline can only validate spatial maps, so a 1-D or global artifact listed here (a mean/representative spectrum, a std band, a whole-image scalar) is unsatisfiable and will fail every retry. The spatially averaged mean spectrum is produced automatically as analysis context — mention it in the `description` if useful, never in `required_outputs`.
 
+A GLOBAL number the objective asks for (a spatial correlation coefficient, a region-integrated quantity, a global fit parameter) is deliverable: instruct it in the task `description` and tell the code to return it via the code contract's optional `scalars` channel — it is then recorded in the run's feature table and reported with the results. Never promise a global number as a map key.
+
+CONSISTENCY RULE: an output your own `description` marks best-effort, optional, or secondary must NEVER appear in `required_outputs`. The retry loop treats every listed key as a hard promise and cannot honor the hedge — it will burn the entire attempt budget failing on your secondary deliverable while the robust ones sit finished. List only outputs the task must not complete without; hedged maps are delivered opportunistically through the ordinary `maps` return and reviewed as diagnostics.
+
+KEEP `required_outputs` MINIMAL — at most TWO keys, unless the user's objective EXPLICITLY names more independent per-pixel quantities. Every listed key must pass review on the SAME attempt, so each addition multiplies the failure surface and the retry cost. Never require an output that is arithmetically derived from other required outputs (a difference, ratio, or sum — e.g. a width defined as the separation of two required edge maps): require the independent primaries only, and deliver the derived maps through the ordinary `maps` return.
+
 Example: if the objective says *"extract the peak position (in eV) of the dominant feature at every pixel"*, the target should set `"required_outputs": ["Peak_Position"]`. The generated code's `maps` dict must then include a key named exactly `Peak_Position`.
 
 **Demand outputs at the scope the evidence supports.** A required output is a promise the data must be able to keep: every retry it fails burns the branch's budget. Before requiring a PER-PIXEL map of a feature, check the decomposition evidence in front of you — if the feature is WEAK (near the noise floor in the components/flux evidence) or LOCALIZED (a compact abundance footprint), the defensible demand is the REGION-INTEGRATED quantity (one fit over the footprint's summed spectrum: position, width, ratio with uncertainties), with the per-pixel map requested in the description as best-effort, NOT in `required_outputs`. Require native-resolution per-pixel maps only for features the evidence shows are strong at the single-pixel level. A user objective phrased per-pixel does not override physics: deliver the region-level quantity as the required output and let the honest-null / resolution-ladder machinery handle the per-pixel question.
@@ -1467,6 +1473,8 @@ You are a Senior Principal Scientist reviewing a draft analysis of hyperspectral
 
 3. **Unsupported Claims:** Are there scientific claims made with "High Confidence" that are barely supported by the visual data?
 
+4. **Instrument-level alternatives:** When MEASUREMENT METADATA is provided, check whether an instrument-level explanation (lock-in modulation broadening, drift/scan-condition gradients over a long acquisition, setpoint/endpoint artifacts) competes with an electronic-structure interpretation before endorsing it. Cross-check numbers quoted in the draft against the RECORDED GLOBAL SCALARS when provided, and check registry/correlation claims against the AUXILIARY companion data when provided.
+
 **Output Format:**
 Return a JSON object:
 {
@@ -1597,6 +1605,9 @@ pre-expected number.
 ### OBJECTIVE
 {objective}
 
+### TASK CONTRACT — the plan's instruction that produced this output
+{target_context}
+
 ### DATA CONTEXT (metadata)
 {metadata}
 
@@ -1607,8 +1618,12 @@ pre-expected number.
 
 ### RESULT
 {result_summary}
-You are also shown the result dashboard (map + histogram) and a representative
-mean spectrum of the data.
+You are also shown the result dashboard (map + histogram), a representative
+mean spectrum of the data, and — when the code provided them — per-pixel fit
+examples (raw spectrum vs the code's model at representative pixels). When fit
+examples are present, weigh them heavily: per-pixel pathologies (a peak pinned
+to a window edge, a fit railing at a bound) are visible there and invisible in
+the aggregate map and histogram.
 
 ### TOOLS USED BY THE METHOD
 The generated code called these vetted, purpose-built helper tools — here is
@@ -1638,6 +1653,11 @@ measurability, …):
   shows the signal, yet the map retained just a few scattered pixels — i.e. a
   real signal was dropped. Judge coverage against what is physically expected,
   either way; the number is evidence, not a verdict.
+- The TASK CONTRACT may declare expected properties of this output — an
+  expected near-zero magnitude, an expected sign, sparsity, or scale. Judge the
+  result against those DECLARED expectations, not a generic magnitude prior: an
+  output that matches what the plan says it should look like is not a trivial
+  collapse. The contract never excuses a genuine methodological flaw.
 - A merely SURPRISING value is not a flaw if the method is sound and the data
   and tool evidence support it. Do not suppress genuine findings.
 - A sample-description prior (how the sample was supposedly prepared and what
