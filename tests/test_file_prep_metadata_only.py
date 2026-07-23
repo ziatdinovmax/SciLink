@@ -86,6 +86,28 @@ def test_scan_finds_nested_data():
     assert _find_data_members(HEADER) == []
 
 
+def test_scan_finds_ndarrays_nested_in_lists():
+    # The any-size ndarray rule must hold THROUGH a plain list: a list judged
+    # non-data as a whole (ragged, or coerced block under the list threshold)
+    # can still hold real ndarray members.
+    ragged = {"spectra": [np.arange(20.0), np.arange(31.0)], "note": "hdr"}
+    assert _find_data_members(ragged) == ["spectra[0]", "spectra[1]"]
+    small = {"spectra": [np.arange(10.0), np.arange(10.0)]}
+    assert _find_data_members(small) == ["spectra[0]", "spectra[1]"]
+    # small scalar lists (and nested ones) are still metadata
+    assert _find_data_members({"dim_px": [168, 168]}) == []
+    assert _find_data_members({"roi": [[1.0, 2.0], [3.0, 4.0]]}) == []
+
+
+def test_list_nested_ndarray_forces_codegen_path(tmp_path):
+    p = _save_pickled(
+        tmp_path,
+        dict(HEADER, spectra=[np.arange(20.0), np.arange(31.0)]),
+        "h3.npy",
+    )
+    assert split_pickled_metadata_only(p, _file_paths(p, tmp_path / "out")) is None
+
+
 # ---------------------------------------------------------------------------
 # 2. Metadata-only split
 # ---------------------------------------------------------------------------

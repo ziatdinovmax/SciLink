@@ -480,13 +480,16 @@ def _find_data_members(obj, _path: str = "") -> list:
             p = f"{_path}.{k}" if _path else str(k)
             if _is_data_member(v):
                 hits.append(p)
-            elif isinstance(v, dict):
+            elif isinstance(v, (dict, list, tuple)):
+                # Recurse into lists too: a list judged non-data as a WHOLE
+                # (small, or ragged → object dtype) can still hold ndarray
+                # elements, which the any-size rule must catch.
                 hits.extend(_find_data_members(v, p))
             elif isinstance(v, np.ndarray) and v.dtype == object:
                 hits.extend(_find_data_members(list(v.ravel()), p))
     elif isinstance(obj, (list, tuple)):
-        # Only reached when the container ITSELF is a list (or nested); a
-        # list already judged by _is_data_member is not re-walked.
+        # Also reached for a list member judged non-data as a whole; its
+        # elements get their own per-type judgment below.
         for i, v in enumerate(obj):
             p = f"{_path}[{i}]"
             if _is_data_member(v):
