@@ -45,12 +45,20 @@ class SpectralUnmixer:
         
         # 1. FLATTEN
         spectra_matrix = hspy_data.reshape((h * w, e))
-        
+
         # 2. FILTER (Internal Masking)
-        # Identify pixels that have actual data (sum > small epsilon)
-        pixel_sums = np.sum(spectra_matrix, axis=1)
-        valid_pixel_mask = pixel_sums > 1e-6 
-        
+        # Identify pixels that carry actual data. Background/ROI-masked pixels
+        # are (essentially) all-zero, so test the pixel's integrated MAGNITUDE
+        # against a RELATIVE floor. Scale- and sign-invariant on purpose
+        # (issue #381): a signed signal (dI/dV, lock-in channels) integrates
+        # to ~0 even when information-rich, and an absolute floor calibrated
+        # for counts-scale data silently drops every pixel of a cube whose
+        # physical units are tiny (e.g. amperes). For non-negative counts data
+        # |sum| == sum and masked zeros stay dropped, so the original
+        # "decompose only non-zero pixels" behavior is preserved.
+        pixel_l1 = np.sum(np.abs(spectra_matrix), axis=1)
+        valid_pixel_mask = pixel_l1 > pixel_l1.max() * 1e-9
+
         # Create a subset containing ONLY valid pixels
         spectra_to_fit = spectra_matrix[valid_pixel_mask]
         n_valid = spectra_to_fit.shape[0]
@@ -63,9 +71,12 @@ class SpectralUnmixer:
         # --- Normalization (Optional) ---
         l1_norms_subset = None
         if self.normalize:
-            # Calculate norms only for the valid subset
-            l1_norms_subset = np.sum(spectra_to_fit, axis=1, keepdims=True)
-            l1_norms_subset[l1_norms_subset == 0] = 1 
+            # L1 norms of the valid subset. |·| so a signed spectrum is scaled
+            # by its total magnitude rather than its near-zero signed integral
+            # (which would blow the pixel up); identical to the previous sum
+            # for non-negative data.
+            l1_norms_subset = np.sum(np.abs(spectra_to_fit), axis=1, keepdims=True)
+            l1_norms_subset[l1_norms_subset == 0] = 1
             spectra_to_fit = spectra_to_fit / l1_norms_subset
 
         # --- Pre-check for NMF ---
