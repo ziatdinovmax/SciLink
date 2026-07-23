@@ -35,3 +35,16 @@ def test_refinement_prompt_forbids_hedged_required_outputs():
     assert "best-effort" in block[:600]
     assert "must NEVER appear in `required_outputs`" in block[:600]
     assert "hard promise" in block[:600]
+
+
+def test_refinement_prompt_caps_required_outputs():
+    """Default cap of two: every required key must pass on the same attempt,
+    so each addition multiplies the gate's failure surface (live sessions
+    required 3-4 interdependent keys — one estimator flaw failed them all
+    simultaneously). Derived keys (a width = separation of two required
+    edges) are forbidden as required outputs."""
+    text = SPECTROSCOPY_REFINEMENT_INSTRUCTIONS
+    block = text[text.index("KEEP `required_outputs` MINIMAL"):]
+    assert "at most TWO" in block[:400]
+    assert "EXPLICITLY names more independent" in block[:400]
+    assert "arithmetically derived" in block[:700]
