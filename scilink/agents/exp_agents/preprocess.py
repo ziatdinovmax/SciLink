@@ -118,19 +118,22 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
         
         signal = stats["p99"]
         noise = stats["p50"]
-        
-        # Avoid division by zero if median is 0
-        if noise > 1e-9:
-            snr = (signal - noise) / noise
-            reasoning = f"Calculated as (P99 - P50) / P50: ({signal:.2e} - {noise:.2e}) / {noise:.2e}"
+
+        # Zero-only division guards, on purpose: an absolute epsilon here
+        # (1e-9) declares real but tiny-scale data (amperes-scale STS,
+        # normalized signals) "signalless" — the same absolute-threshold
+        # trap as the unmixer mask (#381). |P50| so a signed-signal median
+        # scales the ratio without flipping its sign.
+        if abs(noise) > 0:
+            snr = (signal - noise) / abs(noise)
+            reasoning = f"Calculated as (P99 - P50) / |P50|: ({signal:.2e} - {noise:.2e}) / {abs(noise):.2e}"
+        elif stats["std"] > 0:
+            # Fallback if median is exactly zero: use std dev
+            snr = signal / stats["std"]
+            reasoning = f"Calculated as P99 / Std (P50 was zero): {signal:.2e} / {stats['std']:.2e}"
         else:
-            # Fallback if median is zero: use std dev (less ideal but won't crash)
-            if stats["std"] > 1e-9:
-                snr = signal / stats["std"]
-                reasoning = f"Calculated as P99 / Std (P50 was zero): {signal:.2e} / {stats['std']:.2e}"
-            else:
-                snr = 0.0 # No signal or no variance
-                reasoning = "SNR is 0.0 (no variance or signal)"
+            snr = 0.0  # truly constant data
+            reasoning = "SNR is 0.0 (no variance or signal)"
 
         # Cap SNR at a reasonable max to avoid infinity/huge numbers
         snr = min(max(snr, 0.0), 1000.0) 

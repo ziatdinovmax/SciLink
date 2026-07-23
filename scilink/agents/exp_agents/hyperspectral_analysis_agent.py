@@ -1145,6 +1145,25 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # Load data
             original_hspy_data = self._load_hyperspectral_data(data_path)
 
+            # Fail-fast precondition: the physical axis-2 range is a hard
+            # requirement (interpretation prep and every summary plot call
+            # create_axis, which raises without it — deliberate, fcb77007).
+            # Enforce it here, BEFORE preprocessing and the component test
+            # loop burn minutes of compute on a run that cannot finish.
+            from ...skills.hyperspectral.eels.eels import create_axis
+            try:
+                create_axis(original_hspy_data.shape[-1], system_info, axis_index=2)
+            except ValueError as e:
+                self.logger.error(f"Axis precondition failed: {e}")
+                return None, {
+                    "error": "Missing physical axis range for the spectral axis",
+                    "details": (
+                        f"{e} Supply the physical range of the third (signal/"
+                        f"sweep) axis in the metadata before re-running — no "
+                        f"analysis was performed."
+                    ),
+                }
+
             # Handle structure image
             structure_image_blob = None
             if structure_image_path and os.path.exists(structure_image_path):
