@@ -799,6 +799,54 @@ def _map_valid_coverage(result_map) -> tuple[float, int]:
     return 100.0 * n_valid / max(result_map.size, 1), n_valid
 
 
+def _wrap_console_text(text: str, width: int = 70) -> list:
+    """Wrap text to the given width, preserving words (curve-agent style)."""
+    if not text:
+        return [""]
+    lines, current = [], ""
+    for word in str(text).split():
+        candidate = f"{current} {word}".strip()
+        if len(candidate) <= width:
+            current = candidate
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
+# The result reviewer is asked to "name the specific flaw and corrective
+# direction", and its critiques consistently carry a marker like
+# "Corrective direction:" / "CORRECTIVE DIRECTION:" before the fix part.
+_CORRECTIVE_SPLIT = re.compile(r"corrective\s+direction\s*:?\s*", re.IGNORECASE)
+
+
+def _log_qc_rejection(logger, feature_name: str, critique: str, kind: str):
+    """Render one QC rejection as a structured, wrapped console block —
+    stylistically aligned with the curve agent's verification output
+    (numbered location, separate Problem / Fix fields, ~70-col wrap) instead
+    of a single wall-of-text line. Console-only: the FULL critique text still
+    flows untouched into the retry feedback, attempt entries, and records.
+    """
+    parts = _CORRECTIVE_SPLIT.split(critique or "", maxsplit=1)
+    problem = parts[0].strip()
+    fix = parts[1].strip() if len(parts) > 1 else ""
+
+    logger.warning(f"    ❌ {kind} rejected [{feature_name}]")
+    if problem:
+        lines = _wrap_console_text(problem, width=65)
+        logger.warning(f"       Problem: {lines[0]}")
+        for line in lines[1:]:
+            logger.warning(f"                {line}")
+    if fix:
+        lines = _wrap_console_text(fix, width=65)
+        logger.warning(f"       Fix: {lines[0]}")
+        for line in lines[1:]:
+            logger.warning(f"            {line}")
+
+
 _MAX_SCALARS_PER_TASK = 40
 
 
@@ -3294,10 +3342,6 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                             # session: ZBC repeatedly rejected as "trivial
                             # collapse" despite the plan declaring it near-zero).
                             target_context=target_desc)
-                        if not is_valid:
-                            self.logger.warning(
-                                f"    🔎 Combined review rejected "
-                                f"{feature_name}: {critique}")
                     else:
                         # Diagnostic (non-required) map: lighter single
                         # visual QC — no method/physics gate needed.
@@ -3330,7 +3374,11 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                             }
                         })
                     else:
-                        self.logger.warning(f"    ❌ Visual QC rejected {feature_name}: {critique}")
+                        _review_kind = ("Combined review"
+                                        if feature_name in required_outputs
+                                        else "Visual QC")
+                        _log_qc_rejection(self.logger, feature_name,
+                                          critique, _review_kind)
                         qc_failures.append(f"{feature_name}: {critique}")
 
             # --- F. SUCCESS DECISION (Threshold + Required-Outputs Logic) ---
@@ -3409,9 +3457,20 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
 
         except Exception as e:
             error_msg = traceback.format_exc()
-            if "QC failures" in str(e): error_msg = str(e) # Clean message for LLM
+            _is_qc = "QC failures" in str(e) or "Required outputs failed" in str(e)
+            if _is_qc: error_msg = str(e)  # Clean message for LLM
 
-            self.logger.warning(f"    ❌ Attempt {retries+1} failed: {error_msg}")
+            # Console gets a one-line digest for QC failures — the full
+            # critiques were already rendered (structured) above, and the
+            # complete text still travels to the retry feedback via
+            # error_msg. Non-QC failures keep the full traceback.
+            if _is_qc:
+                _head = str(e).split(". QC critiques", 1)[0]
+                self.logger.warning(
+                    f"    ❌ Attempt {retries+1} failed: {_head} "
+                    f"(critiques above; full text passed to the retry)")
+            else:
+                self.logger.warning(f"    ❌ Attempt {retries+1} failed: {error_msg}")
             # HS-1: record the failed attempt with the escalation
             # stage that will be applied to the next one.
             ctx.attempt_entries.append(_hs_attempt_entry(

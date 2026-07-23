@@ -307,6 +307,44 @@ def test_load_image_raw_preserves_native_values(tmp_path):
     assert disp.dtype == np.uint8 and len(np.unique(disp)) > 10
 
 
+def test_qc_rejection_logs_structured_problem_fix(caplog):
+    critique = ("The peak is pinned to the edge of the search band; the "
+                "histogram piles up at the clip values. CORRECTIVE DIRECTION: "
+                "(1) restrict the search window; (2) require a true local "
+                "maximum with prominence.")
+    with caplog.at_level(logging.WARNING, logger="test.qc"):
+        hc._log_qc_rejection(logging.getLogger("test.qc"),
+                             "Coherence_Peak_Plus_Energy", critique,
+                             "Combined review")
+    text = "\n".join(r.message for r in caplog.records)
+    assert "❌ Combined review rejected [Coherence_Peak_Plus_Energy]" in text
+    assert "Problem:" in text and "Fix:" in text
+    assert "restrict the search window" in text
+    # wrapped: no single console line carries the whole critique
+    assert all(len(r.message) < 100 for r in caplog.records)
+
+
+def test_qc_rejection_without_marker_is_problem_only(caplog):
+    with caplog.at_level(logging.WARNING, logger="test.qc2"):
+        hc._log_qc_rejection(logging.getLogger("test.qc2"), "M",
+                             "Map is pure noise with no structure.", "Visual QC")
+    text = "\n".join(r.message for r in caplog.records)
+    assert "Problem:" in text and "Fix:" not in text
+
+
+def test_qc_rejection_logged_once_not_three_times():
+    # The old flow triple-printed each critique: a combined-review warning,
+    # the shared visual-QC warning with the same text, then the attempt
+    # failure re-dumping every critique. Source-assert the dedup: rejections
+    # render only through the structured helper, and the attempt-failure
+    # echo is a one-line digest for QC failures.
+    import inspect
+    src = inspect.getsource(hc.RunDynamicAnalysisController._run_attempt)
+    assert "Combined review rejected" not in src        # inner duplicate gone
+    assert src.count("_log_qc_rejection") == 1          # single render site
+    assert "critiques above; full text passed to the retry" in src
+
+
 def test_auxiliary_image_operand_carries_raw_values(tmp_path, monkeypatch):
     monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
     from scilink.agents.exp_agents.hyperspectral_analysis_agent import (
