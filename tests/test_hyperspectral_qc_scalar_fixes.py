@@ -319,6 +319,28 @@ def analyze_feature(data, axis):
     assert "PASSED review in the failed attempt: ['Good_Map']" in codegen_prompts[1]
 
 
+def test_retry_banner_replaces_misplaced_verification_line(caplog):
+    """The engine's "Verification k/N" banner is suppressed for hyperspectral
+    (verification runs inside the attempt) and replaced by an honest
+    "Preparing attempt k/N" line at the retry-preparation site."""
+    ctrl = hc.RunDynamicAnalysisController(
+        SimpleNamespace(), logging.getLogger("test.banner"),
+        generation_config=None, safety_settings=None,
+        parse_fn=lambda r: ({}, None),
+    )
+    assert ctrl.qc_iteration_banner(SimpleNamespace(), 1, 4) is None
+
+    ctx = SimpleNamespace(retries=1, base_prompt="BASE", annealing_level=0,
+                          last_passed_names=["Good_Map"])
+    with caplog.at_level(logging.INFO, logger="test.banner"):
+        out = ctrl.qc_refine(ctx, {"error_msg": "critique text"})
+    text = "\n".join(r.message for r in caplog.records)
+    assert "Preparing attempt 2/5" in text
+    assert "regenerating with critique feedback" in text
+    assert out["prompt"].startswith("BASE")
+    assert "PASSED review in the failed attempt: ['Good_Map']" in out["prompt"]
+
+
 # ---------------------------------------------------------------------------
 # Fit examples: validation, rendering, reviewer + commit integration
 # ---------------------------------------------------------------------------

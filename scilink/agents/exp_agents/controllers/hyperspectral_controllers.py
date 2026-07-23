@@ -3021,6 +3021,13 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
     def qc_check_accept(self, ctx: QCItemContext, verification: dict) -> bool:
         return bool(verification.get("task_success"))
 
+    def qc_iteration_banner(self, ctx, k: int, n: int):
+        """Suppress the engine's "Verification k/N" banner: hyperspectral QC
+        runs INSIDE the attempt, so at banner time verification has already
+        happened — the honest announcement is the retry-preparation line
+        logged by qc_refine below."""
+        return None
+
     def qc_refine(self, ctx: QCItemContext, verification: dict) -> dict:
         # Annealed retry: escalate from "patch the math" to "abandon the
         # method" as failures accumulate, so retries can leave a wrong-but-
@@ -3029,13 +3036,14 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
         ctx.current_prompt = ctx.base_prompt + _codegen_retry_feedback(
             ctx.retries, verification.get("error_msg") or "",
             passed_names=getattr(ctx, "last_passed_names", None))
-        if ctx.retries >= 2:
-            self.logger.info(
-                f"    ↻ Retry annealing engaged (failure {ctx.retries}): "
-                "escalating from parameter-patch toward method-change."
-            )
         # Level of the NEXT attempt, for the engine's _produced_at_level stamp.
         ctx.annealing_level = _retry_annealing_level(ctx.retries)
+        _total = self.max_verification_iterations + 1
+        _stage = self._CONSTRAINT_ANNEALING_SCHEDULE[
+            min(ctx.annealing_level, len(self._CONSTRAINT_ANNEALING_SCHEDULE) - 1)]
+        self.logger.info(
+            f"    ↻ Preparing attempt {min(ctx.retries + 1, _total)}/{_total}: "
+            f"regenerating with critique feedback — {_stage}.")
         return {"prompt": ctx.current_prompt}
 
     def qc_refit(self, ctx: QCItemContext, verification: dict,
