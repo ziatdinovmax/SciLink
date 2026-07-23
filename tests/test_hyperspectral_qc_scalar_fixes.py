@@ -356,6 +356,91 @@ def test_warm_retry_anchors_script_and_carries_history():
     assert "ABANDON" in p_hot
 
 
+GOOD_SCRIPT = '''
+def analyze_feature(data, axis):
+    m = data.mean(axis=2)
+    return {"maps": {"Mean_Map": m}, "units": "a.u.", "description": "d"}
+'''
+BROKEN_SCRIPT = '''
+def analyze_feature(data, axis):
+    m = data.mean(axis=2
+    return {"maps": {"Mean_Map": m}}
+'''
+
+
+def _exec_state(tmp_path):
+    return {
+        "hspy_data": np.random.rand(5, 5, 8) * 1e-12,
+        "original_hspy_data": np.random.rand(5, 5, 8) * 1e-12,
+        "system_info": dict(AXIS_OK),
+        "energy_axis": np.linspace(1, -1, 8),
+        "settings": {"output_dir": str(tmp_path)},
+        "refinement_decision": {
+            "requires_custom_code": True,
+            "targets": [{"description": "mean map", "type": "custom_code",
+                         "required_outputs": ["Mean_Map"]}],
+        },
+        "iteration_title": "T",
+        "analysis_objective": "obj",
+    }
+
+
+def test_exec_error_repaired_without_ladder_spend(tmp_path, monkeypatch):
+    """A syntax error is fixed by a mechanical correction inside the SAME
+    ladder attempt: the correction prompt carries the traceback, the ladder
+    never advances, and the record notes the repair."""
+    monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
+    prompts = []
+
+    class _Model:
+        def generate_content(self, contents, **kw):
+            prompts.append(contents if isinstance(contents, str) else str(contents))
+            script = BROKEN_SCRIPT if len(prompts) == 1 else GOOD_SCRIPT
+            return json.dumps({"code": script})
+
+    ctrl = hc.RunDynamicAnalysisController(
+        _Model(), LOGGER, generation_config=None, safety_settings=None,
+        parse_fn=lambda r: ({}, None),
+    )
+    ctrl._review_required_output = lambda *a, **k: (True, "")
+    ctrl._check_result_visually = lambda *a, **k: (True, "")
+
+    state = ctrl.execute(_exec_state(tmp_path))
+    names = [m["name"] for m in state.get("custom_analysis_metadata_list") or []]
+    assert names == ["Mean_Map"]                       # task succeeded
+    assert len(prompts) == 2                           # initial + 1 repair
+    assert "MECHANICAL CORRECTION" in prompts[1]
+    # the broken code reaches the repair prompt (via the raw-response head,
+    # since the compile-checking parser rejects syntax errors at parse time)
+    assert "m = data.mean(axis=2" in prompts[1]
+    assert "PREVIOUS ATTEMPT FAILED" not in prompts[1]  # NOT a ladder retry
+    rec = (state.get("dynamic_analysis_records") or [])[0]
+    entries = rec["quality_history"]["verification_iterations"]
+    assert entries[-1].get("exec_corrections") == 1    # honest record
+
+
+def test_exec_corrections_exhausted_becomes_ladder_failure(tmp_path, monkeypatch):
+    monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
+    calls = []
+
+    class _Model:
+        def generate_content(self, contents, **kw):
+            calls.append(contents if isinstance(contents, str) else str(contents))
+            return json.dumps({"code": BROKEN_SCRIPT})
+
+    ctrl = hc.RunDynamicAnalysisController(
+        _Model(), LOGGER, generation_config=None, safety_settings=None,
+        parse_fn=lambda r: ({}, None),
+    )
+    state = _exec_state(tmp_path)
+    state["max_verification_iterations"] = 0           # single ladder attempt
+    state = ctrl.execute(state)
+    assert state.get("dynamic_analysis_failed") is True
+    # 1 initial + (MAX_EXEC_ATTEMPTS - 1) repairs, then the ladder attempt dies
+    assert len(calls) == hc.RunDynamicAnalysisController.MAX_EXEC_ATTEMPTS
+    assert all("MECHANICAL CORRECTION" in c for c in calls[1:])
+
+
 def test_retry_banner_replaces_misplaced_verification_line(caplog):
     """The engine's "Verification k/N" banner is suppressed for hyperspectral
     (verification runs inside the attempt) and replaced by an honest

@@ -269,6 +269,25 @@ def _resample_ref_to_signal_axis(arr, ref_axis, energy_axis, e_):
     return np.interp(energy_axis, ra, rv)
 
 
+def _exec_correction_feedback(script: str, error_tb: str) -> str:
+    """Mechanical-repair prompt block for an execution-level failure.
+
+    Unlike the QC critique feedback, this is NOT a scientific redesign
+    request: the analysis was never judged, the code just didn't run. The
+    repair must keep the analysis identical so the ladder's scientific
+    currency (annealing level, critique history) is not consumed by
+    syntax errors.
+    """
+    return (
+        "\n\n### ⚙️ MECHANICAL CORRECTION — the script below FAILED TO EXECUTE\n"
+        "```python\n" + (script or "(no code was returned)")[:6000] + "\n```\n"
+        "Error:\n```text\n" + (error_tb or "(no traceback)")[-2500:] + "\n```\n"
+        "Fix the execution error ONLY. Keep the analysis logic, estimators, "
+        "parameters, and returned outputs IDENTICAL — this is a repair, not "
+        "a redesign."
+    )
+
+
 def _codegen_retry_feedback(failures: int, critique: str,
                             passed_names: list | None = None,
                             prior_script: str | None = None,
@@ -386,11 +405,15 @@ def _retry_stage_label(failures: int) -> str:
 
 
 def _hs_attempt_entry(level: int, passed_fraction, qc_failures: list,
-                      recommended_action: str, error: str | None = None) -> dict:
+                      recommended_action: str, error: str | None = None,
+                      exec_corrections: int = 0) -> dict:
     """One dynamic-analysis attempt as a verification-record entry.
 
     ``qc_failures`` strings are "feature: critique" — split into the shared
     issues shape; a hard execution error becomes a single issue.
+    ``exec_corrections`` counts the in-attempt mechanical repairs of
+    execution errors (recorded so the history stays honest about what the
+    attempt actually cost; additive — consumers use ``.get``).
     """
     issues = []
     for f in qc_failures or []:
@@ -398,10 +421,12 @@ def _hs_attempt_entry(level: int, passed_fraction, qc_failures: list,
         issues.append({"location": loc.strip(), "problem": prob.strip() or loc.strip()})
     if error:
         issues.append({"location": "execution", "problem": str(error)[:500]})
+    entry_extra = {"exec_corrections": exec_corrections} if exec_corrections else {}
     return {
         "passed_fraction": passed_fraction,
         "annealing_level": level,
         "issues_found": issues,
+        **entry_extra,
         "recommended_action": recommended_action,
     }
 
@@ -2589,6 +2614,14 @@ class RunDynamicAnalysisController:
     """
     MAX_RETRIES = 5
     SUCCESS_THRESHOLD = 0.5  # If >50% of maps in a script pass QC, accept the run.
+    # Executions per LADDER attempt: 1 initial + N mechanical corrections for
+    # execution-level failures (unparsable response, syntax/runtime error,
+    # non-dict return) — curve/image parity, where script-level failures are
+    # repaired inside the attempt instead of spending verification budget.
+    # 3 (not the siblings' 5): each hyperspectral execution can cost up to
+    # executor_timeout (600 s), and mechanical repairs converge fast or not
+    # at all. Timeouts are deliberately excluded from mechanical retry.
+    MAX_EXEC_ATTEMPTS = 3
 
     # Engine plumbing (#327 phase 5). The retry ladder has 3 structural
     # rungs — first try / patch-or-question / abandon-family, expressed in
@@ -3269,52 +3302,88 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             # so the except-path record never hits an unbound name.
             attempt_level = _retry_annealing_level(retries)
             total_maps_expected = 0
+            exec_corrections = 0
             ctx.mean_spec_bytes = None  # rendered lazily for the sanity check
 
-            # --- B. GENERATE CODE ---
-            self.logger.info(f"    (Attempt {retries+1}) Asking LLM to write code...")
-            response = self.model.generate_content(ctx.current_prompt, generation_config=self.generation_config)
-            result_json, _ = parse_codegen_response(response, field="code", logger=self.logger)
-            code_str = (result_json or {}).get("code", "")
-            ctx.last_code = code_str
+            # --- B/C/D. GENERATE + EXECUTE, with mechanical corrections ---
+            # Curve/image parity: execution-level failures (unparsable
+            # response, syntax/runtime error, non-dict return) are repaired
+            # in place with the traceback — no ladder budget spent, no
+            # annealing movement. Timeouts are EXCLUDED: rerunning
+            # near-identical too-slow code burns the full cap again, so they
+            # go to the ladder, whose critique feedback can restructure the
+            # method. QC rejections remain ladder currency as before.
+            code_str, result_dict, _mech_tb = "", None, ""
+            for _exec_try in range(self.MAX_EXEC_ATTEMPTS):
+                if _exec_try == 0:
+                    self.logger.info(f"    (Attempt {retries+1}) Asking LLM to write code...")
+                    _gen_prompt = ctx.current_prompt
+                else:
+                    exec_corrections = _exec_try
+                    self.logger.info(
+                        f"    🔧 Mechanical correction {_exec_try}/"
+                        f"{self.MAX_EXEC_ATTEMPTS - 1}: repairing the "
+                        f"execution error (ladder budget untouched)...")
+                    _gen_prompt = ctx.current_prompt + _exec_correction_feedback(
+                        code_str, _mech_tb)
+                response = self.model.generate_content(_gen_prompt, generation_config=self.generation_config)
+                result_json, _ = parse_codegen_response(response, field="code", logger=self.logger)
+                code_str = (result_json or {}).get("code", "")
+                ctx.last_code = code_str
 
-            # --- C. SANDBOX SETUP ---
-            local_scope = {}
-            global_scope = {
-                "np": np,
-                "scipy": __import__("scipy"),
-                "sklearn": __import__("sklearn"),
-                "lmfit": __import__("lmfit"),
-                "curve_fit": __import__("scipy.optimize", fromlist=["curve_fit"]).curve_fit,
-                "nnls": __import__("scipy.optimize", fromlist=["nnls"]).nnls,
-                "linregress": __import__("scipy.stats", fromlist=["linregress"]).linregress,
-                "find_peaks": __import__("scipy.signal", fromlist=["find_peaks"]).find_peaks,
-                "gaussian_filter": __import__("scipy.ndimage", fromlist=["gaussian_filter"]).gaussian_filter,
-            }
-            # Inject registered tools (from the _shared registry) for the
-            # hyperspectral agent + active skills, so generated code can
-            # optionally call them by name — same mechanism the image /
-            # curve agents use, not domain code hardcoded in this generic
-            # controller.
-            global_scope.update(_registry_tool_callables(state))
+                # Fresh sandbox per try so a failed exec's half-defined state
+                # never leaks into the repaired run.
+                local_scope = {}
+                global_scope = {
+                    "np": np,
+                    "scipy": __import__("scipy"),
+                    "sklearn": __import__("sklearn"),
+                    "lmfit": __import__("lmfit"),
+                    "curve_fit": __import__("scipy.optimize", fromlist=["curve_fit"]).curve_fit,
+                    "nnls": __import__("scipy.optimize", fromlist=["nnls"]).nnls,
+                    "linregress": __import__("scipy.stats", fromlist=["linregress"]).linregress,
+                    "find_peaks": __import__("scipy.signal", fromlist=["find_peaks"]).find_peaks,
+                    "gaussian_filter": __import__("scipy.ndimage", fromlist=["gaussian_filter"]).gaussian_filter,
+                }
+                # Inject registered tools (from the _shared registry) for the
+                # hyperspectral agent + active skills, so generated code can
+                # optionally call them by name — same mechanism the image /
+                # curve agents use, not domain code hardcoded in this generic
+                # controller.
+                global_scope.update(_registry_tool_callables(state))
 
-            # Execute Code
-            with ExecutionTimeout(seconds=self.executor_timeout):
-                exec(code_str, global_scope, local_scope)
+                try:
+                    if not code_str:
+                        raise ValueError(
+                            "Codegen response contained no runnable 'code' "
+                            "(the parser compile-checks scripts, so a syntax "
+                            "error also lands here). Raw response head:\n"
+                            + str(response)[:2000])
+                    with ExecutionTimeout(seconds=self.executor_timeout):
+                        exec(code_str, global_scope, local_scope)
 
-                if "analyze_feature" not in local_scope:
-                    raise ValueError("Function 'analyze_feature' was not found in generated code.")
+                        if "analyze_feature" not in local_scope:
+                            raise ValueError("Function 'analyze_feature' was not found in generated code.")
 
-                # --- D. RUN ON DATA ---
-                self.logger.info(f"    Executing generated code (timeout: {self.executor_timeout}s)...")
-                func = local_scope["analyze_feature"]
-                result_dict = _invoke_analyze_feature(
-                    func, optimal_data, state["energy_axis"], reconstruction,
-                    auxiliary=auxiliary_operands, fit_mask=fit_mask,
-                )
-
-            # Validation
-            if not isinstance(result_dict, dict): raise ValueError("Function return must be a dict.")
+                        self.logger.info(f"    Executing generated code (timeout: {self.executor_timeout}s)...")
+                        func = local_scope["analyze_feature"]
+                        result_dict = _invoke_analyze_feature(
+                            func, optimal_data, state["energy_axis"], reconstruction,
+                            auxiliary=auxiliary_operands, fit_mask=fit_mask,
+                        )
+                    if not isinstance(result_dict, dict):
+                        raise ValueError("Function return must be a dict.")
+                    break  # executed cleanly — proceed to QC
+                except TimeoutError:
+                    raise  # ladder currency, never mechanically retried
+                except Exception:
+                    _mech_tb = traceback.format_exc()
+                    if _exec_try >= self.MAX_EXEC_ATTEMPTS - 1:
+                        raise  # corrections exhausted → ladder failure
+                    _tail = _mech_tb.strip().splitlines()[-1][:200]
+                    self.logger.warning(
+                        f"    ⚙️ Execution failed: {_tail} — repairing in "
+                        f"place.")
 
             # Honest-null path (#358 follow-up): the generated code may
             # DECLARE the requested feature not measurable, with numeric
@@ -3625,7 +3694,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 # HS-1: record the successful attempt (any residual
                 # qc_failures are the maps a partial success dropped).
                 ctx.attempt_entries.append(_hs_attempt_entry(
-                    attempt_level, success_rate, qc_failures, ""))
+                    attempt_level, success_rate, qc_failures, "",
+                    exec_corrections=exec_corrections))
                 return {"success": True, "task_success": True,
                         "error_msg": None}
             else:
@@ -3663,6 +3733,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 qc_failures,
                 _retry_stage_label(retries + 1),
                 error=str(e),
+                exec_corrections=exec_corrections,
             ))
             ctx.retries = retries + 1
             return {"success": True, "task_success": False,

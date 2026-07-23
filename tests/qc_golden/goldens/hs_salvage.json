@@ -111,6 +111,7 @@
         "verification_iterations": [
           {
             "annealing_level": 0,
+            "exec_corrections": 0,
             "fix_applied": "patch the logic/math",
             "issues": [
               {
@@ -126,6 +127,7 @@
           },
           {
             "annealing_level": 1,
+            "exec_corrections": 0,
             "fix_applied": "question the method",
             "issues": [
               {
@@ -141,6 +143,7 @@
           },
           {
             "annealing_level": 1,
+            "exec_corrections": 0,
             "fix_applied": "abandon the method family",
             "issues": [
               {
@@ -156,6 +159,7 @@
           },
           {
             "annealing_level": 2,
+            "exec_corrections": 0,
             "fix_applied": "abandon the method family",
             "issues": [
               {
@@ -171,6 +175,7 @@
           },
           {
             "annealing_level": 2,
+            "exec_corrections": 0,
             "fix_applied": "abandon the method family",
             "issues": [
               {
