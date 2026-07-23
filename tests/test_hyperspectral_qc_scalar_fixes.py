@@ -314,9 +314,46 @@ def analyze_feature(data, axis):
     # Good_Map reviewed ONCE (attempt 2 reused the verdict); Bad_Map twice.
     assert review_calls.count("Good_Map") == 1
     assert review_calls.count("Bad_Map") == 2
-    # The second codegen prompt pinned the passing output.
+    # The second codegen prompt pinned the passing output AND anchored the
+    # prior script (warm level).
     assert len(codegen_prompts) == 2
     assert "PASSED review in the failed attempt: ['Good_Map']" in codegen_prompts[1]
+    assert "ADAPT IT, DO NOT REWRITE FROM SCRATCH" in codegen_prompts[1]
+
+
+def test_warm_retry_anchors_script_and_carries_history():
+    """Curve/image parity: warm retries adapt the prior script and see the
+    earlier-attempt trajectory; hot retries drop the anchor."""
+    ctrl = hc.RunDynamicAnalysisController(
+        SimpleNamespace(), LOGGER, generation_config=None,
+        safety_settings=None, parse_fn=lambda r: ({}, None),
+    )
+    entries = [
+        {"annealing_level": 0, "passed_fraction": 0.25,
+         "issues_found": [{"location": "Gap_Width",
+                           "problem": "edge pinned at window bound"}]},
+        {"annealing_level": 1, "passed_fraction": 0.0,
+         "issues_found": [{"location": "Gap_Width",
+                           "problem": "over-strict gate, 0% coverage"}]},
+    ]
+    ctx = SimpleNamespace(retries=2, base_prompt="BASE", annealing_level=1,
+                          last_passed_names=[], last_code="def analyze_feature(): pass",
+                          attempt_entries=entries)
+    out = ctrl.qc_refine(ctx, {"error_msg": "latest critique"})
+    p = out["prompt"]
+    # warm (retries=2 -> level 1): script anchored + history of EARLIER attempts
+    assert "ADAPT IT, DO NOT REWRITE FROM SCRATCH" in p
+    assert "def analyze_feature(): pass" in p
+    assert "PRIOR ATTEMPTS ON THIS TASK" in p
+    assert "edge pinned at window bound" in p
+    assert "over-strict gate" not in p  # latest failure lives in the Critique, not history
+
+    # hot (retries=3 -> level 2): anchor dropped, history retained
+    ctx.retries = 3
+    p_hot = ctrl.qc_refine(ctx, {"error_msg": "latest critique"})["prompt"]
+    assert "ADAPT IT, DO NOT REWRITE FROM SCRATCH" not in p_hot
+    assert "PRIOR ATTEMPTS ON THIS TASK" in p_hot
+    assert "ABANDON" in p_hot
 
 
 def test_retry_banner_replaces_misplaced_verification_line(caplog):

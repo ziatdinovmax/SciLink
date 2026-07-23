@@ -270,7 +270,9 @@ def _resample_ref_to_signal_axis(arr, ref_axis, energy_axis, e_):
 
 
 def _codegen_retry_feedback(failures: int, critique: str,
-                            passed_names: list | None = None) -> str:
+                            passed_names: list | None = None,
+                            prior_script: str | None = None,
+                            attempt_history: str = "") -> str:
     """Annealed retry guidance for the per-pixel code-gen loop.
 
     Flat retries (re-prompt at the same setting with "fix the math") cannot
@@ -295,6 +297,26 @@ def _codegen_retry_feedback(failures: int, critique: str,
             "critique targets. An output numerically identical to its "
             "previously-passed version keeps its verdict without re-review, "
             "so leaving working estimators untouched converges faster."
+        )
+    if attempt_history:
+        # The trajectory of EARLIER attempts (the latest failure is the
+        # Critique above). Knowing both walls prevents oscillation: fixing
+        # this critique by reintroducing an earlier attempt's failure mode
+        # (e.g. curing edge-pinning with a gate so strict coverage collapses)
+        # just burns the remaining budget.
+        block.append(attempt_history)
+    if prior_script:
+        # Warm-level anchor, mirroring the curve/image agents: adapt the
+        # previous script instead of regenerating from scratch, so working
+        # parts persist in the artifact itself. Omitted at the hot level,
+        # where a structurally different approach must not be anchored to
+        # the structure that failed.
+        block.append(
+            "### PREVIOUS SCRIPT — ADAPT IT, DO NOT REWRITE FROM SCRATCH\n"
+            "```python\n" + prior_script[:6000] + "\n```\n"
+            "Modify ONLY what the critique targets; keep the rest (data "
+            "handling, structure, and every estimator that passed review) "
+            "verbatim."
         )
     if failures <= 1:
         block.append("Fix the logic/math to address this critique.")
@@ -3033,11 +3055,20 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
         # method" as failures accumulate, so retries can leave a wrong-but-
         # self-consistent method basin instead of resampling it. See
         # _codegen_retry_feedback.
-        ctx.current_prompt = ctx.base_prompt + _codegen_retry_feedback(
-            ctx.retries, verification.get("error_msg") or "",
-            passed_names=getattr(ctx, "last_passed_names", None))
         # Level of the NEXT attempt, for the engine's _produced_at_level stamp.
         ctx.annealing_level = _retry_annealing_level(ctx.retries)
+        # Warm retries anchor on the previous script (curve/image parity);
+        # hot retries regenerate freely. History excludes the latest failure
+        # (its critique is passed in full).
+        _anchor = (getattr(ctx, "last_code", None)
+                   if ctx.annealing_level < 2 else None)
+        _history = _render_attempt_history(
+            (getattr(ctx, "attempt_entries", None) or [])[:-1])
+        ctx.current_prompt = ctx.base_prompt + _codegen_retry_feedback(
+            ctx.retries, verification.get("error_msg") or "",
+            passed_names=getattr(ctx, "last_passed_names", None),
+            prior_script=_anchor,
+            attempt_history=_history)
         _total = self.max_verification_iterations + 1
         _stage = self._CONSTRAINT_ANNEALING_SCHEDULE[
             min(ctx.annealing_level, len(self._CONSTRAINT_ANNEALING_SCHEDULE) - 1)]
