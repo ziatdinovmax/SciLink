@@ -837,9 +837,9 @@ Also OPTIONAL — and strongly encouraged whenever you FIT a model per pixel:
 omit "fitted" for non-fit estimators. AXIS ALIGNMENT IS CRITICAL: the panel
 overlays "fitted" on the RAW spectrum, so if you reordered/sorted/sub-sliced
 the axis internally (e.g. ascending re-sort of a descending sweep), you MUST
-include "axis" — the exact axis values (same length as "fitted") your curve
-is evaluated on — or return "fitted" index-aligned to the ORIGINAL axis
-argument. A mismatched ordering renders your correct fit mirror-flipped and
+include "axis" — the exact axis values (same length as "fitted", in the SAME
+UNITS as the input axis argument) your curve is evaluated on — or return
+"fitted" index-aligned to the ORIGINAL axis argument. A mismatched ordering renders your correct fit mirror-flipped and
 it will be rejected for a contradiction that is pure bookkeeping. Choose
 informative pixels: spatially spread, the extremes of your primary map, and
 the best/worst fit-quality pixels when you compute a quality metric. These
