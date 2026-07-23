@@ -1612,8 +1612,12 @@ pre-expected number.
 
 ### RESULT
 {result_summary}
-You are also shown the result dashboard (map + histogram) and a representative
-mean spectrum of the data.
+You are also shown the result dashboard (map + histogram), a representative
+mean spectrum of the data, and — when the code provided them — per-pixel fit
+examples (raw spectrum vs the code's model at representative pixels). When fit
+examples are present, weigh them heavily: per-pixel pathologies (a peak pinned
+to a window edge, a fit railing at a bound) are visible there and invisible in
+the aggregate map and histogram.
 
 ### TOOLS USED BY THE METHOD
 The generated code called these vetted, purpose-built helper tools — here is

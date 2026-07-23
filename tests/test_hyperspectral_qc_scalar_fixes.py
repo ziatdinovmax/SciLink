@@ -320,6 +320,101 @@ def analyze_feature(data, axis):
 
 
 # ---------------------------------------------------------------------------
+# Fit examples: validation, rendering, reviewer + commit integration
+# ---------------------------------------------------------------------------
+
+def test_validate_fit_examples():
+    good = {"fit_examples": [
+        {"pixel": [2, 3], "fitted": np.zeros(8), "label": "map max"},
+        {"pixel": [0, 0]},                              # no fitted: kept
+        {"pixel": [99, 0], "fitted": np.zeros(8)},      # out of bounds: dropped
+        {"pixel": [1, 1], "fitted": np.zeros(5)},       # wrong length: fitted->None
+        "junk",                                         # malformed: dropped
+    ]}
+    out = hc._validate_fit_examples(good, 5, 5, 8)
+    assert [ex["pixel"] for ex in out] == [(2, 3), (0, 0), (1, 1)]
+    assert out[0]["fitted"] is not None
+    assert out[1]["fitted"] is None and out[2]["fitted"] is None
+    # cap
+    many = {"fit_examples": [{"pixel": [0, 0]}] * 30}
+    assert len(hc._validate_fit_examples(many, 5, 5, 8)) == hc._MAX_FIT_EXAMPLES
+    assert hc._validate_fit_examples({}, 5, 5, 8) == []
+
+
+def test_fit_examples_panel_renders():
+    from scilink.skills.hyperspectral.eels.eels import create_fit_examples_panel
+    data = RNG.rand(5, 5, 16) * 1e-12
+    axis = np.linspace(1, -1, 16)
+    examples = [
+        {"pixel": (0, 0), "fitted": data[0, 0] * 1.05, "label": "best R2"},
+        {"pixel": (4, 4), "fitted": None, "label": "map min"},
+    ]
+    maps = {"Gap_Width": RNG.rand(5, 5)}
+    out = create_fit_examples_panel(data, axis, "Bias (V)", examples, maps, LOGGER)
+    assert isinstance(out, bytes) and len(out) > 1000
+    assert create_fit_examples_panel(data, axis, "Bias (V)", [], maps, LOGGER) is None
+
+
+def test_fit_examples_reach_reviewer_and_committed_images(tmp_path, monkeypatch):
+    monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
+    SCRIPT = '''
+def analyze_feature(data, axis):
+    m = data.mean(axis=2)
+    return {"maps": {"Mean_Map": m}, "units": "a.u.", "description": "d",
+            "fit_examples": [
+                {"pixel": [0, 0], "fitted": data[0, 0, :], "label": "corner"},
+                {"pixel": [2, 2], "fitted": data[2, 2, :], "label": "center"},
+            ]}
+'''
+
+    class _Model:
+        def generate_content(self, contents, **kw):
+            return json.dumps({"code": SCRIPT})
+
+    ctrl = hc.RunDynamicAnalysisController(
+        _Model(), LOGGER, generation_config=None, safety_settings=None,
+        parse_fn=lambda r: ({}, None),
+    )
+    seen_panels = []
+
+    def fake_review(*a, **kw):
+        seen_panels.append(kw.get("fit_panel_bytes"))
+        return True, ""
+
+    ctrl._review_required_output = fake_review
+    ctrl._check_result_visually = lambda *a, **k: (True, "")
+
+    state = {
+        "hspy_data": np.random.rand(5, 5, 8) * 1e-12,
+        "original_hspy_data": np.random.rand(5, 5, 8) * 1e-12,
+        "system_info": dict(AXIS_OK),
+        "energy_axis": np.linspace(1, -1, 8),
+        "settings": {"output_dir": str(tmp_path)},
+        "refinement_decision": {
+            "requires_custom_code": True,
+            "targets": [{"description": "mean map", "type": "custom_code",
+                         "required_outputs": ["Mean_Map"]}],
+        },
+        "iteration_title": "T",
+        "analysis_objective": "obj",
+    }
+    state = ctrl.execute(state)
+    # reviewer received the rendered panel
+    assert seen_panels and isinstance(seen_panels[0], bytes)
+    # the panel rode the commit alongside the dashboards
+    labels = [im["label"] for im in state.get("analysis_images", [])]
+    assert any(l.startswith("Fit Examples") for l in labels)
+
+
+def test_codegen_contract_documents_fit_examples():
+    import inspect
+    src = inspect.getsource(hc)
+    block = src[src.index("### REQUIRED RETURN FORMAT"):]
+    assert '"fit_examples"' in block[:4000]
+    assert "representative pixels" in block[:4000]
+
+
+# ---------------------------------------------------------------------------
 # D. Flux table renders any native scale
 # ---------------------------------------------------------------------------
 

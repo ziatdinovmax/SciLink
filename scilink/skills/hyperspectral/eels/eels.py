@@ -1024,6 +1024,74 @@ def create_feature_dashboard(
     return resize_image_bytes(buf.getvalue())
 
 
+def create_fit_examples_panel(
+    hspy_data: np.ndarray,
+    axis: np.ndarray,
+    axis_label: str,
+    examples: list,
+    maps_dict: dict | None = None,
+    logger: logging.Logger = None,
+) -> bytes | None:
+    """Multi-panel figure of per-pixel fit examples: at each selected pixel,
+    the RAW spectrum (thin) with the code's fitted/model curve overlaid
+    (bold) when provided, plus that pixel's extracted map values in the
+    panel title. This is the per-pixel evidence a map + histogram cannot
+    show — for scientists inspecting individual fits AND for the result
+    reviewer, which otherwise must infer per-pixel pathologies (edge-pinned
+    peaks, bound-railing) from histogram shapes alone.
+
+    ``examples``: list of ``{"pixel": (y, x), "fitted": 1-D array | None,
+    "label": str}`` (pre-validated by the caller). Returns JPEG bytes, or
+    ``None`` when nothing renderable.
+    """
+    try:
+        examples = [e for e in (examples or []) if e.get("pixel") is not None]
+        if not examples:
+            return None
+        n = len(examples)
+        cols = min(3, n)
+        rows = (n + cols - 1) // cols
+        fig, axes = plt.subplots(rows, cols, figsize=(cols * 4.2, rows * 3.2),
+                                 squeeze=False)
+        axis = np.asarray(axis, dtype=float)
+        for k, ex in enumerate(examples):
+            ax = axes[k // cols][k % cols]
+            y, x = ex["pixel"]
+            spec = np.asarray(hspy_data[y, x, :], dtype=float)
+            ax.plot(axis, spec, lw=0.8, color="0.45", label="data")
+            fitted = ex.get("fitted")
+            if fitted is not None:
+                ax.plot(axis, np.asarray(fitted, dtype=float), lw=1.8,
+                        color="crimson", label="fit")
+            vals = []
+            for name, m in (maps_dict or {}).items():
+                try:
+                    v = float(np.asarray(m)[y, x])
+                    if np.isfinite(v):
+                        vals.append(f"{name}={v:.4g}")
+                except Exception:  # noqa: BLE001 - annotation only
+                    continue
+            title = f"{ex.get('label') or ''} ({y},{x})".strip()
+            if vals:
+                title += "\n" + "; ".join(vals[:4])
+            ax.set_title(title, fontsize=8)
+            ax.set_xlabel(axis_label, fontsize=8)
+            ax.tick_params(labelsize=7)
+            ax.legend(fontsize=7, frameon=False)
+        for k in range(n, rows * cols):
+            axes[k // cols][k % cols].axis("off")
+        fig.suptitle("Per-pixel fit examples (raw data vs model)", fontsize=10)
+        fig.tight_layout(rect=(0, 0, 1, 0.96))
+        buf = BytesIO()
+        fig.savefig(buf, format="jpeg", bbox_inches="tight", dpi=130)
+        plt.close(fig)
+        return resize_image_bytes(buf.getvalue())
+    except Exception as e:  # noqa: BLE001 - panel is additive, never fatal
+        if logger:
+            logger.warning(f"  (Tool Warning: fit-examples panel failed: {e})")
+        return None
+
+
 def create_image_grid(image_bytes_list: list, logger: logging.Logger = None) -> bytes:
     """
     Stitches a list of JPEG bytes into a single grid image using OpenCV.

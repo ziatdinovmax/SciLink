@@ -779,6 +779,19 @@ put its unit in "units" under the same name. Scalars are recorded in the run's
 feature table and reported alongside the maps — return a requested global
 number here, never as a constant-valued map.
 
+Also OPTIONAL — and strongly encouraged whenever you FIT a model per pixel:
+    "fit_examples": [
+        {{"pixel": [y, x], "fitted": np.ndarray, "label": "map max"}},
+        ...
+    ]
+5-9 representative pixels; "fitted" is YOUR model evaluated over the full
+axis at that pixel (length {e}); omit "fitted" for non-fit estimators. Choose
+informative pixels: spatially spread, the extremes of your primary map, and
+the best/worst fit-quality pixels when you compute a quality metric. These
+render as raw-spectrum-vs-model panels that the result reviewer inspects at
+pixel level and the scientist keeps with the outputs — honest examples
+(including a poor fit) build more trust than curated ones.
+
 ### RESPONSE FORMAT
 Return a JSON object with:
 - "code": The valid Python code string.
@@ -867,6 +880,44 @@ def _log_qc_rejection(logger, feature_name: str, critique: str, kind: str):
 
 
 _MAX_SCALARS_PER_TASK = 40
+_MAX_FIT_EXAMPLES = 9
+
+
+def _validate_fit_examples(result_dict: dict, h: int, w: int, e: int) -> list:
+    """Validate the optional ``fit_examples`` return channel.
+
+    Keeps entries with an in-bounds ``pixel`` and (when present) a ``fitted``
+    curve of the right length; anything malformed is dropped silently —
+    examples are an evidence channel, not a gated deliverable. Capped at
+    ``_MAX_FIT_EXAMPLES``.
+    """
+    raw = result_dict.get("fit_examples")
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out = []
+    for ex in raw:
+        if len(out) >= _MAX_FIT_EXAMPLES:
+            break
+        if not isinstance(ex, dict):
+            continue
+        px = ex.get("pixel")
+        try:
+            y, x = int(px[0]), int(px[1])
+        except Exception:  # noqa: BLE001 - malformed pixel, skip
+            continue
+        if not (0 <= y < h and 0 <= x < w):
+            continue
+        fitted = ex.get("fitted")
+        if fitted is not None:
+            try:
+                fitted = np.asarray(fitted, dtype=float).ravel()
+            except Exception:  # noqa: BLE001
+                fitted = None
+            if fitted is not None and fitted.size != e:
+                fitted = None
+        out.append({"pixel": (y, x), "fitted": fitted,
+                    "label": str(ex.get("label") or "")[:60]})
+    return out
 
 
 def _extract_scalar_records(result_dict: dict, raw_units) -> list:
@@ -3295,6 +3346,26 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             # itself commits (success or salvage).
             current_run_scalar_meta = _extract_scalar_records(result_dict, raw_units)
 
+            # Optional per-pixel fit examples: raw spectrum + model curve at
+            # representative pixels. Rendered once per attempt; shown to the
+            # combined reviewer (per-pixel pathologies — edge-pinned peaks,
+            # bound railing — are invisible in a map + histogram) and saved
+            # with the committed images for the scientist.
+            fit_panel_bytes = None
+            _fit_examples = _validate_fit_examples(
+                result_dict, h, w, int(optimal_data.shape[-1]))
+            if _fit_examples:
+                _a2 = resolve_axis_spec(state.get("system_info"))["axis_2"]
+                _axis_label = (f"{_a2.get('name', 'axis')} "
+                               f"({_a2.get('units', 'a.u.')})")
+                fit_panel_bytes = tools.create_fit_examples_panel(
+                    optimal_data, state["energy_axis"], _axis_label,
+                    _fit_examples, maps_dict, self.logger)
+                if fit_panel_bytes:
+                    self.logger.info(
+                        f"    🧷 Fit-examples panel: {len(_fit_examples)} "
+                        f"pixel(s) rendered.")
+
             for feature_name, result_map in maps_dict.items():
                 # Shape/NaN Check
                 if result_map.shape != (h, w):
@@ -3392,7 +3463,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                             # judge against instead of generic priors (#381
                             # session: ZBC repeatedly rejected as "trivial
                             # collapse" despite the plan declaring it near-zero).
-                            target_context=target_desc)
+                            target_context=target_desc,
+                            fit_panel_bytes=fit_panel_bytes)
                     else:
                         # Diagnostic (non-required) map: lighter single
                         # visual QC — no method/physics gate needed.
@@ -3435,6 +3507,15 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                         _log_qc_rejection(self.logger, feature_name,
                                           critique, _review_kind)
                         qc_failures.append(f"{feature_name}: {critique}")
+
+            # Task-level fit-examples panel rides the commit with the maps —
+            # saved for the scientist alongside the dashboards.
+            if fit_panel_bytes and current_run_valid_maps:
+                current_run_valid_images.append({
+                    "label": f"Fit Examples: Task {i}",
+                    "data": fit_panel_bytes,
+                    "filename": f"{iter_title}_T{i}_FitExamples_{timestamp}.jpeg",
+                })
 
             # --- F. SUCCESS DECISION (Threshold + Required-Outputs Logic) ---
             valid_count = len(current_run_valid_maps)
@@ -3638,7 +3719,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                                     system_info, objective, feature_desc,
                                     result_summary, tool_descriptions,
                                     attempt_history: str = "",
-                                    target_context: str = ""):
+                                    target_context: str = "",
+                                    fit_panel_bytes: bytes | None = None):
         meta_str = (json.dumps(system_info, default=str)[:1500]
                     if system_info else "(none)")
         prompt = [SPECTROSCOPY_RESULT_REVIEW_INSTRUCTIONS.format(
@@ -3656,6 +3738,12 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
         if mean_spec_bytes:
             prompt.append("Representative mean spectrum of the data:")
             prompt.append({"mime_type": "image/png", "data": mean_spec_bytes})
+        if fit_panel_bytes:
+            prompt.append(
+                "Per-pixel fit examples (raw spectrum + the code's model at "
+                "representative pixels) — judge whether the extraction is "
+                "sound AT PIXEL LEVEL, not only in aggregate:")
+            prompt.append({"mime_type": "image/jpeg", "data": fit_panel_bytes})
         resp = self.model.generate_content(
             prompt, generation_config=None, safety_settings=self.safety_settings,
         )
@@ -3666,7 +3754,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                                 system_info, objective, feature_desc,
                                 result_summary, tool_descriptions,
                                 attempt_history: str = "",
-                                target_context: str = "") -> tuple[bool, str]:
+                                target_context: str = "",
+                                fit_panel_bytes: bytes | None = None) -> tuple[bool, str]:
         """Combined visual + physical review for a REQUIRED output, in ONE voted
         pass. Replaces the separate visual-QC then physics-sanity gates for
         required deliverables: a single reviewer weighs the dashboard, the
@@ -3685,7 +3774,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     system_info, objective, feature_desc,
                     result_summary, tool_descriptions,
                     attempt_history=attempt_history,
-                    target_context=target_context)
+                    target_context=target_context,
+                    fit_panel_bytes=fit_panel_bytes)
             except Exception as e:
                 self.logger.warning(f"Combined result review crashed: {e}")
                 return True, ""  # fail-open
