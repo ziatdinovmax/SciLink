@@ -937,6 +937,23 @@ def create_annotated_heatmap(data_map: np.ndarray, title: str, units: str) -> by
     return resize_image_bytes(buf.getvalue())
 
 
+def _robust_hist_window(valid_data: np.ndarray,
+                        p_low: float = 0.5,
+                        p_high: float = 99.5) -> tuple:
+    """(lo, hi, n_below, n_above) — the percentile window the histogram bins
+    over, plus the off-scale counts. A few extreme outliers otherwise stretch
+    the x-axis by orders of magnitude and collapse the real distribution into
+    a single bar (while the map panel, percentile-scaled, looks fine). Falls
+    back to the full range when the percentile window is degenerate."""
+    lo, hi = np.percentile(valid_data, [p_low, p_high])
+    if not (np.isfinite(lo) and np.isfinite(hi)) or hi <= lo:
+        lo, hi = float(np.min(valid_data)), float(np.max(valid_data))
+        return lo, hi, 0, 0
+    n_below = int((valid_data < lo).sum())
+    n_above = int((valid_data > hi).sum())
+    return float(lo), float(hi), n_below, n_above
+
+
 def create_feature_dashboard(
     data_map: np.ndarray,
     feature_name: str,
@@ -996,16 +1013,33 @@ def create_feature_dashboard(
     # --- RIGHT PANEL: Histogram ---
     ax_hist = fig.add_subplot(gs[1])
 
-    # Dynamic binning
-    n_bins = min(50, max(15, int(len(valid_data)**0.4)))
-    ax_hist.hist(valid_data, bins=n_bins, color='#2c3e50', alpha=0.75, edgecolor='white', linewidth=0.5)
+    # Robust histogram window — mirrors the map's percentile color scaling.
+    # Outliers are EXCLUDED from the bins but COUNTED and annotated, so the
+    # distribution stays readable without silently hiding extreme pixels
+    # (the RESULT text the reviewer reads still carries the true full range).
+    h_lo, h_hi, n_below, n_above = _robust_hist_window(valid_data)
+    in_window = valid_data[(valid_data >= h_lo) & (valid_data <= h_hi)]
+    if in_window.size == 0:  # pathological; bin everything
+        in_window, n_below, n_above = valid_data, 0, 0
 
-    # Statistics Box
+    # Dynamic binning
+    n_bins = min(50, max(15, int(len(in_window)**0.4)))
+    ax_hist.hist(in_window, bins=n_bins, color='#2c3e50', alpha=0.75, edgecolor='white', linewidth=0.5)
+
+    # Statistics Box — median alongside mean/std: with heavy outliers the
+    # moment statistics are dominated by them (e.g. mean 1.6, std 319) and
+    # the median is the honest center of the visible distribution.
     mu = np.mean(valid_data)
     sigma = np.std(valid_data)
-    stats_text = f"Mean: {mu:.2f}\nStd Dev: {sigma:.2f}"
+    med = np.median(valid_data)
+    stats_text = f"Mean: {mu:.2f}\nStd Dev: {sigma:.2f}\nMedian: {med:.2f}"
+    n_out = n_below + n_above
+    if n_out:
+        pct = 100.0 * n_out / max(len(valid_data), 1)
+        stats_text += (f"\nOff-scale: {n_out} px ({pct:.2f}%)\n"
+                       f"[{n_below} < {h_lo:.3g}, {n_above} > {h_hi:.3g}]")
     props = dict(boxstyle='round', facecolor='wheat', alpha=0.3)
-    ax_hist.text(0.95, 0.95, stats_text, transform=ax_hist.transAxes, fontsize=10,
+    ax_hist.text(0.95, 0.95, stats_text, transform=ax_hist.transAxes, fontsize=9,
                  verticalalignment='top', horizontalalignment='right', bbox=props)
 
     ax_hist.set_xlabel(f"{feature_name} ({units})")

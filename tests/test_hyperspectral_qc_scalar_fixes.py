@@ -406,6 +406,33 @@ def analyze_feature(data, axis):
     assert any(l.startswith("Fit Examples") for l in labels)
 
 
+def test_robust_hist_window_excludes_and_counts_outliers():
+    from scilink.skills.hyperspectral.eels.eels import _robust_hist_window
+    vals = np.concatenate([RNG.randn(28000),           # real distribution
+                           [-25000.0, 40000.0, 50000.0]])  # spike pixels
+    lo, hi, n_below, n_above = _robust_hist_window(vals)
+    assert -4 < lo < -2 and 2 < hi < 4      # window hugs the real distribution
+    assert n_below >= 1 and n_above >= 2
+    # no-outlier data: window covers essentially everything
+    clean = RNG.randn(10000)
+    lo, hi, nb, na = _robust_hist_window(clean)
+    assert (nb + na) / clean.size <= 0.011  # only the percentile tails
+
+
+def test_robust_hist_window_constant_data():
+    from scilink.skills.hyperspectral.eels.eels import _robust_hist_window
+    lo, hi, nb, na = _robust_hist_window(np.full(100, 7.0))
+    assert lo == hi == 7.0 and nb == 0 and na == 0
+
+
+def test_dashboard_renders_with_extreme_outliers():
+    from scilink.skills.hyperspectral.eels.eels import create_feature_dashboard
+    m = RNG.randn(64, 64)
+    m[0, 0], m[1, 1], m[2, 2] = -25000.0, 40000.0, 50000.0
+    out = create_feature_dashboard(m, "Gap_Depth_Residual_DOS", "dimensionless")
+    assert isinstance(out, bytes) and len(out) > 1000
+
+
 def test_codegen_contract_documents_fit_examples():
     import inspect
     src = inspect.getsource(hc)
