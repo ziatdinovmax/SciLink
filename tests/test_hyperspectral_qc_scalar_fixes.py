@@ -739,6 +739,21 @@ def test_qc_rejection_without_marker_is_problem_only(caplog):
     assert "Problem:" in text and "Fix:" not in text
 
 
+def test_llm_reasoning_rendered_once_not_twice():
+    """The initial-estimate, final-selection, and refinement-target
+    controllers each printed the full LLM reasoning twice (a logger line
+    plus an identical print() banner). Now: one structured block."""
+    import inspect
+    src = inspect.getsource(hc)
+    assert "LLM REASONING (" not in src          # print banners gone
+    for ctrl in (hc.GetInitialComponentParamsController,
+                 hc.GetFinalComponentSelectionController,
+                 hc.SelectRefinementTargetController):
+        s = inspect.getsource(ctrl)
+        assert s.count("_log_structured_block") >= 1
+        assert 'print("\\n" + "="*80)' not in s
+
+
 def test_qc_rejection_logged_once_not_three_times():
     # The old flow triple-printed each critique: a combined-review warning,
     # the shared visual-QC warning with the same text, then the attempt

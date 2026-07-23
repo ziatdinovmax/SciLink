@@ -901,23 +901,25 @@ def _wrap_console_text(text: str, width: int = 70) -> list:
 _CORRECTIVE_SPLIT = re.compile(r"corrective\s+direction\s*:?\s*", re.IGNORECASE)
 
 
-def _log_structured_block(logger, header: str, fields: list):
+def _log_structured_block(logger, header: str, fields: list,
+                          level: int = logging.WARNING):
     """One header line + wrapped, labeled fields — the curve agent's
     verification console style, shared by every long-form QC/judge message
-    (rejections, salvage verdicts, honest-null determinations). Console-only:
-    callers keep passing the FULL text through their functional channels.
-    ``fields`` is a list of ``(label, text)``; empty texts are skipped.
+    (rejections, salvage verdicts, honest-null determinations, LLM decision
+    rationales). Console-only: callers keep passing the FULL text through
+    their functional channels. ``fields`` is a list of ``(label, text)``;
+    empty texts are skipped.
     """
-    logger.warning(f"    {header}")
+    logger.log(level, f"    {header}")
     for label, text in fields:
         text = (text or "").strip()
         if not text:
             continue
         lines = _wrap_console_text(text, width=65)
         pad = " " * (len(label) + 2)
-        logger.warning(f"       {label}: {lines[0]}")
+        logger.log(level, f"       {label}: {lines[0]}")
         for line in lines[1:]:
-            logger.warning(f"       {pad}{line}")
+            logger.log(level, f"       {pad}{line}")
 
 
 def _log_qc_rejection(logger, feature_name: str, critique: str, kind: str):
@@ -1391,19 +1393,12 @@ class GetInitialComponentParamsController:
                 n_components = result_json.get('estimated_components', 4)
                 selected_method = result_json.get('method', 'nmf').lower().strip()
                 reasoning = result_json.get('reasoning', 'No reasoning provided.')
-                self.logger.info(
-                    f"LLM initial estimate: run_decomposition={run_decomposition}, "
-                    f"method={selected_method}, {n_components} components. "
-                    f"Reasoning: {reasoning}"
-                )
-
-                print("\n" + "="*80)
-                print("🧠 LLM REASONING (GetInitialComponentParamsController)")
-                print(f"  Run decomposition: {run_decomposition}")
-                print(f"  Selected method: {selected_method.upper()}")
-                print(f"  Suggested n_components: {n_components}")
-                print(f"  Explanation: {reasoning}")
-                print("="*80 + "\n")
+                _log_structured_block(
+                    self.logger,
+                    f"🧠 LLM initial estimate: run_decomposition="
+                    f"{run_decomposition}, method={selected_method.upper()}, "
+                    f"{n_components} components",
+                    [("Reasoning", reasoning)], level=logging.INFO)
 
                 if not (isinstance(n_components, int) and 2 <= n_components <= 15):
                     self.logger.warning(f"Invalid LLM estimate {n_components}, using default 4.")
@@ -1648,13 +1643,10 @@ class GetFinalComponentSelectionController:
             else:
                 final_n_components = result_json.get('final_components', initial_estimate)
                 reasoning = result_json.get('reasoning', 'No reasoning provided.')
-                self.logger.info(f"LLM final decision: {final_n_components} components. Reasoning: {reasoning}")
-
-                print("\n" + "="*80)
-                print("🧠 LLM REASONING (GetFinalComponentSelectionController)")
-                print(f"  Final n_components: {final_n_components}")
-                print(f"  Explanation: {reasoning}")
-                print("="*80 + "\n")
+                _log_structured_block(
+                    self.logger,
+                    f"🧠 LLM final decision: {final_n_components} components",
+                    [("Reasoning", reasoning)], level=logging.INFO)
 
                 if not (isinstance(final_n_components, int) and final_n_components in component_range):
                     self.logger.warning(f"Invalid LLM final choice {final_n_components}, using initial estimate.")
@@ -2222,21 +2214,17 @@ refinement targets are meaningful here — do not request `spatial` or
             }
 
             step_label = "Analysis plan" if skip_mode else "Refinement decision"
-            self.logger.info(f"✅ LLM Step Complete: {step_label}: {state['refinement_decision']['reasoning']}")
-
-            print("\n" + "="*80)
-            print("🧠 LLM REASONING (SelectRefinementTargetController)")
-            if skip_mode:
-                print(f"  Analysis Plan Ready: {is_needed}")
-            else:
-                print(f"  Refinement Needed: {is_needed}")
-            print(f"  Custom Code Triggered: {requires_custom_code}")
-            print(f"  Explanation: {state['refinement_decision']['reasoning']}")
-            print(f"  Targets Found: {len(final_targets)}")
-            if final_targets:
-                for i, t in enumerate(final_targets):
-                    print(f"    Target {i+1} ({t.get('type')}): {t.get('description')}")
-            print("="*80 + "\n")
+            _fields = [("Reasoning", state['refinement_decision']['reasoning'])]
+            for i, t in enumerate(final_targets, 1):
+                _fields.append((f"Target {i} ({t.get('type')})",
+                                str(t.get('description') or '')))
+            _log_structured_block(
+                self.logger,
+                f"🧠 {step_label}: "
+                f"{'ready' if skip_mode else f'refinement_needed={is_needed}'}, "
+                f"custom_code={requires_custom_code}, "
+                f"{len(final_targets)} target(s)",
+                _fields, level=logging.INFO)
 
         except Exception as e:
             self.logger.error(f"❌ LLM Step Failed: Refinement selection: {e}", exc_info=True)
