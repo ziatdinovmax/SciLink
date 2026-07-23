@@ -739,6 +739,78 @@ def test_qc_rejection_without_marker_is_problem_only(caplog):
     assert "Problem:" in text and "Fix:" not in text
 
 
+def test_reflection_receives_metadata_scalars_and_aux():
+    """The self-reflection critic gets measurement metadata, the recorded
+    global scalars, and auxiliary companion plots — but deliberately NOT
+    the flux table, the QC trajectory, or the objective (measurability and
+    scope-fit are owned by other layers; trajectory invites double
+    jeopardy on already-accepted maps)."""
+    from scilink.agents.exp_agents.controllers.base_controllers import (
+        RunSelfReflectionController,
+    )
+    captured = {}
+
+    class _Model:
+        def generate_content(self, contents, **kw):
+            captured["parts"] = contents
+            return "resp"
+
+    ctrl = RunSelfReflectionController(
+        _Model(), LOGGER, generation_config=None, safety_settings=None,
+        parse_fn=lambda r: ({"status": "approved"}, None),
+    )
+    state = {
+        "result_json": {"detailed_analysis": "draft", "scientific_claims": []},
+        "analysis_images": [{"label": "Map", "data": b"img"}],
+        "system_info": {"experiment": {"technique": "Grid Spectroscopy"},
+                        "modulation_mV": 20},
+        "all_iteration_results": [{
+            "custom_analysis_metadata_list": [
+                {"name": "mean_gap_V", "units": "V", "scalar": 0.31},
+                {"name": "Gap_Width", "units": "V",
+                 "stats": {"min": 0, "max": 1, "mean": 0.3}},  # map: excluded
+            ],
+        }],
+        "auxiliary_items": [{"label": "co-registered topography",
+                             "summary": "raw range [1, 2]",
+                             "plot_bytes": b"topo", "mime_type": "image/jpeg"}],
+    }
+    ctrl.execute(state)
+    text = "".join(p for p in captured["parts"] if isinstance(p, str))
+    images = [p for p in captured["parts"] if isinstance(p, dict)]
+    assert "MEASUREMENT METADATA" in text and "Grid Spectroscopy" in text
+    assert "RECORDED GLOBAL SCALARS" in text
+    assert "mean_gap_V = 0.31 V" in text
+    assert "Gap_Width" not in text.split("RECORDED GLOBAL SCALARS")[1].split("###")[0]
+    assert "Auxiliary: co-registered topography" in text
+    assert any(p.get("data") == b"topo" for p in images)
+    assert state["reflection_result"]["status"] == "approved"
+
+
+def test_reflection_sections_omitted_when_absent():
+    from scilink.agents.exp_agents.controllers.base_controllers import (
+        RunSelfReflectionController,
+    )
+    captured = {}
+
+    class _Model:
+        def generate_content(self, contents, **kw):
+            captured["parts"] = contents
+            return "resp"
+
+    ctrl = RunSelfReflectionController(
+        _Model(), LOGGER, generation_config=None, safety_settings=None,
+        parse_fn=lambda r: ({"status": "approved"}, None),
+    )
+    ctrl.execute({"result_json": {"detailed_analysis": "d"},
+                  "analysis_images": []})
+    text = "".join(p for p in captured["parts"] if isinstance(p, str))
+    # the checklist mentions the section names; the SECTIONS must be absent
+    assert "### MEASUREMENT METADATA" not in text
+    assert "### RECORDED GLOBAL SCALARS" not in text
+    assert "**Auxiliary:" not in text
+
+
 def test_llm_reasoning_rendered_once_not_twice():
     """The initial-estimate, final-selection, and refinement-target
     controllers each printed the full LLM reasoning twice (a logger line

@@ -1473,6 +1473,8 @@ You are a Senior Principal Scientist reviewing a draft analysis of hyperspectral
 
 3. **Unsupported Claims:** Are there scientific claims made with "High Confidence" that are barely supported by the visual data?
 
+4. **Instrument-level alternatives:** When MEASUREMENT METADATA is provided, check whether an instrument-level explanation (lock-in modulation broadening, drift/scan-condition gradients over a long acquisition, setpoint/endpoint artifacts) competes with an electronic-structure interpretation before endorsing it. Cross-check numbers quoted in the draft against the RECORDED GLOBAL SCALARS when provided, and check registry/correlation claims against the AUXILIARY companion data when provided.
+
 **Output Format:**
 Return a JSON object:
 {
