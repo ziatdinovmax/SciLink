@@ -441,6 +441,19 @@ def test_codegen_contract_documents_fit_examples():
     assert "representative pixels" in block[:4000]
 
 
+def test_codegen_contract_guards_divisions():
+    # Ratio-map division blowups (a few unbounded pixels wrecking the map's
+    # statistics) are addressed at the cause: the contract demands
+    # scale-RELATIVE denominator masking, never a fixed absolute epsilon —
+    # the same absolute-threshold trap this branch fixes elsewhere.
+    import inspect
+    src = inspect.getsource(hc)
+    block = src[src.index("### 3. CODING CONSTRAINTS"):]
+    assert "Guard divisions" in block[:2500]
+    assert "RELATIVE to its own scale" in block[:2500]
+    assert "never a fixed absolute epsilon" in block[:2500]
+
+
 # ---------------------------------------------------------------------------
 # D. Flux table renders any native scale
 # ---------------------------------------------------------------------------

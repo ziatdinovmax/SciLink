@@ -702,6 +702,7 @@ Your code will run in a restricted `exec()` sandbox.
 3. **Standard Math:** Use `np.exp`, `np.log`, etc., instead of the `math` library.
 4. **NumPy 2.x:** This sandbox runs NumPy 2.x, where aliases removed in NumPy 2.0 raise `AttributeError` — notably use `np.trapezoid` (NOT `np.trapz`); prefer `scipy.integrate.trapezoid` for integration.
 5. **Return Format:** You must return a dictionary, not a print statement or a plot.
+6. **Guard divisions:** any ratio/normalized map must NaN-mask pixels whose denominator is near zero RELATIVE to its own scale (e.g. |denominator| below a small fraction of its median magnitude — never a fixed absolute epsilon) instead of emitting unbounded values; a few division blowups destroy the map's statistics and fail QC.
 
 ### 4. YOUR GOAL
 Write a function `{signature}` that:
