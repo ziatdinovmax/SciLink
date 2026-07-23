@@ -1065,11 +1065,27 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
             elif is_image:
                 img = load_image(auxiliary_data)
-                result["auxiliary_summary"] = (
-                    f"Image with shape {img.shape} "
-                    f"(dtype: {img.dtype})."
-                )
-                result["auxiliary_array"] = img
+                # The numerical operand carries the RAW values — same rule the
+                # cube branch below states: the uint8 display rendering
+                # quantizes to 256 levels and discards the physical scale
+                # (an STM topography in meters became a constant-zero operand,
+                # silently NaN-ing every correlation computed against it).
+                try:
+                    raw = np.asarray(load_image(auxiliary_data, raw=True))
+                    if np.issubdtype(raw.dtype, np.number):
+                        raw = raw.astype(float, copy=False)
+                    result["auxiliary_array"] = raw
+                    result["auxiliary_summary"] = (
+                        f"Image with shape {raw.shape} (dtype: {raw.dtype}); "
+                        f"raw value range [{float(np.nanmin(raw)):.4g}, "
+                        f"{float(np.nanmax(raw)):.4g}]."
+                    )
+                except Exception:  # noqa: BLE001 - fall back to display array
+                    result["auxiliary_array"] = img
+                    result["auxiliary_summary"] = (
+                        f"Image with shape {img.shape} "
+                        f"(dtype: {img.dtype})."
+                    )
                 if img.ndim == 3:
                     img_gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
                     result["auxiliary_plot_bytes"] = (

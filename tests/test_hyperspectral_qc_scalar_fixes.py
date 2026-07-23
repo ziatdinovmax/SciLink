@@ -269,3 +269,62 @@ def test_flux_table_includes_aligned_auxiliary():
     table = _render_band_flux_table(cube, np.linspace(1, -1, 32), "V", aux=aux)
     assert "I0 reference" in table
     assert "5e-11" in table
+
+
+# ---------------------------------------------------------------------------
+# A2. Tiny-native-scale images: display renders with contrast, operands stay raw
+# ---------------------------------------------------------------------------
+
+def _stm_like_topo():
+    """STM z-height in meters: offset ~-1.6e-7, corrugation ~1e-9 — the shape
+    that collapsed to a constant-zero uint8 under the old 1e-6 epsilon."""
+    base = np.sin(np.linspace(0, 6 * np.pi, 64))[:, None] * np.ones((1, 64))
+    return (-1.58e-7 + 8e-10 * (base + 0.05 * RNG.rand(64, 64))).astype(
+        np.float32)
+
+
+def test_normalize_to_uint8_renders_tiny_range_with_contrast():
+    from scilink.skills._shared.image_processor import _normalize_to_uint8
+    out = _normalize_to_uint8(_stm_like_topo())
+    assert out.dtype == np.uint8
+    assert len(np.unique(out)) > 10  # old code: exactly 1 (all zeros)
+
+
+def test_normalize_to_uint8_constant_image_is_zero_without_crash():
+    from scilink.skills._shared.image_processor import _normalize_to_uint8
+    out = _normalize_to_uint8(np.full((8, 8), -1.58e-7, dtype=np.float32))
+    assert out.dtype == np.uint8 and (out == 0).all()
+
+
+def test_load_image_raw_preserves_native_values(tmp_path):
+    from scilink.skills._shared.image_processor import load_image
+    topo = _stm_like_topo()
+    p = tmp_path / "topo.npy"
+    np.save(p, topo)
+    raw = load_image(str(p), raw=True)
+    assert np.allclose(raw, topo)
+    disp = load_image(str(p))
+    assert disp.dtype == np.uint8 and len(np.unique(disp)) > 10
+
+
+def test_auxiliary_image_operand_carries_raw_values(tmp_path, monkeypatch):
+    monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
+    from scilink.agents.exp_agents.hyperspectral_analysis_agent import (
+        HyperspectralAnalysisAgent,
+    )
+    agent = HyperspectralAnalysisAgent(
+        api_key="dummy", base_url="http://localhost:1",
+        output_dir=str(tmp_path / "out"), enable_human_feedback=False,
+    )
+    topo = _stm_like_topo()
+    p = tmp_path / "topo.npy"
+    np.save(p, topo)
+    state = agent._load_auxiliary_items(str(p), "co-registered topography")
+    item = state["auxiliary_items"][0]
+    arr = item["array"]
+    # Pre-fix: arr was the uint8 display rendering — here all-zero, std 0,
+    # silently NaN-ing any correlation computed against it.
+    assert arr.std() > 0
+    assert np.allclose(arr, topo.astype(float))
+    assert item["plot_bytes"]  # display path still works
+    assert "raw value range" in (item["summary"] or "")
