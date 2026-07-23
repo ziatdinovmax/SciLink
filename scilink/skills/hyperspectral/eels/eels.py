@@ -1095,7 +1095,14 @@ def create_fit_examples_panel(
             ax.plot(axis, spec, lw=0.8, color="0.45", label="data")
             fitted = ex.get("fitted")
             if fitted is not None:
-                ax.plot(axis, np.asarray(fitted, dtype=float), lw=1.8,
+                # Value-space overlay: the example's own axis (when the code
+                # evaluated its model on an internally re-sorted/sub-sliced
+                # axis) or the shared input axis. Index-plotting a re-sorted
+                # curve against a descending sweep mirror-flips a correct
+                # fit and manufactures a false contradiction for the review.
+                fx = ex.get("axis")
+                fx = axis if fx is None else np.asarray(fx, dtype=float)
+                ax.plot(fx, np.asarray(fitted, dtype=float), lw=1.8,
                         color="crimson", label="fit")
             vals = []
             for name, m in (maps_dict or {}).items():

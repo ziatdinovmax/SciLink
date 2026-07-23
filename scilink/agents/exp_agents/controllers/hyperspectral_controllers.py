@@ -829,11 +829,18 @@ number here, never as a constant-valued map.
 
 Also OPTIONAL — and strongly encouraged whenever you FIT a model per pixel:
     "fit_examples": [
-        {{"pixel": [y, x], "fitted": np.ndarray, "label": "map max"}},
+        {{"pixel": [y, x], "fitted": np.ndarray, "axis": np.ndarray,
+          "label": "map max"}},
         ...
     ]
-5-9 representative pixels; "fitted" is YOUR model evaluated over the full
-axis at that pixel (length {e}); omit "fitted" for non-fit estimators. Choose
+5-9 representative pixels; "fitted" is YOUR model evaluated at that pixel;
+omit "fitted" for non-fit estimators. AXIS ALIGNMENT IS CRITICAL: the panel
+overlays "fitted" on the RAW spectrum, so if you reordered/sorted/sub-sliced
+the axis internally (e.g. ascending re-sort of a descending sweep), you MUST
+include "axis" — the exact axis values (same length as "fitted") your curve
+is evaluated on — or return "fitted" index-aligned to the ORIGINAL axis
+argument. A mismatched ordering renders your correct fit mirror-flipped and
+it will be rejected for a contradiction that is pure bookkeeping. Choose
 informative pixels: spatially spread, the extremes of your primary map, and
 the best/worst fit-quality pixels when you compute a quality metric. These
 render as raw-spectrum-vs-model panels that the result reviewer inspects at
@@ -961,9 +968,27 @@ def _validate_fit_examples(result_dict: dict, h: int, w: int, e: int) -> list:
                 fitted = np.asarray(fitted, dtype=float).ravel()
             except Exception:  # noqa: BLE001
                 fitted = None
-            if fitted is not None and fitted.size != e:
-                fitted = None
-        out.append({"pixel": (y, x), "fitted": fitted,
+        # Optional per-example axis: the values "fitted" is evaluated on,
+        # for code that reordered/sub-sliced the axis internally. With it,
+        # the overlay is drawn in VALUE space and no index-alignment
+        # assumption is made (a fitted curve on an internally re-sorted
+        # axis otherwise renders mirror-flipped against a descending sweep).
+        ex_axis = ex.get("axis")
+        if ex_axis is not None and fitted is not None:
+            try:
+                ex_axis = np.asarray(ex_axis, dtype=float).ravel()
+            except Exception:  # noqa: BLE001
+                ex_axis = None
+            if ex_axis is not None and (ex_axis.size != fitted.size
+                                        or not np.all(np.isfinite(ex_axis))):
+                ex_axis = None
+        else:
+            ex_axis = None
+        # Without its own axis, "fitted" must be index-aligned to the full
+        # input axis (length e); a mismatched length is unrenderable.
+        if fitted is not None and ex_axis is None and fitted.size != e:
+            fitted = None
+        out.append({"pixel": (y, x), "fitted": fitted, "axis": ex_axis,
                     "label": str(ex.get("label") or "")[:60]})
     return out
 

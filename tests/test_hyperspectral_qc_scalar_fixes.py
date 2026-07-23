@@ -485,6 +485,48 @@ def test_validate_fit_examples():
     assert hc._validate_fit_examples({}, 5, 5, 8) == []
 
 
+def test_validate_fit_examples_per_example_axis():
+    fe = {"fit_examples": [
+        # sub-sliced fit with its own axis (different length than e): kept
+        {"pixel": [1, 1], "fitted": np.zeros(5), "axis": np.linspace(0.2, 0.6, 5)},
+        # axis length mismatch -> axis dropped -> fitted wrong length -> dropped
+        {"pixel": [2, 2], "fitted": np.zeros(5), "axis": np.zeros(3)},
+        # non-finite axis -> dropped -> full-length fitted still renderable
+        {"pixel": [3, 3], "fitted": np.zeros(8), "axis": np.full(8, np.nan)},
+    ]}
+    out = hc._validate_fit_examples(fe, 5, 5, 8)
+    assert out[0]["axis"] is not None and out[0]["fitted"].size == 5
+    assert out[1]["fitted"] is None
+    assert out[2]["axis"] is None and out[2]["fitted"].size == 8
+
+
+def test_panel_value_space_overlay_not_mirrored(tmp_path):
+    """The TaS2 regression: descending sweep (+1..-1 V), model fitted on the
+    internally re-sorted ascending axis. With the per-example axis the
+    overlay must land at the TRUE peak bias, not its mirror image."""
+    from scilink.skills.hyperspectral.eels.eels import create_fit_examples_panel
+    e = 151
+    raw_axis = np.linspace(1, -1, e)                    # descending sweep
+    peak_v = 0.35
+    spec = np.exp(-((raw_axis - peak_v) ** 2) / 0.01) + 0.05
+    data = np.tile(spec, (4, 4, 1))
+    asc = np.sort(raw_axis)                             # code's internal frame
+    fitted_asc = np.exp(-((asc - peak_v) ** 2) / 0.01) + 0.05
+    out = create_fit_examples_panel(
+        data, raw_axis, "Bias (V)",
+        [{"pixel": (0, 0), "fitted": fitted_asc, "axis": asc,
+          "label": "peak"}], None, LOGGER)
+    assert isinstance(out, bytes) and len(out) > 1000
+
+
+def test_codegen_contract_demands_axis_alignment():
+    import inspect
+    src = inspect.getsource(hc)
+    block = src[src.index("AXIS ALIGNMENT IS CRITICAL"):]
+    assert '"axis"' in block[:600]
+    assert "mirror-flipped" in block[:800]
+
+
 def test_fit_examples_panel_renders():
     from scilink.skills.hyperspectral.eels.eels import create_fit_examples_panel
     data = RNG.rand(5, 5, 16) * 1e-12
