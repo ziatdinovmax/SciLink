@@ -400,15 +400,18 @@ def _render_band_flux_table(data, axis, axis_units: str, aux: dict | None = None
         header = "  ".join(f"{name:>14s}" for name in series)
         lines = [
             "### MEASURED FLUX BY BAND (deterministic — computed from the data)",
-            f"Field-mean counts per channel in equal {axis_units} bands:",
+            f"Field-mean signal per channel in equal {axis_units} bands:",
             f"{'band':>19s}  {header}",
         ]
         for b in range(n_bands):
             m = idx == b
             if not m.any():
                 continue
-            vals = "  ".join(f"{float(v[m].mean()):>14.1f}" for v in series.values())
-            lines.append(f"{edges[b]:>8.1f}-{edges[b + 1]:<10.1f}{vals}")
+            # %.5g, not fixed-point: a counts-mentality ".1f" renders every
+            # band of a tiny-native-scale signal (amperes, normalized units)
+            # as 0.0, making the table read as "no signal" on real data.
+            vals = "  ".join(f"{float(v[m].mean()):>14.5g}" for v in series.values())
+            lines.append(f"{edges[b]:>8.3g}-{edges[b + 1]:<10.3g}{vals}")
         lines.append(
             "These numbers OVERRIDE any visual estimate from the spectrum plot. "
             "Note analysis windows aggregate MANY channels, so usable SNR can be "
@@ -746,15 +749,25 @@ rejected and retried.
 ### REQUIRED RETURN FORMAT
 {{
     "maps": {{
-        "Feature_Name_1": np.ndarray, 
+        "Feature_Name_1": np.ndarray,
         "Feature_Name_2": np.ndarray
     }},
-    "units": {{                 
+    "units": {{
         "Feature_Name_1": "{axis_units}",
         "Feature_Name_2": "a.u."
-    }},    
+    }},
+    "scalars": {{
+        "Metric_Name": 0.0
+    }},
     "description": "Brief physics explanation"
 }}
+
+"scalars" is OPTIONAL: named GLOBAL numeric results the task asks for that are
+NOT per-pixel maps — a spatial correlation coefficient, a region-integrated
+quantity, a global fit parameter. Each value must be a single finite number;
+put its unit in "units" under the same name. Scalars are recorded in the run's
+feature table and reported alongside the maps — return a requested global
+number here, never as a constant-valued map.
 
 ### RESPONSE FORMAT
 Return a JSON object with:
@@ -768,6 +781,60 @@ def _fmt(val, fmt=".4f"):
         return f"{val:{fmt}}"
     except (ValueError, TypeError):
         return "N/A"
+
+
+def _map_valid_coverage(result_map) -> tuple[float, int]:
+    """(coverage %, n_valid) — pixels carrying a real (finite, non-zero) value.
+
+    The non-zero test is EXACT-zero only, on purpose: an absolute epsilon here
+    (this used to be ``> 1e-9``) silently reports 0% coverage for physically
+    real data whose native scale is tiny (amperes-scale STS, normalized
+    signals), feeding the reviewer a phantom "reported collapse" — the same
+    absolute-threshold trap as the #381 unmixer mask. Exact zeros are what a
+    genuine masking/segmentation collapse produces; scale is not evidence.
+    """
+    _finite = np.isfinite(result_map)
+    _real = _finite & (np.abs(result_map) > 0)
+    n_valid = int(_real.sum())
+    return 100.0 * n_valid / max(result_map.size, 1), n_valid
+
+
+_MAX_SCALARS_PER_TASK = 40
+
+
+def _extract_scalar_records(result_dict: dict, raw_units) -> list:
+    """Validate the optional ``scalars`` return channel into meta records.
+
+    Returns ``[{name, units, description, scalar}, ...]`` for every entry that
+    is a single finite number (numpy scalars coerced); anything else — arrays,
+    strings, NaN/inf — is dropped silently rather than failing the attempt,
+    since scalars are a reporting channel, not a QC-gated deliverable. Capped
+    at ``_MAX_SCALARS_PER_TASK`` to keep the feature table a table.
+    """
+    scalars = result_dict.get("scalars")
+    if not isinstance(scalars, dict):
+        return []
+    records = []
+    for name, value in scalars.items():
+        if len(records) >= _MAX_SCALARS_PER_TASK:
+            break
+        try:
+            v = float(np.asarray(value).item())
+        except Exception:  # noqa: BLE001 - non-scalar entry, skip
+            continue
+        if not np.isfinite(v):
+            continue
+        unit = "a.u."
+        if isinstance(raw_units, dict):
+            unit = raw_units.get(name, "a.u.")
+        records.append({
+            "name": str(name),
+            "units": unit,
+            "description": ("Global (non-map) numeric deliverable returned "
+                            "via the task's `scalars` channel."),
+            "scalar": v,
+        })
+    return records
     
 def _sanitize_filename(text: str) -> str:
     """Helper to create safe filenames from labels."""
@@ -2046,13 +2113,17 @@ class BuildHolisticSynthesisPromptController:
                     desc = meta.get('description', 'N/A')
                     units = meta.get('units', 'a.u.')
                     stats = meta.get('stats', {})
-                    
+                    scalar = meta.get('scalar')
+
                     prompt_parts.append(f"\n   **Feature {idx}: {name}**")
                     prompt_parts.append(f"   - Physical Interpretation: {desc}")
                     prompt_parts.append(f"   - Units: {units}")
-                    
+
+                    if isinstance(scalar, (int, float)):
+                        # Global scalar deliverable — a single number, not a map.
+                        prompt_parts.append(f"   - Value: {scalar:.6g}")
                     # Crash Fix: Use .get(key, 0.0) to handle missing stats gracefully
-                    if stats:
+                    elif stats:
                         s_min = stats.get('min', 0.0)
                         s_max = stats.get('max', 0.0)
                         s_mean = stats.get('mean', 0.0)
@@ -2716,7 +2787,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     self.logger.warning(f"Bank retrieval skipped: {e}")
             ctx.retries = 0
             ctx.best_attempt = {"req_passed": -1, "valid_count": -1,
-                                "images": [], "maps": [], "meta": []}
+                                "images": [], "maps": [], "meta": [],
+                                "scalar_meta": []}
             ctx.attempt_entries = []
             ctx.last_code = ""
             ctx.mean_spec_bytes = None
@@ -2937,12 +3009,16 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 for img_item in best_attempt["images"]:
                     tools.save_image_bytes(img_item['data'], output_dir, img_item['filename'], self.logger)
                     state.setdefault("analysis_images", []).append(img_item)
-                for m in best_attempt["meta"]:
+                # Scalars from the salvaged attempt carry the same honesty
+                # marker as its maps — they were computed by a task that
+                # never fully passed.
+                for m in best_attempt["meta"] + best_attempt.get("scalar_meta", []):
                     m["description"] = marker + m.get("description", "")
                     m["confidence"] = conf
                     m["salvage_caveat"] = caveat
                 ctx.session["all_valid_maps"].extend(best_attempt["maps"])
                 ctx.session["all_valid_meta"].extend(best_attempt["meta"])
+                ctx.session["all_valid_meta"].extend(best_attempt.get("scalar_meta", []))
 
         return {"record": self._build_target_record(ctx, task_success=False)}
 
@@ -3125,6 +3201,14 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             raw_units = result_dict.get("units", "a.u.")
             desc = result_dict.get("description", "")
 
+            # Optional global scalar deliverables (correlation coefficients,
+            # region-integrated quantities, …). Staged SEPARATELY from maps:
+            # they carry no dashboard so they get no per-item QC, must not
+            # count toward the map success rate, and must never satisfy a
+            # required_outputs (map) name. They commit only when the attempt
+            # itself commits (success or salvage).
+            current_run_scalar_meta = _extract_scalar_records(result_dict, raw_units)
+
             for feature_name, result_map in maps_dict.items():
                 # Shape/NaN Check
                 if result_map.shape != (h, w):
@@ -3178,15 +3262,13 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                         # masking/segmentation COLLAPSE the value stats
                         # alone don't reveal (a few dozen plausible-valued
                         # pixels look fine by range/mean).
-                        _finite = np.isfinite(result_map)
-                        _real = _finite & (np.abs(result_map) > 1e-9)
-                        _cov = 100.0 * float(_real.sum()) / max(result_map.size, 1)
+                        _cov, _n_valid = _map_valid_coverage(result_map)
                         summary = (
                             f"value range [{float(np.nanmin(result_map)):.4g}, "
                             f"{float(np.nanmax(result_map)):.4g}], mean "
                             f"{float(np.nanmean(result_map)):.4g} {current_unit}; "
                             f"valid coverage {_cov:.1f}% "
-                            f"({int(_real.sum())} of {result_map.size} pixels finite & non-zero)")
+                            f"({_n_valid} of {result_map.size} pixels finite & non-zero)")
                         if fit_mask is not None:
                             summary += (
                                 f" NOTE: the fit was SCOPED to a "
@@ -3204,7 +3286,14 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                             state.get("system_info"),
                             state.get("analysis_objective"),
                             feature_name, summary, tool_descriptions,
-                            attempt_history=_render_attempt_history(ctx.attempt_entries))
+                            attempt_history=_render_attempt_history(ctx.attempt_entries),
+                            # The plan's per-target instruction — it may declare
+                            # expected properties of this output (e.g. an
+                            # expected near-zero magnitude) the reviewer must
+                            # judge against instead of generic priors (#381
+                            # session: ZBC repeatedly rejected as "trivial
+                            # collapse" despite the plan declaring it near-zero).
+                            target_context=target_desc)
                         if not is_valid:
                             self.logger.warning(
                                 f"    🔎 Combined review rejected "
@@ -3267,6 +3356,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     "images": list(current_run_valid_images),
                     "maps": list(current_run_valid_maps),
                     "meta": list(current_run_valid_meta),
+                    "scalar_meta": list(current_run_scalar_meta),
                 }
 
             missing_required = [n for n in required_outputs if n not in valid_names]
@@ -3302,9 +3392,11 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     if "analysis_images" not in state: state["analysis_images"] = []
                     state["analysis_images"].append(img_item)
 
-                # 2. COMMIT Data
+                # 2. COMMIT Data (scalar deliverables ride the same commit:
+                # reported only when the attempt they came from is accepted)
                 ctx.session["all_valid_maps"].extend(current_run_valid_maps)
                 ctx.session["all_valid_meta"].extend(current_run_valid_meta)
+                ctx.session["all_valid_meta"].extend(current_run_scalar_meta)
 
                 # HS-1: record the successful attempt (any residual
                 # qc_failures are the maps a partial success dropped).
@@ -3424,11 +3516,13 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
     def _review_required_output_one(self, dashboard_bytes, code_str, mean_spec_bytes,
                                     system_info, objective, feature_desc,
                                     result_summary, tool_descriptions,
-                                    attempt_history: str = ""):
+                                    attempt_history: str = "",
+                                    target_context: str = ""):
         meta_str = (json.dumps(system_info, default=str)[:1500]
                     if system_info else "(none)")
         prompt = [SPECTROSCOPY_RESULT_REVIEW_INSTRUCTIONS.format(
             objective=objective or "(not specified)",
+            target_context=(target_context or "(not provided)")[:3000],
             metadata=meta_str,
             method=(code_str or "(unavailable)")[:6000],
             result_summary=f"Output '{feature_desc}': {result_summary}",
@@ -3450,7 +3544,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
     def _review_required_output(self, dashboard_bytes, code_str, mean_spec_bytes,
                                 system_info, objective, feature_desc,
                                 result_summary, tool_descriptions,
-                                attempt_history: str = "") -> tuple[bool, str]:
+                                attempt_history: str = "",
+                                target_context: str = "") -> tuple[bool, str]:
         """Combined visual + physical review for a REQUIRED output, in ONE voted
         pass. Replaces the separate visual-QC then physics-sanity gates for
         required deliverables: a single reviewer weighs the dashboard, the
@@ -3468,7 +3563,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     dashboard_bytes, code_str, mean_spec_bytes,
                     system_info, objective, feature_desc,
                     result_summary, tool_descriptions,
-                    attempt_history=attempt_history)
+                    attempt_history=attempt_history,
+                    target_context=target_context)
             except Exception as e:
                 self.logger.warning(f"Combined result review crashed: {e}")
                 return True, ""  # fail-open

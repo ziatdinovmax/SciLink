@@ -546,13 +546,20 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     feats[f"{base}_not_measurable"] = 1
                     continue
                 stats = m.get("stats")
-                if not isinstance(stats, dict):
+                sc = m.get("scalar")
+                is_scalar = isinstance(sc, (int, float)) and np.isfinite(sc)
+                if not isinstance(stats, dict) and not is_scalar:
                     continue
                 base = str(m.get("name") or "feature").strip().replace(" ", "_")
                 units = str(m.get("units") or "").strip()
                 suffix = ("_" + units.replace(" ", "").replace("/", "per")
                           if units and units.lower() not in ("a.u.", "au", "")
                           else "")
+                if is_scalar:
+                    # Global scalar deliverable (task `scalars` channel) —
+                    # one value, its own column, no min/max/mean.
+                    feats[f"{base}{suffix}"] = float(sc)
+                    continue
                 for k, v in stats.items():
                     if isinstance(v, (int, float)) and np.isfinite(v):
                         feats[f"{base}_{k}{suffix}"] = float(v)
