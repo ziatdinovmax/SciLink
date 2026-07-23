@@ -823,28 +823,37 @@ def _wrap_console_text(text: str, width: int = 70) -> list:
 _CORRECTIVE_SPLIT = re.compile(r"corrective\s+direction\s*:?\s*", re.IGNORECASE)
 
 
+def _log_structured_block(logger, header: str, fields: list):
+    """One header line + wrapped, labeled fields — the curve agent's
+    verification console style, shared by every long-form QC/judge message
+    (rejections, salvage verdicts, honest-null determinations). Console-only:
+    callers keep passing the FULL text through their functional channels.
+    ``fields`` is a list of ``(label, text)``; empty texts are skipped.
+    """
+    logger.warning(f"    {header}")
+    for label, text in fields:
+        text = (text or "").strip()
+        if not text:
+            continue
+        lines = _wrap_console_text(text, width=65)
+        pad = " " * (len(label) + 2)
+        logger.warning(f"       {label}: {lines[0]}")
+        for line in lines[1:]:
+            logger.warning(f"       {pad}{line}")
+
+
 def _log_qc_rejection(logger, feature_name: str, critique: str, kind: str):
     """Render one QC rejection as a structured, wrapped console block —
-    stylistically aligned with the curve agent's verification output
-    (numbered location, separate Problem / Fix fields, ~70-col wrap) instead
-    of a single wall-of-text line. Console-only: the FULL critique text still
-    flows untouched into the retry feedback, attempt entries, and records.
+    separate Problem / Fix fields split on the reviewer's own "Corrective
+    direction:" marker. Console-only: the FULL critique text still flows
+    untouched into the retry feedback, attempt entries, and records.
     """
     parts = _CORRECTIVE_SPLIT.split(critique or "", maxsplit=1)
     problem = parts[0].strip()
     fix = parts[1].strip() if len(parts) > 1 else ""
-
-    logger.warning(f"    ❌ {kind} rejected [{feature_name}]")
-    if problem:
-        lines = _wrap_console_text(problem, width=65)
-        logger.warning(f"       Problem: {lines[0]}")
-        for line in lines[1:]:
-            logger.warning(f"                {line}")
-    if fix:
-        lines = _wrap_console_text(fix, width=65)
-        logger.warning(f"       Fix: {lines[0]}")
-        for line in lines[1:]:
-            logger.warning(f"            {line}")
+    _log_structured_block(
+        logger, f"❌ {kind} rejected [{feature_name}]",
+        [("Problem", problem), ("Fix", fix)])
 
 
 _MAX_SCALARS_PER_TASK = 40
@@ -3041,13 +3050,17 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             })
 
             if not present:
-                self.logger.warning(
-                    f"    ⚖️  Salvage judge WITHHELD the partial result "
-                    f"(no physically defensible signal): {caveat}")
+                _log_structured_block(
+                    self.logger,
+                    "⚖️  Salvage judge WITHHELD the partial result "
+                    "(no physically defensible signal)",
+                    [("Caveat", caveat)])
             else:
-                self.logger.warning(
-                    f"    ⚖️  Salvage judge: presenting APPROXIMATE result "
-                    f"({conf} confidence) — {caveat}")
+                _log_structured_block(
+                    self.logger,
+                    f"⚖️  Salvage judge: APPROXIMATE result "
+                    f"({conf} confidence)",
+                    [("Caveat", caveat)])
                 self.logger.warning(
                     f"    ⛑️  Committing best partial attempt "
                     f"({best_attempt['req_passed']}/{len(required_outputs)} "
@@ -3207,10 +3220,12 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             if isinstance(_nm, dict) and not result_dict.get("maps"):
                 ok, critique = self._judge_not_measurable(_nm, ctx)
                 if ok:
-                    self.logger.warning(
-                        f"    ∅ Task {i}: NOT-MEASURABLE determination "
-                        f"accepted by the judge — {_nm.get('description')} "
-                        f"(evidence: {str(_nm.get('evidence'))[:200]})")
+                    _log_structured_block(
+                        self.logger,
+                        f"∅ Task {i}: NOT-MEASURABLE determination "
+                        f"accepted by the judge",
+                        [("Determination", str(_nm.get("description") or "")),
+                         ("Evidence", str(_nm.get("evidence") or "")[:400])])
                     ctx.not_measurable = dict(_nm)
                     ctx.attempt_entries.append({
                         "attempt": retries + 1,
@@ -3228,6 +3243,13 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     ctx.retries = retries + 1
                     return {"success": True, "task_success": True,
                             "not_measurable": dict(_nm)}
+                # Structured console render; the raise below keeps the FULL
+                # critique — it is the retry feedback the next attempt reads.
+                _log_structured_block(
+                    self.logger,
+                    f"∅ Task {i}: NOT-MEASURABLE declaration REJECTED "
+                    f"by the judge",
+                    [("Critique", critique)])
                 raise ValueError(
                     f"not_measurable declaration rejected by the judge: "
                     f"{critique}")
@@ -3457,15 +3479,18 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
 
         except Exception as e:
             error_msg = traceback.format_exc()
-            _is_qc = "QC failures" in str(e) or "Required outputs failed" in str(e)
+            _is_qc = ("QC failures" in str(e)
+                      or "Required outputs failed" in str(e)
+                      or "not_measurable declaration rejected" in str(e))
             if _is_qc: error_msg = str(e)  # Clean message for LLM
 
-            # Console gets a one-line digest for QC failures — the full
+            # Console gets a one-line digest for QC/judge verdicts — the full
             # critiques were already rendered (structured) above, and the
             # complete text still travels to the retry feedback via
             # error_msg. Non-QC failures keep the full traceback.
             if _is_qc:
-                _head = str(e).split(". QC critiques", 1)[0]
+                _head = (str(e).split(". QC critiques", 1)[0]
+                         .split(" by the judge:", 1)[0])
                 self.logger.warning(
                     f"    ❌ Attempt {retries+1} failed: {_head} "
                     f"(critiques above; full text passed to the retry)")
