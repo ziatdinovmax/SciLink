@@ -102,8 +102,22 @@ def _probe_file(path: Path) -> Dict[str, Any]:
     try:
         if ext == ".npy":
             import numpy as np
-            arr = np.load(path, mmap_mode="r", allow_pickle=False)
-            info.update(kind="array", shape=list(arr.shape), dtype=str(arr.dtype))
+            try:
+                arr = np.load(path, mmap_mode="r", allow_pickle=False)
+                info.update(kind="array", shape=list(arr.shape),
+                            dtype=str(arr.dtype))
+            except ValueError:
+                # Pickled object array — e.g. an instrument header dict saved
+                # via np.save. It's a trusted local upload (same trust as every
+                # other format this probe parses), so unpickle to describe its
+                # structure instead of reporting "unreadable" — that blindness
+                # is what starved the prepare_inputs codegen of evidence
+                # (issue #380). Size-capped: object arrays can't be mmap'd, so
+                # a huge pickle would be loaded whole.
+                if path.stat().st_size > 50 * 1024 * 1024:
+                    raise
+                from ...utils.file_prep import probe_pickled_npy
+                info.update(probe_pickled_npy(path))
         elif ext == ".npz":
             import numpy as np
             with np.load(path, allow_pickle=False) as z:
@@ -1117,7 +1131,12 @@ class MetaOrchestratorTools:
                 "falls back to its own split. Use after inspect_uploads when a probe "
                 "shows data and metadata mixed in one file (HDF5/NeXus with attributes, "
                 ".npz/.mat with data+meta keys, a CSV/text with a header/comment "
-                "metadata block, a TIFF with tags/ImageDescription). This is the META "
+                "metadata block, a TIFF with tags/ImageDescription). Also use it on a "
+                "METADATA-ONLY file — e.g. a pickled .npy header/object-array the probe "
+                "reports as kind 'object_array' — where it deterministically serializes "
+                "the container to a metadata JSON and returns data_path=null with "
+                "metadata_only=true; pair that metadata with its sibling data file in "
+                "the delegation. This is the META "
                 "AGENT'S ONLY code-generation tool and it is STRICTLY LIMITED to "
                 "lossless file repackaging: the generated code may only separate "
                 "existing data from metadata and is round-trip verified (the "
