@@ -1071,10 +1071,16 @@ def create_fit_examples_panel(
                         vals.append(f"{name}={v:.4g}")
                 except Exception:  # noqa: BLE001 - annotation only
                     continue
-            title = f"{ex.get('label') or ''} ({y},{x})".strip()
+            ax.set_title(f"{ex.get('label') or ''} ({y},{x})".strip(),
+                         fontsize=9)
             if vals:
-                title += "\n" + "; ".join(vals[:4])
-            ax.set_title(title, fontsize=8)
+                # In-axes box, not the title: long value strings in titles
+                # collide across panels and become unreadable.
+                ax.text(0.02, 0.97, "\n".join(vals[:4]),
+                        transform=ax.transAxes, fontsize=6.5,
+                        va="top", ha="left",
+                        bbox=dict(facecolor="white", alpha=0.75,
+                                  edgecolor="0.7", boxstyle="round,pad=0.25"))
             ax.set_xlabel(axis_label, fontsize=8)
             ax.tick_params(labelsize=7)
             ax.legend(fontsize=7, frameon=False)
