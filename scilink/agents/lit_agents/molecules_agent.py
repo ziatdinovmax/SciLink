@@ -12,11 +12,10 @@ from time import sleep
 from typing import Dict, Any, Optional
 
 
-try:
-    from edison_client import EdisonClient, JobNames
-except ImportError:
-    logging.error("Error: edison_client is not installed. Please install it with 'pip install edison-client'")
-    raise
+# Guarded symbols from the sibling module — one choke point for the optional
+# FutureHouse stack (edison-client -> ldp -> fhlmi). Import never raises;
+# construction raises a clean RuntimeError via _require_edison().
+from .literature_agent import EdisonClient, JobNames, _require_edison
 
 
 class MoleculesAgent:
@@ -40,6 +39,7 @@ class MoleculesAgent:
         if not api_key:
             raise ValueError("API key not provided and FUTUREHOUSE_API_KEY environment variable is not set.")
 
+        _require_edison()
         self.client = EdisonClient(api_key=api_key)
         self.max_wait_time = max_wait_time
         self.logger = logging.getLogger(__name__)
