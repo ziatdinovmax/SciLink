@@ -146,8 +146,13 @@ def test_iteration_error_propagates_to_caller(tmp_path, monkeypatch):
     cube_path = tmp_path / "cube.npy"
     np.save(cube_path, RNG.rand(4, 4, 8))
 
+    # Axis-complete metadata so the run reaches the (stubbed) pipeline —
+    # the fail-fast axis precondition would otherwise return first.
+    system_info = {"axis_spec": {
+        "axis_2": {"name": "energy", "units": "eV", "start": 0.0, "end": 1.0},
+    }}
     result_json, error_dict = agent._run_analysis_pipeline(
-        data_path=str(cube_path), system_info={}, instruction_prompt="x",
+        data_path=str(cube_path), system_info=system_info, instruction_prompt="x",
     )
     assert result_json is None
     # Pre-fix this came back as the derivative

@@ -1209,7 +1209,11 @@ class RunComponentTestLoopController:
             state["component_test_visuals"] = []
             return state
 
-        tool_settings = self.settings.copy()
+        # Per-run state settings carry the LLM-selected method; the
+        # constructor dict never receives it (state["settings"] is a copy),
+        # so reading state here is what makes the selection reach the
+        # unmixer instead of only the plot labels.
+        tool_settings = state.get("settings", self.settings).copy()
         for key in AGENT_METADATA_KEYS_TO_STRIP:
             tool_settings.pop(key, None)
 
@@ -1333,8 +1337,11 @@ class GetFinalComponentSelectionController:
         initial_estimate = state.get("initial_n_components", 4)
         component_range = state.get("component_test_range", [])
         
-        if not state.get("elbow_plot_bytes") or not state.get("component_test_visuals"):
-            self.logger.warning("Missing elbow plot or visual examples. Using initial estimate.")
+        # Proceed with whichever evidence exists — a failed summary plot must
+        # not silently disable the LLM selection when the elbow is available
+        # (and vice versa). Fall back only when there is nothing to look at.
+        if not state.get("elbow_plot_bytes") and not state.get("component_test_visuals"):
+            self.logger.warning("Missing elbow plot and visual examples. Using initial estimate.")
             state["final_n_components"] = initial_estimate
             return state
 
@@ -1342,15 +1349,17 @@ class GetFinalComponentSelectionController:
         prompt_parts.append(f"\n\n--- Context ---")
         prompt_parts.append(f"Initial LLM estimate: {initial_estimate} components")
         prompt_parts.append(f"Tested component range: {component_range}")
-        
-        prompt_parts.append(f"\n\n--- Quantitative Analysis: Reconstruction Error ---")
-        prompt_parts.append("Elbow Plot (Error vs. Number of Components):")
-        prompt_parts.append({"mime_type": "image/jpeg", "data": state["elbow_plot_bytes"]})
-        
-        prompt_parts.append(f"\n\n--- Qualitative Analysis: Visual Examples ---")
-        for viz in state.get("component_test_visuals", []):
-            prompt_parts.append(f"\n\n**{viz['label']}:**")
-            prompt_parts.append({"mime_type": "image/jpeg", "data": viz['image']})
+
+        if state.get("elbow_plot_bytes"):
+            prompt_parts.append(f"\n\n--- Quantitative Analysis: Reconstruction Error ---")
+            prompt_parts.append("Elbow Plot (Error vs. Number of Components):")
+            prompt_parts.append({"mime_type": "image/jpeg", "data": state["elbow_plot_bytes"]})
+
+        if state.get("component_test_visuals"):
+            prompt_parts.append(f"\n\n--- Qualitative Analysis: Visual Examples ---")
+            for viz in state.get("component_test_visuals", []):
+                prompt_parts.append(f"\n\n**{viz['label']}:**")
+                prompt_parts.append({"mime_type": "image/jpeg", "data": viz['image']})
 
         _append_objective_context(prompt_parts, state)
 
@@ -1364,7 +1373,7 @@ class GetFinalComponentSelectionController:
 
         _append_auxiliary_context(prompt_parts, state)
 
-        prompt_parts.append(f"\n\nBased on the elbow plot AND the visual examples, decide the optimal number of components.")
+        prompt_parts.append(f"\n\nBased on the evidence above (elbow plot and/or visual examples), decide the optimal number of components.")
 
         param_gen_config = None#GenerationConfig(response_mime_type="application/json")
         try:
@@ -1424,7 +1433,9 @@ class RunFinalSpectralUnmixingController:
             self.logger.warning(f"Auto-selection failed. Using fixed component count: {final_n_components}")
             state["final_n_components"] = final_n_components
 
-        tool_settings = self.settings.copy()
+        # State settings, not constructor settings — see the component test
+        # loop: this is where the LLM-selected method lives.
+        tool_settings = state.get("settings", self.settings).copy()
         for key in AGENT_METADATA_KEYS_TO_STRIP:
             tool_settings.pop(key, None)
             
