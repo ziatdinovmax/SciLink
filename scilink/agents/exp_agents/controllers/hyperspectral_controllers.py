@@ -269,7 +269,8 @@ def _resample_ref_to_signal_axis(arr, ref_axis, energy_axis, e_):
     return np.interp(energy_axis, ra, rv)
 
 
-def _codegen_retry_feedback(failures: int, critique: str) -> str:
+def _codegen_retry_feedback(failures: int, critique: str,
+                            passed_names: list | None = None) -> str:
     """Annealed retry guidance for the per-pixel code-gen loop.
 
     Flat retries (re-prompt at the same setting with "fix the math") cannot
@@ -286,6 +287,15 @@ def _codegen_retry_feedback(failures: int, critique: str) -> str:
         "\n\n### ❌ PREVIOUS ATTEMPT FAILED",
         f"Critique:\n```text\n{critique}\n```",
     ]
+    if passed_names:
+        block.append(
+            f"These outputs PASSED review in the failed attempt: "
+            f"{sorted(passed_names)}. Reproduce their estimators UNCHANGED — "
+            "identical logic and parameters — and modify only what the "
+            "critique targets. An output numerically identical to its "
+            "previously-passed version keeps its verdict without re-review, "
+            "so leaving working estimators untouched converges faster."
+        )
     if failures <= 1:
         block.append("Fix the logic/math to address this critique.")
     elif failures == 2:
@@ -2847,6 +2857,11 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                                 "images": [], "maps": [], "meta": [],
                                 "scalar_meta": []}
             ctx.attempt_entries = []
+            # Per-task cache of review-passed arrays, for the identity-skip
+            # (reuse the verdict when a later attempt reproduces an output
+            # byte-identically) and the retry-prompt passed-outputs pin.
+            ctx.passed_reviews = {}
+            ctx.last_passed_names = []
             ctx.last_code = ""
             ctx.mean_spec_bytes = None
             ctx.session = {
@@ -2960,7 +2975,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
         # self-consistent method basin instead of resampling it. See
         # _codegen_retry_feedback.
         ctx.current_prompt = ctx.base_prompt + _codegen_retry_feedback(
-            ctx.retries, verification.get("error_msg") or "")
+            ctx.retries, verification.get("error_msg") or "",
+            passed_names=getattr(ctx, "last_passed_names", None))
         if ctx.retries >= 2:
             self.logger.info(
                 f"    ↻ Retry annealing engaged (failure {ctx.retries}): "
@@ -3307,7 +3323,20 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 )
 
                 if dashboard_bytes:
-                    if feature_name in required_outputs:
+                    _prev_passed = ctx.passed_reviews.get(feature_name)
+                    if (_prev_passed is not None
+                            and np.array_equal(result_map, _prev_passed,
+                                               equal_nan=True)):
+                        # Identity-skip: this exact array already passed
+                        # review in an earlier attempt of THIS task —
+                        # identical artifact, identical verdict, no LLM
+                        # votes spent. Changed maps are always re-reviewed.
+                        is_valid, critique = True, ""
+                        self.logger.info(
+                            f"    ♻️ {feature_name}: numerically identical "
+                            f"to a previously passed version — review "
+                            f"verdict reused.")
+                    elif feature_name in required_outputs:
                         # Combined review (visual + physical + tool
                         # evidence) in ONE voted pass for the user-asked-
                         # for deliverables. Merges what were two gates so a
@@ -3378,6 +3407,10 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                             f"{target_desc} ({feature_name}){_mask_note}")
 
                     if is_valid:
+                        # Remember the passed artifact for the identity-skip
+                        # on later attempts of this task.
+                        ctx.passed_reviews[feature_name] = np.array(
+                            result_map, copy=True)
                         # STAGE DATA (Do not commit to state yet)
                         current_run_valid_images.append({
                             "label": f"Custom Analysis: {feature_name}",
@@ -3483,6 +3516,10 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                       or "Required outputs failed" in str(e)
                       or "not_measurable declaration rejected" in str(e))
             if _is_qc: error_msg = str(e)  # Clean message for LLM
+
+            # What DID pass this attempt — feeds the retry prompt's
+            # keep-the-working-estimators pin (qc_refine).
+            ctx.last_passed_names = [m["name"] for m in current_run_valid_meta]
 
             # Console gets a one-line digest for QC/judge verdicts — the full
             # critiques were already rendered (structured) above, and the

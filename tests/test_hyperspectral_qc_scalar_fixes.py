@@ -40,6 +40,13 @@ from scilink.agents.exp_agents.instruct import (
 LOGGER = logging.getLogger("test")
 RNG = np.random.RandomState(0)
 
+AXIS_OK = {
+    "axis_spec": {
+        "axis_2": {"name": "Bias", "units": "V", "start": 1.0, "end": -1.0},
+        "signal_is_nonnegative": False,
+    }
+}
+
 
 # ---------------------------------------------------------------------------
 # A. Coverage is scale-invariant
@@ -231,6 +238,85 @@ def test_scalars_never_satisfy_required_outputs_gate():
     assert "current_run_scalar_meta = _extract_scalar_records" in src
     # valid_names (the gate input) is built from map meta only
     assert "valid_names = {m['name'] for m in current_run_valid_meta}" in src
+
+
+# ---------------------------------------------------------------------------
+# Retry economy: identity-skip + passed-outputs pin
+# ---------------------------------------------------------------------------
+
+def test_retry_feedback_pins_passed_outputs():
+    from scilink.agents.exp_agents.controllers.hyperspectral_controllers import (
+        _codegen_retry_feedback,
+    )
+    fb = _codegen_retry_feedback(1, "bad map", passed_names=["B_Map", "A_Map"])
+    assert "PASSED review in the failed attempt: ['A_Map', 'B_Map']" in fb
+    assert "UNCHANGED" in fb
+    assert "PASSED review" not in _codegen_retry_feedback(1, "bad map")
+
+
+def test_identity_skip_and_pin_across_attempts(tmp_path, monkeypatch):
+    """Attempt 1: Good_Map passes, Bad_Map rejected -> retry. Attempt 2
+    reproduces Good_Map identically -> its review verdict is reused (no
+    second review), and the retry prompt carries the passed-outputs pin."""
+    monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
+
+    SCRIPT = '''
+def analyze_feature(data, axis):
+    m = data.mean(axis=2)
+    return {"maps": {"Good_Map": m, "Bad_Map": m * 2},
+            "units": "a.u.", "description": "test"}
+'''
+    codegen_prompts = []
+
+    class _Model:
+        def generate_content(self, contents, **kw):
+            codegen_prompts.append(contents if isinstance(contents, str)
+                                   else str(contents))
+            return json.dumps({"code": SCRIPT})
+
+    ctrl = hc.RunDynamicAnalysisController(
+        _Model(), LOGGER, generation_config=None, safety_settings=None,
+        parse_fn=lambda r: ({}, None),
+    )
+
+    review_calls = []
+
+    def fake_review(dashboard_bytes, code_str, mean_spec, system_info,
+                    objective, feature_name, summary, tools_desc, **kw):
+        review_calls.append(feature_name)
+        if feature_name == "Bad_Map" and review_calls.count("Bad_Map") == 1:
+            return False, "wrong estimator. Corrective direction: fix it"
+        return True, ""
+
+    ctrl._review_required_output = fake_review
+    ctrl._check_result_visually = lambda *a, **k: (True, "")
+
+    state = {
+        "hspy_data": np.random.rand(5, 5, 8) * 1e-12,
+        "original_hspy_data": np.random.rand(5, 5, 8) * 1e-12,
+        "system_info": dict(AXIS_OK),
+        "energy_axis": np.linspace(1, -1, 8),
+        "settings": {"output_dir": str(tmp_path)},
+        "refinement_decision": {
+            "requires_custom_code": True,
+            "targets": [{
+                "description": "two maps", "type": "custom_code",
+                "required_outputs": ["Good_Map", "Bad_Map"],
+            }],
+        },
+        "iteration_title": "T",
+        "analysis_objective": "obj",
+    }
+    state = ctrl.execute(state)
+
+    names = [m["name"] for m in state.get("custom_analysis_metadata_list") or []]
+    assert sorted(names) == ["Bad_Map", "Good_Map"]
+    # Good_Map reviewed ONCE (attempt 2 reused the verdict); Bad_Map twice.
+    assert review_calls.count("Good_Map") == 1
+    assert review_calls.count("Bad_Map") == 2
+    # The second codegen prompt pinned the passing output.
+    assert len(codegen_prompts) == 2
+    assert "PASSED review in the failed attempt: ['Good_Map']" in codegen_prompts[1]
 
 
 # ---------------------------------------------------------------------------
