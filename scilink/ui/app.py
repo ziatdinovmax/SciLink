@@ -310,6 +310,29 @@ def _find_new_html_reports() -> list[str]:
     return new
 
 
+def _find_new_md_documents() -> list[str]:
+    """Return markdown DELIVERABLES in the session dir not yet shown.
+
+    Whitelisted by stem: white papers and ideation dossiers are chat-facing
+    documents (ideation runs emit no plan.html — these are their reports).
+    Other session markdown (literature dumps, notes) stays in the File
+    Explorer; embedding every .md would bury the deliverables.
+    """
+    session_dir = st.session_state.session_dir
+    if session_dir is None:
+        return []
+    new = []
+    for p in Path(session_dir).rglob("*.md"):
+        s = str(p)
+        if s not in st.session_state.known_images:  # reuse the same set
+            if not (p.stem.startswith("white_paper")
+                    or p.stem.startswith("ideation_report")):
+                continue
+            st.session_state.known_images.add(s)
+            new.append(s)
+    return new
+
+
 def _parse_bestofn_review(context: str, prompt: str):
     """Parse the best-of-N candidate review from captured stdout.
 
@@ -741,6 +764,23 @@ else:
                             mime="text/html",
                             key=f"dl_html_{html_path}",
                         )
+                for md_path in msg.get("md_reports", []):
+                    p = Path(md_path)
+                    if p.exists():
+                        _doc_title = ("White Paper"
+                                      if p.stem.startswith("white_paper")
+                                      else "Ideation Report")
+                        with st.expander(f"{_doc_title}: {p.name}",
+                                         expanded=True):
+                            with st.container(height=600):
+                                st.markdown(p.read_text(encoding="utf-8"))
+                        st.download_button(
+                            f"Download {p.name}",
+                            data=p.read_bytes(),
+                            file_name=p.name,
+                            mime="text/markdown",
+                            key=f"dl_md_{md_path}",
+                        )
                 if msg.get("verbose"):
                     with st.expander("Verbose output"):
                         st.code(_strip_ansi(msg["verbose"]), language="text")
@@ -765,6 +805,7 @@ else:
                 content = re.sub(r"!\[[^\]]*\]\([^)]+\)\n?", "", content).strip()
                 new_images = _find_new_images()
                 new_reports = _find_new_html_reports()
+                new_docs = _find_new_md_documents()
                 # When an HTML report is present it already embeds the
                 # relevant figures — skip showing raw images separately
                 # to avoid duplicate clutter (matches curve fitting UX).
@@ -773,6 +814,7 @@ else:
                     "content": content,
                     "images": [] if new_reports else new_images,
                     "html_reports": new_reports,
+                    "md_reports": new_docs,
                     "verbose": task.verbose_log or "",
                 })
                 st.session_state.chat_task = ChatTask()
