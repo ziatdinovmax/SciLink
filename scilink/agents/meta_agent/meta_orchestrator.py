@@ -605,6 +605,15 @@ class MetaOrchestratorAgent:
                 restore_checkpoint=restore,
                 autonomy_level=AutonomyLevel.CO_PILOT,
                 data_dir=None,
+                # Session-scoped KB. Without this the child inherits
+                # PlanningAgent's cwd-relative default (./kb_storage), silently
+                # loading whatever stale KB the launch directory holds — and a
+                # non-empty index forces query embedding on every plan, which
+                # hard-fails when the embedding provider's key is absent. The
+                # stable-cwd default stays intentional for standalone use;
+                # meta children isolate per session (and still reuse across
+                # restores, which re-create the child in this same dir).
+                knowledge_dir=str(self.planning_dir / "knowledge"),
             )
             # Label its answers as the specialist's — a delegated child's final
             # answer is a deliverable in the meta's verbose stream, not the
