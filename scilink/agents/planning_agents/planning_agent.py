@@ -258,6 +258,42 @@ class PlanningAgent(BaseAgent):
         print(f"     • Actions logged: {len(self.state.get('action_history', []))}")
 
         
+    def rebind_kb(self, kb_base_path: str) -> bool:
+        """Re-point both knowledge bases at a new storage path and reload.
+
+        Mirrors the constructor's path derivation so an already-constructed
+        agent can switch to another persisted KB (e.g. the meta attaching a
+        stable knowledge dir after the planning child exists). In-memory KB
+        state is cleared first — a target with no persisted KB yields empty
+        KBs, never a stale carry-over.
+
+        Returns:
+            True if either KB loaded from the new location.
+        """
+        base_path = Path(kb_base_path)
+        base_path.parent.mkdir(parents=True, exist_ok=True)
+
+        self.kb_docs_prefix = base_path.parent / f"{base_path.name}_docs"
+        self.kb_docs_index = str(self.kb_docs_prefix.with_suffix(".faiss"))
+        self.kb_docs_chunks = str(self.kb_docs_prefix.with_suffix(".json"))
+        self.kb_docs_sources_path = str(self.kb_docs_prefix.with_suffix(".sources.json"))
+
+        self.kb_code_prefix = base_path.parent / f"{base_path.name}_code"
+        self.kb_code_index = str(self.kb_code_prefix.with_suffix(".faiss"))
+        self.kb_code_chunks = str(self.kb_code_prefix.with_suffix(".json"))
+        self.kb_code_map_path = str(self.kb_code_prefix.with_suffix(".maps.json"))
+        self.kb_code_sources_path = str(self.kb_code_prefix.with_suffix(".sources.json"))
+
+        for kb in (self.kb_docs, self.kb_code):
+            kb.index = None
+            kb.chunks = []
+            kb.sources = []
+            kb.repo_maps = {}
+
+        print(f"--- Rebinding Knowledge Bases to {base_path.parent} ---")
+        self._load_knowledge_bases()
+        return self._kb_is_built
+
     def _load_knowledge_bases(self):
         """Attempts to load both KBs from disk."""
         print(f"  - Docs KB: Loading from {self.kb_docs_prefix}...")

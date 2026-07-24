@@ -751,6 +751,40 @@ class MetaOrchestratorTools:
             required=[],
         )
 
+        # -- attach_knowledge_base -------------------------------------------
+        def attach_knowledge_base(path: str = None) -> str:
+            print("  📚 Tool: Attaching knowledge base...")
+            try:
+                attached = self.orch.attach_knowledge_dir(path)
+                return json.dumps({"status": "success", "knowledge_dir": attached})
+            except Exception as e:
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=attach_knowledge_base,
+            name="attach_knowledge_base",
+            description=(
+                "Ground planning delegations in a stable knowledge base (a "
+                "folder of documents with the persisted embedding index that "
+                "previous plan sessions built). With no `path`, attaches the "
+                "detached shared KB named in the system prompt, if any. Call "
+                "this ONLY after the user has agreed (or explicitly asked) to "
+                "use their knowledge base — never attach on your own "
+                "initiative. Takes effect for all subsequent planning "
+                "delegations and persists across session resume."
+            ),
+            parameters={
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Optional knowledge directory. Omit to attach the "
+                        "detached shared KB from the system prompt note."
+                    ),
+                },
+            },
+            required=[],
+        )
+
         # -- review_distilled_skills ----------------------------------------
         def review_distilled_skills(action: str = "list", skill: str = None,
                                     to_domain: str = None, staged: str = None,

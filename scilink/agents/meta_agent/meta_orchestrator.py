@@ -357,6 +357,14 @@ class MetaOrchestratorAgent:
         restore_checkpoint: Whether to restore from a previous checkpoint.
         meta_mode: Autonomy level (AUTOPILOT or AUTONOMOUS). The meta has
             only these two — see MetaMode.
+        knowledge_dir: Optional stable knowledge/KB directory for the
+            planning child (documents plus its persisted embedding index,
+            e.g. the ``./kb_storage`` a standalone plan session built).
+            When set, planning delegations reuse that KB; when omitted, the
+            planning child gets a session-scoped KB so it can never inherit
+            a stale index from the launch directory. NOTE: querying a
+            prebuilt KB requires the same embedding provider it was built
+            with (a missing key degrades to no-retrieval with a warning).
     """
 
     # Configuration constants (match the child orchestrators).
@@ -376,6 +384,7 @@ class MetaOrchestratorAgent:
         restore_checkpoint: bool = False,
         meta_mode: MetaMode = MetaMode.AUTOPILOT,
         max_iterations: Optional[int] = None,
+        knowledge_dir: Optional[str] = None,
     ):
         self.logger = logging.getLogger(self.__class__.__name__)
 
@@ -407,6 +416,19 @@ class MetaOrchestratorAgent:
         self.futurehouse_api_key = (
             futurehouse_api_key or os.environ.get("FUTUREHOUSE_API_KEY")
         )
+        self.knowledge_dir = Path(knowledge_dir) if knowledge_dir else None
+        if self.knowledge_dir and not self.knowledge_dir.exists():
+            raise ValueError(f"knowledge_dir does not exist: {self.knowledge_dir}")
+
+        # Detect (but never auto-attach) the launch directory's shared KB —
+        # the stable ./kb_storage that standalone plan sessions build. The
+        # system prompt surfaces it so the meta ASKS the user in chat instead
+        # of a config surface; attach_knowledge_base performs the attachment.
+        self._shared_kb_candidate: Optional[Path] = None
+        if not self.knowledge_dir:
+            _cand = Path.cwd() / "kb_storage"
+            if _cand.is_dir() and any(_cand.iterdir()):
+                self._shared_kb_candidate = _cand.resolve()
 
         self.meta_mode = meta_mode
         self._enable_human_feedback = self._should_enable_human_feedback()
@@ -472,7 +494,7 @@ class MetaOrchestratorAgent:
         # Tools registry.
         self.tools = MetaOrchestratorTools(self)
 
-        system_prompt = get_system_prompt(self.meta_mode)
+        system_prompt = get_system_prompt(self.meta_mode) + self._kb_note()
 
         # Initialize LLM (dual path, copied from AnalysisOrchestratorAgent).
         if base_url:
@@ -523,12 +545,75 @@ class MetaOrchestratorAgent:
         self.meta_mode = mode
         self._enable_human_feedback = self._should_enable_human_feedback()
 
-        new_system_prompt = get_system_prompt(mode)
+        new_system_prompt = get_system_prompt(mode) + self._kb_note()
         self._system_prompt = new_system_prompt
         if self.messages and self.messages[0]["role"] == "system":
             self.messages[0]["content"] = new_system_prompt
 
         logging.info(f"🔄 Meta mode changed: {old_mode.value} → {mode.value}")
+
+    def _kb_note(self) -> str:
+        """System-prompt note about a detached shared KB, if one exists."""
+        if self.knowledge_dir or not self._shared_kb_candidate:
+            return ""
+        contents = ""
+        try:
+            sources = json.loads(
+                (self._shared_kb_candidate / "default_kb_docs.sources.json").read_text()
+            )
+            names: list = []
+            for entry in sources:
+                if isinstance(entry, dict):
+                    names.extend(entry.get("files") or [Path(entry.get("path", "")).name])
+                else:
+                    names.append(Path(str(entry)).name)
+            seen = sorted({n for n in names
+                           if n and not n.startswith("default_kb")})[:15]
+            if seen:
+                contents = f" Its sources: {', '.join(seen)}."
+        except Exception:  # noqa: BLE001 - listing is best-effort context
+            pass
+        return (
+            f"\n\n## SHARED KNOWLEDGE BASE (detached)\n"
+            f"A knowledge base from previous sessions exists at "
+            f"{self._shared_kb_candidate} but is NOT attached.{contents} "
+            f"Before the first planning delegation, ask the user once whether "
+            f"to ground planning in it and call attach_knowledge_base if they "
+            f"agree. When no user is available to ask, decide from the "
+            f"sources: attach when they are clearly relevant to the task (or "
+            f"the task references the user's knowledge base); leave detached "
+            f"when they are unrelated — irrelevant grounding is worse than "
+            f"none."
+        )
+
+    def attach_knowledge_dir(self, path: Optional[str] = None) -> str:
+        """Attach a stable knowledge/KB directory to the planning child.
+
+        Uses the detected shared-KB candidate when ``path`` is omitted. If
+        the planning child already exists, its planner is re-bound to the
+        KB in place; otherwise the next delegation picks it up. The choice
+        is checkpointed so a resumed session keeps it.
+
+        Returns:
+            The attached directory path.
+        """
+        target = Path(path).expanduser().resolve() if path else self._shared_kb_candidate
+        if not target:
+            raise ValueError("No knowledge directory given and none detected.")
+        if not target.is_dir():
+            raise ValueError(f"knowledge_dir does not exist: {target}")
+
+        self.knowledge_dir = target
+        child = self._children.get("planning")
+        if child is not None:
+            child.knowledge_dir = target
+            child.planner.rebind_kb(str(target / "default_kb"))
+
+        # The detached-KB note no longer applies — refresh the system prompt.
+        self.set_meta_mode(self.meta_mode)
+        self._auto_checkpoint()
+        logging.info(f"📚 Knowledge base attached: {target}")
+        return str(target)
 
     def get_human_feedback_setting(self) -> bool:
         """Returns the current human feedback setting."""
@@ -605,15 +690,19 @@ class MetaOrchestratorAgent:
                 restore_checkpoint=restore,
                 autonomy_level=AutonomyLevel.CO_PILOT,
                 data_dir=None,
-                # Session-scoped KB. Without this the child inherits
-                # PlanningAgent's cwd-relative default (./kb_storage), silently
-                # loading whatever stale KB the launch directory holds — and a
-                # non-empty index forces query embedding on every plan, which
-                # hard-fails when the embedding provider's key is absent. The
-                # stable-cwd default stays intentional for standalone use;
-                # meta children isolate per session (and still reuse across
-                # restores, which re-create the child in this same dir).
-                knowledge_dir=str(self.planning_dir / "knowledge"),
+                # Explicit stable KB when the caller opted in (CLI
+                # --knowledge-dir / chat-approved attach_knowledge_base),
+                # else session-scoped. Without
+                # the session-scoped default the child inherits
+                # PlanningAgent's cwd-relative default (./kb_storage),
+                # silently loading whatever stale KB the launch directory
+                # holds — and a non-empty index forces query embedding on
+                # every plan, which hard-fails when the embedding provider's
+                # key is absent. The stable-cwd default stays intentional for
+                # standalone use; meta children isolate per session unless
+                # the user explicitly points them at a KB.
+                knowledge_dir=str(self.knowledge_dir
+                                  or self.planning_dir / "knowledge"),
             )
             # Label its answers as the specialist's — a delegated child's final
             # answer is a deliverable in the meta's verbose stream, not the
@@ -1333,6 +1422,13 @@ class MetaOrchestratorAgent:
             self.message_count = state.get("message_count", 0)
             self._delegation_ledger = state.get("delegation_ledger", [])
 
+            # Constructor arg wins; otherwise carry the session's KB choice
+            # forward so a resumed session keeps its grounding.
+            if not self.knowledge_dir and state.get("knowledge_dir"):
+                restored_kd = Path(state["knowledge_dir"])
+                if restored_kd.exists():
+                    self.knowledge_dir = restored_kd
+
             print(f"    ✅ Restored state:")
             print(f"       - Meta mode: {self.meta_mode.value}")
             print(f"       - Delegations: {len(self._delegation_ledger)}")
@@ -1349,6 +1445,7 @@ class MetaOrchestratorAgent:
                 "message_count": self.message_count,
                 "children_instantiated": sorted(self._children.keys()),
                 "delegation_ledger": self._delegation_ledger,
+                "knowledge_dir": str(self.knowledge_dir) if self.knowledge_dir else None,
             }
             with open(self.checkpoint_path, 'w') as f:
                 json.dump(checkpoint_data, f, indent=2, default=str)
