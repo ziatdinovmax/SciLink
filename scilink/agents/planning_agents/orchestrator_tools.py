@@ -502,14 +502,30 @@ class OrchestratorTools:
         return str(path)
 
     def _latest_literature_file(self) -> Optional[Path]:
-        """Newest literature_search_*.md in the session output dir, if any.
+        """Newest literature_search_*.md anywhere in the SESSION, if any.
 
         Matched by GLOB, not exact name — multi-type searches save under
         labels like 'literature_search_hypothesis_context+cross_domain.md',
-        which an exact-name lookup misses.
+        which an exact-name lookup misses. Searched session-wide (recursive
+        from base_dir), not just the current output dir: under the meta,
+        each delegation writes into its own delegations/<NN>_<slug>/, so a
+        refine delegation's literature lives in an EARLIER delegation's dir.
         """
-        files = sorted(self._output_dir().glob("literature_search_*.md"),
-                       key=lambda p: p.stat().st_mtime, reverse=True)
+        roots = []
+        base = getattr(self.orch, "base_dir", None)
+        if base:
+            roots.append((Path(base), "rglob"))
+        roots.append((self._output_dir(), "glob"))
+        seen: set = set()
+        files = []
+        for root, mode in roots:
+            it = (root.rglob("literature_search_*.md") if mode == "rglob"
+                  else root.glob("literature_search_*.md"))
+            for p in it:
+                if str(p) not in seen:
+                    seen.add(str(p))
+                    files.append(p)
+        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         return files[0] if files else None
 
     def _write_white_paper(self, audience_context: str = None) -> str:
@@ -1753,10 +1769,12 @@ class OrchestratorTools:
                 else:
                     payload = [payload] + extras
 
-            # Build external context from literature/molecule files or raw text
-            ext_parts = []
+            # Build external context. Literature is tracked SEPARATELY from
+            # molecule/additional context so provenance stamping downstream
+            # never mistakes a critique or constraint note for literature.
+            lit_text = None
             if literature_context:
-                ext_parts.append(self._resolve_context_text(literature_context))
+                lit_text = self._resolve_context_text(literature_context)
                 print(f"    📚 Literature context provided")
             else:
                 # Auto-load the newest saved literature from the session —
@@ -1764,12 +1782,12 @@ class OrchestratorTools:
                 # +cross_domain.md') are found too.
                 lit_path = self._latest_literature_file()
                 if lit_path is not None:
-                    ext_parts.append(lit_path.read_text())
+                    lit_text = lit_path.read_text()
                     print(f"    📚 Auto-loaded literature context from "
                           f"session ({lit_path.name})")
+            ext_parts = [lit_text] if lit_text else []
             if molecule_context:
-                mp = Path(molecule_context)
-                mol_text = mp.read_text() if mp.is_file() else molecule_context
+                mol_text = self._resolve_context_text(molecule_context)
                 ext_parts.append("## Molecular Design & Synthesis Planning\n" + mol_text)
                 print(f"    🧪 Molecule context provided")
             if additional_context:
@@ -1782,7 +1800,8 @@ class OrchestratorTools:
                     results=payload,
                     enable_human_feedback=self._get_human_feedback_enabled(),
                     use_literature_rag=use_literature_rag,
-                    external_context=ext_ctx
+                    external_context=ext_ctx,
+                    literature_text=lit_text
                 )
                 
                 if plan.get("error"):
@@ -1791,30 +1810,10 @@ class OrchestratorTools:
                         "message": plan.get("error")
                     })
 
-                # literature_search is SYSTEM-OWNED provenance: the refine
-                # LLM sometimes authors a prose note into that field ('no new
-                # search was executed...'), which then SHADOWS the campaign's
-                # real corpus for every downstream consumer (seen live: a
-                # white paper citing author-year keys with no DOIs while 380k
-                # chars of literature sat one history entry deeper).
-                # Overwrite with the actual context used this round, else
-                # carry the campaign's prior literature forward.
-                _real_lit = ext_ctx
-                if not _real_lit:
-                    for prev in reversed(
-                            self.orch.planner.state.get("plan_history", [])[:-1]):
-                        pl = prev.get("literature_search")
-                        if pl and len(str(pl)) > 1000:
-                            _real_lit = pl
-                            break
-                if _real_lit:
-                    plan["literature_search"] = _real_lit
-                    cur = self.orch.planner.state.get("current_plan")
-                    if cur is not None:
-                        cur["literature_search"] = _real_lit
-                    if self.orch.planner.state.get("plan_history"):
-                        self.orch.planner.state["plan_history"][-1][
-                            "literature_search"] = _real_lit
+                # (literature_search provenance is stamped inside
+                # refine_plan itself — the single point where the refined
+                # plan enters current_plan and history — from the
+                # literature_text passed above.)
 
                 # Save
                 output_path = self._output_dir() / "plan.json"

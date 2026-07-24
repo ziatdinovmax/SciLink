@@ -1378,7 +1378,8 @@ class PlanningAgent(BaseAgent):
                     enable_human_feedback: bool = True,
                     state_file_path: Optional[str] = None,
                     use_literature_rag: bool = False,
-                    external_context: Optional[str] = None) -> Dict[str, Any]:
+                    external_context: Optional[str] = None,
+                    literature_text: Optional[str] = None) -> Dict[str, Any]:
         """
         Refines the experimental plan (science strategy only) based on new results.
 
@@ -1391,6 +1392,10 @@ class PlanningAgent(BaseAgent):
             external_context: Pre-fetched external context (e.g. from
                 orchestrator's search_literature/query_molecules tools).
                 Merged with any local KB hits from use_literature_rag.
+            literature_text: The LITERATURE-ONLY portion of the external
+                context, when the caller can separate it. Used to stamp the
+                refined plan's ``literature_search`` provenance; without it,
+                the prior plan's literature carries forward.
 
         Returns:
             Dict with refined plan (proposed_experiments)
@@ -1518,6 +1523,22 @@ Select the most appropriate strategy:
             )           
             return new_plan
         
+        # literature_search is SYSTEM-OWNED provenance: the refining LLM
+        # sometimes authors a prose note into that field ('no new search was
+        # executed...'), which then shadows the campaign's real corpus for
+        # every downstream consumer. Stamp it here — the one place the
+        # refined plan enters both current_plan and history — with the
+        # literature actually supplied this round, else carry the prior
+        # plan's literature forward; the model's value survives only if it
+        # is genuinely the most substantial (i.e. it faithfully copied the
+        # corpus).
+        _lit_candidates = [str(new_plan.get("literature_search") or ""),
+                           str(literature_text or ""),
+                           str(current_plan.get("literature_search") or "")]
+        _best_lit = max(_lit_candidates, key=len)
+        if _best_lit:
+            new_plan["literature_search"] = _best_lit
+
         # Snapshot: Reasoning Draft
         new_plan["iteration"] = next_plan_idx
         new_plan["stage"] = "Reasoning Draft"
