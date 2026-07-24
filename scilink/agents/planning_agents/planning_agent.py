@@ -299,16 +299,19 @@ class PlanningAgent(BaseAgent):
         selected = copy.deepcopy(plan)
         literature = selected.pop("literature_search", None)
         findings = selected.pop("critic_findings", None)
-        if not literature:
-            # Literature is CAMPAIGN context, not per-iteration: a
-            # restructured/refined plan often carries none of its own, but
-            # the citations should still come from the most recent iteration
-            # that had it — otherwise the paper degrades to 'transcribe
-            # citations from the prior context before release'.
-            for prev in reversed(self.state.get("plan_history", []) or []):
-                if prev.get("literature_search"):
-                    literature = prev["literature_search"]
-                    break
+        # Literature is CAMPAIGN context, not per-iteration: a restructured
+        # or refined plan may carry none of its own — or worse, a short
+        # model-authored note ('no new search was executed...') that shadows
+        # the real corpus. Take the MOST SUBSTANTIAL literature across the
+        # current plan and the whole history; length is the tiebreak because
+        # the campaign's actual corpus dwarfs any stub.
+        candidates_lit = [literature] + [
+            prev.get("literature_search")
+            for prev in (self.state.get("plan_history", []) or [])
+        ]
+        candidates_lit = [c for c in candidates_lit if c]
+        literature = (max(candidates_lit, key=lambda c: len(str(c)))
+                      if candidates_lit else None)
         parts.append("\n## SELECTED Campaign Plan:\n"
                      + json.dumps(selected, indent=2)[:20000])
 

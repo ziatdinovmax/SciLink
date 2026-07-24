@@ -1790,7 +1790,32 @@ class OrchestratorTools:
                         "status": "error",
                         "message": plan.get("error")
                     })
-                
+
+                # literature_search is SYSTEM-OWNED provenance: the refine
+                # LLM sometimes authors a prose note into that field ('no new
+                # search was executed...'), which then SHADOWS the campaign's
+                # real corpus for every downstream consumer (seen live: a
+                # white paper citing author-year keys with no DOIs while 380k
+                # chars of literature sat one history entry deeper).
+                # Overwrite with the actual context used this round, else
+                # carry the campaign's prior literature forward.
+                _real_lit = ext_ctx
+                if not _real_lit:
+                    for prev in reversed(
+                            self.orch.planner.state.get("plan_history", [])[:-1]):
+                        pl = prev.get("literature_search")
+                        if pl and len(str(pl)) > 1000:
+                            _real_lit = pl
+                            break
+                if _real_lit:
+                    plan["literature_search"] = _real_lit
+                    cur = self.orch.planner.state.get("current_plan")
+                    if cur is not None:
+                        cur["literature_search"] = _real_lit
+                    if self.orch.planner.state.get("plan_history"):
+                        self.orch.planner.state["plan_history"][-1][
+                            "literature_search"] = _real_lit
+
                 # Save
                 output_path = self._output_dir() / "plan.json"
                 with open(output_path, 'w') as f:
