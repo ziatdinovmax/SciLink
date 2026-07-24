@@ -306,24 +306,26 @@ class PlanningAgent(BaseAgent):
         candidates = cand_state.get("candidates") or []
         if len(candidates) > 1:
             sel_idx = cand_state.get("selected_index", 1)
-            alt_lines = []
+            alt_blocks = []
             judge = cand_state.get("judge") or {}
             scores = {s.get("candidate"): s for s in judge.get("scores", [])}
             for ci, cand in enumerate(candidates, 1):
                 if ci == sel_idx:
                     continue
-                exp = (cand.get("proposed_experiments") or [{}])[0]
+                exp = dict((cand.get("proposed_experiments") or [{}])[0])
+                exp.pop("optimization_params", None)  # protocol detail
                 sc = scores.get(ci, {})
-                alt_lines.append(
-                    f"- Candidate {ci}: {exp.get('experiment_name', '?')} — "
-                    f"{exp.get('hypothesis') or exp.get('justification', '')}"
-                    f" [judge comment: {sc.get('comment', 'n/a')}]"
+                alt_blocks.append(
+                    f"### Candidate {ci} "
+                    f"[judge comment: {sc.get('comment', 'n/a')}]\n"
+                    + json.dumps(exp, indent=2)[:6000]
                 )
-            if alt_lines:
+            if alt_blocks:
                 parts.append(
                     "\n## ALTERNATIVE Candidate Strategies (judge-scored "
                     "runners-up; use mechanistically distinct ones as "
-                    "secondary thrusts):\n" + "\n".join(alt_lines)
+                    "secondary thrusts, faithfully to their content):\n"
+                    + "\n".join(alt_blocks)
                     + f"\nJudge's comparative reasoning: "
                       f"{judge.get('reasoning', 'n/a')}"
                 )

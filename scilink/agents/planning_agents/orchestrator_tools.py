@@ -385,6 +385,75 @@ class OrchestratorTools:
             return [str(kd)]
         return None
 
+    def _write_ideation_report(self) -> str:
+        """Render ALL best-of-N candidates into a detailed markdown dossier.
+
+        Deterministic (no LLM): rendered straight from the same campaign
+        state the white paper is generated from, so the two artifacts cannot
+        drift apart. In ideation, runner-up candidates are deliverables, not
+        rejects — the judge's pick designates the flagship, it does not
+        discard the rest.
+        """
+        state = self.orch.planner.state or {}
+        pc = state.get("plan_candidates") or {}
+        candidates = pc.get("candidates") or []
+        if not candidates:
+            raise ValueError("No candidate set in state — nothing to report.")
+        sel = pc.get("selected_index", 1)
+        judge = pc.get("judge") or {}
+        scores = {s.get("candidate"): s for s in judge.get("scores", [])}
+        findings = (state.get("current_plan") or {}).get("critic_findings")
+
+        lines = [f"# Ideation Report: {state.get('objective', '')}", ""]
+        if judge.get("reasoning"):
+            lines += ["## Comparative Assessment (judge)",
+                      judge["reasoning"], ""]
+        for ci, cand in enumerate(candidates, 1):
+            exp = (cand.get("proposed_experiments") or [{}])[0]
+            flag = " — SELECTED (flagship)" if ci == sel else ""
+            lines += [f"## Candidate {ci}{flag}: "
+                      f"{exp.get('experiment_name', 'Untitled')}", ""]
+            sc = scores.get(ci)
+            if sc:
+                crit = ", ".join(f"{k}: {v}" for k, v in sc.items()
+                                 if k not in ("candidate", "comment"))
+                lines += [f"*Judge scores — {crit}*",
+                          f"*Judge comment: {sc.get('comment', '')}*", ""]
+            for key, title in (("hypothesis", "Hypothesis"),
+                               ("experimental_steps", "Proposed program"),
+                               ("required_equipment", "Key capabilities"),
+                               ("optimization_params",
+                                "Suggested exploration variables"),
+                               ("expected_outcome", "Expected outcomes"),
+                               ("justification", "Rationale"),
+                               ("source_documents", "Sources")):
+                val = exp.get(key)
+                if not val:
+                    continue
+                lines.append(f"### {title}")
+                if isinstance(val, list):
+                    for item in val:
+                        if isinstance(item, dict):
+                            lines.append("- " + ", ".join(
+                                f"{k}: {v}" for k, v in item.items()))
+                        else:
+                            lines.append(f"- {item}")
+                else:
+                    lines.append(str(val))
+                lines.append("")
+            if ci == sel and findings:
+                lines.append("### Reviewer caveats (on the flagship)")
+                for f in findings:
+                    lines.append(f"- [{f.get('severity', 'note')}] "
+                                 + str(f.get('note') or f.get('finding')
+                                       or f))
+                lines.append("")
+
+        path = self._output_dir() / "ideation_report.md"
+        path.write_text("\n".join(lines))
+        print(f"    📄 Ideation report saved: {path}")
+        return str(path)
+
     def _write_white_paper(self, audience_context: str = None) -> str:
         """Generate the sponsor-facing white paper from the current plan and
         save it beside the plan artifacts. Returns the saved path."""
@@ -1037,6 +1106,16 @@ class OrchestratorTools:
                         "judge_reasoning": (pc.get("judge") or {}).get("reasoning", ""),
                         "candidate_reports": pc.get("reports", []),
                     }
+
+                # Ideation runs get a detailed all-candidates dossier —
+                # runner-ups are deliverables there, and rendering it
+                # deterministically from the same state the white paper uses
+                # keeps the two consistent by construction.
+                if _ideation_run:
+                    try:
+                        result["ideation_report"] = self._write_ideation_report()
+                    except Exception as e:  # noqa: BLE001 - plan result survives
+                        logging.warning(f"Ideation report failed: {e}")
 
                 # Ideation runs additionally produce a sponsor-facing white
                 # paper by default (white_paper=False opts out; =True forces
