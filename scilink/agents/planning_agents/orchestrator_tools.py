@@ -371,8 +371,18 @@ class OrchestratorTools:
             if paths:
                 return paths
         # Fallback: use orchestrator's configured knowledge directory
-        if self.orch.knowledge_dir and self.orch.knowledge_dir.exists():
-            return [str(self.orch.knowledge_dir)]
+        kd = self.orch.knowledge_dir
+        if kd and kd.exists():
+            # A store KB (marked by its manifest) is PREBUILT: its documents
+            # live under sources/ and are already embedded — handing the KB
+            # root to ingestion would re-embed them and swallow the index
+            # files themselves. Point the source-difference check at the
+            # sources/ dir (or nothing, for index-only imported KBs); plain
+            # knowledge dirs keep the legacy incremental-ingest behavior.
+            if (kd / "manifest.json").is_file():
+                src = kd / "sources"
+                return [str(src)] if src.is_dir() else None
+            return [str(kd)]
         return None
 
     @staticmethod

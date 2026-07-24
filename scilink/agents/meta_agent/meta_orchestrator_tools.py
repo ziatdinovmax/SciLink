@@ -756,7 +756,20 @@ class MetaOrchestratorTools:
             print("  📚 Tool: Attaching knowledge base...")
             try:
                 attached = self.orch.attach_knowledge_dir(path)
-                return json.dumps({"status": "success", "knowledge_dir": attached})
+                from ...knowledge.kb_store import (
+                    read_manifest, embedding_compat_warning,
+                )
+                out = {"status": "success", "knowledge_dir": attached}
+                warn = embedding_compat_warning(
+                    read_manifest(Path(attached)), self.orch.embedding_model
+                )
+                if warn:
+                    out["warning"] = (
+                        f"{warn} Surface this to the user: retrieval from "
+                        "this KB may be degraded or unavailable in this "
+                        "session."
+                    )
+                return json.dumps(out)
             except Exception as e:
                 return json.dumps({"status": "error", "message": str(e)})
 
@@ -764,21 +777,24 @@ class MetaOrchestratorTools:
             func=attach_knowledge_base,
             name="attach_knowledge_base",
             description=(
-                "Ground planning delegations in a stable knowledge base (a "
-                "folder of documents with the persisted embedding index that "
-                "previous plan sessions built). With no `path`, attaches the "
-                "detached shared KB named in the system prompt, if any. Call "
-                "this ONLY after the user has agreed (or explicitly asked) to "
-                "use their knowledge base — never attach on your own "
-                "initiative. Takes effect for all subsequent planning "
-                "delegations and persists across session resume."
+                "Ground planning delegations in a stable knowledge base — "
+                "either a NAMED KB from the user's persistent store (listed "
+                "in the system prompt; pass its name as `path`) or a folder "
+                "holding a persisted KB index. With no `path`, attaches the "
+                "launch directory's detached shared KB, if any. Call this "
+                "ONLY after the user has agreed (or explicitly asked) to use "
+                "their knowledge base — except when running autonomously, "
+                "where you decide from the listed sources' relevance to the "
+                "task. Takes effect for all subsequent planning delegations "
+                "and persists across session resume."
             ),
             parameters={
                 "path": {
                     "type": "string",
                     "description": (
-                        "Optional knowledge directory. Omit to attach the "
-                        "detached shared KB from the system prompt note."
+                        "A named KB from the store (e.g. 'produced-water'), "
+                        "or a knowledge directory path. Omit to attach the "
+                        "launch directory's detached shared KB."
                     ),
                 },
             },

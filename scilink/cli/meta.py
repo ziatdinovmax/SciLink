@@ -103,10 +103,12 @@ Environment Variables:
     parser.add_argument('--restore', action='store_true',
                         help='Restore from previous checkpoint in session directory')
     parser.add_argument('--knowledge-dir', type=str, dest='knowledge_dir',
-                        help='Stable knowledge/KB directory for planning '
-                             'delegations (e.g. the ./kb_storage a plan '
-                             'session built, or a folder of papers). Without '
-                             'it, planning uses a session-scoped KB.')
+                        help='Stable knowledge/KB for planning delegations: '
+                             'a directory (e.g. the ./kb_storage a plan '
+                             'session built) OR the name of a knowledge base '
+                             'from the persistent store (scilink kb list). '
+                             'Without it, planning uses a session-scoped KB '
+                             'and the meta offers any detected KBs in chat.')
 
     # Custom skills — shared with every specialist the meta delegates to
     parser.add_argument(

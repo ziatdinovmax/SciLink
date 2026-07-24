@@ -148,6 +148,24 @@ result (`run_analysis → scalarize`). That cross-mode chain is gated on
 the future `run_task` contract; until it exists, run the analysis
 standalone and feed the resulting scalar in as a data file.
 
+## Knowledge bases are named artifacts; grounding is explicit
+
+RAG knowledge bases live in the persistent store
+(`~/.scilink/knowledge_bases/<name>/`, managed by `scilink kb` /
+`scilink/knowledge/kb_store.py`) with a `manifest.json` recording the
+embedding model that built them — provenance that turns provider
+mismatches into upfront warnings instead of opaque query-time failures.
+Every `knowledge_dir` surface resolves store names as well as paths (an
+existing directory wins over a same-named KB). Two settled rules:
+
+- **No implicit grounding in the meta.** A meta session never silently
+  inherits a launch-directory KB; attachment is an explicit choice —
+  `--knowledge-dir`, a chat-time confirmation (autopilot), or the
+  autonomous relevance decision made from the KB's listed sources.
+  Standalone plan mode keeps its stable-KB conventions.
+- **Retrieval is grounding, not a dependency.** A KB retrieval failure
+  degrades to no-context with a warning; it must never abort generation.
+
 ## Why no `BaseChatOrchestrator` refactor
 
 The three orchestrators share a near-identical chat-loop / message-history /

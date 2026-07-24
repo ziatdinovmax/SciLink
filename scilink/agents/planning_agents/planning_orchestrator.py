@@ -643,7 +643,24 @@ class PlanningOrchestratorAgent:
                 raise ValueError(f"data_dir does not exist: {data_dir}")
 
         self.data_dir = Path(data_dir) if data_dir else None
-        self.knowledge_dir = Path(knowledge_dir) if knowledge_dir else None
+        # knowledge_dir accepts a directory path OR a named KB from the
+        # persistent store (scilink kb create/list) — an existing path wins
+        # over a name. A store manifest also gives us the KB's build-time
+        # embedding model, so provider mismatch warns HERE instead of
+        # failing opaquely at query time.
+        self.knowledge_dir = None
+        self._kb_store_manifest = None
+        if knowledge_dir:
+            from ...knowledge.kb_store import (
+                resolve_knowledge_source, embedding_compat_warning,
+            )
+            self.knowledge_dir, self._kb_store_manifest = resolve_knowledge_source(
+                str(knowledge_dir), strict=False
+            )
+            _compat = embedding_compat_warning(self._kb_store_manifest,
+                                               embedding_model)
+            if _compat:
+                logging.warning(f"⚠️ {_compat}")
         self.code_dir = Path(code_dir) if code_dir else None
 
         if self.data_dir:
@@ -722,7 +739,21 @@ class PlanningOrchestratorAgent:
             output_dir=str(self.base_dir),
         )
         if self.knowledge_dir:
-            planner_kwargs["kb_base_path"] = str(self.knowledge_dir / "default_kb")
+            if self._kb_store_manifest is not None:
+                # Named store KB: sessions load it but must never write back
+                # (a session's in-run appends would silently mutate a shared
+                # artifact — mutate the store only via 'scilink kb'). Seed a
+                # session-local copy of the persisted index; loading stays
+                # instant and any session appends stay session-local.
+                import shutil as _shutil
+                cache = self.base_dir / "kb_cache"
+                cache.mkdir(parents=True, exist_ok=True)
+                for f in self.knowledge_dir.glob("default_kb_*"):
+                    if not (cache / f.name).exists():
+                        _shutil.copy2(f, cache / f.name)
+                planner_kwargs["kb_base_path"] = str(cache / "default_kb")
+            else:
+                planner_kwargs["kb_base_path"] = str(self.knowledge_dir / "default_kb")
         self.planner = PlanningAgent(**planner_kwargs)
 
         # Literature & Molecules agents (orchestrator-level tools)

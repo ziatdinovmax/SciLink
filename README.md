@@ -266,6 +266,53 @@ scilink memory promote <domain>/<name>                       # make a provisiona
 >
 > Without a mount, SciLink logs a one-time warning that memory won't persist.
 
+### Named Knowledge Bases
+
+Knowledge bases — your papers, datasheets, and prior reports, embedded for
+retrieval-augmented planning — can be promoted to **named, reusable artifacts**
+stored under `~/.scilink/knowledge_bases/` (rides `$SCILINK_HOME`). Build one
+once (this embeds the documents, so it needs the embedding provider's API
+key); every later session reuses the persisted index from **any** directory:
+
+```bash
+scilink kb create produced-water --from ./papers ./composition_data \
+    --description "Produced-water composition and criticality references"
+scilink kb list                          # what exists, built with which embedding model
+scilink kb import legacy --from ./kb_storage --embedding-model gemini-embedding-001
+scilink kb rebuild produced-water --embedding-model text-embedding-3-small
+```
+
+Use a KB by name wherever a knowledge directory is accepted:
+
+```bash
+scilink plan --knowledge-dir produced-water
+scilink explore --knowledge-dir produced-water
+```
+
+In a meta (explore) session you don't need the flag: detached KBs — the
+launch directory's `kb_storage`, plus every named KB with its description and
+source list — are offered **in chat**. In autopilot the meta asks before the
+first planning delegation; in autonomous mode it attaches the KB whose
+sources are clearly relevant to the task (and leaves all detached otherwise).
+
+Each KB's `manifest.json` records the embedding model that built it, so a
+provider mismatch (e.g. a Gemini-built KB in an OpenAI-embedding session)
+warns upfront with a rebuild hint instead of failing opaquely at query time.
+A KB created with `kb create` keeps copies of its source documents and can be
+re-embedded with `kb rebuild`; an imported one cannot (no sources), so prefer
+`create` when you have the original documents.
+
+**Behavior changes** (vs. releases before the KB store):
+
+- A meta/explore session **no longer silently inherits** whatever `kb_storage/`
+  sits in the launch directory. Grounding is always an explicit choice: the
+  `--knowledge-dir` flag, a chat-time confirmation, or the autonomous
+  relevance decision. Standalone `scilink plan` behavior is unchanged.
+- A planning-tool retrieval failure (e.g. missing embedding key) now degrades
+  to no-retrieval with a warning instead of aborting plan generation.
+- `--knowledge-dir` accepts a store name as well as a path; an existing
+  directory always wins over a same-named KB.
+
 ---
 
 # Planning Agents

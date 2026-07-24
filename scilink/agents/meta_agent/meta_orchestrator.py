@@ -416,9 +416,22 @@ class MetaOrchestratorAgent:
         self.futurehouse_api_key = (
             futurehouse_api_key or os.environ.get("FUTUREHOUSE_API_KEY")
         )
-        self.knowledge_dir = Path(knowledge_dir) if knowledge_dir else None
-        if self.knowledge_dir and not self.knowledge_dir.exists():
-            raise ValueError(f"knowledge_dir does not exist: {self.knowledge_dir}")
+        # knowledge_dir accepts a directory path OR a named KB from the
+        # persistent store ('scilink kb'); an existing path wins over a name.
+        self.knowledge_dir = None
+        if knowledge_dir:
+            from ...knowledge.kb_store import (
+                resolve_knowledge_source, embedding_compat_warning,
+            )
+            try:
+                self.knowledge_dir, _kb_manifest = resolve_knowledge_source(
+                    str(knowledge_dir)
+                )
+            except FileNotFoundError as e:
+                raise ValueError(str(e)) from e
+            _compat = embedding_compat_warning(_kb_manifest, embedding_model)
+            if _compat:
+                logging.warning(f"⚠️ {_compat}")
 
         # Detect (but never auto-attach) the launch directory's shared KB —
         # the stable ./kb_storage that standalone plan sessions build. The
@@ -552,62 +565,114 @@ class MetaOrchestratorAgent:
 
         logging.info(f"🔄 Meta mode changed: {old_mode.value} → {mode.value}")
 
-    def _kb_note(self) -> str:
-        """System-prompt note about a detached shared KB, if one exists."""
-        if self.knowledge_dir or not self._shared_kb_candidate:
-            return ""
-        contents = ""
+    @staticmethod
+    def _kb_source_names(kb_dir: Path) -> list:
+        """Source-document basenames of a KB dir (best-effort, index files
+        excluded)."""
         try:
             sources = json.loads(
-                (self._shared_kb_candidate / "default_kb_docs.sources.json").read_text()
+                (kb_dir / "default_kb_docs.sources.json").read_text()
             )
             names: list = []
             for entry in sources:
                 if isinstance(entry, dict):
-                    names.extend(entry.get("files") or [Path(entry.get("path", "")).name])
+                    names.extend(entry.get("files") or
+                                 [Path(entry.get("path", "")).name])
                 else:
                     names.append(Path(str(entry)).name)
-            seen = sorted({n for n in names
-                           if n and not n.startswith("default_kb")})[:15]
-            if seen:
-                contents = f" Its sources: {', '.join(seen)}."
+            return sorted({n for n in names
+                           if n and not n.startswith("default_kb")})
         except Exception:  # noqa: BLE001 - listing is best-effort context
+            return []
+
+    def _kb_note(self) -> str:
+        """System-prompt note listing detached knowledge bases: the launch
+        directory's shared KB (if any) plus the named KBs from the
+        persistent store."""
+        if self.knowledge_dir:
+            return ""
+        lines = []
+        if self._shared_kb_candidate:
+            srcs = self._kb_source_names(self._shared_kb_candidate)[:15]
+            detail = f" Sources: {', '.join(srcs)}." if srcs else ""
+            lines.append(
+                f"- (unnamed, launch directory) {self._shared_kb_candidate} — "
+                f"attach with attach_knowledge_base() [no argument].{detail}"
+            )
+        try:
+            from ...knowledge.kb_store import list_kbs
+            for m in list_kbs():
+                desc = f" — {m['description']}" if m.get("description") else ""
+                srcs = (m.get("sources") or [])[:15]
+                detail = f" Sources: {', '.join(srcs)}." if srcs else ""
+                lines.append(
+                    f"- '{m['name']}'{desc} — attach with "
+                    f"attach_knowledge_base(path='{m['name']}').{detail}"
+                )
+        except Exception:  # noqa: BLE001 - the store listing is best-effort
             pass
+        if not lines:
+            return ""
         return (
-            f"\n\n## SHARED KNOWLEDGE BASE (detached)\n"
-            f"A knowledge base from previous sessions exists at "
-            f"{self._shared_kb_candidate} but is NOT attached.{contents} "
-            f"Before the first planning delegation, ask the user once whether "
-            f"to ground planning in it and call attach_knowledge_base if they "
-            f"agree. When no user is available to ask, decide from the "
-            f"sources: attach when they are clearly relevant to the task (or "
-            f"the task references the user's knowledge base); leave detached "
-            f"when they are unrelated — irrelevant grounding is worse than "
-            f"none."
+            "\n\n## KNOWLEDGE BASES (detached)\n"
+            "These knowledge bases exist but are NOT attached:\n"
+            + "\n".join(lines)
+            + "\nBefore the first planning delegation, ask the user once "
+            "whether to ground planning in one of them and attach it if "
+            "they agree. When no user is available to ask, decide from the "
+            "sources: attach the one clearly relevant to the task (or that "
+            "the task references); leave all detached when none are related "
+            "— irrelevant grounding is worse than none."
         )
 
     def attach_knowledge_dir(self, path: Optional[str] = None) -> str:
         """Attach a stable knowledge/KB directory to the planning child.
 
-        Uses the detected shared-KB candidate when ``path`` is omitted. If
-        the planning child already exists, its planner is re-bound to the
-        KB in place; otherwise the next delegation picks it up. The choice
-        is checkpointed so a resumed session keeps it.
+        ``path`` may be a directory or a named KB from the persistent store
+        ('scilink kb'); omitted, the launch directory's detected shared-KB
+        candidate is used. If the planning child already exists, its planner
+        is re-bound to the KB in place; otherwise the next delegation picks
+        it up. The choice is checkpointed so a resumed session keeps it.
 
         Returns:
             The attached directory path.
         """
-        target = Path(path).expanduser().resolve() if path else self._shared_kb_candidate
+        from ...knowledge.kb_store import (
+            resolve_knowledge_source, embedding_compat_warning,
+        )
+        manifest = None
+        if path:
+            try:
+                target, manifest = resolve_knowledge_source(str(path))
+            except FileNotFoundError as e:
+                raise ValueError(str(e)) from e
+        else:
+            target = self._shared_kb_candidate
         if not target:
             raise ValueError("No knowledge directory given and none detected.")
         if not target.is_dir():
             raise ValueError(f"knowledge_dir does not exist: {target}")
+        compat = embedding_compat_warning(manifest, self.embedding_model)
+        if compat:
+            logging.warning(f"⚠️ {compat}")
 
         self.knowledge_dir = target
         child = self._children.get("planning")
         if child is not None:
             child.knowledge_dir = target
-            child.planner.rebind_kb(str(target / "default_kb"))
+            child._kb_store_manifest = manifest or None
+            if manifest is not None:
+                # Named store KB: rebind through a session-local copy so the
+                # child's index writes never mutate the shared store (same
+                # copy-on-write the orchestrator constructor applies).
+                import shutil as _shutil
+                cache = child.base_dir / "kb_cache"
+                cache.mkdir(parents=True, exist_ok=True)
+                for f in target.glob("default_kb_*"):
+                    _shutil.copy2(f, cache / f.name)
+                child.planner.rebind_kb(str(cache / "default_kb"))
+            else:
+                child.planner.rebind_kb(str(target / "default_kb"))
 
         # The detached-KB note no longer applies — refresh the system prompt.
         self.set_meta_mode(self.meta_mode)
