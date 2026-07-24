@@ -310,6 +310,23 @@ def _find_new_html_reports() -> list[str]:
     return new
 
 
+def _demote_md_headings(text: str) -> str:
+    """Shift markdown headings down two levels (H1 -> H3, capped at H6) for
+    the in-chat preview: st.markdown renders a document H1 at page-title
+    size, which is overwhelming inside a chat bubble. The file on disk keeps
+    its proper heading levels. Fenced code blocks are left untouched."""
+    out, in_fence = [], False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+        if not in_fence:
+            m = re.match(r"^(#{1,6})(\s)", line)
+            if m:
+                line = "#" * min(len(m.group(1)) + 2, 6) + line[len(m.group(1)):]
+        out.append(line)
+    return "\n".join(out)
+
+
 def _find_new_md_documents() -> list[str]:
     """Return markdown DELIVERABLES in the session dir not yet shown.
 
@@ -770,10 +787,10 @@ else:
                         _doc_title = ("White Paper"
                                       if p.stem.startswith("white_paper")
                                       else "Ideation Report")
-                        with st.expander(f"{_doc_title}: {p.name}",
-                                         expanded=True):
+                        with st.expander(f"{_doc_title}: {p.name}"):
                             with st.container(height=600):
-                                st.markdown(p.read_text(encoding="utf-8"))
+                                st.markdown(_demote_md_headings(
+                                    p.read_text(encoding="utf-8")))
                         st.download_button(
                             f"Download {p.name}",
                             data=p.read_bytes(),

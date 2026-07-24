@@ -389,6 +389,39 @@ class OrchestratorTools:
             return [str(kd)]
         return None
 
+    @staticmethod
+    def _resolve_context_text(value) -> Optional[str]:
+        """Resolve a literature/molecule context argument to TEXT.
+
+        Accepts a file path, a comma-separated string of file paths, a list
+        of file paths, or raw text. File contents are read and concatenated;
+        anything that isn't resolvable as existing files is treated as raw
+        text (the historical behavior). This closes a live failure where a
+        comma-joined pair of paths fell through the single-path check and
+        the PATH STRING itself became the 'literature', leaving downstream
+        consumers (plan grounding, white-paper citations) with filenames
+        instead of content.
+        """
+        if value is None:
+            return None
+        items = value if isinstance(value, list) else [value]
+        pieces = []
+        for item in items:
+            s = str(item).strip()
+            if not s:
+                continue
+            p = Path(s)
+            if p.is_file():
+                pieces.append(p.read_text())
+                continue
+            tokens = [t.strip() for t in s.split(",") if t.strip()]
+            token_paths = [Path(t) for t in tokens]
+            if len(tokens) > 1 and all(tp.is_file() for tp in token_paths):
+                pieces.extend(tp.read_text() for tp in token_paths)
+            else:
+                pieces.append(s)  # raw text
+        return "\n\n".join(pieces) if pieces else None
+
     def _write_ideation_report(self) -> str:
         """Render ALL best-of-N candidates into a detailed markdown dossier.
 
@@ -407,14 +440,24 @@ class OrchestratorTools:
         judge = pc.get("judge") or {}
         scores = {s.get("candidate"): s for s in judge.get("scores", [])}
         findings = (state.get("current_plan") or {}).get("critic_findings")
+        override = pc.get("human_override")
 
-        lines = [f"# Ideation Report: {state.get('objective', '')}", ""]
+        lines = ["# Ideation Report", "",
+                 f"**Objective:** {state.get('objective', '')}", ""]
+        if override:
+            lines += [f"**Selection:** Candidate {sel} chosen by the PI, "
+                      f"overriding the judge's pick of Candidate "
+                      f"{judge.get('selected_candidate', '?')}.", ""]
         if judge.get("reasoning"):
             lines += ["## Comparative Assessment (judge)",
                       judge["reasoning"], ""]
         for ci, cand in enumerate(candidates, 1):
             exp = (cand.get("proposed_experiments") or [{}])[0]
-            flag = " — SELECTED (flagship)" if ci == sel else ""
+            if ci == sel:
+                flag = (" — SELECTED (flagship, PI override)" if override
+                        else " — SELECTED (flagship)")
+            else:
+                flag = ""
             lines += [f"## Candidate {ci}{flag}: "
                       f"{exp.get('experiment_name', 'Untitled')}", ""]
             sc = scores.get(ci)
@@ -1024,27 +1067,18 @@ class OrchestratorTools:
             external_context_parts = []
             saved_extras = []
             if literature_context:
-                lp = Path(literature_context)
-                if lp.is_file():
-                    lit_text = lp.read_text()
+                lit_text = self._resolve_context_text(literature_context)
+                if lit_text:
                     external_context_parts.append(lit_text)
-                    saved_extras.append(str(lp))
-                    print(f"    📚 Literature context from: {lp.name}")
-                else:
-                    external_context_parts.append(literature_context)
+                    print(f"    📚 Literature context resolved "
+                          f"({len(lit_text.split())} words)")
             if molecule_context:
-                mp = Path(molecule_context)
-                if mp.is_file():
-                    mol_text = mp.read_text()
+                mol_text = self._resolve_context_text(molecule_context)
+                if mol_text:
                     external_context_parts.append(
                         "## Molecular Design & Synthesis Planning\n" + mol_text
                     )
-                    saved_extras.append(str(mp))
-                    print(f"    🧪 Molecule context from: {mp.name}")
-                else:
-                    external_context_parts.append(
-                        "## Molecular Design & Synthesis Planning\n" + molecule_context
-                    )
+                    print("    🧪 Molecule context resolved")
 
             ext_ctx = "\n\n".join(external_context_parts) if external_context_parts else None
 
@@ -1206,7 +1240,15 @@ class OrchestratorTools:
                         getattr(self.orch, "_custom_skills", None)
                     ),
                 },
-                "literature_context": {"type": "string", "description": "File path or text from search_literature() tool. Provides external scientific literature context."},
+                "literature_context": {
+                    "type": ["string", "array"],
+                    "items": {"type": "string"},
+                    "description": (
+                        "Literature from search_literature(): a file path, a "
+                        "LIST of file paths (or comma-separated), or raw "
+                        "text. File contents are read and concatenated."
+                    ),
+                },
                 "molecule_context": {"type": "string", "description": "File path or text from query_molecules() tool. Provides molecular design / synthesis context."},
                 "n_candidates": {
                     "type": "integer",
@@ -1656,8 +1698,7 @@ class OrchestratorTools:
             # Build external context from literature/molecule files or raw text
             ext_parts = []
             if literature_context:
-                lp = Path(literature_context)
-                ext_parts.append(lp.read_text() if lp.is_file() else literature_context)
+                ext_parts.append(self._resolve_context_text(literature_context))
                 print(f"    📚 Literature context provided")
             else:
                 # Auto-load hypothesis context from session if available

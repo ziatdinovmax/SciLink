@@ -308,6 +308,16 @@ class PlanningAgent(BaseAgent):
             sel_idx = cand_state.get("selected_index", 1)
             alt_blocks = []
             judge = cand_state.get("judge") or {}
+            if cand_state.get("human_override"):
+                parts.append(
+                    f"\n## SELECTION PROVENANCE: The PI personally selected "
+                    f"Candidate {sel_idx} as the flagship, OVERRIDING the "
+                    f"judge (which preferred Candidate "
+                    f"{judge.get('selected_candidate', '?')}). Treat the "
+                    f"PI's choice as the primary thrust; the judge's "
+                    f"comparative reasoning below is context, not the "
+                    f"selection rationale."
+                )
             scores = {s.get("candidate"): s for s in judge.get("scores", [])}
             for ci, cand in enumerate(candidates, 1):
                 if ci == sel_idx:
@@ -334,6 +344,15 @@ class PlanningAgent(BaseAgent):
                          "Mitigation):\n" + json.dumps(findings, indent=2))
         if literature:
             lit = str(literature)
+            # Guard: a stored plan may carry file PATH(S) instead of content
+            # (historical sessions where a comma-joined path list slipped
+            # through as raw text) — resolve them to the actual documents so
+            # citation never sees bare filenames.
+            if len(lit) < 4096 and "\n" not in lit.strip():
+                cand_paths = [Path(t.strip()) for t in lit.split(",")
+                              if t.strip()]
+                if cand_paths and all(p.is_file() for p in cand_paths):
+                    lit = "\n\n".join(p.read_text() for p in cand_paths)
             parts.append("\n## Literature Context:\n" + lit[:15000])
             # Long syntheses put their bibliographies well past any sane
             # truncation — extract every DOI-bearing line from the FULL
