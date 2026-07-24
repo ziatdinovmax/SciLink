@@ -142,12 +142,21 @@ def retrieve_context(kb: Any, query: str, top_k: int = 10, dedupe: bool = True) 
     format them into a prompt-ready context block.
 
     The generic RAG retrieval step. Returns an empty string when the KB is
-    empty or unbuilt.
+    empty or unbuilt — and likewise when retrieval itself fails (e.g. the
+    query embedding call errors because the embedding provider's key is
+    absent). A KB is grounding, not a dependency: generation must proceed on
+    its fallback path rather than die on a retrieval error.
     """
     if not (kb is not None and kb.index and kb.index.ntotal > 0):
         return ""
 
-    chunks = kb.retrieve(query, top_k=top_k)
+    try:
+        chunks = kb.retrieve(query, top_k=top_k)
+    except Exception as e:  # noqa: BLE001 - any retrieval failure degrades, never kills
+        logging.warning(
+            f"KB retrieval failed ({e}); proceeding without retrieved context."
+        )
+        return ""
     if dedupe:
         chunks = list({c['text']: c for c in chunks}.values())
 

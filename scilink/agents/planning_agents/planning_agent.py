@@ -1289,7 +1289,13 @@ Select the most appropriate strategy:
             if self.kb_docs.index and self.kb_docs.index.ntotal > 0:
                 search_query = f"Implications and causes of: {consolidated_feedback[:400]}"
                 print(f"  - 🔍 Searching local KB for context on results...")
-                hits = self.kb_docs.retrieve(search_query, top_k=3)
+                try:
+                    hits = self.kb_docs.retrieve(search_query, top_k=3)
+                except Exception as e:  # noqa: BLE001 - degrade, never kill refinement
+                    logging.warning(
+                        f"KB retrieval failed ({e}); refining without local KB context."
+                    )
+                    hits = []
                 if hits:
                     context_parts.append("\n---\n".join([c['text'] for c in hits]))
                     print(f"    -> Found {len(hits)} relevant document chunks.")
