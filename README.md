@@ -61,12 +61,11 @@ SciLink provides three complementary agent systems that cover the full scientifi
 ```bash
 pip install scilink
 
-# With web UI
-pip install scilink[ui]
-
 # With simulation dependencies (ASE, atomate2, etc.)
 pip install scilink[sim]
 ```
+
+The web UI (`scilink ui`) is included in the default installation.
 
 The analysis agents work without additional dependencies, but installing Meta's [Segment Anything Model](https://github.com/facebookresearch/segment-anything) (SAM) enables more advanced particle and grain segmentation. SAM is not available on PyPI and must be installed from source:
 
@@ -115,8 +114,6 @@ scilink analyze --data ./sample.tif --metadata ./metadata.json
 ```bash
 scilink ui
 ```
-
-Requires `pip install scilink[ui]`.
 
 ### MCP Server
 
