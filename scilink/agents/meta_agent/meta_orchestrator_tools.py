@@ -751,6 +751,33 @@ class MetaOrchestratorTools:
             required=[],
         )
 
+        # -- save_checkpoint -------------------------------------------------
+        def save_checkpoint() -> str:
+            print("  💾 Tool: Saving meta checkpoint...")
+            try:
+                path = self.orch.save_checkpoint()
+                return json.dumps({
+                    "status": "success",
+                    "checkpoint_path": path,
+                    "delegations_saved": len(self.orch._delegation_ledger),
+                })
+            except Exception as e:
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=save_checkpoint,
+            name="save_checkpoint",
+            description=(
+                "Save the meta session state (mode, delegation ledger, chat "
+                "history) to checkpoint.json so the session can be resumed "
+                "later. The state is also auto-saved periodically; call this "
+                "when the user asks to save/checkpoint the session, or before "
+                "they intend to stop."
+            ),
+            parameters={},
+            required=[],
+        )
+
         # -- review_distilled_skills ----------------------------------------
         def review_distilled_skills(action: str = "list", skill: str = None,
                                     to_domain: str = None, staged: str = None,
