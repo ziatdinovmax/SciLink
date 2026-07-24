@@ -997,11 +997,18 @@ class OrchestratorTools:
                         f.write(plan["literature_search"])
                     saved_extras.append(str(lit_path))
 
-                # Generate HTML
-                from .html_generator import HTMLReportGenerator
-                html_path = self._output_dir() / "plan.html"
-                generator = HTMLReportGenerator(self.orch.planner.state)
-                generator.generate(str(html_path))
+                # Generate HTML — except for ideation runs: the report
+                # template renders an executable-protocol view (steps,
+                # equipment, optimization-parameter tables) that misrepresents
+                # a free-form research dossier; there the white paper is the
+                # human-facing artifact and plan.json keeps the record.
+                _ideation_run = (selection_profile == "ideation" and n_cand > 1)
+                html_path = None
+                if not _ideation_run:
+                    from .html_generator import HTMLReportGenerator
+                    html_path = self._output_dir() / "plan.html"
+                    generator = HTMLReportGenerator(self.orch.planner.state)
+                    generator.generate(str(html_path))
 
                 num_experiments = len(plan.get('proposed_experiments', []))
 
@@ -1010,12 +1017,13 @@ class OrchestratorTools:
                     "iteration": plan.get('iteration'),
                     "num_experiments": num_experiments,
                     "output_path": str(output_path),
-                    "html_report": str(html_path),
                     "knowledge_used": knowledge_list is not None,
                     "primary_data_used": primary_dataset is not None,
                     "tea_context_included": self.orch.latest_tea_results is not None,
                     "hint": "Use generate_implementation_code() to add executable code"
                 }
+                if html_path is not None:
+                    result["html_report"] = str(html_path)
                 if saved_extras:
                     result["external_results_files"] = saved_extras
                 pc = (self.orch.planner.state or {}).get("plan_candidates")
@@ -1033,8 +1041,7 @@ class OrchestratorTools:
                 # Ideation runs additionally produce a sponsor-facing white
                 # paper by default (white_paper=False opts out; =True forces
                 # one for any profile). Non-fatal: the plan already saved.
-                _wp_auto = (white_paper is None
-                            and selection_profile == "ideation" and n_cand > 1)
+                _wp_auto = (white_paper is None and _ideation_run)
                 if white_paper or _wp_auto:
                     try:
                         wp_path = self._write_white_paper()

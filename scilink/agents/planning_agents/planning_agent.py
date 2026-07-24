@@ -331,7 +331,19 @@ class PlanningAgent(BaseAgent):
             parts.append("\n## Reviewer Caveats (fold into Risks and "
                          "Mitigation):\n" + json.dumps(findings, indent=2))
         if literature:
-            parts.append("\n## Literature Context:\n" + str(literature)[:15000])
+            lit = str(literature)
+            parts.append("\n## Literature Context:\n" + lit[:15000])
+            # Long syntheses put their bibliographies well past any sane
+            # truncation — extract every DOI-bearing line from the FULL
+            # context so the paper can cite with real DOIs, never invented
+            # ones.
+            ref_lines = [ln.strip() for ln in lit.splitlines()
+                         if re.search(r"10\.\d{4,}/", ln)]
+            refs = "\n".join(dict.fromkeys(ref_lines))[:8000]
+            if refs:
+                parts.append("\n## Bibliography extracted from the full "
+                             "literature context (cite from these lines; "
+                             "they carry the DOIs):\n" + refs)
 
         print("\n--- Generating White Paper ---")
         response = self.model.generate_content(

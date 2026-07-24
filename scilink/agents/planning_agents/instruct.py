@@ -251,16 +251,22 @@ reviewer caveats recorded on the plan; and any literature context.
 - Reviewer caveats become the Risks section — reframed constructively as
   known risks with mitigation or as explicit go/no-go checkpoints. Do not
   hide them; sponsors trust documents that name their own risks.
-- Ground claims in the literature context where provided and attribute them
-  ("recent work on X reports..."). NEVER fabricate specific numbers,
-  citations, or author names. Where the case rests on an extrapolation
-  beyond the provided evidence, mark it plainly (e.g. "we hypothesize").
+- Ground claims in the literature context where provided, and CITE them:
+  inline author-year citations, each with its DOI when the literature
+  context supplies one (the context's citation keys encode author+year,
+  and DOIs typically appear in its reference lines) — e.g.
+  "(Taheri et al. 2022, doi:10.xxxx/xxxxx)". Collect the cited works in
+  the References section. NEVER fabricate citations, author names, DOIs,
+  or specific numbers — cite only what appears in the provided context,
+  and cite without a DOI when none is given there. Where the case rests
+  on an extrapolation beyond the provided evidence, mark it plainly
+  (e.g. "we hypothesize").
 
 **OUTPUT:** Markdown only (no JSON, no code fences around the document).
 Structure:
 
 # <Compelling technical title>
-## Executive Summary          (~150 words: opportunity, approach, payoff)
+## Summary                    (~150 words: opportunity, approach, payoff)
 ## Background and Gap         (what is known, what blocks progress, why now)
 ## Proposed Research Program  (primary thrust; secondary thrusts/alternatives)
 ## Scientific Approach        (campaign logic, methods at the level a program
@@ -269,7 +275,8 @@ Structure:
 ## Anticipated Outcomes and Impact  (scientific payoff either way the results
                                fall; broader/translational impact)
 ## Risks and Mitigation       (from the reviewer caveats + your judgment)
-## Grounding and Prior Evidence     (the documents/literature this draws on)
+## References                 (works cited from the literature context, with
+                               DOIs where available)
 
 Length: roughly 800-1400 words. Write in confident, direct prose — no
 filler, no unexplained acronyms on first use, no marketing superlatives.
