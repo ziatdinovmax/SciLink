@@ -28,6 +28,10 @@ from ..lit_agents.optimize_query import optimize_search_query, is_molecule_desig
 from ...skills.loader import list_skills, load_skill
 
 
+# Progress-heartbeat cadence for long-running literature searches (seconds).
+_LIT_HEARTBEAT_SECONDS = 180
+
+
 def _build_planning_skill_description(custom_skills: dict = None) -> str:
     """Build the ``skill`` parameter description for ``generate_initial_plan``.
 
@@ -685,9 +689,33 @@ class OrchestratorTools:
                 })
 
             label = "+".join(types)
-            print(f"  ⚡ Tool: Searching literature ({label}) for "
-                  f"{len(objectives)} question(s): '{objectives[0][:70]}...'"
-                  + (" [parallel]" if len(objectives) * len(types) > 1 else ""))
+            n_jobs = len(objectives) * len(types)
+            print(f"  ⚡ Tool: Searching literature: {len(objectives)} "
+                  f"question(s) x {len(types)} search type(s) ({label}) = "
+                  f"{n_jobs} concurrent search"
+                  f"{'es' if n_jobs != 1 else ''}")
+            for qi, o in enumerate(objectives, 1):
+                print(f"     Q{qi}: '{o[:90]}{'...' if len(o) > 90 else ''}'")
+            print("     ⏱️  Deep literature searches typically take 10-15 "
+                  "minutes — the system is working; progress is reported "
+                  "every few minutes.")
+
+            # Heartbeat so a minutes-long silent wait doesn't read as a hang
+            # (Edison jobs produce no output until they complete).
+            import threading as _threading
+            import time as _time
+            _hb_stop = _threading.Event()
+            _hb_t0 = _time.time()
+
+            def _heartbeat():
+                while not _hb_stop.wait(_LIT_HEARTBEAT_SECONDS):
+                    mins = int((_time.time() - _hb_t0) / 60)
+                    print(f"  ⏳ {n_jobs} literature search"
+                          f"{'es' if n_jobs != 1 else ''} still running "
+                          f"({mins} min elapsed; typically 10-15 min "
+                          f"total)...")
+
+            _threading.Thread(target=_heartbeat, daemon=True).start()
 
             try:
                 clean_queries = [optimize_search_query(
@@ -777,12 +805,16 @@ class OrchestratorTools:
             except Exception as e:
                 logging.error(f"Literature search error: {e}", exc_info=True)
                 return json.dumps({"status": "error", "message": str(e)})
+            finally:
+                _hb_stop.set()
 
         self._register_tool(
             func=search_literature,
             name="search_literature",
             description=(
                 "Searches scientific literature via FutureHouse Edison API. "
+                "A deep search takes ~10-15 minutes — tell the user before "
+                "calling so the wait is expected. "
                 "Call BEFORE generate_initial_plan() to enrich the plan with external context. "
                 "Pass the returned file_path as literature_context to generate_initial_plan(). "
                 "DECOMPOSE, don't concatenate: each objective must be ONE "
