@@ -3,6 +3,7 @@ from pathlib import Path
 import copy
 import json
 import logging
+import re
 import shutil
 import uuid
 from typing import List, Dict, Any, Optional, Union
@@ -20,6 +21,7 @@ from .repo_loader import clone_git_repository
 
 from .instruct import (
     HYPOTHESIS_GENERATION_INSTRUCTIONS,
+    WHITE_PAPER_INSTRUCTIONS,
     TEA_INSTRUCTIONS
 )
 
@@ -258,6 +260,91 @@ class PlanningAgent(BaseAgent):
         print(f"     • Actions logged: {len(self.state.get('action_history', []))}")
 
         
+    def generate_white_paper(self, audience_context: Optional[str] = None) -> str:
+        """Write a sponsor-facing white paper from the current campaign plan.
+
+        Distills the selected plan (plus, after a best-of-N run, the
+        alternative candidate strategies and the judge's comparative
+        reasoning, and the critic's caveats) into a technical pre-proposal
+        aimed at sponsors with technical backgrounds — significance and
+        payoff forward, mechanisms rigorous, no bench-level protocol detail.
+
+        Args:
+            audience_context: Optional targeting notes (e.g. "emphasize
+                fundamental-science significance" or "lead with cost and
+                scalability impact").
+
+        Returns:
+            The white paper as markdown.
+
+        Raises:
+            ValueError: when no plan exists yet in this campaign state.
+        """
+        plan = self.state.get("current_plan") or (
+            self.state["plan_history"][-1]
+            if self.state.get("plan_history") else None
+        )
+        if not plan or not plan.get("proposed_experiments"):
+            raise ValueError(
+                "No campaign plan exists yet — generate a plan first; the "
+                "white paper is distilled from it."
+            )
+
+        parts = [WHITE_PAPER_INSTRUCTIONS,
+                 f"## Research Objective:\n{self.state.get('objective', '')}"]
+        if audience_context:
+            parts.append(f"\n## Sponsor / Audience Targeting Notes:\n"
+                         f"{audience_context}")
+
+        selected = copy.deepcopy(plan)
+        literature = selected.pop("literature_search", None)
+        findings = selected.pop("critic_findings", None)
+        parts.append("\n## SELECTED Campaign Plan:\n"
+                     + json.dumps(selected, indent=2)[:20000])
+
+        cand_state = self.state.get("plan_candidates") or {}
+        candidates = cand_state.get("candidates") or []
+        if len(candidates) > 1:
+            sel_idx = cand_state.get("selected_index", 1)
+            alt_lines = []
+            judge = cand_state.get("judge") or {}
+            scores = {s.get("candidate"): s for s in judge.get("scores", [])}
+            for ci, cand in enumerate(candidates, 1):
+                if ci == sel_idx:
+                    continue
+                exp = (cand.get("proposed_experiments") or [{}])[0]
+                sc = scores.get(ci, {})
+                alt_lines.append(
+                    f"- Candidate {ci}: {exp.get('experiment_name', '?')} — "
+                    f"{exp.get('hypothesis') or exp.get('justification', '')}"
+                    f" [judge comment: {sc.get('comment', 'n/a')}]"
+                )
+            if alt_lines:
+                parts.append(
+                    "\n## ALTERNATIVE Candidate Strategies (judge-scored "
+                    "runners-up; use mechanistically distinct ones as "
+                    "secondary thrusts):\n" + "\n".join(alt_lines)
+                    + f"\nJudge's comparative reasoning: "
+                      f"{judge.get('reasoning', 'n/a')}"
+                )
+        if findings:
+            parts.append("\n## Reviewer Caveats (fold into Risks and "
+                         "Mitigation):\n" + json.dumps(findings, indent=2))
+        if literature:
+            parts.append("\n## Literature Context:\n" + str(literature)[:15000])
+
+        print("\n--- Generating White Paper (sponsor-facing pre-proposal) ---")
+        response = self.model.generate_content(
+            ["\n".join(parts)], generation_config=self.generation_config
+        )
+        text = response.text if hasattr(response, "text") else str(response)
+        # Strip an accidental fence around the whole document.
+        text = text.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```[a-z]*\n", "", text)
+            text = re.sub(r"\n```$", "", text).strip()
+        return text
+
     def rebind_kb(self, kb_base_path: str) -> bool:
         """Re-point both knowledge bases at a new storage path and reload.
 

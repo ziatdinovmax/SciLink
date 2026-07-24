@@ -385,6 +385,17 @@ class OrchestratorTools:
             return [str(kd)]
         return None
 
+    def _write_white_paper(self, audience_context: str = None) -> str:
+        """Generate the sponsor-facing white paper from the current plan and
+        save it beside the plan artifacts. Returns the saved path."""
+        text = self.orch.planner.generate_white_paper(
+            audience_context=audience_context
+        )
+        wp_path = self._output_dir() / "white_paper.md"
+        wp_path.write_text(text)
+        print(f"    📄 White paper saved: {wp_path}")
+        return str(wp_path)
+
     @staticmethod
     def _build_objective_guidance(n_data: int, numeric_cols: list) -> dict:
         """Return data-aware guidance on how many targets the data can support."""
@@ -766,7 +777,8 @@ class OrchestratorTools:
             literature_context: str = None,
             molecule_context: str = None,
             n_candidates: int = None,
-            selection_profile: str = "lab"
+            selection_profile: str = "lab",
+            white_paper: bool = None
         ):
             """
             Generates experimental plan (science strategy only, no code).
@@ -965,6 +977,26 @@ class OrchestratorTools:
                         "judge_reasoning": (pc.get("judge") or {}).get("reasoning", ""),
                         "candidate_reports": pc.get("reports", []),
                     }
+
+                # Ideation runs additionally produce a sponsor-facing white
+                # paper by default (white_paper=False opts out; =True forces
+                # one for any profile). Non-fatal: the plan already saved.
+                _wp_auto = (white_paper is None
+                            and selection_profile == "ideation" and n_cand > 1)
+                if white_paper or _wp_auto:
+                    try:
+                        wp_path = self._write_white_paper()
+                        result["white_paper"] = str(wp_path)
+                        result["hint"] = (
+                            "White paper saved alongside the plan — adapt it "
+                            "for a pitch/pre-proposal; regenerate with "
+                            "generate_white_paper(audience_context=...) to "
+                            "target a specific sponsor. "
+                            + result.get("hint", "")
+                        )
+                    except Exception as e:  # noqa: BLE001 - plan result survives
+                        logging.warning(f"White paper generation failed: {e}")
+                        result["white_paper_error"] = str(e)
                 return json.dumps(result)
                 
             except Exception as e:
@@ -1041,11 +1073,70 @@ class OrchestratorTools:
                         "n_candidates >= 2 — with a single plan there is "
                         "nothing to select and the profile has no effect, "
                         "so never pass n_candidates=1 together with "
-                        "ideation."
+                        "ideation. Ideation runs also produce a "
+                        "sponsor-facing white paper by default (see "
+                        "white_paper)."
+                    ),
+                },
+                "white_paper": {
+                    "type": "boolean",
+                    "description": (
+                        "Also distill the plan into a sponsor-facing "
+                        "technical white paper (pitch / pre-proposal). "
+                        "OMITTED: automatic for ideation-profile runs, off "
+                        "otherwise. Pass false to skip it on an ideation "
+                        "run; pass true to force one for any profile."
                     ),
                 },
             },
             required=[]
+        )
+
+        # --- WHITE PAPER TOOL ---
+        def generate_white_paper(audience_context: str = None):
+            """Distill the current campaign plan into a sponsor-facing
+            white paper (technical pre-proposal)."""
+            print("  ⚡ Tool: Generating white paper...")
+            try:
+                wp_path = self._write_white_paper(audience_context)
+                text = Path(wp_path).read_text()
+                return json.dumps({
+                    "status": "success",
+                    "white_paper": str(wp_path),
+                    "word_count": len(text.split()),
+                    "preview": text[:600],
+                })
+            except Exception as e:
+                logging.error(f"White paper error: {e}", exc_info=True)
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=generate_white_paper,
+            name="generate_white_paper",
+            description=(
+                "Distill the CURRENT campaign plan into a technical white "
+                "paper aimed at sponsors/program managers with technical "
+                "backgrounds — a pitch / pre-proposal: significance and "
+                "payoff forward, mechanisms rigorous, no bench-level "
+                "protocol detail. After a best-of-N run it weaves distinct "
+                "runner-up strategies in as secondary thrusts and turns the "
+                "reviewer caveats into a risks-and-mitigation section. "
+                "Requires an existing plan (generate_initial_plan first). "
+                "Ideation runs already produce one automatically — call "
+                "this to REGENERATE with sponsor targeting via "
+                "audience_context, or to add one to a lab-profile plan."
+            ),
+            parameters={
+                "audience_context": {
+                    "type": "string",
+                    "description": (
+                        "Optional sponsor targeting, e.g. 'emphasize "
+                        "fundamental-science significance and milestones' "
+                        "or 'lead with cost and scalability impact'."
+                    ),
+                },
+            },
+            required=[],
         )
 
         # 2. GENERATE IMPLEMENTATION CODE
