@@ -1344,8 +1344,32 @@ class MetaOrchestratorAgent:
             with open(self.checkpoint_path, 'w') as f:
                 json.dump(checkpoint_data, f, indent=2, default=str)
             print(f"    ✅ Auto-checkpoint saved")
+            return True
         except Exception as e:
             logging.warning(f"Auto-checkpoint failed: {e}")
+            return False
+
+    def save_checkpoint(self) -> str:
+        """Save the meta checkpoint on demand and reset the auto-save timer.
+
+        Children checkpoint themselves during delegations; this persists the
+        meta-level state (mode, message count, delegation ledger) so the
+        session can be resumed without waiting for the periodic auto-save.
+
+        Returns:
+            The checkpoint file path.
+
+        Raises:
+            RuntimeError: if the checkpoint could not be written.
+        """
+        if not self._auto_checkpoint():
+            raise RuntimeError(
+                f"Failed to write checkpoint to {self.checkpoint_path} "
+                "(see log for details)."
+            )
+        self.last_checkpoint_message_count = self.message_count
+        self._save_history()
+        return str(self.checkpoint_path)
 
     def _trim_history(self, history: List[Dict], max_messages: int = None) -> List[Dict]:
         """Keep only recent messages to avoid context window overflow."""
