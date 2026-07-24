@@ -21,8 +21,7 @@ Layout:
 scilink ui
 ```
 
-— in the planning panel, point the agent at the two folders above
-(requires `pip install scilink[ui]`).
+— in the planning panel, point the agent at the two folders above.
 
 **CLI**:
 

@@ -239,7 +239,7 @@ Available Commands:
                 identification via search_match_pattern
 
   ui            Launch the Streamlit web interface for interactive
-                analysis (requires: pip install scilink[ui])
+                analysis
 
   serve         Start SciLink as an MCP tool server so external clients
                 (Claude Desktop, Cursor) can use SciLink's tools
