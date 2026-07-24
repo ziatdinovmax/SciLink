@@ -260,6 +260,28 @@ class PlanningAgent(BaseAgent):
         print(f"     • Actions logged: {len(self.state.get('action_history', []))}")
 
         
+    def _finalize_literature(self, plan_dict: Dict[str, Any],
+                             literature: Optional[str]) -> None:
+        """Final-stamp SYSTEM-OWNED literature provenance onto a plan.
+
+        ``literature_search`` must never be model prose — but conformance,
+        critic and feedback-refinement passes RE-EMIT the plan JSON, so a
+        stamp applied before them can be replaced by a model placeholder
+        ('See prior iteration context (unchanged).', seen live). Call this
+        LAST, after every rewrite pass: it stamps the returned plan and the
+        state's current_plan / latest history snapshot (which may be earlier
+        copies).
+        """
+        if not literature:
+            return
+        plan_dict["literature_search"] = literature
+        cur = self.state.get("current_plan")
+        if isinstance(cur, dict):
+            cur["literature_search"] = literature
+        hist = self.state.get("plan_history") or []
+        if hist and isinstance(hist[-1], dict):
+            hist[-1]["literature_search"] = literature
+
     def generate_white_paper(self, audience_context: Optional[str] = None) -> str:
         """Write a sponsor-facing white paper from the current campaign plan.
 
@@ -1027,7 +1049,11 @@ class PlanningAgent(BaseAgent):
         )
 
         self.state["status"] = "planned"
-        
+
+        # Final provenance stamp — conformance/critic/feedback passes above
+        # may have re-emitted the plan JSON over the earlier stamp.
+        self._finalize_literature(res, external_context)
+
         return res
     
     def generate_implementation_code(self,
@@ -1614,6 +1640,7 @@ Select the most appropriate strategy:
         )
         
         self.state["status"] = "refined"
+        self._finalize_literature(new_plan, _best_lit)
         return new_plan
     
     def adjust_plan_for_constraints(self,
