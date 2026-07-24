@@ -305,6 +305,10 @@ stays session-local and never mutates the store.
 Each KB's `manifest.json` records the embedding model that built it, so a
 provider mismatch (e.g. a Gemini-built KB in an OpenAI-embedding session)
 warns upfront with a rebuild hint instead of failing opaquely at query time.
+And a KB is never unusable: when its embedding provider is unavailable,
+retrieval falls back to model-free keyword (BM25) search over the stored
+chunks — lower recall than dense retrieval, but real grounding from any KB
+in any session, with zero embedding dependency.
 A KB created with `kb create` keeps copies of its source documents and can be
 re-embedded with `kb rebuild`; an imported one cannot (no sources), so prefer
 `create` when you have the original documents.
@@ -315,8 +319,10 @@ re-embedded with `kb rebuild`; an imported one cannot (no sources), so prefer
   sits in the launch directory. Grounding is always an explicit choice: the
   `--knowledge-dir` flag, a chat-time confirmation, or the autonomous
   relevance decision. Standalone `scilink plan` behavior is unchanged.
-- A planning-tool retrieval failure (e.g. missing embedding key) now degrades
-  to no-retrieval with a warning instead of aborting plan generation.
+- A planning-tool retrieval failure (e.g. missing embedding key) now
+  degrades through tiers instead of aborting plan generation: dense
+  retrieval → keyword (BM25) retrieval → no retrieved context, each step
+  logged.
 - `--knowledge-dir` accepts a store name as well as a path; an existing
   directory always wins over a same-named KB.
 

@@ -141,11 +141,14 @@ def retrieve_context(kb: Any, query: str, top_k: int = 10, dedupe: bool = True) 
     """Retrieve the top-k chunks for ``query`` from a ``KnowledgeBase`` and
     format them into a prompt-ready context block.
 
-    The generic RAG retrieval step. Returns an empty string when the KB is
-    empty or unbuilt — and likewise when retrieval itself fails (e.g. the
-    query embedding call errors because the embedding provider's key is
-    absent). A KB is grounding, not a dependency: generation must proceed on
-    its fallback path rather than die on a retrieval error.
+    The generic RAG retrieval step, with graceful degradation tiers. Returns
+    an empty string when the KB is empty or unbuilt. When dense retrieval
+    fails (e.g. the query embedding call errors because the embedding
+    provider that built the index is unavailable), keyword (BM25) retrieval
+    over the stored chunk text takes over — model-free, so it works for any
+    KB regardless of which embedding model built it. Only when that too
+    yields nothing does generation proceed without retrieved context: a KB
+    is grounding, not a dependency, and retrieval must never kill it.
     """
     if not (kb is not None and kb.index and kb.index.ntotal > 0):
         return ""
@@ -153,10 +156,19 @@ def retrieve_context(kb: Any, query: str, top_k: int = 10, dedupe: bool = True) 
     try:
         chunks = kb.retrieve(query, top_k=top_k)
     except Exception as e:  # noqa: BLE001 - any retrieval failure degrades, never kills
-        logging.warning(
-            f"KB retrieval failed ({e}); proceeding without retrieved context."
-        )
-        return ""
+        try:
+            chunks = kb.retrieve_sparse(query, top_k=top_k)
+            logging.warning(
+                f"Dense KB retrieval failed ({e}); using keyword (BM25) "
+                f"fallback — retrieved {len(chunks)} chunks without the "
+                "embedding provider."
+            )
+        except Exception as e2:  # noqa: BLE001
+            logging.warning(
+                f"KB retrieval failed (dense: {e}; sparse: {e2}); "
+                "proceeding without retrieved context."
+            )
+            return ""
     if dedupe:
         chunks = list({c['text']: c for c in chunks}.values())
 

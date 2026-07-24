@@ -157,8 +157,9 @@ def embedding_compat_warning(manifest: Optional[Dict[str, Any]],
         return (
             f"KB '{manifest.get('name', '?')}' was built with "
             f"'{built_with}' but this session embeds queries with "
-            f"'{session_embedding_model}' — retrieval will be degraded or "
-            f"fail. Use --embedding-model {built_with}, or rebuild: "
+            f"'{session_embedding_model}' — dense retrieval will fall back "
+            f"to keyword (BM25) search. For full-quality retrieval use "
+            f"--embedding-model {built_with}, or rebuild: "
             f"scilink kb rebuild {manifest.get('name', '<name>')} "
             f"--embedding-model {session_embedding_model}"
         )

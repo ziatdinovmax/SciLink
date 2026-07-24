@@ -163,8 +163,10 @@ existing directory wins over a same-named KB). Two settled rules:
   `--knowledge-dir`, a chat-time confirmation (autopilot), or the
   autonomous relevance decision made from the KB's listed sources.
   Standalone plan mode keeps its stable-KB conventions.
-- **Retrieval is grounding, not a dependency.** A KB retrieval failure
-  degrades to no-context with a warning; it must never abort generation.
+- **Retrieval is grounding, not a dependency.** Retrieval degrades
+  through tiers — dense, then model-free keyword (BM25) over the stored
+  chunks, then no-context — each with a warning; it must never abort
+  generation.
 
 ## Why no `BaseChatOrchestrator` refactor
 
