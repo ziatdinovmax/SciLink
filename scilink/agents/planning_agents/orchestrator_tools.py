@@ -568,7 +568,7 @@ class OrchestratorTools:
         )
         
         # --- LITERATURE SEARCH TOOL ---
-        def search_literature(objective: str, search_type: str = "hypothesis_context"):
+        def search_literature(objective, search_type: str = "hypothesis_context"):
             """
             Searches scientific literature using the FutureHouse Edison API.
             Call this BEFORE generate_initial_plan to enrich the plan with
@@ -586,8 +586,9 @@ class OrchestratorTools:
                 "economic_data": self.orch.lit_agent.search_for_economic_data,
                 "fitting_models": self.orch.lit_agent.search_for_fitting_models,
             }
-            # Multiple types run CONCURRENTLY: each Edison call is minutes of
-            # waiting, so a serial pair doubles the user's wait for no reason.
+            # Multiple types — and multiple decomposed objectives — run
+            # CONCURRENTLY: each Edison call is minutes of waiting, so a
+            # serial pair doubles the user's wait for no reason.
             types = [t.strip() for t in str(search_type).split(",") if t.strip()]
             bad = [t for t in types if t not in search_methods]
             if bad or not types:
@@ -597,25 +598,47 @@ class OrchestratorTools:
                                 f"(comma-separated) of: {', '.join(search_methods)}")
                 })
 
+            objectives = ([objective] if isinstance(objective, str)
+                          else [str(o) for o in (objective or [])])
+            objectives = [o.strip() for o in objectives if o and o.strip()]
+            if not objectives:
+                return json.dumps({"status": "error",
+                                   "message": "No objective provided."})
+            MAX_TASKS = 6
+            if len(objectives) * len(types) > MAX_TASKS:
+                return json.dumps({
+                    "status": "error",
+                    "message": (f"{len(objectives)} objectives x {len(types)} "
+                                f"search types = {len(objectives) * len(types)} "
+                                f"concurrent searches (max {MAX_TASKS}). Drop "
+                                "less essential objectives/types or split "
+                                "into two calls."),
+                })
+
             label = "+".join(types)
-            print(f"  ⚡ Tool: Searching literature ({label}) for '{objective[:80]}...'"
-                  + (" [parallel]" if len(types) > 1 else ""))
+            print(f"  ⚡ Tool: Searching literature ({label}) for "
+                  f"{len(objectives)} question(s): '{objectives[0][:70]}...'"
+                  + (" [parallel]" if len(objectives) * len(types) > 1 else ""))
 
             try:
-                clean_query = optimize_search_query(
-                    objective=objective, model=self.orch.planner.model
-                )
+                clean_queries = [optimize_search_query(
+                    objective=o, model=self.orch.planner.model
+                ) for o in objectives]
 
-                if len(types) == 1:
-                    results = {types[0]: search_methods[types[0]](clean_query)}
+                tasks = [(oi, t) for oi in range(len(objectives)) for t in types]
+                if len(tasks) == 1:
+                    oi, t = tasks[0]
+                    results = {(oi, t): search_methods[t](clean_queries[oi])}
                 else:
                     from concurrent.futures import ThreadPoolExecutor
-                    with ThreadPoolExecutor(max_workers=len(types)) as ex:
-                        futures = {t: ex.submit(search_methods[t], clean_query)
-                                   for t in types}
-                        results = {t: f.result() for t, f in futures.items()}
+                    with ThreadPoolExecutor(max_workers=len(tasks)) as ex:
+                        futures = {(oi, t): ex.submit(search_methods[t],
+                                                      clean_queries[oi])
+                                   for oi, t in tasks}
+                        results = {k: f.result() for k, f in futures.items()}
 
-                ok = {t: r for t, r in results.items() if r.get("status") == "success"}
+                ok = {k: r for k, r in results.items()
+                      if r.get("status") == "success"}
                 if not ok:
                     first = next(iter(results.values()))
                     return json.dumps({
@@ -635,8 +658,19 @@ class OrchestratorTools:
                     "economic_data": "## ECONOMIC CONTEXT",
                     "fitting_models": "## MODELS AND EQUATIONS",
                 }
-                parts = [f"{SECTION.get(t, '## ' + t.upper())}\n{ok[t]['content']}"
-                         for t in types if t in ok]
+                parts = []
+                for oi in range(len(objectives)):
+                    secs = [f"{SECTION.get(t, '## ' + t.upper())}\n{ok[(oi, t)]['content']}"
+                            for t in types if (oi, t) in ok]
+                    if not secs:
+                        continue
+                    if len(objectives) > 1:
+                        # Multi-question runs keep per-question grouping so
+                        # downstream readers see which evidence answers what.
+                        parts.append(f"# Question {oi + 1}: {objectives[oi]}\n\n"
+                                     + "\n\n".join(secs))
+                    else:
+                        parts.extend(secs)
                 content = "\n\n".join(parts)
 
                 lit_path = self._output_dir() / f"literature_search_{label}.md"
@@ -644,13 +678,17 @@ class OrchestratorTools:
                     f.write(f"# Literature Search Results ({label})\n\n")
                     f.write(content)
 
-                failed = [t for t in types if t not in ok]
-                print(f"  ✅ Literature search completed ({len(ok)}/{len(types)}). "
+                failed = [(f"q{oi + 1}:{t}" if len(objectives) > 1 else t)
+                          for oi, t in tasks if (oi, t) not in ok]
+                print(f"  ✅ Literature search completed ({len(ok)}/{len(tasks)}). "
                       f"Saved to {lit_path.name}")
 
                 out = {
                     "status": "success",
-                    "searches_run": list(ok),
+                    "searches_run": [
+                        (f"q{oi + 1}:{t}" if len(objectives) > 1 else t)
+                        for oi, t in tasks if (oi, t) in ok
+                    ],
                     "file_path": str(lit_path),
                     "content_preview": content[:500] + "..." if len(content) > 500 else content,
                     "hint": "Pass file_path as literature_context to generate_initial_plan()",
@@ -678,12 +716,26 @@ class OrchestratorTools:
                 "Searches scientific literature via FutureHouse Edison API. "
                 "Call BEFORE generate_initial_plan() to enrich the plan with external context. "
                 "Pass the returned file_path as literature_context to generate_initial_plan(). "
-                "Several search types can be requested at once as a comma-separated "
-                "list — they run CONCURRENTLY and are merged into one labelled "
-                "document, so two searches cost roughly the wait of one."
+                "DECOMPOSE, don't concatenate: each objective must be ONE "
+                "focused question — a query stuffed with several distinct "
+                "aspects returns a shallow synthesis of all of them. Pass a "
+                "LIST of objectives to cover distinct aspects; objectives "
+                "and search types all run CONCURRENTLY and are merged into "
+                "one labelled document, so several focused searches cost "
+                "roughly the wait of one (max 6 searches per call)."
             ),
             parameters={
-                "objective": {"type": "string", "description": "Research objective or question to search for"},
+                "objective": {
+                    "type": ["string", "array"],
+                    "items": {"type": "string"},
+                    "description": (
+                        "ONE focused research question, or a LIST of them "
+                        "(run in parallel). Split a broad objective — or "
+                        "one containing too many distinct aspects — into "
+                        "separate entries; each entry should stand alone as "
+                        "a question one review could answer well."
+                    ),
+                },
                 "search_type": {
                     "type": "string",
                     "description": (

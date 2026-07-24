@@ -388,13 +388,17 @@ class LiteratureSearchAgent:
 
     def search_for_hypothesis_context(self, objective: str) -> Dict[str, Any]:
         """
-        Formats a query specifically for generating experimental plans.
-        Focuses on mechanisms, methods, and gaps.
+        Formats a query for grounding a research plan. Focuses on methods,
+        mechanisms, and gaps — framed neutrally across experimental and
+        computational work, so a modeling/simulation objective is not
+        answered through a lab-technique lens (and vice versa).
         """
         formatted_query = (
-            f"Provide a comprehensive review of experimental methods, "
-            f"underlying physical mechanisms, and recent advancements related to: '{objective}'. "
-            f"Highlight any common experimental pitfalls."
+            f"Provide a comprehensive review of the relevant methods — "
+            f"experimental and/or computational, as fits the topic — "
+            f"underlying physical mechanisms, and recent advancements "
+            f"related to: '{objective}'. "
+            f"Highlight common pitfalls of these methods."
         )
         return self._execute_crow_task(formatted_query, task_type="Hypothesis")
 

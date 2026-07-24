@@ -333,7 +333,7 @@ class PlanningAgent(BaseAgent):
         if literature:
             parts.append("\n## Literature Context:\n" + str(literature)[:15000])
 
-        print("\n--- Generating White Paper (sponsor-facing pre-proposal) ---")
+        print("\n--- Generating White Paper ---")
         response = self.model.generate_content(
             ["\n".join(parts)], generation_config=self.generation_config
         )
