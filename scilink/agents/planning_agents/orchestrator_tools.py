@@ -769,19 +769,40 @@ class OrchestratorTools:
                   "every few minutes.")
 
             # Heartbeat so a minutes-long silent wait doesn't read as a hang
-            # (Edison jobs produce no output until they complete).
+            # (Edison jobs produce no output until they complete). Tracks LIVE
+            # completion — '1 of 5 still running', not a static total — via
+            # per-future done-callbacks updating the shared pending set.
             import threading as _threading
             import time as _time
             _hb_stop = _threading.Event()
             _hb_t0 = _time.time()
+            _hb_lock = _threading.Lock()
+            _hb_state = {"pending": None, "total": n_jobs}
+
+            def _hb_mark_done(label):
+                with _hb_lock:
+                    if _hb_state["pending"] is not None:
+                        _hb_state["pending"].discard(label)
 
             def _heartbeat():
                 while not _hb_stop.wait(_LIT_HEARTBEAT_SECONDS):
+                    with _hb_lock:
+                        pending = (set(_hb_state["pending"])
+                                   if _hb_state["pending"] is not None
+                                   else None)
+                    remaining = (len(pending) if pending is not None
+                                 else _hb_state["total"])
+                    if remaining == 0:
+                        continue
+                    detail = (f" — waiting on: "
+                              f"{', '.join(sorted(pending)[:4])}"
+                              if pending else "")
                     mins = int((_time.time() - _hb_t0) / 60)
-                    print(f"  ⏳ {n_jobs} literature search"
-                          f"{'es' if n_jobs != 1 else ''} still running "
-                          f"({mins} min elapsed; typically 10-15 min "
-                          f"total)...")
+                    print(f"  ⏳ {remaining} of {_hb_state['total']} "
+                          f"literature search"
+                          f"{'es' if _hb_state['total'] != 1 else ''} still "
+                          f"running ({mins} min elapsed; typically 10-15 "
+                          f"min total){detail}")
 
             _threading.Thread(target=_heartbeat, daemon=True).start()
 
@@ -791,15 +812,27 @@ class OrchestratorTools:
                 ) for o in objectives]
 
                 tasks = [(oi, t) for oi in range(len(objectives)) for t in types]
+
+                def _task_label(oi, t):
+                    return f"q{oi + 1}:{t}" if len(objectives) > 1 else t
+
+                with _hb_lock:
+                    _hb_state["pending"] = {_task_label(oi, t)
+                                            for oi, t in tasks}
                 if len(tasks) == 1:
                     oi, t = tasks[0]
                     results = {(oi, t): search_methods[t](clean_queries[oi])}
+                    _hb_mark_done(_task_label(oi, t))
                 else:
                     from concurrent.futures import ThreadPoolExecutor
                     with ThreadPoolExecutor(max_workers=len(tasks)) as ex:
-                        futures = {(oi, t): ex.submit(search_methods[t],
-                                                      clean_queries[oi])
-                                   for oi, t in tasks}
+                        futures = {}
+                        for oi, t in tasks:
+                            f = ex.submit(search_methods[t], clean_queries[oi])
+                            f.add_done_callback(
+                                lambda _f, _l=_task_label(oi, t):
+                                _hb_mark_done(_l))
+                            futures[(oi, t)] = f
                         results = {k: f.result() for k, f in futures.items()}
 
                 ok = {k: r for k, r in results.items()
