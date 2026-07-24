@@ -61,6 +61,17 @@ def main():
                           help="OpenAI-compatible proxy for embeddings")
     p_create.add_argument("--overwrite", action="store_true")
 
+    p_add = sub.add_parser(
+        "add", help="Incrementally add documents to a KB (embeds only the "
+                    "new ones, with the KB's own embedding model)")
+    p_add.add_argument("name")
+    p_add.add_argument("--from", dest="sources", nargs="+", required=True,
+                       metavar="PATH", help="New document files/folders")
+    p_add.add_argument("--embedding-api-key", default=None,
+                       help="Key for the KB's embedding provider (default: "
+                            "the provider env var for the manifest's model)")
+    p_add.add_argument("--base-url", default=None)
+
     p_show = sub.add_parser("show", help="Print a KB's manifest")
     p_show.add_argument("name")
 
@@ -131,6 +142,18 @@ def main():
             print(f"✅ KB '{args.name}' created "
                   f"({manifest['n_vectors']} vectors).")
             print(f"   Use it: scilink plan --knowledge-dir {args.name}")
+            return 0
+
+        if args.action == "add":
+            manifest = kb_store.read_manifest(kb_store.kb_path(args.name)) or {}
+            key = _resolve_embedding_key(manifest.get("embedding_model", ""),
+                                         args.embedding_api_key)
+            manifest = kb_store.add_to_kb(
+                args.name, args.sources,
+                api_key=key, base_url=args.base_url,
+            )
+            print(f"✅ KB '{args.name}' updated "
+                  f"({manifest['n_vectors']} vectors total).")
             return 0
 
         if args.action == "show":

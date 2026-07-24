@@ -278,6 +278,7 @@ key); every later session reuses the persisted index from **any** directory:
 scilink kb create produced-water --from ./papers ./composition_data \
     --description "Produced-water composition and criticality references"
 scilink kb list                          # what exists, built with which embedding model
+scilink kb add produced-water --from ./new_paper.pdf   # embeds only the new documents
 scilink kb import legacy --from ./kb_storage --embedding-model gemini-embedding-001
 scilink kb rebuild produced-water --embedding-model text-embedding-3-small
 ```
@@ -294,6 +295,12 @@ launch directory's `kb_storage`, plus every named KB with its description and
 source list — are offered **in chat**. In autopilot the meta asks before the
 first planning delegation; in autonomous mode it attaches the KB whose
 sources are clearly relevant to the task (and leaves all detached otherwise).
+Growing a KB works from chat too — *"add this datasheet to my produced-water
+knowledge base"* embeds just that document (with the KB's own embedding
+model) and the running session picks it up immediately; additions happen
+only on your explicit request, since a named KB is shared across sessions.
+Sessions otherwise treat named KBs as read-only: in-session document use
+stays session-local and never mutates the store.
 
 Each KB's `manifest.json` records the embedding model that built it, so a
 provider mismatch (e.g. a Gemini-built KB in an OpenAI-embedding session)

@@ -204,6 +204,80 @@ class TestCreateRebuild:
         assert (store / "rb" / "sources" / "p.md").exists()  # sources kept
 
 
+# ── incremental add ─────────────────────────────────────────────────────
+
+def _fake_append(target, new_doc_paths, embedding_model, api_key, base_url,
+                 ocr_model, record_as):
+    """Stand-in for _append_index_into: touches the index, returns counts."""
+    (target / "default_kb_docs.faiss").write_bytes(b"GROWN")
+    return len(new_doc_paths), 2 * len(new_doc_paths)
+
+
+class TestAddToKb:
+    def _built(self, store, tmp_path, monkeypatch, name="grow"):
+        monkeypatch.setattr(kb_store, "_build_index_into", _fake_build)
+        doc = tmp_path / "base.md"
+        doc.write_text("base")
+        kb_store.create_kb(name, [str(doc)])
+        return kb_store.kb_path(name)
+
+    def test_add_appends_and_updates_manifest(self, store, tmp_path,
+                                              monkeypatch):
+        self._built(store, tmp_path, monkeypatch)
+        monkeypatch.setattr(kb_store, "_append_index_into", _fake_append)
+        new = tmp_path / "extra.md"
+        new.write_text("more science")
+        manifest = kb_store.add_to_kb("grow", [str(new)])
+        assert manifest["n_vectors"] == 7 + 2          # base 7 + fake 2
+        assert manifest["n_chunks"] == 7 + 1
+        assert "extra.md" in manifest["sources"]
+        assert (kb_store.kb_path("grow") / "sources" / "extra.md").exists()
+
+    def test_add_refuses_duplicate_basenames(self, store, tmp_path,
+                                             monkeypatch):
+        self._built(store, tmp_path, monkeypatch)
+        dup = tmp_path / "elsewhere" / "base.md"
+        dup.parent.mkdir()
+        dup.write_text("changed")
+        with pytest.raises(FileExistsError, match="base.md"):
+            kb_store.add_to_kb("grow", [str(dup)])
+
+    def test_add_refuses_imported_kb(self, store, tmp_path):
+        legacy = _fake_legacy_kb(tmp_path / "kb_storage")
+        kb_store.import_kb("frozen", str(legacy),
+                           embedding_model="gemini-embedding-001")
+        new = tmp_path / "n.md"
+        new.write_text("x")
+        with pytest.raises(ValueError, match="imported"):
+            kb_store.add_to_kb("frozen", [str(new)])
+
+    def test_add_refuses_unknown_embedding_model(self, store, tmp_path,
+                                                 monkeypatch):
+        kb_dir = self._built(store, tmp_path, monkeypatch)
+        mf = json.loads((kb_dir / kb_store.MANIFEST_NAME).read_text())
+        mf["embedding_model"] = "unknown"
+        (kb_dir / kb_store.MANIFEST_NAME).write_text(json.dumps(mf))
+        new = tmp_path / "n.md"
+        new.write_text("x")
+        with pytest.raises(ValueError, match="embedding model"):
+            kb_store.add_to_kb("grow", [str(new)])
+
+    def test_add_failure_is_atomic(self, store, tmp_path, monkeypatch):
+        kb_dir = self._built(store, tmp_path, monkeypatch)
+        before = (kb_dir / "default_kb_docs.faiss").read_bytes()
+
+        def boom(*a, **k):
+            raise RuntimeError("provider down")
+        monkeypatch.setattr(kb_store, "_append_index_into", boom)
+        new = tmp_path / "n.md"
+        new.write_text("x")
+        with pytest.raises(RuntimeError):
+            kb_store.add_to_kb("grow", [str(new)])
+        assert (kb_dir / "default_kb_docs.faiss").read_bytes() == before
+        assert not (kb_dir / "sources" / "n.md").exists()
+        assert not list(store.glob(".staging_*"))
+
+
 # ── orchestrator knowledge-path fallback vs prebuilt store KBs ──────────
 
 class TestKnowledgePathFallback:

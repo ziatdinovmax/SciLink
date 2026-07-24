@@ -231,7 +231,7 @@ Available Commands:
 
   kb            Manage named, reusable knowledge bases — build once from
                 your documents, ground planning in them from any directory
-                (scilink kb create/list/show/import/rebuild/delete)
+                (scilink kb create/add/list/show/import/rebuild/delete)
 
   fetch-xrd-library
                 One-time download of the prebuilt XRD fingerprint reference

@@ -966,6 +966,56 @@ class MetaOrchestratorAgent:
         for name in list(self._mcp_connections):
             self.disconnect_mcp_server(name)
 
+    def add_documents_to_kb(self, paths: List[str],
+                            name: Optional[str] = None) -> Dict[str, Any]:
+        """Permanently add documents to a named store KB (chat-driven
+        counterpart of 'scilink kb add').
+
+        ``name`` defaults to the currently attached KB when that is a named
+        store KB. New documents are embedded with the KB's own embedding
+        model (the session's key is forwarded only when the models match;
+        otherwise the provider env var must supply it). If the grown KB is
+        attached and the planning child exists, its session cache is
+        refreshed in place so the running session retrieves the new
+        documents immediately.
+
+        Returns:
+            The updated manifest.
+        """
+        from ...knowledge.kb_store import (
+            add_to_kb, kb_store_dir, list_kbs, read_manifest,
+        )
+        if not name:
+            attached_manifest = (read_manifest(self.knowledge_dir)
+                                 if self.knowledge_dir else None)
+            if attached_manifest and (
+                    kb_store_dir() in self.knowledge_dir.parents):
+                name = attached_manifest["name"]
+            else:
+                available = [k["name"] for k in list_kbs()]
+                raise ValueError(
+                    "No named KB is attached — say which KB to add to. "
+                    f"Available: {available or 'none'}."
+                )
+        manifest = read_manifest(
+            kb_store_dir() / name) if name else None
+        key = (self.embedding_api_key
+               if manifest and manifest.get("embedding_model") ==
+               self.embedding_model else None)
+        updated = add_to_kb(name, paths, api_key=key, base_url=self.base_url)
+
+        # Refresh the running session's copy so the addition is usable now.
+        child = self._children.get("planning")
+        if (child is not None and self.knowledge_dir
+                and self.knowledge_dir.name == name):
+            import shutil as _shutil
+            cache = child.base_dir / "kb_cache"
+            cache.mkdir(parents=True, exist_ok=True)
+            for f in self.knowledge_dir.glob("default_kb_*"):
+                _shutil.copy2(f, cache / f.name)
+            child.planner.rebind_kb(str(cache / "default_kb"))
+        return updated
+
     def register_skill(self, skill_path: str) -> str:
         """Register a custom skill (.md) and share it with every specialist.
 

@@ -801,6 +801,53 @@ class MetaOrchestratorTools:
             required=[],
         )
 
+        # -- add_to_knowledge_base -------------------------------------------
+        def add_to_knowledge_base(paths, name: str = None) -> str:
+            if isinstance(paths, str):
+                paths = [paths]
+            print(f"  📚 Tool: Adding {len(paths)} document(s) to knowledge base...")
+            try:
+                manifest = self.orch.add_documents_to_kb(paths, name=name)
+                return json.dumps({
+                    "status": "success",
+                    "knowledge_base": manifest.get("name"),
+                    "n_vectors": manifest.get("n_vectors"),
+                    "sources": manifest.get("sources", [])[-10:],
+                })
+            except Exception as e:
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=add_to_knowledge_base,
+            name="add_to_knowledge_base",
+            description=(
+                "PERMANENTLY add document files to a named knowledge base in "
+                "the user's persistent store — the KB is a shared artifact "
+                "reused across sessions, so call this ONLY when the user "
+                "explicitly asks to add/save documents to their knowledge "
+                "base (in any autonomy mode; never on your own initiative). "
+                "Embeds only the new documents, using the KB's own embedding "
+                "model. If that KB is attached to this session, the session "
+                "picks up the additions immediately. For using a document in "
+                "just this session's planning, pass it in the delegation "
+                "task instead."
+            ),
+            parameters={
+                "paths": {
+                    "type": ["string", "array"],
+                    "items": {"type": "string"},
+                    "description": "Absolute path(s) of the document file(s) "
+                                   "or folder(s) to add.",
+                },
+                "name": {
+                    "type": "string",
+                    "description": ("Target KB name. Omit to use the "
+                                    "currently attached named KB."),
+                },
+            },
+            required=["paths"],
+        )
+
         # -- review_distilled_skills ----------------------------------------
         def review_distilled_skills(action: str = "list", skill: str = None,
                                     to_domain: str = None, staged: str = None,

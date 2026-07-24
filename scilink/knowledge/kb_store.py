@@ -372,6 +372,135 @@ def import_kb(name: str,
     return read_manifest(final)
 
 
+def add_to_kb(name: str,
+              source_paths: List[str],
+              api_key: Optional[str] = None,
+              base_url: Optional[str] = None,
+              ocr_model: Any = None) -> Dict[str, Any]:
+    """Incrementally add documents to a named KB.
+
+    New documents are embedded with the KB's OWN embedding model (from the
+    manifest) — appending vectors from a different model would silently
+    corrupt the shared vector space, so the session's model is never used.
+    Only 'built' KBs accept additions (imported KBs carry no sources, and
+    growing a partial ``sources/`` would make a later rebuild lossy).
+    Atomic like create/rebuild: staged copy, swap on success.
+
+    Returns:
+        The updated manifest.
+    """
+    final = kb_path(name)
+    manifest = read_manifest(final)
+    if not final.is_dir() or manifest is None:
+        raise FileNotFoundError(f"KB '{name}' does not exist.")
+    if manifest.get("origin") != "built" or not (final / "sources").is_dir():
+        raise ValueError(
+            f"KB '{name}' was imported (no stored sources) — additions are "
+            "only supported for KBs built with 'scilink kb create'; recreate "
+            "it from the original documents to make it growable."
+        )
+    embedding_model = manifest.get("embedding_model")
+    if embedding_model in (None, "", "unknown"):
+        raise ValueError(
+            f"KB '{name}' does not record its embedding model; rebuild it "
+            "first so additions embed into the same vector space."
+        )
+
+    new_files: List[Path] = []
+    for p in source_paths:
+        src = Path(p).expanduser()
+        if not src.exists():
+            raise FileNotFoundError(f"Source path not found: {src}")
+        new_files.extend(sorted(f for f in src.rglob("*") if f.is_file())
+                         if src.is_dir() else [src])
+    if not new_files:
+        raise ValueError("No files found in the provided source paths.")
+    existing = {f.name for f in (final / "sources").rglob("*") if f.is_file()}
+    conflicts = sorted({f.name for f in new_files} & existing)
+    if conflicts:
+        raise FileExistsError(
+            f"Already in KB '{name}': {conflicts}. Adding them again would "
+            "duplicate their chunks — to replace a document, update it in "
+            "the stored sources and 'scilink kb rebuild', or recreate."
+        )
+
+    store = kb_store_dir()
+    staging = store / f".staging_{name}"
+    if staging.exists():
+        shutil.rmtree(staging)
+    try:
+        shutil.copytree(final, staging)
+        added_dir = staging / "sources"
+        staged_new: List[str] = []
+        for f in new_files:
+            shutil.copy2(f, added_dir / f.name)
+            staged_new.append(str(added_dir / f.name))
+
+        n_chunks, n_added = _append_index_into(
+            staging, staged_new, embedding_model, api_key, base_url,
+            ocr_model, record_as=final / "sources",
+        )
+        _write_manifest(
+            staging,
+            n_chunks=(manifest.get("n_chunks") or 0) + n_chunks,
+            n_vectors=(manifest.get("n_vectors") or 0) + n_added,
+            sources=_source_names(staging),
+        )
+        shutil.rmtree(final)
+        staging.rename(final)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+    _logger.info(f"📚 KB '{name}': +{n_added} vectors "
+                 f"({len(new_files)} document(s) added)")
+    return read_manifest(final)
+
+
+def _append_index_into(target: Path, new_doc_paths: List[str],
+                       embedding_model: str, api_key: Optional[str],
+                       base_url: Optional[str], ocr_model: Any,
+                       record_as: Path) -> Tuple[int, int]:
+    """Ingest only ``new_doc_paths`` and append them to ``target``'s
+    persisted index. Returns (n_new_chunks, n_new_vectors)."""
+    from ..parsers import ingest_files
+    from .knowledge_base import KnowledgeBase
+
+    chunks = ingest_files(new_doc_paths, is_code_mode=False,
+                          ocr_model=ocr_model)
+    if not chunks:
+        raise ValueError(
+            "No ingestible content found in the new documents "
+            "(supported: PDF, text/markdown, Excel/CSV, images with OCR)."
+        )
+
+    kb = KnowledgeBase(
+        embedding_model=embedding_model,
+        api_key=api_key,
+        base_url=base_url,
+        use_litellm=not base_url,
+    )
+    prefix = target / f"{KB_BASE_NAME}_docs"
+    if not kb.load(str(prefix.with_suffix(".faiss")),
+                   str(prefix.with_suffix(".json")),
+                   sources_path=str(prefix.with_suffix(".sources.json"))):
+        raise ValueError(f"Could not load the existing index from {target}.")
+    before = int(kb.index.ntotal)
+    # Record the additions under the FINAL sources path so the orchestrator's
+    # source-difference check keeps recognising everything as embedded.
+    kb.sources.append({
+        "path": str(record_as),
+        "files": sorted(Path(p).name for p in new_doc_paths),
+    })
+    kb.build(chunks)
+    kb.save(
+        str(prefix.with_suffix(".faiss")),
+        str(prefix.with_suffix(".json")),
+        sources_path=str(prefix.with_suffix(".sources.json")),
+    )
+    return len(chunks), int(kb.index.ntotal) - before
+
+
 def rebuild_kb(name: str,
                embedding_model: str,
                api_key: Optional[str] = None,
