@@ -501,9 +501,34 @@ class OrchestratorTools:
         print(f"    📄 Ideation report saved: {path}")
         return str(path)
 
+    def _latest_literature_file(self) -> Optional[Path]:
+        """Newest literature_search_*.md in the session output dir, if any.
+
+        Matched by GLOB, not exact name — multi-type searches save under
+        labels like 'literature_search_hypothesis_context+cross_domain.md',
+        which an exact-name lookup misses.
+        """
+        files = sorted(self._output_dir().glob("literature_search_*.md"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        return files[0] if files else None
+
     def _write_white_paper(self, audience_context: str = None) -> str:
         """Generate the sponsor-facing white paper from the current plan and
         save it beside the plan artifacts. Returns the saved path."""
+        # Last-resort literature continuity: if neither the current plan nor
+        # the campaign history carries literature, seed the state from the
+        # newest saved search so citations survive plan restructuring.
+        state = self.orch.planner.state or {}
+        has_lit = any(p.get("literature_search")
+                      for p in ([state.get("current_plan") or {}]
+                                + list(state.get("plan_history") or [])))
+        if not has_lit:
+            lit_file = self._latest_literature_file()
+            if lit_file is not None and state.get("current_plan"):
+                state["current_plan"]["literature_search"] = \
+                    lit_file.read_text()
+                print(f"    📚 White paper literature restored from "
+                      f"{lit_file.name}")
         text = self.orch.planner.generate_white_paper(
             audience_context=audience_context
         )
@@ -1701,11 +1726,14 @@ class OrchestratorTools:
                 ext_parts.append(self._resolve_context_text(literature_context))
                 print(f"    📚 Literature context provided")
             else:
-                # Auto-load hypothesis context from session if available
-                lit_path = self._output_dir() / "literature_search_hypothesis_context.md"
-                if lit_path.is_file():
+                # Auto-load the newest saved literature from the session —
+                # by glob, so multi-type labels (e.g. '...hypothesis_context
+                # +cross_domain.md') are found too.
+                lit_path = self._latest_literature_file()
+                if lit_path is not None:
                     ext_parts.append(lit_path.read_text())
-                    print(f"    📚 Auto-loaded literature hypothesis context from session")
+                    print(f"    📚 Auto-loaded literature context from "
+                          f"session ({lit_path.name})")
             if molecule_context:
                 mp = Path(molecule_context)
                 mol_text = mp.read_text() if mp.is_file() else molecule_context
