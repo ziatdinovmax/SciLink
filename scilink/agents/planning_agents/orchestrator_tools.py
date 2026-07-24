@@ -5275,7 +5275,26 @@ class OrchestratorTools:
                 "status": "error",
                 "message": f"Tool '{tool_name}' not found in registry"
             })
-        
+
+        # A tool call whose arguments hit the output-token cap mid-generation
+        # can arrive as VALID but incomplete JSON (later keys dropped), which
+        # slips past the malformed-JSON guard in the chat loop. Check the
+        # schema's required list here so the model gets a clean, actionable
+        # error instead of a TypeError traceback.
+        missing = [p for p in self._required_params(tool_name) if p not in kwargs]
+        if missing:
+            return json.dumps({
+                "status": "error",
+                "tool": tool_name,
+                "message": (
+                    f"Missing required argument(s): {', '.join(missing)}. "
+                    "The tool-call arguments were likely truncated by the "
+                    "response length limit — resend the call with all required "
+                    "arguments, splitting long text across multiple smaller "
+                    "calls (e.g. save_file then append_file chunks)."
+                ),
+            })
+
         try:
             return self.functions_map[tool_name](**kwargs)
         except Exception as e:
@@ -5285,5 +5304,13 @@ class OrchestratorTools:
                 "message": str(e),
                 "tool": tool_name
             })
+
+    def _required_params(self, tool_name: str) -> list:
+        """Return the schema-declared required parameter names for a tool."""
+        for schema in self.openai_schemas:
+            fn = schema.get("function", {})
+            if fn.get("name") == tool_name:
+                return fn.get("parameters", {}).get("required", []) or []
+        return []
 
 
