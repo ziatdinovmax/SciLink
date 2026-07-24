@@ -755,6 +755,12 @@ class PlanningOrchestratorAgent:
             else:
                 planner_kwargs["kb_base_path"] = str(self.knowledge_dir / "default_kb")
         self.planner = PlanningAgent(**planner_kwargs)
+        if getattr(self, "_pending_planner_state", None):
+            self.planner.state = self._pending_planner_state
+            n_hist = len(self._pending_planner_state.get("plan_history", []))
+            print(f"    ✅ Planner campaign state restored "
+                  f"({n_hist} plan iteration(s))")
+            self._pending_planner_state = None
 
         # Literature & Molecules agents (orchestrator-level tools)
         self.lit_agent = None
@@ -1185,7 +1191,15 @@ class PlanningOrchestratorAgent:
         try:
             with open(self.checkpoint_path, 'r') as f:
                 state = json.load(f)
-            
+
+            # Stash the PLANNER's campaign state (current_plan,
+            # plan_history, candidates, literature provenance) — the planner
+            # is constructed AFTER this restore runs, so it is applied right
+            # after construction. The save side always recorded it; without
+            # the reload a restored child answered 'no campaign plan exists'
+            # to every follow-up.
+            self._pending_planner_state = state.get("planner_state") or None
+
             self.active_scalarizer_script = state.get("active_scalarizer_script")
             self.expected_input_columns = state.get("expected_input_columns")
 
@@ -1401,6 +1415,11 @@ class PlanningOrchestratorAgent:
             # _active_output_subdir is scoped to this call; clear it so a
             # later direct chat() on the same instance writes to base_dir.
             self._active_output_subdir = None
+            # A delegation-driven child sees ~1 message per delegation and
+            # never reaches the 10-message auto-checkpoint cadence — so a
+            # meta restore found no checkpoint and rebuilt the child FRESH,
+            # losing the campaign. Checkpoint after every delegation.
+            self._auto_checkpoint()
 
         files_produced = sorted(_snapshot_files() - files_before)
 

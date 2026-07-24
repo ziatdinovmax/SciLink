@@ -1590,6 +1590,15 @@ class MetaOrchestratorAgent:
             )
         self.last_checkpoint_message_count = self.message_count
         self._save_history()
+        # Saving the session means the TREE: snapshot every instantiated
+        # child too, so a restore recovers their campaign state no matter
+        # how few messages each child has seen.
+        for name, child in self._children.items():
+            try:
+                if hasattr(child, "_auto_checkpoint"):
+                    child._auto_checkpoint()
+            except Exception as e:  # noqa: BLE001 - one child must not block the save
+                logging.warning(f"Child '{name}' checkpoint failed: {e}")
         return str(self.checkpoint_path)
 
     def _trim_history(self, history: List[Dict], max_messages: int = None) -> List[Dict]:
