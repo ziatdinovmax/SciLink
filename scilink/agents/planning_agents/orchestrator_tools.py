@@ -810,15 +810,12 @@ class OrchestratorTools:
                                  else _hb_state["total"])
                     if remaining == 0:
                         continue
-                    detail = (f" — waiting on: "
-                              f"{', '.join(sorted(pending)[:4])}"
-                              if pending else "")
                     mins = int((_time.time() - _hb_t0) / 60)
                     print(f"  ⏳ {remaining} of {_hb_state['total']} "
                           f"literature search"
                           f"{'es' if _hb_state['total'] != 1 else ''} still "
                           f"running ({mins} min elapsed; typically 10-15 "
-                          f"min total){detail}")
+                          f"min total)")
 
             _threading.Thread(target=_heartbeat, daemon=True).start()
 
