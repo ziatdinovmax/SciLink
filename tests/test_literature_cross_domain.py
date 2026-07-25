@@ -187,4 +187,4 @@ def test_tool_description_states_when_to_use_and_when_not(tool):
     # loss was measured for grounding-only retrieval too, and the remedy is
     # constraint->step mapping, not withholding a search type.
     assert "AVOID" not in st
-    assert "parallel" in desc.lower() or "CONCURRENTLY" in desc
+    assert "parallel" in desc.lower() or "concurrent" in desc.lower()
