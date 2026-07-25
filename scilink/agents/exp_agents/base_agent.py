@@ -907,7 +907,7 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
                 for img_data in stored_images[:5]:
                     if isinstance(img_data, dict) and 'label' in img_data and 'data' in img_data:
                         prompt_parts.append(f"\n**{img_data['label']}:**")
-                        prompt_parts.append({"mime_type": "image/jpeg", "data": img_data['data']})
+                        prompt_parts.append({"mime_type": self._image_mime_type(img_data['data']), "data": img_data['data']})
             
             if novelty_context:
                 prompt_parts.append(f"\n\n## Novelty Context\n{novelty_context}")
@@ -1299,6 +1299,30 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
         """Retrieve stored analysis images."""
         return self._stored_analysis_images.copy()
 
+    @staticmethod
+    def _image_mime_type(data) -> str:
+        """Best-effort media type from magic bytes; stored figures are PNGs
+        more often than JPEGs, and strict providers (Bedrock) reject a
+        declared type that doesn't match the payload. Handles raw bytes and
+        base64 strings; defaults to JPEG when unrecognized."""
+        if isinstance(data, (bytes, bytearray)):
+            head = bytes(data[:8])
+            if head.startswith(b"\x89PNG"):
+                return "image/png"
+            if head.startswith(b"GIF8"):
+                return "image/gif"
+            if head.startswith(b"RIFF"):
+                return "image/webp"
+        else:
+            s = str(data)
+            if s.startswith("iVBOR"):       # base64 of \x89PNG
+                return "image/png"
+            if s.startswith("R0lGO"):       # base64 of GIF8
+                return "image/gif"
+            if s.startswith("UklGR"):       # base64 of RIFF (webp)
+                return "image/webp"
+        return "image/jpeg"
+
     def _clear_stored_images(self) -> None:
         """Clear stored images to free memory."""
         self._stored_analysis_images = []
@@ -1562,7 +1586,7 @@ Maintain the same JSON output format with "detailed_analysis" and "scientific_cl
                 for img_data in stored_images:
                     if isinstance(img_data, dict) and 'label' in img_data and 'data' in img_data:
                         prompt_parts.append(f"\n{img_data['label']}:")
-                        prompt_parts.append({"mime_type": "image/jpeg", "data": img_data['data']})
+                        prompt_parts.append({"mime_type": self._image_mime_type(img_data['data']), "data": img_data['data']})
             
             if system_info:
                 prompt_parts.append(self._build_system_info_prompt_section(system_info))

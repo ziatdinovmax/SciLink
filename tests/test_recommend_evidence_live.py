@@ -131,3 +131,20 @@ def test_image_live():
         ["HAADF-STEM overview image at the current field of view — the "
          "analyzed image"],
         "image_aunp")
+
+
+def test_same_agent_recommend_with_stored_figures_live():
+    """#382 repro: analyze -> recommend on the SAME agent (stored PNG figures
+    attached). Pre-fix this 400'd on Bedrock (PNG declared as image/jpeg)."""
+    from scilink.agents.exp_agents.curve_fitting_agent import CurveFittingAgent
+    d = BENCH / "EELS/EELS_staged/strong/EEL_8"
+    meta = json.loads((d / "metadata.json").read_text())
+    agent = CurveFittingAgent(model_name=MODEL, api_key=None,
+                              enable_human_feedback=False,
+                              output_dir=str(RUNS / "eels_382_same_agent"),
+                              max_verification_iterations=1)
+    res = agent.analyze(str(d / "data1.csv"), system_info=meta)
+    assert res.get("status") == "success"
+    assert agent._get_stored_analysis_images(), "no stored figures — repro invalid"
+    out = agent.recommend_measurements(analysis_result=res, system_info=meta)
+    _contract_checks(out, "eels same-agent with figures (#382)")

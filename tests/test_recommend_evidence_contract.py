@@ -100,3 +100,28 @@ def test_prompt_variants_declare_target():
     )
     for v in (C, S, I):
         assert "target" in v and "expected_signature" in v
+
+
+def test_image_mime_type_sniffing():
+    """#382: stored figures must be declared with their real media type."""
+    import base64
+    from scilink.agents.exp_agents.base_agent import BaseAnalysisAgent
+    sniff = BaseAnalysisAgent._image_mime_type
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
+    jpg = b"\xff\xd8\xff\xe0" + b"\x00" * 8
+    assert sniff(png) == "image/png"
+    assert sniff(jpg) == "image/jpeg"
+    assert sniff(base64.b64encode(png).decode()) == "image/png"
+    assert sniff(base64.b64encode(jpg).decode()) == "image/jpeg"
+    assert sniff("garbage") == "image/jpeg"  # safe default
+
+
+def test_stored_png_declared_as_png_in_recommendation_prompt():
+    import base64
+    agent = _bare_agent(PAYLOAD)
+    png_b64 = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16).decode()
+    agent._stored_analysis_images = [{"label": "Fit", "data": png_b64}]
+    out = agent._generate_recommendations({"detailed_analysis": "x"})
+    assert out["status"] == "success"
+    img_parts = [p for p in agent.model.last_contents if isinstance(p, dict)]
+    assert img_parts and img_parts[0]["mime_type"] == "image/png"
