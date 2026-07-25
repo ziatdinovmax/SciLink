@@ -927,8 +927,13 @@ class OrchestratorTools:
             else:
                 _mapping = (f"{_q} x 1 search type ({label}) = {n_jobs} "
                             f"search{'es' if n_jobs != 1 else ''}")
-            _batch_note = (f", running {MAX_CONCURRENT} at a time in "
-                           f"{n_batches} sequential batches"
+            # Spell out the actual batch sizes — 'running 6 at a time in 2
+            # batches' reads as 6 x 2 = 12 when the last batch only carries
+            # the remainder.
+            _batch_sizes = [min(MAX_CONCURRENT, n_jobs - s)
+                            for s in range(0, n_jobs, MAX_CONCURRENT)]
+            _batch_note = (f", run in {n_batches} sequential batches of "
+                           + " then ".join(str(b) for b in _batch_sizes)
                            if n_batches > 1 else "")
             print(f"  ⚡ Tool: Searching literature: {_mapping}{_batch_note}")
             for qi, o in enumerate(objectives, 1):

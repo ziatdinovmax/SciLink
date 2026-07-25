@@ -202,7 +202,8 @@ def test_intro_states_question_times_type_multiplication(tool, capsys):
     out = capsys.readouterr().out
     assert ("4 questions, each searched 2 ways "
             "(hypothesis_context, cross_domain) = 8 searches") in out
-    assert "running 6 at a time in 2 sequential batches" in out
+    # exact batch sizes, not 'batches of 6' — that read as 6 x 2 = 12
+    assert "run in 2 sequential batches of 6 then 2" in out
     assert "10-15 minutes per batch" in out
     assert "expect ~20-30 minutes total" in out
 
