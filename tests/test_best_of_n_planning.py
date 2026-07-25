@@ -794,7 +794,8 @@ def test_unknown_concept_keys_are_not_silently_dropped(capsys):
         [{"title": "T", "operando_necessity": "state vanishes at rest"}]),
         ideation=True)
     out = capsys.readouterr().out
-    assert "operando_necessity" in out and "state vanishes at rest" in out
+    # rendered for humans ("Operando necessity"), content never dropped
+    assert "Operando necessity" in out and "state vanishes at rest" in out
 
 
 def test_reasoning_passes_see_every_direction():
@@ -1009,3 +1010,69 @@ def test_output_rules_ride_both_tiers(monkeypatch):
                                 selection_profile="lab")
     assert seen["instructions"] == pr.HYPOTHESIS_GENERATION_INSTRUCTIONS
     assert seen["fallback_instructions"] == pr.HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK
+
+
+# --------------------------------- title resolution for author-chosen keys
+
+OBJECTIVE_SHAPED = [{
+    "id": "PS-1", "regime": "Photosynthetic / photocatalytic",
+    "a_title_and_system": ("TITLE: 'Catch the injection before the pump' — "
+                           "bacteriorhodopsin-on-TiO2 photoelectrode. BIOTIC "
+                           "component: oriented purple-membrane patches."),
+    "b_operando_only_question": "Does the abiotic change LEAD or lag?",
+    "f_ai_closed_loop": "Decision agent picks the next perturbation.",
+}]
+
+
+def test_concept_title_survives_author_chosen_keys():
+    """When the objective mandates its own element list, the model uses THOSE
+    as concept keys and never emits `title` — every card rendered
+    'Untitled' (seen live)."""
+    from scilink.agents.planning_agents.user_interface import (
+        concept_title, humanize_key)
+    assert concept_title(OBJECTIVE_SHAPED[0], 1) == \
+        "Catch the injection before the pump"
+    assert concept_title({"title": "Plain Title"}, 1) == "Plain Title"
+    assert concept_title({"name": "By Name"}, 1) == "By Name"
+    assert concept_title({"id": "X", "tier": "1"}, 3) == "Direction 3"
+    assert concept_title({"id": "X", "rationale": "Because it matters. More."},
+                         2) == "Because it matters"
+    assert humanize_key("a_title_and_system") == "Title and system"
+    assert humanize_key("f_ai_closed_loop") == "Ai closed loop"
+    assert humanize_key("regime") == "Regime"
+
+
+def test_all_three_renderers_show_a_real_title(tmp_path, capsys):
+    from scilink.agents.planning_agents.user_interface import display_plan_summary
+    from scilink.agents.planning_agents.html_generator import HTMLReportGenerator
+    from scilink.agents.planning_agents.orchestrator_tools import OrchestratorTools
+
+    plan = _concepts_plan(OBJECTIVE_SHAPED)
+    plan["stage"] = "Science Draft"
+
+    display_plan_summary(plan, ideation=True)
+    cli = capsys.readouterr().out
+    assert "PS-1: Catch the injection before the pump" in cli
+    assert "Untitled" not in cli
+    assert "Title and system:" in cli and "a_title_and_system" not in cli
+
+    state = {"objective": "o", "plan_history": [plan], "current_plan": plan,
+             "experimental_results": [], "action_history": []}
+    out = tmp_path / "p.html"
+    HTMLReportGenerator(state).generate(str(out))
+    h = out.read_text()
+    assert "Catch the injection before the pump" in h
+    assert "Untitled" not in h
+    assert "Title and system" in h
+
+    st = {"objective": "o", "current_plan": plan,
+          "plan_candidates": {"candidates": [plan], "selected_index": 1,
+                              "judge": {"scores": [], "reasoning": "r"}}}
+    tools = OrchestratorTools.__new__(OrchestratorTools)
+    tools.orch = SimpleNamespace(planner=SimpleNamespace(state=st),
+                                 base_dir=tmp_path, _active_output_subdir=None)
+    tools._output_dir = lambda: tmp_path
+    doss = Path(tools._write_ideation_report()).read_text()
+    assert "Catch the injection before the pump" in doss
+    assert "Untitled" not in doss
+    assert "*Title and system:*" in doss

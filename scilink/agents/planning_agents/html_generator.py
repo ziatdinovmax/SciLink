@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 from typing import Dict, Any, List
 
-from .user_interface import format_caveats
+from .user_interface import format_caveats, concept_title, humanize_key
 
 class HTMLReportGenerator:
     def __init__(self, agent_state: Dict[str, Any]):
@@ -216,7 +216,7 @@ class HTMLReportGenerator:
                     blocks.append(f"<li>{html.escape(str(c))}</li>")
                     continue
                 label = html.escape(str(c.get("id") or n))
-                title = html.escape(str(c.get("title", "Untitled")))
+                title = html.escape(concept_title(c, n))
                 tier = (f" <em>(tier {html.escape(str(c['tier']))})</em>"
                         if c.get("tier") else "")
                 rows = ""
@@ -230,8 +230,8 @@ class HTMLReportGenerator:
                         body = f"<ul>{inner}</ul>"
                     else:
                         body = self._markdown_to_html(str(val))
-                    rows += (f"<div><strong>{html.escape(key)}:</strong> "
-                             f"{body}</div>")
+                    rows += (f"<div><strong>{html.escape(humanize_key(key))}:"
+                             f"</strong> {body}</div>")
                 blocks.append(f"<li><strong>{label}. {title}</strong>{tier}"
                               f"{rows}</li>")
             concepts_html = f"""

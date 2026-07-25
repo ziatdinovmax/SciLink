@@ -496,9 +496,10 @@ class OrchestratorTools:
                     if not isinstance(c, dict):
                         lines += [f"**{n}.** {c}", ""]
                         continue
+                    from .user_interface import concept_title, humanize_key
                     tier = f" *(tier {c['tier']})*" if c.get("tier") else ""
                     lines.append(f"**{c.get('id') or n}. "
-                                 f"{c.get('title', 'Untitled')}**{tier}")
+                                 f"{concept_title(c, n)}**{tier}")
                     for key in ("hypothesis", "rationale", "novelty"):
                         if c.get(key):
                             lines.append(f"- *{key.capitalize()}:* {c[key]}")
@@ -509,7 +510,9 @@ class OrchestratorTools:
                     for k, v in c.items():
                         if k not in ("id", "tier", "title", "hypothesis",
                                      "rationale", "novelty", "details") and v:
-                            lines.append(f"- *{k}:* {v}")
+                            if isinstance(v, list):
+                                v = "; ".join(str(x) for x in v)
+                            lines.append(f"- *{humanize_key(k)}:* {v}")
                     lines.append("")
 
             for key, title in (("hypothesis", "Hypothesis"),

@@ -58,6 +58,51 @@ def _print_program(steps: List[Any], numbered: bool) -> None:
                             subsequent_indent=cont))
 
 
+def concept_title(c: Dict[str, Any], fallback_index: Any = "") -> str:
+    """Best available one-line title for a concept entry.
+
+    Authors do not always emit `title`: when the objective mandates its own
+    element list (seen live: "a_title_and_system", "b_operando_only_question",
+    ...) the model uses THOSE as the keys, and every card rendered as
+    "Untitled". Resolve in order: an exact `title`, any key whose name
+    mentions title/name, then the first short-ish string value — so the one
+    scannable line per direction is never empty.
+    """
+    if not isinstance(c, dict):
+        return str(c)[:120]
+    exact = c.get("title")
+    if isinstance(exact, str) and exact.strip():
+        return exact.strip()
+    for k, v in c.items():
+        if not isinstance(v, str) or not v.strip():
+            continue
+        if "title" in k.lower() or "name" in k.lower():
+            t = v.strip()
+            # "TITLE: 'Catch the injection' — system description..." -> the
+            # quoted/leading clause is the title; keep the rest for the body.
+            t = re.sub(r"^TITLE\s*:\s*", "", t, flags=re.I).strip()
+            m = re.match(r"^['\"“](.+?)['\"”]", t)
+            if m:
+                return m.group(1).strip()
+            return t.split(". ")[0][:120].strip()
+    for k, v in c.items():
+        if k in ("id", "tier") or not isinstance(v, str) or not v.strip():
+            continue
+        return v.strip().split(". ")[0][:120]
+    return f"Direction {fallback_index}" if fallback_index else "Untitled"
+
+
+def humanize_key(key: str) -> str:
+    """Render an author-chosen field name for humans.
+
+    Objective-mandated element names arrive as `a_title_and_system` /
+    `f_ai_closed_loop`; strip the ordering prefix and the underscores so the
+    card reads as prose rather than as JSON keys.
+    """
+    k = re.sub(r"^[a-z]_", "", str(key))
+    return k.replace("_", " ").strip().capitalize()
+
+
 def _print_concepts(concepts: List[Any]) -> None:
     """Render a `concepts` portfolio: one block per research direction.
 
@@ -74,7 +119,7 @@ def _print_concepts(concepts: List[Any]) -> None:
             continue
         label = c.get("id") or str(n)
         tier = f"  ·  tier {c['tier']}" if c.get("tier") else ""
-        print(f"\n  ▸ {label}: {c.get('title', 'Untitled')}{tier}")
+        print(f"\n  ▸ {label}: {concept_title(c, n)}{tier}")
         for key in ("hypothesis", "rationale", "novelty"):
             if c.get(key):
                 print(f"     {key.capitalize()}:")
@@ -87,8 +132,12 @@ def _print_concepts(concepts: List[Any]) -> None:
             print(_wrap_field(str(details), indent="       "))
         for key, val in c.items():
             if key not in KNOWN and val:
-                print(f"     {key}:")
-                print(_wrap_field(val, indent="       "))
+                print(f"     {humanize_key(key)}:")
+                if isinstance(val, list):
+                    for item in val:
+                        print(_wrap_field(str(item), indent="       - "))
+                else:
+                    print(_wrap_field(val, indent="       "))
 
 
 def display_plan_summary(result: Dict[str, Any],

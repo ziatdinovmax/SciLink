@@ -232,6 +232,10 @@ entry carries:
   "novelty"    — what is new about it
   "details"    — list of strings for any further per-direction elements the
                  objective asks for, one string per element
+`id` and `title` are REQUIRED on every entry — a bare one-line title, even
+when the objective prescribes its own element list, because they are how a
+reader scans the portfolio; put the objective's own elements in `details` or
+as extra keys ALONGSIDE them, never instead of them.
 Keep `experimental_steps` for protocol shared across the portfolio, or leave
 it short. A single-direction answer needs no `concepts` list at all."""
 
