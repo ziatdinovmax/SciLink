@@ -107,7 +107,7 @@ def _build_optimization_skill_description() -> str:
     return " ".join(parts)
 
 
-def resolve_n_candidates(requested, planner_state) -> int:
+def resolve_n_candidates(requested, planner_state, new_campaign: bool = False) -> int:
     """
     Best-of-N default policy for ``generate_initial_plan`` (issue #377).
 
@@ -118,13 +118,17 @@ def resolve_n_candidates(requested, planner_state) -> int:
     "raise N when open-ended" prompt guidance never triggered. Any later
     plan in the campaign defaults to 1: follow-ups iterate on a committed
     strategy, and the runner-up fallback already covers plan replacement.
+
+    ``new_campaign`` marks a call that will START a new campaign in an
+    existing session (issue #396) — its plan is a campaign-first plan even
+    though ``current_plan`` still holds the previous campaign's plan.
     """
     if requested is not None:
         try:
             return max(1, min(int(requested), 4))
         except (TypeError, ValueError):
             return 1
-    is_first_plan = not (planner_state or {}).get("current_plan")
+    is_first_plan = new_campaign or not (planner_state or {}).get("current_plan")
     return 3 if is_first_plan else 1
 
 
@@ -139,12 +143,12 @@ class OrchestratorTools:
             orchestrator_instance: Reference to the parent OrchestratorAgent
         """
         self.orch = orchestrator_instance
-        
+
         # Build function map and schemas
         self.functions_map: Dict[str, Callable] = {}
         self.openai_schemas: list = []
         self.gemini_functions: list = []
-        
+
         self._register_all_tools()
 
     def _get_human_feedback_enabled(self) -> bool:
@@ -501,43 +505,170 @@ class OrchestratorTools:
         print(f"    📄 Ideation report saved: {path}")
         return str(path)
 
-    def _latest_literature_file(self) -> Optional[Path]:
-        """Newest literature_search_*.md anywhere in the SESSION, if any.
+    def _planner_state(self):
+        """Planner session state, or None when the planner has none (yet)."""
+        return getattr(getattr(self.orch, "planner", None), "state", None)
 
-        Matched by GLOB, not exact name — multi-type searches save under
-        labels like 'literature_search_hypothesis_context+cross_domain.md',
-        which an exact-name lookup misses. Searched session-wide (recursive
-        from base_dir), not just the current output dir: under the meta,
-        each delegation writes into its own delegations/<NN>_<slug>/, so a
-        refine delegation's literature lives in an EARLIER delegation's dir.
+    @property
+    def _pending_lit(self) -> list:
+        """Campaign-literature entries recorded before the planner has any
+        session state (e.g. search_literature before the first plan).
+        Folded into planner state on first access afterwards — see
+        _lit_registry(). Lazily created so partially-constructed tools
+        instances (tests build them via __new__) still work."""
+        if getattr(self, "_prestate_lit", None) is None:
+            self._prestate_lit = []
+        return self._prestate_lit
+
+    def _campaign_id(self) -> int:
+        """Current campaign id from planner state (1 when unset/legacy)."""
+        return int((self._planner_state() or {}).get("campaign_id") or 1)
+
+    def _lit_registry(self) -> list:
+        """The campaign-literature registry: [{'path', 'campaign_id'}, ...].
+
+        Lives in planner state (so it rides session checkpoints and meta
+        restores) once state exists; entries recorded before that are held
+        on the tools instance and folded in on first access afterwards.
+        ``campaign_id`` None marks a pending entry — literature saved
+        before any campaign was active, claimed by the next plan call.
         """
+        st = self._planner_state()
+        if isinstance(st, dict) and st:
+            reg = st.setdefault("campaign_literature", [])
+            pending = self._pending_lit
+            if pending:
+                known = {(e.get("path"), e.get("campaign_id")) for e in reg}
+                reg.extend(e for e in pending
+                           if (e.get("path"), e.get("campaign_id")) not in known)
+                self._prestate_lit = []
+            return reg
+        return self._pending_lit
+
+    def _record_literature_file(self, path) -> None:
+        """Register a freshly saved literature file (issue #396).
+
+        Tagged to the current campaign when one is active (a plan exists);
+        otherwise left pending for the next plan call to claim.
+        """
+        st = self._planner_state() or {}
+        cid = (int(st.get("campaign_id") or 1)
+               if st.get("current_plan") else None)
+        self._lit_registry().append(
+            {"path": str(Path(path).resolve()), "campaign_id": cid})
+
+    def _adopt_literature(self, explicit_context=None) -> None:
+        """Claim literature for the CURRENT campaign: pending entries plus
+        any file paths explicitly passed as literature_context. Called
+        after a successful plan/refine so each campaign's corpus is exactly
+        what it searched for or was explicitly given (issue #396)."""
+        cid = self._campaign_id()
+        reg = self._lit_registry()
+        for e in reg:
+            if e.get("campaign_id") is None:
+                e["campaign_id"] = cid
+        for p in self._context_file_paths(explicit_context):
+            if not any(e.get("path") == p and e.get("campaign_id") == cid
+                       for e in reg):
+                reg.append({"path": p, "campaign_id": cid})
+
+    def _prior_campaign_literature(self, explicit_context) -> list:
+        """File paths in ``explicit_context`` that the registry attributes
+        ONLY to previous campaigns — candidate cross-topic contamination
+        when the current call starts a new campaign."""
+        cid = self._campaign_id()
+        owners: Dict[str, set] = {}
+        for e in self._lit_registry():
+            owners.setdefault(str(e.get("path")), set()).add(e.get("campaign_id"))
+        return [p for p in self._context_file_paths(explicit_context)
+                if p in owners and cid not in owners[p]
+                and None not in owners[p]]
+
+    @staticmethod
+    def _context_file_paths(value) -> list:
+        """Existing-file paths named by a literature_context argument —
+        mirrors _resolve_context_text's path resolution (single path,
+        comma-separated paths, or a list; raw text yields nothing)."""
+        if value is None:
+            return []
+        items = value if isinstance(value, list) else [value]
+        out = []
+        for item in items:
+            s = str(item).strip()
+            if not s:
+                continue
+            p = Path(s)
+            if p.is_file():
+                out.append(str(p.resolve()))
+                continue
+            tokens = [t.strip() for t in s.split(",") if t.strip()]
+            token_paths = [Path(t) for t in tokens]
+            if len(tokens) > 1 and all(tp.is_file() for tp in token_paths):
+                out.extend(str(tp.resolve()) for tp in token_paths)
+        return out
+
+    def _latest_literature_file(self) -> Optional[Path]:
+        """Newest literature file belonging to the CURRENT campaign.
+
+        Campaign-scoped via the literature registry (issue #396): a session
+        can hold several unrelated campaigns, and the old session-wide
+        newest-file glob handed one campaign's corpus to another campaign's
+        refine / white paper. Only same-campaign entries are eligible here;
+        a campaign that supplied no literature gets None — an honest miss,
+        never another topic's corpus.
+
+        Legacy fallback: a session restored from before the registry
+        existed has literature files on disk but no entries — for those,
+        and only while no campaign transition has ever happened, fall back
+        to the old session-wide glob (matched by GLOB, not exact name —
+        multi-type searches save under labels like
+        'literature_search_hypothesis_context+cross_domain.md'; recursive
+        from base_dir because under the meta each delegation writes into
+        its own delegations/<NN>_<slug>/).
+        """
+        cid = self._campaign_id()
+        reg = self._lit_registry()
+        files = [Path(e["path"]) for e in reg
+                 if e.get("campaign_id") == cid and e.get("path")]
+        files = [p for p in files if p.is_file()]
+        if files:
+            files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            return files[0]
+        if reg or cid > 1:
+            return None
         roots = []
         base = getattr(self.orch, "base_dir", None)
         if base:
             roots.append((Path(base), "rglob"))
         roots.append((self._output_dir(), "glob"))
         seen: set = set()
-        files = []
+        legacy = []
         for root, mode in roots:
             it = (root.rglob("literature_search_*.md") if mode == "rglob"
                   else root.glob("literature_search_*.md"))
             for p in it:
                 if str(p) not in seen:
                     seen.add(str(p))
-                    files.append(p)
-        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        return files[0] if files else None
+                    legacy.append(p)
+        legacy.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return legacy[0] if legacy else None
 
     def _write_white_paper(self, audience_context: str = None) -> str:
         """Generate the sponsor-facing white paper from the current plan and
         save it beside the plan artifacts. Returns the saved path."""
         # Last-resort literature continuity: if neither the current plan nor
-        # the campaign history carries literature, seed the state from the
-        # newest saved search so citations survive plan restructuring.
+        # the CURRENT CAMPAIGN's history carries literature, seed the state
+        # from the newest same-campaign saved search so citations survive
+        # plan restructuring. Other campaigns' literature is invisible here
+        # (issue #396): _latest_literature_file is campaign-scoped, and an
+        # earlier campaign's corpus in history must not mask this one's
+        # missing literature.
         state = self.orch.planner.state or {}
+        cid = self._campaign_id()
         has_lit = any(p.get("literature_search")
                       for p in ([state.get("current_plan") or {}]
-                                + list(state.get("plan_history") or [])))
+                                + list(state.get("plan_history") or []))
+                      if int(p.get("campaign_id") or 1) == cid)
         if not has_lit:
             lit_file = self._latest_literature_file()
             if lit_file is not None and state.get("current_plan"):
@@ -911,6 +1042,7 @@ class OrchestratorTools:
                 with open(lit_path, 'w') as f:
                     f.write(f"# Literature Search Results ({label})\n\n")
                     f.write(content)
+                self._record_literature_file(lit_path)
 
                 failed = [(f"q{oi + 1}:{t}" if len(objectives) > 1 else t)
                           for oi, t in tasks if (oi, t) not in ok]
@@ -1073,7 +1205,8 @@ class OrchestratorTools:
             molecule_context: str = None,
             n_candidates: int = None,
             selection_profile: str = "lab",
-            white_paper: bool = None
+            white_paper: bool = None,
+            new_campaign: bool = None
         ):
             """
             Generates experimental plan (science strategy only, no code).
@@ -1083,6 +1216,37 @@ class OrchestratorTools:
             """
             obj = specific_objective if specific_objective else self.orch.objective
             print(f"  ⚡ Tool: Generating Initial Plan for '{obj}'...")
+
+            # Campaign boundary (issue #396): decided up front so the
+            # best-of-N default and the stale-literature guard below see it.
+            _snc = getattr(self.orch.planner, "starts_new_campaign", None)
+            starts_new = bool(_snc(obj, new_campaign)) if _snc else False
+
+            # Guard: a NEW campaign fed literature that the registry
+            # attributes only to PREVIOUS campaigns is cross-topic
+            # contamination (live-confirmed: a chat-visible file path from
+            # an earlier brainstorm gets re-passed for an unrelated one) —
+            # unless the caller declares BOTH signals explicitly
+            # (new_campaign=true + the file), which marks deliberate reuse.
+            if starts_new and new_campaign is not True:
+                stale = self._prior_campaign_literature(literature_context)
+                if stale:
+                    return json.dumps({
+                        "status": "error",
+                        "message": (
+                            "literature_context points to literature from a "
+                            "PREVIOUS campaign on a different topic: "
+                            + ", ".join(Path(p).name for p in stale)
+                            + ". This objective starts a NEW campaign, and "
+                            "another topic's corpus must not ground it."
+                        ),
+                        "hint": (
+                            "Omit literature_context (or run "
+                            "search_literature for THIS topic first). If "
+                            "reusing that literature is deliberate, pass "
+                            "new_campaign=true together with the file."
+                        ),
+                    })
 
             # Resolve knowledge paths (with fallback to orchestrator dir)
             knowledge_list = self._resolve_knowledge_paths(knowledge_paths)
@@ -1183,7 +1347,8 @@ class OrchestratorTools:
 
             try:
                 n_cand = resolve_n_candidates(
-                    n_candidates, self.orch.planner.state)
+                    n_candidates, self.orch.planner.state,
+                    new_campaign=starts_new)
                 if n_candidates is None and n_cand > 1:
                     print(f"    🧭 New campaign — defaulting to best-of-{n_cand} "
                           "candidate plans (pass n_candidates=1 for a single plan).")
@@ -1201,7 +1366,8 @@ class OrchestratorTools:
                                           if n_cand > 1 else None),
                     selection_profile=(selection_profile
                                        if selection_profile in ("lab", "ideation")
-                                       else "lab")
+                                       else "lab"),
+                    new_campaign=new_campaign
                 )
 
                 # Store skill on orchestrator for downstream tools
@@ -1218,6 +1384,10 @@ class OrchestratorTools:
                                     or "Plan generation failed")
                     })
 
+                # Claim literature for the (possibly new) campaign: pending
+                # searches plus explicitly passed files (issue #396).
+                self._adopt_literature(literature_context)
+
                 # Save
                 output_path = self._output_dir() / "plan.json"
                 with open(output_path, 'w') as f:
@@ -1229,6 +1399,7 @@ class OrchestratorTools:
                     with open(lit_path, 'w') as f:
                         f.write("# Literature Search Results\n\n")
                         f.write(plan["literature_search"])
+                    self._record_literature_file(lit_path)
                     saved_extras.append(str(lit_path))
 
                 # Generate HTML — except for ideation runs: the report
@@ -1349,6 +1520,21 @@ class OrchestratorTools:
                     ),
                 },
                 "molecule_context": {"type": "string", "description": "File path or text from query_molecules() tool. Provides molecular design / synthesis context."},
+                "new_campaign": {
+                    "type": "boolean",
+                    "description": (
+                        "Campaign boundary. Set true when this plan starts "
+                        "a NEW research topic unrelated to the current "
+                        "campaign (e.g. a second brainstorm in the same "
+                        "session) — the previous campaign's plans and "
+                        "literature stay archived and are NOT carried into "
+                        "the new topic's plans, white papers, or "
+                        "refinements. Set false to force continuation of "
+                        "the current campaign despite a reworded "
+                        "objective. Omit to auto-detect from objective "
+                        "similarity."
+                    ),
+                },
                 "n_candidates": {
                     "type": "integer",
                     "description": (
@@ -1802,9 +1988,12 @@ class OrchestratorTools:
                 lit_text = self._resolve_context_text(literature_context)
                 print(f"    📚 Literature context provided")
             else:
-                # Auto-load the newest saved literature from the session —
-                # by glob, so multi-type labels (e.g. '...hypothesis_context
-                # +cross_domain.md') are found too.
+                # Auto-load the newest saved literature from the CURRENT
+                # campaign (campaign-scoped registry, issue #396) — matched
+                # by glob-shaped labels (e.g. '...hypothesis_context
+                # +cross_domain.md') via the registry entries. A campaign
+                # that supplied no literature refines without any; another
+                # topic's corpus is never injected.
                 lit_path = self._latest_literature_file()
                 if lit_path is not None:
                     lit_text = lit_path.read_text()
@@ -1834,6 +2023,10 @@ class OrchestratorTools:
                         "status": "error",
                         "message": plan.get("error")
                     })
+
+                # Explicitly supplied literature files now belong to this
+                # campaign's corpus (issue #396).
+                self._adopt_literature(literature_context)
 
                 # (literature_search provenance is stamped inside
                 # refine_plan itself — the single point where the refined

@@ -65,6 +65,51 @@ from .html_generator import HTMLReportGenerator
 from .base_agent import BaseAgent
 
 
+# Generic research verbiage that says nothing about WHICH campaign an
+# objective belongs to. Kept small and domain-agnostic: the point is to
+# strip words shared by virtually every objective ("investigate", "novel",
+# "materials"), so the overlap test below compares actual topic vocabulary.
+_CAMPAIGN_STOPWORDS = frozenset("""
+    the and for with from into using via under over between during
+    across within without about this that these those than not non
+    study studies investigate investigation explore exploration
+    research ideate ideation brainstorm brainstorming directions
+    direction propose proposal proposals develop development design
+    optimize optimization improve improvement improving maximize
+    minimize enhance enhancing understand understanding characterize
+    characterization analysis analyze effect effects impact impacts
+    influence driven based related property properties performance
+    condition conditions experimental experiment experiments campaign
+    campaigns plan plans planning strategy strategies approach
+    approaches method methods material materials system systems
+    new novel high low advanced controlled
+    """.split())
+
+
+def objectives_share_campaign(previous: str, new: str,
+                              min_overlap: float = 0.25) -> bool:
+    """Lexical continuity test between two campaign objectives (issue #396).
+
+    Returns True when ``new`` plausibly continues the campaign ``previous``
+    belongs to. Content words (stopwords and generic research verbiage
+    removed, naive plural fold) are compared by overlap over the smaller
+    set: a rewording or narrowing of the same topic keeps most of its
+    domain vocabulary, while an unrelated topic shares at most a stray
+    generic term. Deterministic on purpose — this is the fallback when the
+    caller does not pass ``new_campaign`` explicitly, and it must not cost
+    an LLM call. Ties toward continuity only when either side has no
+    content words at all.
+    """
+    def _tokens(text: str) -> set:
+        words = re.findall(r"[a-z][a-z0-9]{2,}", (text or "").lower())
+        return {w.rstrip("s") or w for w in words
+                if w not in _CAMPAIGN_STOPWORDS}
+    prev_t, new_t = _tokens(previous), _tokens(new)
+    if not prev_t or not new_t:
+        return True
+    overlap = len(prev_t & new_t) / min(len(prev_t), len(new_t))
+    return overlap >= min_overlap
+
 
 class PlanningAgent(BaseAgent):
     """
@@ -217,6 +262,7 @@ class PlanningAgent(BaseAgent):
         """Agent-specific state fields"""
         return {
             "objective": None,
+            "campaign_id": 1,
             "iteration_index": 0,
             "inputs": {
                 "knowledge_paths": [],
@@ -260,6 +306,45 @@ class PlanningAgent(BaseAgent):
         print(f"     • Actions logged: {len(self.state.get('action_history', []))}")
 
         
+    def starts_new_campaign(self, objective: Optional[str],
+                            new_campaign: Optional[bool] = None) -> bool:
+        """Would generating a plan for ``objective`` start a NEW campaign?
+
+        A session can hold several unrelated brainstorms/campaigns, and
+        every continuity heuristic (literature carry-forward, white-paper
+        corpus selection, refine auto-load) is scoped to ONE campaign
+        (issue #396). An explicit ``new_campaign`` signal wins in both
+        directions; otherwise lexical disjointness between the new
+        objective and the current campaign's objective decides.
+        Non-mutating — ``generate_plan`` applies the transition.
+        """
+        if not self.state or not self.state.get("objective") or not objective:
+            return False
+        if new_campaign is not None:
+            return bool(new_campaign)
+        return not objectives_share_campaign(self.state["objective"], objective)
+
+    def _apply_campaign_transition(self, objective: str) -> None:
+        """Open a new campaign: bump the id and drop the working state the
+        previous campaign would otherwise leak through (current_plan and
+        the best-of-N candidate set). History entries stay archived under
+        their own campaign_id stamps."""
+        prev_cid = int(self.state.get("campaign_id") or 1)
+        self.state["campaign_id"] = prev_cid + 1
+        self.state["current_plan"] = None
+        self.state.pop("plan_candidates", None)
+        print(f"  - 🧭 Objective changed materially — starting campaign "
+              f"#{prev_cid + 1}. The previous campaign's plans and "
+              f"literature stay archived and are NOT carried forward.")
+
+    def _stamp_campaign(self, plan_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Stamp the current campaign id onto a plan snapshot so campaign-
+        scoped consumers (white paper, literature carry-forward) can tell
+        which campaign each history entry belongs to."""
+        if isinstance(plan_dict, dict):
+            plan_dict["campaign_id"] = int(self.state.get("campaign_id") or 1)
+        return plan_dict
+
     def _finalize_literature(self, plan_dict: Dict[str, Any],
                              literature: Optional[str]) -> None:
         """Final-stamp SYSTEM-OWNED literature provenance onto a plan.
@@ -302,9 +387,18 @@ class PlanningAgent(BaseAgent):
         Raises:
             ValueError: when no plan exists yet in this campaign state.
         """
-        plan = self.state.get("current_plan") or (
-            self.state["plan_history"][-1]
-            if self.state.get("plan_history") else None
+        # Campaign scoping (issue #396): a session can hold several
+        # unrelated campaigns; the white paper must be built ONLY from the
+        # current one. Entries without a stamp predate campaign tracking
+        # and are treated as campaign 1.
+        cid = int(self.state.get("campaign_id") or 1)
+
+        def _same_campaign(p: Dict[str, Any]) -> bool:
+            return int(p.get("campaign_id") or 1) == cid
+
+        plan = self.state.get("current_plan") or next(
+            (p for p in reversed(self.state.get("plan_history") or [])
+             if _same_campaign(p)), None
         )
         if not plan or not plan.get("proposed_experiments"):
             raise ValueError(
@@ -325,11 +419,14 @@ class PlanningAgent(BaseAgent):
         # or refined plan may carry none of its own — or worse, a short
         # model-authored note ('no new search was executed...') that shadows
         # the real corpus. Take the MOST SUBSTANTIAL literature across the
-        # current plan and the whole history; length is the tiebreak because
-        # the campaign's actual corpus dwarfs any stub.
+        # current plan and the SAME-CAMPAIGN history; length is the tiebreak
+        # because the campaign's actual corpus dwarfs any stub. History from
+        # other campaigns is excluded outright (issue #396) — length must
+        # never arbitrate between two topics' corpora.
         candidates_lit = [literature] + [
             prev.get("literature_search")
             for prev in (self.state.get("plan_history", []) or [])
+            if _same_campaign(prev)
         ]
         candidates_lit = [c for c in candidates_lit if c]
         literature = (max(candidates_lit, key=lambda c: len(str(c)))
@@ -384,9 +481,14 @@ class PlanningAgent(BaseAgent):
             # through as raw text) — resolve them to the actual documents so
             # citation never sees bare filenames.
             if len(lit) < 4096 and "\n" not in lit.strip():
+                def _is_file(p: Path) -> bool:
+                    try:
+                        return p.is_file()
+                    except OSError:  # e.g. name-too-long for raw prose
+                        return False
                 cand_paths = [Path(t.strip()) for t in lit.split(",")
                               if t.strip()]
-                if cand_paths and all(p.is_file() for p in cand_paths):
+                if cand_paths and all(_is_file(p) for p in cand_paths):
                     lit = "\n\n".join(p.read_text() for p in cand_paths)
             parts.append("\n## Literature Context:\n" + lit[:15000])
             # Long syntheses put their bibliographies well past any sane
@@ -612,7 +714,8 @@ class PlanningAgent(BaseAgent):
                     external_context: Optional[str] = None,
                     n_candidates: int = 1,
                     candidate_report_dir: Optional[str] = None,
-                    selection_profile: str = "lab") -> Dict[str, Any]:
+                    selection_profile: str = "lab",
+                    new_campaign: Optional[bool] = None) -> Dict[str, Any]:
         """
         Generate experimental plan (science only, no implementation code/protocol).
 
@@ -669,6 +772,12 @@ class PlanningAgent(BaseAgent):
                 n_candidates >= 2: the single-plan path ignores the profile
                 entirely (documented behavior — ideation is a property of
                 the multi-candidate process).
+            new_campaign: Campaign-boundary signal (issue #396). True forces
+                a new campaign (prior campaign's plans/literature archived,
+                not carried forward); False forces continuation of the
+                current campaign despite a reworded objective; None (default)
+                auto-detects from lexical objective similarity. Ignored on a
+                fresh state.
 
         Returns:
             Dict containing the experimental plan with keys:
@@ -700,6 +809,8 @@ class PlanningAgent(BaseAgent):
         else:
             print(f"  - 🔄 Appending to existing research session...")
             if objective:
+                if self.starts_new_campaign(objective, new_campaign):
+                    self._apply_campaign_transition(objective)
                 self.state["objective"] = objective
         
         # Load skill (once, at entry point)
@@ -863,7 +974,7 @@ class PlanningAgent(BaseAgent):
         # Snapshot 1: Science Draft
         res["iteration"] = current_iter
         res["stage"] = "Science Draft"
-        self.state["plan_history"].append(res.copy())
+        self.state["plan_history"].append(self._stamp_campaign(res).copy())
         self.state["current_plan"] = res
         
         def _conform_and_critique(res):
@@ -885,7 +996,7 @@ class PlanningAgent(BaseAgent):
 
                     res["iteration"] = current_iter
                     res["stage"] = "Auto-Corrected"
-                    self.state["plan_history"].append(res.copy())
+                    self.state["plan_history"].append(self._stamp_campaign(res).copy())
                     self.state["current_plan"] = res
 
                     self._log_action(
@@ -962,7 +1073,7 @@ class PlanningAgent(BaseAgent):
                     res["literature_search"] = external_context
                 res["iteration"] = current_iter
                 res["stage"] = "Science Draft (human-selected candidate)"
-                self.state["plan_history"].append(res.copy())
+                self.state["plan_history"].append(self._stamp_campaign(res).copy())
                 self.state["current_plan"] = res
                 self._log_action(
                     action="bestofn_human_override",
@@ -1030,7 +1141,7 @@ class PlanningAgent(BaseAgent):
                         fresh = sorted(fresh, key=lambda f: _order.get(f.get("severity"), 1))
                         res["critic_findings"] = fresh
 
-                    self.state["plan_history"].append(res.copy())
+                    self.state["plan_history"].append(self._stamp_campaign(res).copy())
                     self.state["current_plan"] = res
                     display_plan_summary(res)
                     print("✅ Plan updated.")
@@ -1130,7 +1241,7 @@ class PlanningAgent(BaseAgent):
         # Snapshot: Code Generated
         res["iteration"] = current_iter
         res["stage"] = "Code Generated"
-        self.state["plan_history"].append(res.copy())
+        self.state["plan_history"].append(self._stamp_campaign(res).copy())
         self.state["current_plan"] = res
 
         self._log_action(
@@ -1186,7 +1297,7 @@ class PlanningAgent(BaseAgent):
                     
                     res["iteration"] = current_iter
                     res["stage"] = "Code Refined"
-                    self.state["plan_history"].append(res.copy())
+                    self.state["plan_history"].append(self._stamp_campaign(res).copy())
                     self.state["current_plan"] = res
 
                     self._log_action(
@@ -1568,7 +1679,7 @@ Select the most appropriate strategy:
         # Snapshot: Reasoning Draft
         new_plan["iteration"] = next_plan_idx
         new_plan["stage"] = "Reasoning Draft"
-        self.state["plan_history"].append(new_plan.copy())
+        self.state["plan_history"].append(self._stamp_campaign(new_plan).copy())
         self.state["current_plan"] = new_plan
 
         # Resolution-check re-critique so caveats describe the revised plan.
@@ -1619,7 +1730,7 @@ Select the most appropriate strategy:
                 # Snapshot: Human Refined
                 new_plan["iteration"] = next_plan_idx
                 new_plan["stage"] = "Human Refined (Science)"
-                self.state["plan_history"].append(new_plan.copy())
+                self.state["plan_history"].append(self._stamp_campaign(new_plan).copy())
                 self.state["current_plan"] = new_plan
                 new_plan = self._recritique_revision(
                     new_plan, prior_plan=prior_plan,
@@ -1712,7 +1823,7 @@ Select the most appropriate strategy:
         # Keep same iteration — this is an in-place adjustment, not a new cycle
         new_plan["iteration"] = current_plan.get("iteration", 0)
         new_plan["stage"] = "Constraint Adjusted"
-        self.state["plan_history"].append(new_plan.copy())
+        self.state["plan_history"].append(self._stamp_campaign(new_plan).copy())
         self.state["current_plan"] = new_plan
 
         # Resolution-check re-critique: a constraint adjustment often resolves
@@ -1757,7 +1868,7 @@ Select the most appropriate strategy:
                 )
                 new_plan["iteration"] = current_plan.get("iteration", 0)
                 new_plan["stage"] = "Human Refined (Constraint)"
-                self.state["plan_history"].append(new_plan.copy())
+                self.state["plan_history"].append(self._stamp_campaign(new_plan).copy())
                 self.state["current_plan"] = new_plan
                 new_plan = self._recritique_revision(
                     new_plan, prior_plan=prior_plan,
@@ -1834,7 +1945,7 @@ Select the most appropriate strategy:
         # Snapshot: Code Generated
         new_plan["iteration"] = next_plan_idx
         new_plan["stage"] = "Code Generated"
-        self.state["plan_history"].append(new_plan.copy())
+        self.state["plan_history"].append(self._stamp_campaign(new_plan).copy())
         self.state["current_plan"] = new_plan
 
         self._log_action(
@@ -1889,7 +2000,7 @@ Select the most appropriate strategy:
                     # Snapshot: Code Refined
                     new_plan["iteration"] = next_plan_idx
                     new_plan["stage"] = "Code Refined"
-                    self.state["plan_history"].append(new_plan.copy())
+                    self.state["plan_history"].append(self._stamp_campaign(new_plan).copy())
                     self.state["current_plan"] = new_plan
                     
                     print(f"  - 💾 Overwriting files in {temp_dir} with refined code...")
@@ -2320,7 +2431,7 @@ Select the most appropriate strategy:
             res["stage"] = "TEA Initial"
             res["iteration"] = 0 # TEA is step 0 (pre-planning)
             # Append copy to history
-            self.state["plan_history"].append(res.copy())
+            self.state["plan_history"].append(self._stamp_campaign(res).copy())
      
         self._log_action(
             action="perform_technoeconomic_analysis",
