@@ -761,29 +761,36 @@ class OrchestratorTools:
             if not objectives:
                 return json.dumps({"status": "error",
                                    "message": "No objective provided."})
-            MAX_TASKS = 6
-            if len(objectives) * len(types) > MAX_TASKS:
+            # Concurrency is bounded by BATCHING inside this single call —
+            # up to MAX_CONCURRENT searches run in parallel, extras spill
+            # into the next back-to-back batch. This fills the parallel
+            # budget before going sequential, and keeps everything in ONE
+            # tool call so the LLM never splits across turns (which would
+            # serialize). MAX_TOTAL is a wall-clock guardrail (each batch is
+            # ~10-15 min), not a concurrency limit.
+            MAX_CONCURRENT = 6
+            MAX_TOTAL = 12
+            n_jobs = len(objectives) * len(types)
+            if n_jobs > MAX_TOTAL:
                 return json.dumps({
                     "status": "error",
                     "message": (
                         f"{len(objectives)} objectives x {len(types)} search "
-                        f"types = {len(objectives) * len(types)} searches, "
-                        f"over the {MAX_TASKS}-per-call max. Fit it into ONE "
-                        f"call of <= {MAX_TASKS} searches — DO NOT split into "
-                        f"separate calls (separate calls run in separate "
-                        f"turns, i.e. SEQUENTIALLY, losing the parallelism). "
-                        f"Reduce total searches instead: drop the least "
-                        f"essential objectives, or narrow to a single "
-                        f"search_type. E.g. {len(objectives)} objectives with "
-                        f"one search_type = {len(objectives)} searches fits."),
+                        f"types = {n_jobs} searches, over the {MAX_TOTAL}-per-"
+                        f"call ceiling (~{-(-n_jobs // MAX_CONCURRENT)} "
+                        f"sequential batches of {MAX_CONCURRENT} = too long). "
+                        f"Prioritize down to <= {MAX_TOTAL} searches in this "
+                        f"one call — do NOT split into separate calls."),
                 })
 
             label = "+".join(types)
-            n_jobs = len(objectives) * len(types)
+            n_batches = -(-n_jobs // MAX_CONCURRENT)
+            _batch_note = (f" in {n_batches} batches of up to {MAX_CONCURRENT}"
+                           if n_jobs > MAX_CONCURRENT else "")
             print(f"  ⚡ Tool: Searching literature: {len(objectives)} "
                   f"question(s) x {len(types)} search type(s) ({label}) = "
-                  f"{n_jobs} concurrent search"
-                  f"{'es' if n_jobs != 1 else ''}")
+                  f"{n_jobs} search{'es' if n_jobs != 1 else ''}"
+                  f"{_batch_note}")
             for qi, o in enumerate(objectives, 1):
                 print(f"     Q{qi}: '{o[:90]}{'...' if len(o) > 90 else ''}'")
             print("     ⏱️  Deep literature searches typically take 10-15 "
@@ -838,21 +845,31 @@ class OrchestratorTools:
                 with _hb_lock:
                     _hb_state["pending"] = {_task_label(oi, t)
                                             for oi, t in tasks}
+                results = {}
                 if len(tasks) == 1:
                     oi, t = tasks[0]
-                    results = {(oi, t): search_methods[t](clean_queries[oi])}
+                    results[(oi, t)] = search_methods[t](clean_queries[oi])
                     _hb_mark_done(_task_label(oi, t))
                 else:
                     from concurrent.futures import ThreadPoolExecutor
-                    with ThreadPoolExecutor(max_workers=len(tasks)) as ex:
-                        futures = {}
-                        for oi, t in tasks:
-                            f = ex.submit(search_methods[t], clean_queries[oi])
-                            f.add_done_callback(
-                                lambda _f, _l=_task_label(oi, t):
-                                _hb_mark_done(_l))
-                            futures[(oi, t)] = f
-                        results = {k: f.result() for k, f in futures.items()}
+                    # Greedy batches of <= MAX_CONCURRENT, back-to-back. A
+                    # 5-search request is ONE parallel batch; an 8-search
+                    # request is 6 concurrent then 2 concurrent — never 2+3
+                    # sub-optimal splits, and never sequential when it fits
+                    # the parallel budget.
+                    for start in range(0, len(tasks), MAX_CONCURRENT):
+                        batch = tasks[start:start + MAX_CONCURRENT]
+                        with ThreadPoolExecutor(max_workers=len(batch)) as ex:
+                            futures = {}
+                            for oi, t in batch:
+                                f = ex.submit(search_methods[t],
+                                              clean_queries[oi])
+                                f.add_done_callback(
+                                    lambda _f, _l=_task_label(oi, t):
+                                    _hb_mark_done(_l))
+                                futures[(oi, t)] = f
+                            for k, f in futures.items():
+                                results[k] = f.result()
 
                 ok = {k: r for k, r in results.items()
                       if r.get("status") == "success"}
@@ -940,15 +957,15 @@ class OrchestratorTools:
                 "DECOMPOSE, don't concatenate: each objective must be ONE "
                 "focused question — a query stuffed with several distinct "
                 "aspects returns a shallow synthesis of all of them. Pass a "
-                "LIST of objectives to cover distinct aspects; objectives "
-                "and search types all run CONCURRENTLY and are merged into "
-                "one labelled document, so several focused searches cost "
-                "roughly the wait of one. Do ALL the searches in a SINGLE "
-                "call (up to 6 = objectives x search_types): a second call "
-                "runs in a later turn, i.e. SEQUENTIALLY (~10-15 min EACH), "
-                "so splitting doubles the wait. If you'd exceed 6, cut "
-                "objectives or search_types to fit one call — never split "
-                "across calls."
+                "LIST of objectives (and, if useful, multiple search types) "
+                "in a SINGLE call — put ALL the aspects you want covered "
+                "into this one call. The tool runs up to 6 searches "
+                "concurrently and automatically batches any extras into "
+                "back-to-back rounds, merging everything into one labelled "
+                "document. So do NOT make a second search_literature call to "
+                "cover more aspects (a second call is a later turn and runs "
+                "sequentially anyway) — just list them all here. Total "
+                "objectives x search_types must be <= 12."
             ),
             parameters={
                 "objective": {
