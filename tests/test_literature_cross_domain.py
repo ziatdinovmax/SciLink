@@ -188,3 +188,46 @@ def test_tool_description_states_when_to_use_and_when_not(tool):
     # constraint->step mapping, not withholding a search type.
     assert "AVOID" not in st
     assert "parallel" in desc.lower() or "concurrent" in desc.lower()
+
+
+# ---------------------------------------------------------------- display
+
+def test_intro_states_question_times_type_multiplication(tool, capsys):
+    """The Q-list shows DISTINCT questions; the header must say each one
+    runs once per search type — '5 questions but 10 searches' read as a
+    mismatch in live sessions — and scale the wait by batch count."""
+    func, *_ = tool
+    func([f"question {i}" for i in range(1, 5)],
+         "hypothesis_context,cross_domain")  # 8 jobs -> batches of 6 + 2
+    out = capsys.readouterr().out
+    assert ("4 questions, each searched 2 ways "
+            "(hypothesis_context, cross_domain) = 8 searches") in out
+    assert "running 6 at a time in 2 sequential batches" in out
+    assert "10-15 minutes per batch" in out
+    assert "expect ~20-30 minutes total" in out
+
+
+def test_intro_single_batch_keeps_flat_eta(tool, capsys):
+    func, *_ = tool
+    func(["q1", "q2"], "hypothesis_context,cross_domain")  # 4 jobs, 1 batch
+    out = capsys.readouterr().out
+    assert "2 questions, each searched 2 ways" in out
+    assert "sequential batches" not in out
+    assert "per batch" not in out
+    assert "typically take 10-15 minutes" in out
+
+
+def test_heartbeat_reports_running_vs_queued(tool, monkeypatch, capsys):
+    """Batches run back-to-back, so not-yet-submitted jobs are QUEUED, not
+    running — the old single 'N still running' line overstated concurrency
+    whenever a call exceeded the 6-wide budget (seen live: '10 of 10 still
+    running' with 6 in flight)."""
+    from scilink.agents.planning_agents import orchestrator_tools as ot
+    func, lit, *_ = tool
+    monkeypatch.setattr(ot, "_LIT_HEARTBEAT_SECONDS", 0.15)
+    lit.delay = 0.9  # batch 1 spans several heartbeat ticks
+    func([f"q{i}" for i in range(1, 5)],
+         "hypothesis_context,cross_domain")  # 8 jobs: 6 running + 2 queued
+    out = capsys.readouterr().out
+    assert "6 running, 2 queued of 8 literature searches" in out
+    assert "~10-15 min per batch" in out

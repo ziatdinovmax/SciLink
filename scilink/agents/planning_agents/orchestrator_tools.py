@@ -916,17 +916,33 @@ class OrchestratorTools:
 
             label = "+".join(types)
             n_batches = -(-n_jobs // MAX_CONCURRENT)
-            _batch_note = (f" in {n_batches} batches of up to {MAX_CONCURRENT}"
-                           if n_jobs > MAX_CONCURRENT else "")
-            print(f"  ⚡ Tool: Searching literature: {len(objectives)} "
-                  f"question(s) x {len(types)} search type(s) ({label}) = "
-                  f"{n_jobs} search{'es' if n_jobs != 1 else ''}"
-                  f"{_batch_note}")
+            # The Q-list below shows DISTINCT questions; when several search
+            # types are active each question runs once per type, so say that
+            # multiplication out loud — '5 questions but 10 searches' read
+            # as a mismatch in live sessions.
+            _q = f"{len(objectives)} question{'s' if len(objectives) != 1 else ''}"
+            if len(types) > 1:
+                _mapping = (f"{_q}, each searched {len(types)} ways "
+                            f"({', '.join(types)}) = {n_jobs} searches")
+            else:
+                _mapping = (f"{_q} x 1 search type ({label}) = {n_jobs} "
+                            f"search{'es' if n_jobs != 1 else ''}")
+            _batch_note = (f", running {MAX_CONCURRENT} at a time in "
+                           f"{n_batches} sequential batches"
+                           if n_batches > 1 else "")
+            print(f"  ⚡ Tool: Searching literature: {_mapping}{_batch_note}")
             for qi, o in enumerate(objectives, 1):
                 print(f"     Q{qi}: '{o[:90]}{'...' if len(o) > 90 else ''}'")
-            print("     ⏱️  Deep literature searches typically take 10-15 "
-                  "minutes — the system is working; progress is reported "
-                  "every few minutes.")
+            if n_batches > 1:
+                print(f"     ⏱️  Deep literature searches typically take "
+                      f"10-15 minutes per batch — {n_batches} sequential "
+                      f"batches, so expect ~{10 * n_batches}-"
+                      f"{15 * n_batches} minutes total; progress is "
+                      f"reported every few minutes.")
+            else:
+                print("     ⏱️  Deep literature searches typically take 10-15 "
+                      "minutes — the system is working; progress is reported "
+                      "every few minutes.")
 
             # Heartbeat so a minutes-long silent wait doesn't read as a hang
             # (Edison jobs produce no output until they complete). Tracks LIVE
@@ -937,29 +953,46 @@ class OrchestratorTools:
             _hb_stop = _threading.Event()
             _hb_t0 = _time.time()
             _hb_lock = _threading.Lock()
-            _hb_state = {"pending": None, "total": n_jobs}
+            _hb_state = {"pending": None, "running": set(), "total": n_jobs}
+
+            def _hb_mark_running(label):
+                with _hb_lock:
+                    _hb_state["running"].add(label)
 
             def _hb_mark_done(label):
                 with _hb_lock:
                     if _hb_state["pending"] is not None:
                         _hb_state["pending"].discard(label)
+                    _hb_state["running"].discard(label)
 
             def _heartbeat():
+                # Batches are sequential, so 'remaining' includes jobs that
+                # have not been SUBMITTED yet — report running and queued
+                # separately ('10 still running' overstated concurrency in
+                # live multi-batch sessions).
+                _eta = ("typically 10-15 min total" if n_batches == 1
+                        else "~10-15 min per batch")
                 while not _hb_stop.wait(_LIT_HEARTBEAT_SECONDS):
                     with _hb_lock:
                         pending = (set(_hb_state["pending"])
                                    if _hb_state["pending"] is not None
                                    else None)
+                        running = len(_hb_state["running"])
                     remaining = (len(pending) if pending is not None
                                  else _hb_state["total"])
                     if remaining == 0:
                         continue
+                    queued = max(0, remaining - running)
                     mins = int((_time.time() - _hb_t0) / 60)
-                    print(f"  ⏳ {remaining} of {_hb_state['total']} "
-                          f"literature search"
-                          f"{'es' if _hb_state['total'] != 1 else ''} still "
-                          f"running ({mins} min elapsed; typically 10-15 "
-                          f"min total)")
+                    if queued:
+                        print(f"  ⏳ {running} running, {queued} queued of "
+                              f"{_hb_state['total']} literature searches "
+                              f"({mins} min elapsed; {_eta})")
+                    else:
+                        print(f"  ⏳ {remaining} of {_hb_state['total']} "
+                              f"literature search"
+                              f"{'es' if _hb_state['total'] != 1 else ''} still "
+                              f"running ({mins} min elapsed; {_eta})")
 
             _threading.Thread(target=_heartbeat, daemon=True).start()
 
@@ -979,6 +1012,7 @@ class OrchestratorTools:
                 results = {}
                 if len(tasks) == 1:
                     oi, t = tasks[0]
+                    _hb_mark_running(_task_label(oi, t))
                     results[(oi, t)] = search_methods[t](clean_queries[oi])
                     _hb_mark_done(_task_label(oi, t))
                 else:
@@ -993,11 +1027,12 @@ class OrchestratorTools:
                         with ThreadPoolExecutor(max_workers=len(batch)) as ex:
                             futures = {}
                             for oi, t in batch:
+                                _l = _task_label(oi, t)
+                                _hb_mark_running(_l)
                                 f = ex.submit(search_methods[t],
                                               clean_queries[oi])
                                 f.add_done_callback(
-                                    lambda _f, _l=_task_label(oi, t):
-                                    _hb_mark_done(_l))
+                                    lambda _f, _l=_l: _hb_mark_done(_l))
                                 futures[(oi, t)] = f
                             for k, f in futures.items():
                                 results[k] = f.result()
