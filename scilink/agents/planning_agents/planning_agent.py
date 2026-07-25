@@ -325,6 +325,9 @@ class PlanningAgent(BaseAgent):
         self.state["campaign_id"] = prev_cid + 1
         self.state["current_plan"] = None
         self.state.pop("plan_candidates", None)
+        # The new campaign decides its own kind — an ideation brainstorm
+        # must not make the next topic's lab plan render as ideation.
+        self.state.pop("plan_kind", None)
         print(f"  - 🧭 Objective changed materially — starting campaign "
               f"#{prev_cid + 1}. The previous campaign's plans and "
               f"literature stay archived and are NOT carried forward.")
@@ -332,20 +335,34 @@ class PlanningAgent(BaseAgent):
     def _is_ideation_campaign(self) -> bool:
         """Was the current plan authored under the ideation profile?
 
-        Read from the best-of-N selection state so every display site —
-        including refinements, which do not carry the profile argument —
-        agrees. Single-plan runs ignore the profile by design, so they
+        Reads the plan's own ``type`` stamp first — a plan dict restored or
+        read in isolation then still knows what it is — and falls back to
+        the best-of-N selection state for plans authored before the stamp
+        existed. Single-plan runs ignore the profile by design, so they
         report as lab.
         """
+        cur = (self.state or {}).get("current_plan") or {}
+        if cur.get("type") == "ideation":
+            return True
+        if (self.state or {}).get("plan_kind") == "ideation":
+            return True
         pc = (self.state or {}).get("plan_candidates") or {}
         return pc.get("profile") == "ideation"
 
     def _stamp_campaign(self, plan_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """Stamp the current campaign id onto a plan snapshot so campaign-
-        scoped consumers (white paper, literature carry-forward) can tell
-        which campaign each history entry belongs to."""
+        """Stamp campaign id and plan kind onto a snapshot.
+
+        The kind (`type`) is re-applied here because conformance, critic and
+        refinement passes re-emit the plan JSON and drop fields they were not
+        told to keep — the same way `literature_search` had to be
+        final-stamped. An existing `type` is never overwritten (TEA sets its
+        own).
+        """
         if isinstance(plan_dict, dict):
             plan_dict["campaign_id"] = int(self.state.get("campaign_id") or 1)
+            kind = self.state.get("plan_kind")
+            if kind and not plan_dict.get("type"):
+                plan_dict["type"] = kind
         return plan_dict
 
     def _finalize_literature(self, plan_dict: Dict[str, Any],
@@ -434,6 +451,19 @@ class PlanningAgent(BaseAgent):
         candidates_lit = [c for c in candidates_lit if c]
         literature = (max(candidates_lit, key=lambda c: len(str(c)))
                       if candidates_lit else None)
+        # A portfolio is the deliverable of an ideation run, and it sits deep
+        # in the plan JSON where the 20k truncation can cut it — surface it
+        # first, in full, so the paper is written from all N directions.
+        _portfolio = [c for e in (selected.get("proposed_experiments") or [])
+                      for c in (e.get("concepts") or [])]
+        if _portfolio:
+            parts.append(
+                f"\n## RESEARCH DIRECTIONS IN THE SELECTED PLAN "
+                f"({len(_portfolio)}) — this is the program; give each one "
+                f"its due weight, keep the author's ranking, and cite each "
+                f"by its own id so the paper and the dossier can be read "
+                f"side by side:\n"
+                + json.dumps(_portfolio, indent=2)[:20000])
         parts.append("\n## SELECTED Campaign Plan:\n"
                      + json.dumps(selected, indent=2)[:20000])
 
@@ -948,6 +978,16 @@ class PlanningAgent(BaseAgent):
 
         if external_context:
             res["literature_search"] = external_context
+
+        # Plan-kind stamp, mirroring TEA's `type="technoeconomic_analysis"`:
+        # a plan dict read on its own (restored checkpoint, a delegation's
+        # plan.json) can then tell what it is without the session state that
+        # produced it. Only a real ideation run is stamped — the profile is
+        # documented as a no-op on the single-plan path.
+        _ideation_run = (selection_profile == "ideation" and n_candidates > 1)
+        if _ideation_run:
+            res["type"] = "ideation"
+            self.state["plan_kind"] = "ideation"
 
         self._log_action(
             action=("generate_plan_candidates" if n_candidates > 1

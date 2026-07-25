@@ -645,10 +645,14 @@ def test_ideation_override_bars_invented_optimization_params():
     """optimization_params is the schema's only optional field and describes
     knobs of an executable campaign; an ideation portfolio was filling it
     with defensible-looking ranges for a system nobody had chosen."""
-    from scilink.agents.planning_agents.instruct import IDEATION_AUTHOR_OVERRIDE
-    ov = IDEATION_AUTHOR_OVERRIDE
-    assert "optimization_params" in ov
-    assert "omit the field" in ov
+    from scilink.agents.planning_agents.instruct import (
+        IDEATION_AUTHOR_OVERRIDE, IDEATION_OUTPUT_RULES)
+    assert "optimization_params" in IDEATION_OUTPUT_RULES
+    assert "omit the\nfield entirely" in IDEATION_OUTPUT_RULES
+    # shape rules live OUTSIDE the grounding override, which the fallback
+    # tier drops on purpose
+    assert "optimization_params" not in IDEATION_AUTHOR_OVERRIDE
+    assert "concepts" not in IDEATION_AUTHOR_OVERRIDE
 
 
 def test_lab_and_tea_dispatch_identical_to_pre_fix_oracle(monkeypatch):
@@ -731,3 +735,277 @@ def test_lab_schema_block_still_offers_optimization_params():
         assert "optimization_params" in block
         assert "min_value" in block and "max_value" in block
         assert "omit the field" not in block
+
+
+# ------------------------------------------------- concepts portfolio (P1-P3)
+
+CONCEPTS = [
+    {"id": "PS-1", "tier": "1", "title": "Catch the metastable polymorph",
+     "hypothesis": "It nucleates first and relaxes within minutes.",
+     "rationale": "Only visible operando.", "novelty": "Steered, not post-hoc.",
+     "details": ["probes: XRD, PDF", "trigger: quench at max fraction"]},
+    {"id": "BA-1", "tier": "1", "title": "Living biohybrid interphase",
+     "hypothesis": "A charge-transfer interphase co-emerges with product.",
+     "rationale": "Resolves direct-vs-H2.", "novelty": "Dual pumping."},
+    {"id": "BR-1", "title": "Shared belief-state control",
+     "rationale": "One controller spans both domains."},
+]
+
+
+def _concepts_plan(concepts=None, steps=None):
+    exp = {"experiment_name": "Portfolio", "hypothesis": "Thesis.",
+           "expected_outcome": "Support if co-emergence.",
+           "justification": "Grounded.",
+           "experimental_steps": steps if steps is not None else ["S1. Shared prep"]}
+    if concepts is not None:
+        exp["concepts"] = concepts
+    return {"proposed_experiments": [exp]}
+
+
+def test_concepts_render_as_directions_not_steps(capsys):
+    from scilink.agents.planning_agents.user_interface import display_plan_summary
+    display_plan_summary(_concepts_plan(CONCEPTS), ideation=True)
+    out = capsys.readouterr().out
+    assert "--- 🧠 Research Directions (3) ---" in out
+    assert "▸ PS-1: Catch the metastable polymorph  ·  tier 1" in out
+    assert "▸ BR-1: Shared belief-state control" in out       # partial entry ok
+    assert "probes: XRD, PDF" in out                          # details kept
+    # steps demoted to shared protocol, not presented as the whole plan
+    assert "--- 🧭 Shared Protocol ---" in out
+    assert "--- 🧭 Proposed Program ---" not in out
+
+
+def test_plan_without_concepts_renders_exactly_as_before(capsys):
+    from scilink.agents.planning_agents.user_interface import display_plan_summary
+    display_plan_summary(_concepts_plan(), ideation=True)
+    out = capsys.readouterr().out
+    assert "Research Directions" not in out
+    assert "--- 🧭 Proposed Program ---" in out   # unchanged path
+    display_plan_summary(_concepts_plan(), ideation=False)
+    lab = capsys.readouterr().out
+    assert "--- 🧪 Experimental Steps ---" in lab and "Research Directions" not in lab
+
+
+def test_unknown_concept_keys_are_not_silently_dropped(capsys):
+    """Authors add elements the objective asked for; dropping them loses
+    the answer."""
+    from scilink.agents.planning_agents.user_interface import display_plan_summary
+    display_plan_summary(_concepts_plan(
+        [{"title": "T", "operando_necessity": "state vanishes at rest"}]),
+        ideation=True)
+    out = capsys.readouterr().out
+    assert "operando_necessity" in out and "state vanishes at rest" in out
+
+
+def test_reasoning_passes_see_every_direction():
+    """Conformance/critic summarized a 13-concept portfolio as ONE experiment,
+    so a 'propose 4-6 directions' objective read as unsatisfied — the failure
+    that pushed portfolios into experimental_steps."""
+    from scilink.agents.planning_agents.planning_rag import summarize_experiment
+    s = summarize_experiment(_concepts_plan(CONCEPTS)["proposed_experiments"][0], 1)
+    assert "Research directions in this plan (3 total)" in s
+    for label in ("Catch the metastable polymorph", "Living biohybrid interphase",
+                  "Shared belief-state control"):
+        assert label in s
+    assert "[PS-1 1]" in s
+    # unchanged shape when there is no portfolio
+    plain = summarize_experiment(_concepts_plan()["proposed_experiments"][0], 1)
+    assert "Research directions" not in plain
+    assert plain.startswith("Experiment 1: Portfolio")
+
+
+def test_refinement_prompt_preserves_the_portfolio():
+    """refine_plan_with_feedback is the only plan-mutation path (8 call
+    sites); an unnamed field is what gets dropped on rewrite."""
+    import inspect
+    from scilink.agents.planning_agents import planning_rag as pr
+    src = inspect.getsource(pr.refine_plan_with_feedback)
+    assert '"concepts"' in src
+    assert "Never collapse it into prose" in src
+
+
+def test_ideation_type_stamp_survives_rewrite_passes(tmp_path, no_verify_no_critic):
+    model = ScriptedModel([plan_json("P1", "H1"), plan_json("P2", "H2"),
+                           judge_json(1, 2)])
+    agent = make_agent(tmp_path, model)
+    res = agent.generate_plan("ideate directions on X", enable_human_feedback=False,
+                              n_candidates=2, selection_profile="ideation")
+    assert res["type"] == "ideation"
+    assert agent.state["plan_kind"] == "ideation"
+    assert agent._is_ideation_campaign() is True
+    # a pass that re-emits the plan without `type` gets it back on snapshot
+    stripped = {k: v for k, v in res.items() if k != "type"}
+    assert agent._stamp_campaign(stripped)["type"] == "ideation"
+    # ... and TEA's own kind is never overwritten
+    tea = agent._stamp_campaign({"type": "technoeconomic_analysis"})
+    assert tea["type"] == "technoeconomic_analysis"
+
+
+def test_lab_run_is_not_stamped_ideation(tmp_path, no_verify_no_critic):
+    model = ScriptedModel([plan_json("P1", "H1"), plan_json("P2", "H2"),
+                           judge_json(1, 2)])
+    agent = make_agent(tmp_path, model)
+    res = agent.generate_plan("obj", enable_human_feedback=False,
+                              n_candidates=2, selection_profile="lab")
+    assert "type" not in res
+    assert agent._is_ideation_campaign() is False
+
+
+def test_new_campaign_does_not_inherit_ideation_kind(tmp_path, no_verify_no_critic):
+    model = ScriptedModel([plan_json("I1", "H1"), plan_json("I2", "H2"),
+                           judge_json(1, 2), plan_json("LabPlan", "H3")])
+    agent = make_agent(tmp_path, model)
+    agent.generate_plan("ideate research directions on perovskite stability",
+                        enable_human_feedback=False, n_candidates=2,
+                        selection_profile="ideation")
+    assert agent._is_ideation_campaign() is True
+    lab = agent.generate_plan(
+        "optimize suzuki coupling yield on the flow platform",
+        enable_human_feedback=False, n_candidates=1, selection_profile="lab")
+    assert agent.state["campaign_id"] == 2
+    assert "type" not in lab
+    assert agent._is_ideation_campaign() is False
+
+
+def test_white_paper_leads_with_the_portfolio():
+    """Concepts sit deep in the plan JSON where the 20k truncation can cut
+    them; the paper must be written from all N directions."""
+    agent = PlanningAgent.__new__(PlanningAgent)
+    agent.state = {"objective": "o", "campaign_id": 1,
+                   "current_plan": dict(_concepts_plan(CONCEPTS)["proposed_experiments"][0]
+                                        and _concepts_plan(CONCEPTS), campaign_id=1)}
+    agent.state["plan_history"] = [agent.state["current_plan"]]
+    agent.model = ScriptedModel(["paper"])
+    agent.generation_config = None
+    agent.generate_white_paper()
+    prompt = agent.model.calls[0]
+    assert "RESEARCH DIRECTIONS IN THE SELECTED PLAN (3)" in prompt
+    assert prompt.index("RESEARCH DIRECTIONS") < prompt.index("SELECTED Campaign Plan")
+    for label in ("PS-1", "BA-1", "BR-1"):
+        assert label in prompt
+
+
+def test_dossier_renders_the_flagship_as_shipped_not_as_authored(tmp_path):
+    """Conformance/critic rewrite the selected plan AFTER the candidate set
+    is frozen; rendering the stored copy shipped a dossier describing a plan
+    the user never got (live: dossier carried none of the corrected
+    portfolio's directions while the white paper carried them all)."""
+    from scilink.agents.planning_agents.orchestrator_tools import OrchestratorTools
+
+    def exp(name, concepts=None):
+        e = {"experiment_name": name, "hypothesis": f"H-{name}",
+             "justification": "J"}
+        if concepts:
+            e["concepts"] = concepts
+        return {"proposed_experiments": [e]}
+
+    state = {"objective": "brainstorm",
+             "current_plan": exp("Corrected Portfolio", concepts=CONCEPTS),
+             "plan_candidates": {
+                 "candidates": [exp("Authored A"), exp("Authored B")],
+                 "selected_index": 2,
+                 "judge": {"scores": [], "reasoning": "r"}}}
+    tools = OrchestratorTools.__new__(OrchestratorTools)
+    tools.orch = SimpleNamespace(planner=SimpleNamespace(state=state),
+                                 base_dir=tmp_path, _active_output_subdir=None)
+    tools._output_dir = lambda: tmp_path
+    text = Path(tools._write_ideation_report()).read_text()
+
+    assert "## Candidate 2 — SELECTED (flagship): Corrected Portfolio" in text
+    assert "Shown as shipped" in text
+    assert "### Research directions (3)" in text
+    assert "**PS-1. Catch the metastable polymorph** *(tier 1)*" in text
+    assert "## Candidate 1: Authored A" in text          # runner-up as authored
+    assert text.count("Shown as shipped") == 1
+
+    # unrevised flagship -> no note, no behavior change
+    state["current_plan"] = state["plan_candidates"]["candidates"][1]
+    text2 = Path(tools._write_ideation_report()).read_text()
+    assert "Shown as shipped" not in text2
+
+
+def test_html_report_renders_the_portfolio(tmp_path):
+    """The ideation run itself skips plan.html, but every later refine
+    regenerates it — without concepts rendering, the HTML showed only the
+    shared protocol and silently dropped the research directions."""
+    from scilink.agents.planning_agents.html_generator import HTMLReportGenerator
+
+    plan = _concepts_plan(CONCEPTS)
+    plan["stage"] = "Reasoning Draft"
+    state = {"objective": "o", "plan_history": [plan], "current_plan": plan,
+             "experimental_results": [], "action_history": []}
+    out = tmp_path / "plan.html"
+    HTMLReportGenerator(state).generate(str(out))
+    h = out.read_text()
+
+    assert "Research Directions (3)" in h
+    for cid in ("PS-1", "BA-1", "BR-1"):
+        assert cid in h
+    assert "Catch the metastable polymorph" in h
+    assert "probes: XRD, PDF" in h          # details survive
+    assert "Shared Protocol" in h           # steps demoted, not dropped
+    assert "&lt;" not in "Catch the metastable polymorph"   # sanity
+
+
+def test_html_report_unchanged_without_concepts(tmp_path):
+    from scilink.agents.planning_agents.html_generator import HTMLReportGenerator
+    plan = _concepts_plan()
+    plan["stage"] = "Science Draft"
+    state = {"objective": "o", "plan_history": [plan], "current_plan": plan,
+             "experimental_results": [], "action_history": []}
+    out = tmp_path / "plan.html"
+    HTMLReportGenerator(state).generate(str(out))
+    h = out.read_text()
+    assert "Research Directions" not in h
+    assert "🧪 Steps" in h and "Shared Protocol" not in h
+
+
+def test_html_escapes_hostile_concept_content(tmp_path):
+    """Concept text is model-authored; ids/titles must not inject markup."""
+    from scilink.agents.planning_agents.html_generator import HTMLReportGenerator
+    plan = _concepts_plan([{"id": "<script>x</script>", "title": "A & B <b>",
+                            "tier": "<i>1</i>", "rationale": "r"}])
+    plan["stage"] = "Science Draft"
+    state = {"objective": "o", "plan_history": [plan], "current_plan": plan,
+             "experimental_results": [], "action_history": []}
+    out = tmp_path / "plan.html"
+    HTMLReportGenerator(state).generate(str(out))
+    h = out.read_text()
+    assert "<script>x</script>" not in h
+    assert "&lt;script&gt;" in h
+    assert "A &amp; B" in h
+
+
+def test_output_rules_ride_both_tiers(monkeypatch):
+    """Grounding latitude is tier-dependent (the fallback set already grants
+    it, so the override is dropped there by design) — but the OUTPUT shape
+    rules must survive into the fallback set, or a fallback ideation run
+    goes back to cramming its portfolio into experimental_steps."""
+    from scilink.agents.planning_agents import planning_rag as pr
+
+    seen = {}
+
+    def fake_psr(**kw):
+        seen.update(kw)
+        return ({"proposed_experiments": [{"hypothesis": "h"}]},
+                {"retrieved_context": "", "primary_data": ""})
+
+    monkeypatch.setattr(pr, "perform_science_rag", fake_psr)
+    monkeypatch.setattr(pr, "run_rag", lambda **kw: {"error": "stop"})
+
+    pr.generate_plan_candidates(objective="o", kb_docs=None, model=None,
+                                generation_config=None, n_candidates=2,
+                                selection_profile="ideation")
+    author, fb = seen["instructions"], seen["fallback_instructions"]
+    assert "PORTFOLIO OUTPUT" in author and "GROUNDING LATITUDE" in author
+    assert "PORTFOLIO OUTPUT" in fb            # shape survives the tier swap
+    assert "GROUNDING LATITUDE" not in fb      # latitude deliberately does not
+    assert fb.startswith(pr.HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK)
+
+    # lab is untouched in both tiers
+    seen.clear()
+    pr.generate_plan_candidates(objective="o", kb_docs=None, model=None,
+                                generation_config=None, n_candidates=2,
+                                selection_profile="lab")
+    assert seen["instructions"] == pr.HYPOTHESIS_GENERATION_INSTRUCTIONS
+    assert seen["fallback_instructions"] == pr.HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK

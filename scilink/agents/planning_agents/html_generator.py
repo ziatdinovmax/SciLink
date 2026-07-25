@@ -203,22 +203,61 @@ class HTMLReportGenerator:
                  # Handle case where steps are just a single string block
                  steps_html = self._markdown_to_html(str(raw_steps))
 
+        # A `concepts` portfolio is the deliverable of an ideation campaign.
+        # The ideation run itself skips this report, but every later refine
+        # regenerates plan.html — without this the HTML would show only the
+        # shared protocol and silently drop the research directions.
+        concepts = exp.get("concepts")
+        concepts_html = ""
+        if isinstance(concepts, list) and concepts:
+            blocks = []
+            for n, c in enumerate(concepts, 1):
+                if not isinstance(c, dict):
+                    blocks.append(f"<li>{html.escape(str(c))}</li>")
+                    continue
+                label = html.escape(str(c.get("id") or n))
+                title = html.escape(str(c.get("title", "Untitled")))
+                tier = (f" <em>(tier {html.escape(str(c['tier']))})</em>"
+                        if c.get("tier") else "")
+                rows = ""
+                for key, val in c.items():
+                    if key in ("id", "title", "tier") or not val:
+                        continue
+                    if isinstance(val, list):
+                        inner = "".join(
+                            f"<li>{self._markdown_to_html(str(v))}</li>"
+                            for v in val)
+                        body = f"<ul>{inner}</ul>"
+                    else:
+                        body = self._markdown_to_html(str(val))
+                    rows += (f"<div><strong>{html.escape(key)}:</strong> "
+                             f"{body}</div>")
+                blocks.append(f"<li><strong>{label}. {title}</strong>{tier}"
+                              f"{rows}</li>")
+            concepts_html = f"""
+            <div style="margin-top: 15px;">
+                <strong>🧠 Research Directions ({len(concepts)}):</strong>
+                <ol>{''.join(blocks)}</ol>
+            </div>
+            """
+        steps_label = "🧭 Shared Protocol" if concepts_html else "🧪 Steps"
+
         return f"""
         <div class="exp-block">
             <h4 style="color: #2563eb; margin-bottom: 5px;">Experiment {index}: {html.escape(exp.get('experiment_name', 'Unnamed'))}</h4>
-            
+
             <div style="margin-bottom: 10px;">
-                <strong>🎯 Hypothesis:</strong> 
+                <strong>🎯 Hypothesis:</strong>
                 <div>{self._markdown_to_html(exp.get('hypothesis', ''))}</div>
             </div>
-            
+
             <div class="justification">
-                <strong>💡 Justification:</strong> 
+                <strong>💡 Justification:</strong>
                 <div>{self._markdown_to_html(exp.get('justification', ''))}</div>
             </div>
-            
+            {concepts_html}
             <div style="margin-top: 15px;">
-                <strong>🧪 Steps:</strong>
+                <strong>{steps_label}:</strong>
                 {steps_html}
             </div>
             {code_html}

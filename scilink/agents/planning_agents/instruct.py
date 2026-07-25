@@ -202,10 +202,38 @@ is not in the context you MAY introduce one from general scientific
 knowledge — choose the boldest hypothesis you can rigorously defend, and
 mark context-external elements as (speculative) in the justification.
 Never fabricate specific numeric claims or attribute them to unnamed
-sources. `optimization_params` describes knobs of an executable campaign,
-so omit the field entirely unless this direction names a real tunable
-quantity whose range you can defend; inventing ranges to fill it produces
-authoritative-looking numbers for a system nobody has chosen yet."""
+sources."""
+
+
+# Output SHAPE rules for ideation runs. Split out of the override above
+# because that block is grounding latitude, which the fallback tier already
+# grants and therefore deliberately drops — while shape must hold in EVERY
+# tier, or a fallback ideation run reverts to cramming its portfolio into
+# experimental_steps.
+IDEATION_OUTPUT_RULES = """
+## IDEATION OUTPUT RULES
+`optimization_params` describes knobs of an executable campaign, so omit the
+field entirely unless this direction names a real tunable quantity whose
+range you can defend; inventing ranges to fill it produces
+authoritative-looking numbers for a system nobody has chosen yet.
+
+## PORTFOLIO OUTPUT — the `concepts` list
+When the objective asks for SEVERAL research directions (a portfolio, a set
+of use cases, ranked ideas), put each direction in its own entry of an
+OPTIONAL `concepts` list inside the experiment object. `experimental_steps`
+is an ordered protocol, not a document: never encode a portfolio there as
+banner rows, blank spacer rows, or multi-paragraph entries. Each concept
+entry carries:
+  "id"         — your own short label (e.g. "PS-1"), if you label them
+  "title"      — one line
+  "tier"       — your ranking/cluster bucket, if you rank them
+  "hypothesis" — the testable claim
+  "rationale"  — why it is worth doing
+  "novelty"    — what is new about it
+  "details"    — list of strings for any further per-direction elements the
+                 objective asks for, one string per element
+Keep `experimental_steps` for protocol shared across the portfolio, or leave
+it short. A single-direction answer needs no `concepts` list at all."""
 
 
 BESTOFN_SELECTION_PROFILE_LAB = """

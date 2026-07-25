@@ -58,6 +58,39 @@ def _print_program(steps: List[Any], numbered: bool) -> None:
                             subsequent_indent=cont))
 
 
+def _print_concepts(concepts: List[Any]) -> None:
+    """Render a `concepts` portfolio: one block per research direction.
+
+    The portfolio is the deliverable of an ideation run, so each direction
+    gets its own labelled block rather than being flattened into a step
+    list. Unknown keys are printed too — authors add elements the objective
+    asked for, and silently dropping them would lose the answer.
+    """
+    KNOWN = ("id", "tier", "title", "hypothesis", "rationale", "novelty",
+             "details")
+    for n, c in enumerate(concepts, 1):
+        if not isinstance(c, dict):
+            print(f"\n  ▸ {n}. {str(c)[:200]}")
+            continue
+        label = c.get("id") or str(n)
+        tier = f"  ·  tier {c['tier']}" if c.get("tier") else ""
+        print(f"\n  ▸ {label}: {c.get('title', 'Untitled')}{tier}")
+        for key in ("hypothesis", "rationale", "novelty"):
+            if c.get(key):
+                print(f"     {key.capitalize()}:")
+                print(_wrap_field(c[key], indent="       "))
+        details = c.get("details")
+        if isinstance(details, list) and details:
+            for d in details:
+                print(_wrap_field(str(d), indent="       - "))
+        elif details:
+            print(_wrap_field(str(details), indent="       "))
+        for key, val in c.items():
+            if key not in KNOWN and val:
+                print(f"     {key}:")
+                print(_wrap_field(val, indent="       "))
+
+
 def display_plan_summary(result: Dict[str, Any],
                          ideation: bool = False) -> None:
     """
@@ -107,10 +140,21 @@ def display_plan_summary(result: Dict[str, Any],
         print("\n🎯 Hypothesis:")
         print(_wrap_field(exp.get('hypothesis')))
 
+        # --- Portfolio of directions, when the plan carries one ---
+        concepts = exp.get("concepts")
+        if isinstance(concepts, list) and concepts:
+            print(f"\n--- 🧠 Research Directions ({len(concepts)}) ---")
+            _print_concepts(concepts)
+
         # --- Program / steps ---
-        print("\n--- 🧭 Proposed Program ---" if ideation
-              else "\n--- 🧪 Experimental Steps ---")
-        _print_program(exp.get('experimental_steps', []), numbered=not ideation)
+        steps = exp.get('experimental_steps', [])
+        if steps or not concepts:
+            # With a portfolio present the steps list is shared protocol, if
+            # anything — label it so it does not read as the whole plan.
+            print("\n--- 🧭 Shared Protocol ---" if (ideation and concepts)
+                  else "\n--- 🧭 Proposed Program ---" if ideation
+                  else "\n--- 🧪 Experimental Steps ---")
+            _print_program(steps, numbered=not ideation)
 
         # --- Equipment ---
         print("\n--- 🛠️  Key Capabilities ---" if ideation

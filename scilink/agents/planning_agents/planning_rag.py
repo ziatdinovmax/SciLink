@@ -21,8 +21,43 @@ from .instruct import (
     BESTOFN_SELECTION_PROFILE_LAB,
     BESTOFN_SELECTION_PROFILE_IDEATION,
     IDEATION_AUTHOR_OVERRIDE,
+    IDEATION_OUTPUT_RULES,
     CONSTRAINT_COVERAGE_NOTE
 )
+
+
+def summarize_experiment(exp: Dict[str, Any], index: int) -> str:
+    """One experiment rendered for the reasoning passes (conformance, critic).
+
+    Enumerates a `concepts` portfolio when the plan carries one. Without
+    this, a plan holding N research directions is summarized by its single
+    experiment entry, so the conformance check cannot see that a
+    "propose 4-6 directions" objective was in fact satisfied — the failure
+    that pushed portfolios into `experimental_steps` in the first place.
+    Concept bodies are clipped: the passes need coverage and identity, not
+    the full text.
+    """
+    lines = [f"Experiment {index}: {exp.get('experiment_name', 'N/A')}",
+             f"  Hypothesis: {exp.get('hypothesis', 'N/A')}",
+             f"  Justification: "
+             f"{exp.get('justification', 'No justification provided.')}"]
+    concepts = exp.get("concepts")
+    if isinstance(concepts, list) and concepts:
+        lines.append(f"  Research directions in this plan "
+                     f"({len(concepts)} total):")
+        for c in concepts:
+            if not isinstance(c, dict):
+                lines.append(f"    - {str(c)[:200]}")
+                continue
+            label = " ".join(str(c.get(k)) for k in ("id", "tier")
+                             if c.get(k))
+            head = f"[{label}] " if label else ""
+            lines.append(f"    - {head}{str(c.get('title', 'Untitled'))[:160]}")
+            for key in ("hypothesis", "novelty"):
+                if c.get(key):
+                    lines.append(f"        {key}: {str(c[key])[:300]}")
+    lines.append("---")
+    return "\n".join(lines)
 
 
 def verify_plan_relevance(objective: str,
@@ -57,18 +92,8 @@ def verify_plan_relevance(objective: str,
             break
 
     # 2. Build Plan Summary for the Verifier
-    plan_summary_lines = []
-    for i, exp in enumerate(experiments):
-        name = exp.get('experiment_name', 'N/A')
-        hyp = exp.get('hypothesis', 'N/A')
-        justification = exp.get('justification', 'No justification provided.')
-
-        plan_summary_lines.append(f"Experiment {i+1}: {name}")
-        plan_summary_lines.append(f"  Hypothesis: {hyp}")
-        plan_summary_lines.append(f"  Justification: {justification}")
-        plan_summary_lines.append("---")
-
-    plan_summary = "\n".join(plan_summary_lines)
+    plan_summary = "\n".join(summarize_experiment(exp, i + 1)
+                             for i, exp in enumerate(experiments))
 
     # 3. Construct Context-Aware Prompt
     if is_fallback:
@@ -181,12 +206,8 @@ def critique_plan(objective: str,
     if not experiments:
         return {"findings": []}
 
-    plan_summary = "\n".join(
-        f"Experiment {i+1}: {exp.get('experiment_name', 'N/A')}\n"
-        f"  Hypothesis: {exp.get('hypothesis', 'N/A')}\n"
-        f"  Justification: {exp.get('justification', 'No justification provided.')}\n---"
-        for i, exp in enumerate(experiments)
-    )
+    plan_summary = "\n".join(summarize_experiment(exp, i + 1)
+                             for i, exp in enumerate(experiments))
 
     # --- Evidence: mirror what the plan author saw so checks are grounded. ---
     evidence_parts = []
@@ -460,10 +481,18 @@ def generate_plan_candidates(objective: str,
     # rule it supersedes). Lab profile authors exactly as before — the
     # benchmark showed the strict derivability discipline structurally caps
     # rediscovery when the key inspiration is absent from the context.
+    # Grounding latitude is tier-dependent (the fallback set already grants
+    # it); the OUTPUT rules are not — they ride both tiers, else a fallback
+    # ideation run goes back to cramming its portfolio into steps.
+    _ideation = selection_profile == "ideation"
     author_instructions = HYPOTHESIS_GENERATION_INSTRUCTIONS
-    if selection_profile == "ideation":
+    fallback_set = HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK
+    if _ideation:
         author_instructions = (HYPOTHESIS_GENERATION_INSTRUCTIONS
-                               + IDEATION_AUTHOR_OVERRIDE)
+                               + IDEATION_AUTHOR_OVERRIDE
+                               + IDEATION_OUTPUT_RULES)
+        fallback_set = (HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK
+                        + IDEATION_OUTPUT_RULES)
 
     first, author_context = perform_science_rag(
         objective=objective,
@@ -482,9 +511,9 @@ def generate_plan_candidates(objective: str,
         mode_key="_rag_mode",
         # Stated explicitly rather than inferred: the ideation override is
         # concatenated onto the canonical block above, and the fallback set
-        # deliberately carries no override (it already licenses general
-        # knowledge — see this function's docstring).
-        fallback_instructions=HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK,
+        # carries the OUTPUT rules but not the grounding override (it already
+        # licenses general knowledge — see this function's docstring).
+        fallback_instructions=fallback_set,
     )
     tier = first.pop("_rag_mode", "strict") if isinstance(first, dict) else "strict"
     candidates = [first]
@@ -494,8 +523,7 @@ def generate_plan_candidates(objective: str,
     if tier == "fallback":
         print("  - ℹ️  Fallback tier pinned for all candidates in this run.")
 
-    instructions = (author_instructions if tier == "strict"
-                    else HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK)
+    instructions = author_instructions if tier == "strict" else fallback_set
 
     for k in range(2, n_candidates + 1):
         prior = "\n".join(
@@ -872,7 +900,8 @@ def refine_plan_with_feedback(original_result: Dict[str, Any],
 
     **Constraints:**
     - You MUST return the exact same JSON structure (keys: "proposed_experiments", etc.).
-    - Update "experimental_steps", "hypothesis", or "required_equipment" as requested.
+    - Update "experimental_steps", "hypothesis", "required_equipment", or "concepts" as requested.
+    - If the current plan carries a "concepts" list, it is the portfolio of research directions: KEEP it as a list of concept objects, revising, adding or removing entries as the feedback requires. Never collapse it into prose or into "experimental_steps" rows.
     - Do NOT add explanations outside the JSON.
     - Do NOT carry forward quantitative claims from the original plan that contradict the experimental results.
     - For "source_documents", list ONLY references you actually used from the provided Literature Context. Do NOT invent or carry forward references not present in the context.

@@ -434,6 +434,14 @@ class OrchestratorTools:
         drift apart. In ideation, runner-up candidates are deliverables, not
         rejects — the judge's pick designates the flagship, it does not
         discard the rest.
+
+        The flagship is rendered from ``current_plan``, not from the stored
+        candidate: conformance correction and critic passes rewrite the
+        selected plan *after* the candidate set is frozen, and rendering the
+        stored copy shipped a dossier describing a plan the user never got
+        (live: the dossier carried none of the corrected portfolio's
+        directions while the white paper carried them all). Runner-ups are
+        still rendered as authored — nothing rewrites those.
         """
         state = self.orch.planner.state or {}
         pc = state.get("plan_candidates") or {}
@@ -455,23 +463,59 @@ class OrchestratorTools:
         if judge.get("reasoning"):
             lines += ["## Comparative Assessment (judge)",
                       judge["reasoning"], ""]
+        current = state.get("current_plan") or {}
         for ci, cand in enumerate(candidates, 1):
             exp = (cand.get("proposed_experiments") or [{}])[0]
+            revised = False
             if ci == sel:
                 flag = (" — SELECTED (flagship, PI override)" if override
                         else " — SELECTED (flagship)")
+                cur_exp = (current.get("proposed_experiments") or [{}])[0]
+                if cur_exp and cur_exp != exp:
+                    exp = cur_exp          # as-shipped, not as-authored
+                    revised = True
             else:
                 flag = ""
             lines += [f"## Candidate {ci}{flag}: "
                       f"{exp.get('experiment_name', 'Untitled')}", ""]
+            if revised:
+                lines += ["*Shown as shipped: this flagship was revised after "
+                          "selection (conformance / reviewer passes). The "
+                          "judge's scores below refer to the version it "
+                          "compared.*", ""]
             sc = scores.get(ci)
             if sc:
                 crit = ", ".join(f"{k}: {v}" for k, v in sc.items()
                                  if k not in ("candidate", "comment"))
                 lines += [f"*Judge scores — {crit}*",
                           f"*Judge comment: {sc.get('comment', '')}*", ""]
+            concepts = exp.get("concepts")
+            if isinstance(concepts, list) and concepts:
+                lines.append(f"### Research directions ({len(concepts)})")
+                for n, c in enumerate(concepts, 1):
+                    if not isinstance(c, dict):
+                        lines += [f"**{n}.** {c}", ""]
+                        continue
+                    tier = f" *(tier {c['tier']})*" if c.get("tier") else ""
+                    lines.append(f"**{c.get('id') or n}. "
+                                 f"{c.get('title', 'Untitled')}**{tier}")
+                    for key in ("hypothesis", "rationale", "novelty"):
+                        if c.get(key):
+                            lines.append(f"- *{key.capitalize()}:* {c[key]}")
+                    det = c.get("details")
+                    for d in (det if isinstance(det, list) else [det] if det
+                              else []):
+                        lines.append(f"- {d}")
+                    for k, v in c.items():
+                        if k not in ("id", "tier", "title", "hypothesis",
+                                     "rationale", "novelty", "details") and v:
+                            lines.append(f"- *{k}:* {v}")
+                    lines.append("")
+
             for key, title in (("hypothesis", "Hypothesis"),
-                               ("experimental_steps", "Proposed program"),
+                               ("experimental_steps",
+                                "Shared protocol" if concepts
+                                else "Proposed program"),
                                ("required_equipment", "Key capabilities"),
                                ("optimization_params",
                                 "Suggested exploration variables"),
