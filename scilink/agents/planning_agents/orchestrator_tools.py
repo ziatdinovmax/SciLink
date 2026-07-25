@@ -765,11 +765,17 @@ class OrchestratorTools:
             if len(objectives) * len(types) > MAX_TASKS:
                 return json.dumps({
                     "status": "error",
-                    "message": (f"{len(objectives)} objectives x {len(types)} "
-                                f"search types = {len(objectives) * len(types)} "
-                                f"concurrent searches (max {MAX_TASKS}). Drop "
-                                "less essential objectives/types or split "
-                                "into two calls."),
+                    "message": (
+                        f"{len(objectives)} objectives x {len(types)} search "
+                        f"types = {len(objectives) * len(types)} searches, "
+                        f"over the {MAX_TASKS}-per-call max. Fit it into ONE "
+                        f"call of <= {MAX_TASKS} searches — DO NOT split into "
+                        f"separate calls (separate calls run in separate "
+                        f"turns, i.e. SEQUENTIALLY, losing the parallelism). "
+                        f"Reduce total searches instead: drop the least "
+                        f"essential objectives, or narrow to a single "
+                        f"search_type. E.g. {len(objectives)} objectives with "
+                        f"one search_type = {len(objectives)} searches fits."),
                 })
 
             label = "+".join(types)
@@ -937,7 +943,12 @@ class OrchestratorTools:
                 "LIST of objectives to cover distinct aspects; objectives "
                 "and search types all run CONCURRENTLY and are merged into "
                 "one labelled document, so several focused searches cost "
-                "roughly the wait of one (max 6 searches per call)."
+                "roughly the wait of one. Do ALL the searches in a SINGLE "
+                "call (up to 6 = objectives x search_types): a second call "
+                "runs in a later turn, i.e. SEQUENTIALLY (~10-15 min EACH), "
+                "so splitting doubles the wait. If you'd exceed 6, cut "
+                "objectives or search_types to fit one call — never split "
+                "across calls."
             ),
             parameters={
                 "objective": {
