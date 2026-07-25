@@ -202,7 +202,10 @@ is not in the context you MAY introduce one from general scientific
 knowledge — choose the boldest hypothesis you can rigorously defend, and
 mark context-external elements as (speculative) in the justification.
 Never fabricate specific numeric claims or attribute them to unnamed
-sources."""
+sources. `optimization_params` describes knobs of an executable campaign,
+so omit the field entirely unless this direction names a real tunable
+quantity whose range you can defend; inventing ranges to fill it produces
+authoritative-looking numbers for a system nobody has chosen yet."""
 
 
 BESTOFN_SELECTION_PROFILE_LAB = """

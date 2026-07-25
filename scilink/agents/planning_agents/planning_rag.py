@@ -331,7 +331,8 @@ def perform_science_rag(objective: str,
                         external_context: Optional[str] = None,
                         skill_context: Optional[str] = None,
                         return_context: bool = False,
-                        mode_key: Optional[str] = None) -> Any:
+                        mode_key: Optional[str] = None,
+                        fallback_instructions: Optional[str] = None) -> Any:
     """
     Executes the Scientific/TEA RAG loop over the Docs KnowledgeBase.
 
@@ -372,11 +373,16 @@ def perform_science_rag(objective: str,
         additional_context = f"{additional_context}\n{CONSTRAINT_COVERAGE_NOTE}"
 
     # --- Select the fallback instruction set matching the planning task ---
-    fallback_instructions = None
-    if instructions == HYPOTHESIS_GENERATION_INSTRUCTIONS:
-        fallback_instructions = HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK
-    elif instructions == TEA_INSTRUCTIONS:
-        fallback_instructions = TEA_INSTRUCTIONS_FALLBACK
+    # Matched by PREFIX, not identity: callers append overrides to the
+    # canonical block (ideation adds IDEATION_AUTHOR_OVERRIDE), and an
+    # equality test silently left those runs with no fallback set — so an
+    # "Insufficient context" author response aborted the run instead of
+    # regenerating from general knowledge. An explicit argument still wins.
+    if fallback_instructions is None:
+        if instructions.startswith(HYPOTHESIS_GENERATION_INSTRUCTIONS):
+            fallback_instructions = HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK
+        elif instructions.startswith(TEA_INSTRUCTIONS):
+            fallback_instructions = TEA_INSTRUCTIONS_FALLBACK
 
     rag_out = run_rag(
         query=objective,
@@ -474,6 +480,11 @@ def generate_plan_candidates(objective: str,
         skill_context=skill_context,
         return_context=True,
         mode_key="_rag_mode",
+        # Stated explicitly rather than inferred: the ideation override is
+        # concatenated onto the canonical block above, and the fallback set
+        # deliberately carries no override (it already licenses general
+        # knowledge — see this function's docstring).
+        fallback_instructions=HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK,
     )
     tier = first.pop("_rag_mode", "strict") if isinstance(first, dict) else "strict"
     candidates = [first]

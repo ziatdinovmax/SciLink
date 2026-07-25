@@ -1447,9 +1447,10 @@ class OrchestratorTools:
                     saved_extras.append(str(lit_path))
 
                 # Generate HTML — except for ideation runs: the report
-                # template renders an executable-protocol view (steps,
-                # equipment, optimization-parameter tables) that misrepresents
-                # a free-form research dossier; there the white paper is the
+                # template renders the plan as an executable protocol (an
+                # ordered experimental-steps list, pipe-rows merged into
+                # tables) with no ideation vocabulary, which misrepresents a
+                # free-form research dossier; there the white paper is the
                 # human-facing artifact and plan.json keeps the record.
                 _ideation_run = (selection_profile == "ideation" and n_cand > 1)
                 html_path = None
@@ -2354,7 +2355,10 @@ class OrchestratorTools:
 
             # Pass schema to experiment context
             current_plan = self.orch.planner.state.get("current_plan", {})
-            exp_context = current_plan.get("proposed_experiments", [{}])[0] if current_plan else {}
+            # `or [{}]` — the dict default only fires on a MISSING key, so a plan
+            # carrying an empty experiments list would IndexError here.
+            _exps = (current_plan or {}).get("proposed_experiments") or [{}]
+            exp_context = _exps[0]
 
             # Inject schema requirements into context (only when generating new script)
             role_hints = None
@@ -2995,7 +2999,10 @@ class OrchestratorTools:
                 enhanced_objective = f"{enhanced_objective}\n{schema_instruction}".strip()
 
             current_plan = self.orch.planner.state.get("current_plan", {})
-            exp_context = current_plan.get("proposed_experiments", [{}])[0] if current_plan else {}
+            # `or [{}]` — the dict default only fires on a MISSING key, so a plan
+            # carrying an empty experiments list would IndexError here.
+            _exps = (current_plan or {}).get("proposed_experiments") or [{}]
+            exp_context = _exps[0]
 
             if inputs and targets:
                 exp_context = exp_context.copy() if exp_context else {}

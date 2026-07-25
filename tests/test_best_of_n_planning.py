@@ -600,3 +600,134 @@ def test_multiple_entries_keep_their_ordinals(capsys):
     out_id = _summary(plan, True, capsys)
     assert "💡 RESEARCH DIRECTION 1:" in out_id
     assert "💡 RESEARCH DIRECTION 2:" in out_id
+
+
+# ------------------------------------------------- ideation authoring guards
+
+def test_ideation_run_still_resolves_a_fallback_instruction_set(monkeypatch):
+    """The ideation override is CONCATENATED onto the canonical instruction
+    block, so the old identity test (`instructions == HYPOTHESIS_...`) left
+    ideation runs with fallback_instructions=None: an 'Insufficient context'
+    author response then aborted the run instead of regenerating from
+    general knowledge (rag_engine returns the error verbatim when no
+    fallback set is available)."""
+    from scilink.agents.planning_agents import planning_rag as pr
+
+    seen = {}
+    monkeypatch.setattr(pr, "run_rag",
+                        lambda **kw: (seen.update(kw), {"proposed_experiments": []})[1])
+    pr.perform_science_rag(
+        objective="obj",
+        instructions=pr.HYPOTHESIS_GENERATION_INSTRUCTIONS + pr.IDEATION_AUTHOR_OVERRIDE,
+        task_name="Candidate Plan 1", kb_docs=None, model=None,
+        generation_config=None)
+    assert seen["fallback_instructions"] == pr.HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK
+
+    # lab (unconcatenated) and TEA keep resolving as before
+    seen.clear()
+    pr.perform_science_rag(objective="o", instructions=pr.HYPOTHESIS_GENERATION_INSTRUCTIONS,
+                           task_name="t", kb_docs=None, model=None, generation_config=None)
+    assert seen["fallback_instructions"] == pr.HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK
+    seen.clear()
+    pr.perform_science_rag(objective="o", instructions=pr.TEA_INSTRUCTIONS,
+                           task_name="t", kb_docs=None, model=None, generation_config=None)
+    assert seen["fallback_instructions"] == pr.TEA_INSTRUCTIONS_FALLBACK
+
+    # an explicit argument still wins over the prefix inference
+    seen.clear()
+    pr.perform_science_rag(objective="o", instructions=pr.HYPOTHESIS_GENERATION_INSTRUCTIONS,
+                           task_name="t", kb_docs=None, model=None, generation_config=None,
+                           fallback_instructions="CUSTOM")
+    assert seen["fallback_instructions"] == "CUSTOM"
+
+
+def test_ideation_override_bars_invented_optimization_params():
+    """optimization_params is the schema's only optional field and describes
+    knobs of an executable campaign; an ideation portfolio was filling it
+    with defensible-looking ranges for a system nobody had chosen."""
+    from scilink.agents.planning_agents.instruct import IDEATION_AUTHOR_OVERRIDE
+    ov = IDEATION_AUTHOR_OVERRIDE
+    assert "optimization_params" in ov
+    assert "omit the field" in ov
+
+
+def test_lab_and_tea_dispatch_identical_to_pre_fix_oracle(monkeypatch):
+    """No-op proof for the paths that were already correct: for every
+    instruction string the codebase actually passes, the new prefix-based
+    fallback resolution must agree with the OLD identity logic — except for
+    the ideation case, which is exactly the bug (old: None)."""
+    from scilink.agents.planning_agents import planning_rag as pr
+
+    def old_identity_logic(instructions):
+        if instructions == pr.HYPOTHESIS_GENERATION_INSTRUCTIONS:
+            return pr.HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK
+        elif instructions == pr.TEA_INSTRUCTIONS:
+            return pr.TEA_INSTRUCTIONS_FALLBACK
+        return None
+
+    def new_resolution(instructions):
+        seen = {}
+        monkeypatch.setattr(pr, "run_rag",
+                            lambda **kw: (seen.update(kw), {})[1])
+        pr.perform_science_rag(objective="o", instructions=instructions,
+                               task_name="t", kb_docs=None, model=None,
+                               generation_config=None)
+        return seen["fallback_instructions"]
+
+    lab_like = [pr.HYPOTHESIS_GENERATION_INSTRUCTIONS, pr.TEA_INSTRUCTIONS]
+    for instr in lab_like:
+        assert new_resolution(instr) == old_identity_logic(instr), \
+            "lab/TEA dispatch changed — this fix must be a no-op for them"
+
+    ideation = pr.HYPOTHESIS_GENERATION_INSTRUCTIONS + pr.IDEATION_AUTHOR_OVERRIDE
+    assert old_identity_logic(ideation) is None          # the bug
+    assert new_resolution(ideation) is not None          # the fix
+
+
+def test_ideation_prompt_text_never_reaches_a_lab_run(monkeypatch):
+    """The optimization_params ban and the grounding latitude ride
+    IDEATION_AUTHOR_OVERRIDE, which is concatenated only for the ideation
+    profile — a lab author's instruction block must be byte-identical to the
+    canonical constant."""
+    from scilink.agents.planning_agents import planning_rag as pr
+
+    captured = {}
+
+    def fake_rag(**kw):
+        captured[kw["task_name"]] = kw["instructions"]
+        return ({"proposed_experiments": [{"hypothesis": "h"}]},
+                {"retrieved_context": "", "primary_data": ""})
+
+    monkeypatch.setattr(pr, "perform_science_rag", fake_rag)
+    monkeypatch.setattr(pr, "run_rag", lambda **kw: {"error": "stop"})
+
+    pr.generate_plan_candidates(objective="o", kb_docs=None, model=None,
+                                generation_config=None, n_candidates=2,
+                                selection_profile="lab")
+    lab_instr = captured["Candidate Plan 1"]
+    assert lab_instr == pr.HYPOTHESIS_GENERATION_INSTRUCTIONS  # byte-identical
+    assert "IDEATION MODE" not in lab_instr
+    assert "optimization_params describes knobs" not in lab_instr
+
+    captured.clear()
+    pr.generate_plan_candidates(objective="o", kb_docs=None, model=None,
+                                generation_config=None, n_candidates=2,
+                                selection_profile="ideation")
+    id_instr = captured["Candidate Plan 1"]
+    assert id_instr.startswith(pr.HYPOTHESIS_GENERATION_INSTRUCTIONS)
+    assert "IDEATION MODE" in id_instr
+
+
+def test_lab_schema_block_still_offers_optimization_params():
+    """The ban is ideation-only prose; the canonical schema (and its
+    fallback twin) must still describe the field for lab campaigns, which
+    is where run_optimization gets its scientific bounds."""
+    from scilink.agents.planning_agents.instruct import (
+        HYPOTHESIS_GENERATION_INSTRUCTIONS,
+        HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK,
+    )
+    for block in (HYPOTHESIS_GENERATION_INSTRUCTIONS,
+                  HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK):
+        assert "optimization_params" in block
+        assert "min_value" in block and "max_value" in block
+        assert "omit the field" not in block
