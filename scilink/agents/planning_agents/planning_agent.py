@@ -329,6 +329,17 @@ class PlanningAgent(BaseAgent):
               f"#{prev_cid + 1}. The previous campaign's plans and "
               f"literature stay archived and are NOT carried forward.")
 
+    def _is_ideation_campaign(self) -> bool:
+        """Was the current plan authored under the ideation profile?
+
+        Read from the best-of-N selection state so every display site —
+        including refinements, which do not carry the profile argument —
+        agrees. Single-plan runs ignore the profile by design, so they
+        report as lab.
+        """
+        pc = (self.state or {}).get("plan_candidates") or {}
+        return pc.get("profile") == "ideation"
+
     def _stamp_campaign(self, plan_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Stamp the current campaign id onto a plan snapshot so campaign-
         scoped consumers (white paper, literature carry-forward) can tell
@@ -1077,7 +1088,7 @@ class PlanningAgent(BaseAgent):
         # Human feedback on strategy
         human_feedback = None
         if enable_human_feedback and res.get("proposed_experiments") and not res.get("error"):
-            display_plan_summary(res)
+            display_plan_summary(res, ideation=self._is_ideation_campaign())
             human_feedback = get_user_feedback()
             
             if human_feedback:
@@ -1131,7 +1142,7 @@ class PlanningAgent(BaseAgent):
 
                     self.state["plan_history"].append(self._stamp_campaign(res).copy())
                     self.state["current_plan"] = res
-                    display_plan_summary(res)
+                    display_plan_summary(res, ideation=self._is_ideation_campaign())
                     print("✅ Plan updated.")
             else:
                 print("✅ Plan accepted.")
@@ -1696,7 +1707,7 @@ Select the most appropriate strategy:
             print("\n" + "="*60)
             print("🧠 AGENT'S PROPOSED REVISION BASED ON RESULTS")
             print("="*60)
-            display_plan_summary(new_plan)
+            display_plan_summary(new_plan, ideation=self._is_ideation_campaign())
             
             human_feedback = get_user_feedback()
             
@@ -1835,7 +1846,7 @@ Select the most appropriate strategy:
             print("\n" + "=" * 60)
             print("🔧 AGENT'S PROPOSED PLAN ADJUSTMENT (Constraint)")
             print("=" * 60)
-            display_plan_summary(new_plan)
+            display_plan_summary(new_plan, ideation=self._is_ideation_campaign())
 
             human_feedback = get_user_feedback()
 

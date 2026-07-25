@@ -22,10 +22,54 @@ def format_caveats(findings: Optional[List[Dict[str, Any]]]) -> List[str]:
     return lines
 
 
-def display_plan_summary(result: Dict[str, Any]) -> None:
+def _print_program(steps: List[Any], numbered: bool) -> None:
+    """Render the program/steps list.
+
+    Two structural fixes that apply in both modes: blank entries are spacing
+    in the model's output, not steps (they were being NUMBERED, producing
+    empty '2.' / '4.' rows), and a banner entry ('==== DOMAIN 1 ... ====')
+    is a section divider, not a step. Long entries wrap with a hanging
+    indent so the list reads as a list.
+
+    ``numbered=False`` (ideation) leaves the author's own labels — 'PS-1',
+    'BA-3', 'BRIDGE-2', 'S4' — to do the numbering: an imposed 1..N counter
+    fights those labels and implies a sequential protocol that a research
+    portfolio does not have.
     """
-    Parses the agent's results and prints a structured, pretty-printed 
+    if not steps:
+        print("  (Nothing listed)")
+        return
+    n = 0
+    for step in steps:
+        raw = str(step).strip()
+        if not raw:
+            continue
+        if re.fullmatch(r"={3,}.*={3,}", raw):
+            print(f"\n  ▸ {raw.strip('=').strip()}")
+            continue
+        if numbered:
+            n += 1
+            body = re.sub(r'^[\d\-\.\)\s]+', '', raw).strip()
+            lead, cont = f" {n}. ", "    "
+        else:
+            body = raw
+            lead, cont = "  • ", "    "
+        print(textwrap.fill(body, width=78, initial_indent=lead,
+                            subsequent_indent=cont))
+
+
+def display_plan_summary(result: Dict[str, Any],
+                         ideation: bool = False) -> None:
+    """
+    Parses the agent's results and prints a structured, pretty-printed
     summary to the console for human review.
+
+    ``ideation=True`` switches the vocabulary from a bench protocol
+    ("EXPERIMENT 1", "Experimental Steps", "Required Equipment") to the
+    research-portfolio wording the ideation dossier already uses
+    ("RESEARCH DIRECTION", "Proposed program", "Key capabilities"), and
+    drops the imposed step numbering. The plan JSON schema is identical
+    either way — only the presentation differs.
     """
     # 1. Error Handling
     if result.get("error"):
@@ -42,31 +86,35 @@ def display_plan_summary(result: Dict[str, Any]) -> None:
 
     # 3. Header
     print("\n" + "="*80)
-    print("✅ PROPOSED EXPERIMENTAL PLAN")
+    print("✅ PROPOSED RESEARCH DIRECTIONS" if ideation
+          else "✅ PROPOSED EXPERIMENTAL PLAN")
     print("="*80)
 
     # 4. Loop through Experiments
+    multi = len(experiments) > 1
     for i, exp in enumerate(experiments, 1):
-        
-        # --- Name & Hypothesis ---
-        print(f"\n🔬 EXPERIMENT {i}: {exp.get('experiment_name', 'Unnamed Experiment')}")
-        print("-" * 80)
-        print(f"\n> 🎯 Hypothesis:\n> {exp.get('hypothesis', 'N/A')}")
 
-        # --- Experimental Steps (Numbered) ---
-        print("\n--- 🧪 Experimental Steps ---")
-        steps = exp.get('experimental_steps', [])
-        if steps:
-            for j, step in enumerate(steps, 1):
-                # Remove leading numbers/bullets provided by LLM
-                # Regex removes "1.", "1 -", "1)", etc.
-                clean_step = re.sub(r'^[\d\-\.\)\s]+', '', str(step)).strip()
-                print(f" {j}. {clean_step}")
+        # --- Name & Hypothesis ---
+        # A single entry needs no ordinal — an ideation run routinely
+        # returns ONE entry carrying a whole portfolio, where 'EXPERIMENT 1'
+        # reads as the first of a series that does not exist.
+        if ideation:
+            head = f"💡 RESEARCH DIRECTION{f' {i}' if multi else ''}"
         else:
-            print("  (No steps provided)")
-        
+            head = f"🔬 EXPERIMENT{f' {i}' if multi else ''}"
+        print(f"\n{head}: {exp.get('experiment_name', 'Unnamed')}")
+        print("-" * 80)
+        print("\n🎯 Hypothesis:")
+        print(_wrap_field(exp.get('hypothesis')))
+
+        # --- Program / steps ---
+        print("\n--- 🧭 Proposed Program ---" if ideation
+              else "\n--- 🧪 Experimental Steps ---")
+        _print_program(exp.get('experimental_steps', []), numbered=not ideation)
+
         # --- Equipment ---
-        print("\n--- 🛠️  Required Equipment ---")
+        print("\n--- 🛠️  Key Capabilities ---" if ideation
+              else "\n--- 🛠️  Required Equipment ---")
         equipment = exp.get('required_equipment', [])
         if equipment:
             # Print as a clean comma-separated list if short, or bullets if long
@@ -75,14 +123,16 @@ def display_plan_summary(result: Dict[str, Any]) -> None:
             else:
                 print(f"  {', '.join(equipment)}")
         else:
-            print("  (No equipment specified)")
+            print("  (None specified)")
 
         # --- Outcome & Justification (Critical for Review) ---
-        print("\n--- 📈 Expected Outcome ---")
-        print(f"  {exp.get('expected_outcome', 'N/A')}")
+        print("\n--- 📈 Expected Outcomes ---" if ideation
+              else "\n--- 📈 Expected Outcome ---")
+        print(_wrap_field(exp.get('expected_outcome')))
 
-        print("\n--- 💡 Justification ---")
-        print(f"  {exp.get('justification', 'N/A')}")
+        print("\n--- 💡 Rationale ---" if ideation
+              else "\n--- 💡 Justification ---")
+        print(_wrap_field(exp.get('justification')))
         
         # --- Source Documents ---
         print("\n--- 📄 Source Documents ---")

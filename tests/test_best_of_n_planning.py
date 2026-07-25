@@ -19,6 +19,7 @@ All LLM traffic is a scripted mock; no network.
 import ast
 import builtins
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -529,3 +530,73 @@ def test_candidate_cards_are_visually_separated(capsys):
     cands_p, pick = parse(out, "accept plan candidate")
     assert pick == 2
     assert [c["idx"] for c in cands_p] == [1, 2, 3]
+
+
+# ------------------------------------------------- plan summary presentation
+
+def _summary(plan, ideation, capsys):
+    from scilink.agents.planning_agents.user_interface import display_plan_summary
+    display_plan_summary(plan, ideation=ideation)
+    return capsys.readouterr().out
+
+
+def _portfolio_plan():
+    return {"proposed_experiments": [{
+        "experiment_name": "Use-case portfolio",
+        "hypothesis": "PORTFOLIO THESIS: capture structure and function together.",
+        "experimental_steps": [
+            "==================== DOMAIN 1: PRECISION SYNTHESIS ====================",
+            "",
+            "PS-1 (TIER-1) — catch the metastable polymorph before it equilibrates.",
+            "",
+            "PS-2 (TIER-1) — steer the redox state to a target.",
+        ],
+        "required_equipment": ["XRD", "XAS"],
+        "expected_outcome": "SUPPORT if state and function co-emerge.",
+        "justification": "Grounded in the retrieved context.",
+    }]}
+
+
+def test_blank_and_banner_entries_are_not_numbered_steps(capsys):
+    """Blank entries are spacing and '==== ... ====' entries are section
+    dividers — numbering them produced empty '2.'/'4.' rows in live output."""
+    out = _summary(_portfolio_plan(), False, capsys)
+    assert "▸ DOMAIN 1: PRECISION SYNTHESIS" in out
+    assert " 1. PS-1" in out and " 2. PS-2" in out  # numbering skips the gaps
+    assert " 3. " not in out
+    assert not re.search(r"^ \d+\.\s*$", out, re.M)  # no empty numbered rows
+
+
+def test_ideation_view_drops_lab_protocol_vocabulary(capsys):
+    """An ideation portfolio is not a bench protocol: no imposed step
+    numbering (the entries carry their own PS-/BA-/BRIDGE- labels) and no
+    'EXPERIMENT n' ordinal on a single portfolio entry."""
+    out = _summary(_portfolio_plan(), True, capsys)
+    assert "PROPOSED RESEARCH DIRECTIONS" in out
+    assert "💡 RESEARCH DIRECTION: Use-case portfolio" in out
+    assert "RESEARCH DIRECTION 1" not in out  # single entry -> no ordinal
+    assert "--- 🧭 Proposed Program ---" in out
+    assert "--- 🛠️  Key Capabilities ---" in out
+    assert "EXPERIMENT" not in out and "Experimental Steps" not in out
+    assert "  • PS-1" in out and "  • PS-2" in out
+    assert not re.search(r"^ \d+\. PS-", out, re.M)  # author labels, not 1..N
+    assert "▸ DOMAIN 1: PRECISION SYNTHESIS" in out  # dividers still divide
+
+
+def test_lab_view_unchanged_in_shape(capsys):
+    out = _summary(_portfolio_plan(), False, capsys)
+    assert "PROPOSED EXPERIMENTAL PLAN" in out
+    assert "--- 🧪 Experimental Steps ---" in out
+    assert "--- 🛠️  Required Equipment ---" in out
+    assert "RESEARCH DIRECTION" not in out
+
+
+def test_multiple_entries_keep_their_ordinals(capsys):
+    plan = _portfolio_plan()
+    plan["proposed_experiments"].append(
+        dict(plan["proposed_experiments"][0], experiment_name="Second"))
+    out_lab = _summary(plan, False, capsys)
+    assert "🔬 EXPERIMENT 1:" in out_lab and "🔬 EXPERIMENT 2:" in out_lab
+    out_id = _summary(plan, True, capsys)
+    assert "💡 RESEARCH DIRECTION 1:" in out_id
+    assert "💡 RESEARCH DIRECTION 2:" in out_id
