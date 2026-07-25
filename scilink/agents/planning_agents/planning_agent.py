@@ -968,7 +968,11 @@ class PlanningAgent(BaseAgent):
                 is_relevant, critique = verify_plan_relevance(objective, res, self.model, self.generation_config)
 
                 if not is_relevant:
-                    print(f"\n🔄 Self-correction triggered: {critique}")
+                    # The full critique was just printed by the verifier
+                    # ('Plan Verification Failed: ...') — announce the action
+                    # only, or the same paragraph shows twice back to back.
+                    print("\n🔄 Self-correction triggered — regenerating the "
+                          "plan against the verification failure above.")
                     res = refine_plan_with_feedback(
                         original_result=res,
                         feedback=f"CRITICAL: {critique}",
