@@ -276,6 +276,32 @@ class MetaOrchestratorTools:
             },
         })
 
+    def _vision_model(self):
+        """A CLEAN model instance for one-off vision calls (view_image).
+
+        The meta's chat model carries the orchestrator system prompt and the
+        full tool registry — a describe-this-image call through it gets
+        answered in the meta's persona ('I'll view the image...') instead of
+        with an actual description (seen live on the Bedrock path). Same
+        model/credentials, no system instruction, no tools. Lazily built and
+        cached.
+        """
+        if getattr(self, "_vision_model_cache", None) is None:
+            if self.orch.base_url:
+                from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+                self._vision_model_cache = OpenAIAsGenerativeModel(
+                    model=self.orch.model_name,
+                    api_key=self.orch.api_key,
+                    base_url=self.orch.base_url,
+                )
+            else:
+                from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
+                self._vision_model_cache = LiteLLMGenerativeModel(
+                    model=self.orch.model_name,
+                    api_key=self.orch.api_key,
+                )
+        return self._vision_model_cache
+
     def execute_tool(self, tool_name: str, **kwargs) -> str:
         """Execute a tool by name; always returns a JSON string."""
         if tool_name not in self.functions_map:
@@ -1335,7 +1361,7 @@ class MetaOrchestratorTools:
                     buf = io.BytesIO()
                     img.save(buf, format="JPEG", quality=90)
                     description = describe_image(
-                        buf.getvalue(), self.orch.model, prompt
+                        buf.getvalue(), self._vision_model(), prompt
                     )
                     results.append({"name": pp.name,
                                     "description": description})
