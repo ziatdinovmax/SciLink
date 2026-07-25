@@ -1,5 +1,6 @@
 from typing import Dict, Any, Optional, List
 import re
+import textwrap
 
 
 def format_caveats(findings: Optional[List[Dict[str, Any]]]) -> List[str]:
@@ -108,6 +109,23 @@ def display_plan_summary(result: Dict[str, Any]) -> None:
     print("\n" + "="*80)
 
 
+def _wrap_field(text: Any, width: int = 78, indent: str = "   ") -> str:
+    """Wrap a long plan field into an indented block.
+
+    Candidate hypotheses and justifications run to several hundred words;
+    unwrapped they render as one edge-to-edge wall in which the field
+    labels and candidate boundaries are invisible. Indenting the body
+    subordinates it to its label. Paragraph breaks in the source are kept.
+    """
+    s = str(text if text not in (None, "") else "N/A")
+    paras = [p.strip() for p in s.split("\n") if p.strip()] or [s]
+    return "\n\n".join(
+        textwrap.fill(p, width=width, initial_indent=indent,
+                      subsequent_indent=indent)
+        for p in paras
+    )
+
+
 def display_plan_candidates(candidates: List[Dict[str, Any]],
                             judge: Dict[str, Any],
                             selected: int,
@@ -132,25 +150,40 @@ def display_plan_candidates(candidates: List[Dict[str, Any]],
           f"(judge pick: Candidate {selected})")
     print("=" * 80)
 
+    n = len(candidates)
     for i, cand in enumerate(candidates, 1):
         exp = (cand.get("proposed_experiments") or [{}])[0]
         marker = "  ← judge pick" if i == selected else ""
-        print(f"\n── Candidate {i}: {exp.get('experiment_name', 'Unnamed')} ──{marker}")
-        print(f"🎯 Hypothesis: {exp.get('hypothesis', 'N/A')}")
-        print(f"📈 Expected outcome: {exp.get('expected_outcome', 'N/A')}")
-        print(f"💡 Justification: {exp.get('justification', 'N/A')}")
+        # Each candidate's body runs to several hundred words, so a bare
+        # one-line header disappears between the walls of text. Lead with a
+        # banded rule carrying the position ('CANDIDATE 2 of 3'); the
+        # '── Candidate N: <name> ──' line below it stays verbatim — the UI
+        # radio parser gates on exactly that grammar.
+        print(f"\n{'━' * 80}")
+        print(f"  CANDIDATE {i} of {n}"
+              + ("   ★ JUDGE PICK" if i == selected else ""))
+        print("━" * 80)
+        # Marker line keeps its exact grammar AND its trailing pick suffix:
+        # the UI radio parser reads the index/name from it and detects the
+        # pick from what trails the closing '──'.
+        print(f"── Candidate {i}: {exp.get('experiment_name', 'Unnamed')} ──{marker}")
+        for icon, title, key in (("🎯", "Hypothesis", "hypothesis"),
+                                 ("📈", "Expected outcome", "expected_outcome"),
+                                 ("💡", "Justification", "justification")):
+            print(f"\n{icon} {title}:")
+            print(_wrap_field(exp.get(key)))
         s = scores_by_idx.get(i)
         if s:
-            print("🧑‍⚖️ Judge: "
+            print("\n🧑‍⚖️ Judge: "
                   f"groundedness {s.get('groundedness', '?')}/5 · "
                   f"testability {s.get('testability', '?')}/5 · "
                   f"actionability {s.get('actionability', '?')}/5 · "
                   f"feasibility {s.get('feasibility', '?')}/5 · "
                   f"info-gain {s.get('information_gain', '?')}/5")
             if s.get("comment"):
-                print(f"   {s['comment']}")
+                print(_wrap_field(s["comment"]))
         if report_paths and i <= len(report_paths):
-            print(f"📄 Full plan: {report_paths[i - 1]}")
+            print(f"\n📄 Full plan: {report_paths[i - 1]}")
 
     if judge.get("reasoning"):
         print(f"\n🧑‍⚖️ JUDGE REASONING:\n  {judge['reasoning']}")

@@ -498,3 +498,34 @@ def test_coverage_note_preserves_the_original_context(monkeypatch):
         model=None, generation_config=None,
         additional_context="max 2 mL/well, aqueous only", external_context="lit")
     assert "max 2 mL/well, aqueous only" in seen["additional_context"]
+
+
+def test_candidate_cards_are_visually_separated(capsys):
+    """Each candidate's body runs to several hundred words, so boundaries
+    must be findable at a glance: a banded 'CANDIDATE i of n' rule, the pick
+    starred in that band, and wrapped/indented field bodies. The '── Candidate
+    i: name ──' marker line keeps its exact grammar (UI parser contract)."""
+    long_text = ("word " * 400).strip()
+    cands = [json.loads(plan_json(f"Plan {i}", long_text)) for i in (1, 2, 3)]
+    for c in cands:
+        c["proposed_experiments"][0]["justification"] = long_text
+    judge = json.loads(judge_json(2, 3))
+    display_plan_candidates(cands, judge, selected=2)
+    out = capsys.readouterr().out
+
+    assert out.count("━" * 80) == 6  # a rule above and below each banner
+    for i in (1, 2, 3):
+        assert f"  CANDIDATE {i} of 3" in out
+    assert "CANDIDATE 2 of 3   ★ JUDGE PICK" in out
+    assert "CANDIDATE 1 of 3   ★" not in out
+    # labels sit on their own line; bodies are wrapped and indented under them
+    assert "\n🎯 Hypothesis:\n   word" in out
+    assert "\n💡 Justification:\n   word" in out
+    body_lines = [ln for ln in out.splitlines() if ln.startswith("   word")]
+    assert body_lines and max(len(ln) for ln in body_lines) <= 80
+
+    # pick is still readable from the BLOCK alone (prompt carries no index)
+    parse = _load_ui_parser()
+    cands_p, pick = parse(out, "accept plan candidate")
+    assert pick == 2
+    assert [c["idx"] for c in cands_p] == [1, 2, 3]
