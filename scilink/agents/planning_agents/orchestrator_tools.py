@@ -1393,7 +1393,11 @@ class OrchestratorTools:
                 with open(output_path, 'w') as f:
                     json.dump(plan, f, indent=2)
 
-                # If literature came from the deprecated internal path, save it
+                # Persist external grounding that arrived without a literature
+                # file (molecule context / raw text stamped into the plan's
+                # literature_search), so the campaign registry can carry it
+                # into later refines. (The internal literature fallback that
+                # originally motivated this save is removed.)
                 if not literature_context and plan.get("literature_search"):
                     lit_path = self._output_dir() / "literature_search.md"
                     with open(lit_path, 'w') as f:

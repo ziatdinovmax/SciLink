@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 import copy
 import json
@@ -31,11 +30,6 @@ from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 
 from ._deprecation import normalize_params
 from .base_agent import BaseAgent
-
-import warnings
-
-from ..lit_agents.literature_agent import LiteratureSearchAgent
-from ..lit_agents.optimize_query import optimize_search_query
 
 from .planning_rag import (
     perform_science_rag,
@@ -137,7 +131,9 @@ class PlanningAgent(BaseAgent):
             When None, uses LiteLLM for multi-provider support.
         embedding_model: Embedding model name.
         embedding_api_key: API key for the embedding LLM provider.
-        futurehouse_api_key: Optional API key for literature search.
+        futurehouse_api_key: UNUSED. Retained for call-site compatibility;
+            the internal literature fallback was removed. Literature flows
+            in via ``external_context`` (orchestrator's search_literature).
         kb_base_path: Path for knowledge base storage.
         code_chunk_size: Chunk size for code files.
         output_dir: Output directory for artifacts.
@@ -215,17 +211,13 @@ class PlanningAgent(BaseAgent):
         self._api_key = api_key
         self.generation_config = None
 
-        # Literature agent (deprecated — prefer orchestrator's search_literature tool)
-        self.lit_agent = None
-        if futurehouse_api_key or os.getenv("FUTUREHOUSE_API_KEY"):
-            try:
-                self.lit_agent = LiteratureSearchAgent(futurehouse_api_key, max_wait_time=3000)
-                logging.info("✅ Literature Search Agent initialized (deprecated fallback).")
-            except Exception as e:
-                logging.warning(f"⚠️ Failed to initialize Literature Agent: {e}")
-        else:
-            logging.info("ℹ️ No FutureHouse API key provided. Literature search will be skipped.")
-                    
+        # No literature agent here: the internal fallback was removed —
+        # literature reaches plan generation only as external_context, via
+        # the orchestrator's search_literature tool (which owns its own
+        # LiteratureSearchAgent). futurehouse_api_key stays accepted for
+        # call-site compatibility but is unused at this level.
+
+
         # --- Dual KnowledgeBase Initialization ---
         base_path = Path(kb_base_path)
         base_path.parent.mkdir(parents=True, exist_ok=True)
@@ -746,7 +738,8 @@ class PlanningAgent(BaseAgent):
                 If False, appends to the current research session.
             external_context: Pre-fetched external context (e.g. from
                 orchestrator's search_literature/query_molecules tools).
-                When provided, skips internal literature search.
+                The ONLY way literature enters plan generation — there is
+                no internal search.
             n_candidates: Best-of-N width (clamped 1-4). At 1 (default) the
                 single-plan path runs unchanged. Above 1, candidates are
                 generated sequentially — each conditioned to test a DIFFERENT
@@ -783,7 +776,8 @@ class PlanningAgent(BaseAgent):
             Dict containing the experimental plan with keys:
                 - proposed_experiments: List of experiment dicts with hypotheses,
                   steps, justifications, and expected outcomes
-                - literature_search: Literature context (if lit_agent available)
+                - literature_search: Literature context (when external
+                  context was supplied)
                 - iteration: Current iteration number
                 - stage: Pipeline stage that produced this plan
                 - error/message: Present only if generation failed
@@ -847,23 +841,13 @@ class PlanningAgent(BaseAgent):
                 ctx_string += f"## {header}\n{content}\n\n"
             ctx_string = ctx_string.strip() if ctx_string else None
         
-        # External context: prefer caller-provided, fall back to deprecated internal lit search
-        if not external_context and self.lit_agent:
-            warnings.warn(
-                "Internal literature search in PlanningAgent is deprecated. "
-                "Use the orchestrator's search_literature() tool instead.",
-                DeprecationWarning, stacklevel=2
-            )
-            print(f"  - 🌍 Querying literature (deprecated internal path)...")
-            lit_res = self.lit_agent.search_for_hypothesis_context(
-                optimize_search_query(objective=objective, model=self.model)
-            )
-            if lit_res['status'] == 'success':
-                external_context = lit_res['content']
-                print(f"  - ✅ Literature search completed.")
-            else:
-                print(f"  - ⚠️ Literature search {lit_res['status']}: {lit_res.get('message', '')}")
-                external_context = ""
+        # Literature enters ONLY as caller-provided external_context (the
+        # orchestrator's search_literature tool is the sanctioned path).
+        # The old internal fallback searched silently whenever a FutureHouse
+        # key was present and no context was passed — an uninstructable
+        # Edison call that neither the user nor the tool-calling LLM could
+        # veto (seen firing against an explicit "no literature" request
+        # during the #396 live probes). Removed; no replacement.
 
         # Build skill context for plan generation
         skill_planning_context = self._build_skill_context("planning")
@@ -2388,20 +2372,10 @@ Select the most appropriate strategy:
             )
             return error_result
         
-        # 3. External context: prefer caller-provided, fall back to deprecated internal lit
+        # 3. External context is caller-provided only (orchestrator's
+        # search_literature economic_data type is the sanctioned path; the
+        # silent internal fallback was removed with the one in generate_plan).
         lit_context = external_context or ""
-        if not lit_context and self.lit_agent:
-            warnings.warn(
-                "Internal literature search in PlanningAgent is deprecated. "
-                "Use the orchestrator's search_literature() tool instead.",
-                DeprecationWarning, stacklevel=2
-            )
-            print(f"  - 🌍 Querying literature for TEA context (deprecated internal path)...")
-            lit_res = self.lit_agent.search_for_economic_data(
-                optimize_search_query(objective=objective, model=self.model)
-            )
-            if lit_res['status'] == 'success':
-                lit_context = lit_res['content']
 
         # 4. Perform RAG
         # Build skill context for TEA (overview section if relevant)
