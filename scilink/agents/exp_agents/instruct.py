@@ -962,6 +962,7 @@ You MUST output a valid JSON object with two keys: "analysis_integration" and "m
    * **scientific_justification**: (String) Why this measurement provides valuable insights
    * **expected_outcomes**: (String) Specific information to be gained
    * **priority**: (Integer) 1-5 priority ranking
+   * **target**: (Object or null) Machine-readable acquisition target: {"setting": "<concrete instrument setting, e.g. an energy window with numbers>", "expected_signature": "<the specific feature expected there>"}; null when the recommendation is not a direct acquisition
 
 Focus on actionable recommendations that maximize scientific insight while being technically feasible.
 """
@@ -2951,11 +2952,13 @@ the saved fit visualization, extracted parameters, and sample metadata.
             "description": "Specific measurement",
             "scientific_justification": "Why it matters",
             "expected_outcomes": "What you expect to learn",
-            "priority": 1-5
+            "priority": 1-5,
+            "target": {{"setting": "concrete instrument setting (e.g. an energy/wavenumber window with numbers)", "expected_signature": "the specific feature expected there"}}
         }}
     ]
 }}
 ```
+"target" makes a recommendation directly actionable by an instrument; set it to null when the recommendation is not a direct acquisition (e.g. sample preparation or a different technique).
 """
 
 KNOWLEDGE_SYNTHESIS_INSTRUCTIONS = """You are an expert scientific data analyst. You have been given the detailed results from multiple analyses of reference datasets. Your task is to synthesize actionable knowledge from these results, focused on a specific topic.
@@ -4027,9 +4030,11 @@ You have: analysis visualization, extracted features, sample metadata.
             "description": "Specific measurement",
             "scientific_justification": "Why it matters",
             "expected_outcomes": "What you expect to learn",
-            "priority": 1-5
+            "priority": 1-5,
+            "target": {{"setting": "concrete instrument setting (e.g. region + resolution, or a spectral window with numbers)", "expected_signature": "the specific feature expected there"}}
         }}
     ]
 }}
 ```
+"target" makes a recommendation directly actionable by an instrument; set it to null when the recommendation is not a direct acquisition (e.g. sample preparation or a different technique).
 """
