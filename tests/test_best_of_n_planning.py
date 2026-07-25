@@ -1076,3 +1076,42 @@ def test_all_three_renderers_show_a_real_title(tmp_path, capsys):
     assert "Catch the injection before the pump" in doss
     assert "Untitled" not in doss
     assert "*Title and system:*" in doss
+
+
+def test_review_offers_a_browser_report_path(tmp_path, capsys):
+    """These blocks run to thousands of words in a terminal; the reviewer
+    gets an HTML path at the top, like the candidate cards already do. The
+    saved plan.html is written by the orchestrator only AFTER the review
+    returns, so the agent renders a preview from live state."""
+    from scilink.agents.planning_agents.user_interface import display_plan_summary
+
+    agent = PlanningAgent.__new__(PlanningAgent)
+    BaseAgent.__init__(agent, str(tmp_path))
+    plan = _concepts_plan(CONCEPTS)
+    plan["stage"] = "Science Draft"
+    agent.state = {"objective": "o", "plan_history": [plan],
+                   "current_plan": plan, "experimental_results": [],
+                   "action_history": []}
+
+    path = agent._review_preview_path()
+    assert path and Path(path).exists()
+    assert Path(path).name == "plan_preview.html"
+    assert "PS-1" in Path(path).read_text()          # renders the portfolio
+    assert "HTML Report updated" not in capsys.readouterr().out  # no dupe line
+
+    display_plan_summary(plan, ideation=True, report_path=path)
+    out = capsys.readouterr().out
+    assert "📄 Full report (open in a browser): " + path in out
+    # ... at the TOP: before any direction content
+    assert out.index("Full report") < out.index("Research Directions")
+
+    # refreshed on each review, and never fatal
+    agent.state["current_plan"] = {"proposed_experiments": [{"experiment_name": "v2"}]}
+    agent.state["plan_history"] = [agent.state["current_plan"]]
+    assert "v2" in Path(agent._review_preview_path()).read_text()
+    agent.state = None                                # broken state
+    assert agent._review_preview_path() is None       # degrades, no raise
+
+    # omitted -> byte-identical to the previous behaviour
+    display_plan_summary(plan, ideation=True)
+    assert "Full report" not in capsys.readouterr().out

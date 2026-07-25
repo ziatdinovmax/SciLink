@@ -332,6 +332,30 @@ class PlanningAgent(BaseAgent):
               f"#{prev_cid + 1}. The previous campaign's plans and "
               f"literature stay archived and are NOT carried forward.")
 
+    def _review_preview_path(self) -> Optional[str]:
+        """Render the plan under review to HTML and return its path.
+
+        The saved `plan.html` is written by the orchestrator only AFTER this
+        call returns, so a reviewer prompted mid-run has nothing to open —
+        yet these summaries run to thousands of words in a terminal. Render
+        a preview from the live state instead, refreshed at every review so
+        it always shows the plan being asked about. Never fatal: a failed
+        preview must not block the review prompt.
+        """
+        try:
+            path = Path(self.output_dir) / "plan_preview.html"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # Swallow the generator's own "HTML Report updated" line: the
+            # review block announces the path itself, one line above.
+            import io as _io
+            import contextlib as _ctx
+            with _ctx.redirect_stdout(_io.StringIO()):
+                HTMLReportGenerator(self.state).generate(str(path))
+            return str(path)
+        except Exception as e:  # noqa: BLE001 - cosmetic aid only
+            logging.debug(f"Review preview unavailable: {e}")
+            return None
+
     def _is_ideation_campaign(self) -> bool:
         """Was the current plan authored under the ideation profile?
 
@@ -1128,7 +1152,8 @@ class PlanningAgent(BaseAgent):
         # Human feedback on strategy
         human_feedback = None
         if enable_human_feedback and res.get("proposed_experiments") and not res.get("error"):
-            display_plan_summary(res, ideation=self._is_ideation_campaign())
+            display_plan_summary(res, ideation=self._is_ideation_campaign(),
+                                 report_path=self._review_preview_path())
             human_feedback = get_user_feedback()
             
             if human_feedback:
@@ -1182,7 +1207,8 @@ class PlanningAgent(BaseAgent):
 
                     self.state["plan_history"].append(self._stamp_campaign(res).copy())
                     self.state["current_plan"] = res
-                    display_plan_summary(res, ideation=self._is_ideation_campaign())
+                    display_plan_summary(res, ideation=self._is_ideation_campaign(),
+                                 report_path=self._review_preview_path())
                     print("✅ Plan updated.")
             else:
                 print("✅ Plan accepted.")
@@ -1747,7 +1773,8 @@ Select the most appropriate strategy:
             print("\n" + "="*60)
             print("🧠 AGENT'S PROPOSED REVISION BASED ON RESULTS")
             print("="*60)
-            display_plan_summary(new_plan, ideation=self._is_ideation_campaign())
+            display_plan_summary(new_plan, ideation=self._is_ideation_campaign(),
+                                 report_path=self._review_preview_path())
             
             human_feedback = get_user_feedback()
             
@@ -1886,7 +1913,8 @@ Select the most appropriate strategy:
             print("\n" + "=" * 60)
             print("🔧 AGENT'S PROPOSED PLAN ADJUSTMENT (Constraint)")
             print("=" * 60)
-            display_plan_summary(new_plan, ideation=self._is_ideation_campaign())
+            display_plan_summary(new_plan, ideation=self._is_ideation_campaign(),
+                                 report_path=self._review_preview_path())
 
             human_feedback = get_user_feedback()
 

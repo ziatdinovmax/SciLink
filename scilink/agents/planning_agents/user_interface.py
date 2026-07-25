@@ -141,7 +141,8 @@ def _print_concepts(concepts: List[Any]) -> None:
 
 
 def display_plan_summary(result: Dict[str, Any],
-                         ideation: bool = False) -> None:
+                         ideation: bool = False,
+                         report_path: Optional[str] = None) -> None:
     """
     Parses the agent's results and prints a structured, pretty-printed
     summary to the console for human review.
@@ -171,6 +172,10 @@ def display_plan_summary(result: Dict[str, Any],
     print("✅ PROPOSED RESEARCH DIRECTIONS" if ideation
           else "✅ PROPOSED EXPERIMENTAL PLAN")
     print("="*80)
+    # Offered at the TOP: these blocks run to thousands of words in a
+    # terminal, and the same content is far easier to read in a browser.
+    if report_path:
+        print(f"\n📄 Full report (open in a browser): {report_path}")
 
     # 4. Loop through Experiments
     multi = len(experiments) > 1
