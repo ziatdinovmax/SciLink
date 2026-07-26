@@ -19,6 +19,7 @@ All LLM traffic is a scripted mock; no network.
 """
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -603,12 +604,12 @@ def test_ui_embeds_marked_deliverables_and_skips_bulk(tmp_path, monkeypatch):
 
     src = Path("scilink/ui/app.py").read_text()
     tree = ast.parse(src)
-    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
-              and n.name == "_find_new_md_documents")
+    fns = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
     st_stub = SimpleNamespace(session_state=SimpleNamespace(
         session_dir=str(tmp_path), known_images=set()))
     ns = {"st": st_stub, "Path": Path}
-    exec(compile(ast.Module(body=[fn], type_ignores=[]), "app.py", "exec"), ns)
+    exec(compile(ast.Module(body=[fns["_find_new_md_documents"]],
+                            type_ignores=[]), "app.py", "exec"), ns)
 
     found = {Path(p).name for p in ns["_find_new_md_documents"]()}
     assert "top3_priority_brief.md" in found        # marked -> embedded
@@ -714,10 +715,56 @@ def test_ui_skips_the_reviewer_scratch_render(tmp_path):
     (tmp_path / "plan_candidates" / "candidate_1.html").write_text("<html>c</html>")
 
     src = Path("scilink/ui/app.py").read_text()
-    fn = next(n for n in ast.parse(src).body
-              if isinstance(n, ast.FunctionDef) and n.name == "_find_new_html_reports")
+    tree = ast.parse(src)
+    fns = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
     st_stub = SimpleNamespace(session_state=SimpleNamespace(
         session_dir=str(tmp_path), known_images=set()))
     ns = {"st": st_stub, "Path": Path}
-    exec(compile(ast.Module(body=[fn], type_ignores=[]), "app.py", "exec"), ns)
+    exec(compile(ast.Module(body=[fns["_find_new_html_reports"]],
+                            type_ignores=[]), "app.py", "exec"), ns)
     assert [Path(p).name for p in ns["_find_new_html_reports"]()] == ["plan.html"]
+
+
+def test_refined_plan_resurfaces_when_rewritten_in_place(tmp_path):
+    """Standalone plan mode rewrites base_dir/plan.html on every refine, so
+    a path-only key marked it 'already shown' and the REFINED plan never
+    reached the chat — you kept looking at v1. Meta delegations were fine
+    only because each turn writes its own directory."""
+    import ast
+    src = Path("scilink/ui/app.py").read_text()
+    tree = ast.parse(src)
+    fns = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    st_stub = SimpleNamespace(session_state=SimpleNamespace(
+        session_dir=str(tmp_path), known_images=set()))
+    ns = {"st": st_stub, "Path": Path}
+    exec(compile(ast.Module(body=[fns["_find_new_html_reports"]],
+                            type_ignores=[]), "app.py", "exec"), ns)
+    find = ns["_find_new_html_reports"]
+
+    plan = tmp_path / "plan.html"
+    plan.write_text("<html>v1</html>")
+    assert [Path(p).name for p in find()] == ["plan.html"]
+    assert find() == []                                   # unchanged -> once
+
+    os.utime(plan, ns=(0, 2_000_000_000))                 # a refine rewrites it
+    plan.write_text("<html>v2 REFINED</html>")
+    assert [Path(p).name for p in find()] == ["plan.html"]  # v2 surfaces
+    assert find() == []                                   # and only once
+
+
+def test_lab_plan_report_is_marked_a_deliverable(tmp_path):
+    """Lab mode produces no white paper or dossier, so the plan report is
+    the artifact the user asked for and must be starred like theirs."""
+    from scilink.agents.planning_agents.user_interface import (
+        load_deliverables, record_deliverable)
+    src = Path("scilink/agents/planning_agents/orchestrator_tools.py").read_text()
+    # every plan.html generation site marks it
+    # every plan-report generation site marks it — none may be missed
+    assert (src.count('"Experimental plan (report)"')
+            == src.count("generator.generate(str(html_path))") == 5)
+
+    record_deliverable(tmp_path, tmp_path / "plan.html",
+                       "Experimental plan (report)", True)
+    (tmp_path / "plan.html").write_text("<html/>")
+    marked = [e for e in load_deliverables(tmp_path) if e["deliverable"]]
+    assert [e["title"] for e in marked] == ["Experimental plan (report)"]

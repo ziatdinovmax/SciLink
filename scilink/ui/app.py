@@ -302,8 +302,18 @@ def _find_new_html_reports() -> list[str]:
     new = []
     for p in Path(session_dir).rglob("*.html"):
         s = str(p)
-        if s not in st.session_state.known_images:  # reuse the same set
-            st.session_state.known_images.add(s)
+        # Identity = path AND mtime. Under the meta each delegation writes
+        # its own directory so a path is unique per turn, but standalone
+        # plan mode rewrites base_dir/plan.html on every refine — a
+        # path-only key marked it "already shown" and the REFINED plan
+        # never reached the chat. Inlined rather than shared: these sweeps
+        # are exec'd standalone by the UI-contract tests.
+        try:
+            key = f"{p}:{p.stat().st_mtime_ns}"
+        except OSError:
+            key = str(p)
+        if key not in st.session_state.known_images:  # reuse the same set
+            st.session_state.known_images.add(key)
             if p.parent.name == "plan_candidates":
                 continue
             # plan_preview.html is the CLI reviewer's scratch render of the
@@ -361,7 +371,17 @@ def _find_new_md_documents() -> list[str]:
     new = []
     for p in Path(session_dir).rglob("*.md"):
         s = str(p)
-        if s in st.session_state.known_images:  # reuse the same set
+        # Identity = path AND mtime. Under the meta each delegation writes
+        # its own directory so a path is unique per turn, but standalone
+        # plan mode rewrites base_dir/plan.html on every refine — a
+        # path-only key marked it "already shown" and the REFINED plan
+        # never reached the chat. Inlined rather than shared: these sweeps
+        # are exec'd standalone by the UI-contract tests.
+        try:
+            key = f"{p}:{p.stat().st_mtime_ns}"
+        except OSError:
+            key = str(p)
+        if key in st.session_state.known_images:  # reuse the same set
             continue
         is_marked = str(p.resolve()) in marked
         if not is_marked:
@@ -372,7 +392,7 @@ def _find_new_md_documents() -> list[str]:
                     continue
             except OSError:
                 continue
-        st.session_state.known_images.add(s)
+        st.session_state.known_images.add(key)
         new.append(s)
     return new
 

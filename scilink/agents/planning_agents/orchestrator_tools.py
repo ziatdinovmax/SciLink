@@ -1551,6 +1551,12 @@ class OrchestratorTools:
                     html_path = self._output_dir() / "plan.html"
                     generator = HTMLReportGenerator(self.orch.planner.state)
                     generator.generate(str(html_path))
+                    # Lab mode's deliverable: no white paper or dossier is
+                    # produced there, so the plan report is the artifact.
+                    from .user_interface import record_deliverable
+                    record_deliverable(self.orch.base_dir, html_path,
+                                       "Experimental plan (report)",
+                                       deliverable=True)
 
                 num_experiments = len(plan.get('proposed_experiments', []))
 
@@ -1877,6 +1883,13 @@ class OrchestratorTools:
                 html_path = self._output_dir() / "plan.html"
                 generator = HTMLReportGenerator(self.orch.planner.state)
                 generator.generate(str(html_path))
+                # In lab mode there is no white paper or dossier — the plan
+                # report IS what the user asked for, so mark it the way
+                # ideation's artifacts are marked.
+                from .user_interface import record_deliverable
+                record_deliverable(self.orch.base_dir, html_path,
+                                   "Experimental plan (report)",
+                                   deliverable=True)
                 
                 # Check if any experiments actually got code
                 experiments = updated_plan.get("proposed_experiments", [])
@@ -2180,6 +2193,13 @@ class OrchestratorTools:
                 html_path = self._output_dir() / "plan.html"
                 generator = HTMLReportGenerator(self.orch.planner.state)
                 generator.generate(str(html_path))
+                # In lab mode there is no white paper or dossier — the plan
+                # report IS what the user asked for, so mark it the way
+                # ideation's artifacts are marked.
+                from .user_interface import record_deliverable
+                record_deliverable(self.orch.base_dir, html_path,
+                                   "Experimental plan (report)",
+                                   deliverable=True)
 
                 return json.dumps({
                     "status": "success",
@@ -2262,6 +2282,13 @@ class OrchestratorTools:
                 html_path = self._output_dir() / "plan.html"
                 generator = HTMLReportGenerator(self.orch.planner.state)
                 generator.generate(str(html_path))
+                # In lab mode there is no white paper or dossier — the plan
+                # report IS what the user asked for, so mark it the way
+                # ideation's artifacts are marked.
+                from .user_interface import record_deliverable
+                record_deliverable(self.orch.base_dir, html_path,
+                                   "Experimental plan (report)",
+                                   deliverable=True)
 
                 return json.dumps({
                     "status": "success",
@@ -2343,6 +2370,10 @@ class OrchestratorTools:
                 html_path = self._output_dir() / "plan_refined.html"
                 generator = HTMLReportGenerator(self.orch.planner.state)
                 generator.generate(str(html_path))
+                from .user_interface import record_deliverable
+                record_deliverable(self.orch.base_dir, html_path,
+                                   "Experimental plan (report)",
+                                   deliverable=True)
                 
                 # Save scripts
                 final_out = str(self._output_dir() / "output_scripts")
