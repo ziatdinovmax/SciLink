@@ -712,9 +712,11 @@ def test_lab_plan_report_is_marked_a_deliverable(tmp_path):
         load_deliverables, record_deliverable)
     src = Path("scilink/agents/planning_agents/orchestrator_tools.py").read_text()
     # every plan.html generation site marks it
-    # every plan-report generation site marks it — none may be missed
-    assert (src.count('"Experimental plan (report)"')
-            == src.count("generator.generate(str(html_path))") == 5)
+    # every plan-report generation site routes through the one marker
+    assert src.count("self._record_plan_report(html_path)") == 5
+    assert src.count("generator.generate(str(html_path))") == 5
+    # ...and the marking itself is defined exactly once
+    assert src.count("record_deliverable(self.orch.base_dir, html_path,") == 1
 
     record_deliverable(tmp_path, tmp_path / "plan.html",
                        "Experimental plan (report)", True)
@@ -751,3 +753,29 @@ def test_missing_metadata_prompt_degrades_without_a_human(monkeypatch, capsys,
     # a UI-style patched input still works (stdin is not a tty there)
     monkeypatch.setattr(builtins, "input", lambda *a, **k: "yield data ")
     assert ui.get_dataset_description("runs.csv") == "yield data"
+
+
+def test_plan_report_is_not_a_deliverable_in_ideation(tmp_path):
+    """Ideation's deliverables are the dossier and white paper; plan.html is
+    suppressed at generation because the protocol view misrepresents a
+    portfolio. Refinement regenerates it anyway, so a live ideation session
+    starred three 'Experimental plan (report)' files beside its real ones."""
+    from scilink.agents.planning_agents.user_interface import load_deliverables
+
+    html = tmp_path / "plan.html"
+    html.write_text("<html/>")
+    for ideation, expected in ((True, 0), (False, 1)):
+        (tmp_path / "deliverables.json").unlink(missing_ok=True)
+        tools = OrchestratorTools.__new__(OrchestratorTools)
+        tools.orch = SimpleNamespace(
+            base_dir=tmp_path, _active_output_subdir=None,
+            planner=SimpleNamespace(_is_ideation_campaign=lambda: ideation))
+        tools._record_plan_report(html)
+        marked = [e for e in load_deliverables(tmp_path) if e["deliverable"]]
+        assert len(marked) == expected, f"ideation={ideation}"
+
+    # a planner that cannot answer must not break the write path
+    tools = OrchestratorTools.__new__(OrchestratorTools)
+    tools.orch = SimpleNamespace(base_dir=tmp_path, _active_output_subdir=None,
+                                 planner=SimpleNamespace())
+    tools._record_plan_report(html)          # no raise
