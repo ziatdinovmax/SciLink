@@ -9,18 +9,48 @@ from pathlib import Path
 DELIVERABLES_MANIFEST = "deliverables.json"
 
 
-def file_link(path: Any, label: Optional[str] = None) -> str:
-    """An absolute path, clickable where the terminal supports it.
+def _terminal_supports_hyperlinks() -> bool:
+    """Does THIS terminal render OSC-8 hyperlinks?
 
-    Emits an OSC-8 hyperlink ONLY on a real TTY: the UI captures stdout and
-    several parsers gate on these strings, so escape codes must never reach
-    a captured buffer. Everywhere else this is just the absolute path, which
-    is what a reader needs to find the file anyway.
+    Being a TTY is not enough — an emulator that does not understand OSC-8
+    prints the escape as literal junk (']8;;file:///...'), which is strictly
+    worse than a plain path. Apple Terminal.app is the common example. So
+    this is an ALLOW-LIST: emit the escape only where support is known, and
+    fall back to a plain absolute path everywhere else (iTerm2 and VS Code
+    linkify bare absolute paths anyway, so little is lost).
+    """
+    if os.environ.get("SCILINK_NO_HYPERLINKS"):
+        return False
+    if os.environ.get("SCILINK_FORCE_HYPERLINKS"):
+        return True
+    try:
+        if not sys.stdout.isatty():
+            return False
+    except Exception:  # noqa: BLE001
+        return False
+    if os.environ.get("WT_SESSION") or os.environ.get("KONSOLE_VERSION"):
+        return True
+    if (os.environ.get("TERM_PROGRAM") or "").lower() in {
+            "iterm.app", "vscode", "wezterm", "hyper", "ghostty", "tabby"}:
+        return True
+    vte = os.environ.get("VTE_VERSION", "")
+    if vte.isdigit() and int(vte) >= 5000:      # VTE >= 0.50 (GNOME, Tilix)
+        return True
+    return False
+
+
+def file_link(path: Any, label: Optional[str] = None) -> str:
+    """An absolute path, clickable where the terminal actually supports it.
+
+    Falls back to the plain absolute path — which is what a reader needs to
+    find the file regardless — whenever hyperlink support is not positively
+    known, or when stdout is captured (the UI parses this stdout and its
+    review widgets gate on the strings in it).
     """
     p = Path(path).resolve()
     text = label or str(p)
     try:
-        if sys.stdout.isatty() and not os.environ.get("SCILINK_NO_HYPERLINKS"):
+        if _terminal_supports_hyperlinks():
             return f"\033]8;;file://{p}\033\\{text}\033]8;;\033\\"
     except Exception:  # noqa: BLE001 - a link is cosmetic, never fatal
         pass

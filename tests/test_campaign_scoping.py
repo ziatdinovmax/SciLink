@@ -615,3 +615,48 @@ def test_ui_embeds_marked_deliverables_and_skips_bulk(tmp_path, monkeypatch):
     assert "literature_search_x.md" not in found    # bulk context excluded
     assert "huge_notes.md" not in found             # too big to read in chat
     assert ns["_find_new_md_documents"]() == []    # each file surfaces once
+
+
+def test_hyperlinks_only_where_the_terminal_understands_them(monkeypatch):
+    """Being a TTY is not enough: a terminal without OSC-8 support prints
+    the escape as literal junk (']8;;file:///...'), which is worse than a
+    plain path. Allow-list known-good terminals; plain everywhere else."""
+    from scilink.agents.planning_agents import user_interface as ui
+
+    monkeypatch.setattr(ui.sys.stdout, "isatty", lambda: True, raising=False)
+    for var in ("SCILINK_NO_HYPERLINKS", "SCILINK_FORCE_HYPERLINKS",
+                "WT_SESSION", "KONSOLE_VERSION", "TERM_PROGRAM",
+                "VTE_VERSION"):
+        monkeypatch.delenv(var, raising=False)
+
+    # Apple Terminal — the case that printed junk on screen
+    monkeypatch.setenv("TERM_PROGRAM", "Apple_Terminal")
+    assert not ui._terminal_supports_hyperlinks()
+    assert "\x1b]8;;" not in ui.file_link(__file__)
+
+    # unknown terminal -> plain, never a gamble
+    monkeypatch.setenv("TERM_PROGRAM", "some-new-thing")
+    assert not ui._terminal_supports_hyperlinks()
+
+    for tp in ("iTerm.app", "vscode", "WezTerm", "ghostty"):
+        monkeypatch.setenv("TERM_PROGRAM", tp)
+        assert ui._terminal_supports_hyperlinks(), tp
+    monkeypatch.delenv("TERM_PROGRAM")
+    monkeypatch.setenv("WT_SESSION", "1")
+    assert ui._terminal_supports_hyperlinks()
+    monkeypatch.delenv("WT_SESSION")
+    monkeypatch.setenv("VTE_VERSION", "6003")
+    assert ui._terminal_supports_hyperlinks()
+    monkeypatch.setenv("VTE_VERSION", "4200")          # too old for OSC-8
+    assert not ui._terminal_supports_hyperlinks()
+    monkeypatch.delenv("VTE_VERSION")
+
+    # opt-out wins over a supported terminal; opt-in forces it on
+    monkeypatch.setenv("TERM_PROGRAM", "iTerm.app")
+    monkeypatch.setenv("SCILINK_NO_HYPERLINKS", "1")
+    assert not ui._terminal_supports_hyperlinks()
+    monkeypatch.delenv("SCILINK_NO_HYPERLINKS")
+    monkeypatch.setenv("TERM_PROGRAM", "Apple_Terminal")
+    monkeypatch.setenv("SCILINK_FORCE_HYPERLINKS", "1")
+    assert ui._terminal_supports_hyperlinks()
+    assert "\x1b]8;;" in ui.file_link(__file__)
