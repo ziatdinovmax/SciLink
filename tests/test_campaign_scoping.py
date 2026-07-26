@@ -721,3 +721,33 @@ def test_lab_plan_report_is_marked_a_deliverable(tmp_path):
     (tmp_path / "plan.html").write_text("<html/>")
     marked = [e for e in load_deliverables(tmp_path) if e["deliverable"]]
     assert [e["title"] for e in marked] == ["Experimental plan (report)"]
+
+
+def test_missing_metadata_prompt_degrades_without_a_human(monkeypatch, capsys,
+                                                          tmp_path):
+    """LIVE BUG: an AUTONOMOUS meta delegation over a user CSV with no
+    metadata sibling died with EOFError inside generate_plan, and the
+    orchestrator read that as a transient failure and retried into the same
+    wall. Skipping is already a supported outcome, so an unanswerable
+    prompt takes it."""
+    import builtins
+    from scilink.agents.planning_agents import user_interface as ui
+    from scilink.agents.planning_agents.parser_utils import (
+        resolve_primary_data_path)
+
+    def no_stdin(*a, **k):
+        raise EOFError("EOF when reading a line")
+
+    monkeypatch.setattr(builtins, "input", no_stdin)
+    assert ui.get_dataset_description("runs.csv") == ""
+    assert "continuing without metadata" in capsys.readouterr().out
+
+    # and the caller completes instead of raising
+    csv = tmp_path / "runs.csv"
+    csv.write_text("t,y\n1,2\n")
+    out = resolve_primary_data_path(str(csv))
+    assert out["file_path"] == str(csv) and out["metadata_path"] is None
+
+    # a UI-style patched input still works (stdin is not a tty there)
+    monkeypatch.setattr(builtins, "input", lambda *a, **k: "yield data ")
+    assert ui.get_dataset_description("runs.csv") == "yield data"

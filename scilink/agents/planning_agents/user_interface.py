@@ -505,6 +505,17 @@ def get_user_feedback() -> Optional[str]:
 def get_dataset_description(filename: str) -> str:
     """
     Interactive prompt when metadata is missing.
+
+    Degrades to "" when nothing can answer. This ran unconditionally, so an
+    AUTONOMOUS meta delegation over a user CSV with no metadata sibling died
+    with EOFError inside generate_plan — and the orchestrator read that as a
+    transient failure and retried into the same wall. Skipping is already
+    a supported outcome (the caller falls back to header inference), so the
+    unanswerable case simply takes it.
+
+    Detected by ATTEMPTING the prompt rather than by inspecting the
+    environment: the Streamlit UI substitutes builtins.input to route
+    prompts to a widget, so stdin is not a TTY there yet input() works.
     """
     print("\n" + "!"*60)
     print(f"⚠️  MISSING METADATA FOR: {filename}")
@@ -512,6 +523,10 @@ def get_dataset_description(filename: str) -> str:
     print("The agent needs context to understand columns/units in this file.")
     print("• Option 1: Press [ENTER] to skip (Agent will guess based on headers).")
     print("• Option 2: Type a brief description (e.g., 'Yield results from Suzuki coupling').")
-    
-    desc = input("\n> Context: ").strip()
-    return desc
+
+    try:
+        return input("\n> Context: ").strip()
+    except (EOFError, KeyboardInterrupt, OSError):
+        print("  - ℹ️  No interactive session to answer; continuing without "
+              "metadata (the parser will infer from headers).")
+        return ""
