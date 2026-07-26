@@ -90,10 +90,23 @@ def read_manifest(kb_dir: Path) -> Optional[Dict[str, Any]]:
 
 
 def list_kbs() -> List[Dict[str, Any]]:
-    """All named KBs, each as its manifest plus ``name`` and ``path``."""
+    """All named KBs, each as its manifest plus ``name`` and ``path``.
+
+    Also reports leftovers from an interrupted build: a `.staging_<name>`
+    directory means a create/add/rebuild died before publishing. Hiding it
+    is what turned a crash into a silent disappearance, so it is surfaced
+    as a warning even though it is not a usable KB.
+    """
     store = kb_store_dir()
     if not store.is_dir():
         return []
+    for child in sorted(store.iterdir()):
+        if child.is_dir() and child.name.startswith(".staging_"):
+            _logger.warning(
+                "⚠️  Leftover build directory %s — a previous "
+                "create/add/rebuild was interrupted. The live KB is intact; "
+                "re-run the command to rebuild, or delete this directory.",
+                child)
     out = []
     for child in sorted(store.iterdir()):
         if not child.is_dir() or child.name.startswith((".", "_")):
@@ -164,6 +177,44 @@ def embedding_compat_warning(manifest: Optional[Dict[str, Any]],
             f"--embedding-model {session_embedding_model}"
         )
     return None
+
+
+def _swap_into_place(staging: Path, final: Path) -> None:
+    """Publish `staging` at `final` without the KB ever being absent.
+
+    The obvious ordering — rmtree(final) then staging.rename(final) — has a
+    window in which the KB exists at NEITHER path. A crash there is not
+    merely recoverable-in-principle but silently destructive in practice:
+    `kb list` hides dot-directories so the stranded `.staging_<name>` is
+    invisible, nothing promotes it on the next run, and the natural user
+    response ("my KB vanished, recreate it") runs `kb create`, which clears
+    the stale staging directory first — deleting the last surviving copy.
+
+    So the live directory is moved ASIDE rather than removed: at every
+    instant `final` is either the old KB or the new one. The backup is
+    dropped only after the new copy is in place, and is restored if the
+    rename itself fails.
+    """
+    backup = final.with_name(final.name + ".bak")
+    shutil.rmtree(backup, ignore_errors=True)
+    had_previous = final.exists()
+    if had_previous:
+        final.rename(backup)
+    try:
+        staging.rename(final)
+    except Exception:
+        if had_previous and not final.exists():
+            try:
+                backup.rename(final)          # put the old KB back
+            except Exception:                 # noqa: BLE001
+                # Never mask the original failure with a cleanup failure,
+                # and say plainly where the surviving copy is.
+                _logger.error(
+                    "KB publish failed AND the previous copy could not be "
+                    "restored; it is intact at %s — move it back to %s.",
+                    backup, final)
+        raise
+    shutil.rmtree(backup, ignore_errors=True)
 
 
 def _write_manifest(kb_dir: Path, **fields) -> Dict[str, Any]:
@@ -288,9 +339,7 @@ def create_kb(name: str,
             n_vectors=n_vectors,
             sources=_source_names(staging),
         )
-        if final.exists():
-            shutil.rmtree(final)
-        staging.rename(final)
+        _swap_into_place(staging, final)
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise
@@ -362,9 +411,7 @@ def import_kb(name: str,
             n_vectors=n_vectors,
             sources=source_names,
         )
-        if final.exists():
-            shutil.rmtree(final)
-        staging.rename(final)
+        _swap_into_place(staging, final)
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise
@@ -447,8 +494,7 @@ def add_to_kb(name: str,
             n_vectors=(manifest.get("n_vectors") or 0) + n_added,
             sources=_source_names(staging),
         )
-        shutil.rmtree(final)
-        staging.rename(final)
+        _swap_into_place(staging, final)
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise
@@ -540,8 +586,7 @@ def rebuild_kb(name: str,
                "n_chunks": n_chunks,
                "n_vectors": n_vectors},
         )
-        shutil.rmtree(final)
-        staging.rename(final)
+        _swap_into_place(staging, final)
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise

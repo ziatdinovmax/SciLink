@@ -82,7 +82,7 @@ _CAMPAIGN_STOPWORDS = frozenset("""
 
 
 def objectives_share_campaign(previous: str, new: str,
-                              min_overlap: float = 0.25) -> bool:
+                              min_overlap: float = 0.35) -> bool:
     """Lexical continuity test between two campaign objectives (issue #396).
 
     Returns True when ``new`` plausibly continues the campaign ``previous``
@@ -93,11 +93,36 @@ def objectives_share_campaign(previous: str, new: str,
     generic term. Deterministic on purpose — this is the fallback when the
     caller does not pass ``new_campaign`` explicitly, and it must not cost
     an LLM call. Ties toward continuity only when either side has no
-    content words at all.
+    content words at all (an objective with nothing specific in it is not
+    a statement of a new topic).
+
+    The threshold leans DELIBERATELY toward declaring a new campaign,
+    because the two mistakes are not symmetric (review, PR #394): calling
+    two topics one campaign carries the previous corpus forward — the #396
+    leak — while wrongly splitting only loses carry-forward, which the
+    caller can override with ``new_campaign=False``. Measured over real
+    objectives from live sessions, unrelated pairs score <= 0.20 (a
+    perovskite-solar vs solar-wind pair lands exactly there) and genuine
+    continuations >= 0.43, so 0.35 sits mid-gap instead of 0.05 above the
+    dangerous side.
     """
+    def _depluralize(w: str) -> str:
+        """Drop ONE trailing plural 's'.
+
+        `rstrip("s")` strips every trailing s, which mangles ordinary
+        domain words — stress→stre, mass→ma, gas→ga, analysis→analysi,
+        process→proce — and then fails at the job it was doing: gas→'ga'
+        but gases→'gase', so the two no longer match. Words ending in
+        ss/us/is are not plurals; very short words are left alone.
+        (Still a naive fold, not a stemmer: gas/gases remains unmatched.)
+        """
+        if len(w) > 3 and w.endswith("s") and not w.endswith(("ss", "us", "is")):
+            return w[:-1]
+        return w
+
     def _tokens(text: str) -> set:
         words = re.findall(r"[a-z][a-z0-9]{2,}", (text or "").lower())
-        return {w.rstrip("s") or w for w in words
+        return {_depluralize(w) for w in words
                 if w not in _CAMPAIGN_STOPWORDS}
     prev_t, new_t = _tokens(previous), _tokens(new)
     if not prev_t or not new_t:

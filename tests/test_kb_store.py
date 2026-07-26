@@ -354,3 +354,91 @@ class TestKnowledgePathFallback:
         final_sources = str(kb_store.kb_path("recorded") / "sources")
         assert rec["path"] == final_sources, rec
         assert rec["files"] == ["d.md"]
+
+
+class TestCrashSafeSwap:
+    """The publish step must never leave the KB path empty.
+
+    Review (PR #394): rmtree(final) then staging.rename(final) has a window
+    where the KB exists at NEITHER path. That is not merely
+    recoverable-in-principle — `kb list` hid the stranded `.staging_<name>`,
+    nothing promoted it, and the natural "recreate it" response ran
+    `kb create`, which clears stale staging first and destroys the last copy.
+    """
+
+    def test_live_kb_survives_a_crash_during_publish(self, store, monkeypatch):
+        kb = kb_store.kb_path("mykb")
+        kb.mkdir(parents=True)
+        (kb / "default_kb_docs.faiss").write_bytes(b"ORIGINAL")
+        (kb / "manifest.json").write_text(json.dumps({"name": "mykb"}))
+        staging = kb_store.kb_store_dir() / ".staging_mykb"
+        staging.mkdir()
+        (staging / "default_kb_docs.faiss").write_bytes(b"REBUILT")
+
+        real_rename = Path.rename
+        failed = []
+
+        def die_on_publish(self, target):
+            # fail ONLY the staging -> final move, once; the restore that
+            # follows must be allowed to run, as it would after a real crash
+            if Path(self).name.startswith(".staging_") and not failed:
+                failed.append(1)
+                raise RuntimeError("power cut mid-publish")
+            return real_rename(self, target)
+
+        monkeypatch.setattr(Path, "rename", die_on_publish)
+        with pytest.raises(RuntimeError):
+            kb_store._swap_into_place(staging, kb)
+
+        # the ORIGINAL KB is still there, intact and usable
+        assert kb.is_dir()
+        assert (kb / "default_kb_docs.faiss").read_bytes() == b"ORIGINAL"
+        assert kb_store.read_manifest(kb)["name"] == "mykb"
+
+    def test_successful_swap_publishes_and_cleans_up(self, store):
+        kb = kb_store.kb_path("mykb")
+        kb.mkdir(parents=True)
+        (kb / "default_kb_docs.faiss").write_bytes(b"ORIGINAL")
+        staging = kb_store.kb_store_dir() / ".staging_mykb"
+        staging.mkdir()
+        (staging / "default_kb_docs.faiss").write_bytes(b"REBUILT")
+
+        kb_store._swap_into_place(staging, kb)
+        assert (kb / "default_kb_docs.faiss").read_bytes() == b"REBUILT"
+        assert not staging.exists()
+        assert not kb.with_name(kb.name + ".bak").exists()   # no litter
+
+    def test_swap_works_when_there_is_no_previous_kb(self, store):
+        kb = kb_store.kb_path("fresh")
+        staging = kb_store.kb_store_dir() / ".staging_fresh"
+        staging.mkdir(parents=True)
+        (staging / "default_kb_docs.faiss").write_bytes(b"NEW")
+        kb_store._swap_into_place(staging, kb)
+        assert (kb / "default_kb_docs.faiss").read_bytes() == b"NEW"
+
+    def test_a_stale_backup_does_not_block_a_later_swap(self, store):
+        kb = kb_store.kb_path("mykb")
+        kb.mkdir(parents=True)
+        (kb / "x").write_text("live")
+        stale = kb.with_name(kb.name + ".bak")
+        stale.mkdir()
+        (stale / "junk").write_text("from a previous failure")
+        staging = kb_store.kb_store_dir() / ".staging_mykb"
+        staging.mkdir()
+        (staging / "x").write_text("new")
+
+        kb_store._swap_into_place(staging, kb)
+        assert (kb / "x").read_text() == "new"
+        assert not stale.exists()
+
+    def test_interrupted_build_is_reported_not_hidden(self, store, caplog):
+        (kb_store.kb_store_dir() / ".staging_halfbuilt").mkdir(parents=True)
+        good = kb_store.kb_path("good")
+        good.mkdir(parents=True)
+        (good / "manifest.json").write_text(json.dumps({"name": "good"}))
+
+        with caplog.at_level("WARNING"):
+            listed = kb_store.list_kbs()
+        assert [k["name"] for k in listed] == ["good"]   # not a usable KB
+        assert "Leftover build directory" in caplog.text
+        assert ".staging_halfbuilt" in caplog.text

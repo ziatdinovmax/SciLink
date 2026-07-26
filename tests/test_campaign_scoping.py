@@ -779,3 +779,69 @@ def test_plan_report_is_not_a_deliverable_in_ideation(tmp_path):
     tools.orch = SimpleNamespace(base_dir=tmp_path, _active_output_subdir=None,
                                  planner=SimpleNamespace())
     tools._record_plan_report(html)          # no raise
+
+
+def test_plural_fold_does_not_mangle_domain_words():
+    """Review (PR #394): rstrip('s') strips EVERY trailing s — stress→stre,
+    mass→ma, gas→ga, analysis→analysi — and then fails at its own job,
+    since gas→'ga' but gases→'gase' no longer match."""
+    from scilink.agents.planning_agents.planning_agent import (
+        objectives_share_campaign as osc)
+
+    # words that must survive intact are still matched against themselves
+    for w in ("stress", "mass", "gas", "analysis", "process", "bias"):
+        assert osc(f"study of {w} in oxides", f"study of {w} in oxides")
+    # real plurals still fold together
+    assert osc("degradation of layered materials",
+               "degradation of a layered material")
+    assert osc("operando systems for catalysis",
+               "an operando system for catalysis")
+    # and the mangling is gone: stress no longer collides with unrelated
+    # words sharing the 'stre' prefix
+    assert not osc("mechanical stress in alloys",
+                   "streamline flow in microreactors")
+
+
+def test_campaign_threshold_separates_real_objectives():
+    """Locks the measured margin. The two errors are not symmetric — a false
+    'same campaign' carries the previous corpus forward (the #396 leak),
+    a false split only loses carry-forward — so the threshold sits mid-gap
+    rather than just above the dangerous side."""
+    from scilink.agents.planning_agents.planning_agent import (
+        objectives_share_campaign as osc)
+
+    CONTINUATIONS = [
+        ("Ideate research directions on humidity-driven degradation of "
+         "perovskite solar cells",
+         "Add a controlled-humidity aging protocol dimension to the "
+         "perovskite solar cell degradation study"),
+        ("Non-additive materials degradation under simultaneous irradiation, "
+         "mechanical stress and high temperature",
+         "Refine coupled-extremes degradation plan: separate irradiation and "
+         "stress contributions"),
+        ("maximize isolated yield of a Suzuki-Miyaura coupling on an "
+         "automated flow platform",
+         "maximize the isolated yield of Suzuki-Miyaura cross-coupling "
+         "tuning temperature, catalyst loading, residence time"),
+    ]
+    NEW_TOPICS = [
+        # the reviewer's case: one shared specific-ish word, different topic
+        ("perovskite solar cell stability under humidity",
+         "solar wind radiation damage to spacecraft shielding"),
+        ("operando capture of fleeting working states in energy materials",
+         "microelectrode array biocompatibility in chronic neural implants"),
+        ("maximize yield of a Suzuki-Miyaura coupling on a flow platform",
+         "maximize crystallinity of a ZIF-8 MOF synthesis"),
+        ("in-situ characterization of catalyst deactivation",
+         "enzymatic plastic depolymerization"),
+        ("solid-state battery interphase failure",
+         "in-situ study of electrocatalyst degradation"),
+        ("Ideate research directions on humidity-driven degradation of "
+         "perovskite solar cells",
+         "Non-additive materials degradation under simultaneous irradiation, "
+         "mechanical stress and high temperature"),
+    ]
+    for a, b in CONTINUATIONS:
+        assert osc(a, b), f"should continue: {a[:40]}"
+    for a, b in NEW_TOPICS:
+        assert not osc(a, b), f"should split: {a[:40]} VS {b[:40]}"
