@@ -1106,3 +1106,101 @@ class ReferencePropertyCritic(_CriticBase):
         report.setdefault("verdict", "good")
         report.setdefault("failure_class", None)
         return report
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# ReferencePropertySelector
+# ──────────────────────────────────────────────────────────────────────────
+
+_REFERENCE_SELECTOR_PROMPT = """\
+You are validating a simulation's force field BEFORE an expensive production
+run. For EACH component of the system below, choose the SINGLE reference
+property that best validates the force field for that component.
+
+{skill_context}
+
+=== System ===
+{system_description}
+
+=== Components ===
+{components_block}
+
+A good reference property is one that (a) has an independently KNOWN correct
+value for that substance — from experiment or well-established data — so a
+measured value can be judged, and (b) can be measured by a short standalone
+simulation of the pure component. Choose the property that most sharply exposes
+a miscalibration for THIS kind of substance. As a guide, not a rule: a molecular
+liquid is usually best checked by its mass density; a crystalline solid by a
+lattice constant; a small rigid molecule by a characteristic bond length or
+angle. If a component has no independently-known reference property worth
+checking, mark it not measurable and say why.
+
+Return a JSON object:
+  status       "success"
+  selections   list of {{ "component": ..., "property": "<name>",
+               "measurable": true|false, "rationale": "<one sentence>" }} — one
+               entry per component; "property" may be null when "measurable" is
+               false
+"""
+
+
+class ReferencePropertySelector(_CriticBase):
+    """Chooses which reference property to validate for each component.
+
+    Picks the property whose correct value is independently known and that a
+    short pure-component simulation can measure — density for a molecular
+    liquid, a lattice constant for a crystal, a characteristic bond length for a
+    small molecule, and so on. This is what keeps the validation general: the
+    downstream measurement and the judging critic never hardcode a property;
+    this step decides, per component, what is worth checking.
+    """
+
+    SKILL_SECTION = "validation"
+    BASELINE_PROMPT_TEMPLATE = _REFERENCE_SELECTOR_PROMPT
+
+    def select(
+        self,
+        components: List[Dict[str, Any]],
+        system_description: str = "",
+        skill: Optional[str] = None,
+        domain: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Choose a reference property per component.
+
+        Args:
+            components: ``[{"name", "smiles", "role"?}, ...]``. ``role`` is
+                optional free text (e.g. "solvent", "cation").
+            system_description: What is being simulated (context for the choice).
+            skill, domain: Optional skill bundle whose ``validation`` section
+                supplies domain guidance on what to check.
+
+        Returns:
+            ``{"status", "selections": [{"component", "property", "measurable",
+            "rationale"}, ...]}``. Empty selections (no LLM call) when no
+            components are supplied.
+        """
+        if skill and not domain:
+            raise ValueError(
+                "domain is required when skill is provided (e.g. 'lammps' with "
+                "'molecular_dynamics')."
+            )
+        if not components:
+            return {"status": "success", "selections": []}
+
+        lines = []
+        for c in components:
+            smi = f" [{c['smiles']}]" if c.get("smiles") else ""
+            role = f" — {c['role']}" if c.get("role") else ""
+            lines.append(f"- {c.get('name') or c.get('smiles')}{smi}{role}")
+        components_block = "\n".join(lines)
+
+        skill_context = self._load_skill_section(skill, domain or "")
+        prompt = self.BASELINE_PROMPT_TEMPLATE.format(
+            skill_context=skill_context or "(no engine skill loaded)",
+            system_description=system_description or "(not provided)",
+            components_block=components_block,
+        )
+        report = self._generate_json(prompt)
+        report.setdefault("status", "success")
+        report.setdefault("selections", [])
+        return report
