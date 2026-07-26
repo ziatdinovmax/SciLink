@@ -54,7 +54,10 @@ def file_link(path: Any, label: Optional[str] = None) -> str:
             return f"\033]8;;file://{p}\033\\{text}\033]8;;\033\\"
     except Exception:  # noqa: BLE001 - a link is cosmetic, never fatal
         pass
-    return str(p)
+    # The caller's label is honoured in the plain branch too: a list of
+    # 130-character absolute paths is unreadable, and callers that shorten
+    # one print the directory it is relative to alongside.
+    return text
 
 
 def record_deliverable(base_dir: Any, path: Any, title: str = "",
@@ -108,26 +111,58 @@ def display_files_produced(paths: List[str], base_dir: Any = None) -> None:
     deterministic (it cannot drift from what was actually written) and
     stars whatever the agent marked as the answer to the request.
     """
-    # The manifest is bookkeeping, not output — listing it among a turn's
-    # results is noise the reader has to skip past.
-    real = [Path(p) for p in paths
-            if p and Path(p).exists()
-            and Path(p).name != DELIVERABLES_MANIFEST]
+    # A turn touches far more than it delivers: session state, the campaign
+    # checkpoint, the reviewer's scratch render, per-candidate reports, the
+    # literature dump. Listing those as "produced" makes the reader scan
+    # eleven lines to find the three that matter, so they collapse to a
+    # count and the deliverables lead.
+    SUPPORTING_NAMES = {DELIVERABLES_MANIFEST, "planning_state.json",
+                        "checkpoint.json", "chat_history.json",
+                        "plan_preview.html", "session_log.txt"}
+    SUPPORTING_STEMS = ("literature_search", "planning_state")
+
+    def _supporting(p: Path) -> bool:
+        return (p.name in SUPPORTING_NAMES
+                or p.parent.name == "plan_candidates"
+                or any(p.stem.startswith(s) for s in SUPPORTING_STEMS))
+
+    real = [Path(p) for p in paths if p and Path(p).exists()]
     if not real:
         return
     marked = {e["path"]: e for e in load_deliverables(base_dir or "")
               if e.get("deliverable")}
+    shown = [p for p in real
+             if str(p.resolve()) in marked or not _supporting(p)]
+    hidden = [p for p in real if p not in shown]
+    if not shown:
+        return
+
+    root = Path(base_dir).resolve() if base_dir else None
+
+    def _label(p: Path) -> str:
+        """Session-relative text, absolute target: short enough to read, and
+        still opens the right file when the terminal makes it clickable."""
+        try:
+            return str(p.resolve().relative_to(root)) if root else str(p.resolve())
+        except ValueError:
+            return str(p.resolve())
+
     print("\n" + "-" * 60)
-    print(f"📎 FILES PRODUCED THIS TURN ({len(real)})")
+    print(f"📎 FILES PRODUCED THIS TURN ({len(shown)})")
+    if root:
+        print(f"   in {root}")
     print("-" * 60)
-    for p in sorted(real, key=lambda x: (str(x.resolve()) not in marked,
-                                         x.name)):
+    for p in sorted(shown, key=lambda x: (str(x.resolve()) not in marked,
+                                          x.name)):
         info = marked.get(str(p.resolve()))
         size = p.stat().st_size
         unit = f"{size/1024:.0f} KB" if size >= 1024 else f"{size} B"
         star = "★ " if info else "  "
         label = f" — {info['title']}" if info else ""
-        print(f" {star}{file_link(p)}  ({unit}){label}")
+        print(f" {star}{file_link(p, _label(p))}  ({unit}){label}")
+    if hidden:
+        print(f"   (+{len(hidden)} supporting files: candidates, literature, "
+              f"session state)")
     if marked:
         print("  ★ = the deliverable(s) for this request")
 

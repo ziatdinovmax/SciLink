@@ -306,6 +306,11 @@ def _find_new_html_reports() -> list[str]:
             st.session_state.known_images.add(s)
             if p.parent.name == "plan_candidates":
                 continue
+            # plan_preview.html is the CLI reviewer's scratch render of the
+            # plan under review — in chat it duplicates the white paper /
+            # brief that follow it, so it is noise here.
+            if p.stem == "plan_preview":
+                continue
             new.append(s)
     return new
 

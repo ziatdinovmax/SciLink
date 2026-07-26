@@ -571,8 +571,9 @@ def test_agent_marked_deliverable_is_recorded_and_starred(tmp_path, capsys):
     assert "FILES PRODUCED THIS TURN (2)" in block
     assert "deliverables.json" not in block          # bookkeeping, not output
     assert "★" in block and "Top-3 priority brief" in block
-    # absolute paths, so nothing has to be hunted for
-    assert str((deleg / "top3_priority_brief.md").resolve()) in block
+    # locatable without hunting: root stated once, path relative to it
+    assert f"in {tmp_path.resolve()}" in block
+    assert "delegations/06_brief/top3_priority_brief.md" in block
     # the deliverable is listed first
     assert block.index("top3_priority_brief") < block.index("scratch_notes")
 
@@ -660,3 +661,63 @@ def test_hyperlinks_only_where_the_terminal_understands_them(monkeypatch):
     monkeypatch.setenv("SCILINK_FORCE_HYPERLINKS", "1")
     assert ui._terminal_supports_hyperlinks()
     assert "\x1b]8;;" in ui.file_link(__file__)
+
+
+def test_files_block_leads_with_deliverables_and_collapses_the_rest(tmp_path,
+                                                                    capsys):
+    """A turn touches far more than it delivers. Listing session state, the
+    checkpoint, the reviewer's scratch render, N candidate reports and a
+    472 KB literature dump made the reader scan 11 lines to find the 3 that
+    mattered."""
+    from scilink.agents.planning_agents.user_interface import (
+        display_files_produced, record_deliverable)
+
+    root = tmp_path / "planning"
+    d = root / "delegations" / "01_brainstorm"
+    (d / "plan_candidates").mkdir(parents=True)
+    names = ["brief.md", "ideation_report.md", "white_paper.md", "plan.json",
+             "literature_search_x.md"]
+    for n in names:
+        (d / n).write_text("x")
+    for i in (1, 2, 3):
+        (d / "plan_candidates" / f"candidate_{i}.html").write_text("x")
+    for n in ("plan_preview.html", "planning_state.json", "checkpoint.json"):
+        (root / n).write_text("x")
+    record_deliverable(root, d / "brief.md", "Use-case brief", True)
+
+    all_files = [str(p) for p in root.rglob("*") if p.is_file()]
+    display_files_produced(all_files, root)
+    out = capsys.readouterr().out
+
+    assert "FILES PRODUCED THIS TURN (4)" in out          # 4 of 11, not 11
+    assert out.index("brief.md") < out.index("plan.json")  # deliverable first
+    assert "★ delegations/01_brainstorm/brief.md" in out
+    assert "— Use-case brief" in out
+    # paths are session-relative, with the root stated once
+    assert f"in {root.resolve()}" in out
+    assert str(root.resolve()) not in out.split("in " + str(root.resolve()))[1]
+    # supporting files collapse to a count, never a wall of lines
+    for noise in ("planning_state.json", "checkpoint.json", "plan_preview.html",
+                  "candidate_1.html", "literature_search_x.md",
+                  "deliverables.json"):
+        assert noise not in out, noise
+    assert "supporting files" in out
+
+
+def test_ui_skips_the_reviewer_scratch_render(tmp_path):
+    """plan_preview.html is the CLI reviewer's render of the plan under
+    review; in chat it duplicates the white paper that follows it."""
+    import ast
+    (tmp_path / "plan.html").write_text("<html>real</html>")
+    (tmp_path / "plan_preview.html").write_text("<html>scratch</html>")
+    (tmp_path / "plan_candidates").mkdir()
+    (tmp_path / "plan_candidates" / "candidate_1.html").write_text("<html>c</html>")
+
+    src = Path("scilink/ui/app.py").read_text()
+    fn = next(n for n in ast.parse(src).body
+              if isinstance(n, ast.FunctionDef) and n.name == "_find_new_html_reports")
+    st_stub = SimpleNamespace(session_state=SimpleNamespace(
+        session_dir=str(tmp_path), known_images=set()))
+    ns = {"st": st_stub, "Path": Path}
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), "app.py", "exec"), ns)
+    assert [Path(p).name for p in ns["_find_new_html_reports"]()] == ["plan.html"]
