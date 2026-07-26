@@ -713,23 +713,34 @@ and a successful run (give a verdict and sanity-check the physics).
 Return a JSON object with these fields:
   status              "success" | "error"
   run_status          "succeeded" | "failed" | "incomplete"
-  failure_class       "deck" | "structure" | null
-                      Set ONLY when run_status is "failed" — the ROOT cause.
-                      "structure" — the failure is caused by the initial atomic
-                      configuration itself (a broken / overlapping pack), so NO
-                      change to the run inputs can fix it and it must be
-                      regenerated; a tell is a non-finite or absurd energy /
-                      pressure at the very first step that persists even though
-                      the deck already minimizes. "deck" — anything a corrected
-                      input file fixes (a setting, a style, an unstable timestep,
-                      an atom leaving the grid mid-run). When "structure", set
-                      suggested_fixes to null: the structure must be regenerated,
-                      not patched.
+  failure_class       "deck" | "structure" | "force_field" | null
+                      The ROOT cause. Set when a run FAILED, or when a run
+                      CONVERGED but the result is physically unsound (verdict
+                      "poor"). null when the result is acceptable.
+                      "structure" — caused by the initial atomic configuration
+                      itself (a broken / overlapping pack), so NO change to the
+                      run inputs can fix it and it must be regenerated; a tell is
+                      a non-finite or absurd energy / pressure at the very first
+                      step that persists even though the deck already minimizes.
+                      "deck" — anything a corrected input file fixes (a setting,
+                      a style, an unstable timestep, an atom leaving the grid
+                      mid-run). "force_field" — the run completed but a computed
+                      property contradicts the known physical behaviour of the
+                      system or its components, and the cause is the model's
+                      parameters, not the run settings, so no input-deck change
+                      can fix it. When "structure" OR "force_field", set
+                      suggested_fixes to null: the structure must be regenerated
+                      / the force field re-parameterized, not patched by the deck.
   verdict             "good" | "warning" | "poor" | "needs_fixes"
                       good        — converged, physically sensible
                       warning     — converged but with concerns
                       poor        — converged but result is suspect or wrong
                       needs_fixes — did not converge or failed to run
+                      Judge "poor" by reasoning about whether the computed
+                      properties and their trends are consistent with the known
+                      physical behaviour of this system and its components: a run
+                      that completes cleanly but contradicts well-established
+                      behaviour is "poor", not "good".
   reasoning           prose summary (3-6 sentences)
   suggested_fixes     {{ "filename": "complete_corrected_file", ... }} | null
                       Provide a non-null dict only when the verdict is
