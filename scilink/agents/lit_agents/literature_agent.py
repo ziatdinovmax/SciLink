@@ -422,12 +422,16 @@ class LiteratureSearchAgent:
         """
         formatted_query = (
             "Survey mechanisms and design principles from ADJACENT and "
-            "UNRELATED domains that could TRANSFER to the problem below. Do "
-            "NOT provide a topical review of the problem's own subfield "
-            "methods. For each analogous system (a different chemistry, "
-            "biology, or engineering field achieving a similar function), "
-            "describe the underlying mechanism and explain why it might "
-            "transfer. Emphasize unconventional and emerging approaches.\n\n"
+            "UNRELATED domains that could TRANSFER to the problem below. "
+            "State the FUNCTION to be transferred toward in one sentence "
+            "first — drawing on the problem's own field only for that, never "
+            "as the answer — then leave that field behind: the body must NOT "
+            "be a topical review of its methods. For each analogous system "
+            "(a different chemistry, biology, or engineering field achieving "
+            "a similar function), name the field and describe the underlying "
+            "mechanism, how it is measured or realized, why it might "
+            "transfer, and what would break in transfer. Emphasize "
+            "unconventional and emerging approaches.\n\n"
             f"PROBLEM: {objective}"
         )
         return self._execute_crow_task(formatted_query, task_type="CrossDomain")

@@ -102,11 +102,21 @@ def test_cross_domain_prompt_forbids_topical_review():
     q = sent["q"]
     assert "ADJACENT and UNRELATED domains" in q
     assert "TRANSFER" in q
-    assert "NOT provide a topical review" in q
+    assert "NOT be a topical review" in q
     assert "selective lithium recovery from brine" in q
     assert sent["t"] == "CrossDomain"
     # must NOT inherit the grounding template
     assert "comprehensive review of experimental methods" not in q
+
+    # The ban is on the BODY, not on naming the target: an absolute "no
+    # subfield content" rule deadlocks whenever the objective is phrased as
+    # a question about its own field, forcing the model to disobey either
+    # the wrapper or the question. State the function, then leave the field.
+    assert "FUNCTION to be transferred toward" in q
+    assert q.index("FUNCTION to be transferred") < q.index("NOT be a topical")
+    # each analogy must carry its failure mode, not just an appealing story
+    assert "what would break in transfer" in q
+    assert "how it is measured or realized" in q
 
 
 def test_single_type_unchanged(tool):
@@ -232,3 +242,16 @@ def test_heartbeat_reports_running_vs_queued(tool, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "6 running, 2 queued of 8 literature searches" in out
     assert "~10-15 min per batch" in out
+
+
+def test_search_type_routing_excludes_survey_questions(tool):
+    """cross_domain needs a function to transfer TOWARD. A survey question
+    ("what are the frontiers in X", "what is hard to measure in X") asks for
+    X's own field, which the wrapper forbids in the same breath — the two
+    instructions cannot both be satisfied, so the router must not send one
+    there."""
+    _, _, _, params, _ = tool
+    st = params["search_type"]["description"]
+    assert "FUNCTION or CHALLENGE" in st
+    assert "survey question" in st
+    assert "hypothesis_context" in st.split("survey question")[1]

@@ -1246,6 +1246,13 @@ class OrchestratorTools:
                         "'cross_domain': mechanisms from ADJACENT/UNRELATED fields "
                         "that could transfer — use for IDEATION (pair it with "
                         "hypothesis_context: 'hypothesis_context,cross_domain'). "
+                        "cross_domain needs a FUNCTION or CHALLENGE to transfer "
+                        "toward, so phrase that objective as the thing to achieve "
+                        "or overcome; a survey question ('what are the frontiers "
+                        "in X', 'what is hard to measure in X') asks for X's own "
+                        "field and belongs to hypothesis_context — sending it to "
+                        "cross_domain asks for a review and forbids it in the "
+                        "same breath. "
                         "'economic_data' (TEA); 'fitting_models' "
                         "(curve fitting)."
                     ),
