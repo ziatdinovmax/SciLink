@@ -400,3 +400,130 @@ def test_new_campaign_is_campaign_first_for_best_of_n():
     assert resolve_n_candidates(None, state, new_campaign=True) == 3
     assert resolve_n_candidates(2, state, new_campaign=True) == 2
     assert resolve_n_candidates(None, {}) == 3
+
+
+# ------------------------------------------------- state hygiene fixes
+
+def test_literature_stored_once_and_restored_verbatim():
+    """A campaign corpus rides every plan snapshot, so a state file held the
+    same text N times (live: 1.73 MB of a 1.98 MB file was five copies of two
+    corpora). Store once, reference, and restore byte-identically."""
+    from scilink.agents.planning_agents.planning_agent import (
+        compact_planner_state, expand_planner_state)
+
+    big_a, big_b = "A" * 50_000, "B" * 30_000
+    state = {
+        "campaign_id": 2,
+        "current_plan": {"literature_search": big_b, "x": 1},
+        "plan_history": [
+            {"literature_search": big_a}, {"literature_search": big_a},
+            {"literature_search": big_a}, {"literature_search": big_b},
+        ],
+        "plan_candidates": {"candidates": [{"literature_search": big_a}],
+                            "selected_index": 1},
+    }
+    packed = compact_planner_state(state)
+    assert len(packed["_literature_store"]) == 2          # deduped
+    assert packed["plan_history"][0]["literature_search"].startswith(
+        "__scilink_lit_ref__:")
+    assert len(json.dumps(packed)) < len(json.dumps(state)) / 2
+    assert expand_planner_state(packed) == state          # lossless
+    # the live state must never be mutated by serialization
+    assert state["plan_history"][0]["literature_search"] == big_a
+
+
+def test_expand_is_safe_on_uncompacted_and_broken_states():
+    from scilink.agents.planning_agents.planning_agent import (
+        compact_planner_state, expand_planner_state)
+
+    plain = {"current_plan": {"literature_search": "short corpus"},
+             "plan_history": []}
+    assert expand_planner_state(plain) == plain           # no-op, idempotent
+    assert compact_planner_state(plain) == plain          # below threshold
+
+    # an orphaned reference is kept visible, never silently dropped
+    broken = {"current_plan": {"literature_search": "__scilink_lit_ref__:dead"},
+              "plan_history": []}
+    out = expand_planner_state(broken)
+    assert out["current_plan"]["literature_search"] == "__scilink_lit_ref__:dead"
+
+
+def test_agent_state_file_round_trips_through_compaction(tmp_path):
+    from scilink.agents.planning_agents.planning_agent import PlanningAgent
+    from scilink.agents.planning_agents.base_agent import BaseAgent
+
+    agent = PlanningAgent.__new__(PlanningAgent)
+    BaseAgent.__init__(agent, str(tmp_path))
+    agent.agent_type = "planning"
+    corpus = "CORPUS " * 2000
+    agent.state = {"session_id": "s", "campaign_id": 1,
+                   "current_plan": {"literature_search": corpus},
+                   "plan_history": [{"literature_search": corpus}] * 3,
+                   "action_history": []}
+    agent._save_state()
+
+    on_disk = json.loads((tmp_path / "planning_state.json").read_text())
+    assert "_literature_store" in on_disk                  # stored once
+    assert on_disk["plan_history"][0]["literature_search"].startswith(
+        "__scilink_lit_ref__:")
+
+    restored = PlanningAgent.__new__(PlanningAgent)
+    BaseAgent.__init__(restored, str(tmp_path))
+    restored.agent_type = "planning"
+    assert restored.load_state(str(tmp_path / "planning_state.json"))
+    assert restored.state["current_plan"]["literature_search"] == corpus
+    assert all(p["literature_search"] == corpus
+               for p in restored.state["plan_history"])
+
+
+def test_adopting_literature_refreshes_the_state_mirror(tmp_path):
+    """planning_state.json is written from inside generate_plan, before the
+    tool layer adopts literature — live, the mirror showed a file still
+    tagged to the previous campaign while the checkpoint was correct."""
+    saved = []
+    lit = tmp_path / "literature_search_x.md"
+    lit.write_text("corpus")
+    state = {"campaign_id": 2, "current_plan": {"x": 1}}
+    tools = make_tools(tmp_path, state)
+    tools.orch.planner._save_state = lambda: saved.append(
+        dict(state.get("campaign_literature") or []) or True)
+
+    tools._adopt_literature(str(lit))
+    assert saved, "planner state was not re-saved after adoption"
+    assert any(e["campaign_id"] == 2 for e in state["campaign_literature"])
+
+
+def test_saved_files_land_in_the_active_delegation_dir(tmp_path):
+    """save_file rooted at base_dir put LLM-written files OUTSIDE the
+    delegation directory holding every other artifact of that turn — live, a
+    white paper landed in planning/<slug>/ beside delegations/, duplicating
+    the copy already inside it."""
+    from scilink.agents.planning_agents import orchestrator_tools as ot
+
+    deleg = tmp_path / "delegations" / "03_regenerate_white_paper"
+    deleg.mkdir(parents=True)
+    tools = OrchestratorTools.__new__(OrchestratorTools)
+    tools.orch = SimpleNamespace(planner=SimpleNamespace(state={}, model=None),
+                                 base_dir=tmp_path,
+                                 _active_output_subdir=deleg,
+                                 lit_agent=None)
+    captured = {}
+    tools._register_tool = lambda func, name, description, parameters, required=None: (
+        captured.update({name: func}))
+    ot.OrchestratorTools._register_all_tools(tools)
+
+    out = json.loads(captured["save_file"]("white_paper_v2.md", "# paper"))
+    assert out["status"] == "success"
+    assert Path(out["path"]).parent == deleg          # inside the delegation
+    assert not (tmp_path / "white_paper_v2.md").exists()
+
+    # a later turn can still find it by bare name, wherever it was written
+    tools.orch._active_output_subdir = tmp_path / "delegations" / "04_next"
+    (tools.orch._active_output_subdir).mkdir(parents=True)
+    resolved, err = tools._resolve_data_path("white_paper_v2.md")
+    assert err is None and Path(resolved) == Path(out["path"])
+
+    # standalone plan mode (no active delegation) is unchanged: base_dir
+    tools.orch._active_output_subdir = None
+    out2 = json.loads(captured["save_file"]("notes.md", "x"))
+    assert Path(out2["path"]).parent == tmp_path

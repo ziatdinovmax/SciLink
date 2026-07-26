@@ -12,7 +12,8 @@ from ...auth import get_internal_proxy_key
 from ...utils.tool_media import repair_dangling_tool_calls
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
-from .planning_agent import PlanningAgent
+from .planning_agent import (
+    PlanningAgent, compact_planner_state, expand_planner_state)
 from .user_interface import format_caveats
 from .scalarizer_agent import ScalarizerAgent
 from .bo_agent import BOAgent
@@ -1198,7 +1199,9 @@ class PlanningOrchestratorAgent:
             # after construction. The save side always recorded it; without
             # the reload a restored child answered 'no campaign plan exists'
             # to every follow-up.
-            self._pending_planner_state = state.get("planner_state") or None
+            _ps = state.get("planner_state") or None
+            self._pending_planner_state = (
+                expand_planner_state(_ps) if _ps else None)
 
             self.active_scalarizer_script = state.get("active_scalarizer_script")
             self.expected_input_columns = state.get("expected_input_columns")
@@ -1521,7 +1524,7 @@ class PlanningOrchestratorAgent:
                 "expected_input_levels": self.expected_input_levels,
                 "fidelity_spec": self.fidelity_spec,
                 "data_points_collected": len(pd.read_csv(self.bo_data_path)) if self.bo_data_path.exists() else 0,
-                "planner_state": self.planner.state,
+                "planner_state": compact_planner_state(self.planner.state),
                 "message_count": self.message_count,
                 "latest_tea_results": self.latest_tea_results,
                 "delegation_counter": self._delegation_counter,

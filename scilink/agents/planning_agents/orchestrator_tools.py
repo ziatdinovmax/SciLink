@@ -618,6 +618,17 @@ class OrchestratorTools:
             if not any(e.get("path") == p and e.get("campaign_id") == cid
                        for e in reg):
                 reg.append({"path": p, "campaign_id": cid})
+        # Persist immediately. The planner's own state dump is written from
+        # inside generate_plan (after each _log_action), i.e. BEFORE this
+        # runs, so without a re-save the on-disk mirror shows a literature
+        # file still tagged to the previous campaign — a live session's
+        # planning_state.json and checkpoint.json disagreed exactly here.
+        saver = getattr(getattr(self.orch, "planner", None), "_save_state", None)
+        if callable(saver):
+            try:
+                saver()
+            except Exception as e:  # noqa: BLE001 - mirror only
+                logging.debug(f"Planner state re-save after adoption failed: {e}")
 
     def _prior_campaign_literature(self, explicit_context) -> list:
         """File paths in ``explicit_context`` that the registry attributes
@@ -781,6 +792,21 @@ class OrchestratorTools:
                 if candidate.exists():
                     print(f"    🔍 Resolved: {path.name} → {candidate.name}")
                     return str(candidate), None
+
+        # Case 2b: a bare name that exists ANYWHERE in this session. Files
+        # written by save_file land in the delegation directory that was
+        # active at the time, so a later turn asking for them by name must
+        # be able to find them without knowing which delegation wrote them.
+        if not path.is_absolute() and len(path.parts) == 1:
+            try:
+                hits = sorted(self.orch.base_dir.rglob(path.name),
+                              key=lambda p: p.stat().st_mtime, reverse=True)
+                hits = [h for h in hits if h.is_file()]
+                if hits:
+                    print(f"    🔍 Resolved in session: {hits[0]}")
+                    return str(hits[0]), None
+            except Exception:  # noqa: BLE001 - fall through to the usual search
+                pass
         
         # Case 3: Try in common data folders (session dirs first, then cwd-relative)
         session = self.orch.base_dir
@@ -860,8 +886,13 @@ class OrchestratorTools:
         During a meta-agent delegation this is a per-delegation sub-directory
         so a reused planning child does not overwrite an earlier delegation's
         artifacts; for direct `scilink plan` use it is the campaign root
-        (``_active_output_subdir`` is None, so behaviour is unchanged)."""
-        return self.orch._active_output_subdir or self.orch.base_dir
+        (``_active_output_subdir`` is None, so behaviour is unchanged).
+
+        Read defensively: file-writing tools now route through here, and a
+        partially-built orchestrator (tests, early construction) has no
+        delegation attribute yet — falling back to the campaign root is
+        always the right answer there."""
+        return getattr(self.orch, "_active_output_subdir", None) or self.orch.base_dir
 
     def _register_all_tools(self):
         """Register all tools with both OpenAI and Gemini formats."""
@@ -3956,7 +3987,12 @@ class OrchestratorTools:
                     "message": "Invalid filename.",
                 })
 
-            target_dir = self.orch.base_dir
+            # Delegation-scoped, like every other artifact this turn writes
+            # (plan.json, white_paper.md, ...). Rooting at base_dir instead
+            # scattered LLM-saved files OUTSIDE the delegation directory —
+            # live, a white paper landed in planning/<slug>/ as a sibling of
+            # delegations/, duplicating the copy already written inside it.
+            target_dir = self._output_dir()
             if subfolder:
                 safe_sub = Path(subfolder).name
                 target_dir = target_dir / safe_sub
@@ -4029,7 +4065,12 @@ class OrchestratorTools:
                     "message": "Invalid filename.",
                 })
 
-            target_dir = self.orch.base_dir
+            # Delegation-scoped, like every other artifact this turn writes
+            # (plan.json, white_paper.md, ...). Rooting at base_dir instead
+            # scattered LLM-saved files OUTSIDE the delegation directory —
+            # live, a white paper landed in planning/<slug>/ as a sibling of
+            # delegations/, duplicating the copy already written inside it.
+            target_dir = self._output_dir()
             if subfolder:
                 safe_sub = Path(subfolder).name
                 target_dir = target_dir / safe_sub

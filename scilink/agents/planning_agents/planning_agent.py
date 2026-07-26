@@ -1,5 +1,6 @@
 from pathlib import Path
 import copy
+import hashlib
 import json
 import logging
 import re
@@ -103,6 +104,101 @@ def objectives_share_campaign(previous: str, new: str,
         return True
     overlap = len(prev_t & new_t) / min(len(prev_t), len(new_t))
     return overlap >= min_overlap
+
+
+_LIT_REF = "__scilink_lit_ref__:"
+_LIT_MIN_CHARS = 4000          # below this, a copy is cheaper than a lookup
+
+
+def compact_planner_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Serialization view of planner state with literature stored ONCE.
+
+    A campaign's corpus is carried on every plan snapshot, so a state file
+    holds the same text N times — live, 1.73 MB of a 1.98 MB state file was
+    five copies of two corpora. Each copy is replaced by a reference into
+    `_literature_store`; `expand_planner_state` restores them verbatim on
+    load, so no consumer ever sees a reference and no context is lost.
+
+    Returns a shallow-copied view: the live state is never mutated.
+    """
+    if not isinstance(state, dict):
+        return state
+    store: Dict[str, str] = {}
+
+    def _ref(text: str) -> str:
+        key = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        store.setdefault(key, text)
+        return _LIT_REF + key
+
+    def _plan(p: Any) -> Any:
+        if not isinstance(p, dict):
+            return p
+        lit = p.get("literature_search")
+        if isinstance(lit, str) and len(lit) >= _LIT_MIN_CHARS:
+            p = dict(p)
+            p["literature_search"] = _ref(lit)
+        return p
+
+    out = dict(state)
+    if state.get("current_plan") is not None:
+        out["current_plan"] = _plan(state.get("current_plan"))
+    if state.get("plan_history"):
+        out["plan_history"] = [_plan(p) for p in state["plan_history"]]
+    pc = state.get("plan_candidates")
+    if isinstance(pc, dict) and pc.get("candidates"):
+        out["plan_candidates"] = dict(pc)
+        out["plan_candidates"]["candidates"] = [
+            _plan(c) for c in pc["candidates"]]
+    if store:
+        out["_literature_store"] = store
+    return out
+
+
+def expand_planner_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Inverse of :func:`compact_planner_state` — restores literature text.
+
+    Tolerates a state that was never compacted (no store, no refs) and an
+    unresolvable reference (left as-is with a warning rather than dropped,
+    so a truncated file degrades visibly instead of silently losing text).
+    """
+    if not isinstance(state, dict):
+        return state
+    store = state.get("_literature_store") or {}
+    if not store and not any(
+        isinstance((p or {}).get("literature_search"), str)
+        and str((p or {}).get("literature_search")).startswith(_LIT_REF)
+        for p in ([state.get("current_plan")]
+                  + list(state.get("plan_history") or []))
+    ):
+        return state
+
+    def _plan(p: Any) -> Any:
+        if not isinstance(p, dict):
+            return p
+        lit = p.get("literature_search")
+        if isinstance(lit, str) and lit.startswith(_LIT_REF):
+            key = lit[len(_LIT_REF):]
+            if key in store:
+                p = dict(p)
+                p["literature_search"] = store[key]
+            else:
+                logging.warning(
+                    "Literature reference %s missing from the state store; "
+                    "leaving the reference in place.", key)
+        return p
+
+    out = dict(state)
+    if state.get("current_plan") is not None:
+        out["current_plan"] = _plan(state.get("current_plan"))
+    if state.get("plan_history"):
+        out["plan_history"] = [_plan(p) for p in state["plan_history"]]
+    pc = state.get("plan_candidates")
+    if isinstance(pc, dict) and pc.get("candidates"):
+        out["plan_candidates"] = dict(pc)
+        out["plan_candidates"]["candidates"] = [
+            _plan(c) for c in pc["candidates"]]
+    out.pop("_literature_store", None)
+    return out
 
 
 class PlanningAgent(BaseAgent):
@@ -331,6 +427,29 @@ class PlanningAgent(BaseAgent):
         print(f"  - 🧭 Objective changed materially — starting campaign "
               f"#{prev_cid + 1}. The previous campaign's plans and "
               f"literature stay archived and are NOT carried forward.")
+
+    def _save_state(self) -> None:
+        """Persist state with literature stored once (see
+        :func:`compact_planner_state`). Falls back to the plain dump if
+        compaction fails — a state file must always get written."""
+        state_file = self.output_dir / self._get_state_filename()
+        try:
+            payload = compact_planner_state(self.state)
+        except Exception as e:  # noqa: BLE001
+            logging.warning(f"Literature compaction skipped: {e}")
+            payload = self.state
+        try:
+            with open(state_file, 'w') as f:
+                json.dump(payload, f, indent=2)
+        except Exception as e:
+            logging.warning(f"Failed to save {self.agent_type} state: {e}")
+
+    def load_state(self, state_path: str) -> bool:
+        """Restore state, re-inflating any stored literature references."""
+        if not super().load_state(state_path):
+            return False
+        self.state = expand_planner_state(self.state)
+        return True
 
     def _review_preview_path(self) -> Optional[str]:
         """Render the plan under review to HTML and return its path.
