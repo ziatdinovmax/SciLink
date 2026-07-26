@@ -1000,25 +1000,28 @@ behaviour of that component.
 === Measured reference properties (this force field) ===
 {measurements_block}
 
-For EACH component, decide whether its measured value is consistent with the
+For EACH measured value, decide whether it is consistent with the
 well-established behaviour of that substance. Reason from what is known about the
 component; a stored reference value, when provided, is an anchor, not the only
-basis. A value that clearly contradicts known behaviour means the force field is
-miscalibrated for that component, and any prediction built on it is
-untrustworthy — no change to the run settings can fix that. If a value is only
-mildly off, or you are unsure, treat it as consistent: this gate must not veto a
-sound model over a surprising-but-plausible number.
+basis. A value that clearly contradicts known behaviour means the underlying
+model is miscalibrated, and any prediction built on it is untrustworthy — no
+change to the run settings can fix that. If a value is only mildly off, or you
+are unsure, treat it as consistent: this gate must not veto a sound model over a
+surprising-but-plausible number.
 
 Return a JSON object:
-  status          "success"
-  per_component   list of {{ "component": ..., "consistent": true|false,
-                  "reasoning": "<one sentence>" }} — one entry per MEASURED
-                  component (omit components that could not be measured)
-  verdict         "good" — every measured value is physically consistent
-                  "poor" — at least one clearly contradicts known behaviour
-  failure_class   "force_field" when verdict is "poor" (the parameters, not the
-                  run settings, are at fault), else null
-  reasoning       short prose summary (which component, and why)
+  status           "success"
+  per_measurement  list of {{ "component": ..., "property": ...,
+                   "consistent": true|false, "reasoning": "<one sentence>" }} —
+                   one entry per MEASURED value shown above (a component checked
+                   on two properties gets two entries)
+  verdict          "good" — every measured value is physically consistent
+                   "poor" — at least one clearly contradicts known behaviour
+  failure_class    when verdict is "poor", the miscalibrated model — name what
+                   the system actually uses: "force_field" (classical MD),
+                   "functional" (DFT), or "potential" (machine-learning
+                   interatomic potential). null when verdict is "good".
+  reasoning        short prose summary (which value, and why)
 """
 
 
@@ -1029,9 +1032,12 @@ class ReferencePropertyCritic(_CriticBase):
     Given each pure component's measured reference property (from the
     engine-neutral :func:`reference_validation.validate_component_properties`
     stage), it judges each value against the known behaviour of that substance
-    and, when one clearly contradicts it, returns a ``poor`` verdict with
-    ``failure_class="force_field"`` — the same cause vocabulary the post-run
-    :class:`RunCritic` uses, so both feed one reparameterization fixer.
+    and, when one clearly contradicts it, returns a ``poor`` verdict naming the
+    miscalibrated model in the system's own terms — ``failure_class`` is
+    ``"force_field"`` for classical MD, ``"functional"`` for DFT, or
+    ``"potential"`` for a machine-learning interatomic potential. The MD value
+    matches the post-run :class:`RunCritic`, so both feed one reparameterization
+    fixer.
 
     Reasoning-first: the judgement rests on the model's knowledge of the
     components (a skill's ``validation`` section can supply known values as an
@@ -1063,9 +1069,13 @@ class ReferencePropertyCritic(_CriticBase):
                 supplies known reference behaviour as an anchor.
 
         Returns:
-            ``{"status", "verdict", "failure_class", "per_component",
-            "reasoning"}``. Fails open to a non-blocking ``good`` verdict (no
-            LLM call) when no component was measured.
+            ``{"status", "verdict", "failure_class", "per_measurement",
+            "reasoning"}``. ``per_measurement`` has one entry per measured value
+            (``{"component", "property", "consistent", "reasoning"}``);
+            ``failure_class`` names the miscalibrated model in the system's own
+            terms (``"force_field"`` / ``"functional"`` / ``"potential"``).
+            Fails open to a non-blocking ``good`` verdict (no LLM call) when no
+            component was measured.
         """
         if skill and not domain:
             raise ValueError(
@@ -1079,7 +1089,7 @@ class ReferencePropertyCritic(_CriticBase):
                 "status": "success",
                 "verdict": "good",
                 "failure_class": None,
-                "per_component": [],
+                "per_measurement": [],
                 "reasoning": "No reference properties were measured; nothing to "
                              "validate.",
             }
@@ -1087,9 +1097,10 @@ class ReferencePropertyCritic(_CriticBase):
         lines = []
         for m in measurements:
             if m.get("status") == "measured":
+                prop = f" — {m['property']}" if m.get("property") else ""
                 unit = f" {m['units']}" if m.get("units") else ""
                 smi = f" [{m['smiles']}]" if m.get("smiles") else ""
-                lines.append(f"- {m['component']}{smi}: {m['value']}{unit}")
+                lines.append(f"- {m['component']}{prop}{smi}: {m['value']}{unit}")
             else:
                 lines.append(f"- {m.get('component')}: not measured "
                              f"({m.get('error', 'unknown')})")
@@ -1105,6 +1116,7 @@ class ReferencePropertyCritic(_CriticBase):
         report.setdefault("status", "success")
         report.setdefault("verdict", "good")
         report.setdefault("failure_class", None)
+        report.setdefault("per_measurement", [])
         return report
 
 
