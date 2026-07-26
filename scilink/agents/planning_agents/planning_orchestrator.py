@@ -772,7 +772,7 @@ class PlanningOrchestratorAgent:
             from ..lit_agents.optimize_query import optimize_search_query
             fh_key = futurehouse_api_key or os.getenv("FUTUREHOUSE_API_KEY")
             try:
-                self.lit_agent = LiteratureSearchAgent(fh_key, max_wait_time=3000)
+                self.lit_agent = LiteratureSearchAgent(fh_key, max_wait_time=1200)
                 logging.info("✅ Orchestrator: Literature Search Agent initialized.")
             except Exception as e:
                 logging.warning(f"⚠️ Failed to initialize Literature Agent: {e}")

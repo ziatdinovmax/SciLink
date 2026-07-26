@@ -18,6 +18,7 @@ No network: the literature agent is a scripted stub.
 
 import json
 import threading
+from pathlib import Path
 import time
 
 import pytest
@@ -322,3 +323,62 @@ def test_identical_question_for_two_types_is_optimized_once(tool):
     assert sorted(k for k, _ in lit.calls) == ["cross_domain",
                                                "hypothesis_context"]
     assert {q for _, q in lit.calls} == {"optimized::same q"}
+
+
+# ------------------------------------------------- stuck-search containment
+
+def test_terminal_statuses_are_matched_by_substring():
+    """LIVE BUG: the poll treated only {failed, error} as terminal, so a job
+    Edison reported as cancelled/crashed/timeout read as "still running" and
+    was polled for the whole budget — pinning a 5-search call for 45+ min
+    while four finished results sat unusable behind it."""
+    from scilink.agents.lit_agents.literature_agent import _is_terminal_failure
+
+    for dead in ("failed", "FAILED", "error", "cancelled", "CANCELED",
+                 "crashed", "timeout", "aborted", "killed", "rejected"):
+        assert _is_terminal_failure(dead), dead
+    for alive in ("in progress", "queued", "running", "pending", "success",
+                  "submitted", "starting"):
+        assert not _is_terminal_failure(alive), alive
+
+
+def test_one_wedged_search_cannot_hold_the_whole_call(tool, monkeypatch,
+                                                      tmp_path, capsys):
+    """The finished searches must come back even if a straggler never does."""
+    from scilink.agents.planning_agents import orchestrator_tools as ot
+    func, lit, *_ = tool
+    monkeypatch.setattr(ot, "_LIT_BATCH_DEADLINE", 1)   # 1s instead of 25 min
+
+    started = threading.Event()
+
+    def wedged(q):
+        started.set()
+        time.sleep(30)                                   # never returns in time
+        return {"status": "success", "content": "too late"}
+
+    lit.search_for_cross_domain = wedged
+    t0 = time.time()
+    out = json.loads(func({"hypothesis_context": ["a", "b"],
+                           "cross_domain": ["stuck"]}))
+    elapsed = time.time() - t0
+
+    assert started.is_set()
+    assert elapsed < 15, f"call did not return promptly ({elapsed:.0f}s)"
+    assert out["status"] == "success"                    # partial success
+    assert sorted(out["searches_run"]) == ["q1:hypothesis_context",
+                                           "q2:hypothesis_context"]
+    assert out["failed_searches"] == ["q3:cross_domain"]
+    assert "abandoning it" in capsys.readouterr().out
+    # the two good corpora are on disk, not discarded
+    assert "CONTENT::hypothesis_context" in Path(out["file_path"]).read_text()
+
+
+def test_all_searches_wedged_reports_failure_not_success(tool, monkeypatch):
+    from scilink.agents.planning_agents import orchestrator_tools as ot
+    func, lit, *_ = tool
+    monkeypatch.setattr(ot, "_LIT_BATCH_DEADLINE", 1)
+    lit.search_for_hypothesis_context = lambda q: time.sleep(30)
+    lit.search_for_cross_domain = lambda q: time.sleep(30)
+
+    out = json.loads(func(["x", "y"], "hypothesis_context,cross_domain"))
+    assert out["status"] != "success"

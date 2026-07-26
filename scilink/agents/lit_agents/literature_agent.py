@@ -33,6 +33,24 @@ def _require_edison():
             "pip install -U edison-client ldp fhlmi fhaviary"
         )
 
+_TERMINAL_STATUS_MARKERS = ("fail", "error", "cancel", "crash", "timeout",
+                            "abort", "kill", "reject")
+
+
+def _is_terminal_failure(status: object) -> bool:
+    """Has the remote task stopped for good?
+
+    Matched by SUBSTRING rather than against a fixed list. The lists here
+    were exactly {failed, error} (or {FAILED, ERROR, error}), so any other
+    spelling of "this job is dead" — cancelled, crashed, timeout — read as
+    "still running" and was polled until the entire wait budget expired,
+    blocking every other search in the batch behind it. Observed live: one
+    job pinned a five-search call for 45+ minutes. No healthy in-progress
+    state name contains any of these markers.
+    """
+    return any(m in str(status).lower() for m in _TERMINAL_STATUS_MARKERS)
+
+
 class OwlLiteratureAgent:
     """
     Agent for querying scientific literature using the OWL system
@@ -129,7 +147,7 @@ class OwlLiteratureAgent:
                         "query": has_anyone_question
                     }
                 
-                if task_status.status in ["FAILED", "ERROR", "error"]:
+                if _is_terminal_failure(task_status.status):
                     error_msg = f"OWL query failed with status: {task_status.status}"
                     logging.error(error_msg)
                     return {"status": "error", "message": error_msg, "task_id": task_id}
@@ -224,7 +242,7 @@ class IncarLiteratureAgent:
                         "response": clean_response,
                         "task_id": task_id,
                     }
-                elif task_status.status in ["FAILED", "ERROR", "error"]:
+                elif _is_terminal_failure(task_status.status):
                     return {"status": "error", "message": f"CROW failed: {task_status.status}"}
 
                 sleep(10)
@@ -318,7 +336,7 @@ class FittingModelLiteratureAgent:
                         "formatted_answer": task_status.formatted_answer,
                         "task_id": task_id
                     }
-                elif task_status.status in ["FAILED", "ERROR", "error"]:
+                elif _is_terminal_failure(task_status.status):
                     error_msg = f"CROW model search failed with status: {task_status.status}"
                     self.logger.error(error_msg)
                     return {"status": "error", "message": error_msg}
@@ -363,6 +381,7 @@ class LiteratureSearchAgent:
             
             # 2. Poll for Completion
             start_time = time.time()
+            seen_states: set = set()
             while (time.time() - start_time) < self.max_wait_time:
                 task_status = self.client.get_task(task_id)
                 status = task_status.status.lower()
@@ -374,12 +393,21 @@ class LiteratureSearchAgent:
                         "content": task_status.formatted_answer,
                         "sources": [s.url for s in getattr(task_status, 'sources', [])] 
                     }
-                elif status in ["failed", "error"]:
+                elif _is_terminal_failure(status):
                     return {"status": "error", "message": f"Remote status: {status}"}
-                
+                seen_states.add(status)
+
                 time.sleep(5) # Wait before next poll
-            
-            return {"status": "timeout", "message": "Request timed out."}
+
+            # Name the states actually seen: the remote vocabulary is not
+            # documented, so a hang is only diagnosable if we report it.
+            self.logger.warning(
+                "⏱️ %s task %s never finished in %ss; states seen: %s",
+                task_type, task_id, self.max_wait_time,
+                sorted(seen_states) or "none")
+            return {"status": "timeout",
+                    "message": f"Timed out after {self.max_wait_time}s "
+                               f"(states seen: {sorted(seen_states) or 'none'})"}
 
         except Exception as e:
             return {"status": "error", "message": str(e)}

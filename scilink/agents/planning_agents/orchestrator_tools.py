@@ -30,6 +30,12 @@ from ...skills.loader import list_skills, load_skill
 
 # Progress-heartbeat cadence for long-running literature searches (seconds).
 _LIT_HEARTBEAT_SECONDS = 180
+# Wall-clock ceiling for ONE batch of concurrent literature searches. Deep
+# searches are advertised as 10-15 min; past this a straggler is abandoned
+# and whatever finished is returned, rather than holding the call open.
+# Kept just above the agent's own per-task budget so a task normally times
+# itself out first and its worker exits cleanly.
+_LIT_BATCH_DEADLINE = 1500
 
 
 def _build_planning_skill_description(custom_skills: dict = None) -> str:
@@ -1137,6 +1143,16 @@ class OrchestratorTools:
                         continue
                     queued = max(0, remaining - running)
                     mins = int((_time.time() - _hb_t0) / 60)
+                    # Past the advertised window, stop repeating it: saying
+                    # "typically 10-15 min" at minute 45 reads as a hang
+                    # with no end in sight. Say when we will give up.
+                    if mins >= 16:
+                        give_up = _LIT_BATCH_DEADLINE // 60
+                        print(f"  ⏳ {running} still running after {mins} min "
+                              f"— longer than the usual 10-15; abandoning "
+                              f"stragglers at {give_up} min and returning "
+                              f"whatever finished")
+                        continue
                     if queued:
                         print(f"  ⏳ {running} running, {queued} queued of "
                               f"{_hb_state['total']} literature searches "
@@ -1171,7 +1187,8 @@ class OrchestratorTools:
                     results[(oi, t)] = search_methods[t](clean_queries[oi])
                     _hb_mark_done(_task_label(oi, t))
                 else:
-                    from concurrent.futures import ThreadPoolExecutor
+                    from concurrent.futures import (
+                        ThreadPoolExecutor, TimeoutError as FuturesTimeout)
                     # Greedy batches of <= MAX_CONCURRENT, back-to-back. A
                     # 5-search request is ONE parallel batch; an 8-search
                     # request is 6 concurrent then 2 concurrent — never 2+3
@@ -1179,7 +1196,11 @@ class OrchestratorTools:
                     # the parallel budget.
                     for start in range(0, len(tasks), MAX_CONCURRENT):
                         batch = tasks[start:start + MAX_CONCURRENT]
-                        with ThreadPoolExecutor(max_workers=len(batch)) as ex:
+                        # NOT a context manager: its __exit__ joins every
+                        # worker, so one wedged remote task would still hold
+                        # the call open after the deadline below fires.
+                        ex = ThreadPoolExecutor(max_workers=len(batch))
+                        try:
                             futures = {}
                             for oi, t in batch:
                                 _l = _task_label(oi, t)
@@ -1189,8 +1210,39 @@ class OrchestratorTools:
                                 f.add_done_callback(
                                     lambda _f, _l=_l: _hb_mark_done(_l))
                                 futures[(oi, t)] = f
+                            # Bounded wait. One wedged remote task used to
+                            # pin the whole call (live: 45+ min on a
+                            # 5-search request) while four finished results
+                            # sat unusable behind it. Past the deadline the
+                            # stragglers are abandoned and reported as
+                            # failures — the merge below already handles a
+                            # partial result set.
+                            deadline = _time.time() + _LIT_BATCH_DEADLINE
                             for k, f in futures.items():
-                                results[k] = f.result()
+                                remaining = deadline - _time.time()
+                                try:
+                                    results[k] = f.result(
+                                        timeout=max(0.0, remaining))
+                                except FuturesTimeout:
+                                    label = _task_label(*k)
+                                    _hb_mark_done(label)
+                                    print(f"  ⚠️  {label} exceeded "
+                                          f"{_LIT_BATCH_DEADLINE // 60} min "
+                                          f"— abandoning it and returning "
+                                          f"the searches that finished.")
+                                    results[k] = {
+                                        "status": "timeout",
+                                        "message": (
+                                            f"abandoned after "
+                                            f"{_LIT_BATCH_DEADLINE}s"),
+                                    }
+                                except Exception as e:  # noqa: BLE001
+                                    results[k] = {"status": "error",
+                                                  "message": str(e)}
+                        finally:
+                            # Do not join: an abandoned worker keeps polling
+                            # until the agent's own max_wait_time ends it.
+                            ex.shutdown(wait=False, cancel_futures=True)
 
                 ok = {k: r for k, r in results.items()
                       if r.get("status") == "success"}
