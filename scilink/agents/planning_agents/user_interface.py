@@ -1,6 +1,105 @@
 from typing import Dict, Any, Optional, List
+import json
+import os
 import re
+import sys
 import textwrap
+from pathlib import Path
+
+DELIVERABLES_MANIFEST = "deliverables.json"
+
+
+def file_link(path: Any, label: Optional[str] = None) -> str:
+    """An absolute path, clickable where the terminal supports it.
+
+    Emits an OSC-8 hyperlink ONLY on a real TTY: the UI captures stdout and
+    several parsers gate on these strings, so escape codes must never reach
+    a captured buffer. Everywhere else this is just the absolute path, which
+    is what a reader needs to find the file anyway.
+    """
+    p = Path(path).resolve()
+    text = label or str(p)
+    try:
+        if sys.stdout.isatty() and not os.environ.get("SCILINK_NO_HYPERLINKS"):
+            return f"\033]8;;file://{p}\033\\{text}\033]8;;\033\\"
+    except Exception:  # noqa: BLE001 - a link is cosmetic, never fatal
+        pass
+    return str(p)
+
+
+def record_deliverable(base_dir: Any, path: Any, title: str = "",
+                       deliverable: bool = False) -> None:
+    """Note a file the session produced, and whether it is a DELIVERABLE.
+
+    A deliverable is the artifact that answers the user's request. Only the
+    agent knows which one that is — the filename is chosen at request time
+    (`top3_priority_brief.md`), so no allow-list can anticipate it. The
+    manifest lets the CLI star it and the UI embed it, while everything else
+    is still listed so a forgotten flag can never hide a file.
+    """
+    try:
+        manifest = Path(base_dir) / DELIVERABLES_MANIFEST
+        entries = []
+        if manifest.exists():
+            entries = json.loads(manifest.read_text() or "[]")
+        entry = {"path": str(Path(path).resolve()),
+                 "title": title or Path(path).stem.replace("_", " ").title(),
+                 "deliverable": bool(deliverable)}
+        entries = [e for e in entries if e.get("path") != entry["path"]]
+        entries.append(entry)
+        manifest.write_text(json.dumps(entries, indent=2))
+    except Exception:  # noqa: BLE001 - bookkeeping must never break a tool
+        pass
+
+
+def load_deliverables(base_dir: Any) -> List[Dict[str, Any]]:
+    """Every recorded artifact under a session root (manifests may exist per
+    orchestrator, e.g. <meta>/planning/deliverables.json)."""
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    try:
+        for manifest in Path(base_dir).rglob(DELIVERABLES_MANIFEST):
+            for e in json.loads(manifest.read_text() or "[]"):
+                p = e.get("path")
+                if p and p not in seen:
+                    seen.add(p)
+                    out.append(e)
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def display_files_produced(paths: List[str], base_dir: Any = None) -> None:
+    """Print the turn's output files as clickable, absolute paths.
+
+    Hunting for an agent-written file through a session tree is the single
+    most common friction after a run — the assistant's prose cites a short
+    relative path and the reader is left to `find` it. This block is
+    deterministic (it cannot drift from what was actually written) and
+    stars whatever the agent marked as the answer to the request.
+    """
+    # The manifest is bookkeeping, not output — listing it among a turn's
+    # results is noise the reader has to skip past.
+    real = [Path(p) for p in paths
+            if p and Path(p).exists()
+            and Path(p).name != DELIVERABLES_MANIFEST]
+    if not real:
+        return
+    marked = {e["path"]: e for e in load_deliverables(base_dir or "")
+              if e.get("deliverable")}
+    print("\n" + "-" * 60)
+    print(f"📎 FILES PRODUCED THIS TURN ({len(real)})")
+    print("-" * 60)
+    for p in sorted(real, key=lambda x: (str(x.resolve()) not in marked,
+                                         x.name)):
+        info = marked.get(str(p.resolve()))
+        size = p.stat().st_size
+        unit = f"{size/1024:.0f} KB" if size >= 1024 else f"{size} B"
+        star = "★ " if info else "  "
+        label = f" — {info['title']}" if info else ""
+        print(f" {star}{file_link(p)}  ({unit}){label}")
+    if marked:
+        print("  ★ = the deliverable(s) for this request")
 
 
 def format_caveats(findings: Optional[List[Dict[str, Any]]]) -> List[str]:

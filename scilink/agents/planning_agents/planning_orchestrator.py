@@ -1425,6 +1425,15 @@ class PlanningOrchestratorAgent:
             self._auto_checkpoint()
 
         files_produced = sorted(_snapshot_files() - files_before)
+        # Deterministic, clickable list of what this turn wrote. The model's
+        # prose cites short relative paths ("planning/top3_priority_brief.md")
+        # and the reader is left to `find` the file; this cannot drift from
+        # what was actually produced.
+        try:
+            from .user_interface import display_files_produced
+            display_files_produced(files_produced, self.base_dir)
+        except Exception:  # noqa: BLE001 - reporting must never fail a task
+            pass
 
         # data_points_collected: rows in the BO optimization table, if any.
         data_points = 0

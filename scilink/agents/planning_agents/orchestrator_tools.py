@@ -549,7 +549,11 @@ class OrchestratorTools:
 
         path = self._output_dir() / "ideation_report.md"
         path.write_text("\n".join(lines))
-        print(f"    📄 Ideation report saved: {path}")
+        from .user_interface import file_link, record_deliverable
+        record_deliverable(self.orch.base_dir, path,
+                           "Ideation report — all candidate directions",
+                           deliverable=True)
+        print(f"    📄 Ideation report saved: {file_link(path)}")
         return str(path)
 
     def _planner_state(self):
@@ -739,7 +743,10 @@ class OrchestratorTools:
         )
         wp_path = self._output_dir() / "white_paper.md"
         wp_path.write_text(text)
-        print(f"    📄 White paper saved: {wp_path}")
+        from .user_interface import file_link, record_deliverable
+        record_deliverable(self.orch.base_dir, wp_path,
+                           "White paper (sponsor-facing)", deliverable=True)
+        print(f"    📄 White paper saved: {file_link(wp_path)}")
         return str(wp_path)
 
     @staticmethod
@@ -3972,7 +3979,8 @@ class OrchestratorTools:
 
 
         # 9. SAVE FILE
-        def save_file(filename: str, content: str, subfolder: str = ""):
+        def save_file(filename: str, content: str, subfolder: str = "",
+                      deliverable: bool = False, title: str = ""):
             """
             Save text content (code, protocols, notes) to a file in the session
             directory.
@@ -4001,11 +4009,16 @@ class OrchestratorTools:
 
             try:
                 dest.write_text(content, encoding="utf-8")
-                print(f"    💾 Saved: {dest}")
+                from .user_interface import file_link, record_deliverable
+                record_deliverable(self.orch.base_dir, dest, title,
+                                   deliverable)
+                print(f"    💾 Saved{' (deliverable)' if deliverable else ''}: "
+                      f"{file_link(dest)}")
                 return json.dumps({
                     "status": "success",
                     "path": str(dest),
                     "size_bytes": dest.stat().st_size,
+                    "deliverable": bool(deliverable),
                 })
             except Exception as e:
                 logging.error(f"save_file failed: {e}")
@@ -4043,6 +4056,26 @@ class OrchestratorTools:
                     "description": (
                         "Optional subfolder within the session directory, "
                         "e.g. 'protocols' or 'scripts'. Created if it doesn't exist."
+                    ),
+                },
+                "deliverable": {
+                    "type": "boolean",
+                    "description": (
+                        "Set TRUE when this file IS the artifact the user "
+                        "asked for (a brief, a report, a protocol they "
+                        "requested) rather than a working note or "
+                        "intermediate. Deliverables are shown to the user "
+                        "directly — starred in the file list and previewed "
+                        "in the chat — so they do not have to hunt through "
+                        "the session folder for them."
+                    ),
+                },
+                "title": {
+                    "type": "string",
+                    "description": (
+                        "Short human label for the file, e.g. 'Top-3 "
+                        "priority brief'. Shown beside it in the file list "
+                        "and as the preview heading."
                     ),
                 },
             },

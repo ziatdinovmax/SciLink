@@ -527,3 +527,91 @@ def test_saved_files_land_in_the_active_delegation_dir(tmp_path):
     tools.orch._active_output_subdir = None
     out2 = json.loads(captured["save_file"]("notes.md", "x"))
     assert Path(out2["path"]).parent == tmp_path
+
+
+# ------------------------------------------------- deliverable surfacing
+
+def test_agent_marked_deliverable_is_recorded_and_starred(tmp_path, capsys):
+    """The file a user asks for is named at request time
+    ('top3_priority_brief.md'), so no stem allow-list can anticipate it —
+    the agent marks it instead."""
+    from scilink.agents.planning_agents import orchestrator_tools as ot
+    from scilink.agents.planning_agents.user_interface import (
+        load_deliverables, display_files_produced)
+
+    deleg = tmp_path / "delegations" / "06_brief"
+    deleg.mkdir(parents=True)
+    tools = OrchestratorTools.__new__(OrchestratorTools)
+    tools.orch = SimpleNamespace(planner=SimpleNamespace(state={}, model=None),
+                                 base_dir=tmp_path,
+                                 _active_output_subdir=deleg, lit_agent=None)
+    cap = {}
+    tools._register_tool = lambda func, name, description, parameters, required=None: (
+        cap.update({name: func}))
+    ot.OrchestratorTools._register_all_tools(tools)
+
+    out = json.loads(cap["save_file"](
+        "top3_priority_brief.md", "# Brief", deliverable=True,
+        title="Top-3 priority brief"))
+    assert out["status"] == "success" and out["deliverable"] is True
+
+    marked = [e for e in load_deliverables(tmp_path) if e["deliverable"]]
+    assert [e["title"] for e in marked] == ["Top-3 priority brief"]
+    assert Path(marked[0]["path"]).name == "top3_priority_brief.md"
+
+    # an unmarked working note is recorded but not starred
+    cap["save_file"]("scratch_notes.md", "notes")
+    all_e = {Path(e["path"]).name: e for e in load_deliverables(tmp_path)}
+    assert all_e["scratch_notes.md"]["deliverable"] is False
+
+    capsys.readouterr()
+    display_files_produced([e["path"] for e in load_deliverables(tmp_path)],
+                           tmp_path)
+    block = capsys.readouterr().out
+    assert "FILES PRODUCED THIS TURN (2)" in block
+    assert "deliverables.json" not in block          # bookkeeping, not output
+    assert "★" in block and "Top-3 priority brief" in block
+    # absolute paths, so nothing has to be hunted for
+    assert str((deleg / "top3_priority_brief.md").resolve()) in block
+    # the deliverable is listed first
+    assert block.index("top3_priority_brief") < block.index("scratch_notes")
+
+
+def test_file_links_stay_plain_when_stdout_is_captured():
+    """OSC-8 escapes must never reach a captured buffer: the UI parses this
+    stdout and gates its review widgets on the strings in it."""
+    from scilink.agents.planning_agents.user_interface import file_link
+    link = file_link(__file__)          # pytest captures stdout -> not a tty
+    assert "\x1b]8;;" not in link
+    assert link == str(Path(__file__).resolve())
+
+
+def test_ui_embeds_marked_deliverables_and_skips_bulk(tmp_path, monkeypatch):
+    """UI sweep contract: agent-marked files embed under ANY name; unmarked
+    small markdown still embeds (a forgotten flag must not hide a file);
+    literature dumps and oversized files stay in the File Explorer."""
+    import ast
+    from scilink.agents.planning_agents.user_interface import record_deliverable
+
+    (tmp_path / "top3_priority_brief.md").write_text("# Brief")
+    (tmp_path / "scratch.md").write_text("# note")
+    (tmp_path / "literature_search_x.md").write_text("corpus " * 100)
+    (tmp_path / "huge_notes.md").write_text("x" * 70_000)
+    record_deliverable(tmp_path, tmp_path / "top3_priority_brief.md",
+                       "Top-3 priority brief", True)
+
+    src = Path("scilink/ui/app.py").read_text()
+    tree = ast.parse(src)
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+              and n.name == "_find_new_md_documents")
+    st_stub = SimpleNamespace(session_state=SimpleNamespace(
+        session_dir=str(tmp_path), known_images=set()))
+    ns = {"st": st_stub, "Path": Path}
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), "app.py", "exec"), ns)
+
+    found = {Path(p).name for p in ns["_find_new_md_documents"]()}
+    assert "top3_priority_brief.md" in found        # marked -> embedded
+    assert "scratch.md" in found                    # small -> still embedded
+    assert "literature_search_x.md" not in found    # bulk context excluded
+    assert "huge_notes.md" not in found             # too big to read in chat
+    assert ns["_find_new_md_documents"]() == []    # each file surfaces once

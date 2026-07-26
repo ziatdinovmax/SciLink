@@ -330,24 +330,64 @@ def _demote_md_headings(text: str) -> str:
 def _find_new_md_documents() -> list[str]:
     """Return markdown DELIVERABLES in the session dir not yet shown.
 
-    Whitelisted by stem: white papers and ideation dossiers are chat-facing
-    documents (ideation runs emit no plan.html — these are their reports).
-    Other session markdown (literature dumps, notes) stays in the File
-    Explorer; embedding every .md would bury the deliverables.
+    Chosen by the AGENT, not by an allow-list of stems: the filename of the
+    thing a user asked for is invented at request time
+    ("top3_priority_brief.md"), so a stem whitelist silently drops exactly
+    the artifact they are looking for. save_file records a deliverables
+    manifest; anything marked there is embedded. Unmarked markdown is still
+    embedded when it is small enough to read in chat — a forgotten flag must
+    never hide a file — while bulk context (literature dumps) is left to the
+    File Explorer so it cannot bury the deliverables.
     """
     session_dir = st.session_state.session_dir
     if session_dir is None:
         return []
+
+    MAX_INLINE_BYTES = 60_000
+    BULK_STEMS = ("literature_search", "chat_history", "session_log")
+    try:
+        from scilink.agents.planning_agents.user_interface import (
+            load_deliverables)
+        marked = {e["path"] for e in load_deliverables(session_dir)
+                  if e.get("deliverable")}
+    except Exception:
+        marked = set()
+
     new = []
     for p in Path(session_dir).rglob("*.md"):
         s = str(p)
-        if s not in st.session_state.known_images:  # reuse the same set
-            if not (p.stem.startswith("white_paper")
-                    or p.stem.startswith("ideation_report")):
+        if s in st.session_state.known_images:  # reuse the same set
+            continue
+        is_marked = str(p.resolve()) in marked
+        if not is_marked:
+            if any(p.stem.startswith(b) for b in BULK_STEMS):
                 continue
-            st.session_state.known_images.add(s)
-            new.append(s)
+            try:
+                if p.stat().st_size > MAX_INLINE_BYTES:
+                    continue
+            except OSError:
+                continue
+        st.session_state.known_images.add(s)
+        new.append(s)
     return new
+
+
+def _deliverable_title(md_path, p) -> str:
+    """Heading for an embedded markdown doc: the agent's own label when it
+    gave one, else a readable form of the filename."""
+    try:
+        from scilink.agents.planning_agents.user_interface import (
+            load_deliverables)
+        for e in load_deliverables(st.session_state.session_dir or ""):
+            if e.get("path") == str(Path(md_path).resolve()) and e.get("title"):
+                return e["title"]
+    except Exception:
+        pass
+    if p.stem.startswith("white_paper"):
+        return "White Paper"
+    if p.stem.startswith("ideation_report"):
+        return "Ideation Report"
+    return p.stem.replace("_", " ").title()
 
 
 def _parse_bestofn_review(context: str, prompt: str):
@@ -784,9 +824,7 @@ else:
                 for md_path in msg.get("md_reports", []):
                     p = Path(md_path)
                     if p.exists():
-                        _doc_title = ("White Paper"
-                                      if p.stem.startswith("white_paper")
-                                      else "Ideation Report")
+                        _doc_title = _deliverable_title(md_path, p)
                         with st.expander(f"{_doc_title}: {p.name}"):
                             with st.container(height=600):
                                 st.markdown(_demote_md_headings(
