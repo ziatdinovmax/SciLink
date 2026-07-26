@@ -962,18 +962,47 @@ class OrchestratorTools:
             # Multiple types — and multiple decomposed objectives — run
             # CONCURRENTLY: each Edison call is minutes of waiting, so a
             # serial pair doubles the user's wait for no reason.
-            types = [t.strip() for t in str(search_type).split(",") if t.strip()]
+            # PER-TYPE objectives. `objective` may be a mapping
+            # {search_type: question(s)} — because a paired call otherwise
+            # cross-multiplies ONE text across every type, and the two legs
+            # want different text: grounding wants "what are the gaps in X",
+            # transfer wants the FUNCTION to transfer toward. A plain string
+            # or list keeps the historical cross-product.
+            per_type: Dict[str, List[str]] = {}
+            if isinstance(objective, dict):
+                for t, objs in objective.items():
+                    key = str(t).strip()
+                    vals = ([objs] if isinstance(objs, str)
+                            else [str(o) for o in (objs or [])])
+                    vals = [v.strip() for v in vals if v and v.strip()]
+                    if vals:
+                        per_type[key] = vals
+                types = list(per_type)
+            else:
+                types = [t.strip() for t in str(search_type).split(",")
+                         if t.strip()]
             bad = [t for t in types if t not in search_methods]
             if bad or not types:
                 return json.dumps({
                     "status": "error",
-                    "message": (f"Invalid search_type '{search_type}'. Use one or more "
-                                f"(comma-separated) of: {', '.join(search_methods)}")
+                    "message": (f"Invalid search_type '{bad or search_type}'. "
+                                f"Use one or more (comma-separated, or as the "
+                                f"keys of an objective mapping) of: "
+                                f"{', '.join(search_methods)}")
                 })
 
-            objectives = ([objective] if isinstance(objective, str)
-                          else [str(o) for o in (objective or [])])
-            objectives = [o.strip() for o in objectives if o and o.strip()]
+            if per_type:
+                # objective index -> text, deduped so an identical question
+                # asked of two types is optimized once.
+                objectives = list(dict.fromkeys(
+                    o for objs in per_type.values() for o in objs))
+                idx = {o: i for i, o in enumerate(objectives)}
+                task_pairs = [(idx[o], t) for t in types for o in per_type[t]]
+            else:
+                objectives = ([objective] if isinstance(objective, str)
+                              else [str(o) for o in (objective or [])])
+                objectives = [o.strip() for o in objectives if o and o.strip()]
+                task_pairs = None
             if not objectives:
                 return json.dumps({"status": "error",
                                    "message": "No objective provided."})
@@ -986,13 +1015,14 @@ class OrchestratorTools:
             # ~10-15 min), not a concurrency limit.
             MAX_CONCURRENT = 6
             MAX_TOTAL = 12
-            n_jobs = len(objectives) * len(types)
+            n_jobs = (len(task_pairs) if task_pairs is not None
+                      else len(objectives) * len(types))
             if n_jobs > MAX_TOTAL:
                 return json.dumps({
                     "status": "error",
                     "message": (
-                        f"{len(objectives)} objectives x {len(types)} search "
-                        f"types = {n_jobs} searches, over the {MAX_TOTAL}-per-"
+                        f"{n_jobs} searches requested, over the "
+                        f"{MAX_TOTAL}-per-"
                         f"call ceiling (~{-(-n_jobs // MAX_CONCURRENT)} "
                         f"sequential batches of {MAX_CONCURRENT} = too long). "
                         f"Prioritize down to <= {MAX_TOTAL} searches in this "
@@ -1006,7 +1036,13 @@ class OrchestratorTools:
             # multiplication out loud — '5 questions but 10 searches' read
             # as a mismatch in live sessions.
             _q = f"{len(objectives)} question{'s' if len(objectives) != 1 else ''}"
-            if len(types) > 1:
+            if per_type:
+                # Each type has its OWN question(s); the multiplication line
+                # would be a lie here.
+                _mapping = (", ".join(
+                    f"{len(per_type[t])} for {t}" for t in types)
+                    + f" = {n_jobs} searches")
+            elif len(types) > 1:
                 _mapping = (f"{_q}, each searched {len(types)} ways "
                             f"({', '.join(types)}) = {n_jobs} searches")
             else:
@@ -1022,7 +1058,12 @@ class OrchestratorTools:
                            if n_batches > 1 else "")
             print(f"  ⚡ Tool: Searching literature: {_mapping}{_batch_note}")
             for qi, o in enumerate(objectives, 1):
-                print(f"     Q{qi}: '{o[:90]}{'...' if len(o) > 90 else ''}'")
+                _for = ""
+                if per_type:
+                    _owners = [t for t in types if o in per_type[t]]
+                    _for = f" [{'+'.join(_owners)}]"
+                print(f"     Q{qi}{_for}: '{o[:90]}"
+                      f"{'...' if len(o) > 90 else ''}'")
             if n_batches > 1:
                 print(f"     ⏱️  Deep literature searches typically take "
                       f"10-15 minutes per batch — {n_batches} sequential "
@@ -1091,7 +1132,9 @@ class OrchestratorTools:
                     objective=o, model=self.orch.planner.model
                 ) for o in objectives]
 
-                tasks = [(oi, t) for oi in range(len(objectives)) for t in types]
+                tasks = (task_pairs if task_pairs is not None
+                         else [(oi, t) for oi in range(len(objectives))
+                               for t in types])
 
                 def _task_label(oi, t):
                     return f"q{oi + 1}:{t}" if len(objectives) > 1 else t
@@ -1222,18 +1265,30 @@ class OrchestratorTools:
                 "document. So do NOT make a second search_literature call to "
                 "cover more aspects (a second call is a later turn and runs "
                 "sequentially anyway) — just list them all here. Total "
-                "objectives x search_types must be <= 12."
+                "searches must be <= 12. When pairing grounding with "
+                "cross_domain, give each type its OWN objective via the "
+                "object form (see `objective`) rather than one shared "
+                "question."
             ),
             parameters={
                 "objective": {
-                    "type": ["string", "array"],
+                    "type": ["string", "array", "object"],
                     "items": {"type": "string"},
                     "description": (
                         "ONE focused research question, or a LIST of them "
                         "(run in parallel). Split a broad objective — or "
                         "one containing too many distinct aspects — into "
                         "separate entries; each entry should stand alone as "
-                        "a question one review could answer well."
+                        "a question one review could answer well. "
+                        "PER-TYPE form: pass an OBJECT keyed by search type, "
+                        "e.g. {\"hypothesis_context\": [\"what is known "
+                        "about X\"], \"cross_domain\": [\"capture a state "
+                        "that exists only under drive and relaxes in "
+                        "milliseconds\"]}. Use it whenever you pair the two: "
+                        "grounding wants the question about your field, "
+                        "transfer wants the FUNCTION to transfer toward, and "
+                        "a single shared string cannot be both. With the "
+                        "object form, search_type is taken from its keys."
                     ),
                 },
                 "search_type": {

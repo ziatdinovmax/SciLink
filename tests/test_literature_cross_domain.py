@@ -255,3 +255,70 @@ def test_search_type_routing_excludes_survey_questions(tool):
     assert "FUNCTION or CHALLENGE" in st
     assert "survey question" in st
     assert "hypothesis_context" in st.split("survey question")[1]
+
+
+# ------------------------------------------------- per-type objectives
+
+def test_per_type_objectives_send_each_type_its_own_question(tool, tmp_path):
+    """A paired call cross-multiplied ONE text across both types, so the
+    cross_domain leg received a survey question written for grounding —
+    exactly the shape its wrapper tells the model to avoid. Each type can
+    now carry its own objective."""
+    func, lit, *_ = tool
+    out = json.loads(func({
+        "hypothesis_context": ["what are the gaps in biomineralization",
+                               "what is known about amorphous precursors"],
+        "cross_domain": "capture a state that exists only under drive",
+    }))
+    assert out["status"] == "success"
+
+    by_kind = {}
+    for kind, q in lit.calls:
+        by_kind.setdefault(kind, []).append(q)
+    assert sorted(by_kind) == ["cross_domain", "hypothesis_context"]
+    assert len(by_kind["hypothesis_context"]) == 2
+    assert by_kind["cross_domain"] == ["optimized::capture a state that "
+                                       "exists only under drive"]
+    # the grounding questions never reach the transfer leg, and vice versa
+    assert not any("gaps in biomineralization" in q
+                   for q in by_kind["cross_domain"])
+    assert not any("only under drive" in q
+                   for q in by_kind["hypothesis_context"])
+    assert set(out["searches_run"]) and len(lit.calls) == 3
+
+
+def test_shared_objective_still_cross_multiplies(tool):
+    """Back-compat: a string or list keeps the historical behaviour."""
+    func, lit, *_ = tool
+    json.loads(func(["q1", "q2"], "hypothesis_context,cross_domain"))
+    kinds = sorted(k for k, _ in lit.calls)
+    assert kinds == ["cross_domain", "cross_domain",
+                     "hypothesis_context", "hypothesis_context"]
+
+
+def test_per_type_objectives_validate_and_report_honestly(tool, capsys):
+    func, lit, *_ = tool
+    bad = json.loads(func({"nonsense": "q"}))
+    assert bad["status"] == "error" and "nonsense" in bad["message"]
+
+    empty = json.loads(func({"cross_domain": []}))
+    assert empty["status"] == "error"
+
+    capsys.readouterr()
+    json.loads(func({"hypothesis_context": ["a", "b"], "cross_domain": ["c"]}))
+    header = capsys.readouterr().out
+    # no "N questions each searched M ways" — that arithmetic is false here
+    assert "2 for hypothesis_context, 1 for cross_domain = 3 searches" in header
+    assert "each searched" not in header
+    assert "[hypothesis_context]" in header and "[cross_domain]" in header
+
+
+def test_identical_question_for_two_types_is_optimized_once(tool):
+    """Dedup by text: the same question asked of both types costs one query
+    optimization, but still runs once per type."""
+    func, lit, *_ = tool
+    json.loads(func({"hypothesis_context": ["same q"],
+                     "cross_domain": ["same q"]}))
+    assert sorted(k for k, _ in lit.calls) == ["cross_domain",
+                                               "hypothesis_context"]
+    assert {q for _, q in lit.calls} == {"optimized::same q"}
