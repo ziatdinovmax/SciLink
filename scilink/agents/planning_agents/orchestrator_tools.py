@@ -33,9 +33,10 @@ _LIT_HEARTBEAT_SECONDS = 180
 # Wall-clock ceiling for ONE batch of concurrent literature searches. Deep
 # searches are advertised as 10-15 min; past this a straggler is abandoned
 # and whatever finished is returned, rather than holding the call open.
-# Kept just above the agent's own per-task budget so a task normally times
-# itself out first and its worker exits cleanly.
-_LIT_BATCH_DEADLINE = 1500
+# Kept ABOVE the agent's own per-task budget (1500s) so a stalled task
+# normally times itself out first and its worker exits cleanly — this
+# deadline is the backstop for when that does not happen.
+_LIT_BATCH_DEADLINE = 1800
 
 
 def _build_planning_skill_description(custom_skills: dict = None) -> str:
