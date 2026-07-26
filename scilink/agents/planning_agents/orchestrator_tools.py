@@ -774,7 +774,7 @@ class OrchestratorTools:
         wp_path.write_text(text)
         from .user_interface import format_path, record_deliverable
         record_deliverable(self.orch.base_dir, wp_path,
-                           "White paper (sponsor-facing)", deliverable=True)
+                           "White paper", deliverable=True)
         print(f"    📄 White paper saved: {format_path(wp_path)}")
         return str(wp_path)
 
