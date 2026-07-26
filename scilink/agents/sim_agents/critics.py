@@ -979,3 +979,130 @@ class RunCritic(_CriticBase):
         else:
             _drop_vacuous_fix(report)
         return report
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# ReferencePropertyCritic
+# ──────────────────────────────────────────────────────────────────────────
+
+_REFERENCE_CRITIC_PROMPT = """\
+You are validating a simulation's model BEFORE an expensive production run.
+Below are reference properties measured for each pure component of the system,
+computed with the SAME force field the production run will use. Independently of
+any target result, judge each measured value against the KNOWN physical
+behaviour of that component.
+
+{skill_context}
+
+=== System ===
+{system_description}
+
+=== Measured reference properties (this force field) ===
+{measurements_block}
+
+For EACH component, decide whether its measured value is consistent with the
+well-established behaviour of that substance. Reason from what is known about the
+component; a stored reference value, when provided, is an anchor, not the only
+basis. A value that clearly contradicts known behaviour means the force field is
+miscalibrated for that component, and any prediction built on it is
+untrustworthy — no change to the run settings can fix that. If a value is only
+mildly off, or you are unsure, treat it as consistent: this gate must not veto a
+sound model over a surprising-but-plausible number.
+
+Return a JSON object:
+  status          "success"
+  per_component   list of {{ "component": ..., "consistent": true|false,
+                  "reasoning": "<one sentence>" }} — one entry per MEASURED
+                  component (omit components that could not be measured)
+  verdict         "good" — every measured value is physically consistent
+                  "poor" — at least one clearly contradicts known behaviour
+  failure_class   "force_field" when verdict is "poor" (the parameters, not the
+                  run settings, are at fault), else null
+  reasoning       short prose summary (which component, and why)
+"""
+
+
+class ReferencePropertyCritic(_CriticBase):
+    """Reasons over pre-run reference-property measurements to decide whether
+    the force field is trustworthy before the production run.
+
+    Given each pure component's measured reference property (from the
+    engine-neutral :func:`reference_validation.validate_component_properties`
+    stage), it judges each value against the known behaviour of that substance
+    and, when one clearly contradicts it, returns a ``poor`` verdict with
+    ``failure_class="force_field"`` — the same cause vocabulary the post-run
+    :class:`RunCritic` uses, so both feed one reparameterization fixer.
+
+    Reasoning-first: the judgement rests on the model's knowledge of the
+    components (a skill's ``validation`` section can supply known values as an
+    anchor, but is not required), and it is deliberately conservative — a mildly
+    off or merely surprising value is treated as consistent, so a sound model is
+    never vetoed over an unexpected result.
+    """
+
+    SKILL_SECTION = "validation"
+    BASELINE_PROMPT_TEMPLATE = _REFERENCE_CRITIC_PROMPT
+
+    def assess(
+        self,
+        measurements: List[Dict[str, Any]],
+        system_description: str = "",
+        skill: Optional[str] = None,
+        domain: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Judge measured reference properties; flag the force field if a value
+        contradicts known behaviour.
+
+        Args:
+            measurements: The ``measurements`` list from
+                ``validate_component_properties`` — entries with
+                ``status="measured"`` carry ``value`` / ``units``; unmeasured
+                ones are shown for context but not judged.
+            system_description: What is being simulated (context for the judge).
+            skill, domain: Optional skill bundle whose ``validation`` section
+                supplies known reference behaviour as an anchor.
+
+        Returns:
+            ``{"status", "verdict", "failure_class", "per_component",
+            "reasoning"}``. Fails open to a non-blocking ``good`` verdict (no
+            LLM call) when no component was measured.
+        """
+        if skill and not domain:
+            raise ValueError(
+                "domain is required when skill is provided (e.g. 'lammps' with "
+                "'molecular_dynamics')."
+            )
+        measured = [m for m in (measurements or [])
+                    if m.get("status") == "measured"]
+        if not measured:
+            return {
+                "status": "success",
+                "verdict": "good",
+                "failure_class": None,
+                "per_component": [],
+                "reasoning": "No reference properties were measured; nothing to "
+                             "validate.",
+            }
+
+        lines = []
+        for m in measurements:
+            if m.get("status") == "measured":
+                unit = f" {m['units']}" if m.get("units") else ""
+                smi = f" [{m['smiles']}]" if m.get("smiles") else ""
+                lines.append(f"- {m['component']}{smi}: {m['value']}{unit}")
+            else:
+                lines.append(f"- {m.get('component')}: not measured "
+                             f"({m.get('error', 'unknown')})")
+        measurements_block = "\n".join(lines)
+
+        skill_context = self._load_skill_section(skill, domain or "")
+        prompt = self.BASELINE_PROMPT_TEMPLATE.format(
+            skill_context=skill_context or "(no engine skill loaded)",
+            system_description=system_description or "(not provided)",
+            measurements_block=measurements_block,
+        )
+        report = self._generate_json(prompt)
+        report.setdefault("status", "success")
+        report.setdefault("verdict", "good")
+        report.setdefault("failure_class", None)
+        return report
