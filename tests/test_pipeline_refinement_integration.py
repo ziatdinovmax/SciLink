@@ -126,6 +126,35 @@ class TestWorkflowComposition:
         assert result["final_status"] == "success"
         assert result["refinement"]["status"] == "skipped"
 
+    def test_force_field_result_is_surfaced(self, tmp_path, monkeypatch):
+        self._stub_generation(monkeypatch)
+        # Stub the campaign to return a converged, force-field-flagged result
+        # (the detector's output), bypassing the loop/dry-run internals.
+        import scilink.agents.sim_agents.refinement as rf
+        monkeypatch.setattr(rf, "run_campaign", lambda *a, **k: {
+            "status": "success", "failure_class": "force_field",
+            "phases": [], "stages": [], "history": [],
+        })
+        structure = tmp_path / "POSCAR"
+        structure.write_text("dummy")
+        result = sp.run_complete_workflow(
+            "compute mixture density",
+            scale="molecular_dynamics", software="lammps",
+            structure_file=str(structure),
+            output_dir=str(tmp_path / "out_ff"),
+            api_key="fake-do-not-bill",
+            validate=False,
+            executor=LocalExecutor(timeout=30),
+            run_command="true",
+        )
+        # The force-field cause is surfaced plainly; the run still completes
+        # (detection only — the automated fix is not wired yet).
+        assert result["refinement"]["failure_class"] == "force_field"
+        assert result.get("force_field_flagged") is True
+        assert any("reparameteriz" in w.lower()
+                   for w in result.get("warnings", []))
+        assert result["final_status"] == "success"
+
 
 class TestGeneratedRemoteScript:
     """The UI-generated remote-run script must compile and call the pipeline

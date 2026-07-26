@@ -84,6 +84,13 @@ def _warning(files=None):
             "suggested_fixes": files}
 
 
+def _force_field():
+    # A run that CONVERGED but is physically wrong; the cause is the force
+    # field, so no deck fix is offered (like a "structure" cause).
+    return {"status": "success", "run_status": "succeeded", "verdict": "poor",
+            "failure_class": "force_field", "suggested_fixes": None}
+
+
 def _phase(name="production", run_dir="/tmp/rf_test_phase"):
     return Phase(name=name, input_files={"in.sim": "original"},
                  run_command="true", run_dir=run_dir)
@@ -161,6 +168,18 @@ class TestLoopFlow:
         result = run_refinement([_phase()], ex, critic, AutonomousPolicy(), _ctx())
         assert len(ex.calls) == 1
         assert result["phases"][0]["status"] == "stopped"
+
+    def test_force_field_cause_propagates_regardless_of_overall(self):
+        # A converged-but-wrong result: the run "succeeded", so this is not a
+        # crash — yet the force-field cause must surface at the result level
+        # (unlike "structure", which only propagates on a failed run), because
+        # the deck loop cannot fix it and it needs reparameterization upstream.
+        ex = FakeExecutor()
+        critic = ScriptedCritic([_force_field()])
+        result = run_refinement([_phase()], ex, critic, AutonomousPolicy(), _ctx())
+        assert result["failure_class"] == "force_field"
+        assert result["phases"][0]["failure_class"] == "force_field"
+        assert len(ex.calls) == 1          # no deck fix to try → stops
 
     def test_multi_phase_chains(self):
         ex = FakeExecutor()

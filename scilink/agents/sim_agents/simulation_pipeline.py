@@ -410,6 +410,21 @@ def _run_workflow_once(
     )
     result["refinement"] = refinement
     result["steps_completed"].append("refinement")
+    # Detection is wired; the automated reparameterization fix is not. When the
+    # critic attributes a converged-but-wrong result to the force field, surface
+    # it plainly so the result is not read as trustworthy.
+    if refinement.get("failure_class") == "force_field":
+        result["force_field_flagged"] = True
+        result.setdefault("warnings", []).append(
+            "A computed property contradicts the known physical behaviour of the "
+            "system — the force field appears miscalibrated. No input-deck change "
+            "can fix this; the force field needs reparameterization (not yet "
+            "automated). Treat this result as unreliable."
+        )
+        logger.warning(
+            "Run flagged force-field-limited (failure_class='force_field'); "
+            "reparameterization needed — not yet automated."
+        )
     result["final_status"] = (
         "success" if refinement.get("status") == "success"
         else f"refinement_{refinement.get('status', 'failed')}"

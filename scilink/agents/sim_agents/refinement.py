@@ -940,6 +940,11 @@ def run_campaign(
         p.get("failure_class") == "structure" for p in flat
     ):
         result["failure_class"] = "structure"
+    # A force-field cause can arise on a run that CONVERGED (verdict "poor",
+    # not a crash), so surface it regardless of overall status. Like structure,
+    # the deck loop cannot fix it — it needs reparameterization upstream.
+    elif any(p.get("failure_class") == "force_field" for p in flat):
+        result["failure_class"] = "force_field"
     if dry_run_record is not None:
         result["dry_run"] = dry_run_record
     return result
