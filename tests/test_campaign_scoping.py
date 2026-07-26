@@ -572,20 +572,10 @@ def test_agent_marked_deliverable_is_recorded_and_starred(tmp_path, capsys):
     assert "FILES PRODUCED THIS TURN (2)" in block
     assert "deliverables.json" not in block          # bookkeeping, not output
     assert "★" in block and "Top-3 priority brief" in block
-    # locatable without hunting: root stated once, path relative to it
-    assert f"in {tmp_path.resolve()}" in block
-    assert "delegations/06_brief/top3_priority_brief.md" in block
+    # absolute and pasteable: no hunting, no path to reassemble
+    assert str((deleg / "top3_priority_brief.md").resolve()) in block
     # the deliverable is listed first
     assert block.index("top3_priority_brief") < block.index("scratch_notes")
-
-
-def test_file_links_stay_plain_when_stdout_is_captured():
-    """OSC-8 escapes must never reach a captured buffer: the UI parses this
-    stdout and gates its review widgets on the strings in it."""
-    from scilink.agents.planning_agents.user_interface import file_link
-    link = file_link(__file__)          # pytest captures stdout -> not a tty
-    assert "\x1b]8;;" not in link
-    assert link == str(Path(__file__).resolve())
 
 
 def test_ui_embeds_marked_deliverables_and_skips_bulk(tmp_path, monkeypatch):
@@ -619,49 +609,15 @@ def test_ui_embeds_marked_deliverables_and_skips_bulk(tmp_path, monkeypatch):
     assert ns["_find_new_md_documents"]() == []    # each file surfaces once
 
 
-def test_hyperlinks_only_where_the_terminal_understands_them(monkeypatch):
-    """Being a TTY is not enough: a terminal without OSC-8 support prints
-    the escape as literal junk (']8;;file:///...'), which is worse than a
-    plain path. Allow-list known-good terminals; plain everywhere else."""
+def test_paths_are_plain_and_pasteable(monkeypatch):
+    """Terminal hyperlinks were tried and removed: detection was wrong twice,
+    leaking ']8;;file:///...' onto the screen. A plain absolute path is
+    selectable and pasteable, which is all this needed to be."""
     from scilink.agents.planning_agents import user_interface as ui
-
-    monkeypatch.setattr(ui.sys.stdout, "isatty", lambda: True, raising=False)
-    for var in ("SCILINK_NO_HYPERLINKS", "SCILINK_FORCE_HYPERLINKS",
-                "WT_SESSION", "KONSOLE_VERSION", "TERM_PROGRAM",
-                "VTE_VERSION"):
-        monkeypatch.delenv(var, raising=False)
-
-    # Apple Terminal — the case that printed junk on screen
-    monkeypatch.setenv("TERM_PROGRAM", "Apple_Terminal")
-    assert not ui._terminal_supports_hyperlinks()
-    assert "\x1b]8;;" not in ui.file_link(__file__)
-
-    # unknown terminal -> plain, never a gamble
-    monkeypatch.setenv("TERM_PROGRAM", "some-new-thing")
-    assert not ui._terminal_supports_hyperlinks()
-
-    for tp in ("iTerm.app", "vscode", "WezTerm", "ghostty"):
-        monkeypatch.setenv("TERM_PROGRAM", tp)
-        assert ui._terminal_supports_hyperlinks(), tp
-    monkeypatch.delenv("TERM_PROGRAM")
-    monkeypatch.setenv("WT_SESSION", "1")
-    assert ui._terminal_supports_hyperlinks()
-    monkeypatch.delenv("WT_SESSION")
-    monkeypatch.setenv("VTE_VERSION", "6003")
-    assert ui._terminal_supports_hyperlinks()
-    monkeypatch.setenv("VTE_VERSION", "4200")          # too old for OSC-8
-    assert not ui._terminal_supports_hyperlinks()
-    monkeypatch.delenv("VTE_VERSION")
-
-    # opt-out wins over a supported terminal; opt-in forces it on
-    monkeypatch.setenv("TERM_PROGRAM", "iTerm.app")
-    monkeypatch.setenv("SCILINK_NO_HYPERLINKS", "1")
-    assert not ui._terminal_supports_hyperlinks()
-    monkeypatch.delenv("SCILINK_NO_HYPERLINKS")
-    monkeypatch.setenv("TERM_PROGRAM", "Apple_Terminal")
-    monkeypatch.setenv("SCILINK_FORCE_HYPERLINKS", "1")
-    assert ui._terminal_supports_hyperlinks()
-    assert "\x1b]8;;" in ui.file_link(__file__)
+    out = ui.format_path(__file__)
+    assert out == str(Path(__file__).resolve())
+    assert "\x1b" not in out and "]8;;" not in out
+    assert not hasattr(ui, "_terminal_supports_hyperlinks")
 
 
 def test_files_block_leads_with_deliverables_and_collapses_the_rest(tmp_path,
@@ -692,11 +648,8 @@ def test_files_block_leads_with_deliverables_and_collapses_the_rest(tmp_path,
 
     assert "FILES PRODUCED THIS TURN (4)" in out          # 4 of 11, not 11
     assert out.index("brief.md") < out.index("plan.json")  # deliverable first
-    assert "★ delegations/01_brainstorm/brief.md" in out
+    assert f"★ {(d / 'brief.md').resolve()}" in out
     assert "— Use-case brief" in out
-    # paths are session-relative, with the root stated once
-    assert f"in {root.resolve()}" in out
-    assert str(root.resolve()) not in out.split("in " + str(root.resolve()))[1]
     # supporting files collapse to a count, never a wall of lines
     for noise in ("planning_state.json", "checkpoint.json", "plan_preview.html",
                   "candidate_1.html", "literature_search_x.md",

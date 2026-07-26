@@ -549,11 +549,11 @@ class OrchestratorTools:
 
         path = self._output_dir() / "ideation_report.md"
         path.write_text("\n".join(lines))
-        from .user_interface import file_link, record_deliverable
+        from .user_interface import format_path, record_deliverable
         record_deliverable(self.orch.base_dir, path,
                            "Ideation report — all candidate directions",
                            deliverable=True)
-        print(f"    📄 Ideation report saved: {file_link(path)}")
+        print(f"    📄 Ideation report saved: {format_path(path)}")
         return str(path)
 
     def _planner_state(self):
@@ -743,10 +743,10 @@ class OrchestratorTools:
         )
         wp_path = self._output_dir() / "white_paper.md"
         wp_path.write_text(text)
-        from .user_interface import file_link, record_deliverable
+        from .user_interface import format_path, record_deliverable
         record_deliverable(self.orch.base_dir, wp_path,
                            "White paper (sponsor-facing)", deliverable=True)
-        print(f"    📄 White paper saved: {file_link(wp_path)}")
+        print(f"    📄 White paper saved: {format_path(wp_path)}")
         return str(wp_path)
 
     @staticmethod
@@ -4102,11 +4102,11 @@ class OrchestratorTools:
 
             try:
                 dest.write_text(content, encoding="utf-8")
-                from .user_interface import file_link, record_deliverable
+                from .user_interface import format_path, record_deliverable
                 record_deliverable(self.orch.base_dir, dest, title,
                                    deliverable)
                 print(f"    💾 Saved{' (deliverable)' if deliverable else ''}: "
-                      f"{file_link(dest)}")
+                      f"{format_path(dest)}")
                 return json.dumps({
                     "status": "success",
                     "path": str(dest),

@@ -1,63 +1,21 @@
 from typing import Dict, Any, Optional, List
 import json
-import os
 import re
-import sys
 import textwrap
 from pathlib import Path
 
 DELIVERABLES_MANIFEST = "deliverables.json"
 
 
-def _terminal_supports_hyperlinks() -> bool:
-    """Does THIS terminal render OSC-8 hyperlinks?
+def format_path(path: Any) -> str:
+    """A file path as an absolute string, ready to copy into a browser.
 
-    Being a TTY is not enough — an emulator that does not understand OSC-8
-    prints the escape as literal junk (']8;;file:///...'), which is strictly
-    worse than a plain path. Apple Terminal.app is the common example. So
-    this is an ALLOW-LIST: emit the escape only where support is known, and
-    fall back to a plain absolute path everywhere else (iTerm2 and VS Code
-    linkify bare absolute paths anyway, so little is lost).
+    Terminal hyperlinks (OSC-8) were tried and removed: detection was wrong
+    twice — leaking ']8;;file:///...' into terminals that do not render the
+    escape — and a plain absolute path is already selectable and pasteable,
+    which is all this needed to be.
     """
-    if os.environ.get("SCILINK_NO_HYPERLINKS"):
-        return False
-    if os.environ.get("SCILINK_FORCE_HYPERLINKS"):
-        return True
-    try:
-        if not sys.stdout.isatty():
-            return False
-    except Exception:  # noqa: BLE001
-        return False
-    if os.environ.get("WT_SESSION") or os.environ.get("KONSOLE_VERSION"):
-        return True
-    if (os.environ.get("TERM_PROGRAM") or "").lower() in {
-            "iterm.app", "vscode", "wezterm", "hyper", "ghostty", "tabby"}:
-        return True
-    vte = os.environ.get("VTE_VERSION", "")
-    if vte.isdigit() and int(vte) >= 5000:      # VTE >= 0.50 (GNOME, Tilix)
-        return True
-    return False
-
-
-def file_link(path: Any, label: Optional[str] = None) -> str:
-    """An absolute path, clickable where the terminal actually supports it.
-
-    Falls back to the plain absolute path — which is what a reader needs to
-    find the file regardless — whenever hyperlink support is not positively
-    known, or when stdout is captured (the UI parses this stdout and its
-    review widgets gate on the strings in it).
-    """
-    p = Path(path).resolve()
-    text = label or str(p)
-    try:
-        if _terminal_supports_hyperlinks():
-            return f"\033]8;;file://{p}\033\\{text}\033]8;;\033\\"
-    except Exception:  # noqa: BLE001 - a link is cosmetic, never fatal
-        pass
-    # The caller's label is honoured in the plain branch too: a list of
-    # 130-character absolute paths is unreadable, and callers that shorten
-    # one print the directory it is relative to alongside.
-    return text
+    return str(Path(path).resolve())
 
 
 def record_deliverable(base_dir: Any, path: Any, title: str = "",
@@ -103,7 +61,7 @@ def load_deliverables(base_dir: Any) -> List[Dict[str, Any]]:
 
 
 def display_files_produced(paths: List[str], base_dir: Any = None) -> None:
-    """Print the turn's output files as clickable, absolute paths.
+    """Print the turn's output files as absolute, pasteable paths.
 
     Hunting for an agent-written file through a session tree is the single
     most common friction after a run — the assistant's prose cites a short
@@ -137,20 +95,8 @@ def display_files_produced(paths: List[str], base_dir: Any = None) -> None:
     if not shown:
         return
 
-    root = Path(base_dir).resolve() if base_dir else None
-
-    def _label(p: Path) -> str:
-        """Session-relative text, absolute target: short enough to read, and
-        still opens the right file when the terminal makes it clickable."""
-        try:
-            return str(p.resolve().relative_to(root)) if root else str(p.resolve())
-        except ValueError:
-            return str(p.resolve())
-
     print("\n" + "-" * 60)
     print(f"📎 FILES PRODUCED THIS TURN ({len(shown)})")
-    if root:
-        print(f"   in {root}")
     print("-" * 60)
     for p in sorted(shown, key=lambda x: (str(x.resolve()) not in marked,
                                           x.name)):
@@ -159,7 +105,7 @@ def display_files_produced(paths: List[str], base_dir: Any = None) -> None:
         unit = f"{size/1024:.0f} KB" if size >= 1024 else f"{size} B"
         star = "★ " if info else "  "
         label = f" — {info['title']}" if info else ""
-        print(f" {star}{file_link(p, _label(p))}  ({unit}){label}")
+        print(f" {star}{format_path(p)}  ({unit}){label}")
     if hidden:
         print(f"   (+{len(hidden)} supporting files: candidates, literature, "
               f"session state)")
