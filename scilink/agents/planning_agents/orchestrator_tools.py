@@ -6392,6 +6392,7 @@ class OrchestratorTools:
             n_candidates: int = None,
             white_paper: bool = None,
             new_campaign: bool = None,
+            selection_profile: str = None,   # accepted, ignored — see below
         ):
             """Author a PORTFOLIO of research directions (ideation).
 
@@ -6399,6 +6400,16 @@ class OrchestratorTools:
             best-of-N, judge, critic and campaign machinery, different
             contract — directions, not a bench protocol.
             """
+            # `selection_profile` is NOT in this tool's schema, but its
+            # description has to name the lab profile to say where a chosen
+            # direction goes next — which puts the parameter in scope, and a
+            # model duly passed it (live). The profile is meaningless here:
+            # a portfolio is ideation by construction. Accept and ignore
+            # rather than spend a round trip on a TypeError.
+            if selection_profile:
+                logging.info("generate_ideation_portfolio ignoring "
+                             "selection_profile=%r (always ideation)",
+                             selection_profile)
             # Same implementation, different contract — see `kind`.
             return generate_initial_plan(
                 specific_objective=specific_objective,
@@ -6669,6 +6680,31 @@ class OrchestratorTools:
 
         try:
             return self.functions_map[tool_name](**kwargs)
+        except TypeError as e:
+            # An unexpected keyword reaches here as a bare TypeError whose
+            # message names the offending argument but not the valid ones,
+            # so the model has to guess its way back. Name them.
+            if "unexpected keyword argument" in str(e):
+                import inspect as _inspect
+                try:
+                    accepted = [n for n in _inspect.signature(
+                        self.functions_map[tool_name]).parameters]
+                except (TypeError, ValueError):
+                    accepted = []
+                logging.warning(f"Tool {tool_name}: {e}")
+                return json.dumps({
+                    "status": "error",
+                    "tool": tool_name,
+                    "message": (f"{e}. Accepted arguments: "
+                                f"{', '.join(accepted) or 'unknown'}. "
+                                "Re-send the call using only those."),
+                })
+            logging.error(f"Tool execution error ({tool_name}): {e}", exc_info=True)
+            return json.dumps({
+                "status": "error",
+                "message": str(e),
+                "tool": tool_name
+            })
         except Exception as e:
             logging.error(f"Tool execution error ({tool_name}): {e}", exc_info=True)
             return json.dumps({

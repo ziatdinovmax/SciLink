@@ -256,3 +256,50 @@ def test_a_portfolio_edit_has_a_findable_tool():
     # and the document tool declines the job
     j = src.index('name="write_technical_document"')
     assert "belong in refine_portfolio" in src[j:j + 3000]
+
+
+# ── argument tolerance ───────────────────────────────────────────────
+
+def test_portfolio_tool_tolerates_the_profile_it_has_to_mention():
+    """Live: the model called generate_ideation_portfolio(selection_profile=
+    'ideation') and got a TypeError, costing a round trip. The tool's own
+    description names selection_profile='lab' to say where a CHOSEN
+    direction goes next, which puts the parameter in scope — so it must not
+    be an error to pass it. It is meaningless here: a portfolio is ideation
+    by construction, and it stays out of the schema."""
+    import inspect
+    from scilink.agents.planning_agents.orchestrator_tools import OrchestratorTools
+    src = inspect.getsource(OrchestratorTools._register_all_tools)
+    i = src.index("def generate_ideation_portfolio")
+    sig = src[i:src.index("):", i)]
+    assert "selection_profile" in sig, "must be accepted"
+    # ...but not advertised
+    j = src.index('name="generate_ideation_portfolio"')
+    params = src[j:src.index("required=", j)]
+    assert '"selection_profile"' not in params, "must not be in the schema"
+    # and the call still forces the portfolio contract
+    body = src[i:j]
+    assert 'selection_profile="ideation"' in body and 'kind="portfolio"' in body
+
+
+def test_an_unknown_argument_gets_told_what_is_accepted(tmp_path):
+    """A bare TypeError names the bad argument but not the good ones, so the
+    model has to guess its way back."""
+    from types import SimpleNamespace
+    from scilink.agents.planning_agents.orchestrator_tools import OrchestratorTools
+
+    t = OrchestratorTools.__new__(OrchestratorTools)
+    t.functions_map = {"demo": lambda alpha=None, beta=None: "ok"}
+    t.openai_schemas = []          # no schema -> nothing required
+    out = json.loads(OrchestratorTools.execute_tool(t, "demo", gamma=1))
+    assert out["status"] == "error" and out["tool"] == "demo"
+    assert "unexpected keyword argument" in out["message"]
+    assert "alpha" in out["message"] and "beta" in out["message"]
+
+    # a genuine failure inside a tool is still reported as itself
+    def boom():
+        raise ValueError("real failure")
+    t.functions_map["boom"] = boom
+    out2 = json.loads(OrchestratorTools.execute_tool(t, "boom"))
+    assert out2["status"] == "error" and "real failure" in out2["message"]
+    assert "Accepted arguments" not in out2["message"]
