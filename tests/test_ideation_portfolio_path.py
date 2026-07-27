@@ -180,3 +180,59 @@ def test_the_verbs_are_injected_only_for_portfolios():
     assert "refinement_prompt += PORTFOLIO_REFINEMENT_RULES" in flat
     # the shim shape counts too — a portfolio in flight carries concepts
     assert '(e or {}).get("concepts")' in flat
+
+
+# ── the three renderers, on one portfolio ────────────────────────────
+
+def _shimmed():
+    return portfolio_to_experiment_shim(dict(PORTFOLIO, type="ideation"))
+
+
+def test_console_renders_directions_not_a_protocol():
+    import io, contextlib
+    from scilink.agents.planning_agents import user_interface as ui
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        ui.display_plan_summary(_shimmed(), ideation=True,
+                                report_path="/x/portfolio.html")
+    out = buf.getvalue()
+    assert "PROPOSED RESEARCH DIRECTIONS" in out
+    assert out.count("  ▸ ") == 2, "one block per direction"
+    assert "RS-1" in out and "RS-2" in out
+    # the shared protocol is labelled as shared, not as the whole plan
+    assert "Shared Protocol" in out
+    assert "Experimental Steps" not in out
+
+
+def test_html_renders_direction_cards():
+    from scilink.agents.planning_agents.html_generator import HTMLReportGenerator
+    import tempfile, pathlib
+    plan = _shimmed()
+    out = pathlib.Path(tempfile.mkdtemp()) / "p.html"
+    HTMLReportGenerator({"current_plan": plan, "plan_history": [plan],
+                         "objective": "o"}).generate_single_plan(
+        plan, str(out), title="Portfolio")
+    h = out.read_text()
+    assert "Organizing thesis" in h and "Research directions (2)" in h
+    assert "RS-1" in h and "Correlative SECCM+AFM" in h
+    assert "Shared protocol" in h and "Open questions" in h
+    # never the protocol view
+    assert "Experimental Steps" not in h
+
+
+def test_html_still_renders_an_experiment_as_a_protocol():
+    """The regression that would matter most."""
+    from scilink.agents.planning_agents.html_generator import HTMLReportGenerator
+    import tempfile, pathlib
+    lab = {"proposed_experiments": [{"experiment_name": "E", "hypothesis": "H",
+                                     "experimental_steps": ["step one"],
+                                     "required_equipment": ["RDE"]}]}
+    out = pathlib.Path(tempfile.mkdtemp()) / "l.html"
+    HTMLReportGenerator({"current_plan": lab, "plan_history": [lab],
+                         "objective": "o"}).generate_single_plan(
+        lab, str(out), title="Plan")
+    h = out.read_text()
+    assert "step one" in h, "the protocol is the lab deliverable"
+    assert "Organizing thesis" not in h
+    # NB: required_equipment is absent from the single-plan template on main
+    # too — a pre-existing gap, not something this change introduced.
