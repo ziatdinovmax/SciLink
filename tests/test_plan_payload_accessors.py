@@ -207,3 +207,33 @@ def test_no_new_direct_readers_of_the_experiment_schema():
         for f in other.rglob("*.py"):
             assert "proposed_experiments" not in f.read_text(), \
                 f"{f} reaches into the plan payload"
+
+
+def test_a_session_can_hold_both_shapes_at_once():
+    """A campaign that ideated and then planned the bench protocol for one
+    direction carries both in its history — each must resolve as itself
+    after the checkpoint round trip."""
+    from scilink.agents.planning_agents.planning_agent import (
+        compact_planner_state, expand_planner_state)
+    portfolio = {"type": "ideation", "campaign_id": 1, "thesis": "T",
+                 "directions": [{"id": "A", "title": "One"}],
+                 "proposed_experiments": [{"hypothesis": "T", "concepts":
+                                           [{"id": "A", "title": "One"}]}]}
+    bench = {"type": "lab", "campaign_id": 1,
+             "proposed_experiments": [{"experiment_name": "E",
+                                       "experimental_steps": ["s1", "s2"]}]}
+    state = {"campaign_id": 1, "plan_kind": "ideation", "objective": "o",
+             "current_plan": bench, "plan_history": [portfolio, bench]}
+
+    rt = expand_planner_state(compact_planner_state(state))
+    assert rt == state, "state round-trip must be lossless"
+    hist = rt["plan_history"]
+    assert plan_is_portfolio(hist[0]) and len(plan_directions(hist[0])) == 1
+    assert not plan_is_portfolio(hist[1])
+    assert hist[1]["proposed_experiments"][0]["experimental_steps"] == ["s1", "s2"]
+    # the bench plan is current, so the campaign reads as lab despite
+    # plan_kind — the explicit stamp outranks it
+    from scilink.agents.planning_agents.planning_agent import PlanningAgent
+    a = PlanningAgent.__new__(PlanningAgent)
+    a.state = rt
+    assert a._is_ideation_campaign() is False
