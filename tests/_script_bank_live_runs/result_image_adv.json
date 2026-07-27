@@ -1,0 +1,120 @@
+{
+  "status": "success",
+  "output_directory": "/Users/maxim.ziatdinov/Code/SciLink/tests/_script_bank_live_runs/image_adv",
+  "detailed_analysis": "The AFM height map of mica in 2 mM KCl was leveled (row-median) and analyzed by targeted Fourier reflection mapping on calibrated square pixels (0.0294 nm/px, 15.03 nm field of view). The dominant periodicity is a reflection at d = 0.485 nm with high statistical significance (sigma = 7.3), accompanied by a nearly equally strong reflection at d = 0.429 nm (sigma = 7.05). Both correspond to atomic-scale lateral spacings in the ~0.4\u20130.5 nm range, consistent with the pseudo-hexagonal ditrigonal cavity lattice of the mica (001) basal plane and/or an ordered hydration/adsorbate layer templated by it. Notably, the 0.485 nm value is ~7% smaller than the nominal mica basal spacing of 0.52 nm; this shortfall exceeds the ~2% pixel/calibration resolution and may reflect residual lateral scanner calibration error, thermal drift, or that the resolved periodicity is not the bare mica lattice but a commensurate adsorbate/ion-hydration superlattice with a slightly compressed repeat. The presence of two comparably strong reflections (0.485 and 0.429 nm) rather than a single spacing is consistent with the two-dimensional oblique/hexagonal lattice producing multiple in-plane periodicities (e.g., along different lattice directions) rather than a single 1D fringe. No genuine superstructure or satellite reflections were resolved (the apparent 1.00 nm 'satellite candidate' has negative sigma and is a harmonic artifact, not a real feature), indicating no long-range reconstruction or ordered ion superlattice at this resolution. The band-amplitude map is homogeneous (CV = 0.11) with only a smooth low-frequency intensity gradient (bright lobe at right), which is topographic in origin rather than a distinct ordered domain; consistently, the ordered-domain mask returns domain_fraction = 0.0 and localized_ordering_confirmed = false. Together this indicates the periodic order is spatially pervasive (not confined to isolated patches) across the imaged area, i.e., a single continuous lattice/adsorbate film rather than segregated ordered domains. The spot SNR comparison (417 domain vs 263 bulk) does not reach the threshold for localized enhancement, reinforcing that ordering is uniform.",
+  "scientific_claims": [
+    {
+      "claim": "The mica (001) surface in 2 mM KCl exhibits a spatially pervasive, homogeneous in-plane periodic lattice with a dominant spacing of d = 0.485 nm (sigma = 7.3), ~7% smaller than the nominal 0.52 nm mica basal spacing, with no resolvable superstructure or ordered ion superlattice.",
+      "scientific_impact": "Distinguishing the bare mica basal lattice from a hydration/ion-templated adsorbate layer is central to understanding electrical-double-layer and ion-adsorption structure at charged mineral-water interfaces; the ~7% compressed repeat and absence of a superstructure constrain whether adsorbed K+/hydration layers form commensurate ordered arrays or remain lattice-fluid at this ionic strength.",
+      "has_anyone_question": "Has anyone observed a ~0.485 nm in-plane periodicity (compressed relative to the 0.52 nm mica basal spacing) on mica under dilute KCl, and is this the bare lattice or an ion/hydration-templated layer?",
+      "keywords": [
+        "mica basal plane",
+        "AFM",
+        "KCl electrolyte",
+        "Fourier lattice spacing",
+        "electrical double layer",
+        "ion hydration"
+      ]
+    }
+  ],
+  "analysis_approach": "Level the raster baseline, then use targeted Fourier reflection analysis to detect, measure, and spatially map the periodic lattice/adsorbate spacing that defines the mica surface structure.",
+  "extracted_features": {
+    "pixel_size_nm_x": 0.02935546875,
+    "pixel_size_nm_y": 0.02935546875,
+    "pixel_size_nm_used": 0.02935546875,
+    "pixel_size_source": "field_of_view",
+    "pixels_equal_or_resampled": "equal",
+    "resampled_shape": [
+      512,
+      512
+    ],
+    "detected_reflections": [
+      {
+        "d_nm": 0.4848387096774193,
+        "sigma": 7.338807828226186,
+        "is_satellite_candidate": false,
+        "integer_multiple_of": []
+      },
+      {
+        "d_nm": 0.42942857142857144,
+        "sigma": 7.051502555088712,
+        "is_satellite_candidate": false,
+        "integer_multiple_of": []
+      },
+      {
+        "d_nm": 1.87875,
+        "sigma": 1.3943973738337114,
+        "is_satellite_candidate": false,
+        "integer_multiple_of": []
+      },
+      {
+        "d_nm": 0.25913793103448274,
+        "sigma": 0.8279660387728627,
+        "is_satellite_candidate": false,
+        "integer_multiple_of": []
+      },
+      {
+        "d_nm": 0.21782608695652173,
+        "sigma": 0.7797225182349067,
+        "is_satellite_candidate": false,
+        "integer_multiple_of": []
+      },
+      {
+        "d_nm": 1.002,
+        "sigma": -0.6192781420898403,
+        "is_satellite_candidate": true,
+        "integer_multiple_of": [
+          {
+            "base_d_nm": 0.4848,
+            "multiple": 2
+          }
+        ]
+      }
+    ],
+    "strongest_reflection_d_nm": 0.4848387096774193,
+    "strongest_reflection_sigma": 7.338807828226186,
+    "mapped_d_nm": 0.4848387096774193,
+    "mapped_is_satellite_candidate": false,
+    "strongest_satellite_d_nm": null,
+    "is_mapped_superstructure": null,
+    "known_mica_basal_spacing_nm": 0.52,
+    "closest_reflection_to_mica_basal_nm": 0.4848387096774193,
+    "band_amplitude_cv": 0.10715847187378923,
+    "band_amplitude_homogeneity": "homogeneous",
+    "domain_fraction": 0.0,
+    "spot_snr_domain": 417.0540639632026,
+    "spot_snr_bulk": 263.47219300736174,
+    "localized_ordering_confirmed": false
+  },
+  "literature_files": null,
+  "quality_history": {
+    "final_score": 0.86,
+    "threshold": 0.7,
+    "approved": true,
+    "verification_iterations": [
+      {
+        "score": 0.86,
+        "result_type": "delivered",
+        "annealing_level": 0,
+        "issues": [
+          {
+            "location": "Reflection list / mica basal spacing comparison",
+            "problem": "The strongest reflection (d=0.485 nm, sigma=7.3) is reported as the closest to the known mica basal spacing of 0.52 nm, but the analysis notes 0.485 vs 0.52 without discussing that the measured value is ~7% short. Also a second strong reflection at 0.429 nm (sigma=7.05) is nearly as significant and not clearly interpreted."
+          },
+          {
+            "location": "Ordered-domain mask (frac=0.00) and localized_ordering_confirmed=false",
+            "problem": "domain_fraction is 0.0 and localized_ordering_confirmed is false, yet the periodic reflection is clearly significant (sigma~7). The band-amplitude map shows a smooth low-frequency undulation (bright lobe on right), which is topographic, not a sharp domain \u2014 this is correctly not over-interpreted, but the mask panel adds little."
+          }
+        ],
+        "tools_used": [],
+        "fix_applied": "none"
+      }
+    ],
+    "script_errors": [],
+    "judge_reasoning": null,
+    "score_explanation": null
+  },
+  "banked_scripts": [
+    "1ba9ba41"
+  ]
+}

@@ -1,0 +1,222 @@
+{
+  "status": "success",
+  "output_directory": "/Users/maxim.ziatdinov/Code/SciLink/tests/_script_bank_live_runs/adapt_miss2",
+  "task_mode": "fitting",
+  "detailed_analysis": "The spectrum is identified as OLIVINE on the basis of the full band pattern, per the mandatory trap-disambiguation rule for single-region-820-880 features. The decisive evidence is the RESOLVED PAIR at 822.11 +/- 0.02 and 853.87 +/- 0.02 cm-1 (separation 31.75 cm-1), accompanied by weak companion bands at 917.83 +/- 0.10 and 959.62 +/- 0.19 cm-1 and a suite of weak SiO4 bending/lattice modes at 221.6, 300.9, 325.2, 368.8, 428.1, 540.9, 584.8, 606.5 cm-1. This rules out competing single-strong-band candidates: uranyl (single symmetric band, no doublet, no 918/960), scheelite/wolframite tungstates (would lack 918/960 companions and add 320-400 bending unlike this pattern), and apatite (whose dominant band is a single ~964 nu1, here only a weak feature). The doublet positions 822/854 map onto forsterite-rich olivine (Fo endmember reference ~824/856 cm-1). The measured centers sit ~2 cm-1 below the pure-Fo reference, and the doublet separation and DB1 position are consistent with a Mg-rich composition with minor Fe (Fo roughly 80-90); precise Fo# would require calibrated peak-position vs composition curves. The fit quality (R2=0.996, RMSE=56 counts) is high, and the doublet parameters are exceptionally well constrained (center errors ~0.02 cm-1, FWHM errors <0.1 cm-1). However, the localized structured residual on the strong bands indicates genuine band asymmetry / Lorentzian-wing over-projection into the 716-790 region; an asymmetric or split-pseudo-Voigt profile for the two strong bands would likely remove this and slightly revise their widths. Weak-band eta values pin to 0 or 1 with large errors, so their Gaussian/Lorentzian character is undetermined and their areas carry 10-25% uncertainty. No chemistry (EDX/XRF) was supplied, so the assignment is pattern-only but strongly self-consistent across positions AND relative intensities.",
+  "scientific_claims": [
+    {
+      "claim": "The spectrum shows a resolved Si-O stretch doublet at 822.11 +/- 0.02 and 853.87 +/- 0.02 cm-1 (separation 31.75 cm-1) with weak 917.8 +/- 0.1 and 959.6 +/- 0.2 cm-1 companions, diagnostic of forsterite-rich (Mg-dominant) olivine.",
+      "scientific_impact": "The doublet position and separation are compositional indicators (Fo#) for olivine, enabling non-destructive mineral identification and Mg/Fe estimation relevant to petrology and planetary/meteoritic sample characterization.",
+      "has_anyone_question": "Has anyone calibrated the olivine DB1/DB2 Raman doublet positions (~822/854 cm-1) against Fo# to quantify Mg/Fe content in unknown silicate samples?",
+      "keywords": [
+        "olivine",
+        "forsterite",
+        "Raman doublet",
+        "Si-O stretch",
+        "Fo composition",
+        "silicate mineralogy"
+      ]
+    }
+  ],
+  "model_type": "Sum of 12 pseudo-Voigt peaks on a flat linear baseline (Levenberg-Marquardt / TRF least squares). Band centers (cm-1): ~220, ~305, ~325, ~370, ~428, ~542, ~590, ~610, ~822 (strong), ~854 (strong), ~918, ~960. The 810-870 region is treated as a RESOLVED DOUBLET (two symmetric components at ~822 and ~854), not one asymmetric band. Each component: amp*[eta*Lorentzian + (1-eta)*Gaussian], independent center, FWHM, amplitude, eta. Baseline: linear (near-zero) fitted as a model parameter. Constraints: amp>=0, FWHM in (1,60), eta in [0,1], centers within +-10 cm-1 of seeds. Background assessment: rolling-minimum baseline area fraction = 0.276 (<<0.40) => NOT fluorescence-dominated, no ALS applied per plan step 1. Cosmic single-pixel spikes removed via median filter.",
+  "fitting_parameters": {
+    "peak_1": {
+      "label": "band_220",
+      "center": 221.56271835506305,
+      "center_err": 0.6432178474852402,
+      "amplitude": 258.48232171979225,
+      "amplitude_err": 14.719356577314748,
+      "fwhm": 27.164292360605803,
+      "fwhm_err": 2.605790532046802,
+      "eta": 0.9999999999999837,
+      "eta_err": 0.27207836657985623,
+      "integrated_area": 10481.144812162305,
+      "relative_intensity": 0.033634825063468925
+    },
+    "peak_2": {
+      "label": "band_305",
+      "center": 300.9128761229054,
+      "center_err": 0.8525610901501337,
+      "amplitude": 235.2973211647681,
+      "amplitude_err": 29.671270062913116,
+      "fwhm": 17.497094749331435,
+      "fwhm_err": 2.723547405520777,
+      "eta": 0.999999999999946,
+      "eta_err": 0.43725494740263726,
+      "integrated_area": 6345.2194225193625,
+      "relative_intensity": 0.03061789364403501
+    },
+    "peak_3": {
+      "label": "band_325",
+      "center": 325.20101812457676,
+      "center_err": 0.9973104301330594,
+      "amplitude": 271.2127450822399,
+      "amplitude_err": 22.707017870847093,
+      "fwhm": 27.187411325482476,
+      "fwhm_err": 2.6846416373608517,
+      "eta": 0.5090209959928825,
+      "eta_err": 0.4866828047463161,
+      "integrated_area": 9594.37375730351,
+      "relative_intensity": 0.0352913621911569
+    },
+    "peak_4": {
+      "label": "band_370",
+      "center": 368.78806801983893,
+      "center_err": 0.858557178335694,
+      "amplitude": 120.58365594188977,
+      "amplitude_err": 24.890863955636323,
+      "fwhm": 10.339349220643985,
+      "fwhm_err": 3.1118458323030387,
+      "eta": 0.8032223372151647,
+      "eta_err": 1.0054945933879342,
+      "integrated_area": 1820.683577939955,
+      "relative_intensity": 0.015690860969268486
+    },
+    "peak_5": {
+      "label": "band_428",
+      "center": 428.1493664350353,
+      "center_err": 0.31927690024805633,
+      "amplitude": 403.28198017538097,
+      "amplitude_err": 17.88883864075382,
+      "fwhm": 16.578664736030984,
+      "fwhm_err": 1.2967068006710383,
+      "eta": 0.9999999999999976,
+      "eta_err": 0.19951802439130462,
+      "integrated_area": 10378.359671555707,
+      "relative_intensity": 0.05247677583596096
+    },
+    "peak_6": {
+      "label": "band_542",
+      "center": 540.8617943900285,
+      "center_err": 0.2763767478984614,
+      "amplitude": 418.22029048876556,
+      "amplitude_err": 21.578447599350064,
+      "fwhm": 12.39517005539006,
+      "fwhm_err": 1.0764112856648083,
+      "eta": 0.978664385322688,
+      "eta_err": 0.24870260107611594,
+      "integrated_area": 8028.252064564728,
+      "relative_intensity": 0.05442061265540575
+    },
+    "peak_7": {
+      "label": "band_590",
+      "center": 584.7755792185355,
+      "center_err": 0.48381577425602185,
+      "amplitude": 419.4324193816026,
+      "amplitude_err": 20.90833845901103,
+      "fwhm": 21.991469647491286,
+      "fwhm_err": 1.1315176386813828,
+      "eta": 1.9436765514490841e-10,
+      "eta_err": 0.29648370140076247,
+      "integrated_area": 9818.57493838441,
+      "relative_intensity": 0.05457834005043103
+    },
+    "peak_8": {
+      "label": "band_610",
+      "center": 606.4792146783458,
+      "center_err": 0.9014753181774628,
+      "amplitude": 192.326398998904,
+      "amplitude_err": 27.689942935836093,
+      "fwhm": 14.076985439618465,
+      "fwhm_err": 2.847633552969853,
+      "eta": 0.9999999998962005,
+      "eta_err": 0.5417049598426681,
+      "integrated_area": 4219.199403219886,
+      "relative_intensity": 0.0250263334930411
+    },
+    "peak_9": {
+      "label": "band_822_strong",
+      "center": 822.1133369458572,
+      "center_err": 0.0153469345369921,
+      "amplitude": 7684.961085185846,
+      "amplitude_err": 19.418222436623672,
+      "fwhm": 13.518654942710558,
+      "fwhm_err": 0.055571649591220004,
+      "eta": 0.7947615543560856,
+      "eta_err": 0.012187117167154598,
+      "integrated_area": 151414.76758639983,
+      "relative_intensity": 1.0
+    },
+    "peak_10": {
+      "label": "band_854_strong",
+      "center": 853.8676494754936,
+      "center_err": 0.023474019166790216,
+      "amplitude": 5249.708714559384,
+      "amplitude_err": 17.668924929915974,
+      "fwhm": 15.347845971692964,
+      "fwhm_err": 0.07883682174612416,
+      "eta": 0.6178255114574405,
+      "eta_err": 0.016968165398133613,
+      "integrated_area": 110284.2729886175,
+      "relative_intensity": 0.6831145475387179
+    },
+    "peak_11": {
+      "label": "band_918",
+      "center": 917.8342073176893,
+      "center_err": 0.10369720158097821,
+      "amplitude": 793.1995308719487,
+      "amplitude_err": 20.79506477616566,
+      "fwhm": 8.952266276740227,
+      "fwhm_err": 0.28573912256457673,
+      "eta": 7.442243103906282e-17,
+      "eta_err": 0.12101974571225325,
+      "integrated_area": 7558.709423135587,
+      "relative_intensity": 0.10321451495713939
+    },
+    "peak_12": {
+      "label": "band_960",
+      "center": 959.6223195407364,
+      "center_err": 0.18827291432557042,
+      "amplitude": 644.5982632049776,
+      "amplitude_err": 14.167413607410198,
+      "fwhm": 19.409520329676468,
+      "fwhm_err": 0.5253865256238266,
+      "eta": 4.50039686372635e-14,
+      "eta_err": 0.10836734854922622,
+      "integrated_area": 13317.912092513494,
+      "relative_intensity": 0.08387788253704465
+    },
+    "baseline": {
+      "slope": 0.03578492152182396,
+      "slope_err": 0.006120148369612234,
+      "intercept": -42.360446425197175,
+      "intercept_err": 6.218735003315466
+    }
+  },
+  "fit_quality": {
+    "r_squared": 0.9961665292399803,
+    "rmse": 56.40505450784363
+  },
+  "literature_files": null,
+  "quality_history": {
+    "final_r2": 0.9961665292399803,
+    "threshold": 0.95,
+    "approved": true,
+    "verification_iterations": [
+      {
+        "r_squared": 0.9961665292399803,
+        "annealing_level": 0,
+        "tools_used": [],
+        "model": "Sum of 12 pseudo-Voigt profiles on a flat/linear baseline. Band centers (initial): ~220, ~305, ~325, ~370, ~428, ~542, ~590/610 (one band ~590 with weak shoulder ~610), ~822 (strong), ~854 (strong), ~918, ~960 cm\u207b\u00b9. Each component: I\u00b7[\u03b7\u00b7Lorentzian + (1\u2212\u03b7)\u00b7Gaussian] with independent center, width, amplitude, and mixing fraction \u03b7. Baseline: constant offset (near zero) \u2014 use linear baseline to absorb minor slope.",
+        "issues": [
+          {
+            "location": "716.3\u2013789.9 (low-frequency wing of the 822 strong band)",
+            "problem": "Fit sits systematically ABOVE near-zero data (over-projection up to ~200 counts); the heavily-Lorentzian pseudo-Voigt wing of the 822 band extends intensity into a region that is genuinely empty in the data."
+          },
+          {
+            "location": "789.9\u2013863.5 (822/854 doublet crests)",
+            "problem": "Oscillatory residual (~300 counts) on the strong peaks."
+          }
+        ],
+        "fix_applied": "none"
+      }
+    ],
+    "alternative_models": [],
+    "script_errors": [],
+    "judge_reasoning": null,
+    "approved_by": "verifier"
+  },
+  "banked_scripts": [
+    "55f0466c"
+  ]
+}

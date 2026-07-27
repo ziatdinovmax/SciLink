@@ -1,0 +1,65 @@
+{
+  "material_type": "Vaterite particles",
+  "microscopy_type": "Optical microscopy (bright field)",
+  "experimental_details": {
+    "spatial_info": {
+      "field_of_view_x": 165,
+      "field_of_view_y": 124,
+      "field_of_view_units": "um"
+    }
+  },
+  "embedded_file_metadata": {
+    "pixel_size": {
+      "x": 0.0033333333333333335,
+      "y": 0.0033333333333333335,
+      "unit": "per_inch"
+    },
+    "tiff_tags": {
+      "ImageWidth": 2048,
+      "ImageLength": 1536,
+      "BitsPerSample": [
+        8,
+        8,
+        8
+      ],
+      "Compression": 1,
+      "PhotometricInterpretation": 2,
+      "StripOffsets": [
+        308,
+        1044788,
+        2089268,
+        3133748,
+        4178228,
+        5222708,
+        6267188,
+        7311668,
+        8356148,
+        9400628
+      ],
+      "Orientation": 1,
+      "SamplesPerPixel": 3,
+      "RowsPerStrip": 170,
+      "StripByteCounts": [
+        1044480,
+        1044480,
+        1044480,
+        1044480,
+        1044480,
+        1044480,
+        1044480,
+        1044480,
+        1044480,
+        36864
+      ],
+      "XResolution": 300.0,
+      "YResolution": 300.0,
+      "PlanarConfiguration": 1,
+      "ResolutionUnit": 2,
+      "PageNumber": [
+        0,
+        0
+      ],
+      "NewSubfileType": 2
+    }
+  }
+}

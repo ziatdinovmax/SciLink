@@ -1,0 +1,326 @@
+{
+  "timestamp": "2026-05-13T20:24:59.359322",
+  "total_spectra": 4,
+  "successful": 4,
+  "flagged_count": 3,
+  "is_single_spectrum": false,
+  "series_metadata": {
+    "variable": "step",
+    "values": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "unit": ""
+  },
+  "quality_settings": {
+    "r2_threshold": 0.95,
+    "max_model_retries": 1,
+    "outlier_sigma": 2.0
+  },
+  "locked_config": {
+    "analysis_approach": "Fit each spectrum with a two-Gaussian model on a constant (flat) background, as specified by the analysis objective. The two peaks correspond to two carbon chemical environments in the C 1s region.",
+    "physical_model": "y(x) = A1 * exp(-(x - mu1)^2 / (2 * sigma1^2)) + A2 * exp(-(x - mu2)^2 / (2 * sigma2^2)) + C, where the two Gaussian components represent two C 1s chemical states and C is a flat (constant) background.",
+    "parameters_to_extract": [
+      "peak1_center",
+      "peak1_amplitude",
+      "peak1_sigma",
+      "peak1_fwhm",
+      "peak1_area",
+      "peak2_center",
+      "peak2_amplitude",
+      "peak2_sigma",
+      "peak2_fwhm",
+      "peak2_area",
+      "background_constant",
+      "peak1_to_peak2_area_ratio"
+    ],
+    "fitting_strategy": "Initial guesses: Peak 1 (C-C/C-H): center=284.5 eV, amplitude=1.0, sigma=0.4 eV. Peak 2 (C-O): center=286.7 eV, amplitude=0.6, sigma=0.4 eV. Background constant=0.04. Constraints: centers bounded within [283.5, 285.5] and [285.5, 288.0] respectively to prevent peak swapping; sigma bounded [0.2, 1.0] eV for both peaks; amplitudes > 0; background >= 0. Use least-squares (Levenberg-Marquardt) optimization. Apply the same model and initial guesses to all 4 spectra since the spectral character is uniform."
+  },
+  "series_analysis_plan": null,
+  "locked_preprocessing_strategy": null,
+  "results": [
+    {
+      "index": 0,
+      "name": "spectrum_0000",
+      "data_path": "stack_index_0",
+      "success": true,
+      "error": null,
+      "model_type": "Two Gaussians on constant background: y = A1*exp(-(x-mu1)^2/(2*sigma1^2)) + A2*exp(-(x-mu2)^2/(2*sigma2^2)) + C",
+      "parameters": {
+        "peak_1": {
+          "center": 284.5018037515494,
+          "center_err": NaN,
+          "amplitude": 1.0,
+          "amplitude_err": NaN,
+          "sigma": 0.40000046107856974,
+          "sigma_err": NaN,
+          "fwhm": 0.9419291037694381,
+          "fwhm_err": NaN,
+          "area": 1.0026524656049798,
+          "area_err": NaN
+        },
+        "peak_2": {
+          "center": 286.7,
+          "center_err": NaN,
+          "amplitude": 0.6,
+          "amplitude_err": NaN,
+          "sigma": 0.4,
+          "sigma_err": NaN,
+          "fwhm": 0.9419280180123798,
+          "fwhm_err": NaN,
+          "area": 0.60159078591144,
+          "area_err": NaN
+        },
+        "background": {
+          "constant": 141.03649386769698,
+          "constant_err": NaN
+        },
+        "peak1_to_peak2_area_ratio": {
+          "value": 1.666668587827374,
+          "error": NaN
+        }
+      },
+      "fit_quality": {
+        "r_squared": 2.2714052860806078e-11,
+        "rmse": 140.98350620230755
+      },
+      "deviation_note": "Used 'trf' method instead of Levenberg-Marquardt because scipy least_squares LM does not support bounds; trf is the standard bounded least-squares alternative.",
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_fanout_runs/serial/spectrum_0000_fit.png",
+      "statistics": {
+        "n_points": 401,
+        "x_range": [
+          282.0,
+          290.0
+        ],
+        "y_range": [
+          0.0248705118291214,
+          1.058592163003577
+        ],
+        "y_mean": 0.2755463652949329,
+        "y_std": 0.28883888116012385,
+        "has_nans": false
+      },
+      "script": "import numpy as np\nimport json\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom scipy.optimize import least_squares\n\n# Load data\ndata = np.load('/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_fanout_runs/serial/temp_spectrum_0.npy')\n\n# Handle different data shapes\nif data.ndim == 2:\n    x = data[:, 0]\n    y = data[:, 1]\nelif data.ndim == 1:\n    # Assume evenly spaced x from 282 to 290\n    x = np.linspace(282, 290, len(data))\n    y = data\nelse:\n    raise ValueError(f\"Unexpected data shape: {data.shape}\")\n\n# Model: two Gaussians + constant background\n# y(x) = A1 * exp(-(x - mu1)^2 / (2 * sigma1^2)) + A2 * exp(-(x - mu2)^2 / (2 * sigma2^2)) + C\n\ndef gaussian(x, amplitude, center, sigma):\n    return amplitude * np.exp(-(x - center)**2 / (2 * sigma**2))\n\ndef model(x, params):\n    A1, mu1, sigma1, A2, mu2, sigma2, C = params\n    return gaussian(x, A1, mu1, sigma1) + gaussian(x, A2, mu2, sigma2) + C\n\ndef residuals(params, x, y):\n    return y - model(x, params)\n\n# Initial guesses as specified in the plan\n# [A1, mu1, sigma1, A2, mu2, sigma2, C]\np0 = [1.0, 284.5, 0.4, 0.6, 286.7, 0.4, 0.04]\n\n# Bounds as specified\n# A1 > 0, mu1 in [283.5, 285.5], sigma1 in [0.2, 1.0]\n# A2 > 0, mu2 in [285.5, 288.0], sigma2 in [0.2, 1.0]\n# C >= 0\nlower_bounds = [0.0, 283.5, 0.2, 0.0, 285.5, 0.2, 0.0]\nupper_bounds = [np.inf, 285.5, 1.0, np.inf, 288.0, 1.0, np.inf]\n\n# Fit using least_squares (Levenberg-Marquardt does not support bounds in scipy,\n# so we use 'trf' which is the default bounded method and closely related)\nresult = least_squares(residuals, p0, args=(x, y), bounds=(lower_bounds, upper_bounds), method='trf', max_nfev=10000)\n\npopt = result.x\nA1, mu1, sigma1, A2, mu2, sigma2, C = popt\n\n# Compute Jacobian-based parameter uncertainties\nJ = result.jac\nresid = result.fun\nn = len(y)\np = len(popt)\nif n > p:\n    s_sq = np.sum(resid**2) / (n - p)\n    try:\n        cov = np.linalg.inv(J.T @ J) * s_sq\n        perr = np.sqrt(np.diag(cov))\n    except np.linalg.LinAlgError:\n        perr = np.full(p, np.nan)\nelse:\n    perr = np.full(p, np.nan)\n\nA1_err, mu1_err, sigma1_err, A2_err, mu2_err, sigma2_err, C_err = perr\n\n# Compute derived quantities\n# FWHM = 2 * sqrt(2 * ln(2)) * sigma\nfwhm_factor = 2.0 * np.sqrt(2.0 * np.log(2.0))\n\npeak1_fwhm = fwhm_factor * sigma1\npeak2_fwhm = fwhm_factor * sigma2\npeak1_fwhm_err = fwhm_factor * sigma1_err\npeak2_fwhm_err = fwhm_factor * sigma2_err\n\n# Area = amplitude * sigma * sqrt(2*pi)\npeak1_area = A1 * sigma1 * np.sqrt(2 * np.pi)\npeak2_area = A2 * sigma2 * np.sqrt(2 * np.pi)\n\n# Area error propagation: area = A * sigma * sqrt(2*pi)\n# d(area)/dA = sigma * sqrt(2*pi), d(area)/dsigma = A * sqrt(2*pi)\npeak1_area_err = np.sqrt((sigma1 * np.sqrt(2*np.pi) * A1_err)**2 + (A1 * np.sqrt(2*np.pi) * sigma1_err)**2)\npeak2_area_err = np.sqrt((sigma2 * np.sqrt(2*np.pi) * A2_err)**2 + (A2 * np.sqrt(2*np.pi) * sigma2_err)**2)\n\n# Area ratio\nif peak2_area > 0:\n    area_ratio = peak1_area / peak2_area\n    # Error propagation for ratio\n    area_ratio_err = area_ratio * np.sqrt((peak1_area_err/peak1_area)**2 + (peak2_area_err/peak2_area)**2)\nelse:\n    area_ratio = np.inf\n    area_ratio_err = np.nan\n\n# Fit quality\ny_fit = model(x, popt)\nss_res = np.sum((y - y_fit)**2)\nss_tot = np.sum((y - np.mean(y))**2)\nr_squared = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0\nrmse = np.sqrt(np.mean((y - y_fit)**2))\n\n# Visualization\nfig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)\n\ncomp1 = gaussian(x, A1, mu1, sigma1) + C\ncomp2 = gaussian(x, A2, mu2, sigma2) + C\ncomp1_only = gaussian(x, A1, mu1, sigma1)\ncomp2_only = gaussian(x, A2, mu2, sigma2)\nbg = np.full_like(x, C)\n\nax1.scatter(x, y, s=5, color='black', label='Data', zorder=5)\nax1.plot(x, y_fit, 'r-', linewidth=2, label='Fit')\nax1.plot(x, comp1_only + C, 'b--', linewidth=1.2, label='Component 1')\nax1.plot(x, comp2_only + C, 'g--', linewidth=1.2, label='Component 2')\nax1.plot(x, bg, 'k:', linewidth=1, alpha=0.5, label='Background')\nax1.set_ylabel('Y')\nax1.set_title('Data and Fit')\nax1.legend(fontsize=8)\n\nresiduals_plot = y - y_fit\nax2.plot(x, residuals_plot, 'k-', linewidth=0.8, label='Residuals')\nax2.axhline(0, color='gray', linestyle='--', linewidth=0.5)\nax2.set_xlabel('X')\nax2.set_ylabel('Residuals')\nax2.legend(fontsize=8)\n\nplt.tight_layout()\nplt.savefig('fit_visualization.png', dpi=150)\nplt.close()\n\n# Build results JSON\nresults = {\n    \"model_type\": \"Two Gaussians on constant background: y = A1*exp(-(x-mu1)^2/(2*sigma1^2)) + A2*exp(-(x-mu2)^2/(2*sigma2^2)) + C\",\n    \"parameters\": {\n        \"peak_1\": {\n            \"center\": float(mu1),\n            \"center_err\": float(mu1_err),\n            \"amplitude\": float(A1),\n            \"amplitude_err\": float(A1_err),\n            \"sigma\": float(sigma1),\n            \"sigma_err\": float(sigma1_err),\n            \"fwhm\": float(peak1_fwhm),\n            \"fwhm_err\": float(peak1_fwhm_err),\n            \"area\": float(peak1_area),\n            \"area_err\": float(peak1_area_err)\n        },\n        \"peak_2\": {\n            \"center\": float(mu2),\n            \"center_err\": float(mu2_err),\n            \"amplitude\": float(A2),\n            \"amplitude_err\": float(A2_err),\n            \"sigma\": float(sigma2),\n            \"sigma_err\": float(sigma2_err),\n            \"fwhm\": float(peak2_fwhm),\n            \"fwhm_err\": float(peak2_fwhm_err),\n            \"area\": float(peak2_area),\n            \"area_err\": float(peak2_area_err)\n        },\n        \"background\": {\n            \"constant\": float(C),\n            \"constant_err\": float(C_err)\n        },\n        \"peak1_to_peak2_area_ratio\": {\n            \"value\": float(area_ratio),\n            \"error\": float(area_ratio_err)\n        }\n    },\n    \"fit_quality\": {\n        \"r_squared\": float(r_squared),\n        \"rmse\": float(rmse)\n    },\n    \"deviation_note\": \"Used 'trf' method instead of Levenberg-Marquardt because scipy least_squares LM does not support bounds; trf is the standard bounded least-squares alternative.\"\n}\n\nprint(f\"FIT_RESULTS_JSON:{json.dumps(results)}\")\n",
+      "script_errors": [],
+      "quality_warning": "R\u00b2 = 0.0000 below threshold 0.95",
+      "attempted_models": [
+        "y(x) = A1 * exp(-(x - mu1)^2 / (2 * sigma1^2)) + A2 * exp(-(x - mu2)^2 / (2 * sigma2^2)) + C, where the two Gaussian components represent two C 1s chemical states and C is a flat (constant) background."
+      ],
+      "quality_history": {
+        "final_r2": 2.2714052860806078e-11,
+        "threshold": 0.95,
+        "approved": false,
+        "verification_iterations": [],
+        "alternative_models": [],
+        "script_errors": [],
+        "judge_reasoning": null
+      },
+      "flagged": true,
+      "flag_reason": "below_threshold",
+      "flag_recommendation": "Fit quality below threshold but consistent with series. The chosen model may not be optimal for this data type.",
+      "deviation_sigma": 0.5773502691896253
+    },
+    {
+      "index": 1,
+      "name": "spectrum_0001",
+      "data_path": "stack_index_1",
+      "success": true,
+      "error": null,
+      "model_type": "Two Gaussians on constant background: y = A1*exp(-(x-mu1)^2/(2*sigma1^2)) + A2*exp(-(x-mu2)^2/(2*sigma2^2)) + C",
+      "parameters": {
+        "peak_1": {
+          "center": 284.50180374870604,
+          "center_err": NaN,
+          "amplitude": 1.0,
+          "amplitude_err": NaN,
+          "sigma": 0.4000004610689507,
+          "sigma_err": NaN,
+          "fwhm": 0.941929103746787,
+          "fwhm_err": NaN,
+          "area": 1.0026524655808684,
+          "area_err": NaN
+        },
+        "peak_2": {
+          "center": 286.7,
+          "center_err": NaN,
+          "amplitude": 0.6,
+          "amplitude_err": NaN,
+          "sigma": 0.4,
+          "sigma_err": NaN,
+          "fwhm": 0.9419280180123798,
+          "fwhm_err": NaN,
+          "area": 0.60159078591144,
+          "area_err": NaN
+        },
+        "background": {
+          "constant": 141.0331147359411,
+          "constant_err": NaN
+        },
+        "peak1_to_peak2_area_ratio": {
+          "value": 1.6666685877872947,
+          "error": NaN
+        }
+      },
+      "fit_quality": {
+        "r_squared": 2.2713497749293765e-11,
+        "rmse": 140.98688533425104
+      },
+      "deviation_note": "Used 'trf' method instead of Levenberg-Marquardt because scipy least_squares LM does not support bounds; trf is the standard bounded least-squares alternative.",
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_fanout_runs/serial/spectrum_0001_fit.png",
+      "statistics": {
+        "n_points": 401,
+        "x_range": [
+          282.0,
+          290.0
+        ],
+        "y_range": [
+          0.027250249285577843,
+          1.0518200362818295
+        ],
+        "y_mean": 0.2755462040053016,
+        "y_std": 0.2890655052464183,
+        "has_nans": false
+      },
+      "script": "import numpy as np\nimport json\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom scipy.optimize import least_squares\n\n# Load data\ndata = np.load(\"/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_fanout_runs/serial/temp_spectrum_1.npy\")\n\n# Handle different data shapes\nif data.ndim == 2:\n    x = data[:, 0]\n    y = data[:, 1]\nelif data.ndim == 1:\n    # Assume evenly spaced x from 282 to 290\n    x = np.linspace(282, 290, len(data))\n    y = data\nelse:\n    raise ValueError(f\"Unexpected data shape: {data.shape}\")\n\n# Model: two Gaussians + constant background\n# y(x) = A1 * exp(-(x - mu1)^2 / (2 * sigma1^2)) + A2 * exp(-(x - mu2)^2 / (2 * sigma2^2)) + C\n\ndef gaussian(x, amplitude, center, sigma):\n    return amplitude * np.exp(-(x - center)**2 / (2 * sigma**2))\n\ndef model(x, params):\n    A1, mu1, sigma1, A2, mu2, sigma2, C = params\n    return gaussian(x, A1, mu1, sigma1) + gaussian(x, A2, mu2, sigma2) + C\n\ndef residuals(params, x, y):\n    return y - model(x, params)\n\n# Initial guesses as specified in the plan\n# [A1, mu1, sigma1, A2, mu2, sigma2, C]\np0 = [1.0, 284.5, 0.4, 0.6, 286.7, 0.4, 0.04]\n\n# Bounds as specified\n# A1 > 0, mu1 in [283.5, 285.5], sigma1 in [0.2, 1.0]\n# A2 > 0, mu2 in [285.5, 288.0], sigma2 in [0.2, 1.0]\n# C >= 0\nlower_bounds = [0.0, 283.5, 0.2, 0.0, 285.5, 0.2, 0.0]\nupper_bounds = [np.inf, 285.5, 1.0, np.inf, 288.0, 1.0, np.inf]\n\n# Fit using least_squares (Levenberg-Marquardt does not support bounds in scipy,\n# so we use 'trf' which is the default bounded method and closely related)\nresult = least_squares(residuals, p0, args=(x, y), bounds=(lower_bounds, upper_bounds), method='trf', max_nfev=10000)\n\npopt = result.x\nA1, mu1, sigma1, A2, mu2, sigma2, C = popt\n\n# Compute Jacobian-based parameter uncertainties\nJ = result.jac\nresid = result.fun\nn = len(y)\np = len(popt)\nif n > p:\n    s_sq = np.sum(resid**2) / (n - p)\n    try:\n        cov = np.linalg.inv(J.T @ J) * s_sq\n        perr = np.sqrt(np.diag(cov))\n    except np.linalg.LinAlgError:\n        perr = np.full(p, np.nan)\nelse:\n    perr = np.full(p, np.nan)\n\nA1_err, mu1_err, sigma1_err, A2_err, mu2_err, sigma2_err, C_err = perr\n\n# Compute derived quantities\n# FWHM = 2 * sqrt(2 * ln(2)) * sigma\nfwhm_factor = 2.0 * np.sqrt(2.0 * np.log(2.0))\n\npeak1_fwhm = fwhm_factor * sigma1\npeak2_fwhm = fwhm_factor * sigma2\npeak1_fwhm_err = fwhm_factor * sigma1_err\npeak2_fwhm_err = fwhm_factor * sigma2_err\n\n# Area = amplitude * sigma * sqrt(2*pi)\npeak1_area = A1 * sigma1 * np.sqrt(2 * np.pi)\npeak2_area = A2 * sigma2 * np.sqrt(2 * np.pi)\n\n# Area error propagation: area = A * sigma * sqrt(2*pi)\n# d(area)/dA = sigma * sqrt(2*pi), d(area)/dsigma = A * sqrt(2*pi)\npeak1_area_err = np.sqrt((sigma1 * np.sqrt(2*np.pi) * A1_err)**2 + (A1 * np.sqrt(2*np.pi) * sigma1_err)**2)\npeak2_area_err = np.sqrt((sigma2 * np.sqrt(2*np.pi) * A2_err)**2 + (A2 * np.sqrt(2*np.pi) * sigma2_err)**2)\n\n# Area ratio\nif peak2_area > 0:\n    area_ratio = peak1_area / peak2_area\n    # Error propagation for ratio\n    area_ratio_err = area_ratio * np.sqrt((peak1_area_err/peak1_area)**2 + (peak2_area_err/peak2_area)**2)\nelse:\n    area_ratio = np.inf\n    area_ratio_err = np.nan\n\n# Fit quality\ny_fit = model(x, popt)\nss_res = np.sum((y - y_fit)**2)\nss_tot = np.sum((y - np.mean(y))**2)\nr_squared = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0\nrmse = np.sqrt(np.mean((y - y_fit)**2))\n\n# Visualization\nfig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)\n\ncomp1 = gaussian(x, A1, mu1, sigma1) + C\ncomp2 = gaussian(x, A2, mu2, sigma2) + C\ncomp1_only = gaussian(x, A1, mu1, sigma1)\ncomp2_only = gaussian(x, A2, mu2, sigma2)\nbg = np.full_like(x, C)\n\nax1.scatter(x, y, s=5, color='black', label='Data', zorder=5)\nax1.plot(x, y_fit, 'r-', linewidth=2, label='Fit')\nax1.plot(x, comp1_only + C, 'b--', linewidth=1.2, label='Component 1')\nax1.plot(x, comp2_only + C, 'g--', linewidth=1.2, label='Component 2')\nax1.plot(x, bg, 'k:', linewidth=1, alpha=0.5, label='Background')\nax1.set_ylabel('Y')\nax1.set_title('Data and Fit')\nax1.legend(fontsize=8)\n\nresiduals_plot = y - y_fit\nax2.plot(x, residuals_plot, 'k-', linewidth=0.8, label='Residuals')\nax2.axhline(0, color='gray', linestyle='--', linewidth=0.5)\nax2.set_xlabel('X')\nax2.set_ylabel('Residuals')\nax2.legend(fontsize=8)\n\nplt.tight_layout()\nplt.savefig('spectrum_0001_fit.png', dpi=150)\nplt.close()\n\n# Build results JSON\nresults = {\n    \"model_type\": \"Two Gaussians on constant background: y = A1*exp(-(x-mu1)^2/(2*sigma1^2)) + A2*exp(-(x-mu2)^2/(2*sigma2^2)) + C\",\n    \"parameters\": {\n        \"peak_1\": {\n            \"center\": float(mu1),\n            \"center_err\": float(mu1_err),\n            \"amplitude\": float(A1),\n            \"amplitude_err\": float(A1_err),\n            \"sigma\": float(sigma1),\n            \"sigma_err\": float(sigma1_err),\n            \"fwhm\": float(peak1_fwhm),\n            \"fwhm_err\": float(peak1_fwhm_err),\n            \"area\": float(peak1_area),\n            \"area_err\": float(peak1_area_err)\n        },\n        \"peak_2\": {\n            \"center\": float(mu2),\n            \"center_err\": float(mu2_err),\n            \"amplitude\": float(A2),\n            \"amplitude_err\": float(A2_err),\n            \"sigma\": float(sigma2),\n            \"sigma_err\": float(sigma2_err),\n            \"fwhm\": float(peak2_fwhm),\n            \"fwhm_err\": float(peak2_fwhm_err),\n            \"area\": float(peak2_area),\n            \"area_err\": float(peak2_area_err)\n        },\n        \"background\": {\n            \"constant\": float(C),\n            \"constant_err\": float(C_err)\n        },\n        \"peak1_to_peak2_area_ratio\": {\n            \"value\": float(area_ratio),\n            \"error\": float(area_ratio_err)\n        }\n    },\n    \"fit_quality\": {\n        \"r_squared\": float(r_squared),\n        \"rmse\": float(rmse)\n    },\n    \"deviation_note\": \"Used 'trf' method instead of Levenberg-Marquardt because scipy least_squares LM does not support bounds; trf is the standard bounded least-squares alternative.\"\n}\n\nprint(f\"FIT_RESULTS_JSON:{json.dumps(results)}\")\n",
+      "script_errors": [],
+      "flagged": true,
+      "flag_reason": "below_threshold",
+      "flag_recommendation": "Fit quality below threshold but consistent with series. The chosen model may not be optimal for this data type.",
+      "deviation_sigma": 0.5773502691896266
+    },
+    {
+      "index": 2,
+      "name": "spectrum_0002",
+      "data_path": "stack_index_2",
+      "success": true,
+      "error": null,
+      "model_type": "Two Gaussians on constant background: y = A1*exp(-(x-mu1)^2/(2*sigma1^2)) + A2*exp(-(x-mu2)^2/(2*sigma2^2)) + C",
+      "parameters": {
+        "peak_1": {
+          "center": 284.5018037507141,
+          "center_err": NaN,
+          "amplitude": 1.0,
+          "amplitude_err": NaN,
+          "sigma": 0.40000046107582227,
+          "sigma_err": NaN,
+          "fwhm": 0.9419291037629682,
+          "fwhm_err": NaN,
+          "area": 1.0026524655980928,
+          "area_err": NaN
+        },
+        "peak_2": {
+          "center": 286.7,
+          "center_err": NaN,
+          "amplitude": 0.6,
+          "amplitude_err": NaN,
+          "sigma": 0.4,
+          "sigma_err": NaN,
+          "fwhm": 0.9419280180123798,
+          "fwhm_err": NaN,
+          "area": 0.60159078591144,
+          "area_err": NaN
+        },
+        "background": {
+          "constant": 141.03552869851455,
+          "constant_err": NaN
+        },
+        "peak1_to_peak2_area_ratio": {
+          "value": 1.6666685878159262,
+          "error": NaN
+        }
+      },
+      "fit_quality": {
+        "r_squared": 2.2713941838503615e-11,
+        "rmse": 140.98447137154352
+      },
+      "deviation_note": "Used 'trf' method instead of Levenberg-Marquardt because scipy least_squares LM does not support bounds; trf is the standard bounded least-squares alternative.",
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_fanout_runs/serial/spectrum_0002_fit.png",
+      "statistics": {
+        "n_points": 401,
+        "x_range": [
+          282.0,
+          290.0
+        ],
+        "y_range": [
+          0.027379143523733263,
+          1.0607007202987053
+        ],
+        "y_mean": 0.2764658141687977,
+        "y_std": 0.2897857050511278,
+        "has_nans": false
+      },
+      "script": "import numpy as np\nimport json\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom scipy.optimize import least_squares\n\n# Load data\ndata = np.load(\"/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_fanout_runs/serial/temp_spectrum_2.npy\")\n\n# Handle different data shapes\nif data.ndim == 2:\n    x = data[:, 0]\n    y = data[:, 1]\nelif data.ndim == 1:\n    # Assume evenly spaced x from 282 to 290\n    x = np.linspace(282, 290, len(data))\n    y = data\nelse:\n    raise ValueError(f\"Unexpected data shape: {data.shape}\")\n\n# Model: two Gaussians + constant background\n# y(x) = A1 * exp(-(x - mu1)^2 / (2 * sigma1^2)) + A2 * exp(-(x - mu2)^2 / (2 * sigma2^2)) + C\n\ndef gaussian(x, amplitude, center, sigma):\n    return amplitude * np.exp(-(x - center)**2 / (2 * sigma**2))\n\ndef model(x, params):\n    A1, mu1, sigma1, A2, mu2, sigma2, C = params\n    return gaussian(x, A1, mu1, sigma1) + gaussian(x, A2, mu2, sigma2) + C\n\ndef residuals(params, x, y):\n    return y - model(x, params)\n\n# Initial guesses as specified in the plan\n# [A1, mu1, sigma1, A2, mu2, sigma2, C]\np0 = [1.0, 284.5, 0.4, 0.6, 286.7, 0.4, 0.04]\n\n# Bounds as specified\n# A1 > 0, mu1 in [283.5, 285.5], sigma1 in [0.2, 1.0]\n# A2 > 0, mu2 in [285.5, 288.0], sigma2 in [0.2, 1.0]\n# C >= 0\nlower_bounds = [0.0, 283.5, 0.2, 0.0, 285.5, 0.2, 0.0]\nupper_bounds = [np.inf, 285.5, 1.0, np.inf, 288.0, 1.0, np.inf]\n\n# Fit using least_squares (Levenberg-Marquardt does not support bounds in scipy,\n# so we use 'trf' which is the default bounded method and closely related)\nresult = least_squares(residuals, p0, args=(x, y), bounds=(lower_bounds, upper_bounds), method='trf', max_nfev=10000)\n\npopt = result.x\nA1, mu1, sigma1, A2, mu2, sigma2, C = popt\n\n# Compute Jacobian-based parameter uncertainties\nJ = result.jac\nresid = result.fun\nn = len(y)\np = len(popt)\nif n > p:\n    s_sq = np.sum(resid**2) / (n - p)\n    try:\n        cov = np.linalg.inv(J.T @ J) * s_sq\n        perr = np.sqrt(np.diag(cov))\n    except np.linalg.LinAlgError:\n        perr = np.full(p, np.nan)\nelse:\n    perr = np.full(p, np.nan)\n\nA1_err, mu1_err, sigma1_err, A2_err, mu2_err, sigma2_err, C_err = perr\n\n# Compute derived quantities\n# FWHM = 2 * sqrt(2 * ln(2)) * sigma\nfwhm_factor = 2.0 * np.sqrt(2.0 * np.log(2.0))\n\npeak1_fwhm = fwhm_factor * sigma1\npeak2_fwhm = fwhm_factor * sigma2\npeak1_fwhm_err = fwhm_factor * sigma1_err\npeak2_fwhm_err = fwhm_factor * sigma2_err\n\n# Area = amplitude * sigma * sqrt(2*pi)\npeak1_area = A1 * sigma1 * np.sqrt(2 * np.pi)\npeak2_area = A2 * sigma2 * np.sqrt(2 * np.pi)\n\n# Area error propagation: area = A * sigma * sqrt(2*pi)\n# d(area)/dA = sigma * sqrt(2*pi), d(area)/dsigma = A * sqrt(2*pi)\npeak1_area_err = np.sqrt((sigma1 * np.sqrt(2*np.pi) * A1_err)**2 + (A1 * np.sqrt(2*np.pi) * sigma1_err)**2)\npeak2_area_err = np.sqrt((sigma2 * np.sqrt(2*np.pi) * A2_err)**2 + (A2 * np.sqrt(2*np.pi) * sigma2_err)**2)\n\n# Area ratio\nif peak2_area > 0:\n    area_ratio = peak1_area / peak2_area\n    # Error propagation for ratio\n    area_ratio_err = area_ratio * np.sqrt((peak1_area_err/peak1_area)**2 + (peak2_area_err/peak2_area)**2)\nelse:\n    area_ratio = np.inf\n    area_ratio_err = np.nan\n\n# Fit quality\ny_fit = model(x, popt)\nss_res = np.sum((y - y_fit)**2)\nss_tot = np.sum((y - np.mean(y))**2)\nr_squared = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0\nrmse = np.sqrt(np.mean((y - y_fit)**2))\n\n# Visualization\nfig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)\n\ncomp1 = gaussian(x, A1, mu1, sigma1) + C\ncomp2 = gaussian(x, A2, mu2, sigma2) + C\ncomp1_only = gaussian(x, A1, mu1, sigma1)\ncomp2_only = gaussian(x, A2, mu2, sigma2)\nbg = np.full_like(x, C)\n\nax1.scatter(x, y, s=5, color='black', label='Data', zorder=5)\nax1.plot(x, y_fit, 'r-', linewidth=2, label='Fit')\nax1.plot(x, comp1_only + C, 'b--', linewidth=1.2, label='Component 1')\nax1.plot(x, comp2_only + C, 'g--', linewidth=1.2, label='Component 2')\nax1.plot(x, bg, 'k:', linewidth=1, alpha=0.5, label='Background')\nax1.set_ylabel('Y')\nax1.set_title('Data and Fit')\nax1.legend(fontsize=8)\n\nresiduals_plot = y - y_fit\nax2.plot(x, residuals_plot, 'k-', linewidth=0.8, label='Residuals')\nax2.axhline(0, color='gray', linestyle='--', linewidth=0.5)\nax2.set_xlabel('X')\nax2.set_ylabel('Residuals')\nax2.legend(fontsize=8)\n\nplt.tight_layout()\nplt.savefig('spectrum_0002_fit.png', dpi=150)\nplt.close()\n\n# Build results JSON\nresults = {\n    \"model_type\": \"Two Gaussians on constant background: y = A1*exp(-(x-mu1)^2/(2*sigma1^2)) + A2*exp(-(x-mu2)^2/(2*sigma2^2)) + C\",\n    \"parameters\": {\n        \"peak_1\": {\n            \"center\": float(mu1),\n            \"center_err\": float(mu1_err),\n            \"amplitude\": float(A1),\n            \"amplitude_err\": float(A1_err),\n            \"sigma\": float(sigma1),\n            \"sigma_err\": float(sigma1_err),\n            \"fwhm\": float(peak1_fwhm),\n            \"fwhm_err\": float(peak1_fwhm_err),\n            \"area\": float(peak1_area),\n            \"area_err\": float(peak1_area_err)\n        },\n        \"peak_2\": {\n            \"center\": float(mu2),\n            \"center_err\": float(mu2_err),\n            \"amplitude\": float(A2),\n            \"amplitude_err\": float(A2_err),\n            \"sigma\": float(sigma2),\n            \"sigma_err\": float(sigma2_err),\n            \"fwhm\": float(peak2_fwhm),\n            \"fwhm_err\": float(peak2_fwhm_err),\n            \"area\": float(peak2_area),\n            \"area_err\": float(peak2_area_err)\n        },\n        \"background\": {\n            \"constant\": float(C),\n            \"constant_err\": float(C_err)\n        },\n        \"peak1_to_peak2_area_ratio\": {\n            \"value\": float(area_ratio),\n            \"error\": float(area_ratio_err)\n        }\n    },\n    \"fit_quality\": {\n        \"r_squared\": float(r_squared),\n        \"rmse\": float(rmse)\n    },\n    \"deviation_note\": \"Used 'trf' method instead of Levenberg-Marquardt because scipy least_squares LM does not support bounds; trf is the standard bounded least-squares alternative.\"\n}\n\nprint(f\"FIT_RESULTS_JSON:{json.dumps(results)}\")\n",
+      "script_errors": [],
+      "flagged": true,
+      "flag_reason": "below_threshold",
+      "flag_recommendation": "Fit quality below threshold but consistent with series. The chosen model may not be optimal for this data type.",
+      "deviation_sigma": 0.5773502691896255
+    },
+    {
+      "index": 3,
+      "name": "spectrum_0003",
+      "data_path": "stack_index_3",
+      "success": true,
+      "error": null,
+      "model_type": "Two Gaussians on constant background: y = A1*exp(-(x-mu1)^2/(2*sigma1^2)) + A2*exp(-(x-mu2)^2/(2*sigma2^2)) + C",
+      "parameters": {
+        "peak_1": {
+          "center": 283.5161836639591,
+          "center_err": NaN,
+          "amplitude": 908.983532321808,
+          "amplitude_err": NaN,
+          "sigma": 0.9909555706033537,
+          "sigma_err": NaN,
+          "fwhm": 2.3335220413918596,
+          "fwhm_err": NaN,
+          "area": 2257.876237220642,
+          "area_err": NaN
+        },
+        "peak_2": {
+          "center": 286.7,
+          "center_err": NaN,
+          "amplitude": 807.208962718164,
+          "amplitude_err": NaN,
+          "sigma": 0.4,
+          "sigma_err": NaN,
+          "fwhm": 0.9419280180123798,
+          "fwhm_err": NaN,
+          "area": 809.3491237939643,
+          "area_err": NaN
+        },
+        "background": {
+          "constant": 0.037899810146543186,
+          "constant_err": NaN
+        },
+        "peak1_to_peak2_area_ratio": {
+          "value": 2.7897432280354564,
+          "error": NaN
+        }
+      },
+      "fit_quality": {
+        "r_squared": 0.9999999992894945,
+        "rmse": 0.003758231087354196
+      },
+      "deviation_note": "Used 'trf' method instead of Levenberg-Marquardt because scipy least_squares LM does not support bounds; trf is the standard bounded least-squares alternative.",
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_fanout_runs/serial/spectrum_0003_fit.png",
+      "statistics": {
+        "n_points": 401,
+        "x_range": [
+          282.0,
+          290.0
+        ],
+        "y_range": [
+          0.023454992203320108,
+          1.0583101195575004
+        ],
+        "y_mean": 0.27709232176445353,
+        "y_std": 0.28874046699770745,
+        "has_nans": false
+      },
+      "script": "import numpy as np\nimport json\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom scipy.optimize import least_squares\n\n# Load data\ndata = np.load(\"/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_fanout_runs/serial/temp_spectrum_3.npy\")\n\n# Handle different data shapes\nif data.ndim == 2:\n    x = data[:, 0]\n    y = data[:, 1]\nelif data.ndim == 1:\n    # Assume evenly spaced x from 282 to 290\n    x = np.linspace(282, 290, len(data))\n    y = data\nelse:\n    raise ValueError(f\"Unexpected data shape: {data.shape}\")\n\n# Model: two Gaussians + constant background\n# y(x) = A1 * exp(-(x - mu1)^2 / (2 * sigma1^2)) + A2 * exp(-(x - mu2)^2 / (2 * sigma2^2)) + C\n\ndef gaussian(x, amplitude, center, sigma):\n    return amplitude * np.exp(-(x - center)**2 / (2 * sigma**2))\n\ndef model(x, params):\n    A1, mu1, sigma1, A2, mu2, sigma2, C = params\n    return gaussian(x, A1, mu1, sigma1) + gaussian(x, A2, mu2, sigma2) + C\n\ndef residuals(params, x, y):\n    return y - model(x, params)\n\n# Initial guesses as specified in the plan\n# [A1, mu1, sigma1, A2, mu2, sigma2, C]\np0 = [1.0, 284.5, 0.4, 0.6, 286.7, 0.4, 0.04]\n\n# Bounds as specified\n# A1 > 0, mu1 in [283.5, 285.5], sigma1 in [0.2, 1.0]\n# A2 > 0, mu2 in [285.5, 288.0], sigma2 in [0.2, 1.0]\n# C >= 0\nlower_bounds = [0.0, 283.5, 0.2, 0.0, 285.5, 0.2, 0.0]\nupper_bounds = [np.inf, 285.5, 1.0, np.inf, 288.0, 1.0, np.inf]\n\n# Fit using least_squares (Levenberg-Marquardt does not support bounds in scipy,\n# so we use 'trf' which is the default bounded method and closely related)\nresult = least_squares(residuals, p0, args=(x, y), bounds=(lower_bounds, upper_bounds), method='trf', max_nfev=10000)\n\npopt = result.x\nA1, mu1, sigma1, A2, mu2, sigma2, C = popt\n\n# Compute Jacobian-based parameter uncertainties\nJ = result.jac\nresid = result.fun\nn = len(y)\np = len(popt)\nif n > p:\n    s_sq = np.sum(resid**2) / (n - p)\n    try:\n        cov = np.linalg.inv(J.T @ J) * s_sq\n        perr = np.sqrt(np.diag(cov))\n    except np.linalg.LinAlgError:\n        perr = np.full(p, np.nan)\nelse:\n    perr = np.full(p, np.nan)\n\nA1_err, mu1_err, sigma1_err, A2_err, mu2_err, sigma2_err, C_err = perr\n\n# Compute derived quantities\n# FWHM = 2 * sqrt(2 * ln(2)) * sigma\nfwhm_factor = 2.0 * np.sqrt(2.0 * np.log(2.0))\n\npeak1_fwhm = fwhm_factor * sigma1\npeak2_fwhm = fwhm_factor * sigma2\npeak1_fwhm_err = fwhm_factor * sigma1_err\npeak2_fwhm_err = fwhm_factor * sigma2_err\n\n# Area = amplitude * sigma * sqrt(2*pi)\npeak1_area = A1 * sigma1 * np.sqrt(2 * np.pi)\npeak2_area = A2 * sigma2 * np.sqrt(2 * np.pi)\n\n# Area error propagation: area = A * sigma * sqrt(2*pi)\n# d(area)/dA = sigma * sqrt(2*pi), d(area)/dsigma = A * sqrt(2*pi)\npeak1_area_err = np.sqrt((sigma1 * np.sqrt(2*np.pi) * A1_err)**2 + (A1 * np.sqrt(2*np.pi) * sigma1_err)**2)\npeak2_area_err = np.sqrt((sigma2 * np.sqrt(2*np.pi) * A2_err)**2 + (A2 * np.sqrt(2*np.pi) * sigma2_err)**2)\n\n# Area ratio\nif peak2_area > 0:\n    area_ratio = peak1_area / peak2_area\n    # Error propagation for ratio\n    area_ratio_err = area_ratio * np.sqrt((peak1_area_err/peak1_area)**2 + (peak2_area_err/peak2_area)**2)\nelse:\n    area_ratio = np.inf\n    area_ratio_err = np.nan\n\n# Fit quality\ny_fit = model(x, popt)\nss_res = np.sum((y - y_fit)**2)\nss_tot = np.sum((y - np.mean(y))**2)\nr_squared = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0\nrmse = np.sqrt(np.mean((y - y_fit)**2))\n\n# Visualization\nfig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)\n\ncomp1 = gaussian(x, A1, mu1, sigma1) + C\ncomp2 = gaussian(x, A2, mu2, sigma2) + C\ncomp1_only = gaussian(x, A1, mu1, sigma1)\ncomp2_only = gaussian(x, A2, mu2, sigma2)\nbg = np.full_like(x, C)\n\nax1.scatter(x, y, s=5, color='black', label='Data', zorder=5)\nax1.plot(x, y_fit, 'r-', linewidth=2, label='Fit')\nax1.plot(x, comp1_only + C, 'b--', linewidth=1.2, label='Component 1')\nax1.plot(x, comp2_only + C, 'g--', linewidth=1.2, label='Component 2')\nax1.plot(x, bg, 'k:', linewidth=1, alpha=0.5, label='Background')\nax1.set_ylabel('Y')\nax1.set_title('Data and Fit')\nax1.legend(fontsize=8)\n\nresiduals_plot = y - y_fit\nax2.plot(x, residuals_plot, 'k-', linewidth=0.8, label='Residuals')\nax2.axhline(0, color='gray', linestyle='--', linewidth=0.5)\nax2.set_xlabel('X')\nax2.set_ylabel('Residuals')\nax2.legend(fontsize=8)\n\nplt.tight_layout()\nplt.savefig('spectrum_0003_fit.png', dpi=150)\nplt.close()\n\n# Build results JSON\nresults = {\n    \"model_type\": \"Two Gaussians on constant background: y = A1*exp(-(x-mu1)^2/(2*sigma1^2)) + A2*exp(-(x-mu2)^2/(2*sigma2^2)) + C\",\n    \"parameters\": {\n        \"peak_1\": {\n            \"center\": float(mu1),\n            \"center_err\": float(mu1_err),\n            \"amplitude\": float(A1),\n            \"amplitude_err\": float(A1_err),\n            \"sigma\": float(sigma1),\n            \"sigma_err\": float(sigma1_err),\n            \"fwhm\": float(peak1_fwhm),\n            \"fwhm_err\": float(peak1_fwhm_err),\n            \"area\": float(peak1_area),\n            \"area_err\": float(peak1_area_err)\n        },\n        \"peak_2\": {\n            \"center\": float(mu2),\n            \"center_err\": float(mu2_err),\n            \"amplitude\": float(A2),\n            \"amplitude_err\": float(A2_err),\n            \"sigma\": float(sigma2),\n            \"sigma_err\": float(sigma2_err),\n            \"fwhm\": float(peak2_fwhm),\n            \"fwhm_err\": float(peak2_fwhm_err),\n            \"area\": float(peak2_area),\n            \"area_err\": float(peak2_area_err)\n        },\n        \"background\": {\n            \"constant\": float(C),\n            \"constant_err\": float(C_err)\n        },\n        \"peak1_to_peak2_area_ratio\": {\n            \"value\": float(area_ratio),\n            \"error\": float(area_ratio_err)\n        }\n    },\n    \"fit_quality\": {\n        \"r_squared\": float(r_squared),\n        \"rmse\": float(rmse)\n    },\n    \"deviation_note\": \"Used 'trf' method instead of Levenberg-Marquardt because scipy least_squares LM does not support bounds; trf is the standard bounded least-squares alternative.\"\n}\n\nprint(f\"FIT_RESULTS_JSON:{json.dumps(results)}\")\n",
+      "script_errors": []
+    }
+  ]
+}

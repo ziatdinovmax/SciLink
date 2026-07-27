@@ -1,0 +1,338 @@
+{
+  "status": "success",
+  "output_directory": "/Users/maxim.ziatdinov/Code/SciLink/tests/_qc_phase5_live_runs/vote_vaterite_prior",
+  "detailed_analysis": "The image shows near-circular vaterite particles (round discs with textured, granular interiors and a bright central core) coexisting with distinct dark, lens/ellipsoidal bodies (elongated debris or a second morphology). The hybrid LoG+SAM pipeline was designed to separate isolated round discs from touching pairs, and it correctly excludes the dark elongated bodies from the round-disc count. The morphology metrics confirm the target population is genuinely disc-like: the 15 largest detections cluster tightly at ~137-144 px diameter with aspect ratio \u22481.0-1.11 and solidity \u22480.99, i.e. highly circular, convex, solid objects \u2014 consistent with polycrystalline vaterite spherulites imaged as flat discs. The size distribution, however, is bimodal: a main mode of ~12-15 particles at ~140 px sits above a secondary group of ~5 detections at ~104-125 px that have elevated aspect ratios (1.47-1.73) and lower solidity. These small, elongated detections are SAM lobe masks carved from touching clusters that are undersized/partial rather than a true second size population, so the 'monodisperse' claim applies only to the well-resolved isolated discs. Critically, no defensible physical size can be reported: the metadata calibration (80.566 nm/px, derived from field-of-view) implies ~10.9 \u00b5m discs, which is implausible for these few-\u00b5m vaterite particles, and back-computing from an assumed ~5 \u00b5m disc gives ~37 nm/px \u2014 a ~54% disagreement. Calibration is therefore UNVERIFIED and all sizes remain in pixels. The count (24 detected) also undershoots the visual estimate of ~26-30 round discs (recall \u22480.8), with the far-left-edge disc and a couple of central discs missed.",
+  "scientific_claims": [
+    {
+      "claim": "The isolated vaterite discs form a tight, near-monodisperse population with a modal diameter of ~140 px (median 140.6 px, std 15.8 px overall), and are highly circular and convex (median aspect ratio 1.07, median solidity 0.99).",
+      "scientific_impact": "Near-monodispersity and high circularity/solidity indicate a well-controlled crystallization producing uniform spherulitic vaterite discs \u2014 a key quality metric for vaterite as a biomimetic/drug-delivery carrier material where size uniformity governs loading and transport behavior.",
+      "has_anyone_question": "Has anyone observed near-monodisperse, highly circular vaterite spherulite populations (aspect ratio ~1.07, solidity ~0.99) under optical microscopy?",
+      "keywords": [
+        "vaterite",
+        "monodisperse",
+        "particle size distribution",
+        "circularity",
+        "spherulite"
+      ]
+    }
+  ],
+  "analysis_approach": "Detect the near-monodisperse round vaterite particles as bright/textured discs against the uniform background using scale-matched blob detection sized to the particle diameter, then measure the size distribution from the returned diameters, filtering out the dark elongated debris by shape.",
+  "extracted_features": {
+    "per_particle_diameter_px": [
+      161.24,
+      143.71,
+      142.62,
+      142.48,
+      142.4,
+      142.04,
+      141.7,
+      141.66,
+      141.54,
+      141.45,
+      141.21,
+      140.61,
+      140.5,
+      138.57,
+      137.37,
+      125.11,
+      117.22,
+      115.83,
+      115.03,
+      114.28,
+      111.41,
+      110.16,
+      108.49,
+      95.59
+    ],
+    "per_particle_major_axis_px": [
+      180.27,
+      145.28,
+      143.44,
+      146.39,
+      143.85,
+      142.63,
+      149.39,
+      147.2,
+      145.94,
+      143.55,
+      142.54,
+      141.71,
+      147.31,
+      142.21,
+      142.36,
+      144.26,
+      146.42,
+      140.71,
+      145.84,
+      146.99,
+      144.12,
+      144.92,
+      110.64,
+      126.11
+    ],
+    "per_particle_minor_axis_px": [
+      144.49,
+      142.19,
+      141.84,
+      138.71,
+      141.02,
+      141.48,
+      134.44,
+      136.48,
+      137.3,
+      139.42,
+      139.93,
+      139.55,
+      135.45,
+      135.08,
+      132.96,
+      109.07,
+      96.09,
+      95.55,
+      90.81,
+      92.52,
+      95.41,
+      83.85,
+      107.91,
+      72.88
+    ],
+    "per_particle_aspect_ratio": [
+      1.248,
+      1.022,
+      1.011,
+      1.055,
+      1.02,
+      1.008,
+      1.111,
+      1.079,
+      1.063,
+      1.03,
+      1.019,
+      1.016,
+      1.088,
+      1.053,
+      1.071,
+      1.323,
+      1.524,
+      1.473,
+      1.606,
+      1.589,
+      1.511,
+      1.728,
+      1.025,
+      1.73
+    ],
+    "per_particle_solidity": [
+      0.992,
+      0.992,
+      0.992,
+      0.99,
+      0.992,
+      0.991,
+      0.992,
+      0.99,
+      0.991,
+      0.992,
+      0.991,
+      0.991,
+      0.978,
+      0.991,
+      0.991,
+      0.99,
+      0.967,
+      0.984,
+      0.988,
+      0.962,
+      0.853,
+      0.989,
+      0.982,
+      0.986
+    ],
+    "per_particle_area_px2": [
+      20419.0,
+      16221.0,
+      15976.0,
+      15945.0,
+      15925.0,
+      15845.0,
+      15769.0,
+      15760.0,
+      15735.0,
+      15715.0,
+      15661.0,
+      15529.0,
+      15504.0,
+      15082.0,
+      14821.0,
+      12293.0,
+      10792.0,
+      10537.0,
+      10392.0,
+      10258.0,
+      9749.0,
+      9531.0,
+      9244.0,
+      7177.0
+    ],
+    "particle_count": 24,
+    "num_touching_pairs_split": 3,
+    "size_distribution_histogram_px": {
+      "counts": [
+        1,
+        0,
+        1,
+        2,
+        4,
+        0,
+        1,
+        0,
+        0,
+        2,
+        12,
+        0,
+        0,
+        0,
+        1
+      ],
+      "bin_edges": [
+        95.59309709683154,
+        99.9695450237577,
+        104.34599295068385,
+        108.72244087761001,
+        113.09888880453616,
+        117.47533673146232,
+        121.85178465838848,
+        126.22823258531463,
+        130.60468051224078,
+        134.98112843916692,
+        139.3575763660931,
+        143.73402429301925,
+        148.1104722199454,
+        152.48692014687157,
+        156.86336807379772,
+        161.23981600072386
+      ]
+    },
+    "median_diameter_px": 140.55681481353287,
+    "mean_diameter_px": 131.34298621343598,
+    "std_diameter_px": 15.80181998764625,
+    "measured_isolated_disc_diameters_px": [
+      104.4,
+      147.9,
+      153.4,
+      153.4,
+      164.3
+    ],
+    "verified_disc_diameter_px": 135.0,
+    "back_computed_nm_per_px": 37.04,
+    "metadata_nm_per_px": 80.566,
+    "disagreement_percent": 54.0,
+    "calibration_status": "UNVERIFIED/UNRECONCILED",
+    "count_edge_discs_retained": 0,
+    "count_rejected_fragments": 16,
+    "count_rejected_elongated": 6,
+    "count_rejected_edge": 0,
+    "count_rejected_total": 22,
+    "solidity_median": 0.9904412976439192,
+    "aspect_ratio_median": 1.074650469812736
+  },
+  "literature_files": null,
+  "quality_history": {
+    "final_score": 0.75,
+    "threshold": 0.7,
+    "approved": true,
+    "verification_iterations": [
+      {
+        "score": 0.55,
+        "result_type": "delivered",
+        "annealing_level": 0,
+        "issues": [
+          {
+            "location": "Calibration verification / quality metrics",
+            "problem": "The plan explicitly warned that the 50 um FOV / 80.6 nm-px combination gives ~620 px which does NOT match ~80-130 px particles, and instructed to verify. The verification claims 'visible particle diameter ~42.4 px * 80.566 nm/px = 3.42 um', but the round discs in the overlay are clearly ~100-130 px across, not 42 px. The pixel-size self-check is internally inconsistent and the reported diameters (median 10.8 um, ranging to 17.5 um) are physically implausible for near-monodisperse vaterite particles which are typically a few um."
+          },
+          {
+            "location": "Size distribution histogram and per-particle diameters",
+            "problem": "Strongly bimodal distribution: 9 particles at ~1-2 um and several more at 3-4 um (13 of 34 detections) are tiny fragments, while the real particles cluster at 10-13 um. The many sub-1/4-median-area detections indicate over-segmentation / spurious small marks, violating the monodispersity and over-segmentation guard criteria."
+          },
+          {
+            "location": "Overlay \u2014 top-region and small red-cross marks",
+            "problem": "Several marks fall on partial/edge blobs and tiny specks near the top, and some elongated debris regions appear captured within composite masks. Meanwhile a number of clearly visible round particles at the bottom-left and center of the original are captured, but the small false marks contaminate the count."
+          }
+        ],
+        "tools_used": [],
+        "fix_applied": "Re-measure the true pixel size from the visible particle diameter (or report in px), re-run log_blob_detect at the correct scale, and apply a minimum-area/solidity post-filter to remove the ~1-4 um fragments before recomputing the size distribution."
+      },
+      {
+        "score": 0.62,
+        "result_type": "delivered",
+        "annealing_level": 1,
+        "issues": [
+          {
+            "location": "Calibration / quality metrics (verified_pixel_size_nm_per_px, median_diameter)",
+            "problem": "The plan explicitly warned that the metadata 80.6 nm/px is UNVERIFIED and that the visible discs are ~100-130 px across, implying ~30-40 nm/px, and instructed to REPORT IN PX if the calibration cannot be reconciled. Instead the analysis accepted 80.566 nm/px as 'trusted' by claiming a 79.2 px disc diameter. The overlay discs are clearly ~120-150 px across (they span roughly 1/9 of the ~1400 px image width), not 79 px. The self-check is internally inconsistent: 79.2 px * 80.566 nm/px = 6.38 um is quoted, but the reported per-particle median is 13.4 um (implying ~166 px discs at that calibration) \u2014 the back-computed calibration (50.5 nm/px) and the 'trusted' 80.6 differ by 60%, and neither yields a physically plausible near-monodisperse vaterite size of a few um."
+          },
+          {
+            "location": "Left / bottom-left edge of image, several center discs",
+            "problem": "Multiple clearly visible round discs are NOT marked: a large disc on the far left edge (~mid-height), and several round particles in the lower-left and along the bottom of the original are missing from the overlay. Detected count is 19 while ~24-27 round discs are visible."
+          },
+          {
+            "location": "Overlay \u2014 several detections span two touching discs as ONE mask",
+            "problem": "The watershed split only reported 1 touching pair, but the overlay shows several dumbbell-shaped masks (top-left cyan pair, yellow pair upper-left, green pair upper-right, magenta pair bottom-center, olive pair bottom-right) each carrying a single red-cross center. Touching pairs are being merged and counted as one, undercounting and inflating per-particle diameters (e.g. 20.76 um outlier)."
+          }
+        ],
+        "tools_used": [],
+        "fix_applied": "Re-measure isolated disc diameters on the full-res overlay; since 80.6 nm/px yields implausible 10-21 um sizes and the back-computed value disagrees by 60%, REPORT DIAMETERS IN PX with stated calibration uncertainty (per plan), tighten the watershed split so the visible dumbbell pairs count as two, and relax the edge/threshold to capture the missed left-edge and lower-left discs."
+      },
+      {
+        "score": 0.69,
+        "result_type": "delivered",
+        "annealing_level": 1,
+        "issues": [
+          {
+            "location": "Multiple detections across the overlay (upper-left cyan/yellow region, upper-right orange pair, upper-left red+green pair, bottom-center green+red pair, bottom-right magenta+pink pair)",
+            "problem": "Touching dumbbell pairs are still being captured as SINGLE dumbbell-shaped masks with one center, not split into two. num_touching_pairs_split=4 is reported, but the overlay shows at least 4-5 clearly dumbbell-shaped composite masks still merged."
+          },
+          {
+            "location": "Size distribution histogram (right tail, 200-210 px bin)",
+            "problem": "Bimodality persists: 4 detections at 201-209 px (aspect 1.63-1.74, solidity 0.92-0.94) are merged pairs, not single monodisperse discs. For near-monodisperse vaterite the distribution should be unimodal ~135-170 px."
+          },
+          {
+            "location": "Far-left-edge disc and general recall",
+            "problem": "The far-left-edge disc that was flagged missing in Attempt 2 is now visible in the raw-detection panel (cyan circle at left edge) but does NOT carry a colored mask in the final overlay \u2014 it appears dropped in post-filtering. A couple of round discs remain unmarked."
+          }
+        ],
+        "tools_used": [],
+        "fix_applied": "The log_blob + distance-transform watershed split has been tuned across three iterations without fully separating the touching lobes; route the touching/overlapping clusters through run_sam_analysis (designed for touching instances) to obtain individual masks, then merge with the well-behaved isolated log_blob detections before measuring per-particle diameters in PX."
+      },
+      {
+        "score": 0.75,
+        "result_type": "delivered",
+        "annealing_level": 1,
+        "issues": [
+          {
+            "location": "Size distribution histogram / per-particle diameters",
+            "problem": "The distribution remains bimodal: a cluster of 5 detections at ~104-125 px sits well below the main ~140 px mode. These small-diameter, high-aspect (1.47-1.73), lower-solidity detections are SAM lobe masks carved from touching clusters that are undersized/partial, not the near-monodisperse round discs. The success criterion 3 (unimodal ~135-170 px, no small-tail) is not fully met."
+          },
+          {
+            "location": "Far-left-edge disc / count_edge_discs_retained",
+            "problem": "count_edge_discs_retained = 0 \u2014 the criterion 7 (retain the far-left-edge round disc, >=1) is STILL NOT met. The raw log_blob panel shows a large cyan circle on the far-left edge (~mid-height), but the final overlay carries no mask there, mirroring the Attempt-3 failure."
+          },
+          {
+            "location": "Overlay recall vs original",
+            "problem": "24 discs marked vs a visual count of ~26-30 round vaterite discs in the original. A couple of center/lower discs and the far-left-edge disc are unmarked; the SAM lobe panel (n=46) also traces the dark elongated debris (lens-shaped bodies) which are correctly EXCLUDED from the final 24, but recall of true round discs is ~0.8."
+          },
+          {
+            "location": "Calibration handling (quality metrics)",
+            "problem": "None \u2014 this is now correct and should be retained."
+          }
+        ],
+        "tools_used": [],
+        "fix_applied": "Retain the SAM-split + PX-calibration approach; add a per-lobe solidity/aspect reconciliation to trim the over-carved undersized SAM lobes (reducing the low tail), and fix the edge exemption so the far-left round disc is retained (count_edge_discs_retained>=1)."
+      }
+    ],
+    "script_errors": [],
+    "judge_reasoning": null,
+    "score_explanation": null
+  }
+}

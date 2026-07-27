@@ -1,0 +1,336 @@
+{
+  "status": "success",
+  "output_directory": "/Users/maxim.ziatdinov/Code/SciLink/tests/_qc_phase5_live_runs/var_vaterite_same_r2",
+  "detailed_analysis": "The image shows a bright-field optical micrograph of a mixed population: (1) round, translucent, textured discs with a characteristic bright central spot and a fringed rim \u2014 consistent with vaterite (a CaCO3 polymorph that forms spherulitic/disc-shaped particles), and (2) dark, lens-shaped/elongated objects that are almost certainly debris or a second morphology. The hybrid LoG+SAM pipeline detected 24 'individual discs' and split 3 touching pairs from 8 clusters. The extracted shape metrics are internally revealing: solidity is uniformly high (median 0.990), confirming the retained objects are compact and non-concave, but the aspect-ratio and size data expose a contamination/classification problem rather than a clean disc population. Fifteen objects cluster tightly near-circular (aspect ratio 1.0\u20131.13, diameter ~137\u2013161 px) \u2014 these are the true round vaterite discs and are genuinely near-monodisperse. However, a second group (objects with aspect ratio 1.32\u20131.73, minor axes 73\u2013110 px, diameters 95\u2013125 px) are elongated and correspond to the dark lens-shaped debris that the pipeline failed to reject. This produces the bimodal size histogram (a mode at ~110\u2013115 px and a dominant mode at ~140\u2013143 px), which per domain criteria signals mixed populations, not a tight unimodal disc distribution. The full-population count (24) is therefore an overestimate of true vaterite discs (the near-circular subset is ~15), and recall is simultaneously incomplete (several clearly-round discs are unmarked). Calibration is unusable: metadata gives 80.566 nm/px, which would imply ~10.9 um discs \u2014 physically implausible for these few-um vaterite particles \u2014 while back-calculation assuming ~5 um discs yields ~37 nm/px, a 54% disagreement. Sizes are correctly reported in pixels with explicit UNVERIFIED status. The strongest defensible physical result is the tight monodispersity of the round subpopulation (aspect ratio ~1.0, low relative size spread within that mode), which is characteristic of controlled vaterite crystallization.",
+  "scientific_claims": [
+    {
+      "claim": "The retained objects form two distinct morphological populations: a near-circular, near-monodisperse disc population (aspect ratio 1.00\u20131.13, diameter mode ~140 px, n\u224815) and an elongated population (aspect ratio 1.3\u20131.7, diameter ~95\u2013125 px, n\u22488), yielding an overtly bimodal size distribution rather than a single unimodal vaterite disc size distribution.",
+      "scientific_impact": "Bimodality directly undermines the 'near-monodisperse' summary and quantifies contamination of the disc population by a distinct elongated (debris/secondary) morphology, meaning the reported count of 24 conflates two object classes and the true monodisperse vaterite count and size distribution must be drawn only from the near-circular subset.",
+      "has_anyone_question": "Has anyone shown that vaterite disc size distributions measured by automated blob/SAM detection are biased by co-detection of elongated debris of similar area, producing spurious bimodality?",
+      "keywords": [
+        "vaterite",
+        "size distribution",
+        "bimodal",
+        "morphology classification",
+        "aspect ratio",
+        "particle counting"
+      ]
+    }
+  ],
+  "analysis_approach": "Refine the prior detection to close the recall gap and reject shape outliers, counting the round vaterite discs and reporting their pixel-size distribution with explicit calibration and count uncertainty.",
+  "extracted_features": {
+    "per_particle_diameter_px": [
+      161.24,
+      143.71,
+      142.62,
+      142.48,
+      142.4,
+      142.04,
+      141.7,
+      141.66,
+      141.54,
+      141.45,
+      141.21,
+      140.61,
+      140.5,
+      138.57,
+      137.37,
+      125.11,
+      117.22,
+      115.83,
+      115.03,
+      114.28,
+      111.41,
+      110.16,
+      108.49,
+      95.59
+    ],
+    "per_particle_major_axis_px": [
+      180.27,
+      145.28,
+      143.44,
+      146.39,
+      143.85,
+      142.63,
+      149.39,
+      147.2,
+      145.94,
+      143.55,
+      142.54,
+      141.71,
+      147.31,
+      142.21,
+      142.36,
+      144.26,
+      146.42,
+      140.71,
+      145.84,
+      146.99,
+      144.12,
+      144.92,
+      110.64,
+      126.11
+    ],
+    "per_particle_minor_axis_px": [
+      144.49,
+      142.19,
+      141.84,
+      138.71,
+      141.02,
+      141.48,
+      134.44,
+      136.48,
+      137.3,
+      139.42,
+      139.93,
+      139.55,
+      135.45,
+      135.08,
+      132.96,
+      109.07,
+      96.09,
+      95.55,
+      90.81,
+      92.52,
+      95.41,
+      83.85,
+      107.91,
+      72.88
+    ],
+    "per_particle_aspect_ratio": [
+      1.248,
+      1.022,
+      1.011,
+      1.055,
+      1.02,
+      1.008,
+      1.111,
+      1.079,
+      1.063,
+      1.03,
+      1.019,
+      1.016,
+      1.088,
+      1.053,
+      1.071,
+      1.323,
+      1.524,
+      1.473,
+      1.606,
+      1.589,
+      1.511,
+      1.728,
+      1.025,
+      1.73
+    ],
+    "per_particle_solidity": [
+      0.992,
+      0.992,
+      0.992,
+      0.99,
+      0.992,
+      0.991,
+      0.992,
+      0.99,
+      0.991,
+      0.992,
+      0.991,
+      0.991,
+      0.978,
+      0.991,
+      0.991,
+      0.99,
+      0.967,
+      0.984,
+      0.988,
+      0.962,
+      0.853,
+      0.989,
+      0.982,
+      0.986
+    ],
+    "per_particle_area_px2": [
+      20419.0,
+      16221.0,
+      15976.0,
+      15945.0,
+      15925.0,
+      15845.0,
+      15769.0,
+      15760.0,
+      15735.0,
+      15715.0,
+      15661.0,
+      15529.0,
+      15504.0,
+      15082.0,
+      14821.0,
+      12293.0,
+      10792.0,
+      10537.0,
+      10392.0,
+      10258.0,
+      9749.0,
+      9531.0,
+      9244.0,
+      7177.0
+    ],
+    "particle_count": 24,
+    "num_touching_pairs_split": 3,
+    "size_distribution_histogram_px": {
+      "counts": [
+        1,
+        0,
+        1,
+        2,
+        4,
+        0,
+        1,
+        0,
+        0,
+        2,
+        12,
+        0,
+        0,
+        0,
+        1
+      ],
+      "bin_edges": [
+        95.59309709683154,
+        99.9695450237577,
+        104.34599295068385,
+        108.72244087761001,
+        113.09888880453616,
+        117.47533673146232,
+        121.85178465838848,
+        126.22823258531463,
+        130.60468051224078,
+        134.98112843916692,
+        139.3575763660931,
+        143.73402429301925,
+        148.1104722199454,
+        152.48692014687157,
+        156.86336807379772,
+        161.23981600072386
+      ]
+    },
+    "median_diameter_px": 140.55681481353287,
+    "mean_diameter_px": 131.34298621343598,
+    "std_diameter_px": 15.80181998764625,
+    "measured_isolated_disc_diameters_px": [
+      104.4,
+      147.9,
+      153.4,
+      153.4,
+      164.3
+    ],
+    "verified_disc_diameter_px": 135.0,
+    "back_computed_nm_per_px": 37.04,
+    "metadata_nm_per_px": 80.566,
+    "disagreement_percent": 54.0,
+    "calibration_status": "UNVERIFIED/UNRECONCILED",
+    "count_edge_discs_retained": 0,
+    "count_rejected_fragments": 16,
+    "count_rejected_elongated": 6,
+    "count_rejected_edge": 0,
+    "count_rejected_total": 22,
+    "solidity_median": 0.9904412976439192,
+    "aspect_ratio_median": 1.074650469812736
+  },
+  "literature_files": null,
+  "quality_warning": "Reused the locked analysis script from prior run 'vote_vaterite_prior', but vision verification scored 0.59, below the threshold 0.7. The new image may not belong to this series, or imaging conditions shifted. Extracted features are schema-consistent but should be treated as low-confidence.",
+  "quality_history": {
+    "final_score": 0.59,
+    "threshold": 0.7,
+    "approved": false,
+    "verification_iterations": [
+      {
+        "score": 0.69,
+        "result_type": "delivered",
+        "annealing_level": 0,
+        "issues": [
+          {
+            "location": "Multiple dark elongated debris objects marked as retained discs",
+            "problem": "The classification failed to reject several dark, elongated/lens-shaped debris objects that were retained as round discs. In the overlay, the yellow-olive lobe in the top-left pair, the orange object mid-left, the purple object right-center, and the teal object far-right are dark, non-translucent, lens-shaped debris \u2014 not the round translucent vaterite discs (which show characteristic green/magenta internal texture and central pink core)."
+          },
+          {
+            "location": "Size distribution histogram",
+            "problem": "The retained diameter distribution is clearly BIMODAL (a tight mode of 12 objects near 140px and a spread cluster of ~7 objects near 108-125px, plus outliers at 95 and 161px), not the near-unimodal distribution the quality criteria require."
+          },
+          {
+            "location": "Calibration reporting",
+            "problem": "Metadata pixel size (80.6 nm/px) implies 10.9 um discs, implausible for few-um vaterite; the analysis correctly flagged this and reported in pixels only."
+          }
+        ],
+        "tools_used": [],
+        "fix_applied": "Tighten the round-disc classification (aspect_ratio < 1.35 AND solidity > 0.90) and add a translucency/texture intensity gate to reject the ~6 retained dark elongated debris objects; this collapses the distribution to unimodal ~140px and cleans the count."
+      },
+      {
+        "score": 0.59,
+        "result_type": "delivered",
+        "annealing_level": 0,
+        "issues": [
+          {
+            "location": "Whole image \u2014 classification of round discs vs. dark elongated debris",
+            "problem": "The plan's central goal was to COUNT round translucent vaterite discs and REJECT dark elongated debris. But the overlay retains many clearly dark, elongated, lens-shaped debris objects (top-left cluster, right-side elongated bodies) as 'discs'. The classification failed to separate the two populations."
+          },
+          {
+            "location": "Size distribution / bimodality",
+            "problem": "The retained diameter distribution is clearly BIMODAL: a tight cluster around 140 px (12 objects) and a scattered lower mode near 108\u2013117 px, plus one 161 px outlier. The plan's own quality criterion warned that a bimodal distribution indicates mixed populations or over-segmentation."
+          },
+          {
+            "location": "Missed clearly-visible translucent discs",
+            "problem": "Several obviously round, bright-centered translucent discs in the original are NOT marked (under-detection), while debris IS marked (over-detection) \u2014 detection was coupled to the wrong morphology."
+          },
+          {
+            "location": "Calibration reporting",
+            "problem": "Calibration handling is correct and well-documented \u2014 sizes reported in px, metadata scale flagged as unverified (54% disagreement)."
+          }
+        ],
+        "tools_used": [],
+        "fix_applied": "Strictly enforce the planned aspect_ratio<1.35 gate and add a center-intensity (translucent vs. uniformly dark) discriminator to reject the ~6 elongated debris objects currently counted as discs, then re-report the count and the tightened unimodal size distribution."
+      },
+      {
+        "score": 0.58,
+        "result_type": "delivered",
+        "annealing_level": 0,
+        "issues": [
+          {
+            "location": "Retained-disc overlay (both round translucent discs AND dark elongated debris)",
+            "problem": "The classification failed to separate round vaterite discs from dark elongated debris. Many retained (marked) objects are clearly the dark lens-shaped/elongated debris, not translucent round vaterite discs. The plan explicitly required rejecting dark elongated debris; instead they were retained."
+          },
+          {
+            "location": "Full field of view \u2014 missed round discs",
+            "problem": "Several clearly-visible round translucent vaterite discs are NOT marked. Recall gap remains despite the stated goal of closing it."
+          },
+          {
+            "location": "Size distribution histogram",
+            "problem": "The retained-disc size distribution is bimodal (a cluster at ~110-115 px and a dominant cluster at ~140-143 px), which per the domain criteria signals mixed populations rather than a tight unimodal disc distribution. This is a symptom of debris contamination, not over-segmentation."
+          },
+          {
+            "location": "Calibration reporting",
+            "problem": "Calibration handling is correct and conservative \u2014 sizes reported in px with explicit UNVERIFIED status. This is a positive, not an error."
+          }
+        ],
+        "tools_used": [],
+        "fix_applied": "Re-tune the classification post-filter to strictly reject AR>1.35 / lens-shaped debris and recover missed round discs, so the retained set becomes near-unimodal round discs only; keep the px-only calibration reporting."
+      }
+    ],
+    "script_errors": [],
+    "judge_reasoning": null,
+    "score_explanation": null
+  },
+  "reuse_validity": {
+    "reused": true,
+    "source": "vote_vaterite_prior",
+    "quality_score": 0.59,
+    "score_votes": [
+      0.58,
+      0.59,
+      0.69
+    ],
+    "threshold": 0.7,
+    "verdict": "poor",
+    "message": "Reused the locked analysis script from prior run 'vote_vaterite_prior', but vision verification scored 0.59, below the threshold 0.7. The new image may not belong to this series, or imaging conditions shifted. Extracted features are schema-consistent but should be treated as low-confidence."
+  }
+}

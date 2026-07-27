@@ -1,0 +1,114 @@
+{
+  "id": "0dada019",
+  "domain": "hyperspectral",
+  "script_hash": "c08dbb319a17bcb4",
+  "created_at": "2026-07-11T02:16:26+00:00",
+  "sessions": [
+    "hyper_au"
+  ],
+  "stats": {
+    "n_successes": 1,
+    "n_retrievals": 1
+  },
+  "technique_signals": {
+    "active_skills": [],
+    "analysis_target": "Per-pixel Au thickness from the K-edge jump. First form the transmission ratio using the provided baseline_I0 cube as the flat field (I/I0) and compute the optical depth ln(I0/I) per pixel, excluding the scatter/noise-dominated low-energy region. Quantify the discontinuity in ln(I0/I) at the Au K-edge (~80.7 keV) using `measure_edge_step`, which selects robust narrow pre-edge/post-edge windows, gates on flux, and reports whether the edge is measurable \u2014 do not hand-roll pre/post window means. This yields the edge jump Delta(mu*t) per pixel (Edge_Jump map), which localizes the Au coupon spatially. Then convert to physical thickness t = Delta(mu*t) / Delta(mu_tab), where the tabulated linear-attenuation jump for Au at its K-edge is obtained via `attenuation` for the element 'Au' (using the standard density) rather than embedding coefficient tables. Produce the thickness map (Au_Thickness). Mask/flag pixels where `measure_edge_step` reports the edge is not measurable (off-coupon / background)."
+  },
+  "measurement_context": {
+    "experiment_type": "Spectroscopy",
+    "experiment.technique": "Spectral X-ray Imaging",
+    "experiment.date": null,
+    "experiment.instrument": "Hexitec spectral X-ray detector",
+    "experiment.details": "160 kVp bremsstrahlung X-ray source; Spatial resolution: 0.250 mm; Energy resolution: 0.2 keV; Energy bin width: 0.1 keV; 80 x 80 pixels; Ignore energies below 5 keV; 2048 energy bins from 0.1 to 204.8 keV; Data is in the form of a 3D array with dimensions (80, 80, 2048) corresponding to (x, y, ener",
+    "sample.material": "Au",
+    "sample.description": "Gold coupon of unknown thickness; Task is to locate Au and measure thickness; Look for Au K-edge at 80.8 keV.",
+    "sample.title": "Spectral X-ray transmission imaging of Au coupon",
+    "spatial_info.field_of_view_x": 20,
+    "spatial_info.field_of_view_y": 20,
+    "spatial_info.field_of_view_units": "mm",
+    "title": "Spectral X-ray transmission imaging of Au coupon",
+    "data_columns": [
+      "{'name': 'Energy', 'units': 'keV'}",
+      "{'name': 'Counts', 'units': 'counts'}"
+    ],
+    "xlabel": "Energy (keV)",
+    "ylabel": "Counts",
+    "energy_range.start": 0.1,
+    "energy_range.end": 204.8,
+    "energy_range.units": "keV"
+  },
+  "data_fingerprint": {
+    "kind": "hyperspectral",
+    "shape": [
+      80,
+      80,
+      2048
+    ],
+    "axis": {
+      "units": "keV",
+      "start": 0.1,
+      "end": 204.8,
+      "n_channels": 2048
+    },
+    "band_means": [
+      0.123,
+      0.06,
+      0.079,
+      0.119,
+      0.205,
+      0.129,
+      0.059,
+      0.039,
+      0.027,
+      0.017,
+      0.009,
+      0.004,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "snr": 1000.0,
+    "peaks": {
+      "count": 4,
+      "top": [
+        {
+          "position": 1.7,
+          "fwhm": 0.7166,
+          "prominence": 1.785
+        },
+        {
+          "position": 59.7,
+          "fwhm": 3.0716,
+          "prominence": 0.909
+        },
+        {
+          "position": 67.6,
+          "fwhm": 1.6414,
+          "prominence": 0.263
+        },
+        {
+          "position": 23.6,
+          "fwhm": 1.3852,
+          "prominence": 0.085
+        }
+      ]
+    }
+  },
+  "outcome": {
+    "analysis_target": "Per-pixel Au thickness from the K-edge jump. First form the transmission ratio using the provided baseline_I0 cube as the flat field (I/I0) and compute the optical depth ln(I0/I) per pixel, excluding the scatter/noise-dominated low-energy region. Quantify the discontinuity in ln(I0/I) at the Au K-edge (~80.7 keV) using `measure_edge_step`, which selects robust narrow pre-edge/post-edge windows, gates on flux, and reports whether the edge is measurable \u2014 do not hand-roll pre/post window means. This yields the edge jump Delta(mu*t) per pixel (Edge_Jump map), which localizes the Au coupon spatially. Then convert to physical thickness t = Delta(mu*t) / Delta(mu_tab), where the tabulated linear-attenuation jump for Au at its K-edge is obtained via `attenuation` for the element 'Au' (using the standard density) rather than embedding coefficient tables. Produce the thickness map (Au_Thickness). Mask/flag pixels where `measure_edge_step` reports the edge is not measurable (off-coupon / background).",
+    "required_outputs": [
+      "Edge_Jump",
+      "Au_Thickness"
+    ],
+    "metric": {
+      "name": "passed_fraction",
+      "value": 0.75
+    }
+  },
+  "provenance": {
+    "session": "hyper_au",
+    "data_file": "coupon_radiography_Au.npy"
+  },
+  "working_script": "def analyze_feature(data, axis, auxiliary=None):\n    from scilink.skills._shared.edge_step import measure_edge_step\n    from scilink.skills._shared.xray_attenuation import attenuation\n\n    # --- Shape handling ---\n    cube = np.asarray(data, dtype=float)\n    if cube.ndim == 2:\n        # (pixels, energy) -> assume square-ish; try to infer\n        raise ValueError(\"Expected 3D cube (H,W,E)\")\n    H, W, E = cube.shape\n    energy = np.asarray(axis, dtype=float).ravel()\n\n    # --- I0 flat field ---\n    if auxiliary and \"baseline_I0\" in auxiliary and auxiliary[\"baseline_I0\"] is not None:\n        i0 = np.asarray(auxiliary[\"baseline_I0\"], dtype=float)\n    else:\n        # Fallback: use the median spectrum across the field as a pseudo-I0\n        i0 = np.median(cube.reshape(-1, E), axis=0)[None, None, :] * np.ones((H, W, 1))\n\n    # --- Light despiking / smoothing along the energy axis for stability ---\n    # Clip negatives/zeros (physical: intensities are non-negative counts)\n    cube_clean = np.clip(cube, 0.0, None)\n    i0_clean = np.clip(i0, 1e-6, None)\n\n    # Mild spectral smoothing (does not erase the broad K-edge step)\n    cube_sm = gaussian_filter(cube_clean, sigma=(0, 0, 1.2))\n    i0_sm = gaussian_filter(i0_clean, sigma=(0, 0, 1.2))\n\n    edge_kev = 80.7\n\n    # --- Robust edge-step measurement via registered tool ---\n    # Exclude low-energy scatter/noise-dominated region via low_e_cut_kev.\n    r = measure_edge_step(\n        cube_sm,\n        i0_sm,\n        energy,\n        edge_kev,\n        low_e_cut_kev=10.0,\n        auto_center=True,\n        search_tol_kev=2.0,\n    )\n\n    edge_step = np.asarray(r[\"edge_step\"], dtype=float)   # Delta(mu*t) per pixel\n    snr = np.asarray(r[\"snr\"], dtype=float)\n    measurable_field = bool(r[\"measurable\"])\n    edge_used = float(r.get(\"edge_kev_used\", edge_kev))\n\n    # --- Per-pixel measurability mask (SNR gate) ---\n    snr_thresh = 3.0\n    pixel_measurable = np.isfinite(snr) & (snr > snr_thresh) & np.isfinite(edge_step)\n    # If the whole field failed the flux gate, keep only high-SNR pixels anyway\n    # (the coupon itself should still show a jump).\n\n    # --- Tabulated linear-attenuation jump for Au across its K-edge ---\n    # Use standard density of Au for LINEAR mu (1/cm). Sample just below/above edge.\n    rho_au = 19.32  # g/cm^3, standard density\n    e_lo = np.array([edge_used - 1.0])\n    e_hi = np.array([edge_used + 1.0])\n    mu_lo = float(attenuation('Au', e_lo, density=rho_au)[0])   # 1/cm below edge\n    mu_hi = float(attenuation('Au', e_hi, density=rho_au)[0])   # 1/cm above edge\n    delta_mu_tab = mu_hi - mu_lo  # linear-attenuation jump (1/cm)\n\n    # --- Convert edge jump (dimensionless mu*t) to thickness ---\n    # t [cm] = Delta(mu*t) / Delta(mu_tab); convert to microns.\n    if delta_mu_tab <= 0 or not np.isfinite(delta_mu_tab):\n        delta_mu_tab = np.nan\n\n    edge_jump_map = edge_step.copy()\n    thickness_cm = edge_jump_map / delta_mu_tab\n    thickness_um = thickness_cm * 1e4  # cm -> um\n\n    # --- Mask off-coupon / non-measurable pixels ---\n    edge_jump_out = np.where(pixel_measurable, edge_jump_map, np.nan)\n    thickness_out = np.where(pixel_measurable, thickness_um, np.nan)\n\n    # Guard against negative (non-physical) thickness from noise: flag as NaN\n    thickness_out = np.where(thickness_out < 0, np.nan, thickness_out)\n    edge_jump_out = np.where(edge_jump_out < 0, np.nan, edge_jump_out)\n\n    maps = {\n        \"Edge_Jump\": edge_jump_out.astype(float),\n        \"Au_Thickness\": thickness_out.astype(float),\n        \"Edge_SNR\": snr.astype(float),\n        \"Measurable_Mask\": pixel_measurable.astype(float),\n    }\n\n    units = {\n        \"Edge_Jump\": \"a.u. (Delta mu*t, optical depth)\",\n        \"Au_Thickness\": \"um\",\n        \"Edge_SNR\": \"a.u.\",\n        \"Measurable_Mask\": \"bool\",\n    }\n\n    description = (\n        \"Transmission I/I0 was formed against the baseline_I0 flat field and the \"\n        \"K-edge step in optical depth ln(I0/I) at the Au K-edge (~80.7 keV) was \"\n        \"measured per pixel with measure_edge_step (robust pre/post continuum \"\n        \"windows, flux gating, low-energy scatter region excluded via low_e_cut). \"\n        \"This yields Edge_Jump = Delta(mu*t), which localizes the Au coupon. \"\n        \"Thickness is t = Delta(mu*t)/Delta(mu_tab), where the tabulated linear-\"\n        \"attenuation jump Delta(mu_tab) for Au at its K-edge is obtained from the \"\n        \"attenuation() tool at the standard Au density (19.32 g/cm^3), converted to \"\n        \"microns. Pixels flagged non-measurable (SNR<3 / off-coupon background) are \"\n        \"masked as NaN.\"\n    )\n\n    return {\"maps\": maps, \"units\": units, \"description\": description}\n"
+}

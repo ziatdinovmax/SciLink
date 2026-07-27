@@ -4,6 +4,7 @@ import re
 from datetime import datetime
 from typing import Dict, Any, List
 
+from .parser_utils import plan_directions, plan_is_portfolio, plan_thesis
 from .user_interface import format_caveats, concept_title, humanize_key
 
 class HTMLReportGenerator:
@@ -286,15 +287,89 @@ class HTMLReportGenerator:
         </div>
         """
 
+    def _render_portfolio(self, plan: Dict[str, Any]) -> str:
+        """Render a research PORTFOLIO — one card per direction.
+
+        The experiment template renders an ordered protocol, which
+        misrepresents a portfolio badly enough that plan.html was suppressed
+        for ideation entirely. That left the dossier and the white paper as
+        the only readable artifacts and nothing openable mid-run, which is
+        why the reviewer got thousands of words in a terminal instead.
+        """
+        dirs = plan_directions(plan)
+        if not dirs:
+            return ""
+        parts = []
+        thesis = plan_thesis(plan)
+        if thesis:
+            parts.append(
+                '<div class="section"><div class="section-title">'
+                'Organizing thesis</div>'
+                f'<p>{html.escape(str(thesis))}</p></div>'
+            )
+        parts.append('<div class="section"><div class="section-title">'
+                     f'Research directions ({len(dirs)})</div></div>')
+        for n, d in enumerate(dirs, 1):
+            label = html.escape(str(d.get("id") or n))
+            title = html.escape(str(d.get("title") or "Untitled"))
+            tier = d.get("tier")
+            tier_html = (f'<span class="badge plan">{html.escape(str(tier))}</span>'
+                         if tier else "")
+            rows = []
+            for key, heading in (("hypothesis", "Hypothesis"),
+                                 ("rationale", "Rationale"),
+                                 ("novelty", "Novelty")):
+                if d.get(key):
+                    rows.append(
+                        f'<div class="section-title">{heading}</div>'
+                        f'<p>{html.escape(str(d[key]))}</p>')
+            details = d.get("details")
+            if isinstance(details, list) and details:
+                items = "".join(f"<li>{html.escape(str(x))}</li>"
+                                for x in details)
+                rows.append('<div class="section-title">Details</div>'
+                            f'<ul>{items}</ul>')
+            # Author-invented keys carry the objective's own required
+            # elements; dropping them would lose the answer.
+            known = {"id", "title", "tier", "hypothesis", "rationale",
+                     "novelty", "details", "_synthesised"}
+            for k, v in d.items():
+                if k in known or not v:
+                    continue
+                body = ("".join(f"<li>{html.escape(str(x))}</li>" for x in v)
+                        if isinstance(v, list) else
+                        f"<p>{html.escape(str(v))}</p>")
+                body = f"<ul>{body}</ul>" if isinstance(v, list) else body
+                rows.append('<div class="section-title">'
+                            f'{html.escape(k.replace("_", " ").title())}'
+                            f'</div>{body}')
+            parts.append(
+                '<div class="experiment-card">'
+                f'<h3>{label}: {title} {tier_html}</h3>'
+                + "".join(rows) + '</div>'
+            )
+        shared = plan.get("shared_protocol") or []
+        if shared:
+            items = "".join(f"<li>{html.escape(str(x))}</li>" for x in shared)
+            parts.append('<div class="section"><div class="section-title">'
+                         f'Shared protocol</div><ul>{items}</ul></div>')
+        openq = plan.get("open_questions") or []
+        if openq:
+            items = "".join(f"<li>{html.escape(str(x))}</li>" for x in openq)
+            parts.append('<div class="section"><div class="section-title">'
+                         f'Open questions</div><ul>{items}</ul></div>')
+        return "".join(parts)
+
     def generate_single_plan(self, plan: Dict[str, Any], output_path: str,
                              title: str = "Candidate Plan"):
         """Render ONE plan dict (not the session history) to a standalone HTML
         report — used for best-of-N candidate reports, where each candidate
         gets its own persisted page under ``plan_candidates/``."""
-        content_html = "".join(
-            self._render_experiment(exp, x + 1)
-            for x, exp in enumerate(plan.get('proposed_experiments', []))
-        )
+        content_html = (self._render_portfolio(plan)
+                        if plan_is_portfolio(plan) else
+                        "".join(self._render_experiment(exp, x + 1)
+                                for x, exp in enumerate(
+                                    plan.get('proposed_experiments', []))))
         html_content = f"""
         <!DOCTYPE html><html><head><meta charset="UTF-8"><title>{html.escape(title)}</title>{self._get_css()}</head>
         <body><div class="container">
@@ -342,12 +417,17 @@ class HTMLReportGenerator:
             step_num = i + 1 
             is_tea = "technoeconomic_assessment" in plan or plan.get("type") == "technoeconomic_analysis"
             badge_class = "tea" if is_tea else "plan"
-            badge_text = "TECHNO-ECONOMIC ANALYSIS" if is_tea else "EXPERIMENTAL STRATEGY"
+            badge_text = ("TECHNO-ECONOMIC ANALYSIS" if is_tea
+                          else "RESEARCH PORTFOLIO" if plan_is_portfolio(plan)
+                          else "EXPERIMENTAL STRATEGY")
             
             if is_tea:
                 content_html = self._render_tea(plan)
             else:
-                content_html = "".join(self._render_experiment(exp, x+1) for x, exp in enumerate(plan.get('proposed_experiments', [])))
+                content_html = (self._render_portfolio(plan)
+                                if plan_is_portfolio(plan) else
+                                "".join(self._render_experiment(exp, x+1)
+                                        for x, exp in enumerate(plan.get('proposed_experiments', []))))
                 # Advisory critic caveats (same source as the CLI summary / warnings)
                 caveat_lines = format_caveats(plan.get('critic_findings'))
                 if caveat_lines:

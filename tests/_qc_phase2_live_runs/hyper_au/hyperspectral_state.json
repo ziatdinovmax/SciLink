@@ -1,0 +1,139 @@
+{
+  "session_id": "cd28bd12-246b-460a-a0c7-bae282577bdc",
+  "start_time": "2026-07-09T08:08:55.469706",
+  "agent_type": "hyperspectral",
+  "action_history": [
+    {
+      "timestamp": "2026-07-09T08:18:16.538643",
+      "action": "analyze",
+      "input": {
+        "data": "/Users/maxim.ziatdinov/Code/benchmarking_for_paper2/xray_hyper_data/coupon_radiography_Au.npy"
+      },
+      "rationale": "Hyperspectral analysis completed.",
+      "result": {
+        "status": "success",
+        "detailed_analysis": "### Overview and Objective\n\nThe goal of this analysis was to locate a gold (Au) coupon of unknown thickness within a spectral X-ray transmission dataset and to quantify its thickness using the physics of the Au K-edge \u2014 a sharp, element-specific jump in X-ray absorption that occurs at 80.7 keV. Because the K-edge is unique to gold, its presence in a pixel's transmission spectrum is a strong element-specific fingerprint for the metal, and the size of the jump is directly proportional to how much gold the X-rays passed through.\n\n### Critical Prerequisite: Source Spectrum Above the Au K-edge\n\nA foundational experimental requirement for this measurement has NOT yet been verified and must be flagged. A K-edge measurement at 80.7 keV requires the incident beam spectrum to carry substantial flux BOTH below and ABOVE 80.7 keV \u2014 in practice the source must extend to roughly 100+ keV for a clean edge step to be measurable. The present analysis restricts to energies above 40 keV, but it does NOT confirm that the flat-field/source spectrum actually contains meaningful photon flux above the 80.7 keV edge. If the source rolls off before ~80 keV, any apparent 'edge jump' could be an artifact of low counts or spectral modeling rather than a true Au K-edge. This is a potential foundational issue affecting the validity of the entire measurement and should be explicitly checked (e.g., by inspecting the flat-field spectrum above 80.7 keV) before the thickness results are trusted.\n\n### Analysis Strategy\n\nRather than relying on a purely statistical decomposition (NMF/PCA/ICA), which describes variance but does not directly yield a physical thickness, the analysis was carried out using a physics-based, per-pixel model tailored to the K-edge measurement. The experiment provided a companion 'flat-field' reference cube \u2014 an image of the beam with no sample present \u2014 which serves as the denominator for computing transmission (I/I0). Following the standard K-edge subtraction recipe, the model measured the optical-depth step \u0394(\u03bct) across narrow energy windows straddling 80.7 keV, restricted the analysis to energies above 40 keV (intended to exclude low-energy scatter/noise), and converted the measured step to a physical thickness using tabulated attenuation coefficients for gold (density 19.3 g/cm\u00b3). The flat-field normalization and >40 keV cut are described here as the processing choices that were made; their individual benefit has not been demonstrated via an ablation (with vs. without each step) and so is not claimed as a validated best practice.\n\n### Locating the Gold Coupon\n\nThe Au-present map shows an essentially uniform, filled field: 98% of the imaged area registers a detected Au K-edge flag, with only a thin border frame of empty (beam-only) pixels and a scattering of isolated dropout pixels distributed across the interior. This is consistent with a large, spatially continuous sheet that fills nearly the entire 20 \u00d7 20 mm field of view. The transition to zero at the outer frame indicates that empty regions correctly read as containing no gold, which is a reassuring sign that the detection is spatially localized rather than a global artifact. The handful of interior dropout pixels are consistent with sporadic detector noise rather than physical holes in the coupon. (This spatial interpretation is contingent on the source-spectrum prerequisite above being satisfied.)\n\n### Confidence in the Edge Detection\n\nThe per-pixel edge signal-to-noise map has a distribution centered around a mean of roughly 74. However, the SNR histogram shows a substantial tail extending to negative values (down to about \u221225), and the spatial SNR map is essentially salt-and-pepper noise with no structured spatial features. Negative-SNR pixels for a supposedly strong, uniformly present edge are physically suspicious: if a genuine gold edge were present everywhere, one would not expect scattered negative-SNR pixels. This internal inconsistency suggests the SNR estimator or its underlying noise model may be inflating values, and the reported mean of 74 should not be taken at face value as evidence of a uniformly robust detection. The way SNR is computed warrants scrutiny before the high-confidence framing is accepted.\n\n### Measuring the Thickness\n\nThe optical-depth jump \u0394(\u03bct) forms a single-peaked distribution centered near 0.48 (dimensionless, std \u2248 0.08). Converting this to physical thickness via the tabulated gold attenuation jump yields a thickness distribution centered at approximately 0.04 mm (40 micrometers) with a standard deviation of about 0.01 mm. The spatial thickness map (and the optical-depth map from which it is derived) is a featureless salt-and-pepper field with no structured spatial gradient, wedge, or step. Importantly, a featureless noise field is equally consistent with a genuinely uniform coupon OR with a noise-dominated measurement that masks any real thickness variation; the data as presented cannot distinguish these two cases. The measured scatter is dominated by photon-counting statistics rather than resolved physical structure. The ~40 \u00b5m value should therefore be read as a population average whose spatial uniformity is only weakly supported.\n\n### Statistics Masking\n\nBoth the jump and thickness histograms contain a small spike at exactly 0.0, corresponding to the excluded border/dropout pixels. It should be confirmed that these zero-valued pixels are masked BEFORE computing the reported means (0.48 and 40 \u00b5m); otherwise the quoted statistics could be biased slightly low. This should be verified explicitly.\n\n### Unified Physical Model\n\nSubject to the source-spectrum prerequisite being satisfied, the analysis is broadly consistent with a gold coupon on the order of 40 micrometers thick spanning most of the field of view, bounded by a thin empty border. It should be noted that the optical-depth map and the thickness map are NOT independent lines of evidence: the thickness map is a direct linear rescaling of the optical-depth jump, so agreement between them is guaranteed by construction and provides no additional corroboration. The earlier framing of these two views as 'independent internal consistency' was a logic error and is withdrawn. The differential edge-jump approach cancels smooth backgrounds and is relatively insensitive to beam hardening, which supports the general method \u2014 but the confidence in the specific thickness figure is tempered by (1) the unverified source spectrum above 80.7 keV and (2) the SNR anomalies noted above.\n\n### Caveats\n\nThe reported thickness relies on the accuracy of the tabulated attenuation coefficients and on the density of pure gold; any alloying or porosity would modestly bias the derived thickness. The isolated interior dropout pixels should be masked or interpolated in any downstream quantitative summary. The ~40 micrometer value is a per-pixel average across a large region; the quoted spread is dominated by counting noise rather than genuine thickness variation, and the apparent spatial uniformity does not by itself establish true physical uniformity. Most critically, the presence of meaningful source flux above the 80.7 keV Au K-edge must be confirmed before the measurement can be considered foundationally sound.\n\n### Key Evidence\n- **[Global_Analysis] Custom Analysis: Au_Present_Flag**: Shows that ~98% of the field of view carries a positive Au flag with a clean empty border and only isolated noise dropouts, consistent with a large, continuous sheet and correct background rejection \u2014 contingent on the source-spectrum prerequisite.\n- **[Global_Analysis] Custom Analysis: Edge_SNR**: A pure salt-and-pepper spatial field with a mean of ~74 but a tail into negative SNR (down to ~\u221225). The negative-SNR pixels are internally inconsistent with a uniformly present strong edge and suggest the SNR estimator/noise model may be inflating values; this measure should be treated with caution rather than as confirmation of robustness.\n- **[Global_Analysis] Custom Analysis: Au_KEdge_Jump**: A single-peaked distribution of the optical-depth step (mean \u2248 0.48, std \u2248 0.08). The spatial map is featureless salt-and-pepper noise, which cannot by itself distinguish a uniform coupon from a noise-dominated measurement.\n- **[Global_Analysis] Custom Analysis: Au_Thickness**: A direct linear rescaling of the edge jump, yielding a distribution centered at ~0.04 mm (40 \u00b5m). Because it is a rescaling of Au_KEdge_Jump, it provides no independent confirmation of the thickness.",
+        "scientific_claims": [
+          {
+            "claim": "The spatially resolved gold K-edge jump in a spectral X-ray transmission image yields a population-average coupon thickness of approximately 40 micrometers, contingent on confirmation that the source spectrum carries meaningful flux above the 80.7 keV Au K-edge.",
+            "scientific_impact": "If the source-spectrum prerequisite is verified, demonstrating that a differential K-edge subtraction measurement can recover a metal foil thickness on the order of tens of micrometers with per-pixel spatial mapping would support the use of spectral photon-counting detectors as quantitative metrology tools for thin high-Z films. The current data establish a plausible central value but do not yet establish true spatial uniformity, and the SNR behavior and unverified source spectrum limit the strength of this claim.",
+            "has_anyone_question": "Has anyone used K-edge subtraction in spectral X-ray transmission imaging to measure the thickness of thin gold foils on the order of tens of micrometers, with confirmation that the source flux extends above the 80.7 keV Au K-edge?",
+            "keywords": [
+              "K-edge subtraction",
+              "gold foil thickness",
+              "spectral X-ray imaging",
+              "photon-counting detector",
+              "quantitative radiography"
+            ]
+          },
+          {
+            "claim": "The processing pipeline for this measurement uses a flat-field reference cube for I/I0 normalization and restricts analysis to energies above 40 keV to suppress low-energy scatter.",
+            "scientific_impact": "These are standard processing choices for element-specific edge quantification. However, their individual necessity and benefit were not demonstrated here (no with/without ablation for flat-fielding or for the >40 keV cut), so this is offered as a methodological description rather than a validated best-practice claim. An ablation study would be required to establish that each step measurably improves reliability.",
+            "has_anyone_question": "Has anyone performed an ablation study quantifying how flat-field normalization and low-energy exclusion each affect the reliability of per-pixel K-edge thickness measurements in bremsstrahlung spectral X-ray imaging?",
+            "keywords": [
+              "flat-field normalization",
+              "beam hardening",
+              "K-edge quantification",
+              "bremsstrahlung X-ray source",
+              "spectral imaging metrology"
+            ]
+          }
+        ],
+        "output_directory": "/Users/maxim.ziatdinov/Code/SciLink/tests/_qc_phase2_live_runs/hyper_au",
+        "extracted_features": [
+          {
+            "name": "Au_KEdge_Jump",
+            "units": "Delta(mu*t) [dimensionless optical depth]",
+            "description": "Per-pixel Au K-edge (80.725 keV) analysis. Transmission I/I0 formed using a genuine flat-field I0 when provided; otherwise I0 is estimated from empty-field border pixels (median spectrum) rather than a spatial-max envelope, which would fabricate a spurious edge in every pixel. measure_edge_step quantifies the optical-depth jump Delta(mu*t) with robust continuum windows and a flux gate, restricted to >40 keV. Pixels are flagged as Au only where SNR>3 and the step exceeds ~3x the empty-field noise floor, so empty regions read ~0 (localized coupon, coverage=98.2%). Thickness = Delta(mu*t)/Delta_mu, where Delta_mu = [(mu/rho)_above - (mu/rho)_below]*rho (rho=19.3 g/cm3) from NIST tables, reported in mm.. [Data Source: Raw Data (Medium quality, SNR\u224832.5)]",
+            "stats": {
+              "min": 0.0,
+              "max": 0.6822786964377565,
+              "mean": 0.48241759651775296
+            }
+          },
+          {
+            "name": "Au_Thickness",
+            "units": "mm",
+            "description": "Per-pixel Au K-edge (80.725 keV) analysis. Transmission I/I0 formed using a genuine flat-field I0 when provided; otherwise I0 is estimated from empty-field border pixels (median spectrum) rather than a spatial-max envelope, which would fabricate a spurious edge in every pixel. measure_edge_step quantifies the optical-depth jump Delta(mu*t) with robust continuum windows and a flux gate, restricted to >40 keV. Pixels are flagged as Au only where SNR>3 and the step exceeds ~3x the empty-field noise floor, so empty regions read ~0 (localized coupon, coverage=98.2%). Thickness = Delta(mu*t)/Delta_mu, where Delta_mu = [(mu/rho)_above - (mu/rho)_below]*rho (rho=19.3 g/cm3) from NIST tables, reported in mm.. [Data Source: Raw Data (Medium quality, SNR\u224832.5)]",
+            "stats": {
+              "min": 0.0,
+              "max": 0.054425294681892736,
+              "mean": 0.038482397277377706
+            }
+          },
+          {
+            "name": "Au_Present_Flag",
+            "units": "bool (1=Au present)",
+            "description": "Per-pixel Au K-edge (80.725 keV) analysis. Transmission I/I0 formed using a genuine flat-field I0 when provided; otherwise I0 is estimated from empty-field border pixels (median spectrum) rather than a spatial-max envelope, which would fabricate a spurious edge in every pixel. measure_edge_step quantifies the optical-depth jump Delta(mu*t) with robust continuum windows and a flux gate, restricted to >40 keV. Pixels are flagged as Au only where SNR>3 and the step exceeds ~3x the empty-field noise floor, so empty regions read ~0 (localized coupon, coverage=98.2%). Thickness = Delta(mu*t)/Delta_mu, where Delta_mu = [(mu/rho)_above - (mu/rho)_below]*rho (rho=19.3 g/cm3) from NIST tables, reported in mm.. [Data Source: Raw Data (Medium quality, SNR\u224832.5)]",
+            "stats": {
+              "min": 0.0,
+              "max": 1.0,
+              "mean": 0.98234375
+            }
+          },
+          {
+            "name": "Edge_SNR",
+            "units": "a.u.",
+            "description": "Per-pixel Au K-edge (80.725 keV) analysis. Transmission I/I0 formed using a genuine flat-field I0 when provided; otherwise I0 is estimated from empty-field border pixels (median spectrum) rather than a spatial-max envelope, which would fabricate a spurious edge in every pixel. measure_edge_step quantifies the optical-depth jump Delta(mu*t) with robust continuum windows and a flux gate, restricted to >40 keV. Pixels are flagged as Au only where SNR>3 and the step exceeds ~3x the empty-field noise floor, so empty regions read ~0 (localized coupon, coverage=98.2%). Thickness = Delta(mu*t)/Delta_mu, where Delta_mu = [(mu/rho)_above - (mu/rho)_below]*rho (rho=19.3 g/cm3) from NIST tables, reported in mm.. [Data Source: Raw Data (Medium quality, SNR\u224832.5)]",
+            "stats": {
+              "min": -39.915704892905374,
+              "max": 215.54877086567387,
+              "mean": 74.06215858827558
+            }
+          }
+        ],
+        "dynamic_analysis_records": [
+          {
+            "target": "Compute the per-pixel Au coupon thickness from the K-edge jump. Steps: (1) Divide the sample cube by the same-grid I0 flat-field cube to form transmission I/I0, guarding against zero/low-flux; restrict analysis to energies above ~40 keV to avoid scatter/saturation-dominated low-energy region. (2) Form the optical depth ln(I0/I). (3) Use measure_edge_step to quantify the Au K-edge step at 80.725 keV per pixel with robust narrow pre-/post-edge windows and flux gating, producing an edge-jump magnitude map (this doubles as the Au localization map). (4) Obtain the tabulated Au K-edge discontinuity in the mass attenuation coefficient via the attenuation helper for element 'Au', multiply by density rho = 19.3 g/cm3 to get the linear-attenuation jump Delta_mu, and convert the measured Delta(mu*t) to thickness t = Delta(mu*t)/Delta_mu (report in mm). (5) Produce a spatial map of Au thickness and a map/flag of where the edge is measurable (Au present vs. absent). Provide the edge-jump magnitude and derived thickness as output maps.",
+            "required_outputs": [
+              "Au_KEdge_Jump",
+              "Au_Thickness"
+            ],
+            "task_success": true,
+            "salvaged": false,
+            "script": "def analyze_feature(data, axis, auxiliary=None):\n    from scilink.skills._shared.edge_step import measure_edge_step\n    from scilink.skills._shared.xray_attenuation import attenuation\n\n    data = np.asarray(data, dtype=np.float64)\n    axis = np.asarray(axis, dtype=np.float64)\n    H, W, E = data.shape\n\n    edge_kev = 80.725\n\n    # --- Build I0 (incident flux reference) ---\n    # Prefer a genuine flat-field cube from auxiliary.\n    i0 = None\n    if auxiliary:\n        for k in auxiliary:\n            if \"I0\" in k or \"flat\" in k.lower():\n                cand = np.asarray(auxiliary[k], dtype=np.float64)\n                if cand.shape == data.shape:\n                    i0 = cand\n                    break\n                elif cand.ndim == 1 and cand.shape[0] == E:\n                    i0 = np.broadcast_to(cand, data.shape).copy()\n                    break\n\n    # If no genuine flat-field exists, DO NOT use spatial-max envelope\n    # (that manufactures a fake edge in every pixel). Instead estimate I0\n    # from empty-field border pixels which contain no sample.\n    i0_from_border = False\n    if i0 is None:\n        i0_from_border = True\n        # Identify border pixels (frame edges) as candidate empty-field.\n        border_mask = np.zeros((H, W), dtype=bool)\n        bw = max(2, min(H, W) // 12)\n        border_mask[:bw, :] = True\n        border_mask[-bw:, :] = True\n        border_mask[:, :bw] = True\n        border_mask[:, -bw:] = True\n        # Use only border pixels with high, flat flux (no absorption edge)\n        flat = data.reshape(-1, E)\n        bm = border_mask.reshape(-1)\n        border_spec = flat[bm]\n        # Robust I0 spectrum = median over border pixels per energy channel\n        i0_1d = np.nanmedian(border_spec, axis=0)\n        # Guard against zeros\n        i0_1d = np.where(i0_1d <= 0, np.nan, i0_1d)\n        i0 = np.broadcast_to(i0_1d, data.shape).copy()\n\n    # --- Light per-pixel smoothing to stabilize edge measurement ---\n    # Smooth only along energy to preserve spatial localization of coupon.\n    data_s = gaussian_filter(data, sigma=(0, 0, 1.2))\n    i0_s = gaussian_filter(i0, sigma=(0, 0, 1.2)) if i0.ndim == 3 else i0\n\n    # --- Use registered edge-step tool ---\n    # Restrict to >40 keV region via low_e_cut_kev.\n    r = measure_edge_step(\n        data_s, i0_s, axis, edge_kev,\n        pre_gap=2.0, post_gap=1.5, win_width=4.0,\n        low_e_cut_kev=40.0, flux_floor_counts=20.0,\n        auto_center=True, search_tol_kev=2.0,\n    )\n\n    edge_step = np.asarray(r[\"edge_step\"], dtype=np.float64)  # Delta(mu*t) = Delta-OD\n    snr = np.asarray(r.get(\"snr\", np.zeros_like(edge_step)), dtype=np.float64)\n    edge_used = r.get(\"edge_kev_used\", edge_kev)\n\n    # --- Segment coupon: only pixels with a REAL, significant edge jump ---\n    # Empty-field pixels should read ~0. Threshold on SNR and positive step.\n    finite = np.isfinite(edge_step)\n    edge_step = np.where(finite, edge_step, 0.0)\n    snr = np.where(np.isfinite(snr), snr, 0.0)\n\n    # Measurability: require positive edge and adequate SNR.\n    # Also require the step to stand out above the empty-field noise floor.\n    valid = edge_step[snr > 3.0]\n    if valid.size > 20:\n        noise_floor = np.nanmedian(np.abs(edge_step[snr <= 3.0])) if np.any(snr <= 3.0) else 0.0\n    else:\n        noise_floor = 0.0\n    step_thresh = max(3.0 * (noise_floor if noise_floor > 0 else 0.02), 0.02)\n\n    measurable = (snr > 3.0) & (edge_step > step_thresh)\n\n    # Zero out non-coupon pixels so the jump map is localized, not full-field.\n    edge_jump = np.where(measurable, edge_step, 0.0)\n\n    # --- Convert Delta(mu*t) to thickness ---\n    # Delta_mu = [ (mu/rho)_just_above - (mu/rho)_just_below ] * rho\n    rho = 19.3  # g/cm^3\n    e_below = np.array([edge_used - 0.5])\n    e_above = np.array([edge_used + 0.5])\n    mu_below = float(attenuation('Au', e_below)[0])   # cm^2/g\n    mu_above = float(attenuation('Au', e_above)[0])   # cm^2/g\n    delta_mu_over_rho = mu_above - mu_below            # cm^2/g (positive)\n    delta_mu = delta_mu_over_rho * rho                 # 1/cm\n\n    if not np.isfinite(delta_mu) or abs(delta_mu) < 1e-9:\n        delta_mu = np.nan\n\n    # thickness t = Delta(mu*t) / Delta_mu  -> cm, convert to mm\n    with np.errstate(divide='ignore', invalid='ignore'):\n        thickness_cm = edge_jump / delta_mu\n    thickness_mm = thickness_cm * 10.0\n    # Non-coupon pixels -> 0 thickness\n    thickness_mm = np.where(measurable, thickness_mm, 0.0)\n    thickness_mm = np.where(np.isfinite(thickness_mm), thickness_mm, 0.0)\n    # Physical guard: no negative thickness\n    thickness_mm = np.clip(thickness_mm, 0.0, None)\n\n    au_present = measurable.astype(np.float64)\n\n    coverage = 100.0 * measurable.mean()\n\n    return {\n        \"maps\": {\n            \"Au_KEdge_Jump\": edge_jump,\n            \"Au_Thickness\": thickness_mm,\n            \"Au_Present_Flag\": au_present,\n            \"Edge_SNR\": snr,\n        },\n        \"units\": {\n            \"Au_KEdge_Jump\": \"Delta(mu*t) [dimensionless optical depth]\",\n            \"Au_Thickness\": \"mm\",\n            \"Au_Present_Flag\": \"bool (1=Au present)\",\n            \"Edge_SNR\": \"a.u.\",\n        },\n        \"description\": (\n            \"Per-pixel Au K-edge (80.725 keV) analysis. Transmission I/I0 formed \"\n            \"using a genuine flat-field I0 when provided; otherwise I0 is estimated \"\n            \"from empty-field border pixels (median spectrum) rather than a spatial-max \"\n            \"envelope, which would fabricate a spurious edge in every pixel. \"\n            \"measure_edge_step quantifies the optical-depth jump Delta(mu*t) with robust \"\n            \"continuum windows and a flux gate, restricted to >40 keV. Pixels are flagged \"\n            \"as Au only where SNR>3 and the step exceeds ~3x the empty-field noise floor, \"\n            \"so empty regions read ~0 (localized coupon, coverage=%.1f%%). Thickness = \"\n            \"Delta(mu*t)/Delta_mu, where Delta_mu = [(mu/rho)_above - (mu/rho)_below]*rho \"\n            \"(rho=19.3 g/cm3) from NIST tables, reported in mm.\" % coverage\n        ),\n    }",
+            "quality_history": {
+              "final_passed_fraction": 1.0,
+              "threshold": 0.5,
+              "approved": true,
+              "verification_iterations": [
+                {
+                  "passed_fraction": 0.75,
+                  "annealing_level": 0,
+                  "issues": [
+                    {
+                      "location": "Au_KEdge_Jump",
+                      "problem": "The K-edge jump map is nearly uniform (mean 0.48, std 0.07) at 99.1% coverage \u2014 but the mean spectrum shows the Au coupon should be a LOCALIZED feature, not a full-field layer. More critically, the physics is inconsistent: the mean spectrum shows a clear absorption edge (step down) at ~81 keV where transmission drops abruptly, but the reported Delta(mu*t)~0.48 fills essentially the ENTIRE field including regions that should be empty (no sample). This is the tell-tale signature of a bad I0. The code's I0 fallback \u2014 np.nanmax over space per energy bin \u2014 is being used (no auxiliary flat-field cube is present), which is a crude and biased envelope proxy that manufactures a nonzero apparent edge step in EVERY pixel because ln(I0/I) is computed against a spatial max rather than a true no-sample flux. The result is a spatially flat 'edge everywhere' artifact rather than a localized coupon. Corrective direction: supply/measure a genuine I0 flat-field (no-sample) cube for the transmission normalization; if none exists, do not use the spatial-max envelope \u2014 instead estimate I0 from a bordering empty-field region (the map edges appear lower, ~0.35, suggesting the coupon does NOT fill the frame) and re-segment the coupon by thresholding the true edge-step, so that empty-field pixels return ~0 rather than ~0.48. The current uniform 99% coverage is a normalization-induced collapse, not a genuine full-field signal."
+                    },
+                    {
+                      "location": "execution",
+                      "problem": "Required outputs failed: ['Au_KEdge_Jump']. QC critiques on required outputs: [\"Au_KEdge_Jump: The K-edge jump map is nearly uniform (mean 0.48, std 0.07) at 99.1% coverage \u2014 but the mean spectrum shows the Au coupon should be a LOCALIZED feature, not a full-field layer. More critically, the physics is inconsistent: the mean spectrum shows a clear absorption edge (step down) at ~81 keV where transmission drops abruptly, but the reported Delta(mu*t)~0.48 fills essentially the ENTIRE field includi"
+                    }
+                  ],
+                  "fix_applied": "patch the logic/math"
+                },
+                {
+                  "passed_fraction": 1.0,
+                  "annealing_level": 1,
+                  "issues": [],
+                  "fix_applied": ""
+                }
+              ],
+              "script_errors": [],
+              "judge_reasoning": null
+            }
+          }
+        ],
+        "literature_files": {
+          "provided_file": "/Users/maxim.ziatdinov/Code/SciLink/tests/_qc_phase2_live_runs/lit_xray_kedge.md"
+        }
+      },
+      "feedback": null
+    }
+  ],
+  "status": "active",
+  "data_path": "/Users/maxim.ziatdinov/Code/benchmarking_for_paper2/xray_hyper_data/coupon_radiography_Au.npy",
+  "analysis_depth": 0,
+  "components_found": [],
+  "metadata": "/Users/maxim.ziatdinov/Code/SciLink/tests/_qc_phase2_live_runs/metadata_aucoupon_fixed.json"
+}

@@ -1,0 +1,355 @@
+{
+  "status": "success",
+  "output_directory": "/Users/maxim.ziatdinov/Code/SciLink/tests/_script_bank_live_runs/imau_rt/0047",
+  "task_mode": "fitting",
+  "profile": "realtime",
+  "detailed_analysis": "Realtime frame: locked script from 'imau_anchor' reused; R\u00b2 = 0.9993673097078474; gate verdict: good; drift: suspected (fingerprint similarity 0.502). Interpretation is deferred to the post-experiment sweep.",
+  "scientific_claims": [],
+  "model_type": "Sum of split (asymmetric) pseudo-Voigt peaks on SNIP background (global fit_pattern, auto-detected peaks, 10-45 deg)",
+  "fitting_parameters": {
+    "peak_1": {
+      "center": 10.194020144688846,
+      "fwhm": 0.12751924536861908,
+      "amplitude": 2402.2117327952906,
+      "area": 340.396736899967,
+      "eta": 0.09232861710402719,
+      "scherrer_size_nm_lower_bound": 62.5460712391858
+    },
+    "peak_2": {
+      "center": 10.392538542049518,
+      "fwhm": 0.17752091134820988,
+      "amplitude": 2131.4913305776536,
+      "area": 414.11329331145964,
+      "eta": 0.05916737424186979,
+      "scherrer_size_nm_lower_bound": 44.93595905494181
+    },
+    "peak_3": {
+      "center": 10.507949970810092,
+      "fwhm": 0.09757464597723667,
+      "amplitude": 2578.9059588714513,
+      "area": 395.26266494060997,
+      "eta": 0.999953050589483,
+      "scherrer_size_nm_lower_bound": 81.76106686637877
+    },
+    "peak_4": {
+      "center": 10.861118917880848,
+      "fwhm": 0.058399787923222576,
+      "amplitude": 1048.7398956228012,
+      "area": 78.55049774002,
+      "eta": 0.43068792370147657,
+      "scherrer_size_nm_lower_bound": 136.64615874689216
+    },
+    "peak_5": {
+      "center": 11.491452757999125,
+      "fwhm": 0.20152937924916925,
+      "amplitude": 107849.43923901455,
+      "area": 24380.547083446305,
+      "eta": 0.11308849327795542,
+      "scherrer_size_nm_lower_bound": 39.61905095164284
+    },
+    "peak_6": {
+      "center": 12.01188009817783,
+      "fwhm": 0.1686688497937741,
+      "amplitude": 793.6154234654807,
+      "area": 143.85528399855536,
+      "eta": 0.02017878691511851,
+      "scherrer_size_nm_lower_bound": 47.35987393614584
+    },
+    "peak_7": {
+      "center": 12.355979657089234,
+      "fwhm": 0.18236647675671314,
+      "amplitude": 1977.6244465780019,
+      "area": 389.6585681781854,
+      "eta": 0.03152081113337163,
+      "scherrer_size_nm_lower_bound": 43.81669313237091
+    },
+    "peak_8": {
+      "center": 12.461744792701053,
+      "fwhm": 0.18307975891800743,
+      "amplitude": 2016.0215457459408,
+      "area": 440.4918818140037,
+      "eta": 0.2547314059194845,
+      "scherrer_size_nm_lower_bound": 43.65036210844887
+    },
+    "peak_9": {
+      "center": 13.032890189017627,
+      "fwhm": 0.1180117004007804,
+      "amplitude": 1942.5128954565664,
+      "area": 353.65553256416956,
+      "eta": 0.9445799213154644,
+      "scherrer_size_nm_lower_bound": 67.75555494954477
+    },
+    "peak_10": {
+      "center": 13.179796381725351,
+      "fwhm": 0.30079039299695826,
+      "amplitude": 1255.5007704614811,
+      "area": 401.99426917946295,
+      "eta": 3.246727363078773e-05,
+      "scherrer_size_nm_lower_bound": 26.58703898800567
+    },
+    "peak_11": {
+      "center": 13.66653719968742,
+      "fwhm": 0.051485382497416236,
+      "amplitude": 1976.9958610835647,
+      "area": 159.8721257623367,
+      "eta": 0.9997369137672594,
+      "scherrer_size_nm_lower_bound": 155.4057460942354
+    },
+    "peak_12": {
+      "center": 14.169954666561662,
+      "fwhm": 0.33373821341971205,
+      "amplitude": 1204.3588241803218,
+      "area": 440.31718191673116,
+      "eta": 0.06124734431382491,
+      "scherrer_size_nm_lower_bound": 23.987111912646352
+    },
+    "peak_13": {
+      "center": 14.436579524888156,
+      "fwhm": 0.7153866413823845,
+      "amplitude": 932.9864556310623,
+      "area": 1035.4824292292433,
+      "eta": 0.9617118935427962,
+      "scherrer_size_nm_lower_bound": 11.193601975020426
+    },
+    "peak_14": {
+      "center": 15.039995123802047,
+      "fwhm": 0.13390817443346392,
+      "amplitude": 1921.582814872394,
+      "area": 404.1876388020202,
+      "eta": 0.9999782482449145,
+      "scherrer_size_nm_lower_bound": 59.841071663833965
+    },
+    "peak_15": {
+      "center": 16.26860251252281,
+      "fwhm": 0.18938603523478925,
+      "amplitude": 63682.5916162218,
+      "area": 13285.987108702768,
+      "eta": 0.07334371105245231,
+      "scherrer_size_nm_lower_bound": 42.373915205894654
+    },
+    "peak_16": {
+      "center": 16.64945452750512,
+      "fwhm": 0.08557910657772273,
+      "amplitude": 1118.876066957411,
+      "area": 103.06372072362207,
+      "eta": 0.023481453794141356,
+      "scherrer_size_nm_lower_bound": 93.81829890155531
+    },
+    "peak_17": {
+      "center": 17.345483325359663,
+      "fwhm": 0.9507739079573471,
+      "amplitude": 952.3478700219605,
+      "area": 1070.7111319083076,
+      "eta": 0.2331058994803408,
+      "scherrer_size_nm_lower_bound": 8.45224790522119
+    },
+    "peak_18": {
+      "center": 18.555062076588154,
+      "fwhm": 0.47684229572492237,
+      "amplitude": 770.3539316709803,
+      "area": 416.23653041090097,
+      "eta": 0.13558553506584073,
+      "scherrer_size_nm_lower_bound": 16.881022499621416
+    },
+    "peak_19": {
+      "center": 18.668198031440095,
+      "fwhm": 0.04862946359321405,
+      "amplitude": 712.787328820168,
+      "area": 52.086172327573976,
+      "eta": 0.8654463031406964,
+      "scherrer_size_nm_lower_bound": 165.5557616263259
+    },
+    "peak_20": {
+      "center": 18.80638723551983,
+      "fwhm": 0.4776768117007041,
+      "amplitude": 923.1588107196451,
+      "area": 538.904837187959,
+      "eta": 0.3112958919195056,
+      "scherrer_size_nm_lower_bound": 16.85761097735943
+    },
+    "peak_21": {
+      "center": 19.398308517865644,
+      "fwhm": 0.9083983743065511,
+      "amplitude": 738.421901207303,
+      "area": 1044.013871260413,
+      "eta": 0.9715964925586476,
+      "scherrer_size_nm_lower_bound": 8.872199653540026
+    },
+    "peak_22": {
+      "center": 19.839681509664626,
+      "fwhm": 0.3065336638532787,
+      "amplitude": 596.9955004080367,
+      "area": 280.9373900476127,
+      "eta": 0.9296648018056898,
+      "scherrer_size_nm_lower_bound": 26.309870033860804
+    },
+    "peak_23": {
+      "center": 20.182180504311138,
+      "fwhm": 0.8708122272754883,
+      "amplitude": 808.2881344945063,
+      "area": 1063.540348551458,
+      "eta": 0.8818939476766151,
+      "scherrer_size_nm_lower_bound": 9.26619359106625
+    },
+    "peak_24": {
+      "center": 22.552272442228,
+      "fwhm": 0.18060276150869908,
+      "amplitude": 19349.272909443927,
+      "area": 3727.089277460321,
+      "eta": 0.004111649359085498,
+      "scherrer_size_nm_lower_bound": 44.85348195276034
+    },
+    "peak_25": {
+      "center": 23.042314324091286,
+      "fwhm": 0.1902439020734058,
+      "amplitude": 30073.373092416878,
+      "area": 6123.420381976219,
+      "eta": 0.011499021157137237,
+      "scherrer_size_nm_lower_bound": 42.617134161703106
+    },
+    "peak_26": {
+      "center": 24.97852348377779,
+      "fwhm": 0.1653531241983603,
+      "amplitude": 12315.340134764654,
+      "area": 2176.591530982143,
+      "eta": 0.008662981662946222,
+      "scherrer_size_nm_lower_bound": 49.208834679447946
+    },
+    "peak_27": {
+      "center": 25.343892184058472,
+      "fwhm": 0.17139156641543338,
+      "amplitude": 18062.2968991213,
+      "area": 3302.5131193415473,
+      "eta": 0.004603364751448787,
+      "scherrer_size_nm_lower_bound": 47.50891016430788
+    },
+    "peak_28": {
+      "center": 25.77330970705396,
+      "fwhm": 0.1995144513895371,
+      "amplitude": 16904.040944526565,
+      "area": 3600.9021235778473,
+      "eta": 0.006371441325943986,
+      "scherrer_size_nm_lower_bound": 40.84691772899205
+    },
+    "peak_29": {
+      "center": 27.5990221632675,
+      "fwhm": 0.16379462833800834,
+      "amplitude": 3175.5118040812104,
+      "area": 747.2005985380171,
+      "eta": 0.7348837158013874,
+      "scherrer_size_nm_lower_bound": 49.943064342597104
+    },
+    "peak_30": {
+      "center": 28.26322973923697,
+      "fwhm": 0.21583890879567652,
+      "amplitude": 3219.420572678196,
+      "area": 754.968560846458,
+      "eta": 0.043474033164430194,
+      "scherrer_size_nm_lower_bound": 37.955186796339895
+    },
+    "peak_31": {
+      "center": 31.81162625194945,
+      "fwhm": 0.1635783904257126,
+      "amplitude": 2884.366324847999,
+      "area": 502.34656643354157,
+      "eta": 0.0004593476698477246,
+      "scherrer_size_nm_lower_bound": 50.4990709401397
+    },
+    "peak_32": {
+      "center": 32.41509667806091,
+      "fwhm": 0.1808309603330318,
+      "amplitude": 2863.8610470685067,
+      "area": 636.3487904588292,
+      "eta": 0.32449766012686404,
+      "scherrer_size_nm_lower_bound": 45.75038995777451
+    },
+    "peak_33": {
+      "center": 33.953257278956706,
+      "fwhm": 0.20024515535851453,
+      "amplitude": 2306.491774052662,
+      "area": 525.3393586456798,
+      "eta": 0.14410872679796616,
+      "scherrer_size_nm_lower_bound": 41.480366096585236
+    },
+    "peak_34": {
+      "center": 34.8566898950041,
+      "fwhm": 0.21863028639691978,
+      "amplitude": 17971.46656167524,
+      "area": 4182.806294808217,
+      "eta": 0.00020186958620766553,
+      "scherrer_size_nm_lower_bound": 38.08503274402422
+    },
+    "peak_35": {
+      "center": 36.804533312051916,
+      "fwhm": 0.20522255791129418,
+      "amplitude": 13597.255594576318,
+      "area": 2972.8416891319084,
+      "eta": 0.0017589761947199478,
+      "scherrer_size_nm_lower_bound": 40.796808248172994
+    },
+    "peak_36": {
+      "center": 38.199860077793495,
+      "fwhm": 0.23806008080970636,
+      "amplitude": 154055.93414572967,
+      "area": 39147.46890727825,
+      "eta": 0.005848364953769343,
+      "scherrer_size_nm_lower_bound": 35.31505977382266
+    },
+    "peak_37": {
+      "center": 41.17688359229813,
+      "fwhm": 0.1648655382915929,
+      "amplitude": 2951.9516129715535,
+      "area": 648.0782557203727,
+      "eta": 0.5276755116111025,
+      "scherrer_size_nm_lower_bound": 51.474099582302706
+    },
+    "peak_38": {
+      "center": 42.184408780959984,
+      "fwhm": 0.17975359157901166,
+      "amplitude": 6615.891575179575,
+      "area": 1308.6334166989207,
+      "eta": 0.07097495867345165,
+      "scherrer_size_nm_lower_bound": 47.369047071747055
+    },
+    "peak_39": {
+      "center": 42.823706072901736,
+      "fwhm": 0.16774656755500664,
+      "amplitude": 3114.2803583482487,
+      "area": 601.5654598730072,
+      "eta": 0.17192987459674325,
+      "scherrer_size_nm_lower_bound": 50.86990143091462
+    },
+    "peak_40": {
+      "center": 44.382074690302424,
+      "fwhm": 0.238952618642368,
+      "amplitude": 63225.114228850136,
+      "area": 16099.902796862654,
+      "eta": 0.002371510007036824,
+      "scherrer_size_nm_lower_bound": 35.90585201449278
+    }
+  },
+  "fit_quality": {
+    "r_squared": 0.9993673097078474,
+    "rmse": 708.1811039281507,
+    "peak_region_r2": 0.9985718075783464,
+    "global_r_squared_from_fit": 0.9975682730932465,
+    "residual_rms_over_noise": 1.8755955077203483,
+    "max_abs_residual_over_noise": 9.301128758597226,
+    "n_peaks_fitted": 40,
+    "background_method": "snip(iterations=10)"
+  },
+  "literature_files": null,
+  "quality_history": {
+    "produced_under_profile": "realtime"
+  },
+  "reuse_validity": {
+    "reused": true,
+    "source": "imau_anchor",
+    "r_squared": 0.9993673097078474,
+    "threshold": 0.95,
+    "verdict": "good",
+    "message": "Reused the locked fitting script from prior run 'imau_anchor'; R\u00b2 = 0.9994 meets the acceptance threshold 0.950.",
+    "fingerprint_similarity": 0.502,
+    "drift": "suspected"
+  }
+}

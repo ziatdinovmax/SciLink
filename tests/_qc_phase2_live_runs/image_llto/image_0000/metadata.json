@@ -1,0 +1,45 @@
+{
+  "material_type": "Li3xLa2/3-xTiO3 (LLTO) thin film on (LaAlO3)0.3(Sr2AlTaO6)0.7 (LSAT) substrate",
+  "microscopy_type": "STEM HAADF",
+  "experimental_details": {
+    "spatial_info": {
+      "field_of_view_x": 20.88,
+      "field_of_view_y": 20.88,
+      "field_of_view_units": "nm"
+    }
+  },
+  "embedded_file_metadata": {
+    "image_description": "{\"shape\": [1024, 1024, 1]}",
+    "software": "tifffile.py",
+    "pixel_size": {
+      "x": 1.0,
+      "y": 1.0,
+      "unit": "none"
+    },
+    "tiff_tags": {
+      "ImageWidth": 1024,
+      "ImageLength": 1024,
+      "BitsPerSample": [
+        32
+      ],
+      "Compression": 1,
+      "PhotometricInterpretation": 1,
+      "ImageDescription": "{\"shape\": [1024, 1024, 1]}",
+      "StripOffsets": [
+        272
+      ],
+      "SampleFormat": [
+        3
+      ],
+      "SamplesPerPixel": 1,
+      "RowsPerStrip": 1024,
+      "StripByteCounts": [
+        4194304
+      ],
+      "XResolution": 1.0,
+      "YResolution": 1.0,
+      "ResolutionUnit": 1,
+      "Software": "tifffile.py"
+    }
+  }
+}

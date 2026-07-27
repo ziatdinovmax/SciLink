@@ -1,0 +1,85 @@
+{
+  "batch_size": 16,
+  "physical_constraints": null,
+  "batch": [
+    {
+      "T": 339.2504018731415,
+      "pH": 4.654378633014858
+    },
+    {
+      "T": 343.3237459976226,
+      "pH": 4.343020468018949
+    },
+    {
+      "T": 335.83943429403007,
+      "pH": 4.515859284438193
+    },
+    {
+      "T": 344.37445611692965,
+      "pH": 4.367342515848577
+    },
+    {
+      "T": 344.4552453700453,
+      "pH": 4.553682181052864
+    },
+    {
+      "T": 346.27704112790525,
+      "pH": 4.518378873355687
+    },
+    {
+      "T": 342.1161849051714,
+      "pH": 4.595659998245537
+    },
+    {
+      "T": 340.31205917708576,
+      "pH": 4.401829772628844
+    },
+    {
+      "T": 340.2458611410111,
+      "pH": 4.589620356447995
+    },
+    {
+      "T": 347.3479903303087,
+      "pH": 4.442985123954713
+    },
+    {
+      "T": 338.5404229629785,
+      "pH": 4.5512568494305015
+    },
+    {
+      "T": 337.542849779129,
+      "pH": 4.487399113364518
+    },
+    {
+      "T": 343.386508570984,
+      "pH": 4.5307623920962214
+    },
+    {
+      "T": 339.3346914090216,
+      "pH": 4.46588712092489
+    },
+    {
+      "T": 342.03532189130783,
+      "pH": 4.407119826413691
+    },
+    {
+      "T": 345.67211512476206,
+      "pH": 4.478380532003939
+    }
+  ],
+  "strategy": {
+    "model_config": {
+      "kernel": "matern_1.5",
+      "noise": "min_noise_low",
+      "surrogate": "single_task"
+    },
+    "acquisition_strategy": {
+      "type": "thompson",
+      "params": {}
+    },
+    "rationale": "Step 0 with only 12 initial points in 2D and a large batch size of 16. The yield data is extremely skewed (median 0.61, max 99.35), indicating a sharp, narrow high-yield peak with most of the space near zero. Thompson sampling is ideal for this large batch: it provides natural diversity across the batch via posterior sampling while still concentrating points near promising regions. Matern-1.5 kernel chosen because the sharp transition from near-zero to ~99 yield suggests a rough/steep response surface. No budget constraint allows balanced exploration-exploitation, which Thompson provides naturally. Low noise prior lets the GP learn freely from this small dataset.",
+    "batch_size": 16
+  },
+  "constrained_planning": null,
+  "constraint_aware": false
+}

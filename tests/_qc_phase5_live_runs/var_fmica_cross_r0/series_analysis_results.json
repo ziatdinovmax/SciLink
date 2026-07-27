@@ -1,0 +1,242 @@
+{
+  "timestamp": "2026-07-09T23:28:33.992887",
+  "total_images": 1,
+  "successful": 1,
+  "flagged_count": 0,
+  "is_single_image": true,
+  "series_metadata": {},
+  "quality_settings": {
+    "outlier_sigma": 2.0
+  },
+  "locked_config": {
+    "analysis_approach": "Preprocess (row-level + square-pixel resample + z-calibrate), then use targeted reciprocal-space reflection mapping to test quantitatively whether any resolvable periodic lattice survives at 10 mM, and characterize the surface texture via radial PSD length scales and physical roughness.",
+    "processing_pipeline": "Per-row median leveling to remove horizontal streaks -> resample to square physical pixels using FOV (target nm/px = 22.04/512 = 0.04305, resample y accordingly) with resolve_pixel_size_nm to confirm calibration -> convert z to pm using data_range mapping and compute Rq -> fourier_reflection_map on the leveled square-pixel image (d_range ~0.15-1.0 nm, Nyquist-gated) to detect/localize any periodic reflection -> radial PSD to extract characteristic corrugation wavelength and envelope length scale.",
+    "features_to_extract": [
+      "pixel_size_nm (verified from metadata FOV)",
+      "Rq roughness in pm",
+      "reflection spacing and significance (sigma) or legitimate-null",
+      "radial PSD mid-frequency corrugation wavelength (nm)",
+      "radial PSD low-frequency envelope length (nm)"
+    ],
+    "quality_criteria": "Preprocessing: after row-median leveling the horizontal streak pattern over featureless regions is suppressed; resampled pixel size round-trips against FOV/N within float tolerance; z round-trips through the pm mapping. Science: Rq reported in pm and physically plausible for a near-atomically-flat mica surface (sub-nm, on the order of the ~6 pm z-range); fourier_reflection_map either returns a significant reflection with spacing in the physically sensible 0.2-1.0 nm range OR a legitimate null (report 'no resolvable lattice at 10 mM' rather than forcing a spacing); PSD length scales are positive, finite, and above the Nyquist/pixel limit. All lengths in nm, all heights in pm \u2014 no dimensionless pixel/dtype values reported.",
+    "expected_outputs": [
+      "preprocessing_overview.png (raw vs row-leveled vs square-pixel resampled, with line profile confirming streak removal)",
+      "reflection_and_psd.png (fourier_reflection_map amplitude/domain output plus radial PSD with marked corrugation and envelope scales)"
+    ]
+  },
+  "series_analysis_plan": null,
+  "results": [
+    {
+      "index": 0,
+      "name": "(hard) fmica 10mM KCl",
+      "data_path": "/Users/maxim.ziatdinov/Code/benchmarking_for_paper2/AFM/(hard) fmica 10mM KCl.tif",
+      "success": true,
+      "error": null,
+      "analysis_type": "AFM row-leveling + z-calibration + verified-scale square-pixel resampling + polynomial detrend/light-smooth + Nyquist/streak-gated fourier_reflection_map (legitimate-null aware) + radial PSD split into low-freq envelope vs mid-freq corrugation + noise-gated autocorrelation correlation length + z-gated Rq + coverage.",
+      "extracted_features": {
+        "pixel_size_nm": 0.043046875,
+        "pixel_size_nm_x_raw": 0.043046875,
+        "pixel_size_nm_y_raw": 0.0862890625,
+        "pixel_size_source": "metadata",
+        "fov_recovered_flag": true,
+        "scale_uncertain_flag": false,
+        "nyquist_d_nm": 0.08609375,
+        "target_d_range_nm": [
+          0.15,
+          2.0
+        ],
+        "nyquist_resolvable": true,
+        "sub_nm_reflection_authorized": true,
+        "streak_collinear": false,
+        "streak_fraction": 0.040569781327537593,
+        "Rq_nm": 5935.782202801427,
+        "Rq_units": "z-units",
+        "Rq_z_calibrated": false,
+        "reflection_d_nm": 0.48977777777777776,
+        "reflection_sigma": 3.2398194865801693,
+        "spot_snr": 536.9760583987675,
+        "spot_snr_bulk": 176.98152698184555,
+        "domain_fraction": 0.03531615497076023,
+        "reflection_null_flag": false,
+        "strongest_satellite_d_nm": 0.48977777777777776,
+        "n_reflections_detected": 15,
+        "radial_psd_low_freq_envelope_length_nm": 11.0415234375,
+        "radial_psd_mid_freq_peak_wavelength_nm": 0.817890625,
+        "mid_freq_peak_amplitude": 11492906635768.451,
+        "mid_freq_peak_width": 0.13585081881958372,
+        "correlation_length_nm": 0.8718238715079452,
+        "correlation_length_in_px": 20.25289574464918,
+        "correlation_length_noise_flag": false,
+        "coverage": 0.5481504325048733,
+        "mean_patch_size_nm": 0.5876579956353077,
+        "n_patches": 109
+      },
+      "quality_metrics": {
+        "reflection_map_run": true,
+        "reflection_null_flag": false,
+        "spot_snr_domain_gt_bulk": true,
+        "n_reflections_detected": 15,
+        "scale_valid_for_cross_conc": true,
+        "Rq_valid_for_cross_conc": false,
+        "correlation_length_noise_flag": false
+      },
+      "summary": "Row-leveled AFM at 0.0430 nm/px (source=metadata, scale_uncertain=False). Reflection: present d=0.490 nm sigma=3.2. Corrugation (mid-freq PSD) lam=0.818 nm (amp=1.15e+13, width=0.136 1/nm); low-freq envelope L=11.04 nm. Correlation length=0.872 nm (20.25 px, noise_flag=False). Rq=5.94e+03 z-units (z_calibrated=False). Coverage=0.55. Parameter adjustments: detrend=2nd-order poly + Gaussian sigma=3.48 px before autocorr; mid-freq band 1-2 1/nm; corr-noise gate at 1.5 px; reflection search tagged scale-conditional on fallback FOV. Loaded metadata from metadata.json. | No data_range_minimum/maximum in metadata; z stored in raw uint16 counts. Rq reported in raw z-units, Rq_z_calibrated=false, and Rq EXCLUDED from cross-concentration comparison. | Recovered FOV/pixel size from metadata (source=field_of_view): x=0.0430 y=0.0863 nm/px. | Anisotropic pixels (x=0.0430, y=0.0863 nm/px); resampled via FOV to square pixels at 0.0430 nm/px (shape (256, 512) -> (513, 512)). | Detrend: subtracted 2nd-order polynomial background; light Gaussian smooth sigma=3.48 px (~0.150 nm) before autocorrelation. | fourier_reflection_map: 15 reflection(s); mapped d=0.490 nm sigma=3.2 (scale from metadata). | Correlation length 0.872 nm vs mid-freq corrugation wavelength 0.818 nm (ratio=1.07). | Rq in raw z-units (z-units); excluded from cross-conc comparison.",
+      "saved_arrays": {
+        "leveled_image.npy": {
+          "description": "Per-row median leveled AFM topography (square pixels).",
+          "shape": [
+            513,
+            512
+          ],
+          "dtype": "float32"
+        },
+        "detrended_smoothed.npy": {
+          "description": "Polynomial-detrended + light-Gaussian-smoothed surface used for autocorrelation.",
+          "shape": [
+            513,
+            512
+          ],
+          "dtype": "float32"
+        },
+        "patch_mask.npy": {
+          "description": "Binary Otsu coverage mask (1=elevated patch, 0=background).",
+          "shape": [
+            513,
+            512
+          ],
+          "dtype": "uint8"
+        },
+        "reflection_amplitude_map.npy": {
+          "description": "fourier_reflection_map amplitude map of the mapped lattice reflection.",
+          "shape": [
+            513,
+            512
+          ],
+          "dtype": "float32"
+        },
+        "reflection_domain_mask.npy": {
+          "description": "Null-gated ordered-lattice domain mask from fourier_reflection_map.",
+          "shape": [
+            513,
+            512
+          ],
+          "dtype": "uint8"
+        }
+      },
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_qc_phase5_live_runs/var_fmica_cross_r0/image_0000/visualization.png",
+      "statistics": {
+        "shape": [
+          256,
+          512
+        ],
+        "dtype": "uint16",
+        "has_nans": false,
+        "channels": 1,
+        "aspect_ratio": 2.0,
+        "intensity_range": [
+          0.0,
+          65535.0
+        ],
+        "intensity_mean": 32451.5613861084,
+        "intensity_std": 6330.290791986499
+      },
+      "script": "import json\nimport os\nimport numpy as np\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom scipy import ndimage as ndi\n\nfrom scilink.skills._shared.image_analysis_tools import resolve_pixel_size_nm\nfrom scilink.skills._shared.fourier_reflection import fourier_reflection_map\n\nadjustments = []\n\n# ---------------------------------------------------------------\n# 0. Load metadata if available (for pixel size + z-calibration)\n# ---------------------------------------------------------------\nmetadata = {}\nfor _mfn in ('metadata.json', 'system_info.json'):\n    if os.path.exists(_mfn):\n        try:\n            with open(_mfn, 'r') as _f:\n                metadata = json.load(_f)\n            adjustments.append('Loaded metadata from %s.' % _mfn)\n            break\n        except Exception as _e:\n            adjustments.append('Failed to read %s: %s' % (_mfn, repr(_e)))\n\ndef _meta_get(md, key):\n    if not isinstance(md, dict):\n        return None\n    if key in md:\n        return md[key]\n    si = md.get('system_info')\n    if isinstance(si, dict) and key in si:\n        return si[key]\n    return None\n\n# ---------------------------------------------------------------\n# 1. Load image (may be multi-channel, not RGB)\n# ---------------------------------------------------------------\nimg = np.load('data.npy')\nif img.ndim == 3:\n    img = img[:, :, 0]\n    adjustments.append('Input had >2D shape; used channel 0 as topography (height).')\nraw_dtype = str(img.dtype)\nimg = img.astype(np.float64)\n\n# ---------------------------------------------------------------\n# 1b. z-scale calibration from height-channel metadata.\n#     Convert raw counts -> nm. If unavailable, Rq stays in raw\n#     z-units and is EXCLUDED from cross-concentration comparison.\n# ---------------------------------------------------------------\nz_min = _meta_get(metadata, 'data_range_minimum')\nz_max = _meta_get(metadata, 'data_range_maximum')\nz_units = _meta_get(metadata, 'data_range_units') or _meta_get(metadata, 'units')\n\nz_scale = None  # physical-z (nm) per raw-count\nif z_min is not None and z_max is not None:\n    try:\n        z_min = float(z_min); z_max = float(z_max)\n        raw_lo = float(np.nanmin(img)); raw_hi = float(np.nanmax(img))\n        raw_span = raw_hi - raw_lo\n        if raw_span > 0:\n            z_scale = (z_max - z_min) / raw_span\n            adjustments.append(\n                'z-calibration from metadata: raw [%.4g,%.4g] -> z [%.4g,%.4g] %s '\n                '(z_scale=%.6g %s/count).' % (\n                    raw_lo, raw_hi, z_min, z_max, str(z_units),\n                    z_scale, str(z_units)))\n    except Exception as _e:\n        adjustments.append('Failed to build z-calibration mapping: %s' % repr(_e))\n\nRq_z_calibrated = z_scale is not None\nif not Rq_z_calibrated:\n    z_units = z_units or 'z-units'\n    adjustments.append(\n        'No data_range_minimum/maximum in metadata; z stored in raw '\n        '%s counts. Rq reported in raw z-units, Rq_z_calibrated=false, '\n        'and Rq EXCLUDED from cross-concentration comparison.' % raw_dtype)\n\n# ---------------------------------------------------------------\n# 2. AFM preprocessing: per-row median leveling\n# ---------------------------------------------------------------\nrow_med = np.median(img, axis=1, keepdims=True)\nleveled = img - row_med\nleveled = leveled - np.median(leveled)\n\n# ---------------------------------------------------------------\n# 3. Resolve pixel size via FOV (verified-scale). Fall back to\n#    assumed 20 nm FOV if genuinely unavailable, and FLAG scale.\n# ---------------------------------------------------------------\npx = resolve_pixel_size_nm(metadata, leveled.shape)\nfov_recovered_flag = False\nif px is None:\n    assumed_fov_nm = 20.0\n    nm_per_px_x = assumed_fov_nm / leveled.shape[1]\n    nm_per_px_y = assumed_fov_nm / leveled.shape[0]\n    px_source = 'assumed_fov_20nm_fallback'\n    scale_uncertain_flag = True\n    adjustments.append(\n        'resolve_pixel_size_nm returned None (no metadata/FOV available); '\n        'assumed FOV=20 nm -> %.4f nm/px. ALL nm-valued metrics flagged '\n        'scale-uncertain and also reported in px.' % nm_per_px_x)\nelse:\n    nm_per_px_x = float(px['x'])\n    nm_per_px_y = float(px.get('y', px['x']))\n    px_source = 'metadata'\n    fov_recovered_flag = True\n    scale_uncertain_flag = False\n    adjustments.append(\n        'Recovered FOV/pixel size from metadata (source=%s): x=%.4f y=%.4f nm/px.'\n        % (px.get('source', 'metadata'), nm_per_px_x, nm_per_px_y))\n\n# ---------------------------------------------------------------\n# 4. Square-pixel resample via FOV\n# ---------------------------------------------------------------\naniso_ratio = nm_per_px_y / nm_per_px_x if nm_per_px_x > 0 else 1.0\nif abs(aniso_ratio - 1.0) > 1e-3:\n    target_nm = min(nm_per_px_x, nm_per_px_y)\n    ny0, nx0 = leveled.shape\n    zoom_y = nm_per_px_y / target_nm\n    zoom_x = nm_per_px_x / target_nm\n    square = ndi.zoom(leveled, (zoom_y, zoom_x), order=1)\n    nm_per_px = float(target_nm)\n    adjustments.append(\n        'Anisotropic pixels (x=%.4f, y=%.4f nm/px); resampled via FOV to '\n        'square pixels at %.4f nm/px (shape %s -> %s).' % (\n            nm_per_px_x, nm_per_px_y, nm_per_px, (ny0, nx0), square.shape))\nelse:\n    square = leveled\n    nm_per_px = float(nm_per_px_x)\n\n# ---------------------------------------------------------------\n# 4b. Mild detrend + light smoothing prior to autocorrelation.\n#     Subtract a low-order polynomial background plane, then a light\n#     Gaussian sized relative to pixel_size to suppress single-pixel\n#     noise WITHOUT washing out corrugation (~1-2 1/nm).\n# ---------------------------------------------------------------\nny, nx = square.shape\nyy0, xx0 = np.mgrid[0:ny, 0:nx].astype(np.float64)\nyn = (yy0 - ny / 2.0) / (ny / 2.0)\nxn = (xx0 - nx / 2.0) / (nx / 2.0)\n# 2nd-order polynomial background\nA = np.column_stack([\n    np.ones(square.size), xn.ravel(), yn.ravel(),\n    (xn * xn).ravel(), (yn * yn).ravel(), (xn * yn).ravel()])\ncoef, *_ = np.linalg.lstsq(A, square.ravel(), rcond=None)\nbackground = (A @ coef).reshape(square.shape)\ndetr = square - background\n# light Gaussian: aim ~0.15 nm sigma (well below atomic spacing) but >= ~0.6 px\nsmooth_sigma_px = max(0.6, 0.15 / nm_per_px) if nm_per_px > 0 else 0.8\ndetr_sm = ndi.gaussian_filter(detr, sigma=smooth_sigma_px)\nadjustments.append(\n    'Detrend: subtracted 2nd-order polynomial background; light Gaussian '\n    'smooth sigma=%.2f px (~%.3f nm) before autocorrelation.'\n    % (smooth_sigma_px, smooth_sigma_px * nm_per_px))\n\n# ---------------------------------------------------------------\n# 5. Nyquist gate on target d_range for atomic/quasi-atomic lattice.\n#    Only AUTHORIZE sub-nm reflection search when scale is metadata;\n#    on fallback scale still run but tag results scale-conditional.\n# ---------------------------------------------------------------\nd_range = (0.15, 2.0)  # nm target periodicity\nnyquist_d = 2.0 * nm_per_px\nresolvable = nyquist_d < d_range[1]\nsub_nm_authorized = (px_source == 'metadata')\n\n# ---------------------------------------------------------------\n# 6. Streak-collinearity check (avoid mapping scan-streak artifacts)\n# ---------------------------------------------------------------\nwin = np.outer(np.hanning(ny), np.hanning(nx))\nF = np.fft.fftshift(np.fft.fft2(detr * win))\nP = np.abs(F) ** 2\ncy, cx = np.array(P.shape) // 2\nrow_band = P[cy, :].sum() - P[cy, cx]\ncol_band = P[:, cx].sum() - P[cy, cx]\ntotal_offdc = P.sum() - P[cy, cx]\nstreak_frac = float(max(row_band, col_band) / (total_offdc + 1e-12))\nstreak_collinear = streak_frac > 0.5\n\n# ---------------------------------------------------------------\n# 7. fourier_reflection_map if gates pass (do not force spots).\n#    Report legitimate null if only diffuse lobe + streak.\n# ---------------------------------------------------------------\nrefl_result = None\nreflection_null_flag = None\namplitude_map = None\ndomain_mask = None\nrefl_features = {\n    'reflection_d_nm': None, 'reflection_sigma': None,\n    'spot_snr': None, 'spot_snr_bulk': None,\n    'domain_fraction': None, 'strongest_satellite_d_nm': None,\n    'n_reflections_detected': 0,\n}\n\nif resolvable and not streak_collinear:\n    try:\n        refl_result = fourier_reflection_map(\n            square, pixel_size_nm=nm_per_px,\n            params={'d_range': d_range, 'min_sigma': 3.0})\n    except Exception as e:\n        adjustments.append('fourier_reflection_map failed: %s' % repr(e))\n        refl_result = None\nelse:\n    reason = []\n    if not resolvable:\n        reason.append('target d_range below Nyquist (nm/px=%.4f)' % nm_per_px)\n    if streak_collinear:\n        reason.append('FFT dominated by axis-collinear scan streak (frac=%.2f)' % streak_frac)\n    adjustments.append('Skipped fourier_reflection_map: ' + '; '.join(reason))\n\nif refl_result is not None and 'note' not in refl_result and \\\n        refl_result.get('amplitude_map') is not None:\n    amplitude_map = np.asarray(refl_result['amplitude_map'])\n    domain_mask = np.asarray(refl_result.get('domain_mask'))\n    reflections = refl_result.get('reflections', [])\n    mapped_d = refl_result.get('mapped_d_nm')\n    top_sigma = reflections[0]['sigma'] if reflections else None\n    reflection_null_flag = False\n    refl_features = {\n        'reflection_d_nm': float(mapped_d) if mapped_d is not None else None,\n        'reflection_sigma': float(top_sigma) if top_sigma is not None else None,\n        'spot_snr': float(refl_result.get('spot_snr_domain'))\n            if refl_result.get('spot_snr_domain') is not None else None,\n        'spot_snr_bulk': float(refl_result.get('spot_snr_bulk'))\n            if refl_result.get('spot_snr_bulk') is not None else None,\n        'domain_fraction': float(refl_result.get('domain_fraction'))\n            if refl_result.get('domain_fraction') is not None else None,\n        'strongest_satellite_d_nm': (float(refl_result['strongest_satellite_d_nm'])\n            if refl_result.get('strongest_satellite_d_nm') is not None else None),\n        'n_reflections_detected': int(len(reflections)),\n    }\n    if sub_nm_authorized:\n        adjustments.append(\n            'fourier_reflection_map: %d reflection(s); mapped d=%s nm sigma=%s '\n            '(scale from metadata).' % (\n                len(reflections),\n                ('%.3f' % refl_features['reflection_d_nm']) if refl_features['reflection_d_nm'] else 'NA',\n                ('%.1f' % refl_features['reflection_sigma']) if refl_features['reflection_sigma'] else 'NA'))\n    else:\n        adjustments.append(\n            'fourier_reflection_map ran on FALLBACK scale (px_source=%s): '\n            'reflection results are SCALE-CONDITIONAL; d_nm values are '\n            'scale-uncertain.' % px_source)\nelse:\n    # Legitimate null: only diffuse lobe + streak, no discrete spot.\n    if refl_result is not None and 'note' in refl_result:\n        adjustments.append('fourier_reflection_map (legitimate null): ' + str(refl_result.get('note')))\n        reflection_null_flag = True\n    elif refl_result is not None:\n        reflection_null_flag = True\n    # if refl_result is None because gate skipped, leave null_flag None\n\n# ---------------------------------------------------------------\n# 8. ALWAYS: radial PSD. Extract BOTH the low-frequency envelope\n#    length (large-scale height undulation) AND the mid-frequency\n#    (~1-2 1/nm) corrugation peak wavelength / amplitude / width.\n# ---------------------------------------------------------------\nyy, xx = np.indices((ny, nx))\nr = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)\nr_int = r.astype(int)\npsd_sum = np.bincount(r_int.ravel(), weights=P.ravel())\npsd_cnt = np.bincount(r_int.ravel())\nradial_psd = psd_sum / np.maximum(psd_cnt, 1)\nfreq_px = np.arange(len(radial_psd))\nkmax = min(len(radial_psd), ny // 2)\n# spatial frequency (1/nm) for each radial bin\nfreq_inv_nm = (freq_px / float(ny)) / nm_per_px if nm_per_px > 0 else freq_px * 0.0\n\n# --- low-frequency envelope length: dominant peak in low-freq band\n# (exclude DC r<2). Low-freq band = below ~0.5 1/nm (large undulation).\nlow_search = radial_psd.copy().astype(np.float64)\nlow_search[:2] = 0\nlow_band_mask = np.zeros(len(radial_psd), dtype=bool)\nlow_band_mask[2:kmax] = freq_inv_nm[2:kmax] < 0.5\nlow_search[~low_band_mask] = 0\nlow_freq_envelope_length_nm = None\nif low_search.max() > 0:\n    lpk = int(np.argmax(low_search))\n    fnm = freq_inv_nm[lpk]\n    if fnm > 0:\n        low_freq_envelope_length_nm = float(1.0 / fnm)\n\n# --- mid-frequency corrugation peak in ~1-2 1/nm band ---\nmid_lo, mid_hi = 1.0, 2.0  # 1/nm\nmid_band_mask = np.zeros(len(radial_psd), dtype=bool)\nmid_band_mask[2:kmax] = (freq_inv_nm[2:kmax] >= mid_lo) & (freq_inv_nm[2:kmax] <= mid_hi)\nmid_freq_peak_wavelength_nm = None\nmid_freq_peak_amplitude = None\nmid_freq_peak_width = None\nif mid_band_mask.any():\n    band_idx = np.where(mid_band_mask)[0]\n    band_psd = radial_psd[band_idx]\n    # local background: median of the mid band, subtracted for amplitude\n    bg = float(np.median(band_psd))\n    pk_rel = int(np.argmax(band_psd))\n    pk_idx = int(band_idx[pk_rel])\n    fnm_pk = freq_inv_nm[pk_idx]\n    if fnm_pk > 0:\n        mid_freq_peak_wavelength_nm = float(1.0 / fnm_pk)\n    mid_freq_peak_amplitude = float(band_psd[pk_rel] - bg)\n    # width: FWHM in 1/nm around the peak (half-prominence crossing)\n    peak_val = float(band_psd[pk_rel])\n    half = bg + 0.5 * (peak_val - bg)\n    # walk left/right within full spectrum from pk_idx\n    li = pk_idx\n    while li > 2 and radial_psd[li] > half:\n        li -= 1\n    ri = pk_idx\n    while ri < kmax - 1 and radial_psd[ri] > half:\n        ri += 1\n    if ri > li:\n        mid_freq_peak_width = float(abs(freq_inv_nm[ri] - freq_inv_nm[li]))\n\n# corrugation length = mid-frequency peak wavelength (scale-appropriate)\ncorrugation_wavelength_nm = mid_freq_peak_wavelength_nm\n\n# ---------------------------------------------------------------\n# 9. ALWAYS: autocorrelation correlation length (on detrended+smoothed).\n#    Validate against BOTH pixel size and the mid-freq PSD peak;\n#    reject correlation lengths that collapse to ~1 px as noise.\n# ---------------------------------------------------------------\nf = detr_sm - detr_sm.mean()\nac = np.fft.ifft2(np.abs(np.fft.fft2(f)) ** 2).real\nac = np.fft.fftshift(ac)\nac /= ac.max()\nac_sum = np.bincount(r_int.ravel(), weights=ac.ravel())\nac_rad = ac_sum / np.maximum(psd_cnt, 1)\nthr = 1.0 / np.e\ncorr_len_px = None\nfor rr in range(1, min(len(ac_rad), ny // 2)):\n    if ac_rad[rr] < thr:\n        a0, a1 = ac_rad[rr - 1], ac_rad[rr]\n        frac = (a0 - thr) / (a0 - a1 + 1e-12)\n        corr_len_px = (rr - 1) + frac\n        break\n\ncorrelation_length_in_px = float(corr_len_px) if corr_len_px is not None else None\ncorrelation_length_nm = (float(corr_len_px * nm_per_px)\n                         if corr_len_px is not None else None)\n# noise gate: collapse to ~1 px means pixel-noise-limited, not real order\ncorrelation_length_noise_flag = bool(\n    corr_len_px is not None and corr_len_px <= 1.5)\nif correlation_length_noise_flag:\n    adjustments.append(\n        'Correlation length collapsed to ~%.2f px (<=1.5 px): flagged as '\n        'pixel-noise-limited, NOT genuine atomic order.' % corr_len_px)\n# cross-check against mid-freq PSD peak wavelength\nif (correlation_length_nm is not None and corrugation_wavelength_nm is not None\n        and not correlation_length_noise_flag):\n    ratio = correlation_length_nm / corrugation_wavelength_nm\n    adjustments.append(\n        'Correlation length %.3f nm vs mid-freq corrugation wavelength '\n        '%.3f nm (ratio=%.2f).' % (correlation_length_nm,\n                                   corrugation_wavelength_nm, ratio))\n\n# ---------------------------------------------------------------\n# 10. ALWAYS: RMS roughness Rq. Calibrate z to nm if metadata present;\n#     else keep raw z-units and EXCLUDE from cross-concentration.\n# ---------------------------------------------------------------\nrq_raw = float(np.sqrt(np.mean((square - square.mean()) ** 2)))\nif Rq_z_calibrated:\n    Rq_nm = float(rq_raw * abs(z_scale))\n    rq_units = z_units or 'nm'\n    adjustments.append('Rq z-calibrated: Rq=%.4g %s.' % (Rq_nm, rq_units))\nelse:\n    Rq_nm = float(rq_raw)  # raw z-units\n    rq_units = z_units or ('raw %s counts' % raw_dtype)\n    adjustments.append('Rq in raw z-units (%s); excluded from cross-conc comparison.' % rq_units)\n\n# ---------------------------------------------------------------\n# 11. ALWAYS: coverage fraction (Otsu on leveled surface)\n# ---------------------------------------------------------------\nfrom skimage.filters import threshold_otsu\nfrom skimage.measure import label, regionprops\n\nsm = ndi.gaussian_filter(square, sigma=1.0)\ntry:\n    t = threshold_otsu(sm)\nexcept Exception:\n    t = np.median(sm)\npatch_mask = sm > t\npatch_mask = ndi.binary_opening(patch_mask, iterations=1)\ncoverage = float(patch_mask.mean())\nlbl = label(patch_mask)\nprops = regionprops(lbl)\nif props:\n    areas_px = np.array([p.area for p in props])\n    eq_diam_nm = np.array([2.0 * np.sqrt(a / np.pi) for a in areas_px]) * nm_per_px\n    mean_patch_size_nm = float(np.mean(eq_diam_nm))\n    n_patches = int(len(props))\nelse:\n    mean_patch_size_nm = None\n    n_patches = 0\n\n# ---------------------------------------------------------------\n# 12. Save arrays\n# ---------------------------------------------------------------\nnp.save('leveled_image.npy', square.astype(np.float32))\nnp.save('detrended_smoothed.npy', detr_sm.astype(np.float32))\nnp.save('patch_mask.npy', patch_mask.astype(np.uint8))\nsaved = {\n    'leveled_image.npy': {\n        'description': 'Per-row median leveled AFM topography (square pixels).',\n        'shape': list(square.shape), 'dtype': 'float32'},\n    'detrended_smoothed.npy': {\n        'description': 'Polynomial-detrended + light-Gaussian-smoothed surface used for autocorrelation.',\n        'shape': list(detr_sm.shape), 'dtype': 'float32'},\n    'patch_mask.npy': {\n        'description': 'Binary Otsu coverage mask (1=elevated patch, 0=background).',\n        'shape': list(patch_mask.shape), 'dtype': 'uint8'},\n}\nif amplitude_map is not None:\n    np.save('reflection_amplitude_map.npy', amplitude_map.astype(np.float32))\n    saved['reflection_amplitude_map.npy'] = {\n        'description': 'fourier_reflection_map amplitude map of the mapped lattice reflection.',\n        'shape': list(amplitude_map.shape), 'dtype': 'float32'}\nif domain_mask is not None:\n    np.save('reflection_domain_mask.npy', domain_mask.astype(np.uint8))\n    saved['reflection_domain_mask.npy'] = {\n        'description': 'Null-gated ordered-lattice domain mask from fourier_reflection_map.',\n        'shape': list(domain_mask.shape), 'dtype': 'uint8'}\n\n# ---------------------------------------------------------------\n# 13. Visualization (headline result in visualization.png)\n# ---------------------------------------------------------------\nfig, axes = plt.subplots(2, 3, figsize=(15, 10))\n\naxes[0, 0].imshow(img, cmap='afmhot')\naxes[0, 0].set_title('Original AFM (raw ch0)')\naxes[0, 0].axis('off')\n\naxes[0, 1].imshow(square, cmap='afmhot')\naxes[0, 1].set_title('Row-leveled topography (%.4f nm/px, %s)' % (nm_per_px, px_source))\naxes[0, 1].axis('off')\n\naxes[0, 2].imshow(np.log1p(P), cmap='inferno')\naxes[0, 2].set_title('FFT power (log)\\nstreak_frac=%.2f' % streak_frac)\naxes[0, 2].axis('off')\n\n# radial PSD with low-freq envelope + mid-freq corrugation markers\nvalid = np.arange(1, kmax)\naxes[1, 0].loglog(np.maximum(freq_inv_nm[valid], 1e-6),\n                  np.maximum(radial_psd[valid], 1e-12), color='k', lw=0.8)\naxes[1, 0].axvspan(mid_lo, mid_hi, color='orange', alpha=0.15, label='mid band 1-2 1/nm')\nif low_freq_envelope_length_nm:\n    axes[1, 0].axvline(1.0 / low_freq_envelope_length_nm, color='b', ls='--',\n                       label='envelope L=%.2f nm' % low_freq_envelope_length_nm)\nif corrugation_wavelength_nm:\n    axes[1, 0].axvline(1.0 / corrugation_wavelength_nm, color='r', ls='--',\n                       label='corrugation lam=%.3f nm' % corrugation_wavelength_nm)\naxes[1, 0].set_xlabel('spatial freq (1/nm)')\naxes[1, 0].set_ylabel('radial PSD')\naxes[1, 0].set_title('Radial PSD: envelope vs corrugation')\naxes[1, 0].legend(fontsize=7)\n\n# reflection amplitude map or legitimate-null note\nif amplitude_map is not None:\n    axes[1, 1].imshow(amplitude_map, cmap='viridis')\n    ttl = 'Reflection amplitude\\nd=%s nm, sigma=%s%s' % (\n        ('%.3f' % refl_features['reflection_d_nm']) if refl_features['reflection_d_nm'] else 'NA',\n        ('%.1f' % refl_features['reflection_sigma']) if refl_features['reflection_sigma'] else 'NA',\n        '' if sub_nm_authorized else ' (scale-cond.)')\n    axes[1, 1].set_title(ttl)\n    axes[1, 1].axis('off')\nelse:\n    msg = ('Legitimate reflection null\\n(diffuse lobe + streak,\\nno discrete spot)'\n           if reflection_null_flag else 'Reflection search skipped\\n(gate: Nyquist/streak)')\n    axes[1, 1].text(0.5, 0.5, msg, ha='center', va='center')\n    axes[1, 1].set_title('Reflection map')\n    axes[1, 1].axis('off')\n\n# coverage overlay\naxes[1, 2].imshow(square, cmap='gray')\nax_ov = np.zeros((*patch_mask.shape, 4))\nax_ov[patch_mask] = [1, 0, 0, 0.35]\naxes[1, 2].imshow(ax_ov)\naxes[1, 2].contour(patch_mask, colors='yellow', linewidths=0.5)\naxes[1, 2].set_title('Coverage=%.2f, n=%d' % (coverage, n_patches))\naxes[1, 2].axis('off')\n\nplt.tight_layout()\nplt.savefig('visualization.png', dpi=100)\nplt.close()\n\n# Full-resolution verifier panels\nfig2, ax2 = plt.subplots(figsize=(6, 6))\nvalid = np.arange(1, kmax)\nax2.loglog(np.maximum(freq_inv_nm[valid], 1e-6),\n           np.maximum(radial_psd[valid], 1e-12), color='k', lw=0.9)\nax2.axvspan(mid_lo, mid_hi, color='orange', alpha=0.15)\nif low_freq_envelope_length_nm:\n    ax2.axvline(1.0 / low_freq_envelope_length_nm, color='b', ls='--',\n                label='envelope L=%.2f nm' % low_freq_envelope_length_nm)\nif corrugation_wavelength_nm:\n    ax2.axvline(1.0 / corrugation_wavelength_nm, color='r', ls='--',\n                label='corrugation lam=%.3f nm' % corrugation_wavelength_nm)\nax2.set_xlabel('spatial freq (1/nm)'); ax2.set_ylabel('radial PSD')\nax2.set_title('Radial PSD (full res)'); ax2.legend(fontsize=8)\nplt.tight_layout(); plt.savefig('verifier_panel_radial_psd.png', dpi=100); plt.close()\n\nif amplitude_map is not None:\n    fig3, ax3 = plt.subplots(figsize=(6, 6))\n    im3 = ax3.imshow(amplitude_map, cmap='viridis')\n    ax3.set_title('Reflection amplitude map (d=%s nm)'\n                  % (('%.3f' % refl_features['reflection_d_nm'])\n                     if refl_features['reflection_d_nm'] else 'NA'))\n    ax3.axis('off'); plt.colorbar(im3, ax=ax3, fraction=0.046)\n    plt.tight_layout(); plt.savefig('verifier_panel_reflection_amplitude.png', dpi=100); plt.close()\n\n# ---------------------------------------------------------------\n# 14. Results JSON\n# ---------------------------------------------------------------\nextracted = {\n    'pixel_size_nm': float(nm_per_px),\n    'pixel_size_nm_x_raw': float(nm_per_px_x),\n    'pixel_size_nm_y_raw': float(nm_per_px_y),\n    'pixel_size_source': px_source,\n    'fov_recovered_flag': bool(fov_recovered_flag),\n    'scale_uncertain_flag': bool(scale_uncertain_flag),\n    'nyquist_d_nm': float(nyquist_d),\n    'target_d_range_nm': list(d_range),\n    'nyquist_resolvable': bool(resolvable),\n    'sub_nm_reflection_authorized': bool(sub_nm_authorized),\n    'streak_collinear': bool(streak_collinear),\n    'streak_fraction': float(streak_frac),\n    'Rq_nm': float(Rq_nm),\n    'Rq_units': rq_units,\n    'Rq_z_calibrated': bool(Rq_z_calibrated),\n    'reflection_d_nm': refl_features['reflection_d_nm'],\n    'reflection_sigma': refl_features['reflection_sigma'],\n    'spot_snr': refl_features['spot_snr'],\n    'spot_snr_bulk': refl_features['spot_snr_bulk'],\n    'domain_fraction': refl_features['domain_fraction'],\n    'reflection_null_flag': (bool(reflection_null_flag)\n                             if reflection_null_flag is not None else None),\n    'strongest_satellite_d_nm': refl_features['strongest_satellite_d_nm'],\n    'n_reflections_detected': refl_features['n_reflections_detected'],\n    'radial_psd_low_freq_envelope_length_nm': (float(low_freq_envelope_length_nm)\n        if low_freq_envelope_length_nm is not None else None),\n    'radial_psd_mid_freq_peak_wavelength_nm': (float(mid_freq_peak_wavelength_nm)\n        if mid_freq_peak_wavelength_nm is not None else None),\n    'mid_freq_peak_amplitude': (float(mid_freq_peak_amplitude)\n        if mid_freq_peak_amplitude is not None else None),\n    'mid_freq_peak_width': (float(mid_freq_peak_width)\n        if mid_freq_peak_width is not None else None),\n    'correlation_length_nm': correlation_length_nm,\n    'correlation_length_in_px': correlation_length_in_px,\n    'correlation_length_noise_flag': bool(correlation_length_noise_flag),\n    'coverage': coverage,\n    'mean_patch_size_nm': mean_patch_size_nm,\n    'n_patches': n_patches,\n}\n\nquality = {\n    'reflection_map_run': bool(amplitude_map is not None),\n    'reflection_null_flag': (bool(reflection_null_flag)\n                             if reflection_null_flag is not None else None),\n    'spot_snr_domain_gt_bulk': (\n        bool(refl_features['spot_snr'] is not None and\n             refl_features['spot_snr_bulk'] is not None and\n             refl_features['spot_snr'] > 3.0 * refl_features['spot_snr_bulk'])\n        if refl_features['spot_snr'] is not None else None),\n    'n_reflections_detected': refl_features['n_reflections_detected'],\n    'scale_valid_for_cross_conc': bool(px_source == 'metadata'),\n    'Rq_valid_for_cross_conc': bool(Rq_z_calibrated),\n    'correlation_length_noise_flag': bool(correlation_length_noise_flag),\n}\n\nlattice_present = bool(refl_features['reflection_d_nm'] is not None and\n                       refl_features['reflection_sigma'] is not None and\n                       refl_features['reflection_sigma'] >= 3.0)\nsummary = (\n    'Row-leveled AFM at %.4f nm/px (source=%s, scale_uncertain=%s). '\n    'Reflection: %s. Corrugation (mid-freq PSD) lam=%s nm (amp=%s, width=%s 1/nm); '\n    'low-freq envelope L=%s nm. Correlation length=%s nm (%s px, noise_flag=%s). '\n    'Rq=%.3g %s (z_calibrated=%s). Coverage=%.2f. '\n    'Parameter adjustments: detrend=2nd-order poly + Gaussian sigma=%.2f px before '\n    'autocorr; mid-freq band 1-2 1/nm; corr-noise gate at 1.5 px; reflection search '\n    'tagged scale-conditional on fallback FOV. %s' % (\n        nm_per_px, px_source, scale_uncertain_flag,\n        ('present d=%.3f nm sigma=%.1f%s' % (\n            refl_features['reflection_d_nm'], refl_features['reflection_sigma'],\n            '' if sub_nm_authorized else ' [scale-conditional]'))\n            if lattice_present else\n            ('legitimate null (diffuse lobe + streak)' if reflection_null_flag\n             else 'not resolvable/skipped'),\n        ('%.3f' % corrugation_wavelength_nm) if corrugation_wavelength_nm else 'NA',\n        ('%.3g' % mid_freq_peak_amplitude) if mid_freq_peak_amplitude is not None else 'NA',\n        ('%.3f' % mid_freq_peak_width) if mid_freq_peak_width is not None else 'NA',\n        ('%.2f' % low_freq_envelope_length_nm) if low_freq_envelope_length_nm else 'NA',\n        ('%.3f' % correlation_length_nm) if correlation_length_nm else 'NA',\n        ('%.2f' % correlation_length_in_px) if correlation_length_in_px else 'NA',\n        correlation_length_noise_flag,\n        Rq_nm, rq_units, Rq_z_calibrated, coverage, smooth_sigma_px,\n        ' | '.join(adjustments) if adjustments else 'none'))\n\nresults = {\n    'analysis_type': ('AFM row-leveling + z-calibration + verified-scale square-pixel '\n                      'resampling + polynomial detrend/light-smooth + Nyquist/streak-gated '\n                      'fourier_reflection_map (legitimate-null aware) + radial PSD split into '\n                      'low-freq envelope vs mid-freq corrugation + noise-gated autocorrelation '\n                      'correlation length + z-gated Rq + coverage.'),\n    'extracted_features': extracted,\n    'quality_metrics': quality,\n    'summary': summary,\n    'saved_arrays': saved,\n}\nprint('IMAGE_ANALYSIS_RESULTS_JSON:' + json.dumps(results))\n",
+      "script_errors": [],
+      "reuse_validity": {
+        "reused": true,
+        "source": "image_series",
+        "quality_score": 0.43,
+        "score_votes": [
+          0.42,
+          0.43,
+          0.48
+        ],
+        "threshold": 0.7,
+        "verdict": "poor",
+        "message": "Reused the locked analysis script from prior run 'image_series', but vision verification scored 0.43, below the threshold 0.7. The new image may not belong to this series, or imaging conditions shifted. Extracted features are schema-consistent but should be treated as low-confidence."
+      },
+      "quality_history": {
+        "final_score": 0.43,
+        "threshold": 0.7,
+        "approved": false,
+        "verification_iterations": [
+          {
+            "score": 0.42,
+            "result_type": "delivered",
+            "annealing_level": 0,
+            "issues": [
+              {
+                "location": "Rq / roughness reporting (Rq_nm field)",
+                "problem": "Rq is reported as 5935.78 in raw z-units with Rq_z_calibrated=false and Rq_units='z-units'. The plan required Rq in pm, physically plausible for near-atomically-flat mica (sub-nm, on the order of the ~6 pm z-range). A dimensionless/dtype value orders of magnitude off (~5900 vs expected ~few pm) is exactly the broken-unit-mapping bug the domain criteria say to flag."
+              },
+              {
+                "location": "fourier_reflection_map result (reflection_d_nm=0.490 nm, sigma=3.24)",
+                "problem": "A 'periodic reflection' at 0.49 nm is reported as detected (n_reflections_detected=15, null_flag=false), but the raw and leveled images show only isotropic granular texture with no lattice, and the FFT power panel shows only a vertical streak (slow-scan/1D scan artifact) with no discrete Bragg spots. The 'reflection amplitude' map is a smooth low-frequency blob field, not a localized discrete-spot domain. This is almost certainly noise/scan-texture passing a marginal 3.2-sigma floor, not a real mica lattice (mica's ~0.52 nm surface lattice would appear as symmetric hexagonal spots, not a diffuse blob)."
+              },
+              {
+                "location": "Segmentation panel (Coverage=0.55, n=109 patches)",
+                "problem": "The 109-patch domain segmentation with coverage 0.55 is a threshold of a diffuse amplitude/texture field, not a physically meaningful domain census. Given the reflection itself is dubious, these 'patches' likely trace noise contours."
+              },
+              {
+                "location": "FFT power panel / residual streaks",
+                "problem": "The vertical streak in the FFT (and residual horizontal banding still visible in the leveled topography) indicates row-median leveling did not fully suppress scan-line structure; streak_fraction=0.04 is low but the dominant FFT feature is still the scan-direction streak."
+              }
+            ],
+            "tools_used": [],
+            "fix_applied": "Fix the z-to-pm calibration and report Rq in pm; then tighten the reflection significance gate (min_sigma 4-5 + require discrete spot_snr_domain >> bulk) so the analysis either confirms a real lattice or reports the legitimate 'no resolvable lattice at 10 mM' null."
+          },
+          {
+            "score": 0.48,
+            "result_type": "delivered",
+            "annealing_level": 0,
+            "issues": [
+              {
+                "location": "Rq_nm feature / z-calibration",
+                "problem": "Rq is reported as 5935.78 in 'z-units' with Rq_z_calibrated=false \u2014 the z\u2192pm mapping was NOT applied. The planned quality criterion required Rq in pm and physically plausible (sub-nm, on the order of the ~6 pm z-range). The reported value is a raw dtype number, not a physical roughness."
+              },
+              {
+                "location": "fourier_reflection_map result (reflection_d_nm=0.490 nm, sigma=3.24)",
+                "problem": "The claimed 'resolvable lattice/reflection' at 0.49 nm is not credible given the data. The raw and leveled images show no periodic lattice \u2014 only speckle/blob texture and residual horizontal scan striping (visible as the vertical streak in the FFT). Mica lattice spacing (~0.52 nm) is near the claimed value, but the sigma (3.24) is barely above the min_sigma=3.0 floor and the FFT power panel shows NO discrete Bragg spots \u2014 only a central cross/streak from row correlation and a broad radial falloff."
+              },
+              {
+                "location": "FFT / row leveling",
+                "problem": "The FFT power panel still shows a pronounced vertical streak, indicating residual row-to-row correlation (horizontal scan striping) survived per-row median leveling. This anisotropy can seed spurious mid-frequency PSD structure and inflate reflection detection."
+              },
+              {
+                "location": "PSD peak amplitude reporting",
+                "problem": "mid_freq_peak_amplitude=1.15e13 is a raw dimensionless PSD value tied to the uncalibrated z-units; because z was never mapped to pm, all PSD amplitudes are on an arbitrary scale."
+              }
+            ],
+            "tools_used": [],
+            "fix_applied": "Apply the data_range\u2192pm z-calibration before computing Rq/PSD (report Rq in pm), escalate row leveling to per-row polynomial to remove the residual FFT streak, and raise fourier_reflection_map min_sigma to ~4-5 so the marginal 0.49 nm peak either clears a real bar or is reported as 'no resolvable lattice at 10 mM'."
+          },
+          {
+            "score": 0.43,
+            "result_type": "delivered",
+            "annealing_level": 0,
+            "issues": [
+              {
+                "location": "Rq metric (global roughness)",
+                "problem": "Rq reported as 5935.78 in 'z-units' with Rq_z_calibrated=false. The z-calibration to pm FAILED \u2014 the whole plan hinges on mapping z through the data_range (-309.5 to -315.5 pm, a ~6 pm range) so Rq should be sub-nm, on the order of a few pm. Instead a raw dtype value (~5936, i.e. uncalibrated 16-bit counts) is reported. This is exactly the 'dimensionless dtype value in place of a physical quantity' bug the criteria forbid."
+              },
+              {
+                "location": "fourier_reflection_map reflection at d=0.490 nm",
+                "problem": "The tool returns a 'significant' reflection (sigma=3.24) and a smooth, blobby amplitude map, but the mica surface in 10 mM KCl is visibly featureless/amorphous-looking in both raw and leveled images \u2014 no periodic lattice is discernible by eye. The FFT power panel shows ONLY a strong vertical streak (residual scan-line correlation), NOT discrete Bragg spots. The 0.49 nm 'reflection' most plausibly reflects the row-correlated streak/noise structure rather than the mica lattice (mica (100)-type spacings are ~0.52 nm, but the amplitude map here is a smooth low-frequency blob, not a discrete localized spot)."
+              },
+              {
+                "location": "Radial PSD mid-freq peak amplitude and correlation length",
+                "problem": "mid_freq_peak_amplitude reported as ~1.15e13 (raw uncalibrated PSD magnitude), consistent with the failed z-calibration \u2014 the PSD is computed on uncalibrated counts, so all amplitude-derived quantities are in arbitrary dtype^2 units, not pm^2/nm^2."
+              }
+            ],
+            "tools_used": [],
+            "fix_applied": "Fix the z-calibration by applying the data_range->pm mapping before computing Rq/PSD (report in pm), then escalate row leveling and mask the meridional FFT streak and re-run fourier_reflection_map \u2014 if the 0.49 nm spot does not survive, report a legitimate 'no resolvable lattice at 10 mM' null."
+          }
+        ],
+        "script_errors": [],
+        "judge_reasoning": null,
+        "score_explanation": null
+      },
+      "quality_warning": "Reused the locked analysis script from prior run 'image_series', but vision verification scored 0.43, below the threshold 0.7. The new image may not belong to this series, or imaging conditions shifted. Extracted features are schema-consistent but should be treated as low-confidence."
+    }
+  ]
+}

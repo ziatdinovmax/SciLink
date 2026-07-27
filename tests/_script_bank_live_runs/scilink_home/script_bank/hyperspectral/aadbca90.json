@@ -1,0 +1,114 @@
+{
+  "id": "aadbca90",
+  "domain": "hyperspectral",
+  "script_hash": "9179cd137cb480d8",
+  "created_at": "2026-07-11T03:16:23+00:00",
+  "sessions": [
+    "hyper_hit"
+  ],
+  "stats": {
+    "n_successes": 1,
+    "n_retrievals": 0
+  },
+  "technique_signals": {
+    "active_skills": [],
+    "analysis_target": "Form per-pixel transmission by dividing the primary datacube by the baseline_I0 flat-field operand, then compute ln(I0/I). Quantify the Bi K-edge jump at 90.5 keV with `measure_edge_step` (let it pick the robust pre/post windows and gate on flux; exclude energies below ~40 keV). This produces the edge-step map (Delta_mu_t) which both localizes the Bi coupon and serves as the areal-thickness proxy. Convert the measured edge jump to physical thickness using the tabulated Bi K-edge attenuation discontinuity obtained via the `attenuation` tool for element Bi (thickness = Delta_mu_t / Delta_mu_tab, with Bi density). Output the edge-jump map and the thickness map (in mm or cm). Mark pixels where the edge is not measurable as background/NaN."
+  },
+  "measurement_context": {
+    "experiment_type": "Spectroscopy",
+    "experiment.technique": "Spectral X-ray Imaging",
+    "experiment.date": null,
+    "experiment.instrument": "Hexitec spectral X-ray detector",
+    "experiment.details": "160 kVp bremsstrahlung X-ray source; Spatial resolution: 0.250 mm; Energy resolution: 0.2 keV; Energy bin width: 0.1 keV; 80 x 80 pixels; Ignore energies below 5 keV; 2048 energy bins from 0.1 to 204.8 keV; Data is in the form of a 3D array with dimensions (80, 80, 2048) corresponding to (x, y, ener",
+    "sample.material": "Bi",
+    "sample.description": "Bismuth coupon of unknown thickness; Task is to locate Bi and measure thickness; Look for Bi K-edge at 90.5 keV.",
+    "sample.title": "Spectral X-ray transmission imaging of Bi coupon",
+    "spatial_info.field_of_view_x": 20,
+    "spatial_info.field_of_view_y": 20,
+    "spatial_info.field_of_view_units": "mm",
+    "title": "Spectral X-ray transmission imaging of Bi coupon",
+    "data_columns": [
+      "{'name': 'Energy', 'units': 'keV'}",
+      "{'name': 'Counts', 'units': 'counts'}"
+    ],
+    "xlabel": "Energy (keV)",
+    "ylabel": "Counts",
+    "energy_range.start": 0.1,
+    "energy_range.end": 204.8,
+    "energy_range.units": "keV"
+  },
+  "data_fingerprint": {
+    "kind": "hyperspectral",
+    "shape": [
+      80,
+      80,
+      2048
+    ],
+    "axis": {
+      "units": "keV",
+      "start": 0.1,
+      "end": 204.8,
+      "n_channels": 2048
+    },
+    "band_means": [
+      0.148,
+      0.078,
+      0.118,
+      0.153,
+      0.228,
+      0.134,
+      0.078,
+      0.046,
+      0.029,
+      0.017,
+      0.009,
+      0.004,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "snr": 1000.0,
+    "peaks": {
+      "count": 4,
+      "top": [
+        {
+          "position": 1.8,
+          "fwhm": 0.7672,
+          "prominence": 1.656
+        },
+        {
+          "position": 59.7,
+          "fwhm": 3.0446,
+          "prominence": 0.89
+        },
+        {
+          "position": 67.6,
+          "fwhm": 1.605,
+          "prominence": 0.24
+        },
+        {
+          "position": 23.6,
+          "fwhm": 1.219,
+          "prominence": 0.077
+        }
+      ]
+    }
+  },
+  "outcome": {
+    "analysis_target": "Form per-pixel transmission by dividing the primary datacube by the baseline_I0 flat-field operand, then compute ln(I0/I). Quantify the Bi K-edge jump at 90.5 keV with `measure_edge_step` (let it pick the robust pre/post windows and gate on flux; exclude energies below ~40 keV). This produces the edge-step map (Delta_mu_t) which both localizes the Bi coupon and serves as the areal-thickness proxy. Convert the measured edge jump to physical thickness using the tabulated Bi K-edge attenuation discontinuity obtained via the `attenuation` tool for element Bi (thickness = Delta_mu_t / Delta_mu_tab, with Bi density). Output the edge-jump map and the thickness map (in mm or cm). Mark pixels where the edge is not measurable as background/NaN.",
+    "required_outputs": [
+      "Edge_Jump",
+      "Thickness"
+    ],
+    "metric": {
+      "name": "passed_fraction",
+      "value": 0.75
+    }
+  },
+  "provenance": {
+    "session": "hyper_hit",
+    "data_file": "coupon_radiography_Bi.npy"
+  },
+  "working_script": "def analyze_feature(data, axis, auxiliary=None):\n    from scilink.skills._shared.edge_step import measure_edge_step\n    from scilink.skills._shared.xray_attenuation import attenuation\n\n    # --- Shape handling ---\n    cube = np.asarray(data, dtype=float)\n    if cube.ndim == 2:\n        raise ValueError(\"Expected 3D cube (H,W,E)\")\n    H, W, E = cube.shape\n    energy = np.asarray(axis, dtype=float).ravel()\n\n    # --- I0 flat field ---\n    if auxiliary and \"baseline_I0\" in auxiliary and auxiliary[\"baseline_I0\"] is not None:\n        i0 = np.asarray(auxiliary[\"baseline_I0\"], dtype=float)\n    else:\n        i0 = np.median(cube.reshape(-1, E), axis=0)[None, None, :] * np.ones((H, W, 1))\n\n    # --- Clean: clip negatives/zeros, light spectral smoothing for stability ---\n    cube_clean = np.clip(cube, 0.0, None)\n    i0_clean = np.clip(i0, 1e-6, None)\n\n    # Mild spectral smoothing (broad K-edge step preserved)\n    cube_sm = gaussian_filter(cube_clean, sigma=(0, 0, 1.2))\n    i0_sm = gaussian_filter(i0_clean, sigma=(0, 0, 1.2))\n\n    # --- Bi K-edge nominal energy ---\n    edge_kev = 90.5\n\n    # --- Robust edge-step measurement via registered tool ---\n    # Exclude low-energy scatter/noise-dominated region below ~40 keV.\n    r = measure_edge_step(\n        cube_sm,\n        i0_sm,\n        energy,\n        edge_kev,\n        low_e_cut_kev=40.0,\n        auto_center=True,\n        search_tol_kev=2.0,\n    )\n\n    edge_step = np.asarray(r[\"edge_step\"], dtype=float)   # Delta(mu*t) per pixel\n    snr = np.asarray(r[\"snr\"], dtype=float)\n    measurable_field = bool(r[\"measurable\"])\n    edge_used = float(r.get(\"edge_kev_used\", edge_kev))\n\n    # --- Per-pixel measurability mask (SNR gate) ---\n    snr_thresh = 3.0\n    pixel_measurable = np.isfinite(snr) & (snr > snr_thresh) & np.isfinite(edge_step)\n\n    # --- Tabulated linear-attenuation jump for Bi across its K-edge ---\n    rho_bi = 9.78  # g/cm^3, standard density of bismuth\n    e_lo = np.array([edge_used - 1.0])\n    e_hi = np.array([edge_used + 1.0])\n    mu_lo = float(attenuation('Bi', e_lo, density=rho_bi)[0])   # 1/cm below edge\n    mu_hi = float(attenuation('Bi', e_hi, density=rho_bi)[0])   # 1/cm above edge\n    delta_mu_tab = mu_hi - mu_lo  # linear-attenuation jump (1/cm)\n\n    if delta_mu_tab <= 0 or not np.isfinite(delta_mu_tab):\n        delta_mu_tab = np.nan\n\n    # --- Convert edge jump (dimensionless mu*t) to thickness ---\n    edge_jump_map = edge_step.copy()\n    thickness_cm = edge_jump_map / delta_mu_tab\n    thickness_um = thickness_cm * 1e4  # cm -> um\n\n    # --- Mask off-coupon / non-measurable pixels as NaN ---\n    edge_jump_out = np.where(pixel_measurable, edge_jump_map, np.nan)\n    thickness_out = np.where(pixel_measurable, thickness_um, np.nan)\n\n    # Guard against non-physical negative values from noise\n    thickness_out = np.where(thickness_out < 0, np.nan, thickness_out)\n    edge_jump_out = np.where(edge_jump_out < 0, np.nan, edge_jump_out)\n\n    maps = {\n        \"Edge_Jump\": edge_jump_out.astype(float),\n        \"Thickness\": thickness_out.astype(float),\n        \"Edge_SNR\": snr.astype(float),\n        \"Measurable_Mask\": pixel_measurable.astype(float),\n    }\n\n    units = {\n        \"Edge_Jump\": \"a.u. (Delta mu*t, optical depth)\",\n        \"Thickness\": \"um\",\n        \"Edge_SNR\": \"a.u.\",\n        \"Measurable_Mask\": \"bool\",\n    }\n\n    description = (\n        \"Per-pixel transmission I/I0 was formed against the baseline_I0 flat field \"\n        \"and the K-edge step in optical depth ln(I0/I) at the Bi K-edge (~90.5 keV) \"\n        \"was measured per pixel with measure_edge_step (robust pre/post continuum \"\n        \"windows, flux gating, low-energy scatter region below ~40 keV excluded via \"\n        \"low_e_cut_kev). This yields Edge_Jump = Delta(mu*t), which localizes the Bi \"\n        \"coupon and serves as an areal-thickness proxy. Thickness is t = \"\n        \"Delta(mu*t)/Delta(mu_tab), where the tabulated linear-attenuation jump \"\n        \"Delta(mu_tab) for Bi across its K-edge is obtained from the attenuation() \"\n        \"tool at the standard Bi density (9.78 g/cm^3), converted to microns. \"\n        \"Pixels flagged non-measurable (SNR<3 / off-coupon background) are masked as NaN.\"\n    )\n\n    return {\"maps\": maps, \"units\": units, \"description\": description}"
+}

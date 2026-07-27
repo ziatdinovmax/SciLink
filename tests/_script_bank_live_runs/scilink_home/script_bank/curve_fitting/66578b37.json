@@ -1,0 +1,61 @@
+{
+  "id": "66578b37",
+  "domain": "curve_fitting",
+  "script_hash": "8e11e736fce0cf86",
+  "created_at": "2026-07-11T07:36:49+00:00",
+  "sessions": [
+    "cs_miss"
+  ],
+  "stats": {
+    "n_successes": 1,
+    "n_retrievals": 0
+  },
+  "technique_signals": {
+    "active_skills": [],
+    "model_type": "Biexponential decay with constant offset: I(t)=A1*exp(-t/tau1)+A2*exp(-t/tau2)+C"
+  },
+  "measurement_context": {
+    "technique": "time-resolved PL",
+    "description": "biexponential decay, x in ns"
+  },
+  "data_fingerprint": {
+    "kind": "curve",
+    "n_points": 1200,
+    "x_units": null,
+    "x_range": [
+      0.0,
+      500.0
+    ],
+    "snr": 393.5,
+    "peaks": {
+      "count": 0,
+      "top": []
+    },
+    "baseline": {
+      "drift": -0.722,
+      "median_level": 0.07
+    }
+  },
+  "outcome": {
+    "model_type": "Biexponential decay with constant offset: I(t)=A1*exp(-t/tau1)+A2*exp(-t/tau2)+C",
+    "metric": {
+      "name": "r_squared",
+      "value": 0.9998
+    },
+    "plan_summary": "Fit the full 0\u2013500 ns trace to a biexponential decay model (as stated in metadata) with a constant offset for background/dark counts. Extract two lifetimes and their amplitudes, then compute the amplitude-weighted average lifetime. No peak deconvolution is needed; this is a kinetics/decay analysis.",
+    "parameters_extracted": [
+      "A1 (fast amplitude)",
+      "tau1 (fast lifetime, ns)",
+      "A2 (slow amplitude)",
+      "tau2 (slow lifetime, ns)",
+      "C (baseline offset)",
+      "amplitude-weighted average lifetime tau_avg"
+    ]
+  },
+  "provenance": {
+    "session": "cs_miss",
+    "item": "trpl_decay",
+    "data_file": "trpl_decay.csv"
+  },
+  "working_script": "import numpy as np\nimport json\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom lmfit import Model\n\n# --- Load raw data ---\ndata = np.load('data.npy')\ndata = np.asarray(data)\nif data.ndim == 2:\n    if data.shape[0] == 2 and data.shape[1] != 2:\n        x = data[0].astype(float)\n        y = data[1].astype(float)\n    elif data.shape[1] == 2:\n        x = data[:, 0].astype(float)\n        y = data[:, 1].astype(float)\n    else:\n        x = data[0].astype(float)\n        y = data[1].astype(float)\nelse:\n    y = data.astype(float)\n    x = np.linspace(0, 500, y.size)\n\nx_raw = x.copy()\ny_raw = y.copy()\n\n# --- Preprocessing: PL intensity data, clip negatives to zero (noise) ---\ny = np.clip(y, 0, None)\n\n# --- Biexponential + constant offset model ---\ndef biexp(t, A1, tau1, A2, tau2, C):\n    return A1 * np.exp(-t / tau1) + A2 * np.exp(-t / tau2) + C\n\nmodel = Model(biexp)\nparams = model.make_params(A1=6.0, tau1=30.0, A2=4.0, tau2=150.0, C=0.2)\n\n# Constraints: all amplitudes/lifetimes/offset >= 0, enforce tau1 < tau2\nparams['A1'].set(min=0)\nparams['A2'].set(min=0)\nparams['C'].set(min=0)\nparams['tau1'].set(min=1e-6)\n# tau2 = tau1 + delta with delta > 0 to keep tau1 < tau2\nparams.add('dtau', value=120.0, min=1e-6)\nparams['tau2'].set(expr='tau1 + dtau')\n\n# Weighting by 1/sqrt(y) (Poisson-like); guard against zeros\nweights = 1.0 / np.sqrt(np.clip(y, 1e-6, None))\n\nresult = model.fit(y, params, t=x, weights=weights)\n\nfit_y = result.eval(t=x)\n\n# --- Fit quality over full domain ---\nresid = y - fit_y\nss_res = np.sum(resid**2)\nss_tot = np.sum((y - np.mean(y))**2)\nr_squared = 1.0 - ss_res / ss_tot if ss_tot > 0 else float('nan')\nrmse = np.sqrt(np.mean(resid**2))\n\n# --- Extract parameters ---\ndef gv(name):\n    p = result.params.get(name)\n    return (float(p.value) if p is not None and p.value is not None else float('nan'))\n\ndef ge(name):\n    p = result.params.get(name)\n    if p is not None and p.stderr is not None:\n        return float(p.stderr)\n    return None\n\nA1, tau1 = gv('A1'), gv('tau1')\nA2, tau2 = gv('A2'), gv('tau2')\nC = gv('C')\n\n# Amplitude-weighted average lifetime\ndenom = A1 + A2\ntau_avg = (A1 * tau1 + A2 * tau2) / denom if denom > 0 else float('nan')\n\n# --- Save fitted model at all N x-points ---\nfit_full = model.eval(result.params, t=x_raw)\nnp.save('fit.npy', np.asarray(fit_full, dtype=float))\n\n# --- Visualization ---\ncomp1 = A1 * np.exp(-x / tau1) + C\ncomp2 = A2 * np.exp(-x / tau2) + C\nnoise = np.std(resid)\nnorm_resid = resid / noise if noise > 0 else resid\n\nfig, axes = plt.subplots(3, 1, figsize=(9, 10), sharex=False,\n                         gridspec_kw={'height_ratios': [3, 1, 1]})\n\nax0 = axes[0]\nax0.plot(x_raw, y_raw, color='lightgrey', alpha=0.6, lw=1, label='Raw data')\nax0.plot(x, y, '.', color='steelblue', ms=3, alpha=0.6, label='Data')\nax0.plot(x, fit_y, 'r-', lw=1.8, label='Fit')\nax0.plot(x, comp1, '--', color='green', lw=1, label='Component 1')\nax0.plot(x, comp2, '--', color='orange', lw=1, label='Component 2')\nax0.set_yscale('log')\nax0.set_ylabel('Y')\nax0.set_title('Data and Fit')\nax0.legend(fontsize=8)\nax0.set_xlim(x.min(), x.max())\n\nax1 = axes[1]\nax1.plot(x, resid, color='purple', lw=0.8)\nax1.axhline(0, color='k', lw=0.6)\nax1.set_ylabel('Residuals')\nax1.set_xlim(x.min(), x.max())\n\nax2 = axes[2]\nax2.plot(x, norm_resid, color='darkred', lw=0.8)\nax2.axhline(0, color='k', lw=0.6)\nax2.set_ylabel('Norm. residuals')\nax2.set_xlabel('X')\nax2.set_xlim(x.min(), x.max())\n\nfig.tight_layout()\nfig.savefig('visualization.png', dpi=130)\nplt.close(fig)\n\n# --- Results JSON ---\nresults = {\n    \"model_type\": \"Biexponential decay with constant offset: I(t)=A1*exp(-t/tau1)+A2*exp(-t/tau2)+C\",\n    \"parameters\": {\n        \"component_1_fast\": {\n            \"amplitude\": A1, \"amplitude_err\": ge('A1'),\n            \"lifetime_ns\": tau1, \"lifetime_ns_err\": ge('tau1')\n        },\n        \"component_2_slow\": {\n            \"amplitude\": A2, \"amplitude_err\": ge('A2'),\n            \"lifetime_ns\": tau2, \"lifetime_ns_err\": ge('tau2')\n        },\n        \"baseline_offset\": {\"C\": C, \"C_err\": ge('C')},\n        \"tau_avg_amplitude_weighted_ns\": tau_avg\n    },\n    \"fit_quality\": {\"r_squared\": float(r_squared), \"rmse\": float(rmse)},\n    \"deviation_note\": \"\"\n}\nprint(f\"FIT_RESULTS_JSON:{json.dumps(results)}\")\n"
+}

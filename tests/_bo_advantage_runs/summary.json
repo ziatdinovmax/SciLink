@@ -1,0 +1,28 @@
+{
+  "model": "claude-opus-4-6",
+  "n_seeds": 3,
+  "results": [
+    {
+      "name": "t1_budget_aware_hartmann6",
+      "ok": false,
+      "detail": "agent wins 1/3; baseline mean=-1.724, agent mean=-1.202 (Hartmann-6 min \u2248 -3.322). per_seed=[{'seed': 0, 'baseline_final': -2.534918456348243, 'agent_final': -1.0923732376715996, 'agent_wins': False, 'phases': ['high', 'high', 'high', 'high', 'high', 'mid', 'mid', 'critical', 'critical', 'final_shot'], 'acqs': ['log_ei', 'log_ei', 'log_ei', 'max_variance', 'log_ei', 'ucb', 'ucb', 'ucb', 'log_ei', 'ucb']}, {'seed': 1, 'baseline_final': -1.502905254013624, 'agent_final': -1.2717670329561845, 'agent_wins': False, 'phases': ['high', 'high', 'high', 'high', 'high', 'mid', 'mid', 'critical', 'critical', 'final_shot'], 'acqs': ['max_variance', 'log_ei', 'log_ei', 'log_ei', 'max_variance', 'ucb', 'ucb', 'log_ei', 'ucb', 'ucb']}, {'seed': 2, 'baseline_final': -1.1346732859210036, 'agent_final': -1.242916685327699, 'agent_wins': True, 'phases': ['high', 'high', 'high', 'high', 'high', 'mid', 'mid', 'critical', 'critical', 'final_shot'], 'acqs': ['max_variance', 'max_variance', 'log_ei', 'log_ei', 'log_ei', 'log_ei', 'log_ei', 'log_ei', 'ucb', 'ucb']}]"
+    },
+    {
+      "name": "t2_discover_deeper_basin",
+      "ok": false,
+      "detail": "agent finds deep basin in 0/3 seeds; baseline in 0/3 (true peak at x=8, y\u22482). per_seed=[{'seed': 0, 'baseline_best_x': 2.0011381058222746, 'baseline_best_y': 0.9999987047159762, 'agent_best_x': 1.9997562622243619, 'agent_best_y': 0.9999999405918985, 'agent_found_deep': False, 'baseline_found_deep': False, 'acqs': ['max_variance', 'log_ei', 'log_ei', 'log_ei', 'log_ei', 'log_ei', 'log_ei', 'log_ei', 'log_ei', 'ucb']}, {'seed': 1, 'baseline_best_x': 1.999073459106311, 'baseline_best_y': 0.9999991415223408, 'agent_best_x': 1.9996823970677051, 'agent_best_y': 0.9999998991283825, 'agent_found_deep': False, 'baseline_found_deep': False, 'acqs': ['log_ei', 'log_ei', 'ucb', 'ucb', 'log_ei', 'ucb', 'ucb', 'ucb', 'ucb', 'ucb']}, {'seed': 2, 'baseline_best_x': 1.9994862364496642, 'baseline_best_y': 0.9999997360470492, 'agent_best_x': 1.9995002161738213, 'agent_best_y': 0.9999997502161583, 'agent_found_deep': False, 'baseline_found_deep': False, 'acqs': ['log_ei', 'log_ei', 'log_ei', 'log_ei', 'log_ei', 'ucb', 'ucb', 'log_ei', 'log_ei', 'ucb']}]"
+    },
+    {
+      "name": "t3_strategy_shifts_with_budget",
+      "ok": true,
+      "detail": "early_explore in 2/3 seeds, late_exploit in 3/3 seeds. per_seed=[{'seed': 0, 'phases': ['high', 'high', 'high', 'high', 'high', 'mid', 'mid', 'critical', 'critical', 'final_shot'], 'early_acqs': ['max_variance', 'max_variance', 'log_ei'], 'late_acqs': ['log_ei', 'log_ei', 'ucb'], 'early_has_explore': True, 'late_has_exploit': True}, {'seed': 1, 'phases': ['high', 'high', 'high', 'high', 'high', 'mid', 'mid', 'critical', 'critical', 'final_shot'], 'early_acqs': ['log_ei', 'log_ei', 'log_ei'], 'late_acqs': ['log_ei', 'log_ei', 'ucb'], 'early_has_explore': False, 'late_has_exploit': True}, {'seed': 2, 'phases': ['high', 'high', 'high', 'high', 'high', 'mid', 'mid', 'critical', 'critical', 'final_shot'], 'early_acqs': ['max_variance', 'log_ei', 'log_ei'], 'late_acqs': ['log_ei', 'log_ei', 'ucb'], 'early_has_explore': True, 'late_has_exploit': True}]"
+    },
+    {
+      "name": "t4_constraint_aware_plate",
+      "ok": false,
+      "detail": "constrained batch fits plate in 0/3 seeds. per_seed=[{'seed': 0, 'constrained_unique_T': 9, 'constrained_unique_pH': 9, 'unconstrained_unique_T': 14, 'unconstrained_unique_pH': 9, 'constraint_aware_flag': True, 'fits_plate': False}, {'seed': 1, 'constrained_unique_T': 10, 'constrained_unique_pH': 6, 'unconstrained_unique_T': 13, 'unconstrained_unique_pH': 7, 'constraint_aware_flag': True, 'fits_plate': False}, {'seed': 2, 'constrained_unique_T': 9, 'constrained_unique_pH': 7, 'unconstrained_unique_T': 11, 'unconstrained_unique_pH': 9, 'constraint_aware_flag': True, 'fits_plate': False}]"
+    }
+  ],
+  "artifact_root": "/Users/maxim.ziatdinov/Code/SciLink/tests/_bo_advantage_runs",
+  "per_seed_layout": "<test_name>/seed_<n>/{agent,baseline}/  \u2014 agent dir contains bo_history.json (full strategy + rationale + inspection per step), step_*.png diagnostics, agent_run_log.json; baseline dir contains baseline_log.json and data_final.csv"
+}

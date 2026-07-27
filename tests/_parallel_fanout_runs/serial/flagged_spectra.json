@@ -1,0 +1,39 @@
+{
+  "timestamp": "2026-05-13T20:24:59.358861",
+  "r2_threshold": 0.95,
+  "outlier_sigma": 2.0,
+  "total_spectra": 4,
+  "flagged_count": 3,
+  "flagged_spectra": [
+    {
+      "index": 0,
+      "name": "spectrum_0000",
+      "reason": "below_threshold",
+      "r_squared": 2.2714052860806078e-11,
+      "series_mean": 0.249999999839409,
+      "series_std": 0.433012701574726,
+      "deviation_sigma": 0.5773502691896253,
+      "recommendation": "Fit quality below threshold but consistent with series. The chosen model may not be optimal for this data type."
+    },
+    {
+      "index": 1,
+      "name": "spectrum_0001",
+      "reason": "below_threshold",
+      "r_squared": 2.2713497749293765e-11,
+      "series_mean": 0.249999999839409,
+      "series_std": 0.433012701574726,
+      "deviation_sigma": 0.5773502691896266,
+      "recommendation": "Fit quality below threshold but consistent with series. The chosen model may not be optimal for this data type."
+    },
+    {
+      "index": 2,
+      "name": "spectrum_0002",
+      "reason": "below_threshold",
+      "r_squared": 2.2713941838503615e-11,
+      "series_mean": 0.249999999839409,
+      "series_std": 0.433012701574726,
+      "deviation_sigma": 0.5773502691896255,
+      "recommendation": "Fit quality below threshold but consistent with series. The chosen model may not be optimal for this data type."
+    }
+  ]
+}

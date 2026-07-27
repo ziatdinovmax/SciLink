@@ -1,0 +1,37 @@
+{
+  "experiment_type": "Spectroscopy",
+  "experiment": {
+    "technique": "Spectral X-ray Imaging",
+    "date": null,
+    "instrument": "Hexitec spectral X-ray detector",
+    "details": "160 kVp bremsstrahlung X-ray source; Spatial resolution: 0.250 mm; Energy resolution: 0.2 keV; Energy bin width: 0.1 keV; 80 x 80 pixels; Ignore energies below 5 keV; 2048 energy bins from 0.1 to 204.8 keV; Data is in the form of a 3D array with dimensions (80, 80, 2048) corresponding to (x, y, energy)."
+  },
+  "sample": {
+    "material": "In, Pb, and Sn solders in a Cu coupon",
+    "description": "Copper coupon with In, Pb, and Sn solders; Task is to locate In, Pb, and Sn solders and quantify material thicknesses; Look for K-edges for In, Pb, and Sn to find where elements are located; some areas may have mixed elements.",
+    "title": "Spectral X-ray transmission imaging of Cu coupon with solders"
+  },
+  "spatial_info": {
+    "field_of_view_x": 20,
+    "field_of_view_y": 20,
+    "field_of_view_units": "mm"
+  },
+  "title": "Spectral X-ray transmission imaging of Cu coupon with solders",
+  "data_columns": [
+    {
+      "name": "Energy",
+      "units": "keV"
+    },
+    {
+      "name": "Counts",
+      "units": "counts"
+    }
+  ],
+  "xlabel": "Energy (keV)",
+  "ylabel": "Counts",
+  "energy_range": {
+    "start": 0.1,
+    "end": 204.8,
+    "units": "keV"
+  }
+}

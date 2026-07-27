@@ -1,0 +1,278 @@
+{
+  "action_history": [
+    {
+      "timestamp": "2026-07-08T23:35:41.256894",
+      "action": "curve_fit",
+      "input": {
+        "num_spectra": 1,
+        "input_type": "file_paths",
+        "series_metadata": null,
+        "r2_threshold": 0.95
+      },
+      "rationale": "Model: Sum of 12 pseudo-Voigt components (peak_8 and peak_12 skewed/split pseudo-Voigt; peak_11 relocated to ~190 cm-1 real band) on stiff ALS-corrected near-flat baseline with non-negative constant offset; full 135-1271 cm-1 fit",
+      "result": {
+        "status": "success",
+        "output_directory": "/Users/maxim.ziatdinov/Code/SciLink/tests/_qc_phase2_live_runs/curve_weak",
+        "task_mode": "fitting",
+        "detailed_analysis": "The spectrum is confidently assigned to ARAGONITE (orthorhombic CaCO3). Band assignments against carbonate group frequencies: the dominant band at 1085.4 cm-1 (peak_8, rel. intensity 1.0) is the \u03bd1 symmetric C-O stretch; the resolved doublet at 701.3 and 705.6 cm-1 (peaks 6 and 7) is the \u03bd4 in-plane bend, split by aragonite's site symmetry \u2014 this doublet is the decisive discriminator from calcite, which shows a single \u03bd4 near 712 cm-1 and no such splitting. The lattice/external modes at 142.8, 155.0, 189.5, and 213.4 cm-1 (peaks 1, 2, 11, 3) correspond to aragonite's translational/librational lattice modes (reference ~152, ~206 cm-1), with 213 being the strong lattice mode. The 272/284 cm-1 pair (peaks 4, 5) are additional lattice modes. The weaker higher-shift features at ~1111 (peak_9) and the 1206/1235 bands (peaks 10, 12) fall in the region of \u03bd3 antisymmetric stretch / combination and overtone territory (2\u00d7\u03bd4 near ~1460 is out of range; bands near 1200-1240 can include weak \u03bd1+lattice combinations); these are consistent with carbonate but are weak and less individually diagnostic. Every fitted component corresponds to visible intensity \u2014 no components are parked on noise, except peak_2 (~155) and peak_9 (~1111) which are marginal (large fractional errors, degenerate eta). The baseline is genuinely near-flat (baseline_fraction ~0.11, offset ~0), so fluorescence is negligible and band intensities are trustworthy. The dominant \u03bd1 band is asymmetric (fitted fwhm_left 4.47 > fwhm_right 2.31, asymmetry_ratio 0.52), sharper on the high-shift side; however the persistent dispersive apex residual (~\u00b11000 counts localized at 1083.5) means the exact peak shape and thus the reported FWHM (~3.4 cm-1) and asymmetry are not fully resolved and should be treated as approximate. Overall fit quality R2=0.996, RMSE=74 counts against a 22000-count peak.",
+        "scientific_claims": [
+          {
+            "claim": "The mineral is identified as aragonite (CaCO3) from the \u03bd1 band at 1085.4 \u00b1 0.01 cm-1, the resolved \u03bd4 doublet at 701.3 \u00b1 0.06 and 705.6 \u00b1 0.07 cm-1, and lattice modes at 213.4 \u00b1 0.07 and ~152/155 cm-1 \u2014 the \u03bd4 doublet and lattice-mode pattern distinguishing it from calcite.",
+            "scientific_impact": "Aragonite-vs-calcite discrimination is central to biomineralization, paleoclimate/diagenesis, and carbonate polymorph stability studies; the resolved 701/705 \u03bd4 doublet provides an unambiguous non-destructive polymorph fingerprint.",
+            "has_anyone_question": "Has anyone confirmed that the resolved \u03bd4 doublet at ~701/705 cm-1 together with lattice modes near 152/206 cm-1 uniquely identifies aragonite versus calcite in Raman spectra of carbonate samples?",
+            "keywords": [
+              "aragonite",
+              "calcite",
+              "Raman spectroscopy",
+              "carbonate polymorph",
+              "nu4 doublet",
+              "CaCO3"
+            ]
+          }
+        ],
+        "model_type": "Sum of 12 pseudo-Voigt components (peak_8 and peak_12 skewed/split pseudo-Voigt; peak_11 relocated to ~190 cm-1 real band) on stiff ALS-corrected near-flat baseline with non-negative constant offset; full 135-1271 cm-1 fit",
+        "fitting_parameters": {
+          "peak_1": {
+            "center": 142.76189236271568,
+            "center_err": 0.26005493101032123,
+            "fwhm": 3.8882050985160213,
+            "fwhm_err": 0.7044531774289913,
+            "amplitude": 296.9329081844231,
+            "amplitude_err": 51.255233239937695,
+            "eta": 0.09558914056697632,
+            "eta_err": 0.829486212352448,
+            "area": 1271.7676773303276,
+            "rel_intensity": 0.013433513301462084
+          },
+          "peak_2": {
+            "center": 155.00000000000003,
+            "center_err": 1.9019723994065076,
+            "fwhm": 12.75842242949395,
+            "fwhm_err": 4.6697426278329734,
+            "amplitude": 87.86190764641657,
+            "amplitude_err": 24.860282242444057,
+            "eta": 4.5300968681076473e-35,
+            "eta_err": 1.776642924254054,
+            "area": 1193.1417705324975,
+            "rel_intensity": 0.0039749521610009525
+          },
+          "peak_3": {
+            "center": 213.42282635290334,
+            "center_err": 0.06964248048324569,
+            "fwhm": 10.434223253527842,
+            "fwhm_err": 0.20069492157028737,
+            "amplitude": 1754.3318432644026,
+            "amplitude_err": 26.244831886304723,
+            "eta": 0.16703454260479564,
+            "eta_err": 0.0768592485179664,
+            "area": 20924.66999590035,
+            "rel_intensity": 0.07936755914246336
+          },
+          "peak_4": {
+            "center": 272.06272153834465,
+            "center_err": 0.4827517257643223,
+            "fwhm": 11.611451844746142,
+            "fwhm_err": 1.0787991626147868,
+            "amplitude": 529.9109583150956,
+            "amplitude_err": 36.777592537115815,
+            "eta": 2.6214352460016303e-37,
+            "eta_err": 0.2902355764838689,
+            "area": 6549.703438419978,
+            "rel_intensity": 0.023973650986151597
+          },
+          "peak_5": {
+            "center": 283.70169516060207,
+            "center_err": 0.5988861051358623,
+            "fwhm": 10.84273146804622,
+            "fwhm_err": 1.4889077010551837,
+            "amplitude": 488.55649503017804,
+            "amplitude_err": 39.70911211564165,
+            "eta": 0.899035975754782,
+            "eta_err": 0.3438615131313929,
+            "area": 7950.516002729394,
+            "rel_intensity": 0.022102737667686653
+          },
+          "peak_6": {
+            "center": 701.3084972069322,
+            "center_err": 0.06306212516446379,
+            "fwhm": 4.5662240751967555,
+            "fwhm_err": 0.18391268831655463,
+            "amplitude": 2838.0193886052707,
+            "amplitude_err": 59.12328079379943,
+            "eta": 0.9999999999999999,
+            "eta_err": 0.09117276295674857,
+            "area": 20303.946988778443,
+            "rel_intensity": 0.12839456374083424
+          },
+          "peak_7": {
+            "center": 705.6379940171564,
+            "center_err": 0.065623097019567,
+            "fwhm": 3.6772224996906693,
+            "fwhm_err": 0.1527555848486627,
+            "amplitude": 1895.0523876556313,
+            "amplitude_err": 62.99623612573428,
+            "eta": 0.042299164590730624,
+            "eta_err": 0.1427620753241882,
+            "area": 7566.063632709255,
+            "rel_intensity": 0.08573388383320617
+          },
+          "peak_8": {
+            "center": 1085.3691488426557,
+            "center_err": 0.006849118671452705,
+            "fwhm_left": 4.46564877815085,
+            "fwhm_left_err": 0.019706876478673824,
+            "fwhm_right": 2.310695271865443,
+            "fwhm_right_err": 0.01582714999619315,
+            "fwhm": 3.3881720250081466,
+            "asymmetry_ratio": 0.5174377535400944,
+            "amplitude": 22103.890584759043,
+            "amplitude_err": 47.58484768757394,
+            "eta": 0.5888748535026804,
+            "eta_err": 0.00923992756673735,
+            "area": 101891.82964744313,
+            "rel_intensity": 1.0,
+            "profile": "skewed_pseudo_voigt"
+          },
+          "peak_9": {
+            "center": 1111.3708795272817,
+            "center_err": 0.4077799140826379,
+            "fwhm": 15.836717600653298,
+            "fwhm_err": 1.1524407931786549,
+            "amplitude": 349.84725464031874,
+            "amplitude_err": 20.232416321349465,
+            "eta": 3.858886794431326e-41,
+            "eta_err": 0.28541611992309035,
+            "area": 5897.607340129329,
+            "rel_intensity": 0.015827406188915157
+          },
+          "peak_10": {
+            "center": 1206.7573523079575,
+            "center_err": 0.25001996782719355,
+            "fwhm": 19.599881061471685,
+            "fwhm_err": 0.637230843984868,
+            "amplitude": 954.2801237053735,
+            "amplitude_err": 22.2212615026581,
+            "eta": 9.56361634911074e-38,
+            "eta_err": 0.11071556093490703,
+            "area": 19909.55368487473,
+            "rel_intensity": 0.04317249581226952
+          },
+          "peak_11": {
+            "center": 189.54934717126773,
+            "center_err": 0.12303430366006067,
+            "fwhm": 9.245467924205789,
+            "fwhm_err": 0.47276677901134195,
+            "amplitude": 1046.4610098850292,
+            "amplitude_err": 32.0459495428723,
+            "eta": 0.931641896354731,
+            "eta_err": 0.15943581305313884,
+            "area": 14464.783652511016,
+            "rel_intensity": 0.04734284246803951
+          },
+          "peak_12": {
+            "center": 1234.9999999999998,
+            "center_err": 0.3852104611519372,
+            "fwhm_left": 17.846375993998652,
+            "fwhm_left_err": 1.015703482138425,
+            "fwhm_right": 29.05283490740725,
+            "fwhm_right_err": 0.9881242642115197,
+            "fwhm": 23.44960545070295,
+            "asymmetry_ratio": 1.6279403122055192,
+            "amplitude": 1305.064116736483,
+            "amplitude_err": 21.077575341256253,
+            "eta": 4.230009001851097e-43,
+            "eta_err": 0.10156483108810874,
+            "area": 32513.3113294703,
+            "rel_intensity": 0.05904228089313579,
+            "profile": "skewed_pseudo_voigt"
+          },
+          "offset": {
+            "value": 8.906753999510638e-27,
+            "err": 2.008283513411459
+          },
+          "baseline_fraction": 0.11008061665965894
+        },
+        "fit_quality": {
+          "r_squared": 0.995594531380024,
+          "rmse": 73.63889486802866
+        },
+        "literature_files": null,
+        "quality_history": {
+          "final_r2": 0.995594531380024,
+          "threshold": 0.95,
+          "approved": true,
+          "verification_iterations": [
+            {
+              "r_squared": 0.9838515640300409,
+              "annealing_level": 0,
+              "tools_used": [],
+              "model": "Sum of pseudo-Voigt profiles on a light ALS-corrected (near-flat) baseline. Components (12 total): (1) ~155, (2) ~185, (3) ~210 (sharp), (4) ~272, (5) ~284 (doublet partner), (6) ~701, (7) ~705 (doublet partner), (8) ~1088 (dominant, sharp), (9) ~1100 (shoulder), (10) ~1210 (weak, separate band), (11) ~1235, (12) ~1240 (doublet partner). Each: I\u00b7[eta\u00b7Lorentzian + (1-eta)\u00b7Gaussian]. If the 1088 band residual shows a dispersive S-shape, switch that single component to an asymmetric (skewed pseudo-Voigt) profile rather than adding a spurious peak. If the ~1235/1240 doublet resolves as a single asymmetric band after fitting, merge accordingly per residual shape.",
+              "issues": [
+                {
+                  "location": "1058.3\u20131129.4 (main peak at ~1085 cm-1)",
+                  "problem": "The dominant peak is under-resolved: the single pseudo-Voigt (peak_8) cannot capture the peak shape, leaving a strong derivative-like oscillation (RMS/noise=190\u00d7, +2000/-800 residual swings with 3 sign-changes across the peak)."
+                },
+                {
+                  "location": "134.6\u2013205.7 (low-frequency region)",
+                  "problem": "Multiple real maxima are not resolved: a clear data peak/shoulder near 142 cm-1 is missed, and oscillating residuals (7 sign-changes, RMS/noise=21.6\u00d7) indicate several unresolved bands between 140\u2013205."
+                },
+                {
+                  "location": "987.3\u20131058.3 (baseline rise before main peak)",
+                  "problem": "Baseline/onset mismatch: fit dips below zero (~-50) where data sits near zero, then the modeled rise to the 1085 peak diverges from data, producing a monotonic residual trend (1 sign-change)."
+                }
+              ],
+              "fix_applied": "Re-seed existing components within the locked 14-component model: main peak pair at ~1085 and ~1112 cm-1 (fix peak_8 shape/tail), low-frequency components at ~142 and ~160 cm-1, and constrain/deduplicate the degenerate peaks near 1230; also prevent the pre-peak baseline (987\u20131058) from going negative."
+            },
+            {
+              "r_squared": 0.9921398715741615,
+              "annealing_level": 0,
+              "tools_used": [],
+              "model": "Sum of 12 pseudo-Voigt profiles on a light ALS-corrected (near-flat) baseline, with a fixed non-negative offset term. Each component: I\u00b7[eta\u00b7Lorentzian + (1-eta)\u00b7Gaussian], eta in [0,1]. Component re-seeding within the LOCKED 12-component model: (1) ~142 (low-freq shoulder, was ~155/pinned at 150), (2) ~160 (was ~185, now covers 155-165 shoulder cluster), (3) ~210 (sharp), (4) ~272, (5) ~284 (doublet partner), (6) ~701, (7) ~705 (doublet partner), (8) ~1085 (dominant, sharp \u2014 re-seeded from ~1088, permitted to become asymmetric/skewed pseudo-Voigt if a dispersive S-shape persists), (9) ~1112 (main-peak asymmetric tail/shoulder, re-seeded from ~1100 to capture the 1110-1115 shoulder), (10) ~1210 (weak, separate band \u2014 anchor of the 1205-1240 cluster), (11) ~1230 (single band representing the 1225-1240 region, re-seeded from ~1235 and tightly constrained), (12) ~1240 (doublet partner \u2014 to be MERGED into peak_11 as a single asymmetric band if the residual shows no resolved bimodal structure, eliminating the peak_11/peak_12 degeneracy). The dominant peak_8 may adopt an asymmetric (skewed pseudo-Voigt) profile per the locked plan's contingency rather than adding a spurious peak.",
+              "issues": [
+                {
+                  "location": "134.6\u2013205.7 cm-1 (low-frequency region, peak near ~190 cm-1)",
+                  "problem": "A clear, prominent data maximum near ~190 cm-1 (peaking ~1100 counts) is completely unmodeled \u2014 the fit runs flat through it."
+                },
+                {
+                  "location": "1058.3\u20131129.4 cm-1 (dominant ~1085 peak)",
+                  "problem": "Derivative/oscillatory residual across the top of the main peak persists \u2014 the skewed pseudo-Voigt still does not fully capture the peak shape."
+                },
+                {
+                  "location": "205.7\u2013276.8 cm-1 (peak_3 tail at ~213 cm-1)",
+                  "problem": "The 213 cm-1 peak's low-frequency and high-frequency tails are mismatched (fit sits above data on the falling edge 220\u2013255)."
+                }
+              ],
+              "fix_applied": "Relocate one of the degenerate 1230-cluster peaks (peak_11/peak_12) to seed a pseudo-Voigt at ~190 cm-1 to capture the missing low-frequency band, and lightly retune peak_8 asymmetry to reduce the residual apex oscillation at ~1085."
+            },
+            {
+              "r_squared": 0.995594531380024,
+              "annealing_level": 1,
+              "tools_used": [],
+              "model": "Sum of 12 pseudo-Voigt profiles on a light ALS-corrected (near-flat) baseline with a fixed non-negative offset term. Each component: I\u00b7[eta\u00b7Lorentzian + (1-eta)\u00b7Gaussian], eta in [0,1]. REVISED 12-component assignment (model remains LOCKED at 12 components): (1) ~142 (low-freq shoulder), (2) ~160 (155-165 shoulder cluster), (3) ~213 (sharp, tails to be retuned), (4) ~272, (5) ~284 (doublet partner), (6) ~701, (7) ~705 (doublet partner), (8) ~1085 (dominant, sharp, skewed/asymmetric pseudo-Voigt with retuned asymmetry/eta and lightly relaxed left/right FWHM coupling to capture the apex cusp), (9) ~1112 (main-peak asymmetric tail/shoulder), (10) ~1210 (weak separate band anchoring the 1205-1240 cluster), (11) ~190 (RELOCATED from the degenerate 1230-cluster \u2014 captures the prominent unmodeled ~1100-count band near 190 cm-1), (12) ~1230 (single asymmetric band representing the entire 1225-1240 region; absorbs the former peak_11/peak_12 cluster into one non-degenerate band). This eliminates the peak_11/peak_12 degeneracy while keeping the component count fixed at 12 and adding no spurious peak at the 1085 apex.",
+              "issues": [
+                {
+                  "location": "1058.3\u20131129.4 cm-1 (dominant ~1085 peak apex)",
+                  "problem": "Sharp derivative-shaped residual localized at the very top of the dominant peak (\u00b11000 counts at x\u22481083.5)"
+                },
+                {
+                  "location": "1200.4\u20131271.5 cm-1 (~1235 band)",
+                  "problem": "Fit runs slightly above/below data on the flanks of the ~1235 band; the modeled asymmetric band peaks ~1244 while data peaks ~1240 with a flatter top"
+                },
+                {
+                  "location": "987.3\u20131058.3 cm-1 (pre-peak baseline onset)",
+                  "problem": "Lorentzian wing of peak_8 rises above the near-zero data before the main peak, and slightly overshoots near ~1050-1060"
+                }
+              ],
+              "fix_applied": "none"
+            }
+          ],
+          "alternative_models": [],
+          "script_errors": [],
+          "judge_reasoning": null,
+          "approved_by": "verifier"
+        }
+      },
+      "feedback": null
+    }
+  ]
+}

@@ -1,0 +1,153 @@
+{
+  "status": "success",
+  "output_directory": "/Users/maxim.ziatdinov/Code/SciLink/tests/_qc_phase4_live_runs/image_series",
+  "summary": {
+    "total_images": 2,
+    "successful_analyses": 1,
+    "flagged_count": 0,
+    "refitted_count": 0,
+    "input_type": "file_paths",
+    "locked_approach": "After AFM preprocessing (row leveling + square-pixel resampling), use targeted reciprocal-space reflection mapping on each image to quantify the presence, spacing, and significance of the atomic lattice, then compare how that ordered periodicity weakens between 2 mM and 10 mM KCl.",
+    "is_single_image": false
+  },
+  "detailed_analysis": "This series was designed to characterize how the mica surface structure and adsorbate pattern change between 2 mM and 10 mM KCl, but in practice only the 2 mM image (index 0) produced a successful, quality-approved analysis (score 0.75). The 10 mM image analysis was not successful, so the intended cross-concentration comparison could not actually be performed on measured data\u2014every '10 mM' point rendered in the trend dashboard is a placeholder/red-X (invalid or missing), not an observation. This is critical: the plotted 'trend lines' connecting 2 mM to 10 mM are extrapolations or invalid-point overlays, not evidence of a real concentration-dependent change.\n\nFor the one valid image (2 mM KCl), the analysis returned an internally coherent picture of a nanotextured mica surface imaged in electrolyte. Adsorbate/patch coverage was ~0.44 (fractional), with 313 discrete patches of mean size ~0.53 nm and a noise-gated autocorrelation correlation length of ~0.86 nm (~22 px, not noise-flagged). A radial PSD split identified a low-frequency envelope on the order of ~10 nm and a mid-frequency corrugation peak at a wavelength of ~0.67 nm. These sub-nanometer length scales are consistent with atomic/near-atomic lattice-scale corrugation of mica (0.5 mica lattice constant) plus a longer-range height envelope from ordered ions/hydration layers. Importantly, the Fourier reflection map returned a legitimate null (reflection_null_flag = true, 0 reflections detected), and sub-nm reflection detection was NOT authorized because the pixel size was assumed via an FOV fallback (assumed_fov_20nm). Thus no verified periodic lattice reflections were extracted.\n\nA dominant caveat pervades every quantitative statement: the pixel size / field of view was NOT recovered from metadata and was assumed to be 20 nm FOV (scale_uncertain_flag = true, pixel_size_source = 'assumed_fov_20nm_fallback'). Consequently all absolute length scales (correlation length, patch size, corrugation wavelength, envelope length) are only accurate up to the true-FOV scaling factor, and cross_conc validity flags for both scale and Rq are False. The Rq value (~3012) is reported in uncalibrated z-units (Rq_z_calibrated = false), so it carries no physical roughness meaning and cannot be compared across images. Given these limitations, the analysis supports a characterization of the 2 mM surface texture in relative terms but cannot yet answer the core objective of how structure evolves from 2 mM to 10 mM.",
+  "scientific_claims": [
+    {
+      "claim": "At 2 mM KCl, the mica surface in electrolyte exhibits a nanoscale patchy adsorbate/hydration texture with ~44% fractional coverage, ~0.5-0.9 nm characteristic patch/correlation length scales, and a mid-frequency height corrugation at ~0.67 nm wavelength, consistent with lattice-scale/hydration-layer ordering (subject to an unresolved absolute-scale calibration).",
+      "scientific_impact": "Quantifying sub-nanometer adsorbate/hydration structure on mica in dilute KCl constrains models of ion-specific interfacial hydration and electrical double-layer structure at solid-liquid interfaces, which underpin colloid stability, clay swelling, and nanofluidic transport.",
+      "has_anyone_question": "Has anyone quantified the coverage and sub-nanometer correlation length of ordered ion/hydration structures on mica in 2 mM KCl and related the mid-frequency corrugation wavelength to the mica lattice or hydration-layer spacing?",
+      "keywords": [
+        "mica",
+        "KCl",
+        "hydration layer",
+        "AFM",
+        "correlation length",
+        "surface corrugation",
+        "electrical double layer"
+      ]
+    }
+  ],
+  "individual_results": [
+    {
+      "index": 0,
+      "name": "(hard) fmica 2mM KCl",
+      "success": true,
+      "analysis_type": "AFM row-leveling + z-calibration + verified-scale square-pixel resampling + polynomial detrend/light-smooth + Nyquist/streak-gated fourier_reflection_map (legitimate-null aware) + radial PSD split into low-freq envelope vs mid-freq corrugation + noise-gated autocorrelation correlation length + z-gated Rq + coverage.",
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_qc_phase4_live_runs/image_series/image_0000/visualization.png",
+      "error": null,
+      "flagged": false,
+      "flag_reason": null,
+      "adaptively_refitted": false,
+      "verification_score": 0.75,
+      "reuse_validity": null
+    },
+    {
+      "index": 1,
+      "name": "(hard) fmica 10mM KCl",
+      "success": false,
+      "analysis_type": null,
+      "visualization_path": null,
+      "error": "All analysis attempts failed",
+      "flagged": false,
+      "flag_reason": null,
+      "adaptively_refitted": false,
+      "verification_score": null,
+      "reuse_validity": null
+    }
+  ],
+  "flagged_images": [],
+  "flagged_images_analysis": {
+    "summary": "No images were explicitly flagged, but the 10 mM image analysis did not succeed (1 of 2 successful), so every 10 mM data point in the dashboard is a red-X placeholder rather than a real observation. In addition, the successful 2 mM image carries internal caveat flags (scale_uncertain, reflection_null, cross-conc validity = False) that limit its use.",
+    "possible_causes": [
+      "The 10 mM image failed to pass the pipeline (e.g., excessive drift/streaking, insufficient z-contrast, failed leveling, or metadata/scale extraction failure) and produced no valid feature set.",
+      "Field-of-view / pixel-size metadata was not embedded in the TIFF tags (only geometric tags present), forcing an assumed 20 nm FOV fallback that undermines absolute-scale validity even for the successful image.",
+      "Sub-nm reflection detection was legitimately null because the assumed scale did not authorize sub-nanometer Fourier peak extraction, not necessarily because the lattice is absent.",
+      "Uncalibrated z-axis (Rq in z-units) suggests height calibration metadata was also missing or not applied."
+    ],
+    "recommended_followup": [
+      "Recover or re-measure the true FOV and z-calibration from the instrument/parameter files and re-run both images with verified scale to enable legitimate cross-concentration comparison.",
+      "Re-acquire or re-process the 10 mM image, checking for drift/streak artifacts and ensuring adequate atomic-scale contrast and stable feedback.",
+      "Once scale is verified, authorize sub-nm Fourier reflection mapping to test explicitly for a resolved mica lattice at both concentrations.",
+      "Acquire replicate images at each concentration to distinguish real concentration effects from image-to-image variability."
+    ],
+    "scientific_significance": "The missing 10 mM result is a data-completeness/instrumental limitation rather than evidence of interesting physics. Until it is recovered, the central objective (2 mM vs 10 mM structural change) remains unanswered, so the outliers here reflect analysis gaps, not confirmed transitions."
+  },
+  "refit_summary": [],
+  "refit_analysis": {
+    "summary": "No images were adaptively re-analyzed with alternative pipelines; all images used the single standard AFM pipeline.",
+    "pipeline_changes": [],
+    "scientific_implications": "Because no pipeline switching occurred, there is no evidence of a detected structural transition or morphology change that would have triggered an adaptive refit. The single applied pipeline was appropriate for the 2 mM image; the absence of a valid 10 mM result reflects a failed/incomplete analysis rather than a deliberate methodological adaptation."
+  },
+  "trend_analysis": {
+    "success": true,
+    "skipped": false,
+    "approach": "The series metadata declares one primary control variable (KCl concentration: 2 and 10 mM), so I use the standard single-variable trend dashboard: each key feature is plotted on the y-axis versus KCl concentration (x-axis). Although the SERIES SUMMARY currently contains only the 2 mM entry (index 0), the script is written generically to align every result to its concentration via series_metadata['values'][result['index']] and will automatically render the 10 mM point when present. Because only two concentration levels exist, a two-point linear regression is computed and reported for each quantitative feature (slope, intercept, and delta) to characterize the direction/magnitude of change toward the objective; the fitted line is drawn only when >=2 valid points share a feature. Cross-concentration validity flags (scale_valid_for_cross_conc, Rq_valid_for_cross_conc) are surfaced explicitly because the 2 mM scale is flagged uncertain (assumed FOV fallback), which caveats any absolute Rq/wavelength comparison. Quality-metric evolution and reflection-null status are shown in a dedicated panel, and any flagged image is overlaid with a red X.",
+    "metrics_tracked": [
+      "coverage",
+      "correlation_length_nm",
+      "radial_psd_mid_freq_peak_wavelength_nm",
+      "radial_psd_low_freq_envelope_length_nm",
+      "mean_patch_size_nm",
+      "Rq_nm (scale-caveated)"
+    ],
+    "flagged_handling": "No images were flagged in FLAGGED IMAGES, but the script still detects per-point issues (scale_uncertain_flag, reflection_null_flag, correlation_length_noise_flag, and cross-conc validity=False) and overlays a red X on any point whose value is missing/invalid or whose cross-concentration validity is False, with a legend entry. A dedicated quality panel tracks these boolean flags across concentration.",
+    "stdout": "Regression summary (feature: slope per mM, intercept, delta over range):\n",
+    "stderr": null,
+    "generated_files": [
+      "/Users/maxim.ziatdinov/Code/SciLink/tests/_qc_phase4_live_runs/image_series/feature_trends.png"
+    ],
+    "script_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_qc_phase4_live_runs/image_series/trend_analysis.py"
+  },
+  "feature_trends": {
+    "coverage": {
+      "trend": "stable",
+      "interpretation": "Only the 2 mM value (~0.44) is valid; the 10 mM point is an invalid/placeholder marker, so no genuine trend can be established. Reported at 2 mM only."
+    },
+    "correlation_length_nm": {
+      "trend": "stable",
+      "interpretation": "Single valid measurement of ~0.86 nm at 2 mM; the 10 mM point is invalid. Represents near-lattice-scale lateral coherence of the surface texture, contingent on scale assumption."
+    },
+    "radial_psd_mid_freq_peak_wavelength_nm": {
+      "trend": "stable",
+      "interpretation": "~0.67 nm corrugation wavelength at 2 mM only; potentially reflects mica lattice-scale or hydration-related periodicity, but unverified due to scale fallback and reflection null."
+    },
+    "mean_patch_size_nm": {
+      "trend": "stable",
+      "interpretation": "~0.53 nm mean patch size across 313 patches at 2 mM; no valid 10 mM comparison exists."
+    },
+    "Rq_nm": {
+      "trend": "stable",
+      "interpretation": "Reported in uncalibrated z-units (~3012), not physically meaningful and not comparable across concentrations. No trend interpretable."
+    }
+  },
+  "caveats": "The dominant limitation is that only 1 of 2 images produced a valid analysis, so the intended 2 mM vs 10 mM comparison cannot be made from measured data\u2014the 10 mM 'points' in the dashboard are invalid placeholders and any drawn regression line is not supported by observations. All absolute length scales for the 2 mM image are uncertain because pixel size/FOV was assumed via a 20 nm fallback (scale_uncertain_flag = true; scale_valid_for_cross_conc = false), meaning correlation length, patch size, envelope length, and corrugation wavelength are correct only up to an unknown scaling factor. Rq is in uncalibrated z-units (Rq_z_calibrated = false) and is not physically interpretable or comparable. The Fourier reflection map returned a legitimate null with sub-nm detection unauthorized, so no verified lattice periodicity was established. Finally, with a single valid image and no replicates, any relationship to KCl concentration is unconstrained; conclusions should be restricted to a relative characterization of the 2 mM surface texture until scale/z-calibration are recovered and the 10 mM image is successfully analyzed.",
+  "literature_files": null,
+  "locked_analysis_config": {
+    "analysis_approach": "After AFM preprocessing (row leveling + square-pixel resampling), use targeted reciprocal-space reflection mapping on each image to quantify the presence, spacing, and significance of the atomic lattice, then compare how that ordered periodicity weakens between 2 mM and 10 mM KCl.",
+    "processing_pipeline": "1) Per-row median subtraction on the physically-scaled float height image (line-by-line leveling), then verify horizontal streaks over featureless regions are visibly suppressed via a fast-scan line profile; escalate to per-row 1st/2nd-order polynomial if residual stripes remain. 2) Resample to square pixels using metadata FOV (index 1: 256x512 -> 512x512); record nm/px and confirm it matches FOV_x/Nx and FOV_y/Ny within float tolerance; preserve physical height mapping (round-trip check). 3) resolve_pixel_size_nm(metadata, shape) with None-guard. 4) NYQUIST GATE: compute the finest resolvable d = 2*pixel_size_nm. If 2*pixel_size_nm > lower bound of the intended d_range, the ~0.5 nm mica lattice is physically unresolvable at this sampling -> record 'lattice unresolvable at this pixel size' and do NOT run the sub-nm reflection search (any positive result would be artifact). 5) If the pixel size DOES resolve the band, run fourier_reflection_map(image, pixel_size_nm, params) with d_range adapted to the actual resolvable range; verify the detected reflection is NOT collinear with the fast-scan/streak direction before accepting it as a real lattice. 6) In ALL cases, characterize the scale-appropriate surface/adsorbate structure to answer the objective: full-image FFT / radial power spectral density to detect any dominant periodicity or characteristic length, autocorrelation correlation length, RMS roughness (Rq) in nm, and blob/patch coverage statistics \u2014 so the 2mM vs 10mM structural change is quantified even when the sub-nm lattice is absent.",
+    "features_to_extract": [
+      "lattice reflection d_nm and significance sigma (ONLY if Nyquist gate passes and reflection is not streak-collinear; else record 'unresolvable/absent')",
+      "periodic flag (present/absent) from the tool, qualified by whether the target d_range is physically resolvable",
+      "spot_snr_domain vs spot_snr_bulk / domain_fraction (only when a valid reflection is confirmed)",
+      "radial PSD / characteristic length scale of the dominant surface structure (nm)",
+      "autocorrelation correlation length (nm) of the adsorbate/blob pattern",
+      "RMS roughness Rq (nm) on the physically-scaled height image",
+      "patch/blob coverage fraction and mean patch size (nm)"
+    ],
+    "quality_criteria": "Preprocessing: after per-row median leveling, horizontal streaks over featureless regions are visibly suppressed (confirmed by fast-scan line profile); index 1 is 512x512 with square pixels and recorded nm/px matches FOV/N within float tolerance; physical-unit height mapping round-trips within quantization error. Science: all reported lengths in nm and heights/roughness in nm (never pixels/dtype). The sub-nm reflection search is trusted ONLY if (a) 2*pixel_size_nm resolves the target d_range and (b) the detected reflection is not collinear with the fast-scan/streak direction; otherwise 'no resolvable lattice' is the correct, expected finding and must NOT be forced. The 2mM vs 10mM comparison must be supported by scale-appropriate structural metrics (characteristic length, correlation length, Rq, coverage) that coherently reflect the visually evident order->disorder / structural change, not by a reflection sigma that could be a streak artifact. Accept/reject follows the tool's own periodic/sigma/spot_snr fields when the Nyquist and orientation gates pass; when they do not, accept the roughness/PSD/correlation-length characterization as the basis for the cross-concentration comparison.",
+    "expected_outputs": [
+      "leveled_squarepixel_images.png",
+      "reflection_map_2mM_vs_10mM.png",
+      "lattice_order_comparison_table.png"
+    ]
+  },
+  "verification_summary": {
+    "verified_count": 1,
+    "approved_count": 1,
+    "score_range": [
+      0.75,
+      0.75
+    ],
+    "mean_score": 0.75
+  }
+}

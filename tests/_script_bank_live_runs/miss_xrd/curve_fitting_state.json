@@ -1,0 +1,412 @@
+{
+  "action_history": [
+    {
+      "timestamp": "2026-07-10T20:00:01.420574",
+      "action": "curve_fit",
+      "input": {
+        "num_spectra": 1,
+        "input_type": "file_paths",
+        "series_metadata": null,
+        "r2_threshold": 0.95
+      },
+      "rationale": "Model: Sum of split pseudo-Voigt peaks (auto-detect prominence_frac=0.01, min_distance=0.10, plus seeded shoulders at 26.25 and 29.3) on SNIP background; fit_range=(4.5,45.0) to exclude giant ~3.3 deg low-angle feature",
+      "result": {
+        "status": "success",
+        "output_directory": "/Users/maxim.ziatdinov/Code/SciLink/tests/_script_bank_live_runs/miss_xrd",
+        "task_mode": "fitting",
+        "detailed_analysis": "The pattern is fit with 30 split pseudo-Voigt reflections on a SNIP background over 4.5-45 deg. Global R2 = 0.9999994 is inflated by background channels; the diagnostic metric peak_region_r2 = 0.9993 passes cleanly, so peak positions and integrated intensities are reliable. Two dominant reflections at 2theta = 11.04 and 22.20 deg (amplitudes ~1.1e6 each) plus strong features near 17-21 and 26-36 deg define the phase's characteristic fingerprint. Refined FWHMs cluster around 0.2-0.5 deg, placing most reflections in the typical microcrystalline regime (30-100 nm) with several dipping into the nanocrystalline regime (10-30 nm). Per-peak Scherrer sizes range from ~17 to ~43 nm across the well-behaved peaks (mean ~26 nm), a spread >2.5x that flags anisotropic (hkl-dependent) broadening; the isotropic Scherrer mean is therefore an oversimplification and the RANGE should be quoted, not a single number. Two of the fitted 'peaks' (peak_1 FWHM=1.37 deg, peak_3 FWHM=2.0 deg, both eta~0.99) are broad, Lorentzian-dominated features near the low-angle edge that are almost certainly residual background/amorphous contributions absorbed by the peak model rather than genuine crystallite reflections; their Scherrer 'sizes' of 3-6 nm should be discarded. The Williamson-Hall analysis is invalid: R2 = 0.10 with a NEGATIVE slope (implied strain -0.0055), which the domain rules classify as unphysical (bad-background/anisotropy/misassignment signature). Per mandate, the size+strain decomposition is NOT reported; only per-peak Scherrer sizes are. Residuals reach up to 34x noise at the apex of the sharpest peaks (22.2, 11) with a symmetric up-down-up oscillation and a coherent multi-sigma band across the 18.6/19.2/20.2/20.9 cluster; per domain validation these are the irreducible split-PV profile limit and mild overlap at the resolution boundary of the strongest reflections, not unmodelled reflections (no isolated new-peak spikes), so the fit is correctly accepted. Since this is frame 1 of a variable-temperature dehydration series, these positions/widths establish the baseline hydrated-phase fingerprint against which peak shifts (lattice contraction), intensity changes, and any phase transition in later frames should be tracked.",
+        "scientific_claims": [
+          {
+            "claim": "The hydrated phase at 28.7 C is microcrystalline with anisotropic broadening: per-peak Scherrer coherent domain sizes span ~17-43 nm (mean ~26 nm, ~+/-15% instrumental accuracy) across the well-fit reflections, with no reliable microstrain (Williamson-Hall R2 = 0.10, negative slope => decomposition not applicable).",
+            "scientific_impact": "Establishes the crystallite-size baseline and fingerprint of the starting (frame-1) phase in an in-situ dehydration series, and shows broadening is hkl-dependent (anisotropic domain shape) rather than strain-driven; this is the reference state for detecting lattice contraction, intensity redistribution, or a dehydration-induced phase transition in subsequent frames.",
+            "has_anyone_question": "Has anyone observed anisotropic, hkl-dependent crystallite-size broadening (17-43 nm domains) with negligible microstrain in the starting hydrated phase of this material by in-situ synchrotron powder XRD prior to dehydration?",
+            "keywords": [
+              "powder XRD",
+              "Scherrer crystallite size",
+              "anisotropic broadening",
+              "in-situ dehydration",
+              "split pseudo-Voigt",
+              "synchrotron"
+            ]
+          }
+        ],
+        "model_type": "Sum of split pseudo-Voigt peaks (auto-detect prominence_frac=0.01, min_distance=0.10, plus seeded shoulders at 26.25 and 29.3) on SNIP background; fit_range=(4.5,45.0) to exclude giant ~3.3 deg low-angle feature",
+        "fitting_parameters": {
+          "peak_1": {
+            "center": 4.441629108227573,
+            "fwhm": 1.374851558458429,
+            "amplitude": 3984.2362750355514,
+            "area": 8575.281470826394,
+            "eta": 0.9895000085102664,
+            "fwhm_left": 0.03490000000000002,
+            "fwhm_right": 2.7148031169168583,
+            "scherrer_size_nm": 5.782631852659626
+          },
+          "peak_2": {
+            "center": 4.972391026568805,
+            "fwhm": 0.20449369609847068,
+            "amplitude": 16954.280966982322,
+            "area": 3703.2442888338855,
+            "eta": 0.007229274174850172,
+            "fwhm_left": 0.14818418820251156,
+            "fwhm_right": 0.2608032039944298,
+            "scherrer_size_nm": 38.88517912064713
+          },
+          "peak_3": {
+            "center": 6.126992681275228,
+            "fwhm": 1.9961362522983999,
+            "amplitude": 2849.9192204843544,
+            "area": 8926.82731806055,
+            "eta": 0.9968194391707677,
+            "fwhm_left": 1.4535385506133236,
+            "fwhm_right": 2.5387339539834763,
+            "scherrer_size_nm": 3.9855286739590126
+          },
+          "peak_4": {
+            "center": 7.245439875906445,
+            "fwhm": 0.2927517181931818,
+            "amplitude": 36759.95595728779,
+            "area": 11797.728176264041,
+            "eta": 0.06284287423942482,
+            "fwhm_left": 0.37939717546695517,
+            "fwhm_right": 0.2061062609194084,
+            "scherrer_size_nm": 27.190943619874215
+          },
+          "peak_5": {
+            "center": 11.036736604102877,
+            "fwhm": 0.23940486388005683,
+            "amplitude": 1102745.354388826,
+            "area": 290310.9310577564,
+            "eta": 0.06948987883415628,
+            "fwhm_left": 0.3261066542707355,
+            "fwhm_right": 0.1527030734893782,
+            "scherrer_size_nm": 33.33799805281295
+          },
+          "peak_6": {
+            "center": 12.021020318806373,
+            "fwhm": 0.18672413490724227,
+            "amplitude": 23608.62570789397,
+            "area": 5229.966380125825,
+            "eta": 0.24079917990975408,
+            "fwhm_left": 0.21229422772014478,
+            "fwhm_right": 0.16115404209433976,
+            "scherrer_size_nm": 42.78077136777807
+          },
+          "peak_7": {
+            "center": 14.743740779239438,
+            "fwhm": 0.23144379399652315,
+            "amplitude": 17493.856641968447,
+            "area": 5569.740354070683,
+            "eta": 0.6145604670416577,
+            "fwhm_left": 0.3052602396648471,
+            "fwhm_right": 0.15762734832819916,
+            "scherrer_size_nm": 34.61100197478233
+          },
+          "peak_8": {
+            "center": 16.361188644132596,
+            "fwhm": 0.2556598720854384,
+            "amplitude": 14940.620541861861,
+            "area": 5405.186052655141,
+            "eta": 0.6924504068862969,
+            "fwhm_left": 0.39230781359473155,
+            "fwhm_right": 0.11901193057614518,
+            "scherrer_size_nm": 31.39310531440175
+          },
+          "peak_9": {
+            "center": 17.122628523786624,
+            "fwhm": 0.29711051067966854,
+            "amplitude": 192855.98836098125,
+            "area": 61314.85228669239,
+            "eta": 0.011077334242223225,
+            "fwhm_left": 0.26208374062735595,
+            "fwhm_right": 0.3321372807319812,
+            "scherrer_size_nm": 27.03979995077967
+          },
+          "peak_10": {
+            "center": 17.713768243194142,
+            "fwhm": 0.2716081128983935,
+            "amplitude": 125865.62245391106,
+            "area": 36390.0017268762,
+            "eta": 4.2048033508747505e-11,
+            "fwhm_left": 0.18297209379941123,
+            "fwhm_right": 0.3602441319973757,
+            "scherrer_size_nm": 29.602060593883344
+          },
+          "peak_11": {
+            "center": 18.634325103891058,
+            "fwhm": 0.2675525807474865,
+            "amplitude": 200867.66739076213,
+            "area": 57210.50051085386,
+            "eta": 0.00011790700666966193,
+            "fwhm_left": 0.30253938931925434,
+            "fwhm_right": 0.23256577217571864,
+            "scherrer_size_nm": 30.089401739864154
+          },
+          "peak_12": {
+            "center": 19.23773721591582,
+            "fwhm": 0.245307258465329,
+            "amplitude": 91190.6484904188,
+            "area": 23811.839808622386,
+            "eta": 1.8906877710427295e-07,
+            "fwhm_left": 0.24711860832222843,
+            "fwhm_right": 0.24349590860842957,
+            "scherrer_size_nm": 32.84684654989513
+          },
+          "peak_13": {
+            "center": 20.246488789298713,
+            "fwhm": 0.35930431441181826,
+            "amplitude": 54936.21527786846,
+            "area": 21012.942444587476,
+            "eta": 0.00016213562778031378,
+            "fwhm_left": 0.5679403688160434,
+            "fwhm_right": 0.15066826000759315,
+            "scherrer_size_nm": 22.459852562103777
+          },
+          "peak_14": {
+            "center": 20.86763659104608,
+            "fwhm": 0.35738843601503095,
+            "amplitude": 85196.10320851723,
+            "area": 32411.003767776667,
+            "eta": 2.139915010836779e-07,
+            "fwhm_left": 0.3789076683491614,
+            "fwhm_right": 0.3358692036809005,
+            "scherrer_size_nm": 22.60246166077942
+          },
+          "peak_15": {
+            "center": 22.203490962779803,
+            "fwhm": 0.2656722412718377,
+            "amplitude": 1124183.3045351072,
+            "area": 318346.0747899825,
+            "eta": 0.002828809204305033,
+            "fwhm_left": 0.30707156179383094,
+            "fwhm_right": 0.22427292074984445,
+            "scherrer_size_nm": 30.472837770111635
+          },
+          "peak_16": {
+            "center": 23.29844583794381,
+            "fwhm": 0.29368702399435964,
+            "amplitude": 25122.57707389812,
+            "area": 7853.861045300173,
+            "eta": 9.959086297836631e-06,
+            "fwhm_left": 0.271312582260057,
+            "fwhm_right": 0.3160614657286622,
+            "scherrer_size_nm": 27.619081242590102
+          },
+          "peak_17": {
+            "center": 24.620229316249983,
+            "fwhm": 0.4685582993477606,
+            "amplitude": 17232.970944666038,
+            "area": 8610.867374450212,
+            "eta": 0.0038320544850909883,
+            "fwhm_left": 0.2720527663640277,
+            "fwhm_right": 0.6650638323314936,
+            "scherrer_size_nm": 17.35374861825674
+          },
+          "peak_18": {
+            "center": 25.999968971538497,
+            "fwhm": 0.26847418693770936,
+            "amplitude": 153818.86553869207,
+            "area": 44186.558113022125,
+            "eta": 0.010899684083142442,
+            "fwhm_left": 0.2847443975782442,
+            "fwhm_right": 0.2522039762971745,
+            "scherrer_size_nm": 30.368863503969862
+          },
+          "peak_19": {
+            "center": 26.259632981473025,
+            "fwhm": 0.27157557058224713,
+            "amplitude": 115822.51169881708,
+            "area": 33482.50658249136,
+            "eta": 1.0036679075179762e-05,
+            "fwhm_left": 0.2983221624310642,
+            "fwhm_right": 0.24482897873343,
+            "scherrer_size_nm": 30.03784340535111
+          },
+          "peak_20": {
+            "center": 27.45849171022309,
+            "fwhm": 0.2942890793736863,
+            "amplitude": 18013.276886237963,
+            "area": 5652.052745260427,
+            "eta": 0.003425819786504852,
+            "fwhm_left": 0.29275519801855016,
+            "fwhm_right": 0.2958229607288225,
+            "scherrer_size_nm": 27.788827692614188
+          },
+          "peak_21": {
+            "center": 29.359648584204244,
+            "fwhm": 0.4203706754307524,
+            "amplitude": 39902.99364400702,
+            "area": 17888.005407980956,
+            "eta": 0.0038364979256817807,
+            "fwhm_left": 0.6845380677090324,
+            "fwhm_right": 0.15620328315247245,
+            "scherrer_size_nm": 19.536007893844396
+          },
+          "peak_22": {
+            "center": 29.78490004289914,
+            "fwhm": 0.26694088573029406,
+            "amplitude": 244098.68145785472,
+            "area": 69363.84356190023,
+            "eta": 9.879897681702475e-05,
+            "fwhm_left": 0.28836420108112704,
+            "fwhm_right": 0.24551757037946115,
+            "scherrer_size_nm": 30.794881962650543
+          },
+          "peak_23": {
+            "center": 30.534633935542427,
+            "fwhm": 0.25741897078444664,
+            "amplitude": 34823.16547764777,
+            "area": 9542.045574893444,
+            "eta": 2.324475973910862e-06,
+            "fwhm_left": 0.2591599997107273,
+            "fwhm_right": 0.25567794185816606,
+            "scherrer_size_nm": 31.990328817699385
+          },
+          "peak_24": {
+            "center": 32.4034425294723,
+            "fwhm": 0.4126924322067685,
+            "amplitude": 100721.92077110625,
+            "area": 44905.05954837916,
+            "eta": 0.031272071763616995,
+            "fwhm_left": 0.4878744862862233,
+            "fwhm_right": 0.33751037812731366,
+            "scherrer_size_nm": 20.046024085984268
+          },
+          "peak_25": {
+            "center": 33.627537770900624,
+            "fwhm": 0.2886498341903989,
+            "amplitude": 44554.16709203275,
+            "area": 13859.380533202238,
+            "eta": 0.026067958954121714,
+            "fwhm_left": 0.2559354949459834,
+            "fwhm_right": 0.3213641734348145,
+            "scherrer_size_nm": 28.751356690161973
+          },
+          "peak_26": {
+            "center": 35.797578007180554,
+            "fwhm": 0.39130526988544395,
+            "amplitude": 71403.55567757566,
+            "area": 30561.191319120644,
+            "eta": 0.05791682152165202,
+            "fwhm_left": 0.3172272198826781,
+            "fwhm_right": 0.4653833198882098,
+            "scherrer_size_nm": 21.334599498277164
+          },
+          "peak_27": {
+            "center": 37.425295942200634,
+            "fwhm": 0.320318076138023,
+            "amplitude": 15532.109660127884,
+            "area": 5296.076789492363,
+            "eta": 4.922059321383566e-05,
+            "fwhm_left": 0.35438984794202166,
+            "fwhm_right": 0.2862463043340243,
+            "scherrer_size_nm": 26.1854262760055
+          },
+          "peak_28": {
+            "center": 39.31272465828574,
+            "fwhm": 0.3593144535515205,
+            "amplitude": 48170.43348281721,
+            "area": 20184.418052576068,
+            "eta": 0.20085867445068126,
+            "fwhm_left": 0.3388523043150795,
+            "fwhm_right": 0.3797766027879614,
+            "scherrer_size_nm": 23.477687689988294
+          },
+          "peak_29": {
+            "center": 40.985849658788126,
+            "fwhm": 0.43225980784189033,
+            "amplitude": 9564.026706531742,
+            "area": 6476.652442498964,
+            "eta": 0.9917609428311925,
+            "fwhm_left": 0.5853607638575814,
+            "fwhm_right": 0.27915885182619926,
+            "scherrer_size_nm": 19.620158266050343
+          },
+          "peak_30": {
+            "center": 42.88254774251905,
+            "fwhm": 0.4950503654199878,
+            "amplitude": 24987.1543333191,
+            "area": 17836.252275650637,
+            "eta": 0.7454448015382441,
+            "fwhm_left": 0.5388406632833715,
+            "fwhm_right": 0.451260067556604,
+            "scherrer_size_nm": 17.240611575221504
+          }
+        },
+        "fit_quality": {
+          "r_squared": 0.9999994284461664,
+          "rmse": 3165.0396370327107,
+          "peak_region_r2": 0.9992919288448788,
+          "residual_rms_over_noise": 3.960718753693744,
+          "max_abs_residual_over_noise": 34.52002522369943,
+          "n_peaks_fitted": 30,
+          "scherrer_mean_size_nm": 26.174195600766588,
+          "williamson_hall": {
+            "size_nm": 12.308495045298367,
+            "strain": -0.0055003333391203,
+            "r_squared": 0.10161909079010067,
+            "slope": -0.0220013333564812,
+            "intercept": 0.011264902775661712,
+            "n_peaks_used": 30
+          },
+          "background_method": "snip(iterations=16)",
+          "r_squared_self_reported": 0.999139626022283
+        },
+        "literature_files": null,
+        "quality_history": {
+          "final_r2": 0.9999994284461664,
+          "threshold": 0.95,
+          "approved": true,
+          "verification_iterations": [
+            {
+              "r_squared": 0.9999990402975621,
+              "annealing_level": 0,
+              "tools_used": [],
+              "model": "Sum of split (asymmetric) pseudo-Voigt peaks (one per detected Bragg reflection) on a SNIP background. Pseudo-Voigt mixing eta free per peak in [0,1]. Auto-detect determines the peak count (expect ~10\u201315 reflections across the fitted range); no hardcoded centers so the recipe generalizes across the in-situ series frames.",
+              "issues": [
+                {
+                  "location": "x\u224822.2 (Region 21.4\u201324.0)",
+                  "problem": "The main peak apex/wings are under-resolved: the residual shows a clear symmetric oscillation (up-down-up, 2 sign-changes) at 65\u03c3 centered on the strong peak."
+                },
+                {
+                  "location": "x\u224826.0\u201326.3 (Region 24.0\u201326.6)",
+                  "problem": "Under-resolved shoulder on the high-angle side of the ~26.0 peak \u2014 the fit misses a clear data maximum/shoulder near 26.2\u201326.3."
+                },
+                {
+                  "location": "x\u224829.3 (Region 29.2\u201331.9)",
+                  "problem": "Under-resolved shoulder on the low-angle side of the 29.79 peak \u2014 the fit does not cover the data shoulder near 29.3."
+                }
+              ],
+              "fix_applied": "Re-run fit_pattern with prominence_frac\u22480.01 and add/seed components near x\u224826.25 and x\u224829.3; verify the split-pseudo-Voigt shape for the 22.2 peak captures its apex asymmetry."
+            },
+            {
+              "r_squared": 0.9999994284461664,
+              "annealing_level": 0,
+              "tools_used": [],
+              "model": "Sum of split (asymmetric) pseudo-Voigt peaks (one per detected Bragg reflection) on a SNIP background. Pseudo-Voigt mixing eta free per peak in [0,1]; split shape allows independent left/right FWHM to capture apex/wing asymmetry. Peak count is set by auto-detection (expect ~12\u201317 reflections across the fitted range now that low-intensity shoulders are resolved), with no hardcoded centers so the recipe generalizes across the in-situ VT series. Explicit seeded components are added near x\u224826.25 (high-angle shoulder of the 25.97 peak) and x\u224829.3 (low-angle shoulder of the 29.79 peak) to represent genuine but weak reflections previously merged into their neighbors. Model itself is LOCKED \u2014 only detection sensitivity and per-peak shape freedom are adjusted.",
+              "issues": [
+                {
+                  "location": "x\u224822.2 (Region 21.4\u201324.0)",
+                  "problem": "Residual oscillation at the apex/wings of the strong 22.2 peak persists (4 sign-changes, ~50\u03c3)"
+                },
+                {
+                  "location": "x\u224818.8\u201321.4",
+                  "problem": "Coherent multi-\u03c3 residual band across the 18.6/19.2/20.2/20.9 peak cluster"
+                }
+              ],
+              "fix_applied": "none"
+            }
+          ],
+          "alternative_models": [],
+          "script_errors": [],
+          "judge_reasoning": null,
+          "approved_by": "verifier"
+        },
+        "banked_scripts": [
+          "b88d813a"
+        ]
+      },
+      "feedback": null
+    }
+  ]
+}

@@ -1,0 +1,453 @@
+[
+  {
+    "step": 1,
+    "data_points": 8,
+    "config": {
+      "model_config": {
+        "kernel": "matern_2.5",
+        "noise": "min_noise_low",
+        "surrogate": "single_task"
+      },
+      "acquisition_strategy": {
+        "type": "max_variance",
+        "params": {}
+      },
+      "rationale": "Step 0 of 10 with only 8 data points spanning 6 dimensions \u2014 the GP is severely undersampled (ratio ~1.3 points per dimension). The surrogate cannot reliably identify promising regions yet. Using max_variance for 1-2 steps to strategically fill gaps in the input space, improving model fidelity before switching to log_ei for exploitation. Full budget available so early exploration investment is well justified.",
+      "batch_size": 1
+    },
+    "recommendation_batch": [
+      {
+        "x1": 0.2990180382655108,
+        "x2": 0.0,
+        "x3": 0.8422053961950015,
+        "x4": 0.07209566704772886,
+        "x5": 0.7918937651741856,
+        "x6": 0.06496986277143812
+      }
+    ],
+    "inspection": {
+      "status": "pass",
+      "reason": "**LOO-CV Residuals:** Several residuals (points 2, 4, 5) extend beyond the pink 1\u03c3 epistemic band, but this is expected since observation noise is not included in the band. No residual exceeds the band by ~3\u00d7; the largest residuals (~0.35\u20130.4) are roughly 2\u00d7 the band width, which is acceptable. With only 8 data points, some LOO-CV instability is normal. **Trend:** This is the first step \u2014 only initial data is shown (gray squares), so there is no optimization trend to evaluate yet. The max_variance strategy is appropriate for this early exploration phase. **Acquisition Function:** The 2D slice over x2 vs x3 (the two most influential parameters) shows the highest variance region (bright yellow) at low x2 and high x3 values. The red candidate star is placed at approximately (x2\u22480, x3\u22480.85), which sits right at the edge of this high-variance region. This is consistent with the max_variance strategy \u2014 the model is sampling where it is most uncertain, which is appropriate for early-stage exploration. **Sensitivity:** Sobol indices clearly identify x2 (0.8463) as the dominant parameter and x3 (0.4171) as secondary. The sum exceeding 1.0 indicates interaction effects between x2 and x3. Parameters x1, x4, x5, x6 all have zero contribution. The model has clear confidence in parameter importance structure despite limited data."
+    },
+    "budget": {
+      "budget_total": 10,
+      "steps_completed": 0,
+      "budget_fraction_remaining": 1.0,
+      "budget_phase": "high",
+      "budget_guidance": "10 experiments remain (100% of campaign budget). Early-stage \u2014 exploration is valuable. 'max_variance' is appropriate if few data points exist. 'log_ei' or 'thompson' for balanced exploration with some exploitation."
+    },
+    "acquisition": {
+      "strategy": "max_variance",
+      "plot_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_bo_advantage_runs/t1_budget_aware_hartmann6/seed_2/agent/acq_step_1.png",
+      "data_path": null
+    }
+  },
+  {
+    "step": 2,
+    "data_points": 9,
+    "config": {
+      "model_config": {
+        "kernel": "matern_2.5",
+        "noise": "min_noise_low",
+        "surrogate": "single_task"
+      },
+      "acquisition_strategy": {
+        "type": "max_variance",
+        "params": {}
+      },
+      "rationale": "Step 2 of 10, 9 remaining (90% budget). Still only 1.5 points per dimension in 6D \u2014 the GP is undersampled. Sobol indices show x1, x4, x5, x6 at zero sensitivity, but this is likely a data coverage artifact rather than true insensitivity. One final max_variance step to improve coverage in under-explored regions before switching to log_ei at step 3. Diagnostics passed cleanly, so model structure (kernel, noise) is kept as-is. This is the last planned exploration step \u2014 subsequent iterations will shift to log_ei for balanced exploitation.",
+      "batch_size": 1
+    },
+    "recommendation_batch": [
+      {
+        "x1": 0.5388763332774096,
+        "x2": 0.30659809258485116,
+        "x3": 0.0,
+        "x4": 0.84336696099607,
+        "x5": 0.8108362797678667,
+        "x6": 0.641287318430938
+      }
+    ],
+    "inspection": {
+      "status": "fail",
+      "reason": "LOO-CV Residuals: Several residuals (points 2, 4, 5) significantly exceed the 1\u03c3 pink uncertainty band, with magnitudes reaching ~0.35-0.4 against a band of ~0.1-0.15, representing roughly 2.5-3\u00d7 exceedance. This suggests the model is underestimating uncertainty, likely due to the min_noise_low setting being too restrictive for this landscape. Optimization Trend: The green 'Best Found' line shows improvement from ~-0.15 to ~0.0 over the BO-guided steps, which is positive progress. Acquisition Function: The max_variance acquisition is being used for exploration, but the red candidate star is placed at approximately (x2=0.3, x3=0.02), which is in a low-variance (dark/purple) region of the acquisition surface. The high-variance (bright yellow) regions are along the right edge (x2~0.8-1.0), meaning the candidate is NOT near the acquisition peak. This misalignment undermines the exploration strategy. Sensitivity: Sobol indices show x2=0.8449 and x3=0.4015 are the dominant parameters (with strong interactions given total >1), while x1, x4, x5, x6 are all 0.0.",
+      "suggested_adjustments": {
+        "noise": "min_noise_mid",
+        "rationale": "Increase the noise floor to better capture the residual variance seen in LOO-CV. The current min_noise_low setting is causing the model to overfit, producing large LOO-CV residuals and potentially distorting the acquisition landscape. Additionally, verify the acquisition optimizer is correctly finding the global maximum of the max_variance surface, as the current candidate appears misplaced relative to the highest-variance region."
+      }
+    },
+    "budget": {
+      "budget_total": 9,
+      "steps_completed": 1,
+      "budget_fraction_remaining": 0.9,
+      "budget_phase": "high",
+      "budget_guidance": "9 experiments remain (90% of campaign budget). Early-stage \u2014 exploration is valuable. 'max_variance' is appropriate if few data points exist. 'log_ei' or 'thompson' for balanced exploration with some exploitation."
+    },
+    "acquisition": {
+      "strategy": "max_variance",
+      "plot_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_bo_advantage_runs/t1_budget_aware_hartmann6/seed_2/agent/acq_step_2.png",
+      "data_path": null
+    }
+  },
+  {
+    "step": 3,
+    "data_points": 10,
+    "config": {
+      "model_config": {
+        "kernel": "matern_2.5",
+        "noise": "min_noise_med",
+        "surrogate": "single_task"
+      },
+      "acquisition_strategy": {
+        "type": "log_ei",
+        "params": {}
+      },
+      "rationale": "Step 3 of 10, 8 remaining (80% budget). Transitioning from exploration to balanced optimization as planned. Switching from max_variance to log_ei \u2014 we've completed 2 exploration steps and need to start exploiting what we've learned. Critical fix: upgrading noise from min_noise_low to min_noise_med per diagnostic recommendation \u2014 LOO-CV residuals exceeded the 1\u03c3 band by 2.5-3\u00d7, indicating the GP is overfitting with the current noise floor. This likely contributed to the misplaced acquisition candidate in Step 2. The higher noise floor will regularize the GP mean, produce better-calibrated uncertainty estimates, and yield a more reliable acquisition landscape. Keeping matern_2.5 kernel and single_task surrogate as appropriate for the data size and smoothness characteristics observed so far.",
+      "batch_size": 1
+    },
+    "recommendation_batch": [
+      {
+        "x1": 0.7392995069038755,
+        "x2": 0.8862667027868613,
+        "x3": 0.5504476604994262,
+        "x4": 0.20984427724046603,
+        "x5": 0.5279463379388838,
+        "x6": 0.07347828502068866
+      }
+    ],
+    "inspection": {
+      "status": "pass",
+      "reason": "**LOO-CV Residuals:** Several residuals (notably points 4 and 5) exceed the 1\u03c3 pink band significantly \u2014 point 4 reaches ~0.46 and point 5 reaches ~-0.45, which is roughly 3\u00d7 the ~0.15 band width. However, with only ~10 data points and a problem where Sobol analysis reveals the output depends almost entirely on a single parameter (x5 = 0.9983), the landscape along x5 may have sharp features that are difficult to capture with limited data. This is characteristic of a rough/steep landscape rather than model miscalibration. **Optimization Trend:** The green 'Best Found' line shows clear improvement from ~-0.15 to ~-0.02 (closer to 0, which appears to be the optimum), with a recent BO-guided point achieving the best value. Optimization is progressing well. **Acquisition Function:** The log_EI surface shows a clear vertical ridge along x5 \u2248 0.5, consistent with x5 being the dominant parameter. The candidate (red star) sits within this high-acquisition ridge at approximately x5 \u2248 0.55, x6 \u2248 0.07, which is reasonable. The acquisition landscape being a vertical band (invariant to x6) is fully consistent with x6 having zero Sobol importance. **Sensitivity:** Sobol indices show x5 = 0.9983 is overwhelmingly dominant, with all other parameters (x6, x1, x3, x4, x2) at 0.0. This is a nearly 1D problem. The model has high confidence in parameter importance and the acquisition function correctly focuses on x5. Overall, despite some LOO-CV residuals exceeding the band, the optimization is progressing, the acquisition function is well-targeted, and the sensitivity analysis is clear and decisive."
+    },
+    "budget": {
+      "budget_total": 8,
+      "steps_completed": 2,
+      "budget_fraction_remaining": 0.8,
+      "budget_phase": "high",
+      "budget_guidance": "8 experiments remain (80% of campaign budget). Early-stage \u2014 exploration is valuable. 'max_variance' is appropriate if few data points exist. 'log_ei' or 'thompson' for balanced exploration with some exploitation."
+    },
+    "acquisition": {
+      "strategy": "log_ei",
+      "plot_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_bo_advantage_runs/t1_budget_aware_hartmann6/seed_2/agent/acq_step_3.png",
+      "data_path": null
+    }
+  },
+  {
+    "step": 4,
+    "data_points": 11,
+    "config": {
+      "model_config": {
+        "kernel": "matern_2.5",
+        "noise": "min_noise_med",
+        "surrogate": "single_task"
+      },
+      "acquisition_strategy": {
+        "type": "log_ei",
+        "params": {}
+      },
+      "rationale": "Step 4 of 10, 7 remaining (70% budget). Optimization is progressing well \u2014 best y improved to -0.54 with consistent gains each step. No plateau detected, so no escalation needed. Continuing log_ei for balanced exploration/exploitation. The dramatic Sobol sensitivity shift between steps (x2-dominant \u2192 x5-dominant) indicates the GP is still resolving landscape structure with only 11 points in 6D; log_ei naturally handles this by balancing uncertainty and improvement. Keeping min_noise_med per Step 2 diagnostic fix \u2014 LOO-CV residuals improved. Kernel and surrogate unchanged as diagnostics passed and data size doesn't yet warrant DKL.",
+      "batch_size": 1
+    },
+    "recommendation_batch": [
+      {
+        "x1": 0.4287710883828514,
+        "x2": 0.6850904088020642,
+        "x3": 0.7512952157485722,
+        "x4": 0.5734475177214229,
+        "x5": 0.4846364507423228,
+        "x6": 0.658416065249796
+      }
+    ],
+    "inspection": {
+      "status": "pass",
+      "reason": "1. **LOO-CV Residuals:** Most residuals fall within or near the pink 1\u03c3 epistemic uncertainty band. A few points (indices ~4\u20135) exceed the band notably, but none reach ~3\u00d7 the band width, and the majority are well-contained. With only ~11 data points this level of LOO error is acceptable. 2. **Optimization Trend:** The green 'Best Found' line shows clear improvement from the initial data, rising from roughly -0.2 to near 0 over the BO-guided iterations. The most recent BO step achieved a new best, indicating the optimizer is actively improving. 3. **Acquisition Function:** The log_EI surface over x5 vs x6 shows a clear, well-defined peak in the region around (x5\u22480.5, x6\u22480.65\u20130.70). The red candidate star sits directly on this peak, confirming the optimizer is sampling where expected improvement is highest. 4. **Sensitivity:** Sobol total-order indices: x5=0.8381, x6=0.6519, x1=0.0, x4=0.0, x2=0.0, x3=0.0. x5 and x6 are the dominant parameters with strong interaction effects (total-order sum exceeds 1, indicating substantial x5\u2013x6 interaction). x1\u2013x4 have zero importance, suggesting the problem is effectively 2-dimensional in x5 and x6. The acquisition slice correctly focuses on these two key parameters."
+    },
+    "budget": {
+      "budget_total": 7,
+      "steps_completed": 3,
+      "budget_fraction_remaining": 0.7,
+      "budget_phase": "high",
+      "budget_guidance": "7 experiments remain (70% of campaign budget). Early-stage \u2014 exploration is valuable. 'max_variance' is appropriate if few data points exist. 'log_ei' or 'thompson' for balanced exploration with some exploitation."
+    },
+    "acquisition": {
+      "strategy": "log_ei",
+      "plot_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_bo_advantage_runs/t1_budget_aware_hartmann6/seed_2/agent/acq_step_4.png",
+      "data_path": null
+    }
+  },
+  {
+    "step": 5,
+    "data_points": 12,
+    "config": {
+      "model_config": {
+        "kernel": "matern_2.5",
+        "noise": "min_noise_med",
+        "surrogate": "single_task"
+      },
+      "acquisition_strategy": {
+        "type": "log_ei",
+        "params": {}
+      },
+      "rationale": "Step 5 of 10, 6 remaining (60% budget). Optimization is progressing well \u2014 best y improved to -0.54 with gains at every BO step, so no plateau escalation is warranted. The model has resolved the landscape structure: x5 and x6 are the dominant parameters with strong interaction, effectively reducing this to a 2D problem. log_ei will naturally concentrate sampling in the productive x5-x6 subspace while maintaining enough exploration to discover any remaining structure. Keeping min_noise_med (the Step 2 fix that improved LOO-CV calibration) and matern_2.5 kernel \u2014 diagnostics passed cleanly last step with this configuration. No changes to model structure needed; the current setup is well-calibrated and the acquisition function is correctly targeting high-improvement regions.",
+      "batch_size": 1
+    },
+    "recommendation_batch": [
+      {
+        "x1": 0.3593992165803779,
+        "x2": 0.14468505101935036,
+        "x3": 0.3000156905900822,
+        "x4": 0.047628814972622065,
+        "x5": 0.45198606686140413,
+        "x6": 0.6828498158849385
+      }
+    ],
+    "inspection": {
+      "status": "pass",
+      "reason": "**LOO-CV Residuals:** Most residuals are within or near the pink 1\u03c3 band. A few points (indices 2, 4, 8, 11) exceed the band, but only point 4 (~0.46) is notably large \u2014 roughly 3\u00d7 the band width (~0.12). This is borderline but with only 12 points on a landscape driven by 3 active parameters with interactions (total-order Sobol sums to ~1.49), some LOO-CV difficulty is expected and does not indicate systematic miscalibration. **Optimization Trend:** The green 'Best Found' line improved from the initial data value (~-0.15) and has now reached near 0 (the first BO-guided point matched or slightly improved the best). The most recent BO-guided points show a decline in observed value (dropping to ~-0.27), but the best-found line correctly holds at the optimum found so far, indicating the optimizer is exploring. The trend shows the optimizer successfully improved early and is now exploring \u2014 acceptable behavior. **Acquisition Function:** The log_EI surface shows a clear, well-defined peak in the x6 \u2248 0.55\u20130.75, x5 \u2248 0.40\u20130.55 region. The red candidate star sits directly at/near this peak, confirming the optimizer is sampling where it predicts the best improvement. Several existing observations cluster nearby, supporting exploitation of a promising region. **Sensitivity:** Sobol total-order indices \u2014 x6: 0.6002, x5: 0.5596, x4: 0.334, x1: 0.0, x2: 0.0, x3: 0.0. The total exceeds 1.0 (sum \u2248 1.49), indicating substantial interactions among x4, x5, and x6. Parameters x1, x2, x3 have zero influence and could be fixed to reduce dimensionality. The acquisition slice correctly displays the two most important parameters (x6 vs x5)."
+    },
+    "budget": {
+      "budget_total": 6,
+      "steps_completed": 4,
+      "budget_fraction_remaining": 0.6,
+      "budget_phase": "high",
+      "budget_guidance": "6 experiments remain (60% of campaign budget). Early-stage \u2014 exploration is valuable. 'max_variance' is appropriate if few data points exist. 'log_ei' or 'thompson' for balanced exploration with some exploitation."
+    },
+    "acquisition": {
+      "strategy": "log_ei",
+      "plot_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_bo_advantage_runs/t1_budget_aware_hartmann6/seed_2/agent/acq_step_5.png",
+      "data_path": null
+    }
+  },
+  {
+    "step": 6,
+    "data_points": 13,
+    "config": {
+      "model_config": {
+        "kernel": "matern_2.5",
+        "noise": "min_noise_med",
+        "surrogate": "single_task"
+      },
+      "acquisition_strategy": {
+        "type": "log_ei",
+        "params": {}
+      },
+      "rationale": "Step 5 of 10, 5 remaining (50% budget). Optimization is progressing well \u2014 best y = -1.24, a substantial improvement from initial data. No plateau detected, so no escalation needed. The GP is well-calibrated (diagnostics passed, LOO-CV acceptable) with min_noise_med providing appropriate regularization. Sobol analysis identifies x4, x5, x6 as the 3 active parameters with strong interactions (total Sobol ~1.49), effectively reducing the problem to 3D. log_ei will naturally balance exploitation of the promising region around the current best with exploration of the x4-x5-x6 interaction landscape. Maintaining the successful model configuration \u2014 matern_2.5 captures the smooth-but-varying landscape, and single_task is appropriate for 13 data points.",
+      "batch_size": 1
+    },
+    "recommendation_batch": [
+      {
+        "x1": 0.23301450018142367,
+        "x2": 0.0,
+        "x3": 0.09370858929670346,
+        "x4": 0.0,
+        "x5": 0.3984210739681528,
+        "x6": 0.9132461083372211
+      }
+    ],
+    "inspection": {
+      "status": "fail",
+      "reason": "**LOO-CV Residuals:** Several residuals (particularly points 9\u201313) substantially exceed the pink 1\u03c3 epistemic uncertainty band, with the worst cases (points 10, 12, 13) reaching ~0.4\u20130.75 in magnitude, roughly 3\u00d7 or more beyond the band (~0.15\u20130.20). This indicates the GP model is miscalibrated \u2014 it is overconfident in regions where predictions are poor, suggesting the kernel smoothness or noise setting is not capturing the local landscape structure adequately. **Optimization Trend:** The green 'Best Found' line improved early (from ~-0.15 to ~-0.02) and has been flat for the last several BO iterations, indicating the optimizer may be stuck near a local optimum. The most recent BO-guided points are actually returning much worse values (dropping to ~-1.2), suggesting the model is exploring poorly. **Acquisition Function:** The log_EI surface shows a clear peak in the lower-left region (low x5, low x4), and the red candidate star sits at approximately (x5\u22480.4, x4\u22480.0), which is near but slightly offset from the brightest yellow region. The candidate placement is reasonable but not perfectly at the peak. **Sensitivity:** Sobol indices \u2014 x5: 0.7578, x4: 0.3817, x1: 0.1092, x2: 0.0248, x6: 0.0, x3: 0.0. Strong interactions are present (total-order sum > 1.27). x5 is the dominant parameter, followed by x4, with meaningful interaction effects between them. x3 and x6 are inert. The large LOO-CV residuals at multiple points and the flat/stuck optimization trend warrant a model adjustment.",
+      "suggested_adjustments": {
+        "kernel": "matern_1.5",
+        "noise": "min_noise_high",
+        "rationale": "Switch to Mat\u00e9rn 1.5 to allow rougher function modeling, which should better capture the local structure causing large LOO-CV residuals. Increase the noise floor to prevent overconfidence. The flat best-found trend also suggests considering a more exploratory acquisition strategy (e.g., max_variance or qEI with larger batch) to escape the current plateau."
+      }
+    },
+    "budget": {
+      "budget_total": 5,
+      "steps_completed": 5,
+      "budget_fraction_remaining": 0.5,
+      "budget_phase": "mid",
+      "budget_guidance": "5 experiments remain (50% of campaign budget). Mid-campaign \u2014 balance exploration and exploitation. 'log_ei' is a strong default. 'ucb' with beta ~2.0 also appropriate. 'max_variance' acceptable if data is sparse or model uncertain."
+    },
+    "acquisition": {
+      "strategy": "log_ei",
+      "plot_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_bo_advantage_runs/t1_budget_aware_hartmann6/seed_2/agent/acq_step_6.png",
+      "data_path": null
+    }
+  },
+  {
+    "step": 7,
+    "data_points": 14,
+    "config": {
+      "model_config": {
+        "kernel": "matern_1.5",
+        "noise": "min_noise_high",
+        "surrogate": "single_task"
+      },
+      "acquisition_strategy": {
+        "type": "log_ei",
+        "params": {}
+      },
+      "rationale": "Best y improved to -1.24 last step \u2014 no plateau, so no escalation needed. However, diagnostics failed badly: LOO-CV residuals at points 9-13 reach 3\u00d7+ the uncertainty band (0.4-0.75 vs ~0.15-0.20), indicating the GP is overconfident with matern_2.5/min_noise_med. Following diagnostic recommendation: switching to matern_1.5 to capture rougher local structure (the dramatic Sobol sensitivity shifts across steps suggest aliased rough features), and min_noise_high to regularize and prevent overconfidence. This should produce better-calibrated uncertainty and a more reliable acquisition landscape. Continuing log_ei at 40% budget \u2014 optimization is progressing well and log_ei will naturally balance exploitation of the -1.24 region with exploration of the x4-x5 interaction landscape identified by Sobol analysis.",
+      "batch_size": 1
+    },
+    "recommendation_batch": [
+      {
+        "x1": 0.3714224893981864,
+        "x2": 0.33442994560460093,
+        "x3": 0.3387268993747795,
+        "x4": 0.4942640789478242,
+        "x5": 0.16867463757448092,
+        "x6": 0.21117634889755205
+      }
+    ],
+    "inspection": {
+      "status": "pass",
+      "reason": "**LOO-CV Residuals:** Most residuals fall within or near the pink 1\u03c3 epistemic uncertainty band. A few points (indices ~3, 10, 12) extend beyond the band, but none exceed it by ~3\u00d7. Given a 6-dimensional landscape with only ~15 points, some LOO-CV misses are expected and do not indicate miscalibration. **Optimization Trend:** The green 'Best Found' line improved early from the initial data and has held steady near ~-0.02 through the BO-guided phase. The last few BO iterations show the optimizer exploring (one large dip around index 13), but the best found has not degraded \u2014 optimization is not stuck, though gains are marginal, suggesting we are near the optimum. **Acquisition Function:** The 2D slice (x3 vs x1) shows a clear peak near (x3\u22480.3, x1\u22480.4), and the red candidate star sits directly on this peak. This confirms the optimizer is correctly targeting the region of highest expected improvement. **Sensitivity:** Sobol total-order indices: x3=0.7397, x1=0.7004, x5=0.0, x4=0.0, x2=0.0, x6=0.0. x3 and x1 are the dominant parameters with strong total-order values (summing >1 indicates interaction between them). The remaining four parameters (x2, x4, x5, x6) have zero contribution. The acquisition slice through x3 and x1 is well-chosen given these are the only influential dimensions."
+    },
+    "budget": {
+      "budget_total": 4,
+      "steps_completed": 6,
+      "budget_fraction_remaining": 0.4,
+      "budget_phase": "mid",
+      "budget_guidance": "4 experiments remain (40% of campaign budget). Mid-campaign \u2014 balance exploration and exploitation. 'log_ei' is a strong default. 'ucb' with beta ~2.0 also appropriate. 'max_variance' acceptable if data is sparse or model uncertain."
+    },
+    "acquisition": {
+      "strategy": "log_ei",
+      "plot_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_bo_advantage_runs/t1_budget_aware_hartmann6/seed_2/agent/acq_step_7.png",
+      "data_path": null
+    }
+  },
+  {
+    "step": 8,
+    "data_points": 15,
+    "config": {
+      "model_config": {
+        "kernel": "matern_1.5",
+        "noise": "min_noise_high",
+        "surrogate": "single_task"
+      },
+      "acquisition_strategy": {
+        "type": "log_ei",
+        "params": {}
+      },
+      "rationale": "Budget = 3 remaining \u2014 must exploit. Best y = -1.24 with no plateau yet (only 2 steps without improvement). Diagnostics passed cleanly after switching to matern_1.5/min_noise_high last step, confirming the model is now well-calibrated \u2014 no reason to change a working configuration with so few experiments left. log_ei is the preferred exploitation-balanced strategy at this budget level and will target improvement over the current best. The unstable Sobol sensitivities across steps (reflecting 15 points in 6D) mean the GP is still resolving structure, making log_ei's natural uncertainty-awareness valuable \u2014 it will explore where the model is uncertain about improvement rather than committing blindly to any single parameter subspace.",
+      "batch_size": 1
+    },
+    "recommendation_batch": [
+      {
+        "x1": 0.3954859309215547,
+        "x2": 0.12150319617111031,
+        "x3": 0.2867273887819865,
+        "x4": 0.11518647451212731,
+        "x5": 0.4327084268794897,
+        "x6": 0.24610770706022914
+      }
+    ],
+    "inspection": {
+      "status": "pass",
+      "reason": "**LOO-CV Residuals:** Most residuals fall within the pink 1\u03c3 epistemic uncertainty band. A few points (indices ~11, 12, 15) exceed the band, but only point 15 (~-0.65) extends notably beyond it \u2014 roughly 2\u00d7 the band width, which is below the ~3\u00d7 threshold for flagging miscalibration. Given a 6D landscape with only ~15 points, some LOO-CV errors are expected. **Optimization Trend:** The green 'Best Found' line improved early (from ~-0.1 to ~-0.02) and has been flat for several BO iterations. While this suggests the optimizer may be converging or near an optimum, the best value is near zero which appears to be a reasonable optimum for this problem. The trend is not deeply stalled \u2014 recent BO-guided points explored lower regions (down to -1.2) which confirms the optimizer is still exploring. **Acquisition Function:** The 2D slice (x5 vs x1) shows a clear, well-defined peak in the acquisition landscape, and the red candidate star sits directly on/near this peak (~x5=0.45, x1=0.40). This confirms the optimizer is sampling where it believes the best improvement lies. **Sensitivity:** Total-order Sobol indices: x5=0.5764 (most influential), x1=0.4317, x3=0.3993, x4=0.0, x2=0.0, x6=0.0. Three parameters (x5, x1, x3) drive output variance with notable interactions (total-order values sum to ~1.41, exceeding 1.0). Three parameters (x4, x2, x6) have zero contribution and could be fixed to reduce dimensionality. The acquisition slice correctly displays the two most important parameters (x5 and x1)."
+    },
+    "budget": {
+      "budget_total": 3,
+      "steps_completed": 7,
+      "budget_fraction_remaining": 0.3,
+      "budget_phase": "critical",
+      "budget_guidance": "Only 3 experiments remain. Strongly favor exploitation. Use 'log_ei' (preferred) or 'ucb' with low beta (0.3-1.0). Avoid 'max_variance'. 'thompson' acceptable only if batch_size > 10. Reserve at most 1 point for exploration if batch allows."
+    },
+    "acquisition": {
+      "strategy": "log_ei",
+      "plot_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_bo_advantage_runs/t1_budget_aware_hartmann6/seed_2/agent/acq_step_8.png",
+      "data_path": null
+    }
+  },
+  {
+    "step": 9,
+    "data_points": 16,
+    "config": {
+      "model_config": {
+        "kernel": "matern_1.5",
+        "noise": "min_noise_high",
+        "surrogate": "single_task"
+      },
+      "acquisition_strategy": {
+        "type": "ucb",
+        "params": {
+          "beta": 0.3
+        }
+      },
+      "rationale": "Budget = 2 \u2014 must exploit aggressively. Best y = -1.24 has not improved in 5 steps, but budget rules take priority over plateau escalation. Using ucb with beta=0.3 to tightly exploit the region near the current best. The GP found -1.24 during what appears to be an exploratory sample, so the surrounding region likely has untapped potential. Keeping matern_1.5/min_noise_high which passed diagnostics last step \u2014 the rougher kernel better captures local structure in this 6D landscape with only 16 points, and the higher noise floor prevents overconfidence. No model changes warranted with so few experiments remaining.",
+      "batch_size": 1
+    },
+    "recommendation_batch": [
+      {
+        "x1": 0.36565464243768087,
+        "x2": 0.37472991516389226,
+        "x3": 0.29900623586549085,
+        "x4": 0.0838124233530145,
+        "x5": 0.4443050032261006,
+        "x6": 0.7161520313045796
+      }
+    ],
+    "inspection": {
+      "status": "fail",
+      "reason": "LOO-CV Residuals: Several residuals (notably points 11, 12, 15) substantially exceed the 1\u03c3 pink uncertainty band, with point 15 reaching approximately -0.8 which is roughly 3\u00d7 the band width, indicating the model is struggling to fit parts of the landscape \u2014 likely due to the Mat\u00e9rn 1.5 kernel being insufficiently flexible or the high minimum noise setting masking true signal. Optimization Trend: The green 'Best Found' line reached its optimum early (around step 2-3) and has been flat since, while BO-guided points (steps 9-16) have been exploring much worse regions (values around -0.5 to -1.2 before recovering), suggesting the optimizer got stuck and UCB with beta=0.3 is providing insufficient exploration to improve beyond the initial best. Acquisition Function: The candidate (red star) sits near the peak of the UCB surface in the x5-x1 slice, which is well-positioned \u2014 this aspect is functioning correctly. Sensitivity: Sobol total-order indices show x5 (0.5837) is the most influential parameter, followed by x1 (0.407) and x3 (0.3663), with x6 contributing modestly (0.1914), while x4 and x2 have zero contribution. The sum exceeding 1 indicates interactions among x5, x1, and x3. The key concerns are: (1) large LOO-CV residuals suggesting model misfit, and (2) a completely flat best-found trend indicating the optimizer is not improving.",
+      "suggested_adjustments": {
+        "kernel": "matern_2.5",
+        "noise": "min_noise_low",
+        "acquisition_params": {
+          "beta": 1.5
+        },
+        "rationale": "Switch to Mat\u00e9rn 2.5 for slightly more smoothness which may better capture the interactions among x5, x1, x3. Reduce minimum noise from 'min_noise_high' to 'min_noise_low' so the GP can fit the data more tightly \u2014 the large LOO-CV residuals suggest real signal is being attributed to noise. Increase UCB beta from 0.3 to 1.5 to encourage more exploration, since the optimizer has been flat and needs to escape the current region."
+      }
+    },
+    "budget": {
+      "budget_total": 2,
+      "steps_completed": 8,
+      "budget_fraction_remaining": 0.2,
+      "budget_phase": "critical",
+      "budget_guidance": "Only 2 experiments remain. Strongly favor exploitation. Use 'log_ei' (preferred) or 'ucb' with low beta (0.3-1.0). Avoid 'max_variance'. 'thompson' acceptable only if batch_size > 10. Reserve at most 1 point for exploration if batch allows."
+    },
+    "acquisition": {
+      "strategy": "ucb",
+      "plot_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_bo_advantage_runs/t1_budget_aware_hartmann6/seed_2/agent/acq_step_9.png",
+      "data_path": null
+    }
+  },
+  {
+    "step": 10,
+    "data_points": 17,
+    "config": {
+      "model_config": {
+        "kernel": "matern_2.5",
+        "noise": "min_noise_low",
+        "surrogate": "single_task"
+      },
+      "acquisition_strategy": {
+        "type": "ucb",
+        "params": {
+          "beta": 0.1
+        }
+      },
+      "rationale": "LAST experiment \u2014 maximum exploitation required. Switching from matern_1.5/min_noise_high to matern_2.5/min_noise_low as diagnostics failed: large LOO-CV residuals (point 15 at ~3\u00d7 band) indicate min_noise_high is attributing real signal to noise, preventing the GP from fitting the best region tightly. With min_noise_low, the GP can accurately resolve the landscape around y=-1.24, and matern_2.5 better captures the smooth interactions among x5, x1, x3 (total Sobol ~1.37). UCB with beta=0.1 provides near-pure exploitation, targeting the posterior mean minimum \u2014 our best chance to improve on -1.24 in this final shot.",
+      "batch_size": 1
+    },
+    "recommendation_batch": [
+      {
+        "x1": 0.34071811365571636,
+        "x2": 0.781065022813942,
+        "x3": 0.30634710947651245,
+        "x4": 0.01804991377108924,
+        "x5": 0.14841046991642637,
+        "x6": 0.6494351894587281
+      }
+    ],
+    "inspection": {
+      "status": "pass",
+      "reason": "1. **LOO-CV Residuals:** Most residuals fall within the pink 1\u03c3 epistemic uncertainty band. A few points (indices ~3, 11, 14) extend beyond the band, but none exceed it by ~3\u00d7. The largest residual (~-0.6 at index 14) is notable but within roughly 2\u00d7 the band width, which is acceptable given the landscape complexity. The model is not systematically miscalibrated. 2. **Optimization Trend:** The green 'Best Found' line improved early from ~-0.1 to ~-0.02 and has been essentially flat (near 0) since around step 8-9. The optimizer has found a good value and the BO-guided points are exploring but not improving further. The best found is close to 0, which appears to be near-optimal. The flat trend at this level is acceptable \u2014 the optimizer may be near the global optimum. 3. **Acquisition Function:** The UCB acquisition surface (x3 vs x1 slice) shows a clear, well-defined peak around x3\u22480.3, x1\u22480.35. The red candidate star sits directly on/near this peak, confirming the optimizer is sampling where it believes the best improvement lies. The acquisition landscape is not flat, showing good model structure. 4. **Sensitivity:** Total-order Sobol indices: x3=0.7097, x1=0.5932, x6=0.2584, x4=0.0, x5=0.0, x2=0.0. The sum exceeds 1.0, indicating strong interactions between x3, x1, and x6. x3 and x1 are clearly the dominant parameters, consistent with the acquisition slice being shown over these two variables. Three parameters (x4, x5, x2) have zero contribution and could potentially be fixed to reduce dimensionality. Overall, the model is well-calibrated, the acquisition function is coherent with the candidate selection, and the optimization appears to be converging near the optimum."
+    },
+    "budget": {
+      "budget_total": 1,
+      "steps_completed": 9,
+      "budget_fraction_remaining": 0.1,
+      "budget_phase": "final_shot",
+      "budget_guidance": "CRITICAL: This is the LAST experiment. You MUST exploit. Use 'log_ei' or 'ucb' with very low beta (< 0.3). Do NOT use 'max_variance' or 'thompson'. Every point must target the most promising region found so far."
+    },
+    "acquisition": {
+      "strategy": "ucb",
+      "plot_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_bo_advantage_runs/t1_budget_aware_hartmann6/seed_2/agent/acq_step_10.png",
+      "data_path": null
+    }
+  }
+]

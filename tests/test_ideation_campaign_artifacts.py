@@ -54,11 +54,20 @@ def test_campaign_kind(state, expected):
 
 # ── the report decision, now shared by all five sites ────────────────
 
-def test_no_protocol_report_for_a_dossier(tmp_path):
-    state = {"plan_kind": "ideation", "current_plan": {"type": "ideation"}}
+def test_a_portfolio_never_gets_a_protocol_report(tmp_path):
+    """It gets a PORTFOLIO report instead — same suppression of the
+    experiment template, but no longer nothing at all."""
+    state = {"plan_kind": "ideation",
+             "current_plan": {"type": "ideation",
+                              "directions": [{"id": "A", "title": "One"}]}}
     tools = _tools(tmp_path, state, [])
-    assert tools._emit_plan_report() is None
-    assert not (tmp_path / "plan.html").exists()
+    out = tools._emit_plan_report()
+    assert not (tmp_path / "plan.html").exists(), "the protocol view is the bug"
+    assert out and out.name == "portfolio.html"
+
+    from scilink.agents.planning_agents.user_interface import load_deliverables
+    titles = [e["title"] for e in load_deliverables(tmp_path)]
+    assert "Experimental plan (report)" not in titles, "must not be starred"
 
 
 def test_lab_campaigns_still_get_their_report(tmp_path):
@@ -78,8 +87,9 @@ def test_refinement_cannot_resurrect_the_report(tmp_path):
     state = {"plan_kind": "ideation", "current_plan": {"type": "ideation"}}
     tools = _tools(tmp_path, state, [])
     for name in ("plan.html", "plan.html", "plan_refined.html"):
-        assert tools._emit_plan_report(name) is None
-    assert list(tmp_path.glob("*.html")) == []
+        out = tools._emit_plan_report(name)
+        assert out is None or out.name != "plan.html"
+    assert not (tmp_path / "plan.html").exists()
 
 
 def test_every_report_site_routes_through_the_helper():

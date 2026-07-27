@@ -1,0 +1,39 @@
+{
+  "action_history": [
+    {
+      "timestamp": "2026-07-11T10:14:30.994718",
+      "action": "curve_fit",
+      "input": {
+        "num_spectra": 1,
+        "input_type": "file_paths",
+        "series_metadata": null,
+        "r2_threshold": 0.95
+      },
+      "rationale": "Model: None",
+      "result": {
+        "status": "success",
+        "output_directory": "/Users/maxim.ziatdinov/Code/SciLink/tests/_script_bank_live_runs/glitch_runt",
+        "task_mode": "fitting",
+        "profile": "realtime",
+        "detailed_analysis": "Realtime frame: locked script from 'camp_leg1' fallback-regenerated; R\u00b2 = n/a; gate verdict: script_failed; drift: n/a (fingerprint similarity n/a). Interpretation is deferred to the post-experiment sweep.",
+        "scientific_claims": [],
+        "model_type": null,
+        "fitting_parameters": {},
+        "fit_quality": {},
+        "literature_files": null,
+        "quality_warning": "The locked fitting script from prior run 'camp_leg1' could not execute on this data; the model was re-derived from scratch and the extracted-feature schema may differ from the prior run.",
+        "attempted_models": [],
+        "quality_history": {
+          "produced_under_profile": "realtime"
+        },
+        "reuse_validity": {
+          "reused": false,
+          "source": "camp_leg1",
+          "verdict": "script_failed",
+          "message": "The locked fitting script from prior run 'camp_leg1' could not execute on this data; the model was re-derived from scratch and the extracted-feature schema may differ from the prior run."
+        }
+      },
+      "feedback": null
+    }
+  ]
+}

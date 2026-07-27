@@ -1,0 +1,35 @@
+{
+  "action_history": [
+    {
+      "timestamp": "2026-07-09T20:35:09.959309",
+      "action": "curve_fit",
+      "input": {
+        "num_spectra": 5,
+        "input_type": "file_paths",
+        "series_metadata": {
+          "variable": "temperature",
+          "values": [
+            243.2,
+            258.2,
+            278.2,
+            293.5,
+            313.2
+          ],
+          "unit": "K"
+        },
+        "r2_threshold": 0.95
+      },
+      "rationale": "Model: unknown",
+      "result": {
+        "total_spectra": 5,
+        "successful_fits": 5,
+        "flagged_count": 0,
+        "refitted_count": 0,
+        "input_type": "file_paths",
+        "locked_model": "Sum of Voigt profiles (Lorentzian-dominant, Gaussian width free for shim/disorder) on a linear baseline: 1 Voigt for fast-exchange spectra (~-2.5 to -3.5 ppm), 2 Voigts for slow-exchange spectra (free TEP + Mg-coordinated TEP, ~-5.5 and ~-3.5 ppm).",
+        "is_single_spectrum": false
+      },
+      "feedback": null
+    }
+  ]
+}

@@ -1,0 +1,782 @@
+{
+  "timestamp": "2026-07-24T17:42:04.240229",
+  "total_images": 1,
+  "successful": 1,
+  "flagged_count": 0,
+  "is_single_image": true,
+  "series_metadata": {},
+  "quality_settings": {
+    "outlier_sigma": 2.0
+  },
+  "locked_config": {
+    "analysis_approach": "Scale-matched band-pass blob detection sized to the known ~80 nm particle diameter to detect, count, and size the dark spheres, rejecting the speckled background.",
+    "processing_pipeline": "resolve_pixel_size_nm(metadata, image.shape) -> log_blob_detect(image, object_diameter_nm=80, pixel_size_nm=<resolved>, polarity='dark', threshold_rel tuned from overlay) -> inspect overlay: RAISE threshold_rel if speckle/false cores appear, LOWER if visible spheres are unmarked; de-duplicate detections within ~one radius -> if visible touching spheres are still merged into single detections, add a distance-transform watershed (peak_local_max min_distance \u2248 particle radius) to split convex touching cores -> extract per-particle diameter (nm) from split labels and summary statistics",
+    "features_to_extract": [
+      "particle_count (n_detected, n_interior)",
+      "per-particle diameter (nm)",
+      "diameter median/mean/std (nm)",
+      "diameter distribution histogram",
+      "per-particle centroid positions",
+      "polarity_used (must be 'dark')",
+      "detector_used and key params (threshold_rel / min_distance)"
+    ],
+    "quality_criteria": "Detection overlay matches visible spheres: no obvious dark spheres left unmarked and no marks on inter-particle gaps/substrate texture (recall within ~20% of a visual count). Each detection corresponds to one sphere \u2014 touching neighbors are split, not merged into one large detection. Diameter distribution is unimodal with median near the ~80 nm nominal value (within ~30%). Few or no detections below ~1/4 the typical particle area (no fragment over-segmentation) and no oversized detections at ~2x area (no merged pairs). polarity_used should be 'dark'.",
+    "expected_outputs": [
+      "particle_detection_overlay.png",
+      "diameter_distribution_histogram.png"
+    ]
+  },
+  "series_analysis_plan": null,
+  "results": [
+    {
+      "index": 0,
+      "name": "image",
+      "data_path": "/Users/maxim.ziatdinov/Code/benchmarking_for_paper2/TEM_staged/01_easy_AuNP/image.tif",
+      "success": true,
+      "error": null,
+      "analysis_type": "Scale-matched LoG band-pass blob detection (dark polarity) sized to ~80 nm particles, threshold_rel tuned by overlay inspection, de-duplicated within one radius, conditional distance-transform watershed (peak_local_max markers, min_distance ~ radius) to split touching cores, then per-particle sizing.",
+      "extracted_features": {
+        "particle_count_n_detected": 120,
+        "particle_count_final": 120,
+        "n_interior": 91,
+        "diameter_median_nm": 69.609,
+        "diameter_mean_nm": 70.07712500000001,
+        "diameter_std_nm": 8.112964322164146,
+        "diameter_std_nm_err": 8.112964322164146,
+        "diameter_histogram_counts": [
+          1,
+          1,
+          3,
+          2,
+          1,
+          3,
+          4,
+          10,
+          20,
+          51,
+          9,
+          1,
+          2,
+          2,
+          2,
+          4,
+          1,
+          1,
+          0,
+          2
+        ],
+        "diameter_histogram_edges_nm": [
+          45.088,
+          47.77745,
+          50.4669,
+          53.15635,
+          55.8458,
+          58.535250000000005,
+          61.2247,
+          63.91415,
+          66.6036,
+          69.29305,
+          71.9825,
+          74.67195,
+          77.3614,
+          80.05085,
+          82.74029999999999,
+          85.42975,
+          88.1192,
+          90.80865,
+          93.4981,
+          96.18755,
+          98.877
+        ],
+        "per_particle_diameter_nm": [
+          52.998,
+          48.252,
+          71.982,
+          70.4,
+          71.191,
+          71.191,
+          73.564,
+          70.4,
+          71.191,
+          68.027,
+          71.191,
+          83.848,
+          75.146,
+          82.266,
+          68.027,
+          71.191,
+          73.564,
+          71.191,
+          79.102,
+          70.4,
+          71.191,
+          66.445,
+          72.773,
+          59.326,
+          69.609,
+          71.191,
+          65.654,
+          62.49,
+          69.609,
+          62.49,
+          69.609,
+          72.773,
+          70.4,
+          97.295,
+          69.609,
+          71.982,
+          70.4,
+          68.818,
+          83.057,
+          68.818,
+          73.564,
+          69.609,
+          70.4,
+          71.191,
+          72.773,
+          68.027,
+          70.4,
+          69.609,
+          73.564,
+          55.371,
+          69.609,
+          68.027,
+          64.863,
+          98.877,
+          66.445,
+          69.609,
+          69.609,
+          68.818,
+          82.266,
+          70.4,
+          70.4,
+          68.027,
+          66.445,
+          69.609,
+          65.654,
+          60.908,
+          70.4,
+          70.4,
+          68.818,
+          69.609,
+          67.236,
+          71.191,
+          71.191,
+          71.982,
+          68.818,
+          70.4,
+          77.52,
+          68.027,
+          85.43,
+          67.236,
+          89.385,
+          70.4,
+          68.818,
+          70.4,
+          68.818,
+          86.221,
+          69.609,
+          68.027,
+          61.699,
+          91.758,
+          64.863,
+          71.191,
+          68.818,
+          68.818,
+          70.4,
+          69.609,
+          65.654,
+          68.818,
+          64.863,
+          72.773,
+          70.4,
+          68.027,
+          69.609,
+          66.445,
+          71.191,
+          60.117,
+          86.221,
+          69.609,
+          52.207,
+          56.162,
+          71.982,
+          71.191,
+          45.088,
+          71.982,
+          73.564,
+          52.207,
+          86.221,
+          53.789,
+          69.609,
+          61.699
+        ],
+        "per_particle_centroid_yx": [
+          [
+            1084.0,
+            2047.0
+          ],
+          [
+            2047.0,
+            2047.0
+          ],
+          [
+            931.0,
+            1684.0
+          ],
+          [
+            279.0,
+            1112.0
+          ],
+          [
+            726.0,
+            1673.0
+          ],
+          [
+            871.0,
+            1474.0
+          ],
+          [
+            116.0,
+            742.0
+          ],
+          [
+            1677.0,
+            1123.0
+          ],
+          [
+            326.0,
+            742.0
+          ],
+          [
+            368.0,
+            1286.0
+          ],
+          [
+            340.0,
+            395.0
+          ],
+          [
+            1868.0,
+            2047.0
+          ],
+          [
+            215.0,
+            923.0
+          ],
+          [
+            0.0,
+            561.0
+          ],
+          [
+            1390.0,
+            1815.0
+          ],
+          [
+            407.0,
+            1819.0
+          ],
+          [
+            1608.0,
+            591.0
+          ],
+          [
+            1378.0,
+            1287.0
+          ],
+          [
+            0.0,
+            1784.0
+          ],
+          [
+            1113.0,
+            1637.0
+          ],
+          [
+            1497.0,
+            774.0
+          ],
+          [
+            908.0,
+            1111.0
+          ],
+          [
+            1719.0,
+            407.0
+          ],
+          [
+            0.0,
+            925.0
+          ],
+          [
+            208.0,
+            1806.0
+          ],
+          [
+            1406.0,
+            594.0
+          ],
+          [
+            612.0,
+            927.0
+          ],
+          [
+            1025.0,
+            1871.0
+          ],
+          [
+            639.0,
+            1494.0
+          ],
+          [
+            223.0,
+            565.0
+          ],
+          [
+            1115.0,
+            759.0
+          ],
+          [
+            701.0,
+            1110.0
+          ],
+          [
+            446.0,
+            1473.0
+          ],
+          [
+            532.0,
+            0.0
+          ],
+          [
+            1288.0,
+            1115.0
+          ],
+          [
+            825.0,
+            582.0
+          ],
+          [
+            1319.0,
+            419.0
+          ],
+          [
+            1254.0,
+            2047.0
+          ],
+          [
+            494.0,
+            1113.0
+          ],
+          [
+            828.0,
+            232.0
+          ],
+          [
+            326.0,
+            1637.0
+          ],
+          [
+            437.0,
+            577.0
+          ],
+          [
+            893.0,
+            2047.0
+          ],
+          [
+            1438.0,
+            228.0
+          ],
+          [
+            235.0,
+            1451.0
+          ],
+          [
+            1868.0,
+            1130.0
+          ],
+          [
+            1828.0,
+            229.0
+          ],
+          [
+            1030.0,
+            237.0
+          ],
+          [
+            1529.0,
+            1645.0
+          ],
+          [
+            1192.0,
+            580.0
+          ],
+          [
+            1941.0,
+            1308.0
+          ],
+          [
+            780.0,
+            1291.0
+          ],
+          [
+            1964.0,
+            1848.0
+          ],
+          [
+            484.0,
+            2047.0
+          ],
+          [
+            422.0,
+            924.0
+          ],
+          [
+            815.0,
+            929.0
+          ],
+          [
+            1693.0,
+            769.0
+          ],
+          [
+            2047.0,
+            1133.0
+          ],
+          [
+            703.0,
+            2047.0
+          ],
+          [
+            1004.0,
+            933.0
+          ],
+          [
+            522.0,
+            1668.0
+          ],
+          [
+            573.0,
+            1314.0
+          ],
+          [
+            1901.0,
+            1653.0
+          ],
+          [
+            1069.0,
+            1454.0
+          ],
+          [
+            918.0,
+            418.0
+          ],
+          [
+            1708.0,
+            1632.0
+          ],
+          [
+            1779.0,
+            947.0
+          ],
+          [
+            987.0,
+            1277.0
+          ],
+          [
+            1175.0,
+            1281.0
+          ],
+          [
+            530.0,
+            743.0
+          ],
+          [
+            922.0,
+            754.0
+          ],
+          [
+            448.0,
+            233.0
+          ],
+          [
+            1255.0,
+            1463.0
+          ],
+          [
+            1810.0,
+            585.0
+          ],
+          [
+            1829.0,
+            1477.0
+          ],
+          [
+            72.0,
+            1095.0
+          ],
+          [
+            1658.0,
+            2047.0
+          ],
+          [
+            1592.0,
+            945.0
+          ],
+          [
+            2047.0,
+            219.0
+          ],
+          [
+            119.0,
+            1619.0
+          ],
+          [
+            1937.0,
+            9.0
+          ],
+          [
+            1523.0,
+            404.0
+          ],
+          [
+            630.0,
+            573.0
+          ],
+          [
+            1562.0,
+            1288.0
+          ],
+          [
+            1754.0,
+            1301.0
+          ],
+          [
+            2047.0,
+            585.0
+          ],
+          [
+            1634.0,
+            235.0
+          ],
+          [
+            1147.0,
+            71.0
+          ],
+          [
+            1448.0,
+            2047.0
+          ],
+          [
+            0.0,
+            1437.0
+          ],
+          [
+            294.0,
+            1976.0
+          ],
+          [
+            1600.0,
+            1841.0
+          ],
+          [
+            1925.0,
+            402.0
+          ],
+          [
+            1117.0,
+            424.0
+          ],
+          [
+            820.0,
+            1863.0
+          ],
+          [
+            1097.0,
+            1115.0
+          ],
+          [
+            1969.0,
+            944.0
+          ],
+          [
+            1324.0,
+            1636.0
+          ],
+          [
+            171.0,
+            1280.0
+          ],
+          [
+            641.0,
+            222.0
+          ],
+          [
+            731.0,
+            406.0
+          ],
+          [
+            712.0,
+            753.0
+          ],
+          [
+            141.0,
+            394.0
+          ],
+          [
+            1540.0,
+            72.0
+          ],
+          [
+            1202.0,
+            936.0
+          ],
+          [
+            1206.0,
+            1835.0
+          ],
+          [
+            0.0,
+            211.0
+          ],
+          [
+            1458.0,
+            1461.0
+          ],
+          [
+            1659.0,
+            1445.0
+          ],
+          [
+            1326.0,
+            77.0
+          ],
+          [
+            1887.0,
+            774.0
+          ],
+          [
+            619.0,
+            1840.0
+          ],
+          [
+            1257.0,
+            229.0
+          ],
+          [
+            1397.0,
+            949.0
+          ],
+          [
+            97.0,
+            1976.0
+          ],
+          [
+            1778.0,
+            1795.0
+          ],
+          [
+            2047.0,
+            1491.0
+          ],
+          [
+            568.0,
+            394.0
+          ],
+          [
+            1488.0,
+            1107.0
+          ],
+          [
+            731.0,
+            56.0
+          ]
+        ],
+        "polarity_used": "dark",
+        "detector_used": "log_blob_detect + conditional distance-transform watershed",
+        "threshold_rel": 0.4,
+        "watershed_applied": false,
+        "watershed_min_distance_px": 101.1358024691358,
+        "n_merged_components_detected": 0
+      },
+      "quality_metrics": {
+        "pixel_size_nm": 0.3955078125,
+        "radius_px_expected": 101.1358024691358,
+        "n_watershed_regions": 0,
+        "dark_mask_fraction": 0.26032567024230957
+      },
+      "summary": "Detected 120 dark ~80 nm spheres (median diameter 69.6 nm); pixel_size_nm resolved = 0.39551 (source=field_of_view), y=0.39551 | overlay-check thr_rel=0.05: n=127, real_dark=76, false_frac=0.40 | overlay-check thr_rel=0.08: n=127, real_dark=76, false_frac=0.40 | overlay-check thr_rel=0.12: n=127, real_dark=76, false_frac=0.40 | overlay-check thr_rel=0.15: n=127, real_dark=76, false_frac=0.40 | overlay-check thr_rel=0.2: n=130, real_dark=81, false_frac=0.38 | overlay-check thr_rel=0.25: n=127, real_dark=83, false_frac=0.35 | overlay-check thr_rel=0.3: n=126, real_dark=83, false_frac=0.34 | overlay-check thr_rel=0.4: n=120, real_dark=84, false_frac=0.30 | Overlay inspection: all thresholds showed speckle; RAISED to threshold_rel=0.4 for cleanest cores. | Final threshold_rel=0.4, n_detected=120, polarity_used=dark | After de-duplication within radius 101.1px: 120 objects | Merge check: 0 dark components look like merged touching spheres (single-particle area ~32134px). Watershed will NOT be applied. | Watershed skipped: no merged touching spheres detected; using LoG detections directly for sizing. | Used LoG diameters/centroids directly (no merging -> no watershed).",
+      "saved_arrays": {
+        "analysis_labels.npy": {
+          "description": "Integer watershed label map, 0 particles labeled 1..N, background=0 (all-zero if watershed not applied)",
+          "shape": [
+            2048,
+            2048
+          ],
+          "dtype": "int32"
+        },
+        "particle_centroids.npy": {
+          "description": "Per-particle centroid positions (row, col) in pixels",
+          "shape": [
+            120,
+            2
+          ],
+          "dtype": "float64"
+        },
+        "particle_diameters_nm.npy": {
+          "description": "Per-particle equivalent diameters in nm",
+          "shape": [
+            120
+          ],
+          "dtype": "float64"
+        }
+      },
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_rec_contract_live_runs/image_aunp/image_0000/visualization.png",
+      "statistics": {
+        "shape": [
+          2048,
+          2048
+        ],
+        "dtype": "float32",
+        "has_nans": false,
+        "channels": 1,
+        "aspect_ratio": 1.0,
+        "intensity_range": [
+          143.0,
+          2727.0
+        ],
+        "intensity_mean": 856.7555541992188,
+        "intensity_std": 493.9495544433594
+      },
+      "script": "import json\nimport numpy as np\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom matplotlib.patches import Circle\n\nfrom scilink.skills._shared.image_analysis_tools import resolve_pixel_size_nm\nfrom scilink.skills._shared.log_blob import log_blob_detect\n\nimport scipy.ndimage as ndi\nfrom skimage.feature import peak_local_max\nfrom skimage.segmentation import watershed\nfrom skimage import measure\n\n# ----------------------------------------------------------------------\n# 1. Load image + metadata\n# ----------------------------------------------------------------------\nimage = np.load('data.npy')\nnotes = []\n\n# Handle possible multi-channel input\nif image.ndim == 3:\n    # not assuming RGB; use first channel for detection\n    notes.append(f'Input had shape {image.shape}; using channel 0 for detection.')\n    work = image[:, :, 0].astype(np.float32)\nelse:\n    work = image.astype(np.float32)\n\nmetadata = None\ntry:\n    with open('metadata.json', 'r') as f:\n        metadata = json.load(f)\nexcept Exception as e:\n    notes.append(f'metadata.json not readable ({e}); pixel size may be unavailable.')\n\n# ----------------------------------------------------------------------\n# 2. Resolve pixel size (authoritative from metadata)\n# ----------------------------------------------------------------------\npx = resolve_pixel_size_nm(metadata, work.shape) if metadata is not None else None\nif px is None:\n    raise ValueError('pixel size unavailable; cannot convert to nm')\npixel_size_nm = float(px['x'])\nnotes.append(f\"pixel_size_nm resolved = {pixel_size_nm:.5f} (source={px.get('source')}), \"\n             f\"y={px.get('y'):.5f}\")\n\nOBJECT_DIAMETER_NM = 80.0\nradius_px = (OBJECT_DIAMETER_NM / pixel_size_nm) / 2.0\n\n# ----------------------------------------------------------------------\n# 3. LoG blob detection (registered tool), dark polarity\n#    Tune threshold_rel FROM THE OVERLAY: RAISE if speckle/false cores\n#    appear, LOWER if visible spheres are unmarked. We drive the choice\n#    with a count/contrast-based ground-truth check (a proxy for visual\n#    overlay inspection) rather than a packing-density heuristic.\n# ----------------------------------------------------------------------\nPOLARITY = 'dark'\n\ndef run_log(tr):\n    return log_blob_detect(\n        work,\n        object_diameter_nm=OBJECT_DIAMETER_NM,\n        pixel_size_nm=pixel_size_nm,\n        polarity=POLARITY,\n        threshold_rel=tr,\n        overlap=0.5,\n        exclude_border=False,\n        mask_annotations=True,\n    )\n\n# Build a robust dark-region reference used for the overlay-style check:\n# a real dark sphere centroid should sit on a genuinely dark pixel\n# (well below background), whereas speckle/false cores tend to land on\n# near-background intensity.\nmed = np.median(work)\nmad = np.median(np.abs(work - med)) + 1e-9\nstd_robust = 1.4826 * mad\ndark_core_level = med - 0.5 * std_robust  # below this = clearly dark\n\ndef overlay_inspect(res):\n    \"\"\"Emulate overlay inspection: score how many detected cores are\n    truly dark (real spheres) vs. sitting on background (speckle/false).\n    Returns (n_total, n_real_dark, frac_false).\"\"\"\n    objs = res.get('objects', []) or []\n    n_total = len(objs)\n    if n_total == 0:\n        return 0, 0, 0.0\n    n_real = 0\n    for o in objs:\n        iy, ix = int(round(o['cy'])), int(round(o['cx']))\n        if 0 <= iy < work.shape[0] and 0 <= ix < work.shape[1]:\n            # sample a small neighborhood mean to be robust to a single pixel\n            y0 = max(0, iy - 1); y1 = min(work.shape[0], iy + 2)\n            x0 = max(0, ix - 1); x1 = min(work.shape[1], ix + 2)\n            local = float(np.mean(work[y0:y1, x0:x1]))\n            if local <= dark_core_level:\n                n_real += 1\n    frac_false = 1.0 - (n_real / n_total)\n    return n_total, n_real, frac_false\n\n# Sweep a ladder of thresholds and pick the one whose overlay is clean:\n# few false (speckle) cores while still marking visible dark spheres.\n# This is the RAISE-if-speckle / LOWER-if-missed rule made concrete.\nthreshold_ladder = [0.05, 0.08, 0.12, 0.15, 0.20, 0.25, 0.30, 0.40]\nFALSE_FRAC_MAX = 0.25  # if more than this fraction of cores are on background -> speckle, RAISE\n\nsweep = []\nfor tr in threshold_ladder:\n    r = run_log(tr)\n    n_total, n_real, frac_false = overlay_inspect(r)\n    sweep.append((tr, r, n_total, n_real, frac_false))\n    notes.append(f'overlay-check thr_rel={tr}: n={n_total}, real_dark={n_real}, '\n                 f'false_frac={frac_false:.2f}')\n\n# Selection logic mirroring overlay inspection:\n#  - reject thresholds whose overlay is speckle-dominated (false_frac too high) -> RAISE\n#  - among acceptable thresholds, take the LOWEST (so faint visible spheres\n#    are not left unmarked), maximizing real detections.\nacceptable = [s for s in sweep if s[4] <= FALSE_FRAC_MAX and s[3] >= 1]\nif acceptable:\n    # lowest threshold that is still clean -> catches faint spheres without speckle\n    chosen = min(acceptable, key=lambda s: s[0])\n    notes.append(f'Overlay inspection: chose LOWEST clean threshold_rel={chosen[0]} '\n                 f'(false_frac={chosen[4]:.2f}) to avoid leaving faint spheres unmarked.')\nelse:\n    # everything looked speckle-heavy -> RAISE to the highest threshold (cleanest cores)\n    chosen = max(sweep, key=lambda s: s[0])\n    notes.append(f'Overlay inspection: all thresholds showed speckle; RAISED to '\n                 f'threshold_rel={chosen[0]} for cleanest cores.')\n\nthreshold_rel, res, _, _, _ = chosen\n\nobjects = res.get('objects', []) or []\nn_detected = res.get('n_detected', len(objects))\npolarity_used = res.get('polarity_used', POLARITY)\nnotes.append(f'Final threshold_rel={threshold_rel}, n_detected={n_detected}, polarity_used={polarity_used}')\n\n# ----------------------------------------------------------------------\n# 4. De-duplicate detections within ~one radius\n# ----------------------------------------------------------------------\ncents = np.array([[o['cy'], o['cx']] for o in objects], dtype=float) if objects else np.zeros((0, 2))\ndiams = np.array([o.get('diameter_nm', np.nan) for o in objects], dtype=float) if objects else np.zeros((0,))\n\nkeep = np.ones(len(cents), dtype=bool)\nif len(cents) > 1:\n    from scipy.spatial import cKDTree\n    tree = cKDTree(cents)\n    pairs = tree.query_pairs(r=radius_px)\n    for i, j in pairs:\n        if keep[i] and keep[j]:\n            # drop the smaller-diameter / later one\n            if np.nan_to_num(diams[i]) >= np.nan_to_num(diams[j]):\n                keep[j] = False\n            else:\n                keep[i] = False\ncents = cents[keep]\ndiams = diams[keep]\nobjects = [o for o, k in zip(objects, keep) if k]\nnotes.append(f'After de-duplication within radius {radius_px:.1f}px: {len(objects)} objects')\n\n# ----------------------------------------------------------------------\n# 5. Build dark-region mask (foreground for the spheres).\n# ----------------------------------------------------------------------\ndark_mask = work < (med - 0.5 * std_robust)\n# Morphological cleanup\ndark_mask = ndi.binary_opening(dark_mask, structure=np.ones((3, 3)))\ndark_mask = ndi.binary_closing(dark_mask, structure=np.ones((3, 3)))\n\n# ----------------------------------------------------------------------\n# 5a. CONDITIONAL watershed decision.\n#     Only split with a distance-transform watershed IF visible touching\n#     spheres are still merged into single detections. We detect merging\n#     by comparing connected dark-mask components against detections: a\n#     component whose area spans clearly more than one particle but holds\n#     <= 1 detection indicates merged touching cores.\n# ----------------------------------------------------------------------\nsingle_area = np.pi * radius_px ** 2\nmerge_detected = False\nn_merged_components = 0\n\nlbl_cc, n_cc = ndi.label(dark_mask)\nif n_cc > 0 and len(cents) > 0:\n    # map detections to connected components\n    det_component_counts = np.zeros(n_cc + 1, dtype=int)\n    for (cy, cx) in cents:\n        iy, ix = int(round(cy)), int(round(cx))\n        if 0 <= iy < work.shape[0] and 0 <= ix < work.shape[1]:\n            c = lbl_cc[iy, ix]\n            if c > 0:\n                det_component_counts[c] += 1\n    comp_areas = ndi.sum(np.ones_like(lbl_cc), lbl_cc, index=np.arange(1, n_cc + 1))\n    for ci in range(1, n_cc + 1):\n        area = comp_areas[ci - 1]\n        # component large enough to hold >~1.5 particles but with <=1 detection\n        if area >= 1.5 * single_area and det_component_counts[ci] <= 1:\n            n_merged_components += 1\n    if n_merged_components > 0:\n        merge_detected = True\n\nnotes.append(f'Merge check: {n_merged_components} dark components look like merged '\n             f'touching spheres (single-particle area ~{single_area:.0f}px). '\n             f'Watershed {\"WILL\" if merge_detected else \"will NOT\"} be applied.')\n\n# ----------------------------------------------------------------------\n# 5b. Distance-transform watershed (ONLY if merging detected).\n#     Markers come from peak_local_max on the distance transform with\n#     min_distance ~ particle radius (as specified in the plan).\n# ----------------------------------------------------------------------\nlabels = np.zeros(work.shape, dtype=np.int32)\nn_labels = 0\nwatershed_applied = False\n\nif merge_detected and dark_mask.any():\n    distance = ndi.distance_transform_edt(dark_mask)\n    coords = peak_local_max(\n        distance,\n        min_distance=max(1, int(round(radius_px))),\n        labels=dark_mask,\n    )\n    markers = np.zeros(work.shape, dtype=np.int32)\n    for idx, (yy, xx) in enumerate(coords, start=1):\n        markers[yy, xx] = idx\n    markers_lbl, _ = ndi.label(markers)\n    labels = watershed(-distance, markers_lbl, mask=dark_mask)\n    n_labels = int(labels.max())\n    watershed_applied = True\n    notes.append(f'Distance-transform watershed applied (peak_local_max '\n                 f'min_distance={int(round(radius_px))}px) -> {n_labels} regions.')\nelse:\n    notes.append('Watershed skipped: no merged touching spheres detected; '\n                 'using LoG detections directly for sizing.')\n\n# ----------------------------------------------------------------------\n# 6. Per-particle diameter.\n#    If watershed ran, size from split labels; otherwise (plan-conditional\n#    path not triggered) size directly from the LoG detections.\n# ----------------------------------------------------------------------\nper_diam_nm = []\nper_cent = []\nif watershed_applied and n_labels > 0:\n    props = measure.regionprops(labels)\n    min_area_px = np.pi * (0.3 * radius_px) ** 2  # reject tiny fragments\n    for p in props:\n        if p.area < min_area_px:\n            continue\n        d_px = p.equivalent_diameter\n        d_nm = d_px * pixel_size_nm\n        # size filter: keep within [0.4x, 4x] object size\n        if OBJECT_DIAMETER_NM * 0.4 <= d_nm <= OBJECT_DIAMETER_NM * 4.0:\n            per_diam_nm.append(float(d_nm))\n            per_cent.append([float(p.centroid[0]), float(p.centroid[1])])\n\nif len(per_diam_nm) == 0:\n    # use LoG-derived diameters/centroids (watershed not applied or gave no valid regions)\n    per_diam_nm = [float(d) for d in diams if np.isfinite(d)]\n    per_cent = [[float(c[0]), float(c[1])] for c in cents]\n    if watershed_applied:\n        notes.append('Watershed gave no valid regions; used LoG diameters/centroids.')\n    else:\n        notes.append('Used LoG diameters/centroids directly (no merging -> no watershed).')\n\nper_diam_nm = np.array(per_diam_nm, dtype=float)\nper_cent = np.array(per_cent, dtype=float) if len(per_cent) else np.zeros((0, 2))\n\nn_final = len(per_diam_nm)\nn_interior = res.get('n_interior', None)\n\ndiam_median = float(np.median(per_diam_nm)) if n_final else None\ndiam_mean = float(np.mean(per_diam_nm)) if n_final else None\ndiam_std = float(np.std(per_diam_nm)) if n_final else None\n\n# histogram\nif n_final:\n    hist_counts, hist_edges = np.histogram(per_diam_nm,\n                                           bins=min(20, max(5, n_final // 3 + 1)))\n    hist_counts = hist_counts.tolist()\n    hist_edges = hist_edges.tolist()\nelse:\n    hist_counts, hist_edges = [], []\n\n# ----------------------------------------------------------------------\n# 7. Save arrays\n# ----------------------------------------------------------------------\nnp.save('analysis_labels.npy', labels.astype(np.int32))\nnp.save('particle_centroids.npy', per_cent)\nnp.save('particle_diameters_nm.npy', per_diam_nm)\n\n# ----------------------------------------------------------------------\n# 8. Visualization\n# ----------------------------------------------------------------------\nfig, axes = plt.subplots(2, 2, figsize=(14, 14))\n\nvmin, vmax = np.percentile(work, [1, 99])\naxes[0, 0].imshow(work, cmap='gray', vmin=vmin, vmax=vmax)\naxes[0, 0].set_title('Original image (channel 0)')\naxes[0, 0].axis('off')\n\n# Segmentation overlay\nax = axes[0, 1]\nax.imshow(work, cmap='gray', vmin=vmin, vmax=vmax)\nif n_labels > 0:\n    overlay = np.ma.masked_where(labels == 0, labels)\n    ax.imshow(overlay, cmap='nipy_spectral', alpha=0.4)\n    for c in measure.find_contours(labels > 0, 0.5):\n        ax.plot(c[:, 1], c[:, 0], color='red', linewidth=0.6)\nfor (cy, cx) in per_cent:\n    ax.plot(cx, cy, 'c+', markersize=6)\nax.set_title(f'Segmentation overlay (n={n_final}, watershed={watershed_applied})')\nax.axis('off')\n\n# Detected blobs as circles\nax = axes[1, 0]\nax.imshow(work, cmap='gray', vmin=vmin, vmax=vmax)\nfor o in objects:\n    r = (o.get('diameter_nm', OBJECT_DIAMETER_NM) / pixel_size_nm) / 2.0\n    ax.add_patch(Circle((o['cx'], o['cy']), r, fill=False, color='yellow', linewidth=0.8))\nax.set_title(f'LoG detections (thr_rel={threshold_rel}, polarity={polarity_used})')\nax.axis('off')\n\n# Histogram\nax = axes[1, 1]\nif n_final:\n    ax.hist(per_diam_nm, bins=min(20, max(5, n_final // 3 + 1)),\n            color='steelblue', edgecolor='k')\n    if diam_median is not None:\n        ax.axvline(diam_median, color='red', linestyle='--',\n                   label=f'median={diam_median:.1f} nm')\n    ax.legend()\nax.set_xlabel('diameter (nm)')\nax.set_ylabel('count')\nax.set_title('Diameter distribution')\n\nplt.tight_layout()\nplt.savefig('visualization.png', dpi=100)\nplt.close(fig)\n\n# ----------------------------------------------------------------------\n# 9. Results JSON\n# ----------------------------------------------------------------------\nresults = {\n    'analysis_type': 'Scale-matched LoG band-pass blob detection (dark polarity) sized to ~80 nm '\n                     'particles, threshold_rel tuned by overlay inspection, de-duplicated within '\n                     'one radius, conditional distance-transform watershed (peak_local_max markers, '\n                     'min_distance ~ radius) to split touching cores, then per-particle sizing.',\n    'extracted_features': {\n        'particle_count_n_detected': int(n_detected),\n        'particle_count_final': int(n_final),\n        'n_interior': (int(n_interior) if n_interior is not None else None),\n        'diameter_median_nm': diam_median,\n        'diameter_mean_nm': diam_mean,\n        'diameter_std_nm': diam_std,\n        'diameter_std_nm_err': diam_std,\n        'diameter_histogram_counts': hist_counts,\n        'diameter_histogram_edges_nm': hist_edges,\n        'per_particle_diameter_nm': per_diam_nm.tolist(),\n        'per_particle_centroid_yx': per_cent.tolist(),\n        'polarity_used': polarity_used,\n        'detector_used': 'log_blob_detect + conditional distance-transform watershed',\n        'threshold_rel': float(threshold_rel),\n        'watershed_applied': bool(watershed_applied),\n        'watershed_min_distance_px': float(radius_px),\n        'n_merged_components_detected': int(n_merged_components),\n    },\n    'quality_metrics': {\n        'pixel_size_nm': pixel_size_nm,\n        'radius_px_expected': float(radius_px),\n        'n_watershed_regions': int(n_labels),\n        'dark_mask_fraction': float(dark_mask.mean()),\n    },\n    'summary': 'Detected {} dark ~80 nm spheres (median diameter {} nm); '.format(\n        n_final, f'{diam_median:.1f}' if diam_median is not None else 'NA')\n        + ' | '.join(notes),\n    'saved_arrays': {\n        'analysis_labels.npy': {\n            'description': f'Integer watershed label map, {n_labels} particles labeled 1..N, background=0 (all-zero if watershed not applied)',\n            'shape': list(labels.shape),\n            'dtype': str(labels.dtype),\n        },\n        'particle_centroids.npy': {\n            'description': 'Per-particle centroid positions (row, col) in pixels',\n            'shape': list(per_cent.shape),\n            'dtype': str(per_cent.dtype),\n        },\n        'particle_diameters_nm.npy': {\n            'description': 'Per-particle equivalent diameters in nm',\n            'shape': list(per_diam_nm.shape),\n            'dtype': str(per_diam_nm.dtype),\n        },\n    },\n}\nprint(f'IMAGE_ANALYSIS_RESULTS_JSON:{json.dumps(results)}')\n",
+      "script_errors": [],
+      "quality_history": {
+        "final_score": 0.86,
+        "threshold": 0.7,
+        "approved": true,
+        "verification_iterations": [
+          {
+            "score": 0.86,
+            "result_type": "delivered",
+            "annealing_level": 0,
+            "issues": [
+              {
+                "location": "Densely packed field throughout image",
+                "problem": "Some visible particles are not marked (e.g. gaps in the segmentation overlay in the lower-left and central regions where dark spheres are clearly present but lack a cyan cross)"
+              },
+              {
+                "location": "Diameter median vs nominal",
+                "problem": "Median diameter 69.6 nm is ~13% below the 80 nm nominal size"
+              }
+            ],
+            "tools_used": [],
+            "fix_applied": "Optionally lower threshold_rel to ~0.3 to recover the few missed dense-cluster spheres, but the current result is already acceptable for characterizing the size distribution."
+          }
+        ],
+        "script_errors": [],
+        "judge_reasoning": null,
+        "score_explanation": null
+      }
+    }
+  ]
+}

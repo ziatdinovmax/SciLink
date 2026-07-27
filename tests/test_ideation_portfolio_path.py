@@ -130,3 +130,25 @@ def test_the_tool_exists_and_points_the_other_way():
     assert "selection_profile='lab'" in desc
     # kind is threaded, not hardcoded in two places
     assert 'kind="portfolio"' in src and 'kind: str = "experiment"' in src
+
+
+# ── routing ──────────────────────────────────────────────────────────
+
+def test_the_deprecated_ideation_profile_forwards_rather_than_authors():
+    """It must not author a portfolio into the experiment schema one more
+    time — that is the bug being retired."""
+    src = Path("scilink/agents/planning_agents/orchestrator_tools.py").read_text()
+    flat = " ".join(src.split())
+    assert 'if selection_profile == "ideation" and kind != "portfolio":' in flat
+    assert 'kind = "portfolio"' in flat
+    assert "deprecated" in flat
+
+
+def test_the_orchestrator_prompt_teaches_the_new_path():
+    """The system prompt taught selection_profile='ideation' for years; the
+    tool description alone will not outvote it."""
+    src = Path("scilink/agents/planning_agents/planning_orchestrator.py").read_text()
+    assert "generate_ideation_portfolio(..., literature_context=...)" in src
+    assert 'generate_initial_plan(..., literature_context=..., selection_profile="ideation")' \
+        not in src
+    assert "flattened into protocol steps" in src

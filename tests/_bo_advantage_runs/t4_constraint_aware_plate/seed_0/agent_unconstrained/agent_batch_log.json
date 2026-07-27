@@ -1,0 +1,85 @@
+{
+  "batch_size": 16,
+  "physical_constraints": null,
+  "batch": [
+    {
+      "T": 353.74828153289855,
+      "pH": 4.403476112522185
+    },
+    {
+      "T": 366.92356700077653,
+      "pH": 4.275762090459466
+    },
+    {
+      "T": 367.5898856949061,
+      "pH": 4.341729034669697
+    },
+    {
+      "T": 363.71294129639864,
+      "pH": 4.475362018682063
+    },
+    {
+      "T": 361.26508791930974,
+      "pH": 4.495632464066148
+    },
+    {
+      "T": 356.1829452868551,
+      "pH": 4.434723841957748
+    },
+    {
+      "T": 365.0541392620653,
+      "pH": 4.431035963818431
+    },
+    {
+      "T": 366.14759443327785,
+      "pH": 4.315825293771923
+    },
+    {
+      "T": 361.44529562443495,
+      "pH": 4.234889281913638
+    },
+    {
+      "T": 363.54074222035706,
+      "pH": 4.255634662695229
+    },
+    {
+      "T": 357.1883440949023,
+      "pH": 4.273590593598783
+    },
+    {
+      "T": 358.0898383166641,
+      "pH": 4.296026618219912
+    },
+    {
+      "T": 362.76480653323233,
+      "pH": 4.402592025697231
+    },
+    {
+      "T": 359.9695679731667,
+      "pH": 4.410285067744553
+    },
+    {
+      "T": 362.2212491929531,
+      "pH": 4.382321781478822
+    },
+    {
+      "T": 358.8657572399825,
+      "pH": 4.3365763910114765
+    }
+  ],
+  "strategy": {
+    "model_config": {
+      "kernel": "matern_2.5",
+      "noise": "min_noise_low",
+      "surrogate": "single_task"
+    },
+    "acquisition_strategy": {
+      "type": "thompson",
+      "params": {}
+    },
+    "rationale": "Step 0 with only 12 initial data points in a 2D space and a large batch size of 16. The yield landscape is highly skewed (median 0.3, max 73) suggesting a sharp peak region. Thompson sampling is ideal here: (1) batch size 16 > 10 makes it computationally efficient and naturally diverse, (2) no budget constraint allows balanced exploration/exploitation, (3) with sparse data, Thompson's stochastic sampling will spread points across both the promising high-yield region near the best observation and underexplored areas, building a much better surrogate for subsequent steps. Matern-2.5 handles the peaked but smooth yield surface well. Low noise floor lets the GP learn noise freely from the data.",
+    "batch_size": 16
+  },
+  "constrained_planning": null,
+  "constraint_aware": false
+}

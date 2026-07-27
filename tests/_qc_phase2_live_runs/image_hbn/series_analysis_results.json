@@ -1,0 +1,188 @@
+{
+  "timestamp": "2026-07-09T08:30:47.179737",
+  "total_images": 1,
+  "successful": 1,
+  "flagged_count": 0,
+  "is_single_image": true,
+  "series_metadata": {},
+  "quality_settings": {
+    "outlier_sigma": 2.0
+  },
+  "locked_config": {
+    "analysis_approach": "Convert to physical volts, put the image on square pixels and remove the instrument tilt, then cluster the leveled surface potential into contact-potential domains and quantify their CPD contrast in mV and their area fractions.",
+    "processing_pipeline": "Convert uint16 -> volts via V = raw*(1.8176-1.6481)/65535 + 1.6481 (record data_range min/max/units; verify round-trip dtype->V->dtype within quantization). Read FOV_x, FOV_y, N_x, N_y from metadata and resample to SQUARE pixels using true per-axis pixel size (do NOT assume 512x512 or equal nm/px); record nm/px and confirm nm/px = FOV_x/N_x_new = FOV_y/N_y_new within float tolerance, preserving true aspect ratio. Row-align first: subtract per-row median (escalate to per-row 1st/2nd-order polynomial if residual stripes remain over featureless areas) to remove the visible horizontal banding, THEN subtract a 1st-order global plane fit to remove residual tilt. Inspect for and mask obvious scan artifacts (the dark upper-left streaks) before clustering. Gaussian smooth (sigma=2 px) on a parallel copy to suppress KPFM noise while keeping the leveled physical-unit image for measurements. Determine domain count adaptively (try k=2..4, select via silhouette/BIC and visual correspondence to the cloud-like structure) rather than fixing k=3; require resulting domains to be spatially coherent (largest-connected-component / morphological check, reject salt-and-pepper). Extract per-domain mean potential, pairwise CPD contrast (mV) and area fractions on the leveled physical-unit image.",
+    "features_to_extract": [
+      "number of distinct spatially-coherent CPD domains (adaptively determined, with selection metric reported)",
+      "mean surface potential per domain (V)",
+      "pairwise CPD contrast between domains (mV)",
+      "area fraction of each domain (using square-pixel, artifact-masked image)",
+      "total leveled potential range (mV)",
+      "fraction of image area masked as artifact/excluded"
+    ],
+    "quality_criteria": "Physical-unit mapping round-trips (dtype->V->dtype recovers raw within quantization). Square-pixel resampling reproduces recorded nm/px = FOV_x/N_x_new and FOV_y/N_y_new (per axis) within float tolerance; circular/known features not stretched and true aspect ratio preserved. After row alignment + plane fit, horizontal streaks are gone: a line profile along fast-scan shows no global row-to-row offset over featureless areas. Cluster domains are spatially coherent regions matching the visible cloud-like potential structure (not salt-and-pepper or streak-following artifacts); domain count is justified by a selection metric, not hard-coded. Reported CPD contrasts are in mV and physically plausible for KPFM (tens to a few hundred mV; must not exceed the leveled potential range, which caps near ~170 mV). Artifact-masked region reported and excluded from domain statistics.",
+    "expected_outputs": [
+      "cpd_domain_segmentation.png",
+      "leveled_potential_with_profile.png"
+    ]
+  },
+  "series_analysis_plan": null,
+  "results": [
+    {
+      "index": 0,
+      "name": "(hard) hBN SPM",
+      "data_path": "/Users/maxim.ziatdinov/Code/benchmarking_for_paper2/AFM/(hard) hBN SPM.tif",
+      "success": true,
+      "error": null,
+      "analysis_type": "KPFM CPD domain analysis: volts conversion, square-pixel resampling, row-align + plane leveling, artifact masking, adaptive K-means clustering of surface potential into spatially-coherent contact-potential domains",
+      "extracted_features": {
+        "n_cpd_domains": 2,
+        "domain_selection_metric": "silhouette + BIC + coherence",
+        "silhouette_scores_by_k": {
+          "2": 0.5225186698787297,
+          "3": 0.5584235302554362,
+          "4": 0.5371295433881255
+        },
+        "bic_scores_by_k": {
+          "2": -1532877.041031766,
+          "3": -1557997.2725839582,
+          "4": -1529620.1162982131
+        },
+        "coherence_scores_by_k": {
+          "2": 0.5142569607514257,
+          "3": 0.23411872318950291,
+          "4": 0.26864368892768187
+        },
+        "selected_silhouette": 0.5225186698787297,
+        "selected_bic": -1532877.041031766,
+        "mean_surface_potential_V_per_domain": {
+          "domain1": -0.01045869480497382,
+          "domain2": 0.005900716255589763
+        },
+        "pairwise_CPD_contrast_mV": {
+          "domain1_vs_domain2_mV": 16.359411060563584
+        },
+        "area_fraction_per_domain": {
+          "domain1": 0.3537777743748373,
+          "domain2": 0.6462222256251627
+        },
+        "total_leveled_potential_range_mV": 104.4726301377909,
+        "fraction_area_masked_artifact": 0.0035552978515625,
+        "per_domain_details": {
+          "1": {
+            "mean_potential_V": -0.01045869480497382,
+            "std_potential_V": 0.007628565824396998,
+            "area_fraction": 0.3537777743748373,
+            "n_pixels": 92411,
+            "largest_cc_fraction": 0.5142569607514257
+          },
+          "2": {
+            "mean_potential_V": 0.005900716255589763,
+            "std_potential_V": 0.006492081781111963,
+            "area_fraction": 0.6462222256251627,
+            "n_pixels": 168801,
+            "largest_cc_fraction": 0.7136391372089028
+          }
+        }
+      },
+      "quality_metrics": {
+        "nm_per_px": 19.53125,
+        "square_pixel_consistent": true,
+        "nm_per_px_x_check": 19.53125,
+        "nm_per_px_y_check": 19.53125,
+        "volts_roundtrip_within_1LSB": true,
+        "data_range_min_V": 1.6481,
+        "data_range_max_V": 1.8176,
+        "data_range_units": "V",
+        "row_alignment_method": "per-row 1st-order polynomial",
+        "residual_stripe_std_V": 0.002308465442953375,
+        "min_domain_largest_cc_fraction": 0.5142569607514257,
+        "domain_coherence": {
+          "1": 0.5142569607514257,
+          "2": 0.7136391372089028
+        },
+        "clustering_on_valid_pixels_only": true,
+        "resampled_shape": [
+          512,
+          512
+        ],
+        "original_shape": [
+          256,
+          512
+        ]
+      },
+      "summary": "KPFM surface potential leveled (row-align: per-row 1st-order polynomial, then 1st-order plane) and clustered into 2 spatially-coherent CPD domains (k selected by silhouette + BIC corroboration + largest-CC coherence check; clustering fit/predicted on valid non-artifact pixels only, min largest-CC frac 0.51); total leveled range 104.5 mV, 0.36% area masked as artifact. nm/px=19.5312 (square px, aspect preserved).",
+      "saved_arrays": {
+        "cpd_domain_labels.npy": {
+          "description": "Integer CPD domain label map on square-pixel grid (background/artifact=0, domains labeled 1..2 ordered by ascending mean potential)",
+          "shape": [
+            512,
+            512
+          ],
+          "dtype": "int32"
+        },
+        "leveled_potential_V.npy": {
+          "description": "Leveled surface potential in Volts (row-aligned + plane-subtracted, square pixels)",
+          "shape": [
+            512,
+            512
+          ],
+          "dtype": "float32"
+        },
+        "artifact_mask.npy": {
+          "description": "Boolean mask of excluded scan artifacts (dark upper-left streaks / outliers)",
+          "shape": [
+            512,
+            512
+          ],
+          "dtype": "bool"
+        }
+      },
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_qc_phase2_live_runs/image_hbn/image_0000/visualization.png",
+      "statistics": {
+        "shape": [
+          256,
+          512
+        ],
+        "dtype": "uint16",
+        "has_nans": false,
+        "channels": 1,
+        "aspect_ratio": 2.0,
+        "intensity_range": [
+          0.0,
+          65535.0
+        ],
+        "intensity_mean": 40382.769691467285,
+        "intensity_std": 12570.743455091382
+      },
+      "script": "import json\nimport numpy as np\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom scipy import ndimage\nfrom skimage import transform, morphology, measure\nfrom sklearn.cluster import KMeans\nfrom sklearn.metrics import silhouette_score\n\n# ---------------------------------------------------------------\n# Load data\n# ---------------------------------------------------------------\nimage = np.load('data.npy')\nif image.ndim > 2:\n    # Not RGB; take first channel per instructions\n    image = image[:, :, 0]\nimage = image.astype(np.float64)\nN_y, N_x = image.shape  # rows, cols\n\n# ---------------------------------------------------------------\n# Read metadata for calibration (authoritative)\n# ---------------------------------------------------------------\nmeta = {}\ntry:\n    with open('metadata.json', 'r') as f:\n        meta = json.load(f)\nexcept Exception as e:\n    meta = {}\n\ndef deep_get(d, keys, default=None):\n    cur = d\n    for k in keys:\n        if isinstance(cur, dict) and k in cur:\n            cur = cur[k]\n        else:\n            return default\n    return cur\n\n# spatial info\nspatial = deep_get(meta, ['experimental_details', 'spatial_info'], {}) or {}\nif not spatial:\n    spatial = deep_get(meta, ['system_info', 'experimental_details', 'spatial_info'], {}) or {}\n\nFOV_x = spatial.get('field_of_view_x', None)\nFOV_y = spatial.get('field_of_view_y', None)\nfov_units = spatial.get('field_of_view_units', 'nm')\n\n# convert FOV to nm if needed\ndef to_nm(val, units):\n    if val is None:\n        return None\n    u = (units or 'nm').lower()\n    if u in ('nm', 'nanometer', 'nanometers'):\n        return float(val)\n    if u in ('um', 'micron', 'micrometer', 'micrometers', '\u00b5m'):\n        return float(val) * 1000.0\n    if u in ('m', 'meter', 'meters'):\n        return float(val) * 1e9\n    if u in ('a', 'angstrom', 'angstroms', '\u00e5'):\n        return float(val) * 0.1\n    return float(val)\n\nFOV_x_nm = to_nm(FOV_x, fov_units)\nFOV_y_nm = to_nm(FOV_y, fov_units)\n\n# data range for volts mapping\ndata_range = deep_get(meta, ['experimental_details', 'data_range'], {}) or {}\nif not data_range:\n    # sometimes flat keys\n    dr_min = spatial.get('data_range_minimum', None)\n    dr_max = spatial.get('data_range_maximum', None)\n    dr_units = spatial.get('data_range_units', None)\nelse:\n    dr_min = data_range.get('data_range_minimum', None)\n    dr_max = data_range.get('data_range_maximum', None)\n    dr_units = data_range.get('data_range_units', None)\n\n# search broadly for data range if still missing\ndef find_key(d, target):\n    if isinstance(d, dict):\n        for k, v in d.items():\n            if k == target:\n                return v\n            r = find_key(v, target)\n            if r is not None:\n                return r\n    return None\n\nif dr_min is None:\n    dr_min = find_key(meta, 'data_range_minimum')\nif dr_max is None:\n    dr_max = find_key(meta, 'data_range_maximum')\nif dr_units is None:\n    dr_units = find_key(meta, 'data_range_units')\n\n# Plan-specified calibration constants (authoritative fallback)\nV_MIN_PLAN = 1.6481\nV_MAX_PLAN = 1.8176\nif dr_min is None:\n    dr_min = V_MIN_PLAN\nif dr_max is None:\n    dr_max = V_MAX_PLAN\nif dr_units is None:\n    dr_units = 'V'\n\ndr_min = float(dr_min)\ndr_max = float(dr_max)\n\n# ---------------------------------------------------------------\n# Convert uint16 -> volts:  V = raw*(max-min)/65535 + min\n# ---------------------------------------------------------------\nRAW_MAX = 65535.0\nvolts = image * (dr_max - dr_min) / RAW_MAX + dr_min\n\n# round-trip verification within quantization\nround_trip_raw = np.rint((volts - dr_min) * RAW_MAX / (dr_max - dr_min))\nround_trip_ok = bool(np.all(np.abs(round_trip_raw - image) <= 1.0))\n\n# ---------------------------------------------------------------\n# Resample to SQUARE pixels using true per-axis pixel size\n# ---------------------------------------------------------------\nif FOV_x_nm is not None and FOV_y_nm is not None:\n    px_x = FOV_x_nm / N_x  # nm per pixel horizontal\n    px_y = FOV_y_nm / N_y  # nm per pixel vertical\nelse:\n    px_x = 1.0\n    px_y = 1.0\n\n# choose target square pixel size = smaller of the two (finer)\nnm_per_px = min(px_x, px_y)\n# compute new dims preserving physical FOV\nif FOV_x_nm is not None and FOV_y_nm is not None:\n    N_x_new = int(round(FOV_x_nm / nm_per_px))\n    N_y_new = int(round(FOV_y_nm / nm_per_px))\nelse:\n    N_x_new = N_x\n    N_y_new = N_y\n\nvolts_sq = transform.resize(volts, (N_y_new, N_x_new), order=1,\n                            mode='reflect', anti_aliasing=True,\n                            preserve_range=True)\n\n# confirm square pixel consistency\nif FOV_x_nm is not None and FOV_y_nm is not None:\n    nm_px_x_check = FOV_x_nm / N_x_new\n    nm_px_y_check = FOV_y_nm / N_y_new\n    square_ok = bool(abs(nm_px_x_check - nm_px_y_check) < 1e-3 * max(nm_px_x_check, 1e-9))\nelse:\n    nm_px_x_check = nm_px_y_check = nm_per_px\n    square_ok = True\n\n# ---------------------------------------------------------------\n# Row-align: subtract per-row median (escalate to polynomial if striping remains)\n# ---------------------------------------------------------------\nwork = volts_sq.copy()\nrow_med = np.median(work, axis=1, keepdims=True)\nwork_rowmed = work - row_med\n\n# check residual striping over featureless area: std of per-row means\nrow_means_res = np.mean(work_rowmed, axis=1)\nresidual_stripe = float(np.std(row_means_res))\n\nrow_method = 'per-row median'\n# escalate to per-row 1st-order polynomial if striping remains significant\noverall_std = float(np.std(work_rowmed))\nif residual_stripe > 0.02 * overall_std and overall_std > 0:\n    cols = np.arange(work.shape[1])\n    work_poly = np.empty_like(work)\n    for r in range(work.shape[0]):\n        c = np.polyfit(cols, work[r], 1)\n        work_poly[r] = work[r] - np.polyval(c, cols)\n    work_rowmed = work_poly\n    row_method = 'per-row 1st-order polynomial'\n\n# ---------------------------------------------------------------\n# Global 1st-order plane fit removal\n# ---------------------------------------------------------------\nyy, xx = np.mgrid[0:work_rowmed.shape[0], 0:work_rowmed.shape[1]]\nA = np.column_stack([xx.ravel(), yy.ravel(), np.ones(xx.size)])\ncoef, *_ = np.linalg.lstsq(A, work_rowmed.ravel(), rcond=None)\nplane = (A @ coef).reshape(work_rowmed.shape)\nleveled = work_rowmed - plane\n\n# ---------------------------------------------------------------\n# Mask obvious scan artifacts (dark upper-left streaks)\n# Detect extreme low outliers, especially near upper-left\n# ---------------------------------------------------------------\nmed = np.median(leveled)\nmad = np.median(np.abs(leveled - med)) + 1e-12\nrobust_sigma = 1.4826 * mad\n# artifact = strongly dark outliers\nartifact_mask = leveled < (med - 5.0 * robust_sigma)\n# emphasize upper-left region streaks: also catch moderate dark in top-left quadrant\ntop_left = np.zeros_like(leveled, dtype=bool)\ntl_r = leveled.shape[0] // 3\ntl_c = leveled.shape[1] // 3\ntop_left[:tl_r, :tl_c] = True\nartifact_mask |= (top_left & (leveled < (med - 3.5 * robust_sigma)))\n# clean small specks, keep coherent streaks\nartifact_mask = morphology.remove_small_objects(artifact_mask, min_size=8)\nartifact_mask = morphology.binary_dilation(artifact_mask, morphology.disk(1))\n\nvalid_mask = ~artifact_mask\nfrac_masked = float(np.mean(artifact_mask))\n\n# ---------------------------------------------------------------\n# Gaussian smooth (sigma=2) on parallel copy for clustering\n# ---------------------------------------------------------------\nsmoothed = ndimage.gaussian_filter(leveled, sigma=2.0)\n\n# ---------------------------------------------------------------\n# Adaptive domain count k=2..4 via silhouette + BIC + coherence check\n# Cluster ONLY on valid (non-artifact) pixels; artifacts never enter KMeans.\n# ---------------------------------------------------------------\nvalid_vals = smoothed[valid_mask].reshape(-1, 1)\n# subsample for silhouette speed\nrng = np.random.default_rng(42)\nif valid_vals.shape[0] > 6000:\n    sil_idx = rng.choice(valid_vals.shape[0], 6000, replace=False)\nelse:\n    sil_idx = np.arange(valid_vals.shape[0])\n\n\ndef _gaussian_bic(X, labels, centers):\n    # BIC for a spherical-Gaussian mixture (1D feature) implied by KMeans.\n    n, d = X.shape\n    k = centers.shape[0]\n    # pooled variance across clusters\n    ss = 0.0\n    for ci in range(k):\n        pts = X[labels == ci]\n        if pts.shape[0] > 0:\n            ss += np.sum((pts - centers[ci]) ** 2)\n    denom = max(n - k, 1)\n    var = ss / denom + 1e-12\n    ll = 0.0\n    for ci in range(k):\n        pts = X[labels == ci]\n        ni = pts.shape[0]\n        if ni == 0:\n            continue\n        ll += (\n            ni * np.log(ni / n)\n            - ni * d / 2.0 * np.log(2.0 * np.pi * var)\n            - (np.sum((pts - centers[ci]) ** 2)) / (2.0 * var)\n        )\n    n_params = k * d + k + 1  # means + weights + shared variance\n    bic = -2.0 * ll + n_params * np.log(n)\n    return float(bic)\n\n\ndef _coherence_for_labels(km_model, k):\n    # Build a full valid-only label map and measure min largest-connected-component fraction.\n    lm = np.zeros(smoothed.shape, dtype=np.int32)\n    lab_valid = km_model.predict(valid_vals)\n    tmp = np.zeros(smoothed.shape, dtype=np.int32)\n    tmp[valid_mask] = lab_valid + 1  # 1..k in valid region, 0 elsewhere\n    lm = tmp\n    min_coh = 1.0\n    for ci in range(1, k + 1):\n        m = lm == ci\n        if m.sum() == 0:\n            min_coh = 0.0\n            continue\n        lbl, nlab = ndimage.label(m)\n        if nlab == 0:\n            min_coh = 0.0\n            continue\n        sizes = ndimage.sum(np.ones_like(lbl), lbl, range(1, nlab + 1))\n        min_coh = min(min_coh, float(sizes.max() / m.sum()))\n    return min_coh\n\n\nbest = None\nselection_scores = {}\nbic_scores = {}\ncoherence_scores = {}\nfor k in [2, 3, 4]:\n    km = KMeans(n_clusters=k, random_state=42, n_init=10)\n    lab = km.fit_predict(valid_vals)\n    try:\n        sil = float(silhouette_score(valid_vals[sil_idx], lab[sil_idx]))\n    except Exception:\n        sil = -1.0\n    bic = _gaussian_bic(valid_vals, lab, km.cluster_centers_)\n    coh = _coherence_for_labels(km, k)\n    selection_scores[k] = sil\n    bic_scores[k] = bic\n    coherence_scores[k] = coh\n    # Combined selection: prefer silhouette, but require spatial coherence\n    # (reject salt-and-pepper) using BIC as corroboration/tie-breaker.\n    if best is None:\n        best = {'k': k, 'sil': sil, 'bic': bic, 'coh': coh, 'km': km, 'lab': lab}\n    else:\n        # A candidate must be spatially coherent (largest CC >= 0.5) to win on silhouette.\n        cand_ok = coh >= 0.5\n        best_ok = best['coh'] >= 0.5\n        if cand_ok and not best_ok:\n            best = {'k': k, 'sil': sil, 'bic': bic, 'coh': coh, 'km': km, 'lab': lab}\n        elif cand_ok == best_ok:\n            # both coherent (or both not): choose higher silhouette; if silhouettes\n            # are within a small margin, use lower BIC as corroboration.\n            if sil > best['sil'] + 1e-3:\n                best = {'k': k, 'sil': sil, 'bic': bic, 'coh': coh, 'km': km, 'lab': lab}\n            elif abs(sil - best['sil']) <= 1e-3 and bic < best['bic']:\n                best = {'k': k, 'sil': sil, 'bic': bic, 'coh': coh, 'km': km, 'lab': lab}\n\nk_sel = best['k']\nkm = best['km']\n\n# Build full label map from VALID-ONLY clustering (order clusters by mean potential)\ncenters = km.cluster_centers_.ravel()\norder = np.argsort(centers)  # ascending mean potential\nremap = np.zeros(k_sel, dtype=int)\nfor new_i, old_i in enumerate(order):\n    remap[old_i] = new_i + 1  # labels 1..k\n\nlabel_map = np.zeros(smoothed.shape, dtype=np.int32)\n# Predict only on valid pixels so artifacts never enter clustering\nlab_valid = km.predict(valid_vals)\nremapped_valid = remap[lab_valid]\nlabel_map[valid_mask] = remapped_valid\n# artifacts remain 0\n\n# ---------------------------------------------------------------\n# Coherence check: largest connected component fraction per domain\n# ---------------------------------------------------------------\ncoherence = {}\nfor dlab in range(1, k_sel + 1):\n    m = label_map == dlab\n    if m.sum() == 0:\n        coherence[dlab] = 0.0\n        continue\n    lbl, n = ndimage.label(m)\n    if n == 0:\n        coherence[dlab] = 0.0\n        continue\n    sizes = ndimage.sum(np.ones_like(lbl), lbl, range(1, n + 1))\n    coherence[dlab] = float(sizes.max() / m.sum())\n\n# Morphological cleanup to reduce salt-and-pepper (opening) for reporting\nclean_label = label_map.copy()\nfor dlab in range(1, k_sel + 1):\n    m = label_map == dlab\n    m = morphology.remove_small_objects(m, min_size=16)\n    # only remove specks; do not reassign here to keep it simple\n    clean_label[(label_map == dlab) & (~m)] = 0\n\nmin_coherence = float(min(coherence.values())) if coherence else 0.0\n\n# ---------------------------------------------------------------\n# Per-domain measurements on LEVELED physical-unit image (not smoothed)\n# ---------------------------------------------------------------\ntotal_valid_px = int(np.sum(label_map > 0))\ndomain_stats = {}\nfor dlab in range(1, k_sel + 1):\n    m = label_map == dlab\n    npix = int(m.sum())\n    if npix == 0:\n        continue\n    vals = leveled[m]\n    domain_stats[dlab] = {\n        'mean_potential_V': float(np.mean(vals)),\n        'std_potential_V': float(np.std(vals)),\n        'area_fraction': float(npix / total_valid_px) if total_valid_px > 0 else 0.0,\n        'n_pixels': npix,\n        'largest_cc_fraction': coherence.get(dlab, 0.0),\n    }\n\n# pairwise CPD contrast (mV)\npairwise = {}\ndlabs = sorted(domain_stats.keys())\nfor i in range(len(dlabs)):\n    for j in range(i + 1, len(dlabs)):\n        a, b = dlabs[i], dlabs[j]\n        diff_mV = (domain_stats[b]['mean_potential_V'] - domain_stats[a]['mean_potential_V']) * 1000.0\n        pairwise[f'domain{a}_vs_domain{b}_mV'] = float(diff_mV)\n\n# total leveled potential range (mV) over valid area\nleveled_valid = leveled[valid_mask]\ntotal_range_mV = float((leveled_valid.max() - leveled_valid.min()) * 1000.0)\n\n# ---------------------------------------------------------------\n# Visualization\n# ---------------------------------------------------------------\nfig, axes = plt.subplots(2, 3, figsize=(16, 9))\n\nax = axes[0, 0]\nim0 = ax.imshow(volts, cmap='viridis', aspect='auto')\nax.set_title('Original (Volts)\\n%dx%d raw px' % (N_y, N_x))\nplt.colorbar(im0, ax=ax, fraction=0.046, label='V')\n\nax = axes[0, 1]\nim1 = ax.imshow(volts_sq, cmap='viridis')\nax.set_title('Square px %.3f nm/px\\n%dx%d' % (nm_per_px, N_y_new, N_x_new))\nplt.colorbar(im1, ax=ax, fraction=0.046, label='V')\n\nax = axes[0, 2]\nim2 = ax.imshow(leveled * 1000.0, cmap='RdBu_r')\nax.set_title('Leveled (%s + plane)\\nmV' % row_method)\nplt.colorbar(im2, ax=ax, fraction=0.046, label='mV')\n\nax = axes[1, 0]\nim3 = ax.imshow(smoothed * 1000.0, cmap='RdBu_r')\nax.set_title('Smoothed (sigma=2) mV')\nplt.colorbar(im3, ax=ax, fraction=0.046, label='mV')\n\nax = axes[1, 1]\n# segmentation overlay\nax.imshow(leveled * 1000.0, cmap='gray')\nover = np.ma.masked_where(label_map == 0, label_map)\nax.imshow(over, cmap='jet', alpha=0.45)\nfor dlab in range(1, k_sel + 1):\n    conts = measure.find_contours((label_map == dlab).astype(float), 0.5)\n    for c in conts:\n        ax.plot(c[:, 1], c[:, 0], 'k-', linewidth=0.4)\nax.set_title('CPD domains (k=%d)' % k_sel)\n\nax = axes[1, 2]\nax.imshow(leveled * 1000.0, cmap='gray')\nam = np.ma.masked_where(~artifact_mask, artifact_mask)\nax.imshow(am, cmap='autumn', alpha=0.8)\nax.set_title('Artifact mask (%.2f%% masked)' % (frac_masked * 100))\n\nplt.tight_layout()\nplt.savefig('visualization.png', dpi=100)\nplt.close()\n\n# ---------------------------------------------------------------\n# Save arrays\n# ---------------------------------------------------------------\nnp.save('cpd_domain_labels.npy', label_map)\nnp.save('leveled_potential_V.npy', leveled.astype(np.float32))\nnp.save('artifact_mask.npy', artifact_mask)\n\n# ---------------------------------------------------------------\n# Results JSON\n# ---------------------------------------------------------------\ndomain_means = {f'domain{d}': domain_stats[d]['mean_potential_V'] for d in dlabs}\ndomain_areas = {f'domain{d}': domain_stats[d]['area_fraction'] for d in dlabs}\n\nsummary = (\n    'KPFM surface potential leveled (row-align: %s, then 1st-order plane) and clustered into %d '\n    'spatially-coherent CPD domains (k selected by silhouette + BIC corroboration + largest-CC '\n    'coherence check; clustering fit/predicted on valid non-artifact pixels only, min largest-CC frac %.2f); '\n    'total leveled range %.1f mV, %.2f%% area masked as artifact. '\n    'nm/px=%.4f (square px, aspect preserved).'\n) % (row_method, k_sel, min_coherence, total_range_mV, frac_masked * 100, nm_per_px)\n\nadjust_notes = []\nif not round_trip_ok:\n    adjust_notes.append('round-trip dtype->V->dtype exceeded 1-LSB in some pixels (resampling introduces sub-quant deviations).')\nif dr_min == V_MIN_PLAN and dr_max == V_MAX_PLAN and find_key(meta, 'data_range_minimum') is None:\n    adjust_notes.append('data_range not found in metadata; used plan calibration min=1.6481 max=1.8176 V.')\nif FOV_x_nm is None:\n    adjust_notes.append('FOV not in metadata; used nm/px=1.0 placeholder for square resampling.')\nif adjust_notes:\n    summary += ' Notes: ' + ' '.join(adjust_notes)\n\nresults = {\n    'analysis_type': 'KPFM CPD domain analysis: volts conversion, square-pixel resampling, row-align + plane leveling, artifact masking, adaptive K-means clustering of surface potential into spatially-coherent contact-potential domains',\n    'extracted_features': {\n        'n_cpd_domains': int(k_sel),\n        'domain_selection_metric': 'silhouette + BIC + coherence',\n        'silhouette_scores_by_k': selection_scores,\n        'bic_scores_by_k': bic_scores,\n        'coherence_scores_by_k': coherence_scores,\n        'selected_silhouette': float(best['sil']),\n        'selected_bic': float(best['bic']),\n        'mean_surface_potential_V_per_domain': domain_means,\n        'pairwise_CPD_contrast_mV': pairwise,\n        'area_fraction_per_domain': domain_areas,\n        'total_leveled_potential_range_mV': total_range_mV,\n        'fraction_area_masked_artifact': frac_masked,\n        'per_domain_details': {str(d): domain_stats[d] for d in dlabs},\n    },\n    'quality_metrics': {\n        'nm_per_px': float(nm_per_px),\n        'square_pixel_consistent': square_ok,\n        'nm_per_px_x_check': float(nm_px_x_check),\n        'nm_per_px_y_check': float(nm_px_y_check),\n        'volts_roundtrip_within_1LSB': round_trip_ok,\n        'data_range_min_V': dr_min,\n        'data_range_max_V': dr_max,\n        'data_range_units': dr_units,\n        'row_alignment_method': row_method,\n        'residual_stripe_std_V': residual_stripe,\n        'min_domain_largest_cc_fraction': min_coherence,\n        'domain_coherence': {str(d): coherence[d] for d in coherence},\n        'clustering_on_valid_pixels_only': True,\n        'resampled_shape': [int(N_y_new), int(N_x_new)],\n        'original_shape': [int(N_y), int(N_x)],\n    },\n    'summary': summary,\n    'saved_arrays': {\n        'cpd_domain_labels.npy': {\n            'description': 'Integer CPD domain label map on square-pixel grid (background/artifact=0, domains labeled 1..%d ordered by ascending mean potential)' % k_sel,\n            'shape': list(label_map.shape),\n            'dtype': str(label_map.dtype),\n        },\n        'leveled_potential_V.npy': {\n            'description': 'Leveled surface potential in Volts (row-aligned + plane-subtracted, square pixels)',\n            'shape': list(leveled.shape),\n            'dtype': 'float32',\n        },\n        'artifact_mask.npy': {\n            'description': 'Boolean mask of excluded scan artifacts (dark upper-left streaks / outliers)',\n            'shape': list(artifact_mask.shape),\n            'dtype': 'bool',\n        },\n    },\n}\n\nprint('IMAGE_ANALYSIS_RESULTS_JSON:' + json.dumps(results))\n",
+      "script_errors": [],
+      "quality_history": {
+        "final_score": 0.86,
+        "threshold": 0.7,
+        "approved": true,
+        "verification_iterations": [
+          {
+            "score": 0.86,
+            "result_type": "delivered",
+            "annealing_level": 0,
+            "issues": [
+              {
+                "location": "Domain count selection (k=2 vs k=3)",
+                "problem": "Silhouette (0.558) and BIC (most negative, -1.558e6) both favor k=3, but k=2 was selected on the basis of coherence. The reported rationale ('silhouette + BIC + coherence') is somewhat inconsistent since two of the three metrics point to k=3."
+              },
+              {
+                "location": "CPD contrast magnitude",
+                "problem": "Reported CPD contrast between the two domains is only ~16 mV, which is at the low end for KPFM and much smaller than the total leveled potential range (~104 mV). A 2-cluster split of a continuous gradient tends to under-report true domain contrast."
+              }
+            ],
+            "tools_used": [],
+            "fix_applied": ""
+          }
+        ],
+        "script_errors": [],
+        "judge_reasoning": null,
+        "score_explanation": null
+      }
+    }
+  ]
+}

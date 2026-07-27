@@ -1,0 +1,15 @@
+{
+  "experiment_type": "Spectroscopy",
+  "experiment": {
+    "technique": "Raman Spectroscopy",
+    "date": null,
+    "instrument": null,
+    "details": null
+  },
+  "sample": {
+    "material": "N/A",
+    "description": "Unknown compound"
+  },
+  "energy_range": null,
+  "custom_processing_instruction": null
+}

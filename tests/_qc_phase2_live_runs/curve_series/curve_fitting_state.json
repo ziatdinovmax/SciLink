@@ -1,0 +1,35 @@
+{
+  "action_history": [
+    {
+      "timestamp": "2026-07-08T23:45:57.724649",
+      "action": "curve_fit",
+      "input": {
+        "num_spectra": 5,
+        "input_type": "file_paths",
+        "series_metadata": {
+          "variable": "temperature",
+          "values": [
+            243.2,
+            258.2,
+            278.2,
+            293.5,
+            313.2
+          ],
+          "unit": "K"
+        },
+        "r2_threshold": 0.95
+      },
+      "rationale": "Model: unknown",
+      "result": {
+        "total_spectra": 5,
+        "successful_fits": 5,
+        "flagged_count": 0,
+        "refitted_count": 0,
+        "input_type": "file_paths",
+        "locked_model": "Sum of Voigt profiles (Lorentzian-dominant; collapse to pure Lorentzian if Gaussian width refines to ~0) on a constant/linear baseline. Component count set per spectrum: 2 Voigt lines in the low-T slow-exchange regime, 1 Voigt line in the high-T fast-exchange regime; intermediate spectra fit with whichever count the data justify.",
+        "is_single_spectrum": false
+      },
+      "feedback": null
+    }
+  ]
+}

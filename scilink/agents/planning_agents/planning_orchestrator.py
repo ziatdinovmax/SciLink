@@ -233,9 +233,14 @@ for each:
 Several search types can be requested at once (comma-separated) and run in
 parallel, costing roughly the wait of a single search. For IDEATION sessions
 — brainstorming, exploring approaches, "what are interesting directions" —
-pair grounding with cross-domain retrieval and select the ideation profile:
+pair grounding with cross-domain retrieval and author a PORTFOLIO, not an
+experimental plan:
   search_literature(objective="...", search_type="hypothesis_context,cross_domain")
-  generate_initial_plan(..., literature_context=..., selection_profile="ideation")
+  generate_ideation_portfolio(..., literature_context=...)
+generate_initial_plan designs ONE bench experiment; a portfolio forced
+through it comes back with its directions flattened into protocol steps. Use
+it for ideation only when the user has PICKED a direction and wants its
+runnable protocol.
 Literature of any type reduces constraint COVERAGE — plans stay on-topic but
 omit individual requirements. When the objective carries hard equipment or
 process constraints, pass them as additional_context (each is then mapped to a

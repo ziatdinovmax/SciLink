@@ -1,0 +1,1177 @@
+{
+  "timestamp": "2026-05-13T21:05:40.222478",
+  "total_spectra": 20,
+  "successful": 20,
+  "flagged_count": 0,
+  "is_single_spectrum": false,
+  "series_metadata": {},
+  "quality_settings": {
+    "r2_threshold": 0.95,
+    "max_model_retries": 1,
+    "outlier_sigma": 2.0
+  },
+  "locked_config": {
+    "analysis_approach": "Fit a sum of two Gaussian peaks on a flat background.",
+    "physical_model": "y = A1*exp(-(x-mu1)^2 / (2*sigma1^2)) + A2*exp(-(x-mu2)^2 / (2*sigma2^2)) + C; two Gaussian peaks (~284.6 eV and ~286.5 eV) on a flat baseline.",
+    "parameters_to_extract": [
+      "A1",
+      "mu1",
+      "sigma1",
+      "A2",
+      "mu2",
+      "sigma2",
+      "C"
+    ],
+    "fitting_strategy": "Use lmfit GaussianModel x2 + ConstantModel. Initial guesses: mu1=284.6, mu2=286.5; sigma=0.5; A from data."
+  },
+  "series_analysis_plan": null,
+  "locked_preprocessing_strategy": null,
+  "results": [
+    {
+      "index": 0,
+      "name": "spectrum_0000",
+      "data_path": "stack_index_0",
+      "success": true,
+      "error": null,
+      "model_type": "Two Gaussian peaks + constant background",
+      "parameters": {
+        "peak_1": {
+          "center": 284.6002291475526,
+          "center_err": 0.00023240268819735548,
+          "sigma": 0.44935613323137313,
+          "sigma_err": 0.0002518262338077129,
+          "amplitude": 1.1269633613061525,
+          "amplitude_err": 0.0006085564044157512,
+          "fwhm": 1.058152809655902,
+          "height": 1.000527915669312
+        },
+        "peak_2": {
+          "center": 286.4999359758785,
+          "center_err": 0.0004445992728764965,
+          "sigma": 0.5011687336910879,
+          "sigma_err": 0.0004909234605369527,
+          "amplitude": 0.690438923393041,
+          "amplitude_err": 0.0006576959703149503,
+          "fwhm": 1.1801621574704477,
+          "height": 0.54960589835543
+        },
+        "background": {
+          "constant": 0.049788140146420676,
+          "constant_err": 0.00016216933469329655
+        }
+      },
+      "fit_quality": {
+        "r_squared": 0.999713,
+        "rmse": 0.004907
+      },
+      "deviation_note": null,
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/spectrum_0000_fit.png",
+      "statistics": {
+        "n_points": 2000,
+        "x_range": [
+          282.0,
+          290.0
+        ],
+        "y_range": [
+          0.035548094968461334,
+          1.0558844876701714
+        ],
+        "y_mean": 0.27684983759834586,
+        "y_std": 0.2893992278947808,
+        "has_nans": false
+      },
+      "script": "import numpy as np\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom lmfit.models import GaussianModel, ConstantModel\nimport json\nimport os\n\n# 1. Load data\ndata_path = '/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/temp_spectrum_0.npy'\ndata = np.load(data_path)\n\n# Handle different shapes\nif data.ndim == 2:\n    if data.shape[0] == 2:\n        x = data[0]\n        y = data[1]\n    elif data.shape[1] == 2:\n        x = data[:, 0]\n        y = data[:, 1]\n    else:\n        raise ValueError(f\"Unexpected 2D shape: {data.shape}\")\nelif data.ndim == 1:\n    # Assume evenly spaced x from 282 to 290\n    y = data\n    x = np.linspace(282, 290, len(y))\nelse:\n    raise ValueError(f\"Unexpected data dimensions: {data.ndim}\")\n\n# Sort by x\nsort_idx = np.argsort(x)\nx = x[sort_idx]\ny = y[sort_idx]\n\n# 2. Build model: two Gaussians + constant baseline\ngauss1 = GaussianModel(prefix='g1_')\ngauss2 = GaussianModel(prefix='g2_')\nbackground = ConstantModel(prefix='bkg_')\n\nmodel = gauss1 + gauss2 + background\n\n# Initial guesses\n# Estimate baseline from edges\nbkg_guess = np.mean(np.concatenate([y[:50], y[-50:]]))\n\n# Estimate amplitudes from data\ny_nobkg = y - bkg_guess\nmax_y = np.max(y_nobkg)\n\n# For lmfit GaussianModel, 'amplitude' is the area under the curve, not the peak height\n# Peak height = amplitude / (sigma * sqrt(2*pi))\n# So amplitude = height * sigma * sqrt(2*pi)\nsigma_guess = 0.5\namplitude_guess1 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.7\namplitude_guess2 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.4\n\nparams = model.make_params()\n\n# Gaussian 1 (main peak ~284.6)\nparams['g1_center'].set(value=284.6, min=283.5, max=285.5)\nparams['g1_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g1_amplitude'].set(value=amplitude_guess1, min=0)\n\n# Gaussian 2 (secondary peak ~286.5)\nparams['g2_center'].set(value=286.5, min=285.5, max=288.0)\nparams['g2_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g2_amplitude'].set(value=amplitude_guess2, min=0)\n\n# Background\nparams['bkg_c'].set(value=bkg_guess)\n\n# 3. Fit\nresult = model.fit(y, params, x=x)\n\n# 4. Compute fit quality\ny_fit = result.best_fit\nresiduals = y - y_fit\nss_res = np.sum(residuals**2)\nss_tot = np.sum((y - np.mean(y))**2)\nr_squared = 1 - ss_res / ss_tot\nrmse = np.sqrt(np.mean(residuals**2))\n\n# Extract individual components\ncomponents = result.eval_components(x=x)\ng1_component = components['g1_']\ng2_component = components['g2_']\nbkg_component = components['bkg_']\n\n# Extract parameters with errors\ndef get_param(name):\n    p = result.params[name]\n    return {'value': float(p.value), 'error': float(p.stderr) if p.stderr is not None else None}\n\n# For Gaussian, FWHM = 2*sqrt(2*ln2)*sigma ~ 2.3548*sigma\n# lmfit GaussianModel provides fwhm and height as derived params\ng1_center = get_param('g1_center')\ng1_sigma = get_param('g1_sigma')\ng1_amplitude = get_param('g1_amplitude')\ng1_fwhm = result.params['g1_fwhm']\ng1_height = result.params['g1_height']\n\ng2_center = get_param('g2_center')\ng2_sigma = get_param('g2_sigma')\ng2_amplitude = get_param('g2_amplitude')\ng2_fwhm = result.params['g2_fwhm']\ng2_height = result.params['g2_height']\n\nbkg_c = get_param('bkg_c')\n\n# 5. Save visualization\nfig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)\n\n# Main plot\nax1.plot(x, y, 'k.', markersize=1, alpha=0.5, label='Data')\nax1.plot(x, y_fit, 'r-', linewidth=2, label='Fit')\nax1.plot(x, g1_component + bkg_component, 'b--', linewidth=1.5, alpha=0.7, label='Component 1')\nax1.plot(x, g2_component + bkg_component, 'g--', linewidth=1.5, alpha=0.7, label='Component 2')\nax1.axhline(y=bkg_c['value'], color='gray', linestyle=':', alpha=0.5, label='Background')\nax1.set_ylabel('Y')\nax1.set_title('Data and Fit')\nax1.legend(loc='best')\n\n# Annotate parameters\nann_text1 = f\"C1: center={g1_center['value']:.2f}, FWHM={float(g1_fwhm.value):.2f}\"\nann_text2 = f\"C2: center={g2_center['value']:.2f}, FWHM={float(g2_fwhm.value):.2f}\"\nax1.annotate(ann_text1, xy=(0.02, 0.95), xycoords='axes fraction', fontsize=9, verticalalignment='top')\nax1.annotate(ann_text2, xy=(0.02, 0.88), xycoords='axes fraction', fontsize=9, verticalalignment='top')\n\n# Residuals plot\nax2.plot(x, residuals, 'k.', markersize=1, alpha=0.5, label='Residuals')\nax2.axhline(y=0, color='r', linestyle='-', linewidth=0.5)\nax2.set_xlabel('X')\nax2.set_ylabel('Residuals')\nax2.legend(loc='best')\n\nplt.tight_layout()\nplt.savefig('fit_visualization.png', dpi=150, bbox_inches='tight')\nplt.close()\n\n# 6. Print results as JSON\nresults = {\n    \"model_type\": \"Two Gaussian peaks + constant background\",\n    \"parameters\": {\n        \"peak_1\": {\n            \"center\": g1_center['value'],\n            \"center_err\": g1_center['error'],\n            \"sigma\": g1_sigma['value'],\n            \"sigma_err\": g1_sigma['error'],\n            \"amplitude\": g1_amplitude['value'],\n            \"amplitude_err\": g1_amplitude['error'],\n            \"fwhm\": float(g1_fwhm.value),\n            \"height\": float(g1_height.value)\n        },\n        \"peak_2\": {\n            \"center\": g2_center['value'],\n            \"center_err\": g2_center['error'],\n            \"sigma\": g2_sigma['value'],\n            \"sigma_err\": g2_sigma['error'],\n            \"amplitude\": g2_amplitude['value'],\n            \"amplitude_err\": g2_amplitude['error'],\n            \"fwhm\": float(g2_fwhm.value),\n            \"height\": float(g2_height.value)\n        },\n        \"background\": {\n            \"constant\": bkg_c['value'],\n            \"constant_err\": bkg_c['error']\n        }\n    },\n    \"fit_quality\": {\n        \"r_squared\": round(r_squared, 6),\n        \"rmse\": round(rmse, 6)\n    },\n    \"deviation_note\": \"\"\n}\n\nprint(f\"FIT_RESULTS_JSON:{json.dumps(results)}\")\n",
+      "script_errors": [],
+      "quality_history": {
+        "final_r2": 0.999713,
+        "threshold": 0.95,
+        "approved": true,
+        "verification_iterations": [
+          {
+            "r_squared": 0.999713,
+            "annealing_level": 0,
+            "issues": [
+              {
+                "location": "Original data plot",
+                "problem": "The original data reference plot shows only two points (0,0) and (~280,~280), which bears no resemblance to the spectral data being fitted"
+              },
+              {
+                "location": "Residuals around x=283-284 (rising edge of peak 1)",
+                "problem": "Slight systematic structure in residuals on the low-energy side of peak 1"
+              }
+            ],
+            "fix_applied": "none"
+          }
+        ],
+        "alternative_models": [],
+        "script_errors": [],
+        "judge_reasoning": null,
+        "approved_by": "verifier"
+      }
+    },
+    {
+      "index": 1,
+      "name": "spectrum_0001",
+      "data_path": "stack_index_1",
+      "success": true,
+      "error": null,
+      "model_type": "Two Gaussian peaks + constant background",
+      "parameters": {
+        "peak_1": {
+          "center": 284.60190632119327,
+          "center_err": 0.0002357208149004144,
+          "sigma": 0.44986959448555697,
+          "sigma_err": 0.00025549747382565106,
+          "amplitude": 1.1281138418147694,
+          "amplitude_err": 0.0006176426419443884,
+          "fwhm": 1.0593619184864793,
+          "height": 1.0004061982230035
+        },
+        "peak_2": {
+          "center": 286.50243465115153,
+          "center_err": 0.00044885125754060907,
+          "sigma": 0.499378993779088,
+          "sigma_err": 0.000495285292538598,
+          "amplitude": 0.6896635711134054,
+          "amplitude_err": 0.0006652783496328204,
+          "fwhm": 1.175947642130872,
+          "height": 0.5509562370737371
+        },
+        "background": {
+          "constant": 0.049964795982008536,
+          "constant_err": 0.00016449713836785097
+        }
+      },
+      "fit_quality": {
+        "r_squared": 0.999704,
+        "rmse": 0.004978
+      },
+      "deviation_note": null,
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/spectrum_0001_fit.png",
+      "statistics": {
+        "n_points": 2000,
+        "x_range": [
+          282.0,
+          290.0
+        ],
+        "y_range": [
+          0.03593792032721027,
+          1.057821578631114
+        ],
+        "y_mean": 0.2770733610081186,
+        "y_std": 0.28954460101144125,
+        "has_nans": false
+      },
+      "script": "import numpy as np\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom lmfit.models import GaussianModel, ConstantModel\nimport json\nimport os\n\n# 1. Load data\ndata_path = \"/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/temp_spectrum_1.npy\"\ndata = np.load(data_path)\n\n# Handle different shapes\nif data.ndim == 2:\n    if data.shape[0] == 2:\n        x = data[0]\n        y = data[1]\n    elif data.shape[1] == 2:\n        x = data[:, 0]\n        y = data[:, 1]\n    else:\n        raise ValueError(f\"Unexpected 2D shape: {data.shape}\")\nelif data.ndim == 1:\n    # Assume evenly spaced x from 282 to 290\n    y = data\n    x = np.linspace(282, 290, len(y))\nelse:\n    raise ValueError(f\"Unexpected data dimensions: {data.ndim}\")\n\n# Sort by x\nsort_idx = np.argsort(x)\nx = x[sort_idx]\ny = y[sort_idx]\n\n# 2. Build model: two Gaussians + constant baseline\ngauss1 = GaussianModel(prefix='g1_')\ngauss2 = GaussianModel(prefix='g2_')\nbackground = ConstantModel(prefix='bkg_')\n\nmodel = gauss1 + gauss2 + background\n\n# Initial guesses\n# Estimate baseline from edges\nbkg_guess = np.mean(np.concatenate([y[:50], y[-50:]]))\n\n# Estimate amplitudes from data\ny_nobkg = y - bkg_guess\nmax_y = np.max(y_nobkg)\n\n# For lmfit GaussianModel, 'amplitude' is the area under the curve, not the peak height\n# Peak height = amplitude / (sigma * sqrt(2*pi))\n# So amplitude = height * sigma * sqrt(2*pi)\nsigma_guess = 0.5\namplitude_guess1 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.7\namplitude_guess2 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.4\n\nparams = model.make_params()\n\n# Gaussian 1 (main peak ~284.6)\nparams['g1_center'].set(value=284.6, min=283.5, max=285.5)\nparams['g1_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g1_amplitude'].set(value=amplitude_guess1, min=0)\n\n# Gaussian 2 (secondary peak ~286.5)\nparams['g2_center'].set(value=286.5, min=285.5, max=288.0)\nparams['g2_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g2_amplitude'].set(value=amplitude_guess2, min=0)\n\n# Background\nparams['bkg_c'].set(value=bkg_guess)\n\n# 3. Fit\nresult = model.fit(y, params, x=x)\n\n# 4. Compute fit quality\ny_fit = result.best_fit\nresiduals = y - y_fit\nss_res = np.sum(residuals**2)\nss_tot = np.sum((y - np.mean(y))**2)\nr_squared = 1 - ss_res / ss_tot\nrmse = np.sqrt(np.mean(residuals**2))\n\n# Extract individual components\ncomponents = result.eval_components(x=x)\ng1_component = components['g1_']\ng2_component = components['g2_']\nbkg_component = components['bkg_']\n\n# Extract parameters with errors\ndef get_param(name):\n    p = result.params[name]\n    return {'value': float(p.value), 'error': float(p.stderr) if p.stderr is not None else None}\n\n# For Gaussian, FWHM = 2*sqrt(2*ln2)*sigma ~ 2.3548*sigma\n# lmfit GaussianModel provides fwhm and height as derived params\ng1_center = get_param('g1_center')\ng1_sigma = get_param('g1_sigma')\ng1_amplitude = get_param('g1_amplitude')\ng1_fwhm = result.params['g1_fwhm']\ng1_height = result.params['g1_height']\n\ng2_center = get_param('g2_center')\ng2_sigma = get_param('g2_sigma')\ng2_amplitude = get_param('g2_amplitude')\ng2_fwhm = result.params['g2_fwhm']\ng2_height = result.params['g2_height']\n\nbkg_c = get_param('bkg_c')\n\n# 5. Save visualization\nfig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)\n\n# Main plot\nax1.plot(x, y, 'k.', markersize=1, alpha=0.5, label='Data')\nax1.plot(x, y_fit, 'r-', linewidth=2, label='Fit')\nax1.plot(x, g1_component + bkg_component, 'b--', linewidth=1.5, alpha=0.7, label='Component 1')\nax1.plot(x, g2_component + bkg_component, 'g--', linewidth=1.5, alpha=0.7, label='Component 2')\nax1.axhline(y=bkg_c['value'], color='gray', linestyle=':', alpha=0.5, label='Background')\nax1.set_ylabel('Y')\nax1.set_title('Data and Fit')\nax1.legend(loc='best')\n\n# Annotate parameters\nann_text1 = f\"C1: center={g1_center['value']:.2f}, FWHM={float(g1_fwhm.value):.2f}\"\nann_text2 = f\"C2: center={g2_center['value']:.2f}, FWHM={float(g2_fwhm.value):.2f}\"\nax1.annotate(ann_text1, xy=(0.02, 0.95), xycoords='axes fraction', fontsize=9, verticalalignment='top')\nax1.annotate(ann_text2, xy=(0.02, 0.88), xycoords='axes fraction', fontsize=9, verticalalignment='top')\n\n# Residuals plot\nax2.plot(x, residuals, 'k.', markersize=1, alpha=0.5, label='Residuals')\nax2.axhline(y=0, color='r', linestyle='-', linewidth=0.5)\nax2.set_xlabel('X')\nax2.set_ylabel('Residuals')\nax2.legend(loc='best')\n\nplt.tight_layout()\nplt.savefig('spectrum_0001_fit.png', dpi=150, bbox_inches='tight')\nplt.close()\n\n# 6. Print results as JSON\nresults = {\n    \"model_type\": \"Two Gaussian peaks + constant background\",\n    \"parameters\": {\n        \"peak_1\": {\n            \"center\": g1_center['value'],\n            \"center_err\": g1_center['error'],\n            \"sigma\": g1_sigma['value'],\n            \"sigma_err\": g1_sigma['error'],\n            \"amplitude\": g1_amplitude['value'],\n            \"amplitude_err\": g1_amplitude['error'],\n            \"fwhm\": float(g1_fwhm.value),\n            \"height\": float(g1_height.value)\n        },\n        \"peak_2\": {\n            \"center\": g2_center['value'],\n            \"center_err\": g2_center['error'],\n            \"sigma\": g2_sigma['value'],\n            \"sigma_err\": g2_sigma['error'],\n            \"amplitude\": g2_amplitude['value'],\n            \"amplitude_err\": g2_amplitude['error'],\n            \"fwhm\": float(g2_fwhm.value),\n            \"height\": float(g2_height.value)\n        },\n        \"background\": {\n            \"constant\": bkg_c['value'],\n            \"constant_err\": bkg_c['error']\n        }\n    },\n    \"fit_quality\": {\n        \"r_squared\": round(r_squared, 6),\n        \"rmse\": round(rmse, 6)\n    },\n    \"deviation_note\": \"\"\n}\n\nprint(f\"FIT_RESULTS_JSON:{json.dumps(results)}\")\n",
+      "script_errors": []
+    },
+    {
+      "index": 2,
+      "name": "spectrum_0002",
+      "data_path": "stack_index_2",
+      "success": true,
+      "error": null,
+      "model_type": "Two Gaussian peaks + constant background",
+      "parameters": {
+        "peak_1": {
+          "center": 284.60438698379943,
+          "center_err": 0.00023798092216771832,
+          "sigma": 0.4501653783381746,
+          "sigma_err": 0.0002579611317859038,
+          "amplitude": 1.1277287716112747,
+          "amplitude_err": 0.000622798196831762,
+          "fwhm": 1.0600584362183003,
+          "height": 0.9994076212249322
+        },
+        "peak_2": {
+          "center": 286.50403463886096,
+          "center_err": 0.00045330208570691654,
+          "sigma": 0.49995999692058135,
+          "sigma_err": 0.000500328790542519,
+          "amplitude": 0.6896761389941759,
+          "amplitude_err": 0.0006710718751398863,
+          "fwhm": 1.1773157999485235,
+          "height": 0.5503259997602616
+        },
+        "background": {
+          "constant": 0.04995033253660765,
+          "constant_err": 0.0001657518767693649
+        }
+      },
+      "fit_quality": {
+        "r_squared": 0.999699,
+        "rmse": 0.005016
+      },
+      "deviation_note": null,
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/spectrum_0002_fit.png",
+      "statistics": {
+        "n_points": 2000,
+        "x_range": [
+          282.0,
+          290.0
+        ],
+        "y_range": [
+          0.03379946956917193,
+          1.0692396335522136
+        ],
+        "y_mean": 0.27701235805894736,
+        "y_std": 0.2893222977711434,
+        "has_nans": false
+      },
+      "script": "import numpy as np\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom lmfit.models import GaussianModel, ConstantModel\nimport json\nimport os\n\n# 1. Load data\ndata_path = \"/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/temp_spectrum_2.npy\"\ndata = np.load(data_path)\n\n# Handle different shapes\nif data.ndim == 2:\n    if data.shape[0] == 2:\n        x = data[0]\n        y = data[1]\n    elif data.shape[1] == 2:\n        x = data[:, 0]\n        y = data[:, 1]\n    else:\n        raise ValueError(f\"Unexpected 2D shape: {data.shape}\")\nelif data.ndim == 1:\n    # Assume evenly spaced x from 282 to 290\n    y = data\n    x = np.linspace(282, 290, len(y))\nelse:\n    raise ValueError(f\"Unexpected data dimensions: {data.ndim}\")\n\n# Sort by x\nsort_idx = np.argsort(x)\nx = x[sort_idx]\ny = y[sort_idx]\n\n# 2. Build model: two Gaussians + constant baseline\ngauss1 = GaussianModel(prefix='g1_')\ngauss2 = GaussianModel(prefix='g2_')\nbackground = ConstantModel(prefix='bkg_')\n\nmodel = gauss1 + gauss2 + background\n\n# Initial guesses\n# Estimate baseline from edges\nbkg_guess = np.mean(np.concatenate([y[:50], y[-50:]]))\n\n# Estimate amplitudes from data\ny_nobkg = y - bkg_guess\nmax_y = np.max(y_nobkg)\n\n# For lmfit GaussianModel, 'amplitude' is the area under the curve, not the peak height\n# Peak height = amplitude / (sigma * sqrt(2*pi))\n# So amplitude = height * sigma * sqrt(2*pi)\nsigma_guess = 0.5\namplitude_guess1 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.7\namplitude_guess2 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.4\n\nparams = model.make_params()\n\n# Gaussian 1 (main peak ~284.6)\nparams['g1_center'].set(value=284.6, min=283.5, max=285.5)\nparams['g1_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g1_amplitude'].set(value=amplitude_guess1, min=0)\n\n# Gaussian 2 (secondary peak ~286.5)\nparams['g2_center'].set(value=286.5, min=285.5, max=288.0)\nparams['g2_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g2_amplitude'].set(value=amplitude_guess2, min=0)\n\n# Background\nparams['bkg_c'].set(value=bkg_guess)\n\n# 3. Fit\nresult = model.fit(y, params, x=x)\n\n# 4. Compute fit quality\ny_fit = result.best_fit\nresiduals = y - y_fit\nss_res = np.sum(residuals**2)\nss_tot = np.sum((y - np.mean(y))**2)\nr_squared = 1 - ss_res / ss_tot\nrmse = np.sqrt(np.mean(residuals**2))\n\n# Extract individual components\ncomponents = result.eval_components(x=x)\ng1_component = components['g1_']\ng2_component = components['g2_']\nbkg_component = components['bkg_']\n\n# Extract parameters with errors\ndef get_param(name):\n    p = result.params[name]\n    return {'value': float(p.value), 'error': float(p.stderr) if p.stderr is not None else None}\n\n# For Gaussian, FWHM = 2*sqrt(2*ln2)*sigma ~ 2.3548*sigma\n# lmfit GaussianModel provides fwhm and height as derived params\ng1_center = get_param('g1_center')\ng1_sigma = get_param('g1_sigma')\ng1_amplitude = get_param('g1_amplitude')\ng1_fwhm = result.params['g1_fwhm']\ng1_height = result.params['g1_height']\n\ng2_center = get_param('g2_center')\ng2_sigma = get_param('g2_sigma')\ng2_amplitude = get_param('g2_amplitude')\ng2_fwhm = result.params['g2_fwhm']\ng2_height = result.params['g2_height']\n\nbkg_c = get_param('bkg_c')\n\n# 5. Save visualization\nfig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)\n\n# Main plot\nax1.plot(x, y, 'k.', markersize=1, alpha=0.5, label='Data')\nax1.plot(x, y_fit, 'r-', linewidth=2, label='Fit')\nax1.plot(x, g1_component + bkg_component, 'b--', linewidth=1.5, alpha=0.7, label='Component 1')\nax1.plot(x, g2_component + bkg_component, 'g--', linewidth=1.5, alpha=0.7, label='Component 2')\nax1.axhline(y=bkg_c['value'], color='gray', linestyle=':', alpha=0.5, label='Background')\nax1.set_ylabel('Y')\nax1.set_title('Data and Fit')\nax1.legend(loc='best')\n\n# Annotate parameters\nann_text1 = f\"C1: center={g1_center['value']:.2f}, FWHM={float(g1_fwhm.value):.2f}\"\nann_text2 = f\"C2: center={g2_center['value']:.2f}, FWHM={float(g2_fwhm.value):.2f}\"\nax1.annotate(ann_text1, xy=(0.02, 0.95), xycoords='axes fraction', fontsize=9, verticalalignment='top')\nax1.annotate(ann_text2, xy=(0.02, 0.88), xycoords='axes fraction', fontsize=9, verticalalignment='top')\n\n# Residuals plot\nax2.plot(x, residuals, 'k.', markersize=1, alpha=0.5, label='Residuals')\nax2.axhline(y=0, color='r', linestyle='-', linewidth=0.5)\nax2.set_xlabel('X')\nax2.set_ylabel('Residuals')\nax2.legend(loc='best')\n\nplt.tight_layout()\nplt.savefig('spectrum_0002_fit.png', dpi=150, bbox_inches='tight')\nplt.close()\n\n# 6. Print results as JSON\nresults = {\n    \"model_type\": \"Two Gaussian peaks + constant background\",\n    \"parameters\": {\n        \"peak_1\": {\n            \"center\": g1_center['value'],\n            \"center_err\": g1_center['error'],\n            \"sigma\": g1_sigma['value'],\n            \"sigma_err\": g1_sigma['error'],\n            \"amplitude\": g1_amplitude['value'],\n            \"amplitude_err\": g1_amplitude['error'],\n            \"fwhm\": float(g1_fwhm.value),\n            \"height\": float(g1_height.value)\n        },\n        \"peak_2\": {\n            \"center\": g2_center['value'],\n            \"center_err\": g2_center['error'],\n            \"sigma\": g2_sigma['value'],\n            \"sigma_err\": g2_sigma['error'],\n            \"amplitude\": g2_amplitude['value'],\n            \"amplitude_err\": g2_amplitude['error'],\n            \"fwhm\": float(g2_fwhm.value),\n            \"height\": float(g2_height.value)\n        },\n        \"background\": {\n            \"constant\": bkg_c['value'],\n            \"constant_err\": bkg_c['error']\n        }\n    },\n    \"fit_quality\": {\n        \"r_squared\": round(r_squared, 6),\n        \"rmse\": round(rmse, 6)\n    },\n    \"deviation_note\": \"\"\n}\n\nprint(f\"FIT_RESULTS_JSON:{json.dumps(results)}\")\n",
+      "script_errors": []
+    },
+    {
+      "index": 3,
+      "name": "spectrum_0003",
+      "data_path": "stack_index_3",
+      "success": true,
+      "error": null,
+      "model_type": "Two Gaussian peaks + constant background",
+      "parameters": {
+        "peak_1": {
+          "center": 284.60632942790187,
+          "center_err": 0.00022739820570014688,
+          "sigma": 0.4499175675239738,
+          "sigma_err": 0.00024648176978096586,
+          "amplitude": 1.127439127705233,
+          "amplitude_err": 0.000595276786283735,
+          "fwhm": 1.0594748863568042,
+          "height": 0.9997012590373073
+        },
+        "peak_2": {
+          "center": 286.5055981374381,
+          "center_err": 0.00043385575196023835,
+          "sigma": 0.49949108811101306,
+          "sigma_err": 0.0004787909110876003,
+          "amplitude": 0.6879929513046537,
+          "amplitude_err": 0.0006412305822505368,
+          "fwhm": 1.176211604105576,
+          "height": 0.5494982731629139
+        },
+        "background": {
+          "constant": 0.050076693268962365,
+          "constant_err": 0.00015847547204089803
+        }
+      },
+      "fit_quality": {
+        "r_squared": 0.999725,
+        "rmse": 0.004797
+      },
+      "deviation_note": null,
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/spectrum_0003_fit.png",
+      "statistics": {
+        "n_points": 2000,
+        "x_range": [
+          282.0,
+          290.0
+        ],
+        "y_range": [
+          0.034759588750580446,
+          1.056694139925565
+        ],
+        "y_mean": 0.2768922381657275,
+        "y_std": 0.2892661470841099,
+        "has_nans": false
+      },
+      "script": "import numpy as np\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom lmfit.models import GaussianModel, ConstantModel\nimport json\nimport os\n\n# 1. Load data\ndata_path = \"/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/temp_spectrum_3.npy\"\ndata = np.load(data_path)\n\n# Handle different shapes\nif data.ndim == 2:\n    if data.shape[0] == 2:\n        x = data[0]\n        y = data[1]\n    elif data.shape[1] == 2:\n        x = data[:, 0]\n        y = data[:, 1]\n    else:\n        raise ValueError(f\"Unexpected 2D shape: {data.shape}\")\nelif data.ndim == 1:\n    # Assume evenly spaced x from 282 to 290\n    y = data\n    x = np.linspace(282, 290, len(y))\nelse:\n    raise ValueError(f\"Unexpected data dimensions: {data.ndim}\")\n\n# Sort by x\nsort_idx = np.argsort(x)\nx = x[sort_idx]\ny = y[sort_idx]\n\n# 2. Build model: two Gaussians + constant baseline\ngauss1 = GaussianModel(prefix='g1_')\ngauss2 = GaussianModel(prefix='g2_')\nbackground = ConstantModel(prefix='bkg_')\n\nmodel = gauss1 + gauss2 + background\n\n# Initial guesses\n# Estimate baseline from edges\nbkg_guess = np.mean(np.concatenate([y[:50], y[-50:]]))\n\n# Estimate amplitudes from data\ny_nobkg = y - bkg_guess\nmax_y = np.max(y_nobkg)\n\n# For lmfit GaussianModel, 'amplitude' is the area under the curve, not the peak height\n# Peak height = amplitude / (sigma * sqrt(2*pi))\n# So amplitude = height * sigma * sqrt(2*pi)\nsigma_guess = 0.5\namplitude_guess1 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.7\namplitude_guess2 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.4\n\nparams = model.make_params()\n\n# Gaussian 1 (main peak ~284.6)\nparams['g1_center'].set(value=284.6, min=283.5, max=285.5)\nparams['g1_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g1_amplitude'].set(value=amplitude_guess1, min=0)\n\n# Gaussian 2 (secondary peak ~286.5)\nparams['g2_center'].set(value=286.5, min=285.5, max=288.0)\nparams['g2_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g2_amplitude'].set(value=amplitude_guess2, min=0)\n\n# Background\nparams['bkg_c'].set(value=bkg_guess)\n\n# 3. Fit\nresult = model.fit(y, params, x=x)\n\n# 4. Compute fit quality\ny_fit = result.best_fit\nresiduals = y - y_fit\nss_res = np.sum(residuals**2)\nss_tot = np.sum((y - np.mean(y))**2)\nr_squared = 1 - ss_res / ss_tot\nrmse = np.sqrt(np.mean(residuals**2))\n\n# Extract individual components\ncomponents = result.eval_components(x=x)\ng1_component = components['g1_']\ng2_component = components['g2_']\nbkg_component = components['bkg_']\n\n# Extract parameters with errors\ndef get_param(name):\n    p = result.params[name]\n    return {'value': float(p.value), 'error': float(p.stderr) if p.stderr is not None else None}\n\n# For Gaussian, FWHM = 2*sqrt(2*ln2)*sigma ~ 2.3548*sigma\n# lmfit GaussianModel provides fwhm and height as derived params\ng1_center = get_param('g1_center')\ng1_sigma = get_param('g1_sigma')\ng1_amplitude = get_param('g1_amplitude')\ng1_fwhm = result.params['g1_fwhm']\ng1_height = result.params['g1_height']\n\ng2_center = get_param('g2_center')\ng2_sigma = get_param('g2_sigma')\ng2_amplitude = get_param('g2_amplitude')\ng2_fwhm = result.params['g2_fwhm']\ng2_height = result.params['g2_height']\n\nbkg_c = get_param('bkg_c')\n\n# 5. Save visualization\nfig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)\n\n# Main plot\nax1.plot(x, y, 'k.', markersize=1, alpha=0.5, label='Data')\nax1.plot(x, y_fit, 'r-', linewidth=2, label='Fit')\nax1.plot(x, g1_component + bkg_component, 'b--', linewidth=1.5, alpha=0.7, label='Component 1')\nax1.plot(x, g2_component + bkg_component, 'g--', linewidth=1.5, alpha=0.7, label='Component 2')\nax1.axhline(y=bkg_c['value'], color='gray', linestyle=':', alpha=0.5, label='Background')\nax1.set_ylabel('Y')\nax1.set_title('Data and Fit')\nax1.legend(loc='best')\n\n# Annotate parameters\nann_text1 = f\"C1: center={g1_center['value']:.2f}, FWHM={float(g1_fwhm.value):.2f}\"\nann_text2 = f\"C2: center={g2_center['value']:.2f}, FWHM={float(g2_fwhm.value):.2f}\"\nax1.annotate(ann_text1, xy=(0.02, 0.95), xycoords='axes fraction', fontsize=9, verticalalignment='top')\nax1.annotate(ann_text2, xy=(0.02, 0.88), xycoords='axes fraction', fontsize=9, verticalalignment='top')\n\n# Residuals plot\nax2.plot(x, residuals, 'k.', markersize=1, alpha=0.5, label='Residuals')\nax2.axhline(y=0, color='r', linestyle='-', linewidth=0.5)\nax2.set_xlabel('X')\nax2.set_ylabel('Residuals')\nax2.legend(loc='best')\n\nplt.tight_layout()\nplt.savefig('spectrum_0003_fit.png', dpi=150, bbox_inches='tight')\nplt.close()\n\n# 6. Print results as JSON\nresults = {\n    \"model_type\": \"Two Gaussian peaks + constant background\",\n    \"parameters\": {\n        \"peak_1\": {\n            \"center\": g1_center['value'],\n            \"center_err\": g1_center['error'],\n            \"sigma\": g1_sigma['value'],\n            \"sigma_err\": g1_sigma['error'],\n            \"amplitude\": g1_amplitude['value'],\n            \"amplitude_err\": g1_amplitude['error'],\n            \"fwhm\": float(g1_fwhm.value),\n            \"height\": float(g1_height.value)\n        },\n        \"peak_2\": {\n            \"center\": g2_center['value'],\n            \"center_err\": g2_center['error'],\n            \"sigma\": g2_sigma['value'],\n            \"sigma_err\": g2_sigma['error'],\n            \"amplitude\": g2_amplitude['value'],\n            \"amplitude_err\": g2_amplitude['error'],\n            \"fwhm\": float(g2_fwhm.value),\n            \"height\": float(g2_height.value)\n        },\n        \"background\": {\n            \"constant\": bkg_c['value'],\n            \"constant_err\": bkg_c['error']\n        }\n    },\n    \"fit_quality\": {\n        \"r_squared\": round(r_squared, 6),\n        \"rmse\": round(rmse, 6)\n    },\n    \"deviation_note\": \"\"\n}\n\nprint(f\"FIT_RESULTS_JSON:{json.dumps(results)}\")\n",
+      "script_errors": []
+    },
+    {
+      "index": 4,
+      "name": "spectrum_0004",
+      "data_path": "stack_index_4",
+      "success": true,
+      "error": null,
+      "model_type": "Two Gaussian peaks + constant background",
+      "parameters": {
+        "peak_1": {
+          "center": 284.6085189575383,
+          "center_err": 0.0002414508983800717,
+          "sigma": 0.44968074684300374,
+          "sigma_err": 0.00026167992762105556,
+          "amplitude": 1.126442788551456,
+          "amplitude_err": 0.0006318637750060832,
+          "fwhm": 1.0589172162808422,
+          "height": 0.9993438234526524
+        },
+        "peak_2": {
+          "center": 286.5091874121547,
+          "center_err": 0.0004608093932030208,
+          "sigma": 0.4999807242842139,
+          "sigma_err": 0.0005085835199155248,
+          "amplitude": 0.688694551422794,
+          "amplitude_err": 0.0006813876088242195,
+          "fwhm": 1.1773646091589527,
+          "height": 0.5495199614653474
+        },
+        "background": {
+          "constant": 0.050333563560599,
+          "constant_err": 0.00016833972348160792
+        }
+      },
+      "fit_quality": {
+        "r_squared": 0.99969,
+        "rmse": 0.005094
+      },
+      "deviation_note": null,
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/spectrum_0004_fit.png",
+      "statistics": {
+        "n_points": 2000,
+        "x_range": [
+          282.0,
+          290.0
+        ],
+        "y_range": [
+          0.03519055031978248,
+          1.0580445639537968
+        ],
+        "y_mean": 0.2771122845215248,
+        "y_std": 0.2891343860980066,
+        "has_nans": false
+      },
+      "script": "import numpy as np\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom lmfit.models import GaussianModel, ConstantModel\nimport json\nimport os\n\n# 1. Load data\ndata_path = \"/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/temp_spectrum_4.npy\"\ndata = np.load(data_path)\n\n# Handle different shapes\nif data.ndim == 2:\n    if data.shape[0] == 2:\n        x = data[0]\n        y = data[1]\n    elif data.shape[1] == 2:\n        x = data[:, 0]\n        y = data[:, 1]\n    else:\n        raise ValueError(f\"Unexpected 2D shape: {data.shape}\")\nelif data.ndim == 1:\n    # Assume evenly spaced x from 282 to 290\n    y = data\n    x = np.linspace(282, 290, len(y))\nelse:\n    raise ValueError(f\"Unexpected data dimensions: {data.ndim}\")\n\n# Sort by x\nsort_idx = np.argsort(x)\nx = x[sort_idx]\ny = y[sort_idx]\n\n# 2. Build model: two Gaussians + constant baseline\ngauss1 = GaussianModel(prefix='g1_')\ngauss2 = GaussianModel(prefix='g2_')\nbackground = ConstantModel(prefix='bkg_')\n\nmodel = gauss1 + gauss2 + background\n\n# Initial guesses\n# Estimate baseline from edges\nbkg_guess = np.mean(np.concatenate([y[:50], y[-50:]]))\n\n# Estimate amplitudes from data\ny_nobkg = y - bkg_guess\nmax_y = np.max(y_nobkg)\n\n# For lmfit GaussianModel, 'amplitude' is the area under the curve, not the peak height\n# Peak height = amplitude / (sigma * sqrt(2*pi))\n# So amplitude = height * sigma * sqrt(2*pi)\nsigma_guess = 0.5\namplitude_guess1 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.7\namplitude_guess2 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.4\n\nparams = model.make_params()\n\n# Gaussian 1 (main peak ~284.6)\nparams['g1_center'].set(value=284.6, min=283.5, max=285.5)\nparams['g1_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g1_amplitude'].set(value=amplitude_guess1, min=0)\n\n# Gaussian 2 (secondary peak ~286.5)\nparams['g2_center'].set(value=286.5, min=285.5, max=288.0)\nparams['g2_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g2_amplitude'].set(value=amplitude_guess2, min=0)\n\n# Background\nparams['bkg_c'].set(value=bkg_guess)\n\n# 3. Fit\nresult = model.fit(y, params, x=x)\n\n# 4. Compute fit quality\ny_fit = result.best_fit\nresiduals = y - y_fit\nss_res = np.sum(residuals**2)\nss_tot = np.sum((y - np.mean(y))**2)\nr_squared = 1 - ss_res / ss_tot\nrmse = np.sqrt(np.mean(residuals**2))\n\n# Extract individual components\ncomponents = result.eval_components(x=x)\ng1_component = components['g1_']\ng2_component = components['g2_']\nbkg_component = components['bkg_']\n\n# Extract parameters with errors\ndef get_param(name):\n    p = result.params[name]\n    return {'value': float(p.value), 'error': float(p.stderr) if p.stderr is not None else None}\n\n# For Gaussian, FWHM = 2*sqrt(2*ln2)*sigma ~ 2.3548*sigma\n# lmfit GaussianModel provides fwhm and height as derived params\ng1_center = get_param('g1_center')\ng1_sigma = get_param('g1_sigma')\ng1_amplitude = get_param('g1_amplitude')\ng1_fwhm = result.params['g1_fwhm']\ng1_height = result.params['g1_height']\n\ng2_center = get_param('g2_center')\ng2_sigma = get_param('g2_sigma')\ng2_amplitude = get_param('g2_amplitude')\ng2_fwhm = result.params['g2_fwhm']\ng2_height = result.params['g2_height']\n\nbkg_c = get_param('bkg_c')\n\n# 5. Save visualization\nfig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)\n\n# Main plot\nax1.plot(x, y, 'k.', markersize=1, alpha=0.5, label='Data')\nax1.plot(x, y_fit, 'r-', linewidth=2, label='Fit')\nax1.plot(x, g1_component + bkg_component, 'b--', linewidth=1.5, alpha=0.7, label='Component 1')\nax1.plot(x, g2_component + bkg_component, 'g--', linewidth=1.5, alpha=0.7, label='Component 2')\nax1.axhline(y=bkg_c['value'], color='gray', linestyle=':', alpha=0.5, label='Background')\nax1.set_ylabel('Y')\nax1.set_title('Data and Fit')\nax1.legend(loc='best')\n\n# Annotate parameters\nann_text1 = f\"C1: center={g1_center['value']:.2f}, FWHM={float(g1_fwhm.value):.2f}\"\nann_text2 = f\"C2: center={g2_center['value']:.2f}, FWHM={float(g2_fwhm.value):.2f}\"\nax1.annotate(ann_text1, xy=(0.02, 0.95), xycoords='axes fraction', fontsize=9, verticalalignment='top')\nax1.annotate(ann_text2, xy=(0.02, 0.88), xycoords='axes fraction', fontsize=9, verticalalignment='top')\n\n# Residuals plot\nax2.plot(x, residuals, 'k.', markersize=1, alpha=0.5, label='Residuals')\nax2.axhline(y=0, color='r', linestyle='-', linewidth=0.5)\nax2.set_xlabel('X')\nax2.set_ylabel('Residuals')\nax2.legend(loc='best')\n\nplt.tight_layout()\nplt.savefig('spectrum_0004_fit.png', dpi=150, bbox_inches='tight')\nplt.close()\n\n# 6. Print results as JSON\nresults = {\n    \"model_type\": \"Two Gaussian peaks + constant background\",\n    \"parameters\": {\n        \"peak_1\": {\n            \"center\": g1_center['value'],\n            \"center_err\": g1_center['error'],\n            \"sigma\": g1_sigma['value'],\n            \"sigma_err\": g1_sigma['error'],\n            \"amplitude\": g1_amplitude['value'],\n            \"amplitude_err\": g1_amplitude['error'],\n            \"fwhm\": float(g1_fwhm.value),\n            \"height\": float(g1_height.value)\n        },\n        \"peak_2\": {\n            \"center\": g2_center['value'],\n            \"center_err\": g2_center['error'],\n            \"sigma\": g2_sigma['value'],\n            \"sigma_err\": g2_sigma['error'],\n            \"amplitude\": g2_amplitude['value'],\n            \"amplitude_err\": g2_amplitude['error'],\n            \"fwhm\": float(g2_fwhm.value),\n            \"height\": float(g2_height.value)\n        },\n        \"background\": {\n            \"constant\": bkg_c['value'],\n            \"constant_err\": bkg_c['error']\n        }\n    },\n    \"fit_quality\": {\n        \"r_squared\": round(r_squared, 6),\n        \"rmse\": round(rmse, 6)\n    },\n    \"deviation_note\": \"\"\n}\n\nprint(f\"FIT_RESULTS_JSON:{json.dumps(results)}\")\n",
+      "script_errors": []
+    },
+    {
+      "index": 5,
+      "name": "spectrum_0005",
+      "data_path": "stack_index_5",
+      "success": true,
+      "error": null,
+      "model_type": "Two Gaussian peaks + constant background",
+      "parameters": {
+        "peak_1": {
+          "center": 284.6103806779602,
+          "center_err": 0.00024039014896602787,
+          "sigma": 0.450253967591969,
+          "sigma_err": 0.0002605660067886355,
+          "amplitude": 1.1288808398139158,
+          "amplitude_err": 0.0006296429759365612,
+          "fwhm": 1.0602670479649206,
+          "height": 1.0002317604659527
+        },
+        "peak_2": {
+          "center": 286.51090242271215,
+          "center_err": 0.00045893278124083386,
+          "sigma": 0.5004657924241236,
+          "sigma_err": 0.0005066134607609458,
+          "amplitude": 0.6896251513889522,
+          "amplitude_err": 0.0006788529044352546,
+          "fwhm": 1.1785068573161748,
+          "height": 0.5497291687017116
+        },
+        "background": {
+          "constant": 0.04981294045146811,
+          "constant_err": 0.00016758684725187034
+        }
+      },
+      "fit_quality": {
+        "r_squared": 0.999693,
+        "rmse": 0.00507
+      },
+      "deviation_note": null,
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/spectrum_0005_fit.png",
+      "statistics": {
+        "n_points": 2000,
+        "x_range": [
+          282.0,
+          290.0
+        ],
+        "y_range": [
+          0.03599774835192107,
+          1.0605648944848352
+        ],
+        "y_mean": 0.2770125322655129,
+        "y_std": 0.28947252639657034,
+        "has_nans": false
+      },
+      "script": "import numpy as np\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom lmfit.models import GaussianModel, ConstantModel\nimport json\nimport os\n\n# 1. Load data\ndata_path = \"/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/temp_spectrum_5.npy\"\ndata = np.load(data_path)\n\n# Handle different shapes\nif data.ndim == 2:\n    if data.shape[0] == 2:\n        x = data[0]\n        y = data[1]\n    elif data.shape[1] == 2:\n        x = data[:, 0]\n        y = data[:, 1]\n    else:\n        raise ValueError(f\"Unexpected 2D shape: {data.shape}\")\nelif data.ndim == 1:\n    # Assume evenly spaced x from 282 to 290\n    y = data\n    x = np.linspace(282, 290, len(y))\nelse:\n    raise ValueError(f\"Unexpected data dimensions: {data.ndim}\")\n\n# Sort by x\nsort_idx = np.argsort(x)\nx = x[sort_idx]\ny = y[sort_idx]\n\n# 2. Build model: two Gaussians + constant baseline\ngauss1 = GaussianModel(prefix='g1_')\ngauss2 = GaussianModel(prefix='g2_')\nbackground = ConstantModel(prefix='bkg_')\n\nmodel = gauss1 + gauss2 + background\n\n# Initial guesses\n# Estimate baseline from edges\nbkg_guess = np.mean(np.concatenate([y[:50], y[-50:]]))\n\n# Estimate amplitudes from data\ny_nobkg = y - bkg_guess\nmax_y = np.max(y_nobkg)\n\n# For lmfit GaussianModel, 'amplitude' is the area under the curve, not the peak height\n# Peak height = amplitude / (sigma * sqrt(2*pi))\n# So amplitude = height * sigma * sqrt(2*pi)\nsigma_guess = 0.5\namplitude_guess1 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.7\namplitude_guess2 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.4\n\nparams = model.make_params()\n\n# Gaussian 1 (main peak ~284.6)\nparams['g1_center'].set(value=284.6, min=283.5, max=285.5)\nparams['g1_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g1_amplitude'].set(value=amplitude_guess1, min=0)\n\n# Gaussian 2 (secondary peak ~286.5)\nparams['g2_center'].set(value=286.5, min=285.5, max=288.0)\nparams['g2_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g2_amplitude'].set(value=amplitude_guess2, min=0)\n\n# Background\nparams['bkg_c'].set(value=bkg_guess)\n\n# 3. Fit\nresult = model.fit(y, params, x=x)\n\n# 4. Compute fit quality\ny_fit = result.best_fit\nresiduals = y - y_fit\nss_res = np.sum(residuals**2)\nss_tot = np.sum((y - np.mean(y))**2)\nr_squared = 1 - ss_res / ss_tot\nrmse = np.sqrt(np.mean(residuals**2))\n\n# Extract individual components\ncomponents = result.eval_components(x=x)\ng1_component = components['g1_']\ng2_component = components['g2_']\nbkg_component = components['bkg_']\n\n# Extract parameters with errors\ndef get_param(name):\n    p = result.params[name]\n    return {'value': float(p.value), 'error': float(p.stderr) if p.stderr is not None else None}\n\n# For Gaussian, FWHM = 2*sqrt(2*ln2)*sigma ~ 2.3548*sigma\n# lmfit GaussianModel provides fwhm and height as derived params\ng1_center = get_param('g1_center')\ng1_sigma = get_param('g1_sigma')\ng1_amplitude = get_param('g1_amplitude')\ng1_fwhm = result.params['g1_fwhm']\ng1_height = result.params['g1_height']\n\ng2_center = get_param('g2_center')\ng2_sigma = get_param('g2_sigma')\ng2_amplitude = get_param('g2_amplitude')\ng2_fwhm = result.params['g2_fwhm']\ng2_height = result.params['g2_height']\n\nbkg_c = get_param('bkg_c')\n\n# 5. Save visualization\nfig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)\n\n# Main plot\nax1.plot(x, y, 'k.', markersize=1, alpha=0.5, label='Data')\nax1.plot(x, y_fit, 'r-', linewidth=2, label='Fit')\nax1.plot(x, g1_component + bkg_component, 'b--', linewidth=1.5, alpha=0.7, label='Component 1')\nax1.plot(x, g2_component + bkg_component, 'g--', linewidth=1.5, alpha=0.7, label='Component 2')\nax1.axhline(y=bkg_c['value'], color='gray', linestyle=':', alpha=0.5, label='Background')\nax1.set_ylabel('Y')\nax1.set_title('Data and Fit')\nax1.legend(loc='best')\n\n# Annotate parameters\nann_text1 = f\"C1: center={g1_center['value']:.2f}, FWHM={float(g1_fwhm.value):.2f}\"\nann_text2 = f\"C2: center={g2_center['value']:.2f}, FWHM={float(g2_fwhm.value):.2f}\"\nax1.annotate(ann_text1, xy=(0.02, 0.95), xycoords='axes fraction', fontsize=9, verticalalignment='top')\nax1.annotate(ann_text2, xy=(0.02, 0.88), xycoords='axes fraction', fontsize=9, verticalalignment='top')\n\n# Residuals plot\nax2.plot(x, residuals, 'k.', markersize=1, alpha=0.5, label='Residuals')\nax2.axhline(y=0, color='r', linestyle='-', linewidth=0.5)\nax2.set_xlabel('X')\nax2.set_ylabel('Residuals')\nax2.legend(loc='best')\n\nplt.tight_layout()\nplt.savefig('spectrum_0005_fit.png', dpi=150, bbox_inches='tight')\nplt.close()\n\n# 6. Print results as JSON\nresults = {\n    \"model_type\": \"Two Gaussian peaks + constant background\",\n    \"parameters\": {\n        \"peak_1\": {\n            \"center\": g1_center['value'],\n            \"center_err\": g1_center['error'],\n            \"sigma\": g1_sigma['value'],\n            \"sigma_err\": g1_sigma['error'],\n            \"amplitude\": g1_amplitude['value'],\n            \"amplitude_err\": g1_amplitude['error'],\n            \"fwhm\": float(g1_fwhm.value),\n            \"height\": float(g1_height.value)\n        },\n        \"peak_2\": {\n            \"center\": g2_center['value'],\n            \"center_err\": g2_center['error'],\n            \"sigma\": g2_sigma['value'],\n            \"sigma_err\": g2_sigma['error'],\n            \"amplitude\": g2_amplitude['value'],\n            \"amplitude_err\": g2_amplitude['error'],\n            \"fwhm\": float(g2_fwhm.value),\n            \"height\": float(g2_height.value)\n        },\n        \"background\": {\n            \"constant\": bkg_c['value'],\n            \"constant_err\": bkg_c['error']\n        }\n    },\n    \"fit_quality\": {\n        \"r_squared\": round(r_squared, 6),\n        \"rmse\": round(rmse, 6)\n    },\n    \"deviation_note\": \"\"\n}\n\nprint(f\"FIT_RESULTS_JSON:{json.dumps(results)}\")\n",
+      "script_errors": []
+    },
+    {
+      "index": 6,
+      "name": "spectrum_0006",
+      "data_path": "stack_index_6",
+      "success": true,
+      "error": null,
+      "model_type": "Two Gaussian peaks + constant background",
+      "parameters": {
+        "peak_1": {
+          "center": 284.6129031555912,
+          "center_err": 0.0002315898311068188,
+          "sigma": 0.450070200707141,
+          "sigma_err": 0.00025103426603675656,
+          "amplitude": 1.1290544119329637,
+          "amplitude_err": 0.0006070282871050865,
+          "fwhm": 1.0598343100291898,
+          "height": 1.0007940166089235
+        },
+        "peak_2": {
+          "center": 286.5130511918728,
+          "center_err": 0.0004421115631690495,
+          "sigma": 0.49948579312044106,
+          "sigma_err": 0.000487880265829983,
+          "amplitude": 0.6882314589581278,
+          "amplitude_err": 0.0006537351859548669,
+          "fwhm": 1.1761991353558772,
+          "height": 0.5496945958238802
+        },
+        "background": {
+          "constant": 0.05006684427234556,
+          "constant_err": 0.0001616020224595867
+        }
+      },
+      "fit_quality": {
+        "r_squared": 0.999715,
+        "rmse": 0.004891
+      },
+      "deviation_note": null,
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/spectrum_0006_fit.png",
+      "statistics": {
+        "n_points": 2000,
+        "x_range": [
+          282.0,
+          290.0
+        ],
+        "y_range": [
+          0.03253150870378664,
+          1.0572988328192428
+        ],
+        "y_mean": 0.2771139973263104,
+        "y_std": 0.28955821247187974,
+        "has_nans": false
+      },
+      "script": "import numpy as np\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom lmfit.models import GaussianModel, ConstantModel\nimport json\nimport os\n\n# 1. Load data\ndata_path = \"/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/temp_spectrum_6.npy\"\ndata = np.load(data_path)\n\n# Handle different shapes\nif data.ndim == 2:\n    if data.shape[0] == 2:\n        x = data[0]\n        y = data[1]\n    elif data.shape[1] == 2:\n        x = data[:, 0]\n        y = data[:, 1]\n    else:\n        raise ValueError(f\"Unexpected 2D shape: {data.shape}\")\nelif data.ndim == 1:\n    # Assume evenly spaced x from 282 to 290\n    y = data\n    x = np.linspace(282, 290, len(y))\nelse:\n    raise ValueError(f\"Unexpected data dimensions: {data.ndim}\")\n\n# Sort by x\nsort_idx = np.argsort(x)\nx = x[sort_idx]\ny = y[sort_idx]\n\n# 2. Build model: two Gaussians + constant baseline\ngauss1 = GaussianModel(prefix='g1_')\ngauss2 = GaussianModel(prefix='g2_')\nbackground = ConstantModel(prefix='bkg_')\n\nmodel = gauss1 + gauss2 + background\n\n# Initial guesses\n# Estimate baseline from edges\nbkg_guess = np.mean(np.concatenate([y[:50], y[-50:]]))\n\n# Estimate amplitudes from data\ny_nobkg = y - bkg_guess\nmax_y = np.max(y_nobkg)\n\n# For lmfit GaussianModel, 'amplitude' is the area under the curve, not the peak height\n# Peak height = amplitude / (sigma * sqrt(2*pi))\n# So amplitude = height * sigma * sqrt(2*pi)\nsigma_guess = 0.5\namplitude_guess1 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.7\namplitude_guess2 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.4\n\nparams = model.make_params()\n\n# Gaussian 1 (main peak ~284.6)\nparams['g1_center'].set(value=284.6, min=283.5, max=285.5)\nparams['g1_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g1_amplitude'].set(value=amplitude_guess1, min=0)\n\n# Gaussian 2 (secondary peak ~286.5)\nparams['g2_center'].set(value=286.5, min=285.5, max=288.0)\nparams['g2_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g2_amplitude'].set(value=amplitude_guess2, min=0)\n\n# Background\nparams['bkg_c'].set(value=bkg_guess)\n\n# 3. Fit\nresult = model.fit(y, params, x=x)\n\n# 4. Compute fit quality\ny_fit = result.best_fit\nresiduals = y - y_fit\nss_res = np.sum(residuals**2)\nss_tot = np.sum((y - np.mean(y))**2)\nr_squared = 1 - ss_res / ss_tot\nrmse = np.sqrt(np.mean(residuals**2))\n\n# Extract individual components\ncomponents = result.eval_components(x=x)\ng1_component = components['g1_']\ng2_component = components['g2_']\nbkg_component = components['bkg_']\n\n# Extract parameters with errors\ndef get_param(name):\n    p = result.params[name]\n    return {'value': float(p.value), 'error': float(p.stderr) if p.stderr is not None else None}\n\n# For Gaussian, FWHM = 2*sqrt(2*ln2)*sigma ~ 2.3548*sigma\n# lmfit GaussianModel provides fwhm and height as derived params\ng1_center = get_param('g1_center')\ng1_sigma = get_param('g1_sigma')\ng1_amplitude = get_param('g1_amplitude')\ng1_fwhm = result.params['g1_fwhm']\ng1_height = result.params['g1_height']\n\ng2_center = get_param('g2_center')\ng2_sigma = get_param('g2_sigma')\ng2_amplitude = get_param('g2_amplitude')\ng2_fwhm = result.params['g2_fwhm']\ng2_height = result.params['g2_height']\n\nbkg_c = get_param('bkg_c')\n\n# 5. Save visualization\nfig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)\n\n# Main plot\nax1.plot(x, y, 'k.', markersize=1, alpha=0.5, label='Data')\nax1.plot(x, y_fit, 'r-', linewidth=2, label='Fit')\nax1.plot(x, g1_component + bkg_component, 'b--', linewidth=1.5, alpha=0.7, label='Component 1')\nax1.plot(x, g2_component + bkg_component, 'g--', linewidth=1.5, alpha=0.7, label='Component 2')\nax1.axhline(y=bkg_c['value'], color='gray', linestyle=':', alpha=0.5, label='Background')\nax1.set_ylabel('Y')\nax1.set_title('Data and Fit')\nax1.legend(loc='best')\n\n# Annotate parameters\nann_text1 = f\"C1: center={g1_center['value']:.2f}, FWHM={float(g1_fwhm.value):.2f}\"\nann_text2 = f\"C2: center={g2_center['value']:.2f}, FWHM={float(g2_fwhm.value):.2f}\"\nax1.annotate(ann_text1, xy=(0.02, 0.95), xycoords='axes fraction', fontsize=9, verticalalignment='top')\nax1.annotate(ann_text2, xy=(0.02, 0.88), xycoords='axes fraction', fontsize=9, verticalalignment='top')\n\n# Residuals plot\nax2.plot(x, residuals, 'k.', markersize=1, alpha=0.5, label='Residuals')\nax2.axhline(y=0, color='r', linestyle='-', linewidth=0.5)\nax2.set_xlabel('X')\nax2.set_ylabel('Residuals')\nax2.legend(loc='best')\n\nplt.tight_layout()\nplt.savefig('spectrum_0006_fit.png', dpi=150, bbox_inches='tight')\nplt.close()\n\n# 6. Print results as JSON\nresults = {\n    \"model_type\": \"Two Gaussian peaks + constant background\",\n    \"parameters\": {\n        \"peak_1\": {\n            \"center\": g1_center['value'],\n            \"center_err\": g1_center['error'],\n            \"sigma\": g1_sigma['value'],\n            \"sigma_err\": g1_sigma['error'],\n            \"amplitude\": g1_amplitude['value'],\n            \"amplitude_err\": g1_amplitude['error'],\n            \"fwhm\": float(g1_fwhm.value),\n            \"height\": float(g1_height.value)\n        },\n        \"peak_2\": {\n            \"center\": g2_center['value'],\n            \"center_err\": g2_center['error'],\n            \"sigma\": g2_sigma['value'],\n            \"sigma_err\": g2_sigma['error'],\n            \"amplitude\": g2_amplitude['value'],\n            \"amplitude_err\": g2_amplitude['error'],\n            \"fwhm\": float(g2_fwhm.value),\n            \"height\": float(g2_height.value)\n        },\n        \"background\": {\n            \"constant\": bkg_c['value'],\n            \"constant_err\": bkg_c['error']\n        }\n    },\n    \"fit_quality\": {\n        \"r_squared\": round(r_squared, 6),\n        \"rmse\": round(rmse, 6)\n    },\n    \"deviation_note\": \"\"\n}\n\nprint(f\"FIT_RESULTS_JSON:{json.dumps(results)}\")\n",
+      "script_errors": []
+    },
+    {
+      "index": 7,
+      "name": "spectrum_0007",
+      "data_path": "stack_index_7",
+      "success": true,
+      "error": null,
+      "model_type": "Two Gaussian peaks + constant background",
+      "parameters": {
+        "peak_1": {
+          "center": 284.6150126299881,
+          "center_err": 0.00023661474708702216,
+          "sigma": 0.44983348682709834,
+          "sigma_err": 0.00025645741463716534,
+          "amplitude": 1.127167297612178,
+          "amplitude_err": 0.000619367516082136,
+          "fwhm": 1.0592768914501878,
+          "height": 0.9996470413218203
+        },
+        "peak_2": {
+          "center": 286.5148592219272,
+          "center_err": 0.0004508366064335696,
+          "sigma": 0.4997855791623341,
+          "sigma_err": 0.0004975662652320678,
+          "amplitude": 0.6895311386094449,
+          "amplitude_err": 0.0006675580430710878,
+          "fwhm": 1.1769050775230476,
+          "height": 0.5504023121665975
+        },
+        "background": {
+          "constant": 0.05010786938992984,
+          "constant_err": 0.0001649354764398103
+        }
+      },
+      "fit_quality": {
+        "r_squared": 0.999702,
+        "rmse": 0.004992
+      },
+      "deviation_note": null,
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/spectrum_0007_fit.png",
+      "statistics": {
+        "n_points": 2000,
+        "x_range": [
+          282.0,
+          290.0
+        ],
+        "y_range": [
+          0.034494478485943274,
+          1.0571606860469467
+        ],
+        "y_mean": 0.27708162984559487,
+        "y_std": 0.2893233705297391,
+        "has_nans": false
+      },
+      "script": "import numpy as np\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom lmfit.models import GaussianModel, ConstantModel\nimport json\nimport os\n\n# 1. Load data\ndata_path = \"/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/temp_spectrum_7.npy\"\ndata = np.load(data_path)\n\n# Handle different shapes\nif data.ndim == 2:\n    if data.shape[0] == 2:\n        x = data[0]\n        y = data[1]\n    elif data.shape[1] == 2:\n        x = data[:, 0]\n        y = data[:, 1]\n    else:\n        raise ValueError(f\"Unexpected 2D shape: {data.shape}\")\nelif data.ndim == 1:\n    # Assume evenly spaced x from 282 to 290\n    y = data\n    x = np.linspace(282, 290, len(y))\nelse:\n    raise ValueError(f\"Unexpected data dimensions: {data.ndim}\")\n\n# Sort by x\nsort_idx = np.argsort(x)\nx = x[sort_idx]\ny = y[sort_idx]\n\n# 2. Build model: two Gaussians + constant baseline\ngauss1 = GaussianModel(prefix='g1_')\ngauss2 = GaussianModel(prefix='g2_')\nbackground = ConstantModel(prefix='bkg_')\n\nmodel = gauss1 + gauss2 + background\n\n# Initial guesses\n# Estimate baseline from edges\nbkg_guess = np.mean(np.concatenate([y[:50], y[-50:]]))\n\n# Estimate amplitudes from data\ny_nobkg = y - bkg_guess\nmax_y = np.max(y_nobkg)\n\n# For lmfit GaussianModel, 'amplitude' is the area under the curve, not the peak height\n# Peak height = amplitude / (sigma * sqrt(2*pi))\n# So amplitude = height * sigma * sqrt(2*pi)\nsigma_guess = 0.5\namplitude_guess1 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.7\namplitude_guess2 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.4\n\nparams = model.make_params()\n\n# Gaussian 1 (main peak ~284.6)\nparams['g1_center'].set(value=284.6, min=283.5, max=285.5)\nparams['g1_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g1_amplitude'].set(value=amplitude_guess1, min=0)\n\n# Gaussian 2 (secondary peak ~286.5)\nparams['g2_center'].set(value=286.5, min=285.5, max=288.0)\nparams['g2_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g2_amplitude'].set(value=amplitude_guess2, min=0)\n\n# Background\nparams['bkg_c'].set(value=bkg_guess)\n\n# 3. Fit\nresult = model.fit(y, params, x=x)\n\n# 4. Compute fit quality\ny_fit = result.best_fit\nresiduals = y - y_fit\nss_res = np.sum(residuals**2)\nss_tot = np.sum((y - np.mean(y))**2)\nr_squared = 1 - ss_res / ss_tot\nrmse = np.sqrt(np.mean(residuals**2))\n\n# Extract individual components\ncomponents = result.eval_components(x=x)\ng1_component = components['g1_']\ng2_component = components['g2_']\nbkg_component = components['bkg_']\n\n# Extract parameters with errors\ndef get_param(name):\n    p = result.params[name]\n    return {'value': float(p.value), 'error': float(p.stderr) if p.stderr is not None else None}\n\n# For Gaussian, FWHM = 2*sqrt(2*ln2)*sigma ~ 2.3548*sigma\n# lmfit GaussianModel provides fwhm and height as derived params\ng1_center = get_param('g1_center')\ng1_sigma = get_param('g1_sigma')\ng1_amplitude = get_param('g1_amplitude')\ng1_fwhm = result.params['g1_fwhm']\ng1_height = result.params['g1_height']\n\ng2_center = get_param('g2_center')\ng2_sigma = get_param('g2_sigma')\ng2_amplitude = get_param('g2_amplitude')\ng2_fwhm = result.params['g2_fwhm']\ng2_height = result.params['g2_height']\n\nbkg_c = get_param('bkg_c')\n\n# 5. Save visualization\nfig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)\n\n# Main plot\nax1.plot(x, y, 'k.', markersize=1, alpha=0.5, label='Data')\nax1.plot(x, y_fit, 'r-', linewidth=2, label='Fit')\nax1.plot(x, g1_component + bkg_component, 'b--', linewidth=1.5, alpha=0.7, label='Component 1')\nax1.plot(x, g2_component + bkg_component, 'g--', linewidth=1.5, alpha=0.7, label='Component 2')\nax1.axhline(y=bkg_c['value'], color='gray', linestyle=':', alpha=0.5, label='Background')\nax1.set_ylabel('Y')\nax1.set_title('Data and Fit')\nax1.legend(loc='best')\n\n# Annotate parameters\nann_text1 = f\"C1: center={g1_center['value']:.2f}, FWHM={float(g1_fwhm.value):.2f}\"\nann_text2 = f\"C2: center={g2_center['value']:.2f}, FWHM={float(g2_fwhm.value):.2f}\"\nax1.annotate(ann_text1, xy=(0.02, 0.95), xycoords='axes fraction', fontsize=9, verticalalignment='top')\nax1.annotate(ann_text2, xy=(0.02, 0.88), xycoords='axes fraction', fontsize=9, verticalalignment='top')\n\n# Residuals plot\nax2.plot(x, residuals, 'k.', markersize=1, alpha=0.5, label='Residuals')\nax2.axhline(y=0, color='r', linestyle='-', linewidth=0.5)\nax2.set_xlabel('X')\nax2.set_ylabel('Residuals')\nax2.legend(loc='best')\n\nplt.tight_layout()\nplt.savefig('spectrum_0007_fit.png', dpi=150, bbox_inches='tight')\nplt.close()\n\n# 6. Print results as JSON\nresults = {\n    \"model_type\": \"Two Gaussian peaks + constant background\",\n    \"parameters\": {\n        \"peak_1\": {\n            \"center\": g1_center['value'],\n            \"center_err\": g1_center['error'],\n            \"sigma\": g1_sigma['value'],\n            \"sigma_err\": g1_sigma['error'],\n            \"amplitude\": g1_amplitude['value'],\n            \"amplitude_err\": g1_amplitude['error'],\n            \"fwhm\": float(g1_fwhm.value),\n            \"height\": float(g1_height.value)\n        },\n        \"peak_2\": {\n            \"center\": g2_center['value'],\n            \"center_err\": g2_center['error'],\n            \"sigma\": g2_sigma['value'],\n            \"sigma_err\": g2_sigma['error'],\n            \"amplitude\": g2_amplitude['value'],\n            \"amplitude_err\": g2_amplitude['error'],\n            \"fwhm\": float(g2_fwhm.value),\n            \"height\": float(g2_height.value)\n        },\n        \"background\": {\n            \"constant\": bkg_c['value'],\n            \"constant_err\": bkg_c['error']\n        }\n    },\n    \"fit_quality\": {\n        \"r_squared\": round(r_squared, 6),\n        \"rmse\": round(rmse, 6)\n    },\n    \"deviation_note\": \"\"\n}\n\nprint(f\"FIT_RESULTS_JSON:{json.dumps(results)}\")\n",
+      "script_errors": []
+    },
+    {
+      "index": 8,
+      "name": "spectrum_0008",
+      "data_path": "stack_index_8",
+      "success": true,
+      "error": null,
+      "model_type": "Two Gaussian peaks + constant background",
+      "parameters": {
+        "peak_1": {
+          "center": 284.61694919538485,
+          "center_err": 0.00023172669012245056,
+          "sigma": 0.45029558187351104,
+          "sigma_err": 0.0002511706514616634,
+          "amplitude": 1.1286109040543044,
+          "amplitude_err": 0.0006066116767446692,
+          "fwhm": 1.0603650421073814,
+          "height": 0.9999001722272725
+        },
+        "peak_2": {
+          "center": 286.51680156087434,
+          "center_err": 0.0004426131466663467,
+          "sigma": 0.5009228639427531,
+          "sigma_err": 0.0004886968748856697,
+          "amplitude": 0.6899171405145816,
+          "amplitude_err": 0.0006543998801796744,
+          "fwhm": 1.179583178469674,
+          "height": 0.5494601078495895
+        },
+        "background": {
+          "constant": 0.04983307677160344,
+          "constant_err": 0.00016141564942379535
+        }
+      },
+      "fit_quality": {
+        "r_squared": 0.999715,
+        "rmse": 0.004883
+      },
+      "deviation_note": null,
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/spectrum_0008_fit.png",
+      "statistics": {
+        "n_points": 2000,
+        "x_range": [
+          282.0,
+          290.0
+        ],
+        "y_range": [
+          0.03695120088828065,
+          1.0576511643822568
+        ],
+        "y_mean": 0.2770354239155695,
+        "y_std": 0.2893902268160973,
+        "has_nans": false
+      },
+      "script": "import numpy as np\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom lmfit.models import GaussianModel, ConstantModel\nimport json\nimport os\n\n# 1. Load data\ndata_path = \"/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/temp_spectrum_8.npy\"\ndata = np.load(data_path)\n\n# Handle different shapes\nif data.ndim == 2:\n    if data.shape[0] == 2:\n        x = data[0]\n        y = data[1]\n    elif data.shape[1] == 2:\n        x = data[:, 0]\n        y = data[:, 1]\n    else:\n        raise ValueError(f\"Unexpected 2D shape: {data.shape}\")\nelif data.ndim == 1:\n    # Assume evenly spaced x from 282 to 290\n    y = data\n    x = np.linspace(282, 290, len(y))\nelse:\n    raise ValueError(f\"Unexpected data dimensions: {data.ndim}\")\n\n# Sort by x\nsort_idx = np.argsort(x)\nx = x[sort_idx]\ny = y[sort_idx]\n\n# 2. Build model: two Gaussians + constant baseline\ngauss1 = GaussianModel(prefix='g1_')\ngauss2 = GaussianModel(prefix='g2_')\nbackground = ConstantModel(prefix='bkg_')\n\nmodel = gauss1 + gauss2 + background\n\n# Initial guesses\n# Estimate baseline from edges\nbkg_guess = np.mean(np.concatenate([y[:50], y[-50:]]))\n\n# Estimate amplitudes from data\ny_nobkg = y - bkg_guess\nmax_y = np.max(y_nobkg)\n\n# For lmfit GaussianModel, 'amplitude' is the area under the curve, not the peak height\n# Peak height = amplitude / (sigma * sqrt(2*pi))\n# So amplitude = height * sigma * sqrt(2*pi)\nsigma_guess = 0.5\namplitude_guess1 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.7\namplitude_guess2 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.4\n\nparams = model.make_params()\n\n# Gaussian 1 (main peak ~284.6)\nparams['g1_center'].set(value=284.6, min=283.5, max=285.5)\nparams['g1_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g1_amplitude'].set(value=amplitude_guess1, min=0)\n\n# Gaussian 2 (secondary peak ~286.5)\nparams['g2_center'].set(value=286.5, min=285.5, max=288.0)\nparams['g2_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g2_amplitude'].set(value=amplitude_guess2, min=0)\n\n# Background\nparams['bkg_c'].set(value=bkg_guess)\n\n# 3. Fit\nresult = model.fit(y, params, x=x)\n\n# 4. Compute fit quality\ny_fit = result.best_fit\nresiduals = y - y_fit\nss_res = np.sum(residuals**2)\nss_tot = np.sum((y - np.mean(y))**2)\nr_squared = 1 - ss_res / ss_tot\nrmse = np.sqrt(np.mean(residuals**2))\n\n# Extract individual components\ncomponents = result.eval_components(x=x)\ng1_component = components['g1_']\ng2_component = components['g2_']\nbkg_component = components['bkg_']\n\n# Extract parameters with errors\ndef get_param(name):\n    p = result.params[name]\n    return {'value': float(p.value), 'error': float(p.stderr) if p.stderr is not None else None}\n\n# For Gaussian, FWHM = 2*sqrt(2*ln2)*sigma ~ 2.3548*sigma\n# lmfit GaussianModel provides fwhm and height as derived params\ng1_center = get_param('g1_center')\ng1_sigma = get_param('g1_sigma')\ng1_amplitude = get_param('g1_amplitude')\ng1_fwhm = result.params['g1_fwhm']\ng1_height = result.params['g1_height']\n\ng2_center = get_param('g2_center')\ng2_sigma = get_param('g2_sigma')\ng2_amplitude = get_param('g2_amplitude')\ng2_fwhm = result.params['g2_fwhm']\ng2_height = result.params['g2_height']\n\nbkg_c = get_param('bkg_c')\n\n# 5. Save visualization\nfig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)\n\n# Main plot\nax1.plot(x, y, 'k.', markersize=1, alpha=0.5, label='Data')\nax1.plot(x, y_fit, 'r-', linewidth=2, label='Fit')\nax1.plot(x, g1_component + bkg_component, 'b--', linewidth=1.5, alpha=0.7, label='Component 1')\nax1.plot(x, g2_component + bkg_component, 'g--', linewidth=1.5, alpha=0.7, label='Component 2')\nax1.axhline(y=bkg_c['value'], color='gray', linestyle=':', alpha=0.5, label='Background')\nax1.set_ylabel('Y')\nax1.set_title('Data and Fit')\nax1.legend(loc='best')\n\n# Annotate parameters\nann_text1 = f\"C1: center={g1_center['value']:.2f}, FWHM={float(g1_fwhm.value):.2f}\"\nann_text2 = f\"C2: center={g2_center['value']:.2f}, FWHM={float(g2_fwhm.value):.2f}\"\nax1.annotate(ann_text1, xy=(0.02, 0.95), xycoords='axes fraction', fontsize=9, verticalalignment='top')\nax1.annotate(ann_text2, xy=(0.02, 0.88), xycoords='axes fraction', fontsize=9, verticalalignment='top')\n\n# Residuals plot\nax2.plot(x, residuals, 'k.', markersize=1, alpha=0.5, label='Residuals')\nax2.axhline(y=0, color='r', linestyle='-', linewidth=0.5)\nax2.set_xlabel('X')\nax2.set_ylabel('Residuals')\nax2.legend(loc='best')\n\nplt.tight_layout()\nplt.savefig('spectrum_0008_fit.png', dpi=150, bbox_inches='tight')\nplt.close()\n\n# 6. Print results as JSON\nresults = {\n    \"model_type\": \"Two Gaussian peaks + constant background\",\n    \"parameters\": {\n        \"peak_1\": {\n            \"center\": g1_center['value'],\n            \"center_err\": g1_center['error'],\n            \"sigma\": g1_sigma['value'],\n            \"sigma_err\": g1_sigma['error'],\n            \"amplitude\": g1_amplitude['value'],\n            \"amplitude_err\": g1_amplitude['error'],\n            \"fwhm\": float(g1_fwhm.value),\n            \"height\": float(g1_height.value)\n        },\n        \"peak_2\": {\n            \"center\": g2_center['value'],\n            \"center_err\": g2_center['error'],\n            \"sigma\": g2_sigma['value'],\n            \"sigma_err\": g2_sigma['error'],\n            \"amplitude\": g2_amplitude['value'],\n            \"amplitude_err\": g2_amplitude['error'],\n            \"fwhm\": float(g2_fwhm.value),\n            \"height\": float(g2_height.value)\n        },\n        \"background\": {\n            \"constant\": bkg_c['value'],\n            \"constant_err\": bkg_c['error']\n        }\n    },\n    \"fit_quality\": {\n        \"r_squared\": round(r_squared, 6),\n        \"rmse\": round(rmse, 6)\n    },\n    \"deviation_note\": \"\"\n}\n\nprint(f\"FIT_RESULTS_JSON:{json.dumps(results)}\")\n",
+      "script_errors": []
+    },
+    {
+      "index": 9,
+      "name": "spectrum_0009",
+      "data_path": "stack_index_9",
+      "success": true,
+      "error": null,
+      "model_type": "Two Gaussian peaks + constant background",
+      "parameters": {
+        "peak_1": {
+          "center": 284.61921086564473,
+          "center_err": 0.00023149269988578003,
+          "sigma": 0.45002755651563275,
+          "sigma_err": 0.00025092331087541597,
+          "amplitude": 1.1283028371774066,
+          "amplitude_err": 0.0006063980521532312,
+          "fwhm": 1.0597338906341425,
+          "height": 1.0002225918013177
+        },
+        "peak_2": {
+          "center": 286.5193420260768,
+          "center_err": 0.00044167965843748986,
+          "sigma": 0.49961086790047726,
+          "sigma_err": 0.000487425232542822,
+          "amplitude": 0.6885018775732474,
+          "amplitude_err": 0.0006532179911165847,
+          "fwhm": 1.176493663949402,
+          "height": 0.5497729137631663
+        },
+        "background": {
+          "constant": 0.0500032182890426,
+          "constant_err": 0.00016144424132850992
+        }
+      },
+      "fit_quality": {
+        "r_squared": 0.999715,
+        "rmse": 0.004886
+      },
+      "deviation_note": null,
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/spectrum_0009_fit.png",
+      "statistics": {
+        "n_points": 2000,
+        "x_range": [
+          282.0,
+          290.0
+        ],
+        "y_range": [
+          0.03576716512533955,
+          1.0585339078315983
+        ],
+        "y_mean": 0.2769902569348356,
+        "y_std": 0.28942474533324264,
+        "has_nans": false
+      },
+      "script": "import numpy as np\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom lmfit.models import GaussianModel, ConstantModel\nimport json\nimport os\n\n# 1. Load data\ndata_path = \"/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/temp_spectrum_9.npy\"\ndata = np.load(data_path)\n\n# Handle different shapes\nif data.ndim == 2:\n    if data.shape[0] == 2:\n        x = data[0]\n        y = data[1]\n    elif data.shape[1] == 2:\n        x = data[:, 0]\n        y = data[:, 1]\n    else:\n        raise ValueError(f\"Unexpected 2D shape: {data.shape}\")\nelif data.ndim == 1:\n    # Assume evenly spaced x from 282 to 290\n    y = data\n    x = np.linspace(282, 290, len(y))\nelse:\n    raise ValueError(f\"Unexpected data dimensions: {data.ndim}\")\n\n# Sort by x\nsort_idx = np.argsort(x)\nx = x[sort_idx]\ny = y[sort_idx]\n\n# 2. Build model: two Gaussians + constant baseline\ngauss1 = GaussianModel(prefix='g1_')\ngauss2 = GaussianModel(prefix='g2_')\nbackground = ConstantModel(prefix='bkg_')\n\nmodel = gauss1 + gauss2 + background\n\n# Initial guesses\n# Estimate baseline from edges\nbkg_guess = np.mean(np.concatenate([y[:50], y[-50:]]))\n\n# Estimate amplitudes from data\ny_nobkg = y - bkg_guess\nmax_y = np.max(y_nobkg)\n\n# For lmfit GaussianModel, 'amplitude' is the area under the curve, not the peak height\n# Peak height = amplitude / (sigma * sqrt(2*pi))\n# So amplitude = height * sigma * sqrt(2*pi)\nsigma_guess = 0.5\namplitude_guess1 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.7\namplitude_guess2 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.4\n\nparams = model.make_params()\n\n# Gaussian 1 (main peak ~284.6)\nparams['g1_center'].set(value=284.6, min=283.5, max=285.5)\nparams['g1_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g1_amplitude'].set(value=amplitude_guess1, min=0)\n\n# Gaussian 2 (secondary peak ~286.5)\nparams['g2_center'].set(value=286.5, min=285.5, max=288.0)\nparams['g2_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g2_amplitude'].set(value=amplitude_guess2, min=0)\n\n# Background\nparams['bkg_c'].set(value=bkg_guess)\n\n# 3. Fit\nresult = model.fit(y, params, x=x)\n\n# 4. Compute fit quality\ny_fit = result.best_fit\nresiduals = y - y_fit\nss_res = np.sum(residuals**2)\nss_tot = np.sum((y - np.mean(y))**2)\nr_squared = 1 - ss_res / ss_tot\nrmse = np.sqrt(np.mean(residuals**2))\n\n# Extract individual components\ncomponents = result.eval_components(x=x)\ng1_component = components['g1_']\ng2_component = components['g2_']\nbkg_component = components['bkg_']\n\n# Extract parameters with errors\ndef get_param(name):\n    p = result.params[name]\n    return {'value': float(p.value), 'error': float(p.stderr) if p.stderr is not None else None}\n\n# For Gaussian, FWHM = 2*sqrt(2*ln2)*sigma ~ 2.3548*sigma\n# lmfit GaussianModel provides fwhm and height as derived params\ng1_center = get_param('g1_center')\ng1_sigma = get_param('g1_sigma')\ng1_amplitude = get_param('g1_amplitude')\ng1_fwhm = result.params['g1_fwhm']\ng1_height = result.params['g1_height']\n\ng2_center = get_param('g2_center')\ng2_sigma = get_param('g2_sigma')\ng2_amplitude = get_param('g2_amplitude')\ng2_fwhm = result.params['g2_fwhm']\ng2_height = result.params['g2_height']\n\nbkg_c = get_param('bkg_c')\n\n# 5. Save visualization\nfig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)\n\n# Main plot\nax1.plot(x, y, 'k.', markersize=1, alpha=0.5, label='Data')\nax1.plot(x, y_fit, 'r-', linewidth=2, label='Fit')\nax1.plot(x, g1_component + bkg_component, 'b--', linewidth=1.5, alpha=0.7, label='Component 1')\nax1.plot(x, g2_component + bkg_component, 'g--', linewidth=1.5, alpha=0.7, label='Component 2')\nax1.axhline(y=bkg_c['value'], color='gray', linestyle=':', alpha=0.5, label='Background')\nax1.set_ylabel('Y')\nax1.set_title('Data and Fit')\nax1.legend(loc='best')\n\n# Annotate parameters\nann_text1 = f\"C1: center={g1_center['value']:.2f}, FWHM={float(g1_fwhm.value):.2f}\"\nann_text2 = f\"C2: center={g2_center['value']:.2f}, FWHM={float(g2_fwhm.value):.2f}\"\nax1.annotate(ann_text1, xy=(0.02, 0.95), xycoords='axes fraction', fontsize=9, verticalalignment='top')\nax1.annotate(ann_text2, xy=(0.02, 0.88), xycoords='axes fraction', fontsize=9, verticalalignment='top')\n\n# Residuals plot\nax2.plot(x, residuals, 'k.', markersize=1, alpha=0.5, label='Residuals')\nax2.axhline(y=0, color='r', linestyle='-', linewidth=0.5)\nax2.set_xlabel('X')\nax2.set_ylabel('Residuals')\nax2.legend(loc='best')\n\nplt.tight_layout()\nplt.savefig('spectrum_0009_fit.png', dpi=150, bbox_inches='tight')\nplt.close()\n\n# 6. Print results as JSON\nresults = {\n    \"model_type\": \"Two Gaussian peaks + constant background\",\n    \"parameters\": {\n        \"peak_1\": {\n            \"center\": g1_center['value'],\n            \"center_err\": g1_center['error'],\n            \"sigma\": g1_sigma['value'],\n            \"sigma_err\": g1_sigma['error'],\n            \"amplitude\": g1_amplitude['value'],\n            \"amplitude_err\": g1_amplitude['error'],\n            \"fwhm\": float(g1_fwhm.value),\n            \"height\": float(g1_height.value)\n        },\n        \"peak_2\": {\n            \"center\": g2_center['value'],\n            \"center_err\": g2_center['error'],\n            \"sigma\": g2_sigma['value'],\n            \"sigma_err\": g2_sigma['error'],\n            \"amplitude\": g2_amplitude['value'],\n            \"amplitude_err\": g2_amplitude['error'],\n            \"fwhm\": float(g2_fwhm.value),\n            \"height\": float(g2_height.value)\n        },\n        \"background\": {\n            \"constant\": bkg_c['value'],\n            \"constant_err\": bkg_c['error']\n        }\n    },\n    \"fit_quality\": {\n        \"r_squared\": round(r_squared, 6),\n        \"rmse\": round(rmse, 6)\n    },\n    \"deviation_note\": \"\"\n}\n\nprint(f\"FIT_RESULTS_JSON:{json.dumps(results)}\")\n",
+      "script_errors": []
+    },
+    {
+      "index": 10,
+      "name": "spectrum_0010",
+      "data_path": "stack_index_10",
+      "success": true,
+      "error": null,
+      "model_type": "Two Gaussian peaks + constant background",
+      "parameters": {
+        "peak_1": {
+          "center": 284.62116976841565,
+          "center_err": 0.00023199293455405354,
+          "sigma": 0.45003387669143435,
+          "sigma_err": 0.0002514667470841046,
+          "amplitude": 1.128718676489855,
+          "amplitude_err": 0.0006078936821120308,
+          "fwhm": 1.0597487735105235,
+          "height": 1.0005771746835903
+        },
+        "peak_2": {
+          "center": 286.52101381736765,
+          "center_err": 0.0004418269973201437,
+          "sigma": 0.49962003766865304,
+          "sigma_err": 0.00048759699314001003,
+          "amplitude": 0.6900143868146802,
+          "amplitude_err": 0.0006548289224535499,
+          "fwhm": 1.1765152571028976,
+          "height": 0.5509705491265757
+        },
+        "background": {
+          "constant": 0.04979370541446504,
+          "constant_err": 0.00016182857998568246
+        }
+      },
+      "fit_quality": {
+        "r_squared": 0.999714,
+        "rmse": 0.004898
+      },
+      "deviation_note": null,
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/spectrum_0010_fit.png",
+      "statistics": {
+        "n_points": 2000,
+        "x_range": [
+          282.0,
+          290.0
+        ],
+        "y_range": [
+          0.03608290250495039,
+          1.0582961140203604
+        ],
+        "y_mean": 0.2770216671177297,
+        "y_std": 0.2896277047601775,
+        "has_nans": false
+      },
+      "script": "import numpy as np\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom lmfit.models import GaussianModel, ConstantModel\nimport json\nimport os\n\n# 1. Load data\ndata_path = \"/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/temp_spectrum_10.npy\"\ndata = np.load(data_path)\n\n# Handle different shapes\nif data.ndim == 2:\n    if data.shape[0] == 2:\n        x = data[0]\n        y = data[1]\n    elif data.shape[1] == 2:\n        x = data[:, 0]\n        y = data[:, 1]\n    else:\n        raise ValueError(f\"Unexpected 2D shape: {data.shape}\")\nelif data.ndim == 1:\n    # Assume evenly spaced x from 282 to 290\n    y = data\n    x = np.linspace(282, 290, len(y))\nelse:\n    raise ValueError(f\"Unexpected data dimensions: {data.ndim}\")\n\n# Sort by x\nsort_idx = np.argsort(x)\nx = x[sort_idx]\ny = y[sort_idx]\n\n# 2. Build model: two Gaussians + constant baseline\ngauss1 = GaussianModel(prefix='g1_')\ngauss2 = GaussianModel(prefix='g2_')\nbackground = ConstantModel(prefix='bkg_')\n\nmodel = gauss1 + gauss2 + background\n\n# Initial guesses\n# Estimate baseline from edges\nbkg_guess = np.mean(np.concatenate([y[:50], y[-50:]]))\n\n# Estimate amplitudes from data\ny_nobkg = y - bkg_guess\nmax_y = np.max(y_nobkg)\n\n# For lmfit GaussianModel, 'amplitude' is the area under the curve, not the peak height\n# Peak height = amplitude / (sigma * sqrt(2*pi))\n# So amplitude = height * sigma * sqrt(2*pi)\nsigma_guess = 0.5\namplitude_guess1 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.7\namplitude_guess2 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.4\n\nparams = model.make_params()\n\n# Gaussian 1 (main peak ~284.6)\nparams['g1_center'].set(value=284.6, min=283.5, max=285.5)\nparams['g1_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g1_amplitude'].set(value=amplitude_guess1, min=0)\n\n# Gaussian 2 (secondary peak ~286.5)\nparams['g2_center'].set(value=286.5, min=285.5, max=288.0)\nparams['g2_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g2_amplitude'].set(value=amplitude_guess2, min=0)\n\n# Background\nparams['bkg_c'].set(value=bkg_guess)\n\n# 3. Fit\nresult = model.fit(y, params, x=x)\n\n# 4. Compute fit quality\ny_fit = result.best_fit\nresiduals = y - y_fit\nss_res = np.sum(residuals**2)\nss_tot = np.sum((y - np.mean(y))**2)\nr_squared = 1 - ss_res / ss_tot\nrmse = np.sqrt(np.mean(residuals**2))\n\n# Extract individual components\ncomponents = result.eval_components(x=x)\ng1_component = components['g1_']\ng2_component = components['g2_']\nbkg_component = components['bkg_']\n\n# Extract parameters with errors\ndef get_param(name):\n    p = result.params[name]\n    return {'value': float(p.value), 'error': float(p.stderr) if p.stderr is not None else None}\n\n# For Gaussian, FWHM = 2*sqrt(2*ln2)*sigma ~ 2.3548*sigma\n# lmfit GaussianModel provides fwhm and height as derived params\ng1_center = get_param('g1_center')\ng1_sigma = get_param('g1_sigma')\ng1_amplitude = get_param('g1_amplitude')\ng1_fwhm = result.params['g1_fwhm']\ng1_height = result.params['g1_height']\n\ng2_center = get_param('g2_center')\ng2_sigma = get_param('g2_sigma')\ng2_amplitude = get_param('g2_amplitude')\ng2_fwhm = result.params['g2_fwhm']\ng2_height = result.params['g2_height']\n\nbkg_c = get_param('bkg_c')\n\n# 5. Save visualization\nfig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)\n\n# Main plot\nax1.plot(x, y, 'k.', markersize=1, alpha=0.5, label='Data')\nax1.plot(x, y_fit, 'r-', linewidth=2, label='Fit')\nax1.plot(x, g1_component + bkg_component, 'b--', linewidth=1.5, alpha=0.7, label='Component 1')\nax1.plot(x, g2_component + bkg_component, 'g--', linewidth=1.5, alpha=0.7, label='Component 2')\nax1.axhline(y=bkg_c['value'], color='gray', linestyle=':', alpha=0.5, label='Background')\nax1.set_ylabel('Y')\nax1.set_title('Data and Fit')\nax1.legend(loc='best')\n\n# Annotate parameters\nann_text1 = f\"C1: center={g1_center['value']:.2f}, FWHM={float(g1_fwhm.value):.2f}\"\nann_text2 = f\"C2: center={g2_center['value']:.2f}, FWHM={float(g2_fwhm.value):.2f}\"\nax1.annotate(ann_text1, xy=(0.02, 0.95), xycoords='axes fraction', fontsize=9, verticalalignment='top')\nax1.annotate(ann_text2, xy=(0.02, 0.88), xycoords='axes fraction', fontsize=9, verticalalignment='top')\n\n# Residuals plot\nax2.plot(x, residuals, 'k.', markersize=1, alpha=0.5, label='Residuals')\nax2.axhline(y=0, color='r', linestyle='-', linewidth=0.5)\nax2.set_xlabel('X')\nax2.set_ylabel('Residuals')\nax2.legend(loc='best')\n\nplt.tight_layout()\nplt.savefig('spectrum_0010_fit.png', dpi=150, bbox_inches='tight')\nplt.close()\n\n# 6. Print results as JSON\nresults = {\n    \"model_type\": \"Two Gaussian peaks + constant background\",\n    \"parameters\": {\n        \"peak_1\": {\n            \"center\": g1_center['value'],\n            \"center_err\": g1_center['error'],\n            \"sigma\": g1_sigma['value'],\n            \"sigma_err\": g1_sigma['error'],\n            \"amplitude\": g1_amplitude['value'],\n            \"amplitude_err\": g1_amplitude['error'],\n            \"fwhm\": float(g1_fwhm.value),\n            \"height\": float(g1_height.value)\n        },\n        \"peak_2\": {\n            \"center\": g2_center['value'],\n            \"center_err\": g2_center['error'],\n            \"sigma\": g2_sigma['value'],\n            \"sigma_err\": g2_sigma['error'],\n            \"amplitude\": g2_amplitude['value'],\n            \"amplitude_err\": g2_amplitude['error'],\n            \"fwhm\": float(g2_fwhm.value),\n            \"height\": float(g2_height.value)\n        },\n        \"background\": {\n            \"constant\": bkg_c['value'],\n            \"constant_err\": bkg_c['error']\n        }\n    },\n    \"fit_quality\": {\n        \"r_squared\": round(r_squared, 6),\n        \"rmse\": round(rmse, 6)\n    },\n    \"deviation_note\": \"\"\n}\n\nprint(f\"FIT_RESULTS_JSON:{json.dumps(results)}\")\n",
+      "script_errors": []
+    },
+    {
+      "index": 11,
+      "name": "spectrum_0011",
+      "data_path": "stack_index_11",
+      "success": true,
+      "error": null,
+      "model_type": "Two Gaussian peaks + constant background",
+      "parameters": {
+        "peak_1": {
+          "center": 284.62322483234993,
+          "center_err": 0.00024094630709727049,
+          "sigma": 0.45033594842489855,
+          "sigma_err": 0.00026120344054891603,
+          "amplitude": 1.1276820115302204,
+          "amplitude_err": 0.0006305866826386413,
+          "fwhm": 1.0604600980699197,
+          "height": 0.9989876600391321
+        },
+        "peak_2": {
+          "center": 286.52398235893014,
+          "center_err": 0.0004585466067219305,
+          "sigma": 0.4991194288724835,
+          "sigma_err": 0.0005059373252635832,
+          "amplitude": 0.6882186661795486,
+          "amplitude_err": 0.0006784735181481573,
+          "fwhm": 1.1753364134975017,
+          "height": 0.5500878581481681
+        },
+        "background": {
+          "constant": 0.05014383711119457,
+          "constant_err": 0.0001678307445997669
+        }
+      },
+      "fit_quality": {
+        "r_squared": 0.999692,
+        "rmse": 0.005079
+      },
+      "deviation_note": null,
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/spectrum_0011_fit.png",
+      "statistics": {
+        "n_points": 2000,
+        "x_range": [
+          282.0,
+          290.0
+        ],
+        "y_range": [
+          0.035620878595118685,
+          1.055208945460113
+        ],
+        "y_mean": 0.2770179276408073,
+        "y_std": 0.2891993497258155,
+        "has_nans": false
+      },
+      "script": "import numpy as np\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom lmfit.models import GaussianModel, ConstantModel\nimport json\nimport os\n\n# 1. Load data\ndata_path = \"/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/temp_spectrum_11.npy\"\ndata = np.load(data_path)\n\n# Handle different shapes\nif data.ndim == 2:\n    if data.shape[0] == 2:\n        x = data[0]\n        y = data[1]\n    elif data.shape[1] == 2:\n        x = data[:, 0]\n        y = data[:, 1]\n    else:\n        raise ValueError(f\"Unexpected 2D shape: {data.shape}\")\nelif data.ndim == 1:\n    # Assume evenly spaced x from 282 to 290\n    y = data\n    x = np.linspace(282, 290, len(y))\nelse:\n    raise ValueError(f\"Unexpected data dimensions: {data.ndim}\")\n\n# Sort by x\nsort_idx = np.argsort(x)\nx = x[sort_idx]\ny = y[sort_idx]\n\n# 2. Build model: two Gaussians + constant baseline\ngauss1 = GaussianModel(prefix='g1_')\ngauss2 = GaussianModel(prefix='g2_')\nbackground = ConstantModel(prefix='bkg_')\n\nmodel = gauss1 + gauss2 + background\n\n# Initial guesses\n# Estimate baseline from edges\nbkg_guess = np.mean(np.concatenate([y[:50], y[-50:]]))\n\n# Estimate amplitudes from data\ny_nobkg = y - bkg_guess\nmax_y = np.max(y_nobkg)\n\n# For lmfit GaussianModel, 'amplitude' is the area under the curve, not the peak height\n# Peak height = amplitude / (sigma * sqrt(2*pi))\n# So amplitude = height * sigma * sqrt(2*pi)\nsigma_guess = 0.5\namplitude_guess1 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.7\namplitude_guess2 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.4\n\nparams = model.make_params()\n\n# Gaussian 1 (main peak ~284.6)\nparams['g1_center'].set(value=284.6, min=283.5, max=285.5)\nparams['g1_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g1_amplitude'].set(value=amplitude_guess1, min=0)\n\n# Gaussian 2 (secondary peak ~286.5)\nparams['g2_center'].set(value=286.5, min=285.5, max=288.0)\nparams['g2_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g2_amplitude'].set(value=amplitude_guess2, min=0)\n\n# Background\nparams['bkg_c'].set(value=bkg_guess)\n\n# 3. Fit\nresult = model.fit(y, params, x=x)\n\n# 4. Compute fit quality\ny_fit = result.best_fit\nresiduals = y - y_fit\nss_res = np.sum(residuals**2)\nss_tot = np.sum((y - np.mean(y))**2)\nr_squared = 1 - ss_res / ss_tot\nrmse = np.sqrt(np.mean(residuals**2))\n\n# Extract individual components\ncomponents = result.eval_components(x=x)\ng1_component = components['g1_']\ng2_component = components['g2_']\nbkg_component = components['bkg_']\n\n# Extract parameters with errors\ndef get_param(name):\n    p = result.params[name]\n    return {'value': float(p.value), 'error': float(p.stderr) if p.stderr is not None else None}\n\n# For Gaussian, FWHM = 2*sqrt(2*ln2)*sigma ~ 2.3548*sigma\n# lmfit GaussianModel provides fwhm and height as derived params\ng1_center = get_param('g1_center')\ng1_sigma = get_param('g1_sigma')\ng1_amplitude = get_param('g1_amplitude')\ng1_fwhm = result.params['g1_fwhm']\ng1_height = result.params['g1_height']\n\ng2_center = get_param('g2_center')\ng2_sigma = get_param('g2_sigma')\ng2_amplitude = get_param('g2_amplitude')\ng2_fwhm = result.params['g2_fwhm']\ng2_height = result.params['g2_height']\n\nbkg_c = get_param('bkg_c')\n\n# 5. Save visualization\nfig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)\n\n# Main plot\nax1.plot(x, y, 'k.', markersize=1, alpha=0.5, label='Data')\nax1.plot(x, y_fit, 'r-', linewidth=2, label='Fit')\nax1.plot(x, g1_component + bkg_component, 'b--', linewidth=1.5, alpha=0.7, label='Component 1')\nax1.plot(x, g2_component + bkg_component, 'g--', linewidth=1.5, alpha=0.7, label='Component 2')\nax1.axhline(y=bkg_c['value'], color='gray', linestyle=':', alpha=0.5, label='Background')\nax1.set_ylabel('Y')\nax1.set_title('Data and Fit')\nax1.legend(loc='best')\n\n# Annotate parameters\nann_text1 = f\"C1: center={g1_center['value']:.2f}, FWHM={float(g1_fwhm.value):.2f}\"\nann_text2 = f\"C2: center={g2_center['value']:.2f}, FWHM={float(g2_fwhm.value):.2f}\"\nax1.annotate(ann_text1, xy=(0.02, 0.95), xycoords='axes fraction', fontsize=9, verticalalignment='top')\nax1.annotate(ann_text2, xy=(0.02, 0.88), xycoords='axes fraction', fontsize=9, verticalalignment='top')\n\n# Residuals plot\nax2.plot(x, residuals, 'k.', markersize=1, alpha=0.5, label='Residuals')\nax2.axhline(y=0, color='r', linestyle='-', linewidth=0.5)\nax2.set_xlabel('X')\nax2.set_ylabel('Residuals')\nax2.legend(loc='best')\n\nplt.tight_layout()\nplt.savefig('spectrum_0011_fit.png', dpi=150, bbox_inches='tight')\nplt.close()\n\n# 6. Print results as JSON\nresults = {\n    \"model_type\": \"Two Gaussian peaks + constant background\",\n    \"parameters\": {\n        \"peak_1\": {\n            \"center\": g1_center['value'],\n            \"center_err\": g1_center['error'],\n            \"sigma\": g1_sigma['value'],\n            \"sigma_err\": g1_sigma['error'],\n            \"amplitude\": g1_amplitude['value'],\n            \"amplitude_err\": g1_amplitude['error'],\n            \"fwhm\": float(g1_fwhm.value),\n            \"height\": float(g1_height.value)\n        },\n        \"peak_2\": {\n            \"center\": g2_center['value'],\n            \"center_err\": g2_center['error'],\n            \"sigma\": g2_sigma['value'],\n            \"sigma_err\": g2_sigma['error'],\n            \"amplitude\": g2_amplitude['value'],\n            \"amplitude_err\": g2_amplitude['error'],\n            \"fwhm\": float(g2_fwhm.value),\n            \"height\": float(g2_height.value)\n        },\n        \"background\": {\n            \"constant\": bkg_c['value'],\n            \"constant_err\": bkg_c['error']\n        }\n    },\n    \"fit_quality\": {\n        \"r_squared\": round(r_squared, 6),\n        \"rmse\": round(rmse, 6)\n    },\n    \"deviation_note\": \"\"\n}\n\nprint(f\"FIT_RESULTS_JSON:{json.dumps(results)}\")\n",
+      "script_errors": []
+    },
+    {
+      "index": 12,
+      "name": "spectrum_0012",
+      "data_path": "stack_index_12",
+      "success": true,
+      "error": null,
+      "model_type": "Two Gaussian peaks + constant background",
+      "parameters": {
+        "peak_1": {
+          "center": 284.6249884457292,
+          "center_err": 0.0002310565053711177,
+          "sigma": 0.44996220075830706,
+          "sigma_err": 0.00025043572140903643,
+          "amplitude": 1.1281481131863558,
+          "amplitude_err": 0.0006052649101629297,
+          "fwhm": 1.0595799895896767,
+          "height": 1.0002306910597005
+        },
+        "peak_2": {
+          "center": 286.52584648589317,
+          "center_err": 0.00044086687529177595,
+          "sigma": 0.4999694881801735,
+          "sigma_err": 0.0004865710612847285,
+          "amplitude": 0.6892424418790617,
+          "amplitude_err": 0.0006524054353079836,
+          "fwhm": 1.1773381501564362,
+          "height": 0.5499694911817484
+        },
+        "background": {
+          "constant": 0.04994315228708501,
+          "constant_err": 0.00016118888164731263
+        }
+      },
+      "fit_quality": {
+        "r_squared": 0.999716,
+        "rmse": 0.004877
+      },
+      "deviation_note": null,
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/spectrum_0012_fit.png",
+      "statistics": {
+        "n_points": 2000,
+        "x_range": [
+          282.0,
+          290.0
+        ],
+        "y_range": [
+          0.02899556489465788,
+          1.0592767295222703
+        ],
+        "y_mean": 0.2770033843889076,
+        "y_std": 0.2894285030357149,
+        "has_nans": false
+      },
+      "script": "import numpy as np\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom lmfit.models import GaussianModel, ConstantModel\nimport json\nimport os\n\n# 1. Load data\ndata_path = \"/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/temp_spectrum_12.npy\"\ndata = np.load(data_path)\n\n# Handle different shapes\nif data.ndim == 2:\n    if data.shape[0] == 2:\n        x = data[0]\n        y = data[1]\n    elif data.shape[1] == 2:\n        x = data[:, 0]\n        y = data[:, 1]\n    else:\n        raise ValueError(f\"Unexpected 2D shape: {data.shape}\")\nelif data.ndim == 1:\n    # Assume evenly spaced x from 282 to 290\n    y = data\n    x = np.linspace(282, 290, len(y))\nelse:\n    raise ValueError(f\"Unexpected data dimensions: {data.ndim}\")\n\n# Sort by x\nsort_idx = np.argsort(x)\nx = x[sort_idx]\ny = y[sort_idx]\n\n# 2. Build model: two Gaussians + constant baseline\ngauss1 = GaussianModel(prefix='g1_')\ngauss2 = GaussianModel(prefix='g2_')\nbackground = ConstantModel(prefix='bkg_')\n\nmodel = gauss1 + gauss2 + background\n\n# Initial guesses\n# Estimate baseline from edges\nbkg_guess = np.mean(np.concatenate([y[:50], y[-50:]]))\n\n# Estimate amplitudes from data\ny_nobkg = y - bkg_guess\nmax_y = np.max(y_nobkg)\n\n# For lmfit GaussianModel, 'amplitude' is the area under the curve, not the peak height\n# Peak height = amplitude / (sigma * sqrt(2*pi))\n# So amplitude = height * sigma * sqrt(2*pi)\nsigma_guess = 0.5\namplitude_guess1 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.7\namplitude_guess2 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.4\n\nparams = model.make_params()\n\n# Gaussian 1 (main peak ~284.6)\nparams['g1_center'].set(value=284.6, min=283.5, max=285.5)\nparams['g1_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g1_amplitude'].set(value=amplitude_guess1, min=0)\n\n# Gaussian 2 (secondary peak ~286.5)\nparams['g2_center'].set(value=286.5, min=285.5, max=288.0)\nparams['g2_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g2_amplitude'].set(value=amplitude_guess2, min=0)\n\n# Background\nparams['bkg_c'].set(value=bkg_guess)\n\n# 3. Fit\nresult = model.fit(y, params, x=x)\n\n# 4. Compute fit quality\ny_fit = result.best_fit\nresiduals = y - y_fit\nss_res = np.sum(residuals**2)\nss_tot = np.sum((y - np.mean(y))**2)\nr_squared = 1 - ss_res / ss_tot\nrmse = np.sqrt(np.mean(residuals**2))\n\n# Extract individual components\ncomponents = result.eval_components(x=x)\ng1_component = components['g1_']\ng2_component = components['g2_']\nbkg_component = components['bkg_']\n\n# Extract parameters with errors\ndef get_param(name):\n    p = result.params[name]\n    return {'value': float(p.value), 'error': float(p.stderr) if p.stderr is not None else None}\n\n# For Gaussian, FWHM = 2*sqrt(2*ln2)*sigma ~ 2.3548*sigma\n# lmfit GaussianModel provides fwhm and height as derived params\ng1_center = get_param('g1_center')\ng1_sigma = get_param('g1_sigma')\ng1_amplitude = get_param('g1_amplitude')\ng1_fwhm = result.params['g1_fwhm']\ng1_height = result.params['g1_height']\n\ng2_center = get_param('g2_center')\ng2_sigma = get_param('g2_sigma')\ng2_amplitude = get_param('g2_amplitude')\ng2_fwhm = result.params['g2_fwhm']\ng2_height = result.params['g2_height']\n\nbkg_c = get_param('bkg_c')\n\n# 5. Save visualization\nfig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)\n\n# Main plot\nax1.plot(x, y, 'k.', markersize=1, alpha=0.5, label='Data')\nax1.plot(x, y_fit, 'r-', linewidth=2, label='Fit')\nax1.plot(x, g1_component + bkg_component, 'b--', linewidth=1.5, alpha=0.7, label='Component 1')\nax1.plot(x, g2_component + bkg_component, 'g--', linewidth=1.5, alpha=0.7, label='Component 2')\nax1.axhline(y=bkg_c['value'], color='gray', linestyle=':', alpha=0.5, label='Background')\nax1.set_ylabel('Y')\nax1.set_title('Data and Fit')\nax1.legend(loc='best')\n\n# Annotate parameters\nann_text1 = f\"C1: center={g1_center['value']:.2f}, FWHM={float(g1_fwhm.value):.2f}\"\nann_text2 = f\"C2: center={g2_center['value']:.2f}, FWHM={float(g2_fwhm.value):.2f}\"\nax1.annotate(ann_text1, xy=(0.02, 0.95), xycoords='axes fraction', fontsize=9, verticalalignment='top')\nax1.annotate(ann_text2, xy=(0.02, 0.88), xycoords='axes fraction', fontsize=9, verticalalignment='top')\n\n# Residuals plot\nax2.plot(x, residuals, 'k.', markersize=1, alpha=0.5, label='Residuals')\nax2.axhline(y=0, color='r', linestyle='-', linewidth=0.5)\nax2.set_xlabel('X')\nax2.set_ylabel('Residuals')\nax2.legend(loc='best')\n\nplt.tight_layout()\nplt.savefig('spectrum_0012_fit.png', dpi=150, bbox_inches='tight')\nplt.close()\n\n# 6. Print results as JSON\nresults = {\n    \"model_type\": \"Two Gaussian peaks + constant background\",\n    \"parameters\": {\n        \"peak_1\": {\n            \"center\": g1_center['value'],\n            \"center_err\": g1_center['error'],\n            \"sigma\": g1_sigma['value'],\n            \"sigma_err\": g1_sigma['error'],\n            \"amplitude\": g1_amplitude['value'],\n            \"amplitude_err\": g1_amplitude['error'],\n            \"fwhm\": float(g1_fwhm.value),\n            \"height\": float(g1_height.value)\n        },\n        \"peak_2\": {\n            \"center\": g2_center['value'],\n            \"center_err\": g2_center['error'],\n            \"sigma\": g2_sigma['value'],\n            \"sigma_err\": g2_sigma['error'],\n            \"amplitude\": g2_amplitude['value'],\n            \"amplitude_err\": g2_amplitude['error'],\n            \"fwhm\": float(g2_fwhm.value),\n            \"height\": float(g2_height.value)\n        },\n        \"background\": {\n            \"constant\": bkg_c['value'],\n            \"constant_err\": bkg_c['error']\n        }\n    },\n    \"fit_quality\": {\n        \"r_squared\": round(r_squared, 6),\n        \"rmse\": round(rmse, 6)\n    },\n    \"deviation_note\": \"\"\n}\n\nprint(f\"FIT_RESULTS_JSON:{json.dumps(results)}\")\n",
+      "script_errors": []
+    },
+    {
+      "index": 13,
+      "name": "spectrum_0013",
+      "data_path": "stack_index_13",
+      "success": true,
+      "error": null,
+      "model_type": "Two Gaussian peaks + constant background",
+      "parameters": {
+        "peak_1": {
+          "center": 284.6276192447668,
+          "center_err": 0.00024312659707796916,
+          "sigma": 0.4502898078936287,
+          "sigma_err": 0.00026355796452177585,
+          "amplitude": 1.128269390410086,
+          "amplitude_err": 0.0006365282855983133,
+          "fwhm": 1.0603514454240748,
+          "height": 0.999610423641051
+        },
+        "peak_2": {
+          "center": 286.5275623794005,
+          "center_err": 0.0004624815575949591,
+          "sigma": 0.4994878633493889,
+          "sigma_err": 0.0005103682079059865,
+          "amplitude": 0.6897176564356078,
+          "amplitude_err": 0.0006852690280910914,
+          "fwhm": 1.176204010372408,
+          "height": 0.5508793474258254
+        },
+        "background": {
+          "constant": 0.050058405896277615,
+          "constant_err": 0.00016938698203053338
+        }
+      },
+      "fit_quality": {
+        "r_squared": 0.999686,
+        "rmse": 0.005126
+      },
+      "deviation_note": null,
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/spectrum_0013_fit.png",
+      "statistics": {
+        "n_points": 2000,
+        "x_range": [
+          282.0,
+          290.0
+        ],
+        "y_range": [
+          0.03538074707447283,
+          1.0626888141442445
+        ],
+        "y_mean": 0.2771931621933077,
+        "y_std": 0.28943347245621165,
+        "has_nans": false
+      },
+      "script": "import numpy as np\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom lmfit.models import GaussianModel, ConstantModel\nimport json\nimport os\n\n# 1. Load data\ndata_path = \"/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/temp_spectrum_13.npy\"\ndata = np.load(data_path)\n\n# Handle different shapes\nif data.ndim == 2:\n    if data.shape[0] == 2:\n        x = data[0]\n        y = data[1]\n    elif data.shape[1] == 2:\n        x = data[:, 0]\n        y = data[:, 1]\n    else:\n        raise ValueError(f\"Unexpected 2D shape: {data.shape}\")\nelif data.ndim == 1:\n    # Assume evenly spaced x from 282 to 290\n    y = data\n    x = np.linspace(282, 290, len(y))\nelse:\n    raise ValueError(f\"Unexpected data dimensions: {data.ndim}\")\n\n# Sort by x\nsort_idx = np.argsort(x)\nx = x[sort_idx]\ny = y[sort_idx]\n\n# 2. Build model: two Gaussians + constant baseline\ngauss1 = GaussianModel(prefix='g1_')\ngauss2 = GaussianModel(prefix='g2_')\nbackground = ConstantModel(prefix='bkg_')\n\nmodel = gauss1 + gauss2 + background\n\n# Initial guesses\n# Estimate baseline from edges\nbkg_guess = np.mean(np.concatenate([y[:50], y[-50:]]))\n\n# Estimate amplitudes from data\ny_nobkg = y - bkg_guess\nmax_y = np.max(y_nobkg)\n\n# For lmfit GaussianModel, 'amplitude' is the area under the curve, not the peak height\n# Peak height = amplitude / (sigma * sqrt(2*pi))\n# So amplitude = height * sigma * sqrt(2*pi)\nsigma_guess = 0.5\namplitude_guess1 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.7\namplitude_guess2 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.4\n\nparams = model.make_params()\n\n# Gaussian 1 (main peak ~284.6)\nparams['g1_center'].set(value=284.6, min=283.5, max=285.5)\nparams['g1_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g1_amplitude'].set(value=amplitude_guess1, min=0)\n\n# Gaussian 2 (secondary peak ~286.5)\nparams['g2_center'].set(value=286.5, min=285.5, max=288.0)\nparams['g2_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g2_amplitude'].set(value=amplitude_guess2, min=0)\n\n# Background\nparams['bkg_c'].set(value=bkg_guess)\n\n# 3. Fit\nresult = model.fit(y, params, x=x)\n\n# 4. Compute fit quality\ny_fit = result.best_fit\nresiduals = y - y_fit\nss_res = np.sum(residuals**2)\nss_tot = np.sum((y - np.mean(y))**2)\nr_squared = 1 - ss_res / ss_tot\nrmse = np.sqrt(np.mean(residuals**2))\n\n# Extract individual components\ncomponents = result.eval_components(x=x)\ng1_component = components['g1_']\ng2_component = components['g2_']\nbkg_component = components['bkg_']\n\n# Extract parameters with errors\ndef get_param(name):\n    p = result.params[name]\n    return {'value': float(p.value), 'error': float(p.stderr) if p.stderr is not None else None}\n\n# For Gaussian, FWHM = 2*sqrt(2*ln2)*sigma ~ 2.3548*sigma\n# lmfit GaussianModel provides fwhm and height as derived params\ng1_center = get_param('g1_center')\ng1_sigma = get_param('g1_sigma')\ng1_amplitude = get_param('g1_amplitude')\ng1_fwhm = result.params['g1_fwhm']\ng1_height = result.params['g1_height']\n\ng2_center = get_param('g2_center')\ng2_sigma = get_param('g2_sigma')\ng2_amplitude = get_param('g2_amplitude')\ng2_fwhm = result.params['g2_fwhm']\ng2_height = result.params['g2_height']\n\nbkg_c = get_param('bkg_c')\n\n# 5. Save visualization\nfig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)\n\n# Main plot\nax1.plot(x, y, 'k.', markersize=1, alpha=0.5, label='Data')\nax1.plot(x, y_fit, 'r-', linewidth=2, label='Fit')\nax1.plot(x, g1_component + bkg_component, 'b--', linewidth=1.5, alpha=0.7, label='Component 1')\nax1.plot(x, g2_component + bkg_component, 'g--', linewidth=1.5, alpha=0.7, label='Component 2')\nax1.axhline(y=bkg_c['value'], color='gray', linestyle=':', alpha=0.5, label='Background')\nax1.set_ylabel('Y')\nax1.set_title('Data and Fit')\nax1.legend(loc='best')\n\n# Annotate parameters\nann_text1 = f\"C1: center={g1_center['value']:.2f}, FWHM={float(g1_fwhm.value):.2f}\"\nann_text2 = f\"C2: center={g2_center['value']:.2f}, FWHM={float(g2_fwhm.value):.2f}\"\nax1.annotate(ann_text1, xy=(0.02, 0.95), xycoords='axes fraction', fontsize=9, verticalalignment='top')\nax1.annotate(ann_text2, xy=(0.02, 0.88), xycoords='axes fraction', fontsize=9, verticalalignment='top')\n\n# Residuals plot\nax2.plot(x, residuals, 'k.', markersize=1, alpha=0.5, label='Residuals')\nax2.axhline(y=0, color='r', linestyle='-', linewidth=0.5)\nax2.set_xlabel('X')\nax2.set_ylabel('Residuals')\nax2.legend(loc='best')\n\nplt.tight_layout()\nplt.savefig('spectrum_0013_fit.png', dpi=150, bbox_inches='tight')\nplt.close()\n\n# 6. Print results as JSON\nresults = {\n    \"model_type\": \"Two Gaussian peaks + constant background\",\n    \"parameters\": {\n        \"peak_1\": {\n            \"center\": g1_center['value'],\n            \"center_err\": g1_center['error'],\n            \"sigma\": g1_sigma['value'],\n            \"sigma_err\": g1_sigma['error'],\n            \"amplitude\": g1_amplitude['value'],\n            \"amplitude_err\": g1_amplitude['error'],\n            \"fwhm\": float(g1_fwhm.value),\n            \"height\": float(g1_height.value)\n        },\n        \"peak_2\": {\n            \"center\": g2_center['value'],\n            \"center_err\": g2_center['error'],\n            \"sigma\": g2_sigma['value'],\n            \"sigma_err\": g2_sigma['error'],\n            \"amplitude\": g2_amplitude['value'],\n            \"amplitude_err\": g2_amplitude['error'],\n            \"fwhm\": float(g2_fwhm.value),\n            \"height\": float(g2_height.value)\n        },\n        \"background\": {\n            \"constant\": bkg_c['value'],\n            \"constant_err\": bkg_c['error']\n        }\n    },\n    \"fit_quality\": {\n        \"r_squared\": round(r_squared, 6),\n        \"rmse\": round(rmse, 6)\n    },\n    \"deviation_note\": \"\"\n}\n\nprint(f\"FIT_RESULTS_JSON:{json.dumps(results)}\")\n",
+      "script_errors": []
+    },
+    {
+      "index": 14,
+      "name": "spectrum_0014",
+      "data_path": "stack_index_14",
+      "success": true,
+      "error": null,
+      "model_type": "Two Gaussian peaks + constant background",
+      "parameters": {
+        "peak_1": {
+          "center": 284.62971727197026,
+          "center_err": 0.00023423248456819738,
+          "sigma": 0.4498366613118312,
+          "sigma_err": 0.00025388219116675976,
+          "amplitude": 1.1274104133396823,
+          "amplitude_err": 0.0006133608111190977,
+          "fwhm": 1.0592843667903264,
+          "height": 0.9998555965404015
+        },
+        "peak_2": {
+          "center": 286.52991659598615,
+          "center_err": 0.0004461677096359735,
+          "sigma": 0.49940687354964497,
+          "sigma_err": 0.0004923372661083571,
+          "amplitude": 0.6891263427453227,
+          "amplitude_err": 0.0006607237742610757,
+          "fwhm": 1.176013293972175,
+          "height": 0.550496324192218
+        },
+        "background": {
+          "constant": 0.05015235183524401,
+          "constant_err": 0.00016335118833994317
+        }
+      },
+      "fit_quality": {
+        "r_squared": 0.999708,
+        "rmse": 0.004944
+      },
+      "deviation_note": null,
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/spectrum_0014_fit.png",
+      "statistics": {
+        "n_points": 2000,
+        "x_range": [
+          282.0,
+          290.0
+        ],
+        "y_range": [
+          0.030547547445154255,
+          1.059500517202062
+        ],
+        "y_mean": 0.2771059124530802,
+        "y_std": 0.2893698135419199,
+        "has_nans": false
+      },
+      "script": "import numpy as np\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom lmfit.models import GaussianModel, ConstantModel\nimport json\nimport os\n\n# 1. Load data\ndata_path = \"/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/temp_spectrum_14.npy\"\ndata = np.load(data_path)\n\n# Handle different shapes\nif data.ndim == 2:\n    if data.shape[0] == 2:\n        x = data[0]\n        y = data[1]\n    elif data.shape[1] == 2:\n        x = data[:, 0]\n        y = data[:, 1]\n    else:\n        raise ValueError(f\"Unexpected 2D shape: {data.shape}\")\nelif data.ndim == 1:\n    # Assume evenly spaced x from 282 to 290\n    y = data\n    x = np.linspace(282, 290, len(y))\nelse:\n    raise ValueError(f\"Unexpected data dimensions: {data.ndim}\")\n\n# Sort by x\nsort_idx = np.argsort(x)\nx = x[sort_idx]\ny = y[sort_idx]\n\n# 2. Build model: two Gaussians + constant baseline\ngauss1 = GaussianModel(prefix='g1_')\ngauss2 = GaussianModel(prefix='g2_')\nbackground = ConstantModel(prefix='bkg_')\n\nmodel = gauss1 + gauss2 + background\n\n# Initial guesses\n# Estimate baseline from edges\nbkg_guess = np.mean(np.concatenate([y[:50], y[-50:]]))\n\n# Estimate amplitudes from data\ny_nobkg = y - bkg_guess\nmax_y = np.max(y_nobkg)\n\n# For lmfit GaussianModel, 'amplitude' is the area under the curve, not the peak height\n# Peak height = amplitude / (sigma * sqrt(2*pi))\n# So amplitude = height * sigma * sqrt(2*pi)\nsigma_guess = 0.5\namplitude_guess1 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.7\namplitude_guess2 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.4\n\nparams = model.make_params()\n\n# Gaussian 1 (main peak ~284.6)\nparams['g1_center'].set(value=284.6, min=283.5, max=285.5)\nparams['g1_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g1_amplitude'].set(value=amplitude_guess1, min=0)\n\n# Gaussian 2 (secondary peak ~286.5)\nparams['g2_center'].set(value=286.5, min=285.5, max=288.0)\nparams['g2_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g2_amplitude'].set(value=amplitude_guess2, min=0)\n\n# Background\nparams['bkg_c'].set(value=bkg_guess)\n\n# 3. Fit\nresult = model.fit(y, params, x=x)\n\n# 4. Compute fit quality\ny_fit = result.best_fit\nresiduals = y - y_fit\nss_res = np.sum(residuals**2)\nss_tot = np.sum((y - np.mean(y))**2)\nr_squared = 1 - ss_res / ss_tot\nrmse = np.sqrt(np.mean(residuals**2))\n\n# Extract individual components\ncomponents = result.eval_components(x=x)\ng1_component = components['g1_']\ng2_component = components['g2_']\nbkg_component = components['bkg_']\n\n# Extract parameters with errors\ndef get_param(name):\n    p = result.params[name]\n    return {'value': float(p.value), 'error': float(p.stderr) if p.stderr is not None else None}\n\n# For Gaussian, FWHM = 2*sqrt(2*ln2)*sigma ~ 2.3548*sigma\n# lmfit GaussianModel provides fwhm and height as derived params\ng1_center = get_param('g1_center')\ng1_sigma = get_param('g1_sigma')\ng1_amplitude = get_param('g1_amplitude')\ng1_fwhm = result.params['g1_fwhm']\ng1_height = result.params['g1_height']\n\ng2_center = get_param('g2_center')\ng2_sigma = get_param('g2_sigma')\ng2_amplitude = get_param('g2_amplitude')\ng2_fwhm = result.params['g2_fwhm']\ng2_height = result.params['g2_height']\n\nbkg_c = get_param('bkg_c')\n\n# 5. Save visualization\nfig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)\n\n# Main plot\nax1.plot(x, y, 'k.', markersize=1, alpha=0.5, label='Data')\nax1.plot(x, y_fit, 'r-', linewidth=2, label='Fit')\nax1.plot(x, g1_component + bkg_component, 'b--', linewidth=1.5, alpha=0.7, label='Component 1')\nax1.plot(x, g2_component + bkg_component, 'g--', linewidth=1.5, alpha=0.7, label='Component 2')\nax1.axhline(y=bkg_c['value'], color='gray', linestyle=':', alpha=0.5, label='Background')\nax1.set_ylabel('Y')\nax1.set_title('Data and Fit')\nax1.legend(loc='best')\n\n# Annotate parameters\nann_text1 = f\"C1: center={g1_center['value']:.2f}, FWHM={float(g1_fwhm.value):.2f}\"\nann_text2 = f\"C2: center={g2_center['value']:.2f}, FWHM={float(g2_fwhm.value):.2f}\"\nax1.annotate(ann_text1, xy=(0.02, 0.95), xycoords='axes fraction', fontsize=9, verticalalignment='top')\nax1.annotate(ann_text2, xy=(0.02, 0.88), xycoords='axes fraction', fontsize=9, verticalalignment='top')\n\n# Residuals plot\nax2.plot(x, residuals, 'k.', markersize=1, alpha=0.5, label='Residuals')\nax2.axhline(y=0, color='r', linestyle='-', linewidth=0.5)\nax2.set_xlabel('X')\nax2.set_ylabel('Residuals')\nax2.legend(loc='best')\n\nplt.tight_layout()\nplt.savefig('spectrum_0014_fit.png', dpi=150, bbox_inches='tight')\nplt.close()\n\n# 6. Print results as JSON\nresults = {\n    \"model_type\": \"Two Gaussian peaks + constant background\",\n    \"parameters\": {\n        \"peak_1\": {\n            \"center\": g1_center['value'],\n            \"center_err\": g1_center['error'],\n            \"sigma\": g1_sigma['value'],\n            \"sigma_err\": g1_sigma['error'],\n            \"amplitude\": g1_amplitude['value'],\n            \"amplitude_err\": g1_amplitude['error'],\n            \"fwhm\": float(g1_fwhm.value),\n            \"height\": float(g1_height.value)\n        },\n        \"peak_2\": {\n            \"center\": g2_center['value'],\n            \"center_err\": g2_center['error'],\n            \"sigma\": g2_sigma['value'],\n            \"sigma_err\": g2_sigma['error'],\n            \"amplitude\": g2_amplitude['value'],\n            \"amplitude_err\": g2_amplitude['error'],\n            \"fwhm\": float(g2_fwhm.value),\n            \"height\": float(g2_height.value)\n        },\n        \"background\": {\n            \"constant\": bkg_c['value'],\n            \"constant_err\": bkg_c['error']\n        }\n    },\n    \"fit_quality\": {\n        \"r_squared\": round(r_squared, 6),\n        \"rmse\": round(rmse, 6)\n    },\n    \"deviation_note\": \"\"\n}\n\nprint(f\"FIT_RESULTS_JSON:{json.dumps(results)}\")\n",
+      "script_errors": []
+    },
+    {
+      "index": 15,
+      "name": "spectrum_0015",
+      "data_path": "stack_index_15",
+      "success": true,
+      "error": null,
+      "model_type": "Two Gaussian peaks + constant background",
+      "parameters": {
+        "peak_1": {
+          "center": 284.63131792765824,
+          "center_err": 0.00023974908094538647,
+          "sigma": 0.44997527330518683,
+          "sigma_err": 0.0002598586189629083,
+          "amplitude": 1.1280239710638762,
+          "amplitude_err": 0.0006278151740453391,
+          "fwhm": 1.0596107730845201,
+          "height": 1.000091569845309
+        },
+        "peak_2": {
+          "center": 286.5311385416731,
+          "center_err": 0.00045723153068533097,
+          "sigma": 0.5001111301133524,
+          "sigma_err": 0.0005046861929605678,
+          "amplitude": 0.6897375126576817,
+          "amplitude_err": 0.0006768259316992061,
+          "fwhm": 1.1776716914135246,
+          "height": 0.5502086498926092
+        },
+        "background": {
+          "constant": 0.0496675949941523,
+          "constant_err": 0.00016714470831131714
+        }
+      },
+      "fit_quality": {
+        "r_squared": 0.999695,
+        "rmse": 0.005058
+      },
+      "deviation_note": null,
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/spectrum_0015_fit.png",
+      "statistics": {
+        "n_points": 2000,
+        "x_range": [
+          282.0,
+          290.0
+        ],
+        "y_range": [
+          0.03420670754448635,
+          1.0587060433713367
+        ],
+        "y_mean": 0.2767741700247482,
+        "y_std": 0.28944171478136554,
+        "has_nans": false
+      },
+      "script": "import numpy as np\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom lmfit.models import GaussianModel, ConstantModel\nimport json\nimport os\n\n# 1. Load data\ndata_path = \"/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/temp_spectrum_15.npy\"\ndata = np.load(data_path)\n\n# Handle different shapes\nif data.ndim == 2:\n    if data.shape[0] == 2:\n        x = data[0]\n        y = data[1]\n    elif data.shape[1] == 2:\n        x = data[:, 0]\n        y = data[:, 1]\n    else:\n        raise ValueError(f\"Unexpected 2D shape: {data.shape}\")\nelif data.ndim == 1:\n    # Assume evenly spaced x from 282 to 290\n    y = data\n    x = np.linspace(282, 290, len(y))\nelse:\n    raise ValueError(f\"Unexpected data dimensions: {data.ndim}\")\n\n# Sort by x\nsort_idx = np.argsort(x)\nx = x[sort_idx]\ny = y[sort_idx]\n\n# 2. Build model: two Gaussians + constant baseline\ngauss1 = GaussianModel(prefix='g1_')\ngauss2 = GaussianModel(prefix='g2_')\nbackground = ConstantModel(prefix='bkg_')\n\nmodel = gauss1 + gauss2 + background\n\n# Initial guesses\n# Estimate baseline from edges\nbkg_guess = np.mean(np.concatenate([y[:50], y[-50:]]))\n\n# Estimate amplitudes from data\ny_nobkg = y - bkg_guess\nmax_y = np.max(y_nobkg)\n\n# For lmfit GaussianModel, 'amplitude' is the area under the curve, not the peak height\n# Peak height = amplitude / (sigma * sqrt(2*pi))\n# So amplitude = height * sigma * sqrt(2*pi)\nsigma_guess = 0.5\namplitude_guess1 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.7\namplitude_guess2 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.4\n\nparams = model.make_params()\n\n# Gaussian 1 (main peak ~284.6)\nparams['g1_center'].set(value=284.6, min=283.5, max=285.5)\nparams['g1_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g1_amplitude'].set(value=amplitude_guess1, min=0)\n\n# Gaussian 2 (secondary peak ~286.5)\nparams['g2_center'].set(value=286.5, min=285.5, max=288.0)\nparams['g2_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g2_amplitude'].set(value=amplitude_guess2, min=0)\n\n# Background\nparams['bkg_c'].set(value=bkg_guess)\n\n# 3. Fit\nresult = model.fit(y, params, x=x)\n\n# 4. Compute fit quality\ny_fit = result.best_fit\nresiduals = y - y_fit\nss_res = np.sum(residuals**2)\nss_tot = np.sum((y - np.mean(y))**2)\nr_squared = 1 - ss_res / ss_tot\nrmse = np.sqrt(np.mean(residuals**2))\n\n# Extract individual components\ncomponents = result.eval_components(x=x)\ng1_component = components['g1_']\ng2_component = components['g2_']\nbkg_component = components['bkg_']\n\n# Extract parameters with errors\ndef get_param(name):\n    p = result.params[name]\n    return {'value': float(p.value), 'error': float(p.stderr) if p.stderr is not None else None}\n\n# For Gaussian, FWHM = 2*sqrt(2*ln2)*sigma ~ 2.3548*sigma\n# lmfit GaussianModel provides fwhm and height as derived params\ng1_center = get_param('g1_center')\ng1_sigma = get_param('g1_sigma')\ng1_amplitude = get_param('g1_amplitude')\ng1_fwhm = result.params['g1_fwhm']\ng1_height = result.params['g1_height']\n\ng2_center = get_param('g2_center')\ng2_sigma = get_param('g2_sigma')\ng2_amplitude = get_param('g2_amplitude')\ng2_fwhm = result.params['g2_fwhm']\ng2_height = result.params['g2_height']\n\nbkg_c = get_param('bkg_c')\n\n# 5. Save visualization\nfig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)\n\n# Main plot\nax1.plot(x, y, 'k.', markersize=1, alpha=0.5, label='Data')\nax1.plot(x, y_fit, 'r-', linewidth=2, label='Fit')\nax1.plot(x, g1_component + bkg_component, 'b--', linewidth=1.5, alpha=0.7, label='Component 1')\nax1.plot(x, g2_component + bkg_component, 'g--', linewidth=1.5, alpha=0.7, label='Component 2')\nax1.axhline(y=bkg_c['value'], color='gray', linestyle=':', alpha=0.5, label='Background')\nax1.set_ylabel('Y')\nax1.set_title('Data and Fit')\nax1.legend(loc='best')\n\n# Annotate parameters\nann_text1 = f\"C1: center={g1_center['value']:.2f}, FWHM={float(g1_fwhm.value):.2f}\"\nann_text2 = f\"C2: center={g2_center['value']:.2f}, FWHM={float(g2_fwhm.value):.2f}\"\nax1.annotate(ann_text1, xy=(0.02, 0.95), xycoords='axes fraction', fontsize=9, verticalalignment='top')\nax1.annotate(ann_text2, xy=(0.02, 0.88), xycoords='axes fraction', fontsize=9, verticalalignment='top')\n\n# Residuals plot\nax2.plot(x, residuals, 'k.', markersize=1, alpha=0.5, label='Residuals')\nax2.axhline(y=0, color='r', linestyle='-', linewidth=0.5)\nax2.set_xlabel('X')\nax2.set_ylabel('Residuals')\nax2.legend(loc='best')\n\nplt.tight_layout()\nplt.savefig('spectrum_0015_fit.png', dpi=150, bbox_inches='tight')\nplt.close()\n\n# 6. Print results as JSON\nresults = {\n    \"model_type\": \"Two Gaussian peaks + constant background\",\n    \"parameters\": {\n        \"peak_1\": {\n            \"center\": g1_center['value'],\n            \"center_err\": g1_center['error'],\n            \"sigma\": g1_sigma['value'],\n            \"sigma_err\": g1_sigma['error'],\n            \"amplitude\": g1_amplitude['value'],\n            \"amplitude_err\": g1_amplitude['error'],\n            \"fwhm\": float(g1_fwhm.value),\n            \"height\": float(g1_height.value)\n        },\n        \"peak_2\": {\n            \"center\": g2_center['value'],\n            \"center_err\": g2_center['error'],\n            \"sigma\": g2_sigma['value'],\n            \"sigma_err\": g2_sigma['error'],\n            \"amplitude\": g2_amplitude['value'],\n            \"amplitude_err\": g2_amplitude['error'],\n            \"fwhm\": float(g2_fwhm.value),\n            \"height\": float(g2_height.value)\n        },\n        \"background\": {\n            \"constant\": bkg_c['value'],\n            \"constant_err\": bkg_c['error']\n        }\n    },\n    \"fit_quality\": {\n        \"r_squared\": round(r_squared, 6),\n        \"rmse\": round(rmse, 6)\n    },\n    \"deviation_note\": \"\"\n}\n\nprint(f\"FIT_RESULTS_JSON:{json.dumps(results)}\")\n",
+      "script_errors": []
+    },
+    {
+      "index": 16,
+      "name": "spectrum_0016",
+      "data_path": "stack_index_16",
+      "success": true,
+      "error": null,
+      "model_type": "Two Gaussian peaks + constant background",
+      "parameters": {
+        "peak_1": {
+          "center": 284.63363013386487,
+          "center_err": 0.00023697430675264896,
+          "sigma": 0.4498512856094832,
+          "sigma_err": 0.0002568488766996731,
+          "amplitude": 1.1280595574110026,
+          "amplitude_err": 0.0006207891643018824,
+          "fwhm": 1.0593188043789232,
+          "height": 1.0003987734764417
+        },
+        "peak_2": {
+          "center": 286.53352526350307,
+          "center_err": 0.0004520133534453849,
+          "sigma": 0.4997533257103004,
+          "sigma_err": 0.0004988583291112796,
+          "amplitude": 0.6892215147678791,
+          "amplitude_err": 0.0006690398897470794,
+          "fwhm": 1.1768291264491297,
+          "height": 0.5501906684066203
+        },
+        "background": {
+          "constant": 0.04997037712852999,
+          "constant_err": 0.0001653114467798831
+        }
+      },
+      "fit_quality": {
+        "r_squared": 0.999701,
+        "rmse": 0.005003
+      },
+      "deviation_note": null,
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/spectrum_0016_fit.png",
+      "statistics": {
+        "n_points": 2000,
+        "x_range": [
+          282.0,
+          290.0
+        ],
+        "y_range": [
+          0.03319659182440002,
+          1.0560999536529139
+        ],
+        "y_mean": 0.2770169307553933,
+        "y_std": 0.2894838092789301,
+        "has_nans": false
+      },
+      "script": "import numpy as np\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom lmfit.models import GaussianModel, ConstantModel\nimport json\nimport os\n\n# 1. Load data\ndata_path = \"/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/temp_spectrum_16.npy\"\ndata = np.load(data_path)\n\n# Handle different shapes\nif data.ndim == 2:\n    if data.shape[0] == 2:\n        x = data[0]\n        y = data[1]\n    elif data.shape[1] == 2:\n        x = data[:, 0]\n        y = data[:, 1]\n    else:\n        raise ValueError(f\"Unexpected 2D shape: {data.shape}\")\nelif data.ndim == 1:\n    # Assume evenly spaced x from 282 to 290\n    y = data\n    x = np.linspace(282, 290, len(y))\nelse:\n    raise ValueError(f\"Unexpected data dimensions: {data.ndim}\")\n\n# Sort by x\nsort_idx = np.argsort(x)\nx = x[sort_idx]\ny = y[sort_idx]\n\n# 2. Build model: two Gaussians + constant baseline\ngauss1 = GaussianModel(prefix='g1_')\ngauss2 = GaussianModel(prefix='g2_')\nbackground = ConstantModel(prefix='bkg_')\n\nmodel = gauss1 + gauss2 + background\n\n# Initial guesses\n# Estimate baseline from edges\nbkg_guess = np.mean(np.concatenate([y[:50], y[-50:]]))\n\n# Estimate amplitudes from data\ny_nobkg = y - bkg_guess\nmax_y = np.max(y_nobkg)\n\n# For lmfit GaussianModel, 'amplitude' is the area under the curve, not the peak height\n# Peak height = amplitude / (sigma * sqrt(2*pi))\n# So amplitude = height * sigma * sqrt(2*pi)\nsigma_guess = 0.5\namplitude_guess1 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.7\namplitude_guess2 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.4\n\nparams = model.make_params()\n\n# Gaussian 1 (main peak ~284.6)\nparams['g1_center'].set(value=284.6, min=283.5, max=285.5)\nparams['g1_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g1_amplitude'].set(value=amplitude_guess1, min=0)\n\n# Gaussian 2 (secondary peak ~286.5)\nparams['g2_center'].set(value=286.5, min=285.5, max=288.0)\nparams['g2_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g2_amplitude'].set(value=amplitude_guess2, min=0)\n\n# Background\nparams['bkg_c'].set(value=bkg_guess)\n\n# 3. Fit\nresult = model.fit(y, params, x=x)\n\n# 4. Compute fit quality\ny_fit = result.best_fit\nresiduals = y - y_fit\nss_res = np.sum(residuals**2)\nss_tot = np.sum((y - np.mean(y))**2)\nr_squared = 1 - ss_res / ss_tot\nrmse = np.sqrt(np.mean(residuals**2))\n\n# Extract individual components\ncomponents = result.eval_components(x=x)\ng1_component = components['g1_']\ng2_component = components['g2_']\nbkg_component = components['bkg_']\n\n# Extract parameters with errors\ndef get_param(name):\n    p = result.params[name]\n    return {'value': float(p.value), 'error': float(p.stderr) if p.stderr is not None else None}\n\n# For Gaussian, FWHM = 2*sqrt(2*ln2)*sigma ~ 2.3548*sigma\n# lmfit GaussianModel provides fwhm and height as derived params\ng1_center = get_param('g1_center')\ng1_sigma = get_param('g1_sigma')\ng1_amplitude = get_param('g1_amplitude')\ng1_fwhm = result.params['g1_fwhm']\ng1_height = result.params['g1_height']\n\ng2_center = get_param('g2_center')\ng2_sigma = get_param('g2_sigma')\ng2_amplitude = get_param('g2_amplitude')\ng2_fwhm = result.params['g2_fwhm']\ng2_height = result.params['g2_height']\n\nbkg_c = get_param('bkg_c')\n\n# 5. Save visualization\nfig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)\n\n# Main plot\nax1.plot(x, y, 'k.', markersize=1, alpha=0.5, label='Data')\nax1.plot(x, y_fit, 'r-', linewidth=2, label='Fit')\nax1.plot(x, g1_component + bkg_component, 'b--', linewidth=1.5, alpha=0.7, label='Component 1')\nax1.plot(x, g2_component + bkg_component, 'g--', linewidth=1.5, alpha=0.7, label='Component 2')\nax1.axhline(y=bkg_c['value'], color='gray', linestyle=':', alpha=0.5, label='Background')\nax1.set_ylabel('Y')\nax1.set_title('Data and Fit')\nax1.legend(loc='best')\n\n# Annotate parameters\nann_text1 = f\"C1: center={g1_center['value']:.2f}, FWHM={float(g1_fwhm.value):.2f}\"\nann_text2 = f\"C2: center={g2_center['value']:.2f}, FWHM={float(g2_fwhm.value):.2f}\"\nax1.annotate(ann_text1, xy=(0.02, 0.95), xycoords='axes fraction', fontsize=9, verticalalignment='top')\nax1.annotate(ann_text2, xy=(0.02, 0.88), xycoords='axes fraction', fontsize=9, verticalalignment='top')\n\n# Residuals plot\nax2.plot(x, residuals, 'k.', markersize=1, alpha=0.5, label='Residuals')\nax2.axhline(y=0, color='r', linestyle='-', linewidth=0.5)\nax2.set_xlabel('X')\nax2.set_ylabel('Residuals')\nax2.legend(loc='best')\n\nplt.tight_layout()\nplt.savefig('spectrum_0016_fit.png', dpi=150, bbox_inches='tight')\nplt.close()\n\n# 6. Print results as JSON\nresults = {\n    \"model_type\": \"Two Gaussian peaks + constant background\",\n    \"parameters\": {\n        \"peak_1\": {\n            \"center\": g1_center['value'],\n            \"center_err\": g1_center['error'],\n            \"sigma\": g1_sigma['value'],\n            \"sigma_err\": g1_sigma['error'],\n            \"amplitude\": g1_amplitude['value'],\n            \"amplitude_err\": g1_amplitude['error'],\n            \"fwhm\": float(g1_fwhm.value),\n            \"height\": float(g1_height.value)\n        },\n        \"peak_2\": {\n            \"center\": g2_center['value'],\n            \"center_err\": g2_center['error'],\n            \"sigma\": g2_sigma['value'],\n            \"sigma_err\": g2_sigma['error'],\n            \"amplitude\": g2_amplitude['value'],\n            \"amplitude_err\": g2_amplitude['error'],\n            \"fwhm\": float(g2_fwhm.value),\n            \"height\": float(g2_height.value)\n        },\n        \"background\": {\n            \"constant\": bkg_c['value'],\n            \"constant_err\": bkg_c['error']\n        }\n    },\n    \"fit_quality\": {\n        \"r_squared\": round(r_squared, 6),\n        \"rmse\": round(rmse, 6)\n    },\n    \"deviation_note\": \"\"\n}\n\nprint(f\"FIT_RESULTS_JSON:{json.dumps(results)}\")\n",
+      "script_errors": []
+    },
+    {
+      "index": 17,
+      "name": "spectrum_0017",
+      "data_path": "stack_index_17",
+      "success": true,
+      "error": null,
+      "model_type": "Two Gaussian peaks + constant background",
+      "parameters": {
+        "peak_1": {
+          "center": 284.6357709749826,
+          "center_err": 0.00023653637753710702,
+          "sigma": 0.4501037331505482,
+          "sigma_err": 0.0002563888430866687,
+          "amplitude": 1.1275408832163367,
+          "amplitude_err": 0.0006189621232587921,
+          "fwhm": 1.059913272897574,
+          "height": 0.9993779659319161
+        },
+        "peak_2": {
+          "center": 286.53530113018826,
+          "center_err": 0.0004510460262692943,
+          "sigma": 0.5000506087876676,
+          "sigma_err": 0.0004978574905813799,
+          "amplitude": 0.6891193556553823,
+          "amplitude_err": 0.000667087473073591,
+          "fwhm": 1.1775291745853755,
+          "height": 0.5497820738308766
+        },
+        "background": {
+          "constant": 0.049921561552931704,
+          "constant_err": 0.00016474171274660963
+        }
+      },
+      "fit_quality": {
+        "r_squared": 0.999703,
+        "rmse": 0.004985
+      },
+      "deviation_note": null,
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/spectrum_0017_fit.png",
+      "statistics": {
+        "n_points": 2000,
+        "x_range": [
+          282.0,
+          290.0
+        ],
+        "y_range": [
+          0.034089069517489634,
+          1.0567303230209577
+        ],
+        "y_mean": 0.2768905498215182,
+        "y_std": 0.2892562032156624,
+        "has_nans": false
+      },
+      "script": "import numpy as np\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom lmfit.models import GaussianModel, ConstantModel\nimport json\nimport os\n\n# 1. Load data\ndata_path = \"/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/temp_spectrum_17.npy\"\ndata = np.load(data_path)\n\n# Handle different shapes\nif data.ndim == 2:\n    if data.shape[0] == 2:\n        x = data[0]\n        y = data[1]\n    elif data.shape[1] == 2:\n        x = data[:, 0]\n        y = data[:, 1]\n    else:\n        raise ValueError(f\"Unexpected 2D shape: {data.shape}\")\nelif data.ndim == 1:\n    # Assume evenly spaced x from 282 to 290\n    y = data\n    x = np.linspace(282, 290, len(y))\nelse:\n    raise ValueError(f\"Unexpected data dimensions: {data.ndim}\")\n\n# Sort by x\nsort_idx = np.argsort(x)\nx = x[sort_idx]\ny = y[sort_idx]\n\n# 2. Build model: two Gaussians + constant baseline\ngauss1 = GaussianModel(prefix='g1_')\ngauss2 = GaussianModel(prefix='g2_')\nbackground = ConstantModel(prefix='bkg_')\n\nmodel = gauss1 + gauss2 + background\n\n# Initial guesses\n# Estimate baseline from edges\nbkg_guess = np.mean(np.concatenate([y[:50], y[-50:]]))\n\n# Estimate amplitudes from data\ny_nobkg = y - bkg_guess\nmax_y = np.max(y_nobkg)\n\n# For lmfit GaussianModel, 'amplitude' is the area under the curve, not the peak height\n# Peak height = amplitude / (sigma * sqrt(2*pi))\n# So amplitude = height * sigma * sqrt(2*pi)\nsigma_guess = 0.5\namplitude_guess1 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.7\namplitude_guess2 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.4\n\nparams = model.make_params()\n\n# Gaussian 1 (main peak ~284.6)\nparams['g1_center'].set(value=284.6, min=283.5, max=285.5)\nparams['g1_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g1_amplitude'].set(value=amplitude_guess1, min=0)\n\n# Gaussian 2 (secondary peak ~286.5)\nparams['g2_center'].set(value=286.5, min=285.5, max=288.0)\nparams['g2_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g2_amplitude'].set(value=amplitude_guess2, min=0)\n\n# Background\nparams['bkg_c'].set(value=bkg_guess)\n\n# 3. Fit\nresult = model.fit(y, params, x=x)\n\n# 4. Compute fit quality\ny_fit = result.best_fit\nresiduals = y - y_fit\nss_res = np.sum(residuals**2)\nss_tot = np.sum((y - np.mean(y))**2)\nr_squared = 1 - ss_res / ss_tot\nrmse = np.sqrt(np.mean(residuals**2))\n\n# Extract individual components\ncomponents = result.eval_components(x=x)\ng1_component = components['g1_']\ng2_component = components['g2_']\nbkg_component = components['bkg_']\n\n# Extract parameters with errors\ndef get_param(name):\n    p = result.params[name]\n    return {'value': float(p.value), 'error': float(p.stderr) if p.stderr is not None else None}\n\n# For Gaussian, FWHM = 2*sqrt(2*ln2)*sigma ~ 2.3548*sigma\n# lmfit GaussianModel provides fwhm and height as derived params\ng1_center = get_param('g1_center')\ng1_sigma = get_param('g1_sigma')\ng1_amplitude = get_param('g1_amplitude')\ng1_fwhm = result.params['g1_fwhm']\ng1_height = result.params['g1_height']\n\ng2_center = get_param('g2_center')\ng2_sigma = get_param('g2_sigma')\ng2_amplitude = get_param('g2_amplitude')\ng2_fwhm = result.params['g2_fwhm']\ng2_height = result.params['g2_height']\n\nbkg_c = get_param('bkg_c')\n\n# 5. Save visualization\nfig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)\n\n# Main plot\nax1.plot(x, y, 'k.', markersize=1, alpha=0.5, label='Data')\nax1.plot(x, y_fit, 'r-', linewidth=2, label='Fit')\nax1.plot(x, g1_component + bkg_component, 'b--', linewidth=1.5, alpha=0.7, label='Component 1')\nax1.plot(x, g2_component + bkg_component, 'g--', linewidth=1.5, alpha=0.7, label='Component 2')\nax1.axhline(y=bkg_c['value'], color='gray', linestyle=':', alpha=0.5, label='Background')\nax1.set_ylabel('Y')\nax1.set_title('Data and Fit')\nax1.legend(loc='best')\n\n# Annotate parameters\nann_text1 = f\"C1: center={g1_center['value']:.2f}, FWHM={float(g1_fwhm.value):.2f}\"\nann_text2 = f\"C2: center={g2_center['value']:.2f}, FWHM={float(g2_fwhm.value):.2f}\"\nax1.annotate(ann_text1, xy=(0.02, 0.95), xycoords='axes fraction', fontsize=9, verticalalignment='top')\nax1.annotate(ann_text2, xy=(0.02, 0.88), xycoords='axes fraction', fontsize=9, verticalalignment='top')\n\n# Residuals plot\nax2.plot(x, residuals, 'k.', markersize=1, alpha=0.5, label='Residuals')\nax2.axhline(y=0, color='r', linestyle='-', linewidth=0.5)\nax2.set_xlabel('X')\nax2.set_ylabel('Residuals')\nax2.legend(loc='best')\n\nplt.tight_layout()\nplt.savefig('spectrum_0017_fit.png', dpi=150, bbox_inches='tight')\nplt.close()\n\n# 6. Print results as JSON\nresults = {\n    \"model_type\": \"Two Gaussian peaks + constant background\",\n    \"parameters\": {\n        \"peak_1\": {\n            \"center\": g1_center['value'],\n            \"center_err\": g1_center['error'],\n            \"sigma\": g1_sigma['value'],\n            \"sigma_err\": g1_sigma['error'],\n            \"amplitude\": g1_amplitude['value'],\n            \"amplitude_err\": g1_amplitude['error'],\n            \"fwhm\": float(g1_fwhm.value),\n            \"height\": float(g1_height.value)\n        },\n        \"peak_2\": {\n            \"center\": g2_center['value'],\n            \"center_err\": g2_center['error'],\n            \"sigma\": g2_sigma['value'],\n            \"sigma_err\": g2_sigma['error'],\n            \"amplitude\": g2_amplitude['value'],\n            \"amplitude_err\": g2_amplitude['error'],\n            \"fwhm\": float(g2_fwhm.value),\n            \"height\": float(g2_height.value)\n        },\n        \"background\": {\n            \"constant\": bkg_c['value'],\n            \"constant_err\": bkg_c['error']\n        }\n    },\n    \"fit_quality\": {\n        \"r_squared\": round(r_squared, 6),\n        \"rmse\": round(rmse, 6)\n    },\n    \"deviation_note\": \"\"\n}\n\nprint(f\"FIT_RESULTS_JSON:{json.dumps(results)}\")\n",
+      "script_errors": []
+    },
+    {
+      "index": 18,
+      "name": "spectrum_0018",
+      "data_path": "stack_index_18",
+      "success": true,
+      "error": null,
+      "model_type": "Two Gaussian peaks + constant background",
+      "parameters": {
+        "peak_1": {
+          "center": 284.6379851743222,
+          "center_err": 0.00023726859240604027,
+          "sigma": 0.4496710529699752,
+          "sigma_err": 0.00025714978300046636,
+          "amplitude": 1.1270240791265662,
+          "amplitude_err": 0.0006212037370532085,
+          "fwhm": 1.058894388954757,
+          "height": 0.9998810804309335
+        },
+        "peak_2": {
+          "center": 286.5380788304761,
+          "center_err": 0.0004526426675361095,
+          "sigma": 0.4999064178606252,
+          "sigma_err": 0.0004995722571284638,
+          "amplitude": 0.6891980786099026,
+          "amplitude_err": 0.0006698249138476006,
+          "fwhm": 1.1771896309065575,
+          "height": 0.5500034742760034
+        },
+        "background": {
+          "constant": 0.05009675237240603,
+          "constant_err": 0.00016547753839902545
+        }
+      },
+      "fit_quality": {
+        "r_squared": 0.9997,
+        "rmse": 0.005008
+      },
+      "deviation_note": null,
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/spectrum_0018_fit.png",
+      "statistics": {
+        "n_points": 2000,
+        "x_range": [
+          282.0,
+          290.0
+        ],
+        "y_range": [
+          0.03605049704153977,
+          1.05717071932246
+        ],
+        "y_mean": 0.2770110078993561,
+        "y_std": 0.2893120087385458,
+        "has_nans": false
+      },
+      "script": "import numpy as np\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom lmfit.models import GaussianModel, ConstantModel\nimport json\nimport os\n\n# 1. Load data\ndata_path = \"/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/temp_spectrum_18.npy\"\ndata = np.load(data_path)\n\n# Handle different shapes\nif data.ndim == 2:\n    if data.shape[0] == 2:\n        x = data[0]\n        y = data[1]\n    elif data.shape[1] == 2:\n        x = data[:, 0]\n        y = data[:, 1]\n    else:\n        raise ValueError(f\"Unexpected 2D shape: {data.shape}\")\nelif data.ndim == 1:\n    # Assume evenly spaced x from 282 to 290\n    y = data\n    x = np.linspace(282, 290, len(y))\nelse:\n    raise ValueError(f\"Unexpected data dimensions: {data.ndim}\")\n\n# Sort by x\nsort_idx = np.argsort(x)\nx = x[sort_idx]\ny = y[sort_idx]\n\n# 2. Build model: two Gaussians + constant baseline\ngauss1 = GaussianModel(prefix='g1_')\ngauss2 = GaussianModel(prefix='g2_')\nbackground = ConstantModel(prefix='bkg_')\n\nmodel = gauss1 + gauss2 + background\n\n# Initial guesses\n# Estimate baseline from edges\nbkg_guess = np.mean(np.concatenate([y[:50], y[-50:]]))\n\n# Estimate amplitudes from data\ny_nobkg = y - bkg_guess\nmax_y = np.max(y_nobkg)\n\n# For lmfit GaussianModel, 'amplitude' is the area under the curve, not the peak height\n# Peak height = amplitude / (sigma * sqrt(2*pi))\n# So amplitude = height * sigma * sqrt(2*pi)\nsigma_guess = 0.5\namplitude_guess1 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.7\namplitude_guess2 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.4\n\nparams = model.make_params()\n\n# Gaussian 1 (main peak ~284.6)\nparams['g1_center'].set(value=284.6, min=283.5, max=285.5)\nparams['g1_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g1_amplitude'].set(value=amplitude_guess1, min=0)\n\n# Gaussian 2 (secondary peak ~286.5)\nparams['g2_center'].set(value=286.5, min=285.5, max=288.0)\nparams['g2_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g2_amplitude'].set(value=amplitude_guess2, min=0)\n\n# Background\nparams['bkg_c'].set(value=bkg_guess)\n\n# 3. Fit\nresult = model.fit(y, params, x=x)\n\n# 4. Compute fit quality\ny_fit = result.best_fit\nresiduals = y - y_fit\nss_res = np.sum(residuals**2)\nss_tot = np.sum((y - np.mean(y))**2)\nr_squared = 1 - ss_res / ss_tot\nrmse = np.sqrt(np.mean(residuals**2))\n\n# Extract individual components\ncomponents = result.eval_components(x=x)\ng1_component = components['g1_']\ng2_component = components['g2_']\nbkg_component = components['bkg_']\n\n# Extract parameters with errors\ndef get_param(name):\n    p = result.params[name]\n    return {'value': float(p.value), 'error': float(p.stderr) if p.stderr is not None else None}\n\n# For Gaussian, FWHM = 2*sqrt(2*ln2)*sigma ~ 2.3548*sigma\n# lmfit GaussianModel provides fwhm and height as derived params\ng1_center = get_param('g1_center')\ng1_sigma = get_param('g1_sigma')\ng1_amplitude = get_param('g1_amplitude')\ng1_fwhm = result.params['g1_fwhm']\ng1_height = result.params['g1_height']\n\ng2_center = get_param('g2_center')\ng2_sigma = get_param('g2_sigma')\ng2_amplitude = get_param('g2_amplitude')\ng2_fwhm = result.params['g2_fwhm']\ng2_height = result.params['g2_height']\n\nbkg_c = get_param('bkg_c')\n\n# 5. Save visualization\nfig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)\n\n# Main plot\nax1.plot(x, y, 'k.', markersize=1, alpha=0.5, label='Data')\nax1.plot(x, y_fit, 'r-', linewidth=2, label='Fit')\nax1.plot(x, g1_component + bkg_component, 'b--', linewidth=1.5, alpha=0.7, label='Component 1')\nax1.plot(x, g2_component + bkg_component, 'g--', linewidth=1.5, alpha=0.7, label='Component 2')\nax1.axhline(y=bkg_c['value'], color='gray', linestyle=':', alpha=0.5, label='Background')\nax1.set_ylabel('Y')\nax1.set_title('Data and Fit')\nax1.legend(loc='best')\n\n# Annotate parameters\nann_text1 = f\"C1: center={g1_center['value']:.2f}, FWHM={float(g1_fwhm.value):.2f}\"\nann_text2 = f\"C2: center={g2_center['value']:.2f}, FWHM={float(g2_fwhm.value):.2f}\"\nax1.annotate(ann_text1, xy=(0.02, 0.95), xycoords='axes fraction', fontsize=9, verticalalignment='top')\nax1.annotate(ann_text2, xy=(0.02, 0.88), xycoords='axes fraction', fontsize=9, verticalalignment='top')\n\n# Residuals plot\nax2.plot(x, residuals, 'k.', markersize=1, alpha=0.5, label='Residuals')\nax2.axhline(y=0, color='r', linestyle='-', linewidth=0.5)\nax2.set_xlabel('X')\nax2.set_ylabel('Residuals')\nax2.legend(loc='best')\n\nplt.tight_layout()\nplt.savefig('spectrum_0018_fit.png', dpi=150, bbox_inches='tight')\nplt.close()\n\n# 6. Print results as JSON\nresults = {\n    \"model_type\": \"Two Gaussian peaks + constant background\",\n    \"parameters\": {\n        \"peak_1\": {\n            \"center\": g1_center['value'],\n            \"center_err\": g1_center['error'],\n            \"sigma\": g1_sigma['value'],\n            \"sigma_err\": g1_sigma['error'],\n            \"amplitude\": g1_amplitude['value'],\n            \"amplitude_err\": g1_amplitude['error'],\n            \"fwhm\": float(g1_fwhm.value),\n            \"height\": float(g1_height.value)\n        },\n        \"peak_2\": {\n            \"center\": g2_center['value'],\n            \"center_err\": g2_center['error'],\n            \"sigma\": g2_sigma['value'],\n            \"sigma_err\": g2_sigma['error'],\n            \"amplitude\": g2_amplitude['value'],\n            \"amplitude_err\": g2_amplitude['error'],\n            \"fwhm\": float(g2_fwhm.value),\n            \"height\": float(g2_height.value)\n        },\n        \"background\": {\n            \"constant\": bkg_c['value'],\n            \"constant_err\": bkg_c['error']\n        }\n    },\n    \"fit_quality\": {\n        \"r_squared\": round(r_squared, 6),\n        \"rmse\": round(rmse, 6)\n    },\n    \"deviation_note\": \"\"\n}\n\nprint(f\"FIT_RESULTS_JSON:{json.dumps(results)}\")\n",
+      "script_errors": []
+    },
+    {
+      "index": 19,
+      "name": "spectrum_0019",
+      "data_path": "stack_index_19",
+      "success": true,
+      "error": null,
+      "model_type": "Two Gaussian peaks + constant background",
+      "parameters": {
+        "peak_1": {
+          "center": 284.640183798996,
+          "center_err": 0.0002316444184866456,
+          "sigma": 0.4499984059635159,
+          "sigma_err": 0.0002510839095046789,
+          "amplitude": 1.128985522463767,
+          "amplitude_err": 0.0006071337586489964,
+          "fwhm": 1.0596652463310066,
+          "height": 1.0008926143505352
+        },
+        "peak_2": {
+          "center": 286.53991403936584,
+          "center_err": 0.00044221145016712897,
+          "sigma": 0.4997482100784658,
+          "sigma_err": 0.00048804617736492766,
+          "amplitude": 0.6888740534053095,
+          "amplitude_err": 0.0006541658062770143,
+          "fwhm": 1.1768170800569728,
+          "height": 0.549918926638451
+        },
+        "background": {
+          "constant": 0.049874764917297566,
+          "constant_err": 0.00016163020018296028
+        }
+      },
+      "fit_quality": {
+        "r_squared": 0.999715,
+        "rmse": 0.004892
+      },
+      "deviation_note": null,
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/spectrum_0019_fit.png",
+      "statistics": {
+        "n_points": 2000,
+        "x_range": [
+          282.0,
+          290.0
+        ],
+        "y_range": [
+          0.03582226448259774,
+          1.0647631142740024
+        ],
+        "y_mean": 0.27699359537279,
+        "y_std": 0.28960120050801325,
+        "has_nans": false
+      },
+      "script": "import numpy as np\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom lmfit.models import GaussianModel, ConstantModel\nimport json\nimport os\n\n# 1. Load data\ndata_path = \"/Users/maxim.ziatdinov/Code/SciLink/tests/_parallel_speedup_runs/parallel/temp_spectrum_19.npy\"\ndata = np.load(data_path)\n\n# Handle different shapes\nif data.ndim == 2:\n    if data.shape[0] == 2:\n        x = data[0]\n        y = data[1]\n    elif data.shape[1] == 2:\n        x = data[:, 0]\n        y = data[:, 1]\n    else:\n        raise ValueError(f\"Unexpected 2D shape: {data.shape}\")\nelif data.ndim == 1:\n    # Assume evenly spaced x from 282 to 290\n    y = data\n    x = np.linspace(282, 290, len(y))\nelse:\n    raise ValueError(f\"Unexpected data dimensions: {data.ndim}\")\n\n# Sort by x\nsort_idx = np.argsort(x)\nx = x[sort_idx]\ny = y[sort_idx]\n\n# 2. Build model: two Gaussians + constant baseline\ngauss1 = GaussianModel(prefix='g1_')\ngauss2 = GaussianModel(prefix='g2_')\nbackground = ConstantModel(prefix='bkg_')\n\nmodel = gauss1 + gauss2 + background\n\n# Initial guesses\n# Estimate baseline from edges\nbkg_guess = np.mean(np.concatenate([y[:50], y[-50:]]))\n\n# Estimate amplitudes from data\ny_nobkg = y - bkg_guess\nmax_y = np.max(y_nobkg)\n\n# For lmfit GaussianModel, 'amplitude' is the area under the curve, not the peak height\n# Peak height = amplitude / (sigma * sqrt(2*pi))\n# So amplitude = height * sigma * sqrt(2*pi)\nsigma_guess = 0.5\namplitude_guess1 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.7\namplitude_guess2 = max_y * sigma_guess * np.sqrt(2 * np.pi) * 0.4\n\nparams = model.make_params()\n\n# Gaussian 1 (main peak ~284.6)\nparams['g1_center'].set(value=284.6, min=283.5, max=285.5)\nparams['g1_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g1_amplitude'].set(value=amplitude_guess1, min=0)\n\n# Gaussian 2 (secondary peak ~286.5)\nparams['g2_center'].set(value=286.5, min=285.5, max=288.0)\nparams['g2_sigma'].set(value=sigma_guess, min=0.1, max=2.0)\nparams['g2_amplitude'].set(value=amplitude_guess2, min=0)\n\n# Background\nparams['bkg_c'].set(value=bkg_guess)\n\n# 3. Fit\nresult = model.fit(y, params, x=x)\n\n# 4. Compute fit quality\ny_fit = result.best_fit\nresiduals = y - y_fit\nss_res = np.sum(residuals**2)\nss_tot = np.sum((y - np.mean(y))**2)\nr_squared = 1 - ss_res / ss_tot\nrmse = np.sqrt(np.mean(residuals**2))\n\n# Extract individual components\ncomponents = result.eval_components(x=x)\ng1_component = components['g1_']\ng2_component = components['g2_']\nbkg_component = components['bkg_']\n\n# Extract parameters with errors\ndef get_param(name):\n    p = result.params[name]\n    return {'value': float(p.value), 'error': float(p.stderr) if p.stderr is not None else None}\n\n# For Gaussian, FWHM = 2*sqrt(2*ln2)*sigma ~ 2.3548*sigma\n# lmfit GaussianModel provides fwhm and height as derived params\ng1_center = get_param('g1_center')\ng1_sigma = get_param('g1_sigma')\ng1_amplitude = get_param('g1_amplitude')\ng1_fwhm = result.params['g1_fwhm']\ng1_height = result.params['g1_height']\n\ng2_center = get_param('g2_center')\ng2_sigma = get_param('g2_sigma')\ng2_amplitude = get_param('g2_amplitude')\ng2_fwhm = result.params['g2_fwhm']\ng2_height = result.params['g2_height']\n\nbkg_c = get_param('bkg_c')\n\n# 5. Save visualization\nfig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)\n\n# Main plot\nax1.plot(x, y, 'k.', markersize=1, alpha=0.5, label='Data')\nax1.plot(x, y_fit, 'r-', linewidth=2, label='Fit')\nax1.plot(x, g1_component + bkg_component, 'b--', linewidth=1.5, alpha=0.7, label='Component 1')\nax1.plot(x, g2_component + bkg_component, 'g--', linewidth=1.5, alpha=0.7, label='Component 2')\nax1.axhline(y=bkg_c['value'], color='gray', linestyle=':', alpha=0.5, label='Background')\nax1.set_ylabel('Y')\nax1.set_title('Data and Fit')\nax1.legend(loc='best')\n\n# Annotate parameters\nann_text1 = f\"C1: center={g1_center['value']:.2f}, FWHM={float(g1_fwhm.value):.2f}\"\nann_text2 = f\"C2: center={g2_center['value']:.2f}, FWHM={float(g2_fwhm.value):.2f}\"\nax1.annotate(ann_text1, xy=(0.02, 0.95), xycoords='axes fraction', fontsize=9, verticalalignment='top')\nax1.annotate(ann_text2, xy=(0.02, 0.88), xycoords='axes fraction', fontsize=9, verticalalignment='top')\n\n# Residuals plot\nax2.plot(x, residuals, 'k.', markersize=1, alpha=0.5, label='Residuals')\nax2.axhline(y=0, color='r', linestyle='-', linewidth=0.5)\nax2.set_xlabel('X')\nax2.set_ylabel('Residuals')\nax2.legend(loc='best')\n\nplt.tight_layout()\nplt.savefig('spectrum_0019_fit.png', dpi=150, bbox_inches='tight')\nplt.close()\n\n# 6. Print results as JSON\nresults = {\n    \"model_type\": \"Two Gaussian peaks + constant background\",\n    \"parameters\": {\n        \"peak_1\": {\n            \"center\": g1_center['value'],\n            \"center_err\": g1_center['error'],\n            \"sigma\": g1_sigma['value'],\n            \"sigma_err\": g1_sigma['error'],\n            \"amplitude\": g1_amplitude['value'],\n            \"amplitude_err\": g1_amplitude['error'],\n            \"fwhm\": float(g1_fwhm.value),\n            \"height\": float(g1_height.value)\n        },\n        \"peak_2\": {\n            \"center\": g2_center['value'],\n            \"center_err\": g2_center['error'],\n            \"sigma\": g2_sigma['value'],\n            \"sigma_err\": g2_sigma['error'],\n            \"amplitude\": g2_amplitude['value'],\n            \"amplitude_err\": g2_amplitude['error'],\n            \"fwhm\": float(g2_fwhm.value),\n            \"height\": float(g2_height.value)\n        },\n        \"background\": {\n            \"constant\": bkg_c['value'],\n            \"constant_err\": bkg_c['error']\n        }\n    },\n    \"fit_quality\": {\n        \"r_squared\": round(r_squared, 6),\n        \"rmse\": round(rmse, 6)\n    },\n    \"deviation_note\": \"\"\n}\n\nprint(f\"FIT_RESULTS_JSON:{json.dumps(results)}\")\n",
+      "script_errors": []
+    }
+  ]
+}

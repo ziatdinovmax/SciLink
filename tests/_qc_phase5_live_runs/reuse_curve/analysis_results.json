@@ -1,0 +1,121 @@
+{
+  "status": "success",
+  "output_directory": "/Users/maxim.ziatdinov/Code/SciLink/tests/_qc_phase5_live_runs/reuse_curve",
+  "task_mode": "fitting",
+  "detailed_analysis": "The measured band set \u2014 strongest ~142 cm^-1, plus 395, 514, 636, and weak broad 795 cm^-1 \u2014 is the diagnostic Raman signature of anatase TiO2. Reference anatase modes: Eg ~144 (dominant), Eg ~197 (weak, often below detection; consistent with the very weak feature seen near 200), B1g ~399, A1g+B1g ~516 (unresolved doublet), Eg ~639, plus a weaker higher-frequency feature. All strongest three bands (142, 514, 395/636) are explained, and no carbonate/sulfate/phosphate/silicate v1 band appears in 950-1100 cm^-1, which rules out those oxyanion classes. The fit's shoulder components at 135 and 391 do not correspond to separate anatase modes; they compensate for the intrinsically asymmetric, wing-heavy (Lorentzian-plus-anharmonic) lineshape of the strong low-frequency phonons. The large residual excursions (up to ~10x noise) concentrated on the steep flanks of the 142 and 395 bands corroborate residual asymmetry/lineshape mismatch rather than missing chemistry. Centers and FWHM of the true bands are tightly constrained (sub-cm^-1). The main Eg band FWHM (~8-21 cm^-1 depending on which component; the sharp core ~8.5 cm^-1) is broader than ideal single-crystal anatase, which can indicate nanocrystalline domain size or minor non-stoichiometry, though the shoulder-component ambiguity limits how firmly this can be stated. No chemistry (EDX/XRF) was provided, so this identification is pattern-based only.",
+  "scientific_claims": [
+    {
+      "claim": "The spectrum is identified as anatase TiO2 from its diagnostic band set: dominant Eg at 142.1 +/- 0.01 cm^-1, plus 395.2 +/- 0.06, 514.4 +/- 0.03, and 636.4 +/- 0.16 cm^-1, on a flat baseline (fluorescence fraction ~0.039).",
+      "scientific_impact": "Anatase is the photocatalytically active TiO2 polymorph; unambiguous polymorph identification (anatase vs rutile vs brookite) from the low-frequency Eg mode position and the 399/516/639 satellite pattern is central to catalyst, pigment, and thin-film characterization.",
+      "has_anyone_question": "Has anyone observed a nanocrystalline anatase TiO2 phase whose dominant Eg Raman mode sits at ~142 cm^-1 with satellite bands at 395/514/636 cm^-1 and no rutile 447/612 cm^-1 features?",
+      "keywords": [
+        "anatase",
+        "TiO2",
+        "Raman",
+        "Eg mode",
+        "polymorph identification",
+        "photocatalyst"
+      ]
+    }
+  ],
+  "model_type": "Sum of 7 symmetric pseudo-Voigt profiles on a flat (constant) baseline; full-range fit (91-1286 cm^-1) via staged Trust Region Reflective least squares. Reseeded 128/141 shoulder+main pair and 375/394 flank+main pair with min-separation >=9 cm^-1 soft constraint. Baseline area fraction ~0.039 (rolling-min estimate) -> flat baseline used, no ALS.",
+  "fitting_parameters": {
+    "peak_1": {
+      "center": 134.8561757990014,
+      "center_err": 0.23596350266719882,
+      "amplitude": 96547.24812202243,
+      "amplitude_err": 2849.5798824600506,
+      "fwhm": 20.578873946494145,
+      "fwhm_err": 0.24341491454957825,
+      "eta": 2.7284558206783004e-33,
+      "eta_err": 0.028818882929967524,
+      "integrated_area": 2114918.932883006,
+      "relative_intensity": 0.3474634357330893
+    },
+    "peak_2": {
+      "center": 142.13224784726515,
+      "center_err": 0.012615127534848333,
+      "amplitude": 277863.0445483393,
+      "amplitude_err": 4006.818733112984,
+      "fwhm": 8.457971982151328,
+      "fwhm_err": 0.08367618001827565,
+      "eta": 0.5995480508643436,
+      "eta_err": 0.027193217290113814,
+      "integrated_area": 3215100.0142511004,
+      "relative_intensity": 1.0
+    },
+    "peak_3": {
+      "center": 391.15377748206083,
+      "center_err": 0.20284222911346567,
+      "amplitude": 98564.5606710997,
+      "amplitude_err": 6027.9679876059345,
+      "fwhm": 32.418296891515745,
+      "fwhm_err": 0.3138101934300489,
+      "eta": 1.8965722759811173e-35,
+      "eta_err": 0.03698571870837726,
+      "integrated_area": 3401286.413014867,
+      "relative_intensity": 0.3547235323477952
+    },
+    "peak_4": {
+      "center": 395.19363575482856,
+      "center_err": 0.06319595610166709,
+      "amplitude": 110986.22667448201,
+      "amplitude_err": 6273.436125695587,
+      "fwhm": 15.805906141536422,
+      "fwhm_err": 0.3961680340195232,
+      "eta": 0.18118513966312286,
+      "eta_err": 0.09345471432820099,
+      "integrated_area": 2028261.0351538921,
+      "relative_intensity": 0.3994278075189446
+    },
+    "peak_5": {
+      "center": 514.3991328481187,
+      "center_err": 0.027472070779444434,
+      "amplitude": 149444.1389473308,
+      "amplitude_err": 392.01368301648233,
+      "fwhm": 23.280045038810457,
+      "fwhm_err": 0.09550028549522104,
+      "eta": 0.6395935335235338,
+      "eta_err": 0.01151726633357413,
+      "integrated_area": 4830029.394964362,
+      "relative_intensity": 0.5378338065439727
+    },
+    "peak_6": {
+      "center": 636.3608128706986,
+      "center_err": 0.16410484061652644,
+      "amplitude": 22619.230716943737,
+      "amplitude_err": 356.2805528160764,
+      "fwhm": 23.110368915658917,
+      "fwhm_err": 0.4515404173794167,
+      "eta": 1.1019583480474982e-25,
+      "eta_err": 0.06883101194146805,
+      "integrated_area": 556438.1873123134,
+      "relative_intensity": 0.08140424270421003
+    },
+    "peak_7": {
+      "center": 795.2082036818355,
+      "center_err": 1.3748263471214337,
+      "amplitude": 4441.3281257852595,
+      "amplitude_err": 294.1754243423278,
+      "fwhm": 47.642634670978744,
+      "fwhm_err": 5.440081031841437,
+      "eta": 0.9406682018306859,
+      "eta_err": 0.30001382606897925,
+      "integrated_area": 326018.45715641126,
+      "relative_intensity": 0.01598387483662877
+    }
+  },
+  "fit_quality": {
+    "r_squared": 0.9985905042128423,
+    "rmse": 1506.8993088181326
+  },
+  "literature_files": null,
+  "reuse_validity": {
+    "reused": true,
+    "source": "curve_raman",
+    "r_squared": 0.9985905042128423,
+    "threshold": 0.95,
+    "verdict": "good",
+    "message": "Reused the locked fitting script from prior run 'curve_raman'; R\u00b2 = 0.9986 meets the acceptance threshold 0.950."
+  }
+}

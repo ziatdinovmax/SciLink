@@ -1,0 +1,64 @@
+{
+  "status": "success",
+  "output_directory": "/Users/maxim.ziatdinov/Code/SciLink/tests/_script_bank_live_runs/cs_miss",
+  "task_mode": "fitting",
+  "detailed_analysis": "The transient is well-described by two independent exponential decay channels. The fast channel dominates (A1=7.96, ~80% of initial amplitude) with a lifetime tau1=59.7+/-0.6 ns, tightly constrained because it governs the well-sampled, high-signal early region. The slow channel (A2=2.04, ~20% amplitude) has tau2=294+/-19 ns; its ~6% lifetime uncertainty reflects its weaker amplitude and location in the noisier low-signal tail, exactly as anticipated. The amplitude-weighted average lifetime is 107.6 ns. Physically, biexponential PL decay commonly signals two distinct recombination pathways \u2014 e.g. a fast channel dominated by nonradiative/surface or trap-assisted recombination and a slower channel reflecting radiative or bulk recombination, or two distinct emitter populations/environments. The near-zero baseline confirms full return to background with negligible long-lived dark-count contribution. Fit quality is excellent (R^2=0.9998, RMSE=0.030) with white residuals, so the two-channel description is statistically sufficient and no third lifetime is warranted.",
+  "scientific_claims": [
+    {
+      "claim": "The PL decay is biexponential with a dominant fast lifetime tau1 = 59.7 +/- 0.6 ns (amplitude fraction ~80%) and a minor slow lifetime tau2 = 294 +/- 19 ns (~20%), giving an amplitude-weighted average lifetime of 107.6 ns.",
+      "scientific_impact": "Resolving two distinct decay time constants demonstrates the sample relaxes through two separable recombination pathways rather than a single channel, which constrains models of the emitter's radiative/nonradiative branching and carrier dynamics.",
+      "has_anyone_question": "Has anyone observed a biexponential photoluminescence decay with a ~60 ns fast component and a ~290 ns slow component in this class of emitter, and assigned these to distinct radiative versus trap-mediated recombination channels?",
+      "keywords": [
+        "time-resolved photoluminescence",
+        "biexponential decay",
+        "carrier lifetime",
+        "radiative recombination",
+        "excited-state dynamics"
+      ]
+    }
+  ],
+  "model_type": "Biexponential decay with constant offset: I(t)=A1*exp(-t/tau1)+A2*exp(-t/tau2)+C",
+  "fitting_parameters": {
+    "component_1_fast": {
+      "amplitude": 7.958831391845381,
+      "amplitude_err": 0.07248208799318769,
+      "lifetime_ns": 59.703509972705795,
+      "lifetime_ns_err": 0.5627551558918055
+    },
+    "component_2_slow": {
+      "amplitude": 2.0423758853386142,
+      "amplitude_err": 0.047911812134703025,
+      "lifetime_ns": 294.05594129073876,
+      "lifetime_ns_err": 18.776181184960716
+    },
+    "baseline_offset": {
+      "C": 2.2777335573209712e-10,
+      "C_err": 0.003678966429832735
+    },
+    "tau_avg_amplitude_weighted_ns": 107.56130764942708
+  },
+  "fit_quality": {
+    "r_squared": 0.9997935423865927,
+    "rmse": 0.030426957549522033
+  },
+  "literature_files": null,
+  "quality_history": {
+    "final_r2": 0.9997935423865927,
+    "threshold": 0.95,
+    "approved": true,
+    "verification_iterations": [
+      {
+        "r_squared": 0.9997935423865927,
+        "annealing_level": 0,
+        "tools_used": [],
+        "model": "I(t) = A1*exp(-t/tau1) + A2*exp(-t/tau2) + C, where A1, A2 are amplitudes of the fast and slow PL decay channels, tau1 (short lifetime) and tau2 (long lifetime) are the two radiative/nonradiative decay constants, and C is a constant baseline offset (background/dark counts). Two exponential components (biexponential), one constant baseline term.",
+        "issues": [],
+        "fix_applied": "none"
+      }
+    ],
+    "alternative_models": [],
+    "script_errors": [],
+    "judge_reasoning": null,
+    "approved_by": "verifier"
+  }
+}

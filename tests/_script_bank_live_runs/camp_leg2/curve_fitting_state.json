@@ -1,0 +1,32 @@
+{
+  "action_history": [
+    {
+      "timestamp": "2026-07-10T21:07:41.230043",
+      "action": "curve_fit",
+      "input": {
+        "num_spectra": 2,
+        "input_type": "file_paths",
+        "series_metadata": {
+          "variable": "temperature",
+          "values": [
+            33.4,
+            35.9
+          ],
+          "unit": "C"
+        },
+        "r2_threshold": 0.95
+      },
+      "rationale": "Model: unknown",
+      "result": {
+        "total_spectra": 2,
+        "successful_fits": 2,
+        "flagged_count": 0,
+        "refitted_count": 0,
+        "input_type": "file_paths",
+        "locked_model": "Sum of split (asymmetric) pseudo-Voigt profiles, one per Bragg reflection, on a SNIP background (snip_iterations='auto'). eta (Gaussian-Lorentzian mixing) free per peak in [0,1]. Expected ~7\u20139 significant reflections: ~11.0\u00b0, ~17.7\u00b0, ~18.6\u00b0, ~19.2\u00b0 (weak), ~22.2\u00b0 (strong), ~24.6\u00b0 (weak/borderline), ~26.0\u00b0 (broad), ~29.5\u00b0, plus weaker high-angle features. Peaks within 1.5\u00d7FWHM (the 17.7/18.6/19.2 cluster) are fit jointly within the single global model.",
+        "is_single_spectrum": false
+      },
+      "feedback": null
+    }
+  ]
+}

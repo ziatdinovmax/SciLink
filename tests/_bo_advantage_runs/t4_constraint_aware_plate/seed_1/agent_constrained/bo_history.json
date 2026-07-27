@@ -1,0 +1,113 @@
+[
+  {
+    "step": 1,
+    "data_points": 12,
+    "config": {
+      "model_config": {
+        "kernel": "matern_2.5",
+        "noise": "min_noise_low",
+        "surrogate": "single_task"
+      },
+      "acquisition_strategy": {
+        "type": "thompson",
+        "params": {}
+      },
+      "rationale": "Step 0 with 12 initial data points and batch size 16 (>10). The yield landscape is highly skewed with a sharp peak (max 82.16 vs median 2.35), suggesting a localized optimum in T-pH space. Thompson sampling is ideal for this large batch: it provides natural diversity across the search space while probabilistically favoring the promising high-yield region. With no budget constraint and sparse data (12 points, 2D), we want broad coverage with exploitation bias. Matern-2.5 suits the expected smooth-but-peaked chemical yield surface. Low noise floor lets the GP learn freely \u2014 the extreme variation is likely real signal, not measurement noise.",
+      "batch_size": 16
+    },
+    "recommendation_batch": [
+      {
+        "T": 354.0,
+        "pH": 4.69
+      },
+      {
+        "T": 354.0,
+        "pH": 4.23
+      },
+      {
+        "T": 358.0,
+        "pH": 4.23
+      },
+      {
+        "T": 292.0,
+        "pH": 5.92
+      },
+      {
+        "T": 292.0,
+        "pH": 5.38
+      },
+      {
+        "T": 381.0,
+        "pH": 4.69
+      },
+      {
+        "T": 327.0,
+        "pH": 4.69
+      },
+      {
+        "T": 258.0,
+        "pH": 5.38
+      },
+      {
+        "T": 335.0,
+        "pH": 3.0
+      },
+      {
+        "T": 265.0,
+        "pH": 4.46
+      },
+      {
+        "T": 365.0,
+        "pH": 4.69
+      },
+      {
+        "T": 365.0,
+        "pH": 5.38
+      },
+      {
+        "T": 358.0,
+        "pH": 3.0
+      },
+      {
+        "T": 258.0,
+        "pH": 4.69
+      },
+      {
+        "T": 363.0,
+        "pH": 4.46
+      },
+      {
+        "T": 354.0,
+        "pH": 4.46
+      }
+    ],
+    "inspection": {
+      "status": "fail",
+      "reason": "LOO-CV Residuals: Data point index ~10 has a residual of ~75, which exceeds the 1\u03c3 pink band (~25) by approximately 3\u00d7, indicating a significant outlier or model miscalibration at that point. Most other residuals are within the band, so the model is generally reasonable but struggles with this high-leverage point. Trend (Top-Right): This is the initial data overview \u2014 no optimization has started yet, so no trend to evaluate. The initial data shows considerable spread with one very high observation (~83). Acquisition Function: The Thompson sampling landscape shows multiple peaks concentrated in the T=330\u2013390, pH=4.2\u20134.8 region. The candidate stars are generally clustered near these high-acquisition regions, which is appropriate. However, the landscape is quite noisy/spiky, which is characteristic of Thompson sampling but also suggests the Mat\u00e9rn 2.5 kernel may be fitting noise or the surface is genuinely rough. Sobol indices: pH = 0.7226, T = 0.6529. Both parameters are highly influential with substantial interaction effects (total-order sum = 1.3755 > 1). pH is slightly more influential than T. The large residual at point ~10 (~3\u00d7 the uncertainty band) warrants attention \u2014 this point likely corresponds to the high outlier (~83) in the initial data and is distorting the model.",
+      "suggested_adjustments": {
+        "noise": "min_noise_medium",
+        "kernel": "matern_2.5"
+      }
+    },
+    "budget": {
+      "budget_total": null,
+      "steps_completed": 0,
+      "budget_fraction_remaining": null,
+      "budget_phase": "unlimited",
+      "budget_guidance": "No experimental budget constraint. Balance exploration and exploitation normally."
+    },
+    "constrained_planning": {
+      "allocation_strategy": "56% of experiments (9) concentrated in top 5 regions (T\u2248354-381, pH\u22484.2-4.7 and T\u2248292, pH\u22485.9). 25% (4) in regions 6-9. 12.5% (2) for validation near current best. Remaining slot for boundary/exploration (Region 14: T=258, pH=4.69).",
+      "coverage_summary": "Covered 13 of top 15 regions. Region 10 (T\u2248304, pH\u22484.77) partially covered by nearby Region 5 experiment. Region 15 (T\u2248388, pH\u22484.0) skipped\u2014closest feasible T=381 already used for Region 4. All regions feasible within bounds.",
+      "trade_offs": "Region 2 center is T=357.7, snapped to T=358 (deviation <0.3). Region 6 center pH=5.54, snapped to 5.38 (deviation 0.16, within spread of 0.325). Region 8 center T=265.4, snapped to 265. Used 9 unique T values via T=358 and T=363 additions to capture both BO suggestions and validation needs.",
+      "validation_points": "Experiments 15 (T=363, pH=4.46) and 16 (T=354, pH=4.46) serve as near-replicates of the current best (T=363, pH=4.46, yield=82.16) to confirm reproducibility and bracket the optimum.",
+      "pareto_strategy": "",
+      "valid_count": 16,
+      "requested_count": 16,
+      "shortfall": 0,
+      "validation_errors": null,
+      "attempts": 1
+    },
+    "physical_constraints": "96-well plate: rows share temperature (8 unique values), columns share pH (12 unique values). Design 16 wells that fit on the plate."
+  }
+]

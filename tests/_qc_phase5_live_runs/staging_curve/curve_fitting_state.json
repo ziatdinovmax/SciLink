@@ -1,0 +1,237 @@
+{
+  "action_history": [
+    {
+      "timestamp": "2026-07-09T21:23:23.027288",
+      "action": "curve_fit",
+      "input": {
+        "num_spectra": 1,
+        "input_type": "file_paths",
+        "series_metadata": null,
+        "r2_threshold": 0.95
+      },
+      "rationale": "Model: Sum of 13 pseudo-Voigt profiles on a linear baseline (nu1 core/wing split, nu4 doublet, lattice modes, high-x doublet)",
+      "result": {
+        "status": "success",
+        "output_directory": "/Users/maxim.ziatdinov/Code/SciLink/tests/_qc_phase5_live_runs/staging_curve",
+        "task_mode": "fitting",
+        "detailed_analysis": "The spectrum is diagnostic of a CaCO3-family carbonate. The four internal/external mode groups match the carbonate fingerprint: (1) \u03bd1 symmetric CO3 stretch at 1085.2 cm-1 (dominant, sharp, FWHM ~2.7 cm-1); (2) \u03bd4 in-plane bend resolved as a doublet at 701.3 and 705.7 cm-1; (3) lattice/external modes at ~156, 190, 213, 272, and 284 cm-1; and (4) broad higher-shift bands at 1206 and 1238 cm-1 (likely combination/overtone or \u03bd3-region features). The critical discriminator is polymorph identity. Per the mandatory domain rules, calcite shows \u03bd1 ~1086 with a SINGLE \u03bd4 near 712 and a lattice mode near 282, whereas aragonite shows \u03bd1 ~1085 with a \u03bd4 DOUBLET at 705+701 and lattice modes near 152 and 206. The fitted spectrum has a clearly resolved 701/706 \u03bd4 doublet plus the ~156/213 lattice pattern, which matches ARAGONITE and rules against calcite (a single 712 band and 282 mode are not what is observed). The resolved \u03bd4 doublet is the decisive feature and exactly the polymorph separator the rules emphasize. The \u03bd1 core/wing decomposition (1085.2 sharp core + 1083.0 broader wing) is a fitting device rather than two physical modes; the residual ringing at the apex most plausibly reflects finite spectrometer sampling of an extremely narrow line, slight instrumental asymmetry, or minor detector nonlinearity at very high count rates, rather than a distinct vibrational transition. Band summary (center cm-1, relative intensity, strongest first): 1085.2 (1.00), 701.3 (0.15), 213.4 (0.09), 705.7 (0.10), 189.5 (0.06), 1238.1 (0.07), 272.0 (0.03), 283.7 (0.03), 1206.3 (0.05), 142.8 (0.02), 156.0 (0.005), 1105 (0.02). Note: relative intensities use fitted amplitudes; the 1083/1085 pair should be summed as one \u03bd1. No sample chemistry (EDX/XRF) was provided, so this identification is pattern-only; the pattern is internally consistent with aragonite but Ca is not independently confirmed.",
+        "scientific_claims": [
+          {
+            "claim": "The sample is identified as aragonite (CaCO3 orthorhombic polymorph) on the basis of a resolved \u03bd4 doublet at 701.3 \u00b1 0.02 and 705.7 \u00b1 0.02 cm-1 together with \u03bd1 at 1085.2 \u00b1 0.003 cm-1 and lattice modes at ~156 and ~213 cm-1, distinguishing it from calcite.",
+            "scientific_impact": "Polymorph discrimination between aragonite and calcite is central to biomineralization, paleoclimate proxies, and diagenesis studies; the \u03bd4 doublet and low-frequency lattice modes provide the definitive Raman signature and prevent the common misassignment of aragonite as calcite from the \u03bd1 band alone.",
+            "has_anyone_question": "Has anyone confirmed that a resolved Raman \u03bd4 doublet near 701/706 cm-1 with \u03bd1 at ~1085 cm-1 uniquely identifies aragonite versus calcite in unknown CaCO3 samples?",
+            "keywords": [
+              "aragonite",
+              "carbonate polymorph",
+              "Raman spectroscopy",
+              "\u03bd4 doublet",
+              "CaCO3"
+            ]
+          }
+        ],
+        "model_type": "Sum of 13 pseudo-Voigt profiles on a linear baseline (nu1 core/wing split, nu4 doublet, lattice modes, high-x doublet)",
+        "fitting_parameters": {
+          "peak_1": {
+            "center": 142.79762338161964,
+            "center_err": 0.07209452181303455,
+            "amplitude": 299.5807261207097,
+            "amplitude_err": 14.487249195686154,
+            "fwhm": 3.878560419286869,
+            "fwhm_err": 0.20635514518958292,
+            "eta": 0.19823962928570765,
+            "eta_err": 0.2308516059706946
+          },
+          "peak_2": {
+            "center": 156.00000000000003,
+            "center_err": 0.45620935209053703,
+            "amplitude": 98.90072904367926,
+            "amplitude_err": 7.649235766414443,
+            "fwhm": 13.045371619501196,
+            "fwhm_err": 1.1433597662335837,
+            "eta": 1.0230595739788071e-32,
+            "eta_err": 0.5215148396482209
+          },
+          "peak_3": {
+            "center": 189.54630922158574,
+            "center_err": 0.03644028280335725,
+            "amplitude": 1087.031613987392,
+            "amplitude_err": 9.591242808541267,
+            "fwhm": 9.851843639348768,
+            "fwhm_err": 0.14119098800594676,
+            "eta": 0.9999999999999999,
+            "eta_err": 0.047799922095323376
+          },
+          "peak_4": {
+            "center": 213.36865930528043,
+            "center_err": 0.03658086932538115,
+            "amplitude": 1762.922978153375,
+            "amplitude_err": 14.155118682840067,
+            "fwhm": 10.980343274844584,
+            "fwhm_err": 0.09979058454685441,
+            "eta": 0.13587690353582516,
+            "eta_err": 0.03762408132763438
+          },
+          "peak_5": {
+            "center": 272.03940175043067,
+            "center_err": 0.2642585944760875,
+            "amplitude": 526.8571393100221,
+            "amplitude_err": 20.61690058117091,
+            "fwhm": 11.718809726536985,
+            "fwhm_err": 0.6044172719187294,
+            "eta": 1.5415120506640986e-31,
+            "eta_err": 0.1662655371272296
+          },
+          "peak_6": {
+            "center": 283.68415349692447,
+            "center_err": 0.327383808124436,
+            "amplitude": 496.13298169309957,
+            "amplitude_err": 22.43211568220462,
+            "fwhm": 10.943190622969228,
+            "fwhm_err": 0.8445014263682724,
+            "eta": 0.9999999999633271,
+            "eta_err": 0.19367373349875733
+          },
+          "peak_7": {
+            "center": 701.3406431669144,
+            "center_err": 0.022424293765490877,
+            "amplitude": 2810.1018909203885,
+            "amplitude_err": 20.92425812750629,
+            "fwhm": 4.770589145777988,
+            "fwhm_err": 0.06758676846724088,
+            "eta": 0.9999999999999999,
+            "eta_err": 0.03190363669918339
+          },
+          "peak_8": {
+            "center": 705.6567584397044,
+            "center_err": 0.022442992718642484,
+            "amplitude": 1914.7845439678754,
+            "amplitude_err": 23.051210091997113,
+            "fwhm": 3.542428857516656,
+            "fwhm_err": 0.05591521080340725,
+            "eta": 0.2587056010748463,
+            "eta_err": 0.051502886894286816
+          },
+          "peak_9": {
+            "center": 1085.1872924020975,
+            "center_err": 0.0034190365982967185,
+            "amplitude": 18837.284538214306,
+            "amplitude_err": 476.6667715860071,
+            "fwhm": 2.711229303862689,
+            "fwhm_err": 0.032774523869162374,
+            "eta": 0.30000000000000004,
+            "eta_err": 0.024776767053518976
+          },
+          "peak_10": {
+            "center": 1083.0309316124076,
+            "center_err": 0.1357087998972435,
+            "amplitude": 5757.948915070541,
+            "amplitude_err": 270.94722255500466,
+            "fwhm": 5.335724154821326,
+            "fwhm_err": 0.14225837502193217,
+            "eta": 0.015004280205773489,
+            "eta_err": 0.028129069939523067
+          },
+          "peak_11": {
+            "center": 1104.9999999999998,
+            "center_err": 0.5774520528607435,
+            "amplitude": 438.47169410030216,
+            "amplitude_err": 9.914371483193447,
+            "fwhm": 32.97683055503185,
+            "fwhm_err": 1.7725194067623706,
+            "eta": 0.8333427770697979,
+            "eta_err": 0.11385999596178503
+          },
+          "peak_12": {
+            "center": 1206.266414972835,
+            "center_err": 0.08443826756950505,
+            "amplitude": 1018.3742040918721,
+            "amplitude_err": 11.10449621288004,
+            "fwhm": 19.375447977958306,
+            "fwhm_err": 0.22144338895012466,
+            "eta": 0.0681930788333772,
+            "eta_err": 0.0581434155948444
+          },
+          "peak_13": {
+            "center": 1238.101485570817,
+            "center_err": 0.07444354285495434,
+            "amplitude": 1396.1921104708258,
+            "amplitude_err": 9.3202114449889,
+            "fwhm": 25.08149542657692,
+            "fwhm_err": 0.1995127879452518,
+            "eta": 4.762576163177609e-36,
+            "eta_err": 0.04470240953607868
+          },
+          "baseline": {
+            "slope": -0.015276442112209247,
+            "slope_err": 0.005739711124738755,
+            "intercept": 12.667714599658295,
+            "intercept_err": 3.922030702976649
+          }
+        },
+        "fit_quality": {
+          "r_squared": 0.9989411864233013,
+          "rmse": 36.10114337750321
+        },
+        "literature_files": null,
+        "quality_history": {
+          "final_r2": 0.9989411864233013,
+          "threshold": 0.95,
+          "approved": true,
+          "verification_iterations": [
+            {
+              "r_squared": 0.9714010836325138,
+              "annealing_level": 2,
+              "tools_used": [],
+              "model": "Sum of pseudo-Voigt profiles on a linear baseline. 9 components: (1) ~185 cm\u207b\u00b9 lattice mode, (2) ~213 cm\u207b\u00b9 lattice mode, (3) ~272 cm\u207b\u00b9 and (4) ~284 cm\u207b\u00b9 (resolved doublet from zoom), (5) ~700 cm\u207b\u00b9 and (6) ~706 cm\u207b\u00b9 (\u03bd4 doublet from zoom), (7) ~1088 cm\u207b\u00b9 strong \u03bd1 symmetric stretch, (8) ~1100 cm\u207b\u00b9 shoulder, (9) ~1210 cm\u207b\u00b9 and add ~1240 cm\u207b\u00b9 \u2014 the high-wavenumber region is a doublet, so 10 components total (splitting 9 into 1210 + 1240).",
+              "issues": [
+                {
+                  "location": "1058.3\u20131129.4 (main peak at ~1085)",
+                  "problem": "The dominant peak is systematically under-fit at its apex and its width/shape is wrong. The fit peaks at ~20000 while data reaches ~22000, and the fit is too narrow on the rising/falling flanks, producing a large dispersive (derivative-like) residual with 4 sign-changes."
+                },
+                {
+                  "location": "134.6\u2013205.7 (low-x multiplet)",
+                  "problem": "Multiple real features are unmodelled/under-resolved. The data shows a clear shoulder near ~142.8 and a peak near ~161 that the fit renders as essentially zero baseline, and the peak near ~189 is under-fit."
+                },
+                {
+                  "location": "632.0\u2013703.1 (doublet at ~701/706)",
+                  "problem": "The sharp doublet apexes are under-resolved; the fit undershoots both maxima (~701 and ~706) and produces a ringing residual."
+                },
+                {
+                  "location": "1200.4\u20131271.5 (high-x doublet)",
+                  "problem": "Localized systematic residual with 5 sign-changes indicates the ~1207/~1238 doublet shape is not fully captured."
+                }
+              ],
+              "fix_applied": "Add components seeded at x\u22481085 (narrow core on the main peak), x\u2248142.8, and x\u2248161; free/relax peak-shape (eta) and widths on peaks 5/6 and the main peak, then refit."
+            },
+            {
+              "r_squared": 0.9989411864233013,
+              "annealing_level": 2,
+              "tools_used": [],
+              "model": "Sum of pseudo-Voigt profiles on a linear baseline, now 13 components: (1) ~142.8 cm\u207b\u00b9 lattice shoulder (NEW), (2) ~161 cm\u207b\u00b9 weak lattice mode (NEW), (3) ~189 cm\u207b\u00b9 lattice mode (re-seeded/broadened from prior ~185), (4) ~213 cm\u207b\u00b9 lattice mode, (5) ~272 cm\u207b\u00b9 and (6) ~284 cm\u207b\u00b9 resolved lattice doublet, (7) ~701 cm\u207b\u00b9 and (8) ~706 cm\u207b\u00b9 \u03bd4 bending doublet (widths/eta freed), (9) ~1085 cm\u207b\u00b9 SHARP CORE of the \u03bd1 symmetric stretch and (10) ~1088 cm\u207b\u00b9 BROADER WING sharing the \u03bd1 apex (core/wing two-component decomposition, replacing the single dominant band), (11) ~1100 cm\u207b\u00b9 shoulder, (12) ~1207 cm\u207b\u00b9 and (13) ~1238 cm\u207b\u00b9 high-wavenumber doublet. This is consistent with a sulfate/carbonate-like species: strong \u03bd1 symmetric stretch near 1085 (with a sharp lorentzian-dominated core on broader wings), \u03bd4 bending doublet near 700, and lattice/external modes below ~300 cm\u207b\u00b9. The core/wing split on \u03bd1 is justified by the derivative-like residual with 4 sign-changes and the apex under-fit (fit 20000 vs data 22000), which a single symmetric profile cannot reproduce.",
+              "issues": [
+                {
+                  "location": "1058.3\u20131129.4 (main \u03bd1 peak apex, x\u22481085)",
+                  "problem": "Sharp derivative-like residual at the apex of the dominant peak (\u00b1500 counts, ringing with 4 sign-changes)."
+                },
+                {
+                  "location": "134.6\u2013205.7 low-x multiplet",
+                  "problem": "Low-amplitude wavy residual (\u00b1100 on features up to ~1900)."
+                }
+              ],
+              "fix_applied": "none"
+            }
+          ],
+          "alternative_models": [],
+          "script_errors": [],
+          "judge_reasoning": null,
+          "approved_by": "verifier"
+        },
+        "staged_solutions": [
+          "b6b16b56",
+          "fe696011"
+        ]
+      },
+      "feedback": null
+    }
+  ]
+}

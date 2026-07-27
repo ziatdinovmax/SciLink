@@ -626,7 +626,12 @@ class OrchestratorTools:
             except Exception:  # noqa: BLE001
                 ideation = False
         if ideation:
-            return None
+            # Now that the generator has a portfolio template, an ideation
+            # campaign gets a real browser-readable report — under its own
+            # name, because "plan.html" is what this whole change is getting
+            # ideation out of. Not starred: the deliverables stay the dossier
+            # and the white paper (_record_plan_report is lab-only).
+            name = "portfolio.html" if name == "plan.html" else name
         from .html_generator import HTMLReportGenerator
         html_path = self._output_dir() / name
         HTMLReportGenerator(self.orch.planner.state).generate(str(html_path))
@@ -1649,6 +1654,19 @@ class OrchestratorTools:
 
             ext_ctx = "\n\n".join(external_context_parts) if external_context_parts else None
 
+            # DEPRECATED: ideation through the experiment tool. It is what
+            # the portfolio contract replaces, so forward rather than author
+            # a portfolio into the wrong schema one more time. Removed once
+            # no caller passes it.
+            if selection_profile == "ideation" and kind != "portfolio":
+                logging.warning(
+                    "selection_profile='ideation' on generate_initial_plan is "
+                    "deprecated — forwarding to the portfolio contract; call "
+                    "generate_ideation_portfolio directly.")
+                print("    ↪️  ideation profile is deprecated on this tool — "
+                      "authoring a portfolio instead.")
+                kind = "portfolio"
+
             try:
                 n_cand = resolve_n_candidates(
                     n_candidates, self.orch.planner.state,
@@ -1731,6 +1749,7 @@ class OrchestratorTools:
                 # tables) with no ideation vocabulary, which misrepresents a
                 # free-form research dossier; there the white paper is the
                 # human-facing artifact and plan.json keeps the record.
+                # (see the deprecation forward above)
                 # Ask the PLAN what it is, not the best-of-N judge knob.
                 # `selection_profile` weights candidate selection and is a
                 # documented no-op with n_candidates=1 — so a consolidation

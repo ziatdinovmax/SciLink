@@ -1,0 +1,267 @@
+{
+  "action_history": [
+    {
+      "timestamp": "2026-07-10T19:50:23.743585",
+      "action": "curve_fit",
+      "input": {
+        "num_spectra": 1,
+        "input_type": "file_paths",
+        "series_metadata": null,
+        "r2_threshold": 0.95
+      },
+      "rationale": "Model: Sum of 13 Lorentzian-dominated pseudo-Voigt peaks (eta seeded ~0.8) on a constant+linear baseline, fit simultaneously over the full 109-1271 cm-1 range via TRF (Levenberg-Marquardt-style) least squares. Seed centers: ~120(shoulder), 130, 205, 262, 356, 402, 450(shoulder), 464, 505, 700, 810, 1085, 1160 cm-1. Dropped the spurious ~415 candidate; added a 120 cm-1 shoulder on the 130-band low flank and a 450 cm-1 shoulder on the 464-band rising flank to resolve the asymmetric composite line shapes. band_700 FWHM upper bound widened to 55 cm-1. No ALS subtraction (rolling-min baseline area fraction = 0.192, not fluorescence-dominated); background modeled as constant+linear parameters. Center windows +/-10 cm-1 (shoulders tighter: 116-124 and 445-455), FWHM 2-40 cm-1, amp>=0, eta in [0,1].",
+      "result": {
+        "status": "success",
+        "output_directory": "/Users/maxim.ziatdinov/Code/SciLink/tests/_script_bank_live_runs/adapt_miss",
+        "task_mode": "fitting",
+        "detailed_analysis": "Band summary (center cm-1, relative intensity, strongest first): 464.0 (1.00, sharp, eta~0.89), 203.4 (0.32, broad FWHM ~27), 127.5 (0.24), 454-455 shoulder (0.15), 124 shoulder (0.09), 354.3 (0.08), 263.4 (0.07), 507.6 (0.03), 807.6 (0.03), 393.4 (0.02), 1081.1 (0.015), 1158.8 (0.012), 691.6 (0.007). The dominant sharp 464 cm-1 band (FWHM ~9.6 cm-1, center error 0.01 cm-1) is diagnostic of the alpha-quartz A1 symmetric Si-O-Si bending mode. The broad 205 cm-1 band and sharp 128, 356, 394, 507 cm-1 features complete the quartz lattice/framework mode pattern (positions match alpha-quartz within a few cm-1: 128, 206, 265, 355, 394, 464, 507). This is a multi-band, multi-intensity match (not just the strongest band), so the quartz assignment is well supported. The 262 cm-1 band is a known quartz weak mode. The residual bands are NOT explained by quartz: 1085 cm-1 with 155/282-region lattice modes would suggest a carbonate nu1 (calcite/aragonite ~1085-1086), but the required strong 712/282 or 705/206 companions are not clearly resolved above the quartz bands, so a carbonate accessory is only tentative; 807 cm-1 is near the olivine/silicate region but lacks its diagnostic pair; 700 and 1160 cm-1 are weak and broad. These minor bands most plausibly indicate a low-abundance secondary silicate/carbonate phase or amorphous/defect contributions, but none forms a complete secondary fingerprint on its own. Baseline is linear with small slope (0.0166) and rolling-min area fraction 0.192, confirming no fluorescence domination. Center parameters for strong bands are exceptionally well constrained; eta values pinned at 0 or 1 on shoulders/weak bands indicate those lineshapes are not independently determined.",
+        "scientific_claims": [
+          {
+            "claim": "The dominant Raman band at 464.0 +/- 0.01 cm-1 (FWHM 9.58 +/- 0.04 cm-1, eta 0.885) together with bands at 127.5, 203.4, 263.4, 354.3, 393.4, and 507.6 cm-1 identifies the sample as alpha-quartz (SiO2), with weak accessory bands at 700-1160 cm-1 indicating a minor secondary phase.",
+            "scientific_impact": "A full multi-band match (positions and relative intensities) rather than a single-line match provides a robust mineralogical identification; the well-constrained 464 cm-1 position and width can serve as a crystallinity/strain indicator for quartz in the specimen.",
+            "has_anyone_question": "Has anyone characterized quartz identification and crystallinity from the 464 cm-1 A1 mode position and width alongside a minor accessory phase in the 700-1160 cm-1 region?",
+            "keywords": [
+              "alpha-quartz",
+              "Raman spectroscopy",
+              "464 cm-1 A1 mode",
+              "mineral identification",
+              "pseudo-Voigt fitting"
+            ]
+          }
+        ],
+        "model_type": "Sum of 13 Lorentzian-dominated pseudo-Voigt peaks (eta seeded ~0.8) on a constant+linear baseline, fit simultaneously over the full 109-1271 cm-1 range via TRF (Levenberg-Marquardt-style) least squares. Seed centers: ~120(shoulder), 130, 205, 262, 356, 402, 450(shoulder), 464, 505, 700, 810, 1085, 1160 cm-1. Dropped the spurious ~415 candidate; added a 120 cm-1 shoulder on the 130-band low flank and a 450 cm-1 shoulder on the 464-band rising flank to resolve the asymmetric composite line shapes. band_700 FWHM upper bound widened to 55 cm-1. No ALS subtraction (rolling-min baseline area fraction = 0.192, not fluorescence-dominated); background modeled as constant+linear parameters. Center windows +/-10 cm-1 (shoulders tighter: 116-124 and 445-455), FWHM 2-40 cm-1, amp>=0, eta in [0,1].",
+        "fitting_parameters": {
+          "peak_1": {
+            "label": "band_120_shoulder",
+            "center": 123.99999999999999,
+            "center_err": 0.5230879930679855,
+            "amplitude": 201.4858327798057,
+            "amplitude_err": 29.473933289993145,
+            "fwhm": 11.948210382270037,
+            "fwhm_err": 0.3892682291697255,
+            "eta": 1.4732522569216735e-22,
+            "eta_err": 0.11942386727052424,
+            "integrated_area": 2558.667345005364,
+            "relative_intensity": 0.09359657624657151
+          },
+          "peak_2": {
+            "label": "band_130",
+            "center": 127.4722372479515,
+            "center_err": 0.028103873141195463,
+            "amplitude": 516.771160604736,
+            "amplitude_err": 37.24032813185523,
+            "fwhm": 5.234421745436399,
+            "fwhm_err": 0.19522678066211221,
+            "eta": 0.20119608878224043,
+            "eta_err": 0.15572638909679073,
+            "integrated_area": 3116.074588021459,
+            "relative_intensity": 0.2400566365796524
+          },
+          "peak_3": {
+            "label": "band_205",
+            "center": 203.4143951632975,
+            "center_err": 0.029436542972202582,
+            "amplitude": 681.4158367250167,
+            "amplitude_err": 1.8401541045980907,
+            "fwhm": 27.541919690176506,
+            "fwhm_err": 0.102808769492572,
+            "eta": 0.6039474960746314,
+            "eta_err": 0.013218140819338753,
+            "integrated_area": 24822.71191875713,
+            "relative_intensity": 0.31653932406927343
+          },
+          "peak_4": {
+            "label": "band_262",
+            "center": 263.42783526413416,
+            "center_err": 0.08191105119817368,
+            "amplitude": 141.0913654885451,
+            "amplitude_err": 3.1958526359490675,
+            "fwhm": 8.293298482700507,
+            "fwhm_err": 0.33193483143749597,
+            "eta": 0.9999999999999999,
+            "eta_err": 0.10192898005363285,
+            "integrated_area": 1819.8975214579923,
+            "relative_intensity": 0.06554142574437653
+          },
+          "peak_5": {
+            "label": "band_356",
+            "center": 354.3086780362898,
+            "center_err": 0.05936809679584945,
+            "amplitude": 179.18919623429235,
+            "amplitude_err": 3.4523063500960665,
+            "fwhm": 7.04178656342054,
+            "fwhm_err": 0.24075018670639353,
+            "eta": 0.9999999999999999,
+            "eta_err": 0.08627454617551739,
+            "integrated_area": 1970.5724822318339,
+            "relative_intensity": 0.08323907957456037
+          },
+          "peak_6": {
+            "label": "band_402",
+            "center": 393.39432366131064,
+            "center_err": 0.23702537871343252,
+            "amplitude": 49.4017408591598,
+            "amplitude_err": 2.3764021862280305,
+            "fwhm": 11.345034910449787,
+            "fwhm_err": 0.6582972774173417,
+            "eta": 3.601313968539091e-25,
+            "eta_err": 0.22523506584778016,
+            "integrated_area": 596.5959488641901,
+            "relative_intensity": 0.022948679523740443
+          },
+          "peak_7": {
+            "label": "band_450_shoulder",
+            "center": 454.99999999999994,
+            "center_err": 0.2635505635824657,
+            "amplitude": 323.2152786468277,
+            "amplitude_err": 5.624251959157834,
+            "fwhm": 15.598893276285175,
+            "fwhm_err": 0.43012654433614167,
+            "eta": 1.3683350894063651e-27,
+            "eta_err": 0.05026656048650153,
+            "integrated_area": 5366.830496502879,
+            "relative_intensity": 0.15014377464933462
+          },
+          "peak_8": {
+            "label": "band_464",
+            "center": 464.0383474893983,
+            "center_err": 0.012590248540489011,
+            "amplitude": 2152.705161447465,
+            "amplitude_err": 14.16689381627974,
+            "fwhm": 9.580753710227873,
+            "fwhm_err": 0.03633605144909498,
+            "eta": 0.8851535905216934,
+            "eta_err": 0.01237976448490912,
+            "integrated_area": 31020.2926940778,
+            "relative_intensity": 1.0
+          },
+          "peak_9": {
+            "label": "band_505",
+            "center": 507.62996679376,
+            "center_err": 0.15385541397362262,
+            "amplitude": 74.20308595111428,
+            "amplitude_err": 3.2010031810694017,
+            "fwhm": 8.109997828009154,
+            "fwhm_err": 0.6236913475559912,
+            "eta": 0.9999999999999999,
+            "eta_err": 0.19181541902220292,
+            "integrated_area": 940.6255331106646,
+            "relative_intensity": 0.03446969296121379
+          },
+          "peak_10": {
+            "label": "band_700",
+            "center": 691.5778058696569,
+            "center_err": 2.134106417994818,
+            "amplitude": 13.997532496060192,
+            "amplitude_err": 1.2909959317769313,
+            "fwhm": 54.99999999999999,
+            "fwhm_err": 8.669867651219661,
+            "eta": 0.9999999999999999,
+            "eta_err": 0.4394020996588596,
+            "integrated_area": 1172.8844310139157,
+            "relative_intensity": 0.00650229894308812
+          },
+          "peak_11": {
+            "label": "band_810",
+            "center": 807.5648792017105,
+            "center_err": 0.2112085823318859,
+            "amplitude": 67.39847795974222,
+            "amplitude_err": 2.5564675834453454,
+            "fwhm": 12.618819910167929,
+            "fwhm_err": 0.8561943882841182,
+            "eta": 0.9999999999999999,
+            "eta_err": 0.16718096466561766,
+            "integrated_area": 1326.3141839055077,
+            "relative_intensity": 0.031308736173802795
+          },
+          "peak_12": {
+            "label": "band_1085",
+            "center": 1081.1415887509436,
+            "center_err": 0.3563053077848667,
+            "amplitude": 33.245612874052675,
+            "amplitude_err": 2.872217505219428,
+            "fwhm": 9.219576383908944,
+            "fwhm_err": 1.3206203447227847,
+            "eta": 0.7908569954170239,
+            "eta_err": 0.37325914413835715,
+            "integrated_area": 445.4886231017639,
+            "relative_intensity": 0.015443644336179573
+          },
+          "peak_13": {
+            "label": "band_1160",
+            "center": 1158.8214852913409,
+            "center_err": 0.47760428078237227,
+            "amplitude": 24.993181875346774,
+            "amplitude_err": 2.2774664148236075,
+            "fwhm": 11.813398509927262,
+            "fwhm_err": 1.3115996582711789,
+            "eta": 4.52974367202979e-25,
+            "eta_err": 0.4066874977445332,
+            "integrated_area": 314.28858979630064,
+            "relative_intensity": 0.011610127723455413
+          },
+          "baseline": {
+            "slope": 0.01660914765662665,
+            "slope_err": 0.0010100306328142395,
+            "intercept": -16.7764072638826,
+            "intercept_err": 0.994928213543189
+          }
+        },
+        "fit_quality": {
+          "r_squared": 0.9988306651804628,
+          "rmse": 7.144047043923161
+        },
+        "literature_files": null,
+        "quality_history": {
+          "final_r2": 0.9988306651804628,
+          "threshold": 0.95,
+          "approved": true,
+          "verification_iterations": [
+            {
+              "r_squared": 0.9924120574455726,
+              "annealing_level": 0,
+              "tools_used": [],
+              "model": "Sum of pseudo-Voigt profiles (Lorentzian-weighted, eta ~0.7-1.0) on a constant+linear baseline (no ALS; background is <40% of area). Start with 12 components: ~130, 205, 262, 356, 402, ~415 (weak broad feature seen in the 399-436 zoom), 464, 505, 700, 810, 1085, 1160 cm-1. Keep the ~415 component only if it survives fitting with amplitude above the noise floor; drop it if it parks on noise. I(x) = b0 + b1*x + Sum_i A_i*pseudoVoigt(x; x0_i, w_i, eta_i).",
+              "issues": [
+                {
+                  "location": "~450 cm-1 (rising edge of the 464 band, region 399.4\u2013472.1)",
+                  "problem": "The main 464 peak is under-resolved: the data shows a distinct shoulder/inflection on its low-frequency rising flank (~448\u2013455) that the single Lorentzian at 463.4 does not cover."
+                },
+                {
+                  "location": "465\u2013475 cm-1 (high-frequency edge of 464 band, region 472.1\u2013544.7)",
+                  "problem": "Asymmetry of the 464 band is not captured; the fit overshoots the apex and falls too slowly on the descending flank."
+                },
+                {
+                  "location": "119\u2013128 cm-1 (band_130, region 109.0\u2013181.6)",
+                  "problem": "The 130 band is under-resolved on its low-frequency side; the fit misses a shoulder near ~119\u2013120 and mis-tracks the apex."
+                }
+              ],
+              "fix_applied": "Add a component seeded at ~450 cm-1 on the rising flank of the 464 band (and let band_130 relax/add a ~120 cm-1 shoulder) to resolve the systematic residual structure; drop or re-seed the noise-fitting band_415 candidate."
+            },
+            {
+              "r_squared": 0.9988306651804628,
+              "annealing_level": 0,
+              "tools_used": [],
+              "model": "Sum of pseudo-Voigt profiles (Lorentzian-weighted, eta ~0.7-1.0) on a constant+linear baseline (no ALS; background is <40% of area). I(x) = b0 + b1*x + Sum_i A_i*pseudoVoigt(x; x0_i, w_i, eta_i). Component set updated: retain the core bands at ~130, 205, 262, 356, 402, 464, 505, 700, 810, 1085, 1160 cm-1. DROP the spurious ~415 candidate (peak_6), which refined to noise-level amplitude (8.7 \u00b1 9.8), center pinned at its 405 bound, and eta~0. ADD a shoulder component at ~450 cm-1 on the low-frequency rising flank of the 464 band to resolve its documented shoulder/inflection and reproduce the band's asymmetric line shape via the composite of the 450 + 464 pair. ADD (or re-seed) a shoulder component at ~120 cm-1 on the low-frequency flank of the 130 band to capture the under-resolved 119-120 shoulder. Net component count moves from 12 to ~13 (drop 415, add 450 and 120; band_130 either relaxes or gains a shoulder).",
+              "issues": [
+                {
+                  "location": "181.6\u2013254.2 cm-1 (band_205 flank) and 109\u2013181.6 (baseline between band_130 and band_262)",
+                  "problem": "Residual shows low-amplitude coherent ripple (RMS/noise ~30x, few sign changes) along the flanks of the strong 205 band and across the shallow baseline region."
+                }
+              ],
+              "fix_applied": "none"
+            }
+          ],
+          "alternative_models": [],
+          "script_errors": [],
+          "judge_reasoning": null,
+          "approved_by": "verifier"
+        },
+        "banked_scripts": [
+          "f68c1956"
+        ]
+      },
+      "feedback": null
+    }
+  ]
+}

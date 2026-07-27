@@ -1,0 +1,146 @@
+{
+  "action_history": [
+    {
+      "timestamp": "2026-07-10T19:08:38.409697",
+      "action": "curve_fit",
+      "input": {
+        "num_spectra": 1,
+        "input_type": "file_paths",
+        "series_metadata": null,
+        "r2_threshold": 0.95
+      },
+      "rationale": "Model: Sum of 7 pseudo-Voigt peaks on a linear baseline (Levenberg-Marquardt least squares); reseeded/retuned peak_1 (~141) and peak_4 (~394) to narrower FWHM + intermediate-high eta, reassigned peak_2 (~197 narrow) and peak_3 (~307 broad hump), FWHM capped at 50 cm-1; flat/linear baseline confirmed (rolling-min baseline area fraction = 0.206, not fluorescence-dominated)",
+      "result": {
+        "status": "success",
+        "output_directory": "/Users/maxim.ziatdinov/Code/SciLink/tests/_script_bank_live_runs/curve_reuse",
+        "task_mode": "fitting",
+        "detailed_analysis": "The fitted band centers (141.1, 196.6, 393.6, 514.4, 636.4 cm-1) match the anatase TiO2 Raman active modes: Eg(~144), Eg(~197), B1g(~399), A1g+B1g(~516), Eg(~639). The dominant Eg mode at 141 cm-1 is very strong (relative intensity 1.0) and narrow (FWHM ~11 cm-1), consistent with well-crystallized anatase; a slight downshift from 144 toward 141 and the narrow width are typical of larger, well-ordered crystallites (nanoscale anatase would blueshift and broaden this band, so this points to bulk/large-grain material). The intensity ordering (141 >> 394 > 514 > 636 > 197) reproduces the canonical anatase pattern. No rutile signature (447/612 cm-1) or 144-absence is seen, so the material is essentially phase-pure anatase. The weak broad hump near 297 cm-1 and the band near 794 cm-1 are not fundamental anatase modes; 297 is likely a weak second-order/combination feature or fit artifact, and 794 (broad, FWHM-railed) is most plausibly a second-order overtone (anatase shows weak features ~796 cm-1, the B1g overtone) rather than a distinct phase. The linear baseline and 0.206 baseline fraction confirm a non-fluorescent crystalline oxide. The persistent bimodal residual on the 141 cm-1 band suggests real asymmetry (Fano-type or anharmonic broadening common in the anatase Eg mode) that a symmetric pseudo-Voigt cannot fully capture. No chemistry (EDX/XRF) was provided, so this is a pattern-only identification, but the full five-band match (positions AND relative intensities) strongly supports anatase over any single-band coincidence.",
+        "scientific_claims": [
+          {
+            "claim": "The spectrum is identified as anatase TiO2, with the dominant Eg mode at 141.10 +/- 0.03 cm-1 (FWHM 11.4 +/- 0.1 cm-1) and companion bands at 196.6, 393.6, 514.4, and 636.4 cm-1 matching the anatase mode pattern in both position and relative intensity.",
+            "scientific_impact": "A phase-pure anatase identification with a sharp, only slightly downshifted main Eg band indicates well-crystallized, likely bulk/large-grain material rather than nanoscale anatase; the precise Eg position and width are diagnostic of crystallite size, oxygen stoichiometry, and strain state.",
+            "has_anyone_question": "Has anyone observed a phase-pure anatase TiO2 with an Eg Raman mode at ~141 cm-1 and FWHM ~11 cm-1, and how do this position and width map to crystallite size and stoichiometry?",
+            "keywords": [
+              "anatase",
+              "TiO2",
+              "Raman spectroscopy",
+              "Eg mode",
+              "phase identification",
+              "crystallite size"
+            ]
+          }
+        ],
+        "model_type": "Sum of 7 pseudo-Voigt peaks on a linear baseline (Levenberg-Marquardt least squares); reseeded/retuned peak_1 (~141) and peak_4 (~394) to narrower FWHM + intermediate-high eta, reassigned peak_2 (~197 narrow) and peak_3 (~307 broad hump), FWHM capped at 50 cm-1; flat/linear baseline confirmed (rolling-min baseline area fraction = 0.206, not fluorescence-dominated)",
+        "fitting_parameters": {
+          "peak_1": {
+            "center": 141.09795289675313,
+            "center_err": 0.02572997215206482,
+            "amplitude": 341538.64121040626,
+            "amplitude_err": 1825.695876621468,
+            "fwhm": 11.411102863056495,
+            "fwhm_err": 0.10477078788665233,
+            "eta": 0.9999999999998358,
+            "eta_err": 0.02482881480955292,
+            "integrated_area": 5888867.161358573,
+            "relative_intensity": 1.0
+          },
+          "peak_2": {
+            "center": 196.57483253762987,
+            "center_err": 1.478251246997109,
+            "amplitude": 4153.047197215938,
+            "amplitude_err": 1892.5084852690854,
+            "fwhm": 7.406603309390576,
+            "fwhm_err": 4.060277553795603,
+            "eta": 3.6169254631038756e-12,
+            "eta_err": 2.0632494583193544,
+            "integrated_area": 32742.97689951921,
+            "relative_intensity": 0.012159816477859195
+          },
+          "peak_3": {
+            "center": 297.00000000044685,
+            "center_err": 4.0176383734157035,
+            "amplitude": 4696.239452577566,
+            "amplitude_err": 965.3884268613738,
+            "fwhm": 49.99999999453316,
+            "fwhm_err": 16.43842719266261,
+            "eta": 0.999999999999987,
+            "eta_err": 1.0138890154545237,
+            "integrated_area": 351658.42536527896,
+            "relative_intensity": 0.013750243415896327
+          },
+          "peak_4": {
+            "center": 393.63051519861307,
+            "center_err": 0.057565849466482404,
+            "amplitude": 205299.67142573968,
+            "amplitude_err": 1180.8411951464786,
+            "fwhm": 23.1127353588053,
+            "fwhm_err": 0.18648843737512055,
+            "eta": 0.4855789206291329,
+            "eta_err": 0.026806875342086024,
+            "integrated_area": 6158592.209312919,
+            "relative_intensity": 0.6011023253420511
+          },
+          "peak_5": {
+            "center": 514.4216046298375,
+            "center_err": 0.07995617144553196,
+            "amplitude": 151553.17696093253,
+            "amplitude_err": 1201.7989712772921,
+            "fwhm": 23.429068680275297,
+            "fwhm_err": 0.2848550319187791,
+            "eta": 0.696118318639896,
+            "eta_err": 0.03590984808109261,
+            "integrated_area": 4978176.373861021,
+            "relative_intensity": 0.44373654595518397
+          },
+          "peak_6": {
+            "center": 636.4298025352933,
+            "center_err": 0.4718353454451342,
+            "amplitude": 25465.24682244214,
+            "amplitude_err": 1206.423313414354,
+            "fwhm": 22.676765752264863,
+            "fwhm_err": 1.7216947363609767,
+            "eta": 0.7533532014213591,
+            "eta_err": 0.20980766548767585,
+            "integrated_area": 826646.3291067056,
+            "relative_intensity": 0.074560368139294
+          },
+          "peak_7": {
+            "center": 794.2807000507105,
+            "center_err": 2.898432658816931,
+            "amplitude": 6356.003011357295,
+            "amplitude_err": 863.4414591841793,
+            "fwhm": 49.9999999999236,
+            "fwhm_err": 11.788300891113186,
+            "eta": 0.9999999999999984,
+            "eta_err": 0.6221017576363183,
+            "integrated_area": 485472.6975927524,
+            "relative_intensity": 0.018609908936897283
+          },
+          "baseline": {
+            "slope": 5.30756639986997,
+            "slope_err": 0.6167585598798276,
+            "intercept": -5923.373228865921,
+            "intercept_err": 670.4163411240542
+          }
+        },
+        "fit_quality": {
+          "r_squared": 0.98650948233915,
+          "rmse": 4663.6017248726475
+        },
+        "literature_files": null,
+        "reuse_validity": {
+          "reused": true,
+          "source": "curve_raman",
+          "r_squared": 0.98650948233915,
+          "threshold": 0.95,
+          "verdict": "good",
+          "message": "Reused the locked fitting script from prior run 'curve_raman'; R\u00b2 = 0.9865 meets the acceptance threshold 0.950."
+        },
+        "banked_scripts": [
+          "7ff14941"
+        ]
+      },
+      "feedback": null
+    }
+  ]
+}

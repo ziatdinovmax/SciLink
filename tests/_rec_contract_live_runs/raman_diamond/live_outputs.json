@@ -1,0 +1,101 @@
+{
+  "base": {
+    "status": "success",
+    "analysis_integration": "The fit unambiguously identifies diamond via the T2g phonon at 1336 cm^-1, but three issues limit the quantitative conclusions: (1) the ~4 cm^-1 offset from the canonical 1332 cm^-1 cannot be distinguished between calibration error and real strain without a calibration standard; (2) the residual shows severe under-sampling/under-resolution around the sharp apex (\u00b1320-sigma coherent oscillation), meaning the reported 14 cm^-1 FWHM is an upper bound and the intrinsic linewidth (a proxy for crystalline quality and phonon lifetime) is not reliably determined; (3) the second-order band at ~2443 cm^-1 is poorly constrained (parameters pinned at bounds) and the 780 cm^-1 component is a rejected artifact. Follow-up measurements should therefore prioritize calibration verification and a high-resolution rescan of the first-order line, then optionally extend to second-order characterization and defect/impurity screening.",
+    "measurement_recommendations": [
+      {
+        "description": "Photoluminescence / defect-band screening scan across the visible-NIR window using the 780 nm (or additionally 532 nm) excitation to search for nitrogen/vacancy and other color-center signatures.",
+        "scientific_justification": "The ideal chemistry is C only, but natural diamonds commonly host N, NV, or GR1 centers that reveal growth history and origin. This extends the finding from pure phonon characterization to defect/impurity content, and helps distinguish natural vs synthetic origin.",
+        "expected_outcomes": "Presence/absence of characteristic features such as the NV zero-phonon lines (575 nm / 637 nm), N3 (~415 nm with 532 nm excitation), or GR1 (~741 nm). Detection would indicate defect content and constrain diamond type (Ia/Ib/IIa).",
+        "priority": 2,
+        "target": {
+          "setting": "PL scan 600-800 nm under 532 nm excitation (and NIR band under 780 nm)",
+          "expected_signature": "NV0 ZPL at 575 nm and NV- ZPL at 637 nm, GR1 at 741 nm if present"
+        }
+      },
+      {
+        "description": "Dedicated long-integration acquisition of the second-order (two-phonon) scattering region with extended dwell time.",
+        "scientific_justification": "The overtone band near 2443 cm^-1 is real but poorly constrained (FWHM and eta pinned at bounds, center_err 17 cm^-1). A targeted high-SNR scan can properly resolve the two-phonon density-of-states envelope and its cutoff, corroborating the assignment and probing lattice anharmonicity.",
+        "expected_outcomes": "A resolved broad two-phonon band with a characteristic high-frequency cutoff near ~2660 cm^-1 (twice the maximum phonon frequency) and structure reflecting the 2-phonon DOS, confirming the overtone assignment quantitatively.",
+        "priority": 3,
+        "target": {
+          "setting": "Scan 2100-2700 cm^-1 with high accumulation/dwell, wide bandpass",
+          "expected_signature": "Broad multi-featured second-order band peaking ~2450-2500 cm^-1 with cutoff near ~2660 cm^-1"
+        }
+      },
+      {
+        "description": "High-spectral-resolution rescan of the first-order T2g band with fine point spacing (<=0.3 cm^-1/pixel) and a high-groove-density grating (e.g., 1800-2400 gr/mm).",
+        "scientific_justification": "The current data under-samples the sharp apex (coherent residual oscillation across 1305-1360 cm^-1), so the 14 cm^-1 FWHM is inflated and the intrinsic linewidth - the key metric for crystalline quality and phonon lifetime - is unresolved. Diamond's true intrinsic FWHM is ~1.5-2 cm^-1.",
+        "expected_outcomes": "A well-resolved Lorentzian-dominant lineshape yielding a reliable intrinsic FWHM. Expect FWHM to drop substantially toward ~2 cm^-1 for high-quality diamond, converting linewidth into a phonon lifetime (tau ~ 1/(pi*c*FWHM)) and confirming high crystalline order.",
+        "priority": 4,
+        "target": {
+          "setting": "Scan 1320-1345 cm^-1 with 1800+ gr/mm grating, ~0.3 cm^-1/pixel, long integration",
+          "expected_signature": "Narrow Lorentzian-dominant T2g peak with resolved apex and FWHM << 14 cm^-1"
+        }
+      },
+      {
+        "description": "Re-measure the first-order region using a calibration standard (e.g., neon lamp lines or a Si reference at 520.7 cm^-1) acquired immediately before/after the diamond spectrum under identical settings.",
+        "scientific_justification": "The observed +4 cm^-1 offset from canonical 1332 cm^-1 could be either an instrument calibration artifact or a genuine strain/pressure shift. Only an in-situ calibration standard can separate these, which is required before any strain claim can be made.",
+        "expected_outcomes": "If the Si line appears shifted from 520.7 cm^-1 by ~+4 cm^-1, the diamond offset is a calibration artifact and the true position is ~1332 cm^-1. If Si is on-position, the diamond shift is real and indicates residual compressive stress (~0.5-1 GPa scale).",
+        "priority": 5,
+        "target": {
+          "setting": "Acquire Si reference over 480-560 cm^-1 (expect line at 520.7 cm^-1) and diamond over 1300-1370 cm^-1 in the same session",
+          "expected_signature": "Si Raman peak at 520.7 cm^-1 used to correct the diamond T2g apparent center"
+        }
+      }
+    ],
+    "novelty_informed": false,
+    "novelty_recommendations": []
+  },
+  "hist": {
+    "status": "success",
+    "analysis_integration": "The fit unambiguously identifies diamond via the T2g first-order phonon at 1336.05 cm^-1, but three concrete issues limit the quantitative claims: (1) the reported FWHM (14.06 cm^-1) is inflated by under-sampling/under-resolution, as evidenced by the huge coherent residual oscillation across 1305-1360 cm^-1, so the intrinsic linewidth (and thus phonon lifetime/crystalline quality) is not reliably extracted; (2) the ~4 cm^-1 offset from the canonical 1332 cm^-1 cannot be attributed to strain versus calibration error without a wavenumber calibration standard; (3) the second-order band at ~2443 cm^-1 is real but poorly constrained (FWHM and eta pinned at bounds), and the 780 cm^-1 component is a rejected artifact. Recommendations therefore prioritize a high-resolution, calibrated re-acquisition of the first-order band, a dedicated scan of the second-order region, and orientation/temperature context to substantiate the crystalline-quality and phonon-lifetime claims.",
+    "measurement_recommendations": [
+      {
+        "description": "Polarized/orientation-dependent Raman measurements on a single-crystal facet (parallel and crossed polarization, sample rotated through defined crystallographic angles).",
+        "scientific_justification": "The T2g mode has a characteristic Raman tensor; polarization selection rules confirm the mode symmetry and single-crystal nature versus polycrystalline/nanocrystalline material, adding rigor to the 'high crystalline order' claim beyond linewidth alone.",
+        "expected_outcomes": "Intensity modulation of the 1332 cm^-1 line consistent with T2g selection rules, confirming mode symmetry and monocrystallinity (or revealing depolarization indicative of disorder).",
+        "priority": 2,
+        "target": {
+          "setting": "Raman shift window 1300-1370 cm^-1 acquired in VV and VH polarization configurations at sample rotation angles 0, 45, 90 degrees",
+          "expected_signature": "orientation-dependent intensity variation of the T2g line following the diamond Raman tensor selection rules"
+        }
+      },
+      {
+        "description": "Low-temperature (e.g. ~80 K liquid-nitrogen cryostat) Raman of the first-order band under the same high-resolution/calibrated conditions.",
+        "scientific_justification": "Temperature narrows the intrinsic linewidth (reduced anharmonic phonon-phonon decay) and shifts the peak, directly separating anharmonic/lifetime broadening from defect/strain broadening and validating the phonon-lifetime interpretation of the linewidth.",
+        "expected_outcomes": "A measurable upshift (~1-2 cm^-1) and narrowing of the T2g band at 80 K relative to 300 K, quantifying the anharmonic contribution and yielding a lower bound on the defect-limited linewidth.",
+        "priority": 2,
+        "target": {
+          "setting": "Raman shift window 1300-1370 cm^-1, step <=0.3 cm^-1, sample at ~80 K (LN2 cryostat), same calibration standard as room-temperature scan",
+          "expected_signature": "T2g line narrowed and slightly upshifted vs 300 K, quantifying anharmonic vs residual (defect/strain) broadening"
+        }
+      },
+      {
+        "description": "Dedicated longer-integration scan of the second-order (two-phonon) region to properly constrain the overtone band.",
+        "scientific_justification": "The ~2443 cm^-1 band is real but its parameters are pinned at fit bounds (FWHM at 300 cm^-1, eta at 1.0), so it cannot currently corroborate the two-phonon density-of-states claim quantitatively. A targeted, high-SNR scan captures the full second-order envelope and any 2LO structure near ~2460-2670 cm^-1.",
+        "expected_outcomes": "A resolved broad two-phonon feature with a physically meaningful width and shape, confirming the overtone assignment and its ~twice-fundamental position, strengthening the crystalline-order corroboration.",
+        "priority": 3,
+        "target": {
+          "setting": "Raman shift window 2200-2800 cm^-1, integration time increased 5-10x relative to first-order acquisition to lift the ~0.3% intensity feature above noise",
+          "expected_signature": "broad diamond second-order/overtone envelope peaking near 2440-2670 cm^-1 with resolvable multi-phonon shape"
+        }
+      },
+      {
+        "description": "High-resolution Raman re-acquisition of the first-order T2g band with a fine spectral step (<=0.3 cm^-1/point) and a preceding neon/atomic-line or silicon (520.7 cm^-1) wavenumber calibration.",
+        "scientific_justification": "The current fit's FWHM is inflated by under-sampling (the point spacing approaches the intrinsic linewidth), and the +4 cm^-1 offset from 1332 cm^-1 is ambiguous between calibration error and strain. A finely sampled, calibrated scan resolves the peak apex and fixes the absolute wavenumber axis, enabling a defensible intrinsic linewidth and phonon-lifetime estimate.",
+        "expected_outcomes": "A well-sampled Lorentzian-dominated line whose true FWHM is likely <=14 cm^-1 (possibly ~2-3 cm^-1 for high-quality natural diamond), a residual free of the current +/-320-sigma oscillation, and a calibrated center that either confirms ~1332 cm^-1 (calibration artifact) or a genuine shift (strain).",
+        "priority": 5,
+        "target": {
+          "setting": "Raman shift window 1300-1370 cm^-1, step <=0.3 cm^-1, grating >=1800 gr/mm, with Si 520.7 cm^-1 calibration standard measured in the same session",
+          "expected_signature": "sharp Lorentzian-dominated T2g phonon apex fully resolved near 1332 cm^-1, intrinsic FWHM <= current 14 cm^-1"
+        }
+      }
+    ],
+    "novelty_informed": false,
+    "novelty_recommendations": []
+  },
+  "history": [
+    "Raman, 532 nm excitation, 100-1500 cm-1 \u2014 the analyzed spectrum"
+  ]
+}

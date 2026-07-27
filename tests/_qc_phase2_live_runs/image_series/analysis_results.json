@@ -1,0 +1,164 @@
+{
+  "status": "success",
+  "output_directory": "/Users/maxim.ziatdinov/Code/SciLink/tests/_qc_phase2_live_runs/image_series",
+  "summary": {
+    "total_images": 2,
+    "successful_analyses": 2,
+    "flagged_count": 0,
+    "refitted_count": 0,
+    "input_type": "file_paths",
+    "locked_approach": "Preprocess each AFM frame (row-level + square pixels), then use targeted reciprocal-space mapping (fourier_reflection_map) to detect and quantify the periodic lattice/ordered-adsorbate reflection and its spatial coherence, and compare presence/spacing/coherence between 2 mM and 10 mM to characterize how ordering changes with KCl concentration.",
+    "is_single_image": false
+  },
+  "detailed_analysis": "This series aims to characterize how the surface structure/adsorbate pattern on mica evolves between 2 mM and 10 mM KCl using AFM height maps. Two frames were analyzed with a rigorous, artifact-aware pipeline (per-row median leveling escalated to polynomial subtraction, streak-removal verification, square-pixel resampling, fourier_reflection_map with strict streak-axis artifact rejection and null/SNR/coherence gating). Both frames passed quality verification (scores 0.79 and 0.87, mean 0.83), and streak removal was fully successful in the 2 mM frame (streak_std reduced from ~1341 to ~4e-12 after escalation to polynomial leveling).\n\nThe critical finding is that the intended comparative analysis is essentially UNRESOLVED, because only the 2 mM frame produced extractable quantitative features. The 10 mM entry has empty extracted_features and quality_metrics, so no spacing, domain fraction, SNR, or reflection-count values are available for it. Consequently the 'trend' between concentrations is degenerate: every feature is reported as a single point with no regression possible.\n\nFor the 2 mM frame, the pipeline detected 28 candidate reflections and a nominal periodicity of ~0.392 nm at a frequency of ~0.498 cyc/px, with a high sigma-resolvability (7.65). However, this reflection was NOT confirmed as real ordered-adsorbate/lattice content: reflection_present is False, the domain SNR (14.5) is substantially LOWER than the bulk SNR (34.7), so spot_snr_domain_gt_bulk is False and reflection_confirmed_domain_gt_bulk is False. The domain fraction is very small (~0.025, i.e. ~2.5% of the field). A frequency of ~0.498 cyc/px is essentially at the Nyquist limit (0.5 cyc/px), which is a classic signature of a pixel-grid / single-pixel-alternation artifact rather than genuine surface periodicity. Combined with the fallback pixel calibration (100 nm FOV assumption, 0.195 nm/px), the '0.392 nm' spacing is an artifact of the Nyquist frequency times an assumed pixel size, not a physically meaningful lattice constant. The gating logic correctly declined to confirm this as a real reflection.\n\nTaken together, the data support a conservative conclusion: at 2 mM KCl, no resolvable, spatially-coherent ordered-adsorbate lattice reflection is confirmed above bulk background, and at 10 mM no quantitative features were extractable at all. The comparative objective (how structure changes from 2 to 10 mM) therefore cannot be answered from the present dataset; the most defensible statement is that neither frame provides confirmed evidence of an ordered adsorbate superlattice under these imaging/calibration conditions.",
+  "scientific_claims": [
+    {
+      "claim": "At 2 mM KCl on mica, no ordered-adsorbate/lattice reflection is confirmed above bulk background: the leading Fourier candidate (~0.498 cyc/px, i.e. at the Nyquist limit) has lower domain SNR (14.5) than bulk SNR (34.7) and occupies only ~2.5% of the field, failing the domain>bulk confirmation gate.",
+      "scientific_impact": "Establishes a rigorous null result and prevents over-interpretation of near-Nyquist Fourier peaks as genuine atomic/adsorbate lattices, which is a common pitfall in high-resolution AFM of electrolyte-mica interfaces.",
+      "has_anyone_question": "Has anyone rigorously distinguished genuine ordered-adsorbate lattice reflections from Nyquist-limit pixel-grid artifacts in AFM height maps of the KCl\u2013mica interface using domain-vs-bulk SNR gating?",
+      "keywords": [
+        "AFM",
+        "mica",
+        "KCl",
+        "Fourier analysis",
+        "Nyquist artifact",
+        "ordered adsorbate",
+        "null result"
+      ]
+    }
+  ],
+  "individual_results": [
+    {
+      "index": 0,
+      "name": "(hard) fmica 2mM KCl",
+      "success": true,
+      "analysis_type": "AFM per-row leveling + square-pixel resample + fourier_reflection_map reciprocal-space mapping of ordered-adsorbate/lattice reflection (KCl ordering).",
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_qc_phase2_live_runs/image_series/image_0000/visualization.png",
+      "error": null,
+      "flagged": false,
+      "flag_reason": null,
+      "adaptively_refitted": false,
+      "verification_score": 0.79,
+      "reuse_validity": null
+    },
+    {
+      "index": 1,
+      "name": "(hard) fmica 10mM KCl",
+      "success": true,
+      "analysis_type": "Comparative AFM (KCl concentration): per-frame row-flatten + streak-removal verification/escalation (chained from median subtraction), square-pixel resample, fourier_reflection_map reciprocal-space mapping with strict streak-axis artifact rejection and null/SNR/coherence gating; differential presence/spacing/coherence compared between concentrations.",
+      "visualization_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_qc_phase2_live_runs/image_series/image_0001/visualization.png",
+      "error": null,
+      "flagged": false,
+      "flag_reason": null,
+      "adaptively_refitted": false,
+      "verification_score": 0.87,
+      "reuse_validity": null
+    }
+  ],
+  "flagged_images": [],
+  "flagged_images_analysis": {
+    "summary": "No images were formally flagged by the QC pipeline; both frames were approved. However, the 10 mM frame is effectively a silent failure: it passed quality verification (score 0.87) yet returned empty extracted_features and quality_metrics, so it contributes no usable data to the comparative objective.",
+    "possible_causes": [
+      "The 10 mM analysis may have found 'no resolvable order' (a legitimate finding per the pipeline) but failed to populate the feature dictionary with the null values.",
+      "A pipeline serialization/reporting bug: features were computed but not written to the summary dict.",
+      "Genuine absence of any detectable reflection at 10 mM, causing the reflection-mapping step to return empty rather than explicit nulls.",
+      "The 10 mM image may have had stronger streaking, tip artifacts, or drift that caused the reflection-mapping stage to abort after leveling."
+    ],
+    "recommended_followup": [
+      "Re-run the 10 mM analysis and explicitly force reporting of null-result features (spacing=None, domain_fraction, SNRs) rather than an empty dict.",
+      "Inspect the 10 mM leveled image and its Fourier map directly to confirm whether the empty result is a true null or a reporting failure.",
+      "Acquire the true FOV/scale metadata to replace the fallback 100 nm assumption, since pixel calibration directly controls whether the near-Nyquist peak maps to a plausible spacing.",
+      "Collect replicate frames at each concentration to distinguish stochastic imaging quality from concentration-dependent structure."
+    ],
+    "scientific_significance": "The 'flagged' status is administrative rather than physical: the missing 10 mM data is a data-completeness problem, not evidence of interesting physics. The genuinely interesting observation is the conservative null at 2 mM."
+  },
+  "refit_summary": [],
+  "refit_analysis": {
+    "summary": "No images were adaptively re-analyzed with alternative pipelines. However, within the standard pipeline, the 2 mM frame required escalation from median row-subtraction to per-row polynomial (1st-2nd order) subtraction to fully remove streaks (streak_std_after ~4e-12).",
+    "pipeline_changes": [
+      {
+        "index": 0,
+        "from_pipeline": "Per-row median subtraction",
+        "to_pipeline": "Per-row 1st-2nd order polynomial subtraction (escalated)",
+        "interpretation": "The escalation indicates residual low-order row bowing/tilt beyond a simple constant offset \u2014 consistent with scanner bow, thermal drift, or gradual baseline curvature in the fast-scan direction. This is an instrumental/leveling issue, not a structural change of the mica surface."
+      }
+    ],
+    "scientific_implications": "The need for polynomial leveling reflects instrumental baseline characteristics rather than sample physics. No structural transition or morphology change can be inferred from the leveling escalation. The near-Nyquist candidate reflection surviving into detection underscores the importance of the artifact-rejection gates, which correctly prevented an aggressive-leveling residual from being mistaken for real ordering."
+  },
+  "trend_analysis": {
+    "success": true,
+    "skipped": false,
+    "approach": "Single control variable (KCl concentration: 2 mM, 10 mM), so I use the standard trend dashboard with feature values on the y-axis vs. KCl concentration on the x-axis. Because only two concentration points exist, I connect them with straight lines (a 2-point 'trend' is degenerate for regression confidence, but I still fit and report a linear slope per feature to quantify direction/magnitude of change, framing the objective: how the ordered-adsorbate/lattice reflection signature evolves from 2 mM to 10 mM). The 10 mM entry has empty extracted_features/quality_metrics, so the script robustly handles missing values by plotting only available points and annotating missing data. Key panels track reflection presence/confirmation, reflection spacing, domain fraction & SNR (domain vs bulk), and streak-removal/leveling quality metrics. Regression slopes are computed and printed where >=2 numeric points exist.",
+    "metrics_tracked": [
+      "reflection_present/confirmed",
+      "reflection_spacing_nm",
+      "domain_fraction",
+      "spot_snr_domain vs spot_snr_bulk",
+      "reflection_sigma_resolvability",
+      "n_reflections_detected"
+    ],
+    "flagged_handling": "No images were flagged; the script still contains logic to overlay red X markers on any flagged index if present. Missing-feature entries (e.g., empty 10 mM dict) are annotated as 'no data' rather than plotted as zero.",
+    "stdout": "Saved feature_trends.png\nRegression / trend summary:\n  reflection_spacing_nm: single point (0.392) - no regression\n  domain_fraction: single point (0.025) - no regression\n  spot_snr_domain: single point (14.5) - no regression\n  spot_snr_bulk: single point (34.7) - no regression\n  reflection_sigma_resolvability: single point (7.65) - no regression\n  n_reflections_detected: single point (28) - no regression\n  NOTE: 1/2 frames missing extracted features\n",
+    "stderr": null,
+    "generated_files": [
+      "/Users/maxim.ziatdinov/Code/SciLink/tests/_qc_phase2_live_runs/image_series/feature_trends.png"
+    ],
+    "script_path": "/Users/maxim.ziatdinov/Code/SciLink/tests/_qc_phase2_live_runs/image_series/trend_analysis.py"
+  },
+  "feature_trends": {
+    "reflection_present/confirmed": {
+      "trend": "stable",
+      "interpretation": "2 mM frame is unconfirmed (False); 10 mM has no data. No confirmed ordered structure at either point that can be quantified."
+    },
+    "reflection_spacing_nm": {
+      "trend": "stable",
+      "interpretation": "Only a single 2 mM value (0.392 nm) exists, and it corresponds to a near-Nyquist frequency under fallback calibration, so it is likely an artifact rather than a physical lattice spacing. No trend determinable."
+    },
+    "domain_fraction": {
+      "trend": "stable",
+      "interpretation": "Only 2 mM measured (~0.025), indicating any ordered content occupies a negligible fraction of the field. No comparison possible with 10 mM."
+    },
+    "spot_snr_domain vs spot_snr_bulk": {
+      "trend": "stable",
+      "interpretation": "At 2 mM, domain SNR (14.5) < bulk SNR (34.7), meaning the candidate reflection is weaker than background \u2014 evidence against real ordered content. No 10 mM data."
+    },
+    "reflection_sigma_resolvability": {
+      "trend": "stable",
+      "interpretation": "High value (7.65) at 2 mM reflects a sharp Fourier peak, but sharpness alone (especially near Nyquist) does not establish physical validity. No 10 mM data."
+    },
+    "n_reflections_detected": {
+      "trend": "stable",
+      "interpretation": "28 candidate reflections at 2 mM prior to gating; most are rejected by artifact/SNR gates. No 10 mM data."
+    }
+  },
+  "caveats": "The comparative objective cannot be answered: only 1 of 2 frames yielded quantitative features (the 10 mM frame is empty), so no true concentration trend can be established \u2014 all 'trends' are single-point and degenerate. Pixel calibration relied on a fallback 100 nm FOV assumption, so the reported 0.392 nm spacing is not metrologically reliable; its frequency (~0.498 cyc/px) sits at the Nyquist limit, a strong indicator of a pixel-grid artifact rather than a real lattice. The single detected candidate at 2 mM failed the domain>bulk SNR gate (14.5 < 34.7) and occupies only ~2.5% of the field, so no confirmed ordered structure exists even at 2 mM. With only two concentrations and no replicates, statistical confidence is minimal. Conclusions should be limited to (a) a conservative null at 2 mM and (b) a data-completeness failure at 10 mM requiring re-analysis with explicit null reporting and true scale metadata before any concentration-dependence claim is made.",
+  "literature_files": null,
+  "locked_analysis_config": {
+    "analysis_approach": "Preprocess each AFM frame (row-level + square pixels), then use targeted reciprocal-space mapping (fourier_reflection_map) to detect and quantify the periodic lattice/ordered-adsorbate reflection and its spatial coherence, and compare presence/spacing/coherence between 2 mM and 10 mM to characterize how ordering changes with KCl concentration.",
+    "processing_pipeline": "Per-row median subtraction for row alignment (median is robust to blobs) -> VERIFY streak removal: extract line profiles perpendicular to fast-scan over featureless regions; if residual row-to-row offset or streaks remain, ESCALATE to per-row 1st-2nd order polynomial subtraction and re-verify -> resample to square pixels using metadata FOV (512x512 no-op; 256x512 upsample slow axis to 512x512 assuming square FOV; record nm/px via resolve_pixel_size_nm; fall back to cyc/px with explicit caveat if calibration unavailable), preserving true aspect ratio -> fourier_reflection_map on the leveled square-pixel image -> ARTIFACT REJECTION: reject any detected reflection whose orientation is aligned with the residual streak axis (i.e. a horizontal-streak-induced vertical-frequency ridge) unless it independently passes the null-gate AND spot_snr_domain > spot_snr_bulk AND the domain map corresponds to real image content (not edge/streak bands) -> compare spacing, sigma, domain_fraction, spot_snr_domain vs spot_snr_bulk between 2 mM and 10 mM; report 'no resolvable order' as a legitimate finding for 10 mM if criteria are not met.",
+    "features_to_extract": [
+      "primary lattice/adsorbate reflection spacing (nm if calibrated, else cyc/px)",
+      "reflection significance (sigma) / whether periodic order is resolvable at all",
+      "ordered-domain area fraction (domain_fraction)",
+      "spot SNR in domain vs bulk (coherence of ordering)",
+      "presence/absence of superstructure (strongest_satellite_d_nm)",
+      "orientation of any detected reflection relative to the fast-scan/streak axis (to distinguish real lattice from streak artifact)",
+      "qualitative change in ordering between 2 mM and 10 mM (including explicit 'order lost' if 10 mM has no resolvable reflection)"
+    ],
+    "quality_criteria": "Preprocessing verified: horizontal streaks removed after row alignment, confirmed by a flat line profile across the fast-scan direction over featureless regions; if streaks persist (as is likely on the 10 mM frame), escalation to per-row polynomial is applied and re-verified before any FFT. Resampled image is 512x512 with recorded nm/px matching FOV/N when calibration exists (else pixel units flagged), with true aspect ratio preserved. Science verified via the tool's own fields: fourier_reflection_map returns periodic=True with at least one reflection above its significance floor AND spot_snr_domain > spot_snr_bulk for a claimed ordered frame; any reflection oriented along the residual-streak axis is treated as a suspected artifact and rejected unless it independently satisfies the null-gate and domain-map coherence checks. A reported 'no resolvable reflection' for the 10 mM frame is accepted and reported as a genuine loss-of-order finding, not forced. Any reported spacing is physically plausible for mica/adsorbate lattices (sub-nm, ~0.5 nm) when calibrated. Amplitude/domain maps must correspond to real image content, not streak bands, edges, noise, or NaN.",
+    "expected_outputs": [
+      "preprocessing_qc_2mM_and_10mM.png",
+      "fourier_reflection_maps_2mM_vs_10mM.png",
+      "reflection_comparison_summary.png"
+    ]
+  },
+  "verification_summary": {
+    "verified_count": 2,
+    "approved_count": 2,
+    "score_range": [
+      0.79,
+      0.87
+    ],
+    "mean_score": 0.8300000000000001
+  }
+}
