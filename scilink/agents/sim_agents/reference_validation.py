@@ -83,3 +83,54 @@ def validate_component_properties(
         "reference_property": reference_property,
         "measurements": measurements,
     }
+
+
+def run_reference_check(
+    components: List[Dict[str, Any]],
+    system_description: str,
+    *,
+    select_fn: Callable[[List[Dict[str, Any]], str], Dict[str, Any]],
+    measure_fn: Callable[[Dict[str, Any], str], Optional[Dict[str, Any]]],
+    judge_fn: Callable[[List[Dict[str, Any]], str], Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Pre-run force-field validation: the whole pre-production check in one call.
+
+    Composes the three reasoning/measurement steps so a caller (the
+    parameterization gate) runs one thing before committing to production:
+
+    1. ``select_fn`` chooses a reference property per component (density for a
+       liquid, a lattice constant for a crystal, ...);
+    2. each measurable component's chosen property is measured
+       (``measure_fn(component, property)``), collected via
+       :func:`validate_component_properties` (dedupe + fail-open);
+    3. ``judge_fn`` reasons over the measurements and returns the verdict —
+       ``good``, or ``poor`` with the miscalibrated model named.
+
+    All three are injected, so this stays engine/backend-neutral and unit-
+    testable: ``select_fn`` / ``judge_fn`` are the reference-property selector /
+    critic, ``measure_fn`` the (backend-agnostic) measurement.
+
+    Returns ``{"selections", "status", "reference_property", "measurements",
+    "verdict"}`` — the selections, the per-measurement collection, and the
+    verdict. A verdict of ``poor`` is the pre-run catch: the force field is
+    untrustworthy and production should not proceed unfixed.
+    """
+    selection = select_fn(components, system_description)
+    by_component = {s.get("component"): s
+                    for s in selection.get("selections", [])}
+
+    def _measure_selected(component: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        key = component.get("name") or component.get("smiles")
+        chosen = by_component.get(key) or {}
+        if not chosen.get("measurable"):
+            return {"error": chosen.get("rationale",
+                                        "no reference property selected")}
+        return measure_fn(component, chosen.get("property"))
+
+    report = validate_component_properties(components, _measure_selected)
+    verdict = judge_fn(
+        [m for m in report["measurements"] if m.get("status") == "measured"],
+        system_description,
+    )
+    return {"selections": selection.get("selections", []), **report,
+            "verdict": verdict}
