@@ -4263,7 +4263,8 @@ class OrchestratorTools:
             func=save_file,
             name="save_file",
             description=(
-                "Save text content (protocols, notes, small scripts) to a file "
+                "Save text content (notes, small scripts, content you have "
+                "already composed) to a file "
                 "in the session directory. Large content may not survive the "
                 "trip as a single tool-call argument — for anything long "
                 "(roughly >100 lines), save the first chunk with save_file and "
@@ -6309,7 +6310,13 @@ class OrchestratorTools:
                 "campaign's literature and in prior session documents you "
                 "name, so you get retrieval-backed authoring rather than "
                 "writing it unaided into save_file. Use save_file for short "
-                "notes and for content you have already composed."
+                "notes and for content you have already composed. "
+                "NOT for an EXPERIMENTAL PROTOCOL: a procedure with a "
+                "hypothesis and measurements — including 'the runnable bench "
+                "protocol for direction X' — is generate_initial_plan with "
+                "selection_profile='lab', which gives it conformance "
+                "checking, the critic, and refinement against results later. "
+                "A document cannot be refined with results."
             ),
             parameters={
                 "request": {
@@ -6404,8 +6411,9 @@ class OrchestratorTools:
                 "sponsor-facing white paper by default, and an all-candidates "
                 "dossier when several candidate portfolios were generated. "
                 "Once the user PICKS a direction and wants the runnable "
-                "protocol for it, that is generate_initial_plan with "
-                "selection_profile='lab'."
+                "bench protocol for it, that is generate_initial_plan with "
+                "selection_profile='lab' — an experimental plan, NOT a "
+                "written document."
             ),
             parameters={
                 "specific_objective": {

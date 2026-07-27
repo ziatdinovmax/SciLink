@@ -111,3 +111,18 @@ def test_the_document_contract_forbids_invented_figures():
     assert "sections" in t and "heading" in t and "body" in t
     # and it must not smuggle the experiment schema back in
     assert "not an experimental plan" in t
+
+
+def test_an_experimental_protocol_is_not_a_document():
+    """The mirror of the original bug, seen live: after ideation, "give me
+    the runnable bench protocol" was authored as prose, so it had no
+    conformance check, no critic, and could never be refined with results."""
+    src = Path("scilink/agents/planning_agents/orchestrator_tools.py").read_text()
+    i = src.index('name="write_technical_document"')
+    desc = src[i:i + 2600]
+    assert "NOT for an EXPERIMENTAL PROTOCOL" in desc
+    assert "runnable bench" in desc
+    assert "A document cannot be refined with results." in desc
+    # save_file must not advertise protocols as its own either
+    j = src.index('name="save_file"')
+    assert "protocols, notes" not in src[j - 1200:j + 400]
