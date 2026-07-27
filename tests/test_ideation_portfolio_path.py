@@ -303,3 +303,41 @@ def test_an_unknown_argument_gets_told_what_is_accepted(tmp_path):
     out2 = json.loads(OrchestratorTools.execute_tool(t, "boom"))
     assert out2["status"] == "error" and "real failure" in out2["message"]
     assert "Accepted arguments" not in out2["message"]
+
+
+def test_wrapped_bullets_do_not_repeat_their_marker():
+    """Live: every continuation line was prefixed with '- ', so a single
+    sentence read as four bullets and consecutive entries were
+    indistinguishable."""
+    from scilink.agents.planning_agents.user_interface import _wrap_field
+    long = ("FUNCTION AND RARE SITE: reaching a designated target polymorph "
+            "by design, where the rare active site is the transient "
+            "nucleation locus that selects which phase becomes competent.")
+    out = _wrap_field(long, indent="       - ")
+    lines = out.splitlines()
+    assert len(lines) > 1, "needs to wrap for this to mean anything"
+    assert lines[0].startswith("       - ")
+    assert all(not l.lstrip().startswith("- ") for l in lines[1:]), out
+    # continuations align under the text, not under the marker
+    assert all(l.startswith(" " * 9) for l in lines[1:]), out
+
+
+def test_plain_indents_are_unchanged_by_that_fix():
+    """Every other caller passes whitespace; their output must not move."""
+    from scilink.agents.planning_agents.user_interface import _wrap_field
+    out = _wrap_field("word " * 40, indent="   ")
+    assert all(l.startswith("   ") and not l.startswith("    ")
+               for l in out.splitlines())
+
+
+def test_details_are_labelled():
+    """Unlabelled they read as a continuation of the field above them."""
+    import io, contextlib
+    from scilink.agents.planning_agents import user_interface as ui
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        ui._print_concepts([{"id": "A", "title": "T", "novelty": "N",
+                             "details": ["one", "two"]}])
+    out = buf.getvalue()
+    assert "Details:" in out
+    assert out.index("Novelty:") < out.index("Details:")

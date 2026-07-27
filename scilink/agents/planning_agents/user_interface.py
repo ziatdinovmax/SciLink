@@ -264,6 +264,8 @@ def _print_concepts(concepts: List[Any]) -> None:
                 print(_wrap_field(c[key], indent="       "))
         details = c.get("details")
         if isinstance(details, list) and details:
+            # Unlabelled, these read as a continuation of the field above.
+            print("     Details:")
             for d in details:
                 print(_wrap_field(str(d), indent="       - "))
         elif details:
@@ -425,9 +427,15 @@ def _wrap_field(text: Any, width: int = 78, indent: str = "   ") -> str:
     """
     s = str(text if text not in (None, "") else "N/A")
     paras = [p.strip() for p in s.split("\n") if p.strip()] or [s]
+    # Continuation lines are indented to the same WIDTH but never repeat the
+    # marker: callers pass bullets like "       - ", and reusing that verbatim
+    # prefixed every wrapped line with "- ", so one sentence read as four
+    # separate bullet points and consecutive entries became indistinguishable.
+    # Identical to the old behaviour for whitespace-only indents.
+    cont = " " * len(indent)
     return "\n\n".join(
         textwrap.fill(p, width=width, initial_indent=indent,
-                      subsequent_indent=indent)
+                      subsequent_indent=cont)
         for p in paras
     )
 
