@@ -85,6 +85,18 @@ is. `proposed_experiments` does not appear.
 4. **Deprecation.** `generate_initial_plan(selection_profile="ideation")`
    warns and forwards for one release, then the parameter goes.
 
+## Amendment (during implementation): the transition shim
+
+Migrating 53 sites at once is the 6–8 day estimate below, and every
+intermediate state would be a half-migration. Instead the portfolio carries
+BOTH shapes during the transition: `directions` at the top level (the real
+payload) plus a minimal one-entry `proposed_experiments` shim derived from
+it. Existing consumers keep working untouched; ported consumers read
+`plan_directions()`. This is the same additive strategy that let `concepts`
+land safely in PR #394, and it means every phase boundary is shippable.
+
+The shim is what phase 6 removes, once no stored session needs it.
+
 ## Phases
 
 Each phase ends green on the full suite with the failure set unchanged, and

@@ -378,3 +378,105 @@ def parse_multimodal_results(results: Any) -> Tuple[str, List]:
 
     consolidated_feedback = "\n\n".join(parsed_text_results)
     return consolidated_feedback, loaded_images
+
+# ── Plan payload accessors ───────────────────────────────────────────
+# A plan-mode artifact is one of two things: an EXPERIMENT (a testable
+# hypothesis with measurements, in `proposed_experiments`) or a PORTFOLIO of
+# research directions (ideation). The portfolio rode the experiment schema
+# for a long time — one `proposed_experiments` entry wrapping the whole
+# portfolio, with the directions in `concepts` if the author complied and in
+# `experimental_steps` as pseudo-sections if it did not.
+#
+# Everything that reads directions goes through here, so consumers never
+# branch on payload shape and old sessions stay readable. Resolution order:
+#   1. top-level `directions`      — the portfolio contract
+#   2. `proposed_experiments[*].concepts` — the PR #394 shape
+#   3. a single direction synthesised from the experiment fields — plans
+#      that predate `concepts` entirely
+# Tiers 2 and 3 are what let a checkpoint written before this change restore.
+
+def plan_is_portfolio(plan: Optional[Dict[str, Any]]) -> bool:
+    """Is this plan-mode artifact a research portfolio rather than an
+    experiment? Reads the plan's own stamp; falls back to the presence of
+    directions for a plan dict read in isolation."""
+    if not isinstance(plan, dict):
+        return False
+    if plan.get("type") == "ideation":
+        return True
+    return bool(plan.get("directions"))
+
+
+def plan_thesis(plan: Optional[Dict[str, Any]]) -> str:
+    """The portfolio's organizing idea, or the experiment's hypothesis."""
+    if not isinstance(plan, dict):
+        return ""
+    if plan.get("thesis"):
+        return str(plan["thesis"])
+    exps = plan.get("proposed_experiments") or []
+    return str((exps[0] or {}).get("hypothesis") or "") if exps else ""
+
+
+def plan_directions(plan: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Every research direction in a portfolio, in the author's order.
+
+    Returns [] for an experiment plan — callers use that to tell the shapes
+    apart without reading the schema themselves.
+    """
+    if not isinstance(plan, dict):
+        return []
+    top = plan.get("directions")
+    if isinstance(top, list) and top:
+        return [d for d in top if isinstance(d, dict)]
+
+    nested: List[Dict[str, Any]] = []
+    for exp in plan.get("proposed_experiments") or []:
+        if isinstance(exp, dict):
+            nested.extend(c for c in (exp.get("concepts") or [])
+                          if isinstance(c, dict))
+    if nested:
+        return nested
+
+    # Tier 3: an ideation plan authored before `concepts` existed carries one
+    # direction spread across the experiment fields. Synthesised rather than
+    # returned empty so the portfolio consumers render SOMETHING true for it.
+    if plan.get("type") == "ideation":
+        for exp in plan.get("proposed_experiments") or []:
+            if isinstance(exp, dict) and (exp.get("experiment_name")
+                                          or exp.get("hypothesis")):
+                return [{"id": "D1",
+                         "title": exp.get("experiment_name") or "Direction",
+                         "hypothesis": exp.get("hypothesis"),
+                         "rationale": exp.get("justification"),
+                         "_synthesised": True}]
+    return []
+
+
+def portfolio_to_experiment_shim(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """Give a portfolio the minimal experiment shape its legacy readers need.
+
+    Transitional. Fifty-odd sites read `proposed_experiments` — validity
+    checks, counters, log rationales, the best-of-N judge, the HTML report.
+    Rewriting them all at once would leave every intermediate state a
+    half-migration, so a portfolio carries BOTH shapes: `directions` is the
+    real payload, and this one-entry shim keeps the legacy readers correct
+    rather than empty-handed. Removed once nothing depends on it.
+    """
+    dirs = plan_directions(plan)
+    if not dirs or plan.get("proposed_experiments"):
+        return plan
+    titles = [str(d.get("title") or d.get("id") or "").strip()
+              for d in dirs]
+    plan["proposed_experiments"] = [{
+        "experiment_name": (plan.get("portfolio_title")
+                            or "Research portfolio"),
+        "hypothesis": plan_thesis(plan),
+        "concepts": dirs,
+        "experimental_steps": plan.get("shared_protocol") or [],
+        "required_equipment": plan.get("required_equipment") or [],
+        "expected_outcome": plan.get("expected_outcome") or "",
+        "justification": plan.get("rationale") or "",
+        "source_documents": plan.get("source_documents") or [],
+        "_portfolio_shim": True,
+        "_direction_titles": [t for t in titles if t],
+    }]
+    return plan

@@ -12,6 +12,9 @@ from datetime import datetime
 
 from scilink.knowledge import KnowledgeBase
 from .parser_utils import (
+    plan_directions,
+    plan_is_portfolio,
+    plan_thesis,
     generate_repo_map,
     write_experiments_to_disk,
     resolve_primary_data_path,
@@ -630,8 +633,7 @@ class PlanningAgent(BaseAgent):
         # A portfolio is the deliverable of an ideation run, and it sits deep
         # in the plan JSON where the 20k truncation can cut it — surface it
         # first, in full, so the paper is written from all N directions.
-        _portfolio = [c for e in (selected.get("proposed_experiments") or [])
-                      for c in (e.get("concepts") or [])]
+        _portfolio = plan_directions(selected)
         if _portfolio:
             parts.append(
                 f"\n## RESEARCH DIRECTIONS IN THE SELECTED PLAN "

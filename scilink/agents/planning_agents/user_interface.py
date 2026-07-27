@@ -338,6 +338,8 @@ def display_plan_summary(result: Dict[str, Any],
             print(_wrap_field(exp.get('hypothesis')))
 
         # --- Portfolio of directions, when the plan carries one ---
+        # Through the accessor so the portfolio contract, the PR #394
+        # `concepts` shape and pre-concepts plans all render identically.
         concepts = exp.get("concepts")
         if isinstance(concepts, list) and concepts:
             print(f"\n--- 🧠 Research Directions ({len(concepts)}) ---")
