@@ -382,3 +382,43 @@ def test_all_searches_wedged_reports_failure_not_success(tool, monkeypatch):
 
     out = json.loads(func(["x", "y"], "hypothesis_context,cross_domain"))
     assert out["status"] != "success"
+
+
+def test_heartbeat_clock_restarts_with_each_batch(monkeypatch, capsys):
+    """Live: a 7-search call ran as 6 then 1. The second batch's first
+    minutes were reported against the WHOLE call's clock, so a search that
+    had just started printed '1 still running after 17 min — longer than the
+    usual 10-15' and threatened a give-up time already in the past. Each
+    batch gets its own deadline, so it must get its own clock."""
+    import re
+    from pathlib import Path
+    src = Path("scilink/agents/planning_agents/orchestrator_tools.py").read_text()
+    flat = " ".join(src.split())
+
+    # the clock is shared state, reset per batch — never a call-scoped local
+    assert "_hb_t0" not in src, "a call-scoped clock cannot be reset per batch"
+    assert '"t0": _time.time()' in flat
+    assert '_hb_state["t0"] = _time.time()' in flat
+
+    # ...and the reset happens INSIDE the batch loop, before the work
+    i_loop = flat.index("for start in range(0, len(tasks), MAX_CONCURRENT):")
+    i_reset = flat.index('_hb_state["t0"] = _time.time()')
+    i_submit = flat.index("f = ex.submit(search_methods[t]")
+    assert i_loop < i_reset < i_submit
+
+    # the display reads that clock and names the batch when there are several
+    assert 'mins = int((_time.time() - _t0) / 60)' in flat
+    assert '_of = f" [batch {_bi} of {_bn}]" if _bn > 1 else ""' in flat
+    assert flat.count("{mins} min") >= 3 and "{_of}" in flat
+
+
+def test_batch_count_matches_the_announced_split():
+    """The banner promises 'N sequential batches of 6 then 1'; the heartbeat
+    must count the same batches."""
+    from pathlib import Path
+    src = Path("scilink/agents/planning_agents/orchestrator_tools.py").read_text()
+    assert "_n_batches = -(-len(tasks) // MAX_CONCURRENT)" in src
+    # 7 tasks at 6 wide is 2 batches, not 1
+    MAX = 6
+    for n, expected in ((1, 1), (6, 1), (7, 2), (12, 2), (13, 3)):
+        assert -(-n // MAX) == expected, n

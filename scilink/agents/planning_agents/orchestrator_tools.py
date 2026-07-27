@@ -1157,9 +1157,13 @@ class OrchestratorTools:
             import threading as _threading
             import time as _time
             _hb_stop = _threading.Event()
-            _hb_t0 = _time.time()
             _hb_lock = _threading.Lock()
-            _hb_state = {"pending": None, "running": set(), "total": n_jobs}
+            # `t0` is PER BATCH, not per call. Batches run back-to-back and
+            # each gets its own deadline, so a global clock made batch 2's
+            # first minute read as "17 min elapsed — longer than the usual
+            # 10-15" and threatened a give-up time that had already passed.
+            _hb_state = {"pending": None, "running": set(), "total": n_jobs,
+                         "t0": _time.time(), "batch": 0, "n_batches": 1}
 
             def _hb_mark_running(label):
                 with _hb_lock:
@@ -1189,13 +1193,17 @@ class OrchestratorTools:
                     if remaining == 0:
                         continue
                     queued = max(0, remaining - running)
-                    mins = int((_time.time() - _hb_t0) / 60)
+                    with _hb_lock:
+                        _t0 = _hb_state["t0"]
+                        _bi, _bn = _hb_state["batch"], _hb_state["n_batches"]
+                    mins = int((_time.time() - _t0) / 60)
+                    _of = f" [batch {_bi} of {_bn}]" if _bn > 1 else ""
                     # Past the advertised window, stop repeating it: saying
                     # "typically 10-15 min" at minute 45 reads as a hang
                     # with no end in sight. Say when we will give up.
                     if mins >= 16:
                         give_up = _LIT_BATCH_DEADLINE // 60
-                        print(f"  ⏳ {running} still running after {mins} min "
+                        print(f"  ⏳ {running} still running after {mins} min{_of} "
                               f"— longer than the usual 10-15; abandoning "
                               f"stragglers at {give_up} min and returning "
                               f"whatever finished")
@@ -1203,12 +1211,12 @@ class OrchestratorTools:
                     if queued:
                         print(f"  ⏳ {running} running, {queued} queued of "
                               f"{_hb_state['total']} literature searches "
-                              f"({mins} min elapsed; {_eta})")
+                              f"({mins} min elapsed{_of}; {_eta})")
                     else:
                         print(f"  ⏳ {remaining} of {_hb_state['total']} "
                               f"literature search"
                               f"{'es' if _hb_state['total'] != 1 else ''} still "
-                              f"running ({mins} min elapsed; {_eta})")
+                              f"running ({mins} min elapsed{_of}; {_eta})")
 
             _threading.Thread(target=_heartbeat, daemon=True).start()
 
@@ -1241,8 +1249,16 @@ class OrchestratorTools:
                     # request is 6 concurrent then 2 concurrent — never 2+3
                     # sub-optimal splits, and never sequential when it fits
                     # the parallel budget.
+                    _n_batches = -(-len(tasks) // MAX_CONCURRENT)
+                    with _hb_lock:
+                        _hb_state["n_batches"] = _n_batches
                     for start in range(0, len(tasks), MAX_CONCURRENT):
                         batch = tasks[start:start + MAX_CONCURRENT]
+                        # Fresh clock: this batch's deadline starts here, so
+                        # the elapsed time reported against it must too.
+                        with _hb_lock:
+                            _hb_state["t0"] = _time.time()
+                            _hb_state["batch"] = start // MAX_CONCURRENT + 1
                         # NOT a context manager: its __exit__ joins every
                         # worker, so one wedged remote task would still hold
                         # the call open after the deadline below fires.
