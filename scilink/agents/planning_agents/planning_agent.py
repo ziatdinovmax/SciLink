@@ -15,8 +15,6 @@ from .parser_utils import (
     plan_directions,
     portfolio_to_experiment_shim,
     resync_portfolio,
-    plan_is_portfolio,
-    plan_thesis,
     generate_repo_map,
     write_experiments_to_disk,
     resolve_primary_data_path,
