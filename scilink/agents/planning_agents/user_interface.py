@@ -213,6 +213,34 @@ def humanize_key(key: str) -> str:
     return k.replace("_", " ").strip().capitalize()
 
 
+# The direction card: the three fields that let a reader judge a research
+# direction without reading its protocol. Best-of-N has rendered candidates
+# this way all along; the single-plan review printed the same fields under
+# scattered headers with the full step list wedged between them, so the two
+# surfaces disagreed about what a direction looks like. One block, both.
+_CARD_FIELDS = (("🎯", "Hypothesis", "hypothesis"),
+                ("📈", "Expected outcome", "expected_outcome"),
+                ("💡", "Justification", "justification"))
+# Ideation keeps its own vocabulary for the same three fields.
+_CARD_FIELDS_IDEATION = (("🎯", "Hypothesis", "hypothesis"),
+                         ("📈", "Expected outcomes", "expected_outcome"),
+                         ("💡", "Rationale", "justification"))
+
+# How many program entries an ideation review prints before pointing at the
+# report. A portfolio that lands in `experimental_steps` instead of
+# `concepts` arrives as document sections — live, one delegation produced 56
+# entries / ~15.6k chars, ~200 terminal lines, at a prompt whose question is
+# only "is this the right direction?".
+_IDEATION_PROGRAM_MAX = 12
+
+
+def _print_direction_fields(exp: Dict[str, Any], ideation: bool = False) -> None:
+    for icon, title, key in (_CARD_FIELDS_IDEATION if ideation
+                             else _CARD_FIELDS):
+        print(f"\n{icon} {title}:")
+        print(_wrap_field(exp.get(key)))
+
+
 def _print_concepts(concepts: List[Any]) -> None:
     """Render a `concepts` portfolio: one block per research direction.
 
@@ -301,8 +329,13 @@ def display_plan_summary(result: Dict[str, Any],
             head = f"🔬 EXPERIMENT{f' {i}' if multi else ''}"
         print(f"\n{head}: {exp.get('experiment_name', 'Unnamed')}")
         print("-" * 80)
-        print("\n🎯 Hypothesis:")
-        print(_wrap_field(exp.get('hypothesis')))
+        if ideation:
+            # Same card the best-of-N review shows, so a direction reads the
+            # same whether it arrived with rivals or alone.
+            _print_direction_fields(exp, ideation=True)
+        else:
+            print("\n🎯 Hypothesis:")
+            print(_wrap_field(exp.get('hypothesis')))
 
         # --- Portfolio of directions, when the plan carries one ---
         concepts = exp.get("concepts")
@@ -318,7 +351,19 @@ def display_plan_summary(result: Dict[str, Any],
             print("\n--- 🧭 Shared Protocol ---" if (ideation and concepts)
                   else "\n--- 🧭 Proposed Program ---" if ideation
                   else "\n--- 🧪 Experimental Steps ---")
-            _print_program(steps, numbered=not ideation)
+            # A lab protocol IS the deliverable, so it always prints in full.
+            # An ideation portfolio that missed `concepts` is a document in
+            # disguise: show enough to judge the direction and point at the
+            # report for the rest, rather than paging the whole thing past a
+            # reviewer who was asked one question.
+            if (ideation and not concepts
+                    and len(steps) > _IDEATION_PROGRAM_MAX):
+                _print_program(steps[:_IDEATION_PROGRAM_MAX], numbered=False)
+                print(f"\n   … {len(steps) - _IDEATION_PROGRAM_MAX} more "
+                      + ("— full text in the report above."
+                         if report_path else "— see the saved plan."))
+            else:
+                _print_program(steps, numbered=not ideation)
 
         # --- Equipment ---
         print("\n--- 🛠️  Key Capabilities ---" if ideation
@@ -334,13 +379,14 @@ def display_plan_summary(result: Dict[str, Any],
             print("  (None specified)")
 
         # --- Outcome & Justification (Critical for Review) ---
-        print("\n--- 📈 Expected Outcomes ---" if ideation
-              else "\n--- 📈 Expected Outcome ---")
-        print(_wrap_field(exp.get('expected_outcome')))
+        # Ideation printed both in the card above; repeating them here was
+        # what made a direction read as a protocol with appendices.
+        if not ideation:
+            print("\n--- 📈 Expected Outcome ---")
+            print(_wrap_field(exp.get('expected_outcome')))
 
-        print("\n--- 💡 Rationale ---" if ideation
-              else "\n--- 💡 Justification ---")
-        print(_wrap_field(exp.get('justification')))
+            print("\n--- 💡 Justification ---")
+            print(_wrap_field(exp.get('justification')))
         
         # --- Source Documents ---
         print("\n--- 📄 Source Documents ---")
@@ -425,11 +471,7 @@ def display_plan_candidates(candidates: List[Dict[str, Any]],
         # the UI radio parser reads the index/name from it and detects the
         # pick from what trails the closing '──'.
         print(f"── Candidate {i}: {exp.get('experiment_name', 'Unnamed')} ──{marker}")
-        for icon, title, key in (("🎯", "Hypothesis", "hypothesis"),
-                                 ("📈", "Expected outcome", "expected_outcome"),
-                                 ("💡", "Justification", "justification")):
-            print(f"\n{icon} {title}:")
-            print(_wrap_field(exp.get(key)))
+        _print_direction_fields(exp)
         s = scores_by_idx.get(i)
         if s:
             print("\n🧑‍⚖️ Judge: "
