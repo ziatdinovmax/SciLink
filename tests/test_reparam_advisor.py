@@ -44,6 +44,9 @@ def test_flagged_properties_and_backend_reach_the_prompt():
     assert "EIS" in prompt and "density" in prompt
     assert "Far below the known density" in prompt        # the critic's reasoning
     assert "openff" in prompt
+    # The system drives the search itself — the finding is not punted to a human.
+    assert "searches the literature" in prompt
+    assert "punt the SEARCH to a human" in prompt
 
 
 def test_recommendation_passes_through():

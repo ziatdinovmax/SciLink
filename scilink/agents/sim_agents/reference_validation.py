@@ -134,3 +134,66 @@ def run_reference_check(
     )
     return {"selections": selection.get("selections", []), **report,
             "verdict": verdict}
+
+
+def run_reparameterization(
+    flagged: List[Dict[str, Any]],
+    system_description: str,
+    backend: str,
+    *,
+    advise_fn: Callable[[List[Dict[str, Any]], str, str], Dict[str, Any]],
+    search_fn: Callable[[Dict[str, Any], List[Any]], Optional[Any]],
+    apply_and_recheck_fn: Callable[[Any], Dict[str, Any]],
+    confirm_fn: Callable[[Any], bool] = lambda candidate: True,
+    max_attempts: int = 2,
+) -> Dict[str, Any]:
+    """Autonomously fix a force field the pre-run check flagged, and re-validate.
+
+    SciLink drives the fix; the human only approves. The loop:
+
+    1. ``advise_fn`` recommends a corrective action for the flagged properties;
+    2. ``search_fn`` finds a candidate correction (e.g. literature parameters
+       for the offending component), given what has already been tried;
+    3. ``confirm_fn`` is the human checkpoint (approve the candidate) — the
+       identity default auto-approves for autonomous runs;
+    4. ``apply_and_recheck_fn`` applies the candidate (re-parameterizes) and
+       re-runs the pure-component check — the SAME check that caught the problem
+       now validates the fix, so a wrong candidate fails here and is discarded.
+
+    Repeats up to ``max_attempts`` distinct candidates. All operations are
+    injected, so this is engine/backend-neutral and unit-testable without a
+    model, a literature search, or a simulation.
+
+    Returns ``{"status", "recommendation", "candidate"?, "reference_validation"?,
+    "attempts"}`` where ``status`` is:
+    ``"fixed"`` (a candidate re-validated), ``"escalated"`` (no automatic action
+    to attempt), ``"no_candidate"`` (search found nothing), ``"declined"`` (human
+    rejected a candidate), or ``"unresolved"`` (candidates tried, none passed).
+    """
+    recommendation = advise_fn(flagged, system_description, backend)
+    action = recommendation.get("recommended_action")
+    if action in (None, "escalate"):
+        return {"status": "escalated", "recommendation": recommendation,
+                "attempts": []}
+
+    tried: List[Any] = []
+    attempts: List[Dict[str, Any]] = []
+    for _ in range(max(1, max_attempts)):
+        candidate = search_fn(recommendation, tried)
+        if not candidate:
+            return {"status": "no_candidate" if not tried else "unresolved",
+                    "recommendation": recommendation, "attempts": attempts}
+        if not confirm_fn(candidate):
+            return {"status": "declined", "recommendation": recommendation,
+                    "candidate": candidate, "attempts": attempts}
+        result = apply_and_recheck_fn(candidate)
+        verdict = (result.get("verdict") or {}).get("verdict")
+        attempts.append({"candidate": candidate, "verdict": verdict})
+        if verdict == "good":
+            return {"status": "fixed", "recommendation": recommendation,
+                    "candidate": candidate, "reference_validation": result,
+                    "attempts": attempts}
+        tried.append(candidate)
+
+    return {"status": "unresolved", "recommendation": recommendation,
+            "attempts": attempts}

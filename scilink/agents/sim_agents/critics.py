@@ -1248,22 +1248,30 @@ Reason about the LIKELY cause of each flagged value — partial charges, van der
 Waals / Lennard-Jones terms, bonded/torsion terms, or a chemistry the base force
 field does not really cover — and recommend ONE concrete corrective action:
 - "add_force_field": supplement or replace the offending component's parameters
-  with a validated set (e.g. a literature model for that chemistry), supplied
+  with a validated set (e.g. a literature model for that chemistry), applied
   through the backend's extra-force-field channel.
 - "adjust_parameters": change specific named terms — for a targeted issue.
 - "switch_backend": use a backend that covers this chemistry better.
-- "escalate": no confident automatic fix — hand to the human with the diagnosis.
+- "escalate": no confident automatic fix to attempt — hand to the human.
 
-Recommend the human confirm or supply the concrete parameters unless the fix is
-unambiguous; a wrong "fix" that still fails wastes another validation cycle.
+The system finds and applies the fix ITSELF: it searches the literature for
+candidate parameters and re-runs this same pure-component check to validate them
+automatically, so a wrong candidate is caught and discarded, not trusted. So do
+NOT punt the SEARCH to a human — recommend "add_force_field" whenever a validated
+set plausibly exists in the literature. A human APPROVES the corrected model
+before production; a human is not needed to find the parameters. Reserve
+"escalate" for when no automatic fix is worth attempting at all.
 
 Return a JSON object:
   status              "success"
   diagnosis           which component/property, and the likely force-field cause
   recommended_action  one of "add_force_field" | "adjust_parameters" |
                       "switch_backend" | "escalate"
-  detail              concrete specifics (what to add / change / switch to)
-  requires_human      true|false — whether a human must supply or approve the fix
+  detail              concrete specifics (what to search for / change / switch to)
+  requires_human      true|false — whether a human must APPROVE the corrected
+                      model before production (finding the parameters is
+                      automatic; use "escalate" when there is no automatic fix
+                      to attempt at all)
   rationale           short prose
 """
 
