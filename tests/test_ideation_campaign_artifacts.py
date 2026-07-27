@@ -193,12 +193,15 @@ def test_single_plan_ideation_gets_the_portfolio_rules():
     concepts, delegation 05 emitted none and used 56 steps as sections."""
     from pathlib import Path
     src = Path("scilink/agents/planning_agents/planning_agent.py").read_text()
-    assert "_ideation_out = (selection_profile == \"ideation\"" in src
-    assert "or self._is_ideation_campaign())" in src
-    # both tiers, or a fallback run reverts to cramming
-    assert src.count("IDEATION_OUTPUT_RULES if _ideation_out else \"\"") == 1
-    assert "HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK\n" \
-           "                    + IDEATION_OUTPUT_RULES) if _ideation_out" in src
+    # Whitespace-insensitive: the block gets re-indented as the surrounding
+    # branch structure changes, and that must not read as a regression.
+    flat = " ".join(src.split())
+    assert '_ideation_out = (selection_profile == "ideation"' in flat
+    assert "or self._is_ideation_campaign())" in flat
+    # the rule reaches BOTH tiers, or a fallback run reverts to cramming
+    assert 'IDEATION_OUTPUT_RULES if _ideation_out else ""' in flat
+    assert ("HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK "
+            "+ IDEATION_OUTPUT_RULES) if _ideation_out" in flat)
 
 
 # ── one card, both surfaces ──────────────────────────────────────────

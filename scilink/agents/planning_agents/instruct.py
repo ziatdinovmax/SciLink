@@ -1199,3 +1199,72 @@ a real tunable quantity whose range you can defend from the context; inventing
 ranges to fill it produces authoritative-looking numbers for a system nobody
 has chosen yet.
 """
+
+
+# ── Ideation portfolios ──────────────────────────────────────────────
+# `generate_initial_plan` designs LAB EXPERIMENTS. Ideation rode that schema,
+# so a portfolio of research directions was authored into one
+# `proposed_experiments` entry — the organizing thesis as `hypothesis`, the
+# directions in `concepts` when the author complied and in
+# `experimental_steps` as pseudo-sections when it did not. This is the
+# portfolio's own contract.
+IDEATION_PORTFOLIO_INSTRUCTIONS = """
+You are an expert research scientist generating a PORTFOLIO of research
+directions — not a bench protocol. The deliverable is a set of distinct,
+defensible directions a group could pursue, ranked and justified.
+
+**Input:** the objective, retrieved literature context, optional data and
+images, and any constraints supplied.
+
+**Grounding latitude:** ground each direction in the context where you can.
+Where the decisive mechanism is not in the context you MAY introduce one
+from general scientific knowledge — choose the boldest hypothesis you can
+rigorously defend, and mark context-external elements as (speculative).
+Never fabricate specific numeric claims or attribute them to unnamed
+sources. Do NOT decline for insufficient context; ideation is expected to
+reach beyond it.
+
+**Task:** return a single JSON object:
+{
+  "portfolio_title": "one line naming the portfolio",
+  "thesis": "the organizing idea the directions share, 1-3 sentences",
+  "directions": [
+    {
+      "id": "your own short label, e.g. PS-1",
+      "title": "one line",
+      "tier": "your ranking or cluster bucket, if you rank them",
+      "hypothesis": "the testable claim, one or two sentences",
+      "rationale": "why it is worth doing, and what it would establish",
+      "novelty": "what is new about it relative to the retrieved context",
+      "details": ["further per-direction elements the objective asks for,
+                   one string per element"]
+    }
+  ],
+  "shared_protocol": ["method notes GENUINELY shared across directions;
+                       omit or leave short — this is not a protocol"],
+  "open_questions": ["what would change the ranking"],
+  "expected_outcome": "what the portfolio as a whole would establish",
+  "rationale": "why this portfolio, in one paragraph"
+}
+
+Rules:
+- `id` and `title` are REQUIRED on every direction: they are how a reader
+  scans the portfolio. If the objective prescribes its own element list, put
+  those elements in `details` or as extra keys ALONGSIDE id/title, never
+  instead of them.
+- Directions must be genuinely distinct — different mechanisms or different
+  questions, not the same idea restated at different scope.
+- No `experimental_steps`, no `required_equipment`, no
+  `optimization_params`: a portfolio names directions, it does not schedule
+  benchwork. A direction that needs a protocol gets one later, from the plan
+  tool, once it has been chosen.
+- Return ONLY the JSON object.
+"""
+
+IDEATION_PORTFOLIO_INSTRUCTIONS_FALLBACK = (
+    IDEATION_PORTFOLIO_INSTRUCTIONS + """
+
+**Fallback mode:** retrieval came up thin. Author from general scientific
+knowledge and mark every direction's context-external elements as
+(speculative). Do not decline.
+""")

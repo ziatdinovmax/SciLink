@@ -23,6 +23,8 @@ from .instruct import (
     IDEATION_AUTHOR_OVERRIDE,
     IDEATION_OUTPUT_RULES,
     TECHNICAL_DOCUMENT_INSTRUCTIONS,
+    IDEATION_PORTFOLIO_INSTRUCTIONS,
+    IDEATION_PORTFOLIO_INSTRUCTIONS_FALLBACK,
     TECHNICAL_DOCUMENT_INSTRUCTIONS_FALLBACK,
     CONSTRAINT_COVERAGE_NOTE
 )
@@ -443,7 +445,8 @@ def generate_plan_candidates(objective: str,
                              additional_context: Optional[str] = None,
                              external_context: Optional[str] = None,
                              skill_context: Optional[str] = None,
-                             selection_profile: str = "lab"
+                             selection_profile: str = "lab",
+                             contract: Optional[Dict[str, Any]] = None
                              ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], str]:
     """
     Sequential, diversity-conditioned best-of-N candidate generation.
@@ -486,10 +489,22 @@ def generate_plan_candidates(objective: str,
     # Grounding latitude is tier-dependent (the fallback set already grants
     # it); the OUTPUT rules are not — they ride both tiers, else a fallback
     # ideation run goes back to cramming its portfolio into steps.
+    # A CONTRACT swaps what a candidate IS — a portfolio of research
+    # directions rather than an experiment — while the tier pinning,
+    # distinctness conditioning and early-stop below are shape-agnostic and
+    # stay shared. Absent a contract this is byte-for-byte the experiment
+    # path it has always been.
+    _key = (contract or {}).get("key", "proposed_experiments")
+    _label = (contract or {}).get("label", "Candidate Plan")
+    _summarise = (contract or {}).get("summarise")
+
     _ideation = selection_profile == "ideation"
     author_instructions = HYPOTHESIS_GENERATION_INSTRUCTIONS
     fallback_set = HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK
-    if _ideation:
+    if contract:
+        author_instructions = contract["strict"]
+        fallback_set = contract["fallback"]
+    elif _ideation:
         author_instructions = (HYPOTHESIS_GENERATION_INSTRUCTIONS
                                + IDEATION_AUTHOR_OVERRIDE
                                + IDEATION_OUTPUT_RULES)
@@ -499,7 +514,7 @@ def generate_plan_candidates(objective: str,
     first, author_context = perform_science_rag(
         objective=objective,
         instructions=author_instructions,
-        task_name="Candidate Plan 1",
+        task_name=f"{_label} 1",
         kb_docs=kb_docs,
         model=model,
         generation_config=generation_config,
@@ -519,7 +534,7 @@ def generate_plan_candidates(objective: str,
     )
     tier = first.pop("_rag_mode", "strict") if isinstance(first, dict) else "strict"
     candidates = [first]
-    if first.get("error") or not first.get("proposed_experiments"):
+    if first.get("error") or not first.get(_key):
         return candidates, author_context, tier
 
     if tier == "fallback":
@@ -529,7 +544,7 @@ def generate_plan_candidates(objective: str,
 
     for k in range(2, n_candidates + 1):
         prior = "\n".join(
-            f"{i}. {c['proposed_experiments'][0].get('hypothesis', 'N/A')}"
+            f"{i}. {_summarise(c) if _summarise else (c['proposed_experiments'][0].get('hypothesis', 'N/A'))}"
             for i, c in enumerate(candidates, 1)
         )
         conditioning = HYPOTHESIS_DISTINCTNESS_CONDITIONING.format(
@@ -553,10 +568,10 @@ def generate_plan_candidates(objective: str,
             primary_data_str=author_context.get("primary_data"),
             skill_context=skill_context,
             fallback_instructions=None,
-            task_name=f"Candidate Plan {k}",
+            task_name=f"{_label} {k}",
         )
-        if not isinstance(res, dict) or res.get("error") or not res.get("proposed_experiments"):
-            reason = (res or {}).get("error", "no experiments returned") \
+        if not isinstance(res, dict) or res.get("error") or not res.get(_key):
+            reason = (res or {}).get("error", f"no {_key} returned") \
                 if isinstance(res, dict) else "unparseable response"
             print(f"  - 🛑 Candidate {k} declined ({reason}) — "
                   f"stopping at {len(candidates)} distinct candidate(s).")
@@ -1109,3 +1124,39 @@ def document_to_markdown(title: str, sections: List[Dict[str, Any]]) -> str:
         if body:
             out += [body, ""]
     return "\n".join(out).rstrip() + "\n"
+
+
+# The portfolio contract for generate_plan_candidates. The tier pinning,
+# distinctness conditioning and early stop are shape-agnostic and shared; only
+# what a candidate IS changes.
+def portfolio_contract() -> Dict[str, Any]:
+    def _summarise(cand: Dict[str, Any]) -> str:
+        dirs = cand.get("directions") or []
+        titles = "; ".join(str(d.get("title") or d.get("id") or "")
+                           for d in dirs[:6] if isinstance(d, dict))
+        return f"{cand.get('thesis', 'N/A')} — directions: {titles}"
+
+    return {"key": "directions",
+            "label": "Candidate Portfolio",
+            "strict": IDEATION_PORTFOLIO_INSTRUCTIONS,
+            "fallback": IDEATION_PORTFOLIO_INSTRUCTIONS_FALLBACK,
+            "summarise": _summarise}
+
+
+def author_portfolio(objective: str,
+                     kb_docs: Any,
+                     model: Any,
+                     generation_config: Any,
+                     **kw) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Author ONE portfolio (the n_candidates=1 path)."""
+    return perform_science_rag(
+        objective=objective,
+        instructions=IDEATION_PORTFOLIO_INSTRUCTIONS,
+        fallback_instructions=IDEATION_PORTFOLIO_INSTRUCTIONS_FALLBACK,
+        task_name="Research Portfolio",
+        kb_docs=kb_docs,
+        model=model,
+        generation_config=generation_config,
+        return_context=True,
+        **kw,
+    )

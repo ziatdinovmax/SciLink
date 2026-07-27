@@ -1509,7 +1509,8 @@ class OrchestratorTools:
             n_candidates: int = None,
             selection_profile: str = None,
             white_paper: bool = None,
-            new_campaign: bool = None
+            new_campaign: bool = None,
+            kind: str = "experiment"
         ):
             """
             Generates experimental plan (science strategy only, no code).
@@ -1670,7 +1671,8 @@ class OrchestratorTools:
                     selection_profile=(selection_profile
                                        if selection_profile in ("lab", "ideation")
                                        else "lab"),
-                    new_campaign=new_campaign
+                    new_campaign=new_campaign,
+                    kind=kind,
                 )
 
                 # An explicit lab profile marks THIS plan a bench plan even
@@ -6333,6 +6335,116 @@ class OrchestratorTools:
                 },
             },
             required=["request"]
+        )
+
+        def generate_ideation_portfolio(
+            specific_objective: str,
+            knowledge_paths: str = None,
+            additional_context: str = None,
+            skill: str = None,
+            literature_context: str = None,
+            n_candidates: int = None,
+            white_paper: bool = None,
+            new_campaign: bool = None,
+        ):
+            """Author a PORTFOLIO of research directions (ideation).
+
+            The ideation twin of generate_initial_plan: same grounding,
+            best-of-N, judge, critic and campaign machinery, different
+            contract — directions, not a bench protocol.
+            """
+            # Same implementation, different contract — see `kind`.
+            return generate_initial_plan(
+                specific_objective=specific_objective,
+                knowledge_paths=knowledge_paths,
+                additional_context=additional_context,
+                skill=skill,
+                literature_context=literature_context,
+                n_candidates=n_candidates,
+                selection_profile="ideation",
+                white_paper=white_paper,
+                new_campaign=new_campaign,
+                kind="portfolio",
+            )
+
+        self._register_tool(
+            func=generate_ideation_portfolio,
+            name="generate_ideation_portfolio",
+            description=(
+                "Generate a PORTFOLIO of research directions — brainstorming, "
+                "ideation, 'what should we work on', a slate of use cases, a "
+                "hedge against one direction failing, or consolidating earlier "
+                "threads into a standalone class. Each direction carries its "
+                "own hypothesis, rationale and novelty; the portfolio carries "
+                "an organizing thesis. USE THIS INSTEAD OF "
+                "generate_initial_plan whenever the ask is which directions "
+                "are worth pursuing rather than how to run one on the bench — "
+                "generate_initial_plan designs a lab experiment, and a "
+                "portfolio forced into that schema comes back with its "
+                "directions flattened into protocol steps. Produces a "
+                "sponsor-facing white paper by default, and an all-candidates "
+                "dossier when several candidate portfolios were generated. "
+                "Once the user PICKS a direction and wants the runnable "
+                "protocol for it, that is generate_initial_plan with "
+                "selection_profile='lab'."
+            ),
+            parameters={
+                "specific_objective": {
+                    "type": "string",
+                    "description": (
+                        "What to ideate on, in full — the domain, what makes "
+                        "a direction interesting here, any structure the user "
+                        "asked for (how many directions, how to rank or "
+                        "cluster them, elements each must carry)."
+                    ),
+                },
+                "knowledge_paths": {
+                    "type": "string",
+                    "description": "Comma-separated paths to papers/reports/docs folders",
+                },
+                "additional_context": {
+                    "type": "string",
+                    "description": "Constraints, prior findings, or user preferences to honour",
+                },
+                "skill": {
+                    "type": "string",
+                    "description": "Optional planning skill to load for domain guidance",
+                },
+                "literature_context": {
+                    "type": "string",
+                    "description": (
+                        "Path to a literature search file to ground the "
+                        "portfolio in (from search_literature)."
+                    ),
+                },
+                "n_candidates": {
+                    "type": "integer",
+                    "description": (
+                        "How many DISTINCT candidate portfolios to author "
+                        "before the judge picks one. Defaults to best-of-3 on "
+                        "a campaign's first portfolio and 1 for follow-ups. "
+                        "Only a multi-candidate run produces the "
+                        "all-candidates dossier, since that dossier IS the "
+                        "report over the candidate set."
+                    ),
+                },
+                "white_paper": {
+                    "type": "boolean",
+                    "description": (
+                        "Force (true) or suppress (false) the sponsor-facing "
+                        "white paper. Omit for the default, which produces one."
+                    ),
+                },
+                "new_campaign": {
+                    "type": "boolean",
+                    "description": (
+                        "TRUE when this starts a NEW line of work unrelated to "
+                        "the current campaign, so its literature and history "
+                        "do not leak in. Omit to continue the current campaign."
+                    ),
+                },
+            },
+            required=["specific_objective"]
         )
 
         self._register_tool(

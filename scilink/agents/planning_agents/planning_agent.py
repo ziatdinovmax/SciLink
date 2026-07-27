@@ -13,6 +13,7 @@ from datetime import datetime
 from scilink.knowledge import KnowledgeBase
 from .parser_utils import (
     plan_directions,
+    portfolio_to_experiment_shim,
     plan_is_portfolio,
     plan_thesis,
     generate_repo_map,
@@ -38,6 +39,8 @@ from ._deprecation import normalize_params
 from .base_agent import BaseAgent
 
 from .planning_rag import (
+    author_portfolio,
+    portfolio_contract,
     perform_science_rag,
     perform_code_rag,
     refine_plan_with_feedback,
@@ -926,7 +929,8 @@ class PlanningAgent(BaseAgent):
                     n_candidates: int = 1,
                     candidate_report_dir: Optional[str] = None,
                     selection_profile: str = "lab",
-                    new_campaign: Optional[bool] = None) -> Dict[str, Any]:
+                    new_campaign: Optional[bool] = None,
+                    kind: str = "experiment") -> Dict[str, Any]:
         """
         Generate experimental plan (science only, no implementation code/protocol).
 
@@ -1072,14 +1076,24 @@ class PlanningAgent(BaseAgent):
         skill_planning_context = self._build_skill_context("planning")
 
         # RAG for science plan
-        print(f"\n--- Generating Experimental Strategy ---")
+        # A PORTFOLIO of research directions, or an EXPERIMENT. Ideation asked
+        # for the first and was handed the second for a long time; the plan
+        # tool designs bench experiments, and a portfolio squeezed into that
+        # schema came back with its directions as pseudo-steps.
+        _portfolio_run = (kind == "portfolio")
+        print(f"\n--- Generating {'Research Portfolio' if _portfolio_run else 'Experimental Strategy'} ---")
         n_candidates = max(1, min(int(n_candidates or 1), 4))
         bestofn_candidates = None
         bestofn_judge = None
         bestofn_selected = None
         bestofn_reports = []
         if n_candidates > 1:
+            # One engine, two contracts: a portfolio candidate is a set of
+            # research directions, an experiment candidate a protocol. The
+            # tier pinning, distinctness conditioning and early stop are
+            # shape-agnostic and stay shared.
             candidates, author_context, tier = generate_plan_candidates(
+                contract=(portfolio_contract() if _portfolio_run else None),
                 objective=objective,
                 kb_docs=self.kb_docs,
                 model=self.model,
@@ -1093,8 +1107,16 @@ class PlanningAgent(BaseAgent):
                 skill_context=skill_planning_context,
                 selection_profile=selection_profile,
             )
+            # Shim BEFORE judging: the judge, the candidate cards and the
+            # dossier all read `proposed_experiments`, and re-teaching three
+            # consumers the portfolio shape to judge a portfolio is the
+            # migration this transition device exists to avoid.
+            if _portfolio_run:
+                candidates = [portfolio_to_experiment_shim(c)
+                              for c in candidates]
             if len(candidates) > 1:
-                print(f"\n--- Judging {len(candidates)} Candidate Plans ---")
+                print(f"\n--- Judging {len(candidates)} Candidate "
+                      f"{'Portfolios' if _portfolio_run else 'Plans'} ---")
                 bestofn_judge = judge_plan_candidates(
                     objective=objective,
                     candidates=candidates,
@@ -1149,25 +1171,39 @@ class PlanningAgent(BaseAgent):
             # fallback run reverts to cramming otherwise.
             _ideation_out = (selection_profile == "ideation"
                              or self._is_ideation_campaign())
-            res, author_context = perform_science_rag(
-                objective=objective,
-                instructions=(HYPOTHESIS_GENERATION_INSTRUCTIONS
-                              + (IDEATION_OUTPUT_RULES if _ideation_out else "")),
-                fallback_instructions=(
-                    HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK
-                    + IDEATION_OUTPUT_RULES) if _ideation_out else None,
-                task_name="Experimental Plan",
-                kb_docs=self.kb_docs,
-                model=self.model,
-                generation_config=self.generation_config,
-                primary_data_set=primary_data_set,
-                image_paths=all_image_paths,
-                image_descriptions=image_descriptions,
-                additional_context=ctx_string,
-                external_context=external_context,
-                skill_context=skill_planning_context,
-                return_context=True
-            )
+            if _portfolio_run:
+                res, author_context = author_portfolio(
+                    objective=objective,
+                    kb_docs=self.kb_docs,
+                    model=self.model,
+                    generation_config=self.generation_config,
+                    primary_data_set=primary_data_set,
+                    image_paths=all_image_paths,
+                    image_descriptions=image_descriptions,
+                    additional_context=ctx_string,
+                    external_context=external_context,
+                    skill_context=skill_planning_context,
+                )
+            else:
+                res, author_context = perform_science_rag(
+                    objective=objective,
+                    instructions=(HYPOTHESIS_GENERATION_INSTRUCTIONS
+                                  + (IDEATION_OUTPUT_RULES if _ideation_out else "")),
+                    fallback_instructions=(
+                        HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK
+                        + IDEATION_OUTPUT_RULES) if _ideation_out else None,
+                    task_name="Experimental Plan",
+                    kb_docs=self.kb_docs,
+                    model=self.model,
+                    generation_config=self.generation_config,
+                    primary_data_set=primary_data_set,
+                    image_paths=all_image_paths,
+                    image_descriptions=image_descriptions,
+                    additional_context=ctx_string,
+                    external_context=external_context,
+                    skill_context=skill_planning_context,
+                    return_context=True
+                )
 
         if external_context:
             res["literature_search"] = external_context
@@ -1178,9 +1214,17 @@ class PlanningAgent(BaseAgent):
         # produced it. Only a real ideation run is stamped — the profile is
         # documented as a no-op on the single-plan path.
         _ideation_run = (selection_profile == "ideation" and n_candidates > 1)
-        if _ideation_run:
+        if _ideation_run or _portfolio_run:
             res["type"] = "ideation"
             self.state["plan_kind"] = "ideation"
+
+        # A portfolio carries BOTH shapes through the transition: `directions`
+        # is the payload, and a one-entry shim keeps the fifty-odd legacy
+        # readers of `proposed_experiments` correct rather than empty-handed —
+        # the validity gates especially, where a missing key reads as a FAILED
+        # plan and aborts the run.
+        if _portfolio_run and isinstance(res, dict) and not res.get("error"):
+            res = portfolio_to_experiment_shim(res)
 
         self._log_action(
             action=("generate_plan_candidates" if n_candidates > 1
