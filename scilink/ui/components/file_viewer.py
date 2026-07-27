@@ -4,6 +4,10 @@ from pathlib import Path
 
 import streamlit as st
 
+# Rendered markdown is re-parsed on every rerun, so a runaway file (a pasted
+# literature dump) would stall the page. Matches the code-preview clip.
+_MD_MAX_CHARS = 100_000
+
 
 def render_file_preview(file_path: Path) -> None:
     """Display an appropriate preview for the given file and a download button."""
@@ -104,6 +108,33 @@ def render_file_preview(file_path: Path) -> None:
         )
         return
 
+    # Markdown — rendered, with the source one click away.
+    #
+    # Reports, white papers and plans are the most-clicked files in a session
+    # and they were the ones shown as raw source: headings as literal #, tables
+    # as pipe soup. Unlike the in-chat preview this pane IS the document view,
+    # so headings keep their true levels rather than being demoted.
+    if suffix == ".md":
+        text = file_path.read_text(errors="replace")
+        clipped = text[:_MD_MAX_CHARS]
+        if len(text) > _MD_MAX_CHARS:
+            st.caption(f"Showing the first {_MD_MAX_CHARS:,} of "
+                       f"{len(text):,} characters.")
+            # Clipping mid-fence would render the whole tail as code.
+            if clipped.count("```") % 2:
+                clipped += "\n```"
+        view = st.segmented_control(
+            "View", ["Rendered", "Source"], default="Rendered",
+            key=f"mdview_{file_path}", label_visibility="collapsed",
+        )
+        # A segmented control can be deselected back to None; that is not a
+        # request for raw source, so anything but an explicit Source renders.
+        if view == "Source":
+            st.code(clipped, language="markdown")
+        else:
+            st.markdown(clipped)
+        return
+
     # Source code
     _code_langs = {
         ".py": "python",
@@ -124,7 +155,7 @@ def render_file_preview(file_path: Path) -> None:
         return
 
     # Plain text fallback
-    if suffix in (".txt", ".md", ".log"):
+    if suffix in (".txt", ".log"):
         st.code(file_path.read_text()[:100000], language="text")
         return
 
