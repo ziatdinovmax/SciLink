@@ -711,11 +711,12 @@ def test_lab_plan_report_is_marked_a_deliverable(tmp_path):
     from scilink.agents.planning_agents.user_interface import (
         load_deliverables, record_deliverable)
     src = Path("scilink/agents/planning_agents/orchestrator_tools.py").read_text()
-    # every plan.html generation site marks it
-    # every plan-report generation site routes through the one marker
-    assert src.count("self._record_plan_report(html_path)") == 5
-    assert src.count("generator.generate(str(html_path))") == 5
-    # ...and the marking itself is defined exactly once
+    # The five generation sites were inlined copies, each marking the report
+    # itself; they now share one helper that decides whether to render at all
+    # (see test_ideation_campaign_artifacts). Marking still happens once per
+    # rendered report, and is defined exactly once.
+    assert src.count("self._emit_plan_report(") == 5
+    assert src.count("self._record_plan_report(html_path)") == 1
     assert src.count("record_deliverable(self.orch.base_dir, html_path,") == 1
 
     record_deliverable(tmp_path, tmp_path / "plan.html",

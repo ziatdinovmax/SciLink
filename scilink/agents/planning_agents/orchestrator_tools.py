@@ -5,6 +5,8 @@ Supports both Google Gemini (function objects) and OpenAI (JSON schemas).
 
 from datetime import datetime
 import json
+from .planning_rag import (author_technical_document,
+                           document_to_markdown)
 import logging
 import re
 import pandas as pd
@@ -602,6 +604,34 @@ class OrchestratorTools:
                 self._prestate_lit = []
             return reg
         return self._pending_lit
+
+    def _emit_plan_report(self, name: str = "plan.html", ideation=None):
+        """Render the campaign's protocol report — unless this is a dossier.
+
+        An ideation campaign gets no plan.html at all: the template renders
+        an ordered experimental-steps protocol, which misrepresents a
+        research portfolio. That suppression used to live on the
+        initial-plan path only, while the four refinement paths kept
+        regenerating the report — so a long ideation session (live: nine
+        delegations of cdoc use-case ideation) accumulated protocol reports
+        for a portfolio it had never planned. One helper, one rule.
+
+        `ideation` may be passed when the caller has already decided; it
+        defaults to asking the campaign. Returns the path, or None when
+        suppressed.
+        """
+        if ideation is None:
+            try:
+                ideation = self.orch.planner._is_ideation_campaign()
+            except Exception:  # noqa: BLE001
+                ideation = False
+        if ideation:
+            return None
+        from .html_generator import HTMLReportGenerator
+        html_path = self._output_dir() / name
+        HTMLReportGenerator(self.orch.planner.state).generate(str(html_path))
+        self._record_plan_report(html_path)
+        return html_path
 
     def _record_plan_report(self, html_path) -> None:
         """Mark a generated plan report as the campaign's deliverable —
@@ -1477,7 +1507,7 @@ class OrchestratorTools:
             literature_context: str = None,
             molecule_context: str = None,
             n_candidates: int = None,
-            selection_profile: str = "lab",
+            selection_profile: str = None,
             white_paper: bool = None,
             new_campaign: bool = None
         ):
@@ -1643,6 +1673,20 @@ class OrchestratorTools:
                     new_campaign=new_campaign
                 )
 
+                # An explicit lab profile marks THIS plan a bench plan even
+                # inside an ideation campaign: the campaign ideated, the user
+                # picked a direction, and now wants the executable protocol
+                # for it. Without a way to say so the campaign stamp would
+                # hand a runnable protocol a research dossier. Omitting the
+                # profile inherits the campaign; only the explicit word
+                # overrides it. `_stamp_campaign` never overwrites a type
+                # that is already set, so this survives the later passes.
+                if selection_profile == "lab" and isinstance(plan, dict):
+                    plan.setdefault("type", "lab")
+                    _cur = (self.orch.planner.state or {}).get("current_plan")
+                    if isinstance(_cur, dict):
+                        _cur.setdefault("type", "lab")
+
                 # Store skill on orchestrator for downstream tools
                 if effective_skill:
                     self.orch._active_skill = effective_skill
@@ -1685,14 +1729,21 @@ class OrchestratorTools:
                 # tables) with no ideation vocabulary, which misrepresents a
                 # free-form research dossier; there the white paper is the
                 # human-facing artifact and plan.json keeps the record.
-                _ideation_run = (selection_profile == "ideation" and n_cand > 1)
-                html_path = None
-                if not _ideation_run:
-                    from .html_generator import HTMLReportGenerator
-                    html_path = self._output_dir() / "plan.html"
-                    generator = HTMLReportGenerator(self.orch.planner.state)
-                    generator.generate(str(html_path))
-                    self._record_plan_report(html_path)
+                # Ask the PLAN what it is, not the best-of-N judge knob.
+                # `selection_profile` weights candidate selection and is a
+                # documented no-op with n_candidates=1 — so a consolidation
+                # call inside an ideation campaign (live: "consolidate the
+                # session's threads into one cross-cutting class") scored as
+                # a lab run and got a protocol report, no dossier, and no
+                # white paper, while the console it printed still used the
+                # ideation vocabulary. The plan's own `type` stamp, inherited
+                # from the campaign, is the honest signal; the profile clause
+                # remains for the first call, which establishes the stamp.
+                _ideation_run = (
+                    plan.get("type") == "ideation"
+                    or (selection_profile == "ideation" and n_cand > 1)
+                )
+                html_path = self._emit_plan_report(ideation=_ideation_run)
 
                 num_experiments = len(plan.get('proposed_experiments', []))
 
@@ -1726,7 +1777,12 @@ class OrchestratorTools:
                 # runner-ups are deliverables there, and rendering it
                 # deterministically from the same state the white paper uses
                 # keeps the two consistent by construction.
-                if _ideation_run:
+                # ...but the DOSSIER is a report over the candidate set, so it
+                # needs one from THIS call. `plan_candidates` survives in state
+                # across delegations, so a single-plan follow-up would render
+                # its own flagship beside an EARLIER question's runner-ups — a
+                # dossier answering a question the user has moved on from.
+                if _ideation_run and n_cand > 1:
                     try:
                         result["ideation_report"] = self._write_ideation_report()
                     except Exception as e:  # noqa: BLE001 - plan result survives
@@ -1764,7 +1820,14 @@ class OrchestratorTools:
             func=generate_initial_plan,
             name="generate_initial_plan",
             description=(
-                "Generates experimental plan (science strategy only, no implementation code). "
+                "Generates an EXPERIMENTAL plan — a testable hypothesis with "
+                "the measurements that would test it (science strategy only, "
+                "no implementation code). "
+                "NOT for a document that merely contains the word plan: a "
+                "build/staging roadmap, a cost or footprint estimate, a "
+                "consolidation memo or a summary is authored with "
+                "write_technical_document. If the request has no hypothesis to "
+                "test and nothing to measure, it is not this tool. "
                 "Automatically includes previous TEA results if available. "
                 "Can use: papers/reports, experimental data, lab constraints."
             ),
@@ -1845,11 +1908,22 @@ class OrchestratorTools:
                         "tomorrow's runnable protocol. Same candidates and "
                         "scores either way; only the authoring latitude and "
                         "the pick's weighting change, and the human can "
-                        "still override. NOTE: ideation requires "
+                        "still override. NOTE: ideation weighting requires "
                         "n_candidates >= 2 — with a single plan there is "
-                        "nothing to select and the profile has no effect, "
-                        "so never pass n_candidates=1 together with "
-                        "ideation. Ideation runs also produce a "
+                        "nothing to select — so never pass n_candidates=1 "
+                        "together with ideation. OMIT this parameter inside "
+                        "an established campaign: the plan then inherits "
+                        "that campaign's kind, so a follow-up or "
+                        "consolidation in an ideation campaign still gets "
+                        "the dossier and white paper rather than a bench "
+                        "protocol report. Pass 'lab' EXPLICITLY to force a "
+                        "bench/engineering plan even inside an ideation "
+                        "campaign — the case is the user picking one ideated "
+                        "direction and asking for its runnable bench "
+                        "protocol. Note this tool is for EXPERIMENTAL "
+                        "design and measurements; a roadmap, estimate or "
+                        "summary document is not a plan and belongs in "
+                        "save_file. Ideation plans also produce a "
                         "sponsor-facing white paper by default (see "
                         "white_paper)."
                     ),
@@ -2015,11 +2089,7 @@ class OrchestratorTools:
                     json.dump(updated_plan, f, indent=2)
                 
                 # Regenerate HTML
-                from .html_generator import HTMLReportGenerator
-                html_path = self._output_dir() / "plan.html"
-                generator = HTMLReportGenerator(self.orch.planner.state)
-                generator.generate(str(html_path))
-                self._record_plan_report(html_path)
+                html_path = self._emit_plan_report()
                 
                 # Check if any experiments actually got code
                 experiments = updated_plan.get("proposed_experiments", [])
@@ -2034,7 +2104,7 @@ class OrchestratorTools:
                         "message": "Code generation failed — no executable code was produced for any experiment.",
                         "hint": "This may be due to an LLM API timeout or error. Try again.",
                         "output_path": str(output_path),
-                        "html_report": str(html_path)
+                        "html_report": str(html_path) if html_path else None
                     })
 
                 # Save scripts to output folder
@@ -2046,7 +2116,7 @@ class OrchestratorTools:
                     "status": "success",
                     "message": "Implementation code added to plan",
                     "output_path": str(output_path),
-                    "html_report": str(html_path),
+                    "html_report": str(html_path) if html_path else None,
                     "scripts_saved_to": final_out,
                     "code_sources_used": code_list
                 })
@@ -2319,18 +2389,14 @@ class OrchestratorTools:
                     json.dump(plan, f, indent=2)
 
                 # Generate HTML
-                from .html_generator import HTMLReportGenerator
-                html_path = self._output_dir() / "plan.html"
-                generator = HTMLReportGenerator(self.orch.planner.state)
-                generator.generate(str(html_path))
-                self._record_plan_report(html_path)
+                html_path = self._emit_plan_report()
 
                 return json.dumps({
                     "status": "success",
                     "iteration": plan.get('iteration'),
                     "num_experiments": len(plan.get('proposed_experiments', [])),
                     "output_path": str(output_path),
-                    "html_report": str(html_path),
+                    "html_report": str(html_path) if html_path else None,
                     "hint": "Use refine_implementation_code() to update executable code"
                 })
                 
@@ -2402,18 +2468,14 @@ class OrchestratorTools:
                     json.dump(plan, f, indent=2)
 
                 # Generate HTML
-                from .html_generator import HTMLReportGenerator
-                html_path = self._output_dir() / "plan.html"
-                generator = HTMLReportGenerator(self.orch.planner.state)
-                generator.generate(str(html_path))
-                self._record_plan_report(html_path)
+                html_path = self._emit_plan_report()
 
                 return json.dumps({
                     "status": "success",
                     "iteration": plan.get('iteration'),
                     "num_experiments": len(plan.get('proposed_experiments', [])),
                     "output_path": str(output_path),
-                    "html_report": str(html_path),
+                    "html_report": str(html_path) if html_path else None,
                     "hint": "Use generate_implementation_code() or refine_implementation_code() to update executable code for the adjusted plan."
                 })
 
@@ -2484,11 +2546,7 @@ class OrchestratorTools:
                     json.dump(updated_plan, f, indent=2)
                 
                 # Regenerate HTML
-                from .html_generator import HTMLReportGenerator
-                html_path = self._output_dir() / "plan_refined.html"
-                generator = HTMLReportGenerator(self.orch.planner.state)
-                generator.generate(str(html_path))
-                self._record_plan_report(html_path)
+                html_path = self._emit_plan_report("plan_refined.html")
                 
                 # Save scripts
                 final_out = str(self._output_dir() / "output_scripts")
@@ -2499,7 +2557,7 @@ class OrchestratorTools:
                     "status": "success",
                     "message": "Implementation code updated",
                     "output_path": str(output_path),
-                    "html_report": str(html_path),
+                    "html_report": str(html_path) if html_path else None,
                     "scripts_saved_to": final_out
                 })
                 
@@ -6121,6 +6179,161 @@ class OrchestratorTools:
                 "total_source_ids": all_ids,
                 "note": f"Skill '{skill_name}' has been updated in persistent memory."
             })
+
+        def write_technical_document(
+            request: str,
+            filename: str = None,
+            title: str = None,
+            source_files: str = None,
+            use_literature: bool = True,
+        ):
+            """Author a grounded technical document and save it.
+
+            Not a plan: no experiment schema, no campaign state, no plan
+            report. A roadmap or estimate that went through the plan tool
+            came back with a build sequence as its `hypothesis` and invented
+            optimization ranges (live, cdoc facility roadmap).
+            """
+            try:
+                planner = self.orch.planner
+                lit = None
+                if use_literature:
+                    lit_file = self._latest_literature_file()
+                    if lit_file is not None:
+                        lit = lit_file.read_text()
+
+                # Prior documents the agent names — this is how a revision or
+                # a merge builds on what the session already wrote instead of
+                # re-deriving it.
+                sources, missing = [], []
+                for raw in (source_files or "").split(","):
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    fp = Path(raw)
+                    if not fp.is_absolute():
+                        fp = self._output_dir() / raw
+                    if fp.exists():
+                        sources.append(f"### {fp.name}\n{fp.read_text()}")
+                    else:
+                        # The agent names its own earlier file; that file
+                        # lives in a SIBLING delegation directory, so search
+                        # the session root by basename before giving up.
+                        hits = sorted(Path(self.orch.base_dir).rglob(fp.name))
+                        if hits:
+                            sources.append(f"### {hits[0].name}\n"
+                                           + hits[0].read_text())
+                        else:
+                            missing.append(raw)
+
+                doc_title = title or (request[:70].strip() or "Technical document")
+                result = author_technical_document(
+                    request=request,
+                    kb_docs=planner.kb_docs,
+                    model=planner.model,
+                    generation_config=planner.generation_config,
+                    external_context=lit,
+                    source_documents=("\n\n".join(sources) if sources else None),
+                    skill_context=planner._build_skill_context("planning"),
+                    task_name="Technical Document",
+                )
+                if result.get("error"):
+                    return json.dumps({"status": "error",
+                                       "message": result["error"]})
+                sections = result.get("sections") or []
+                if not sections:
+                    return json.dumps({
+                        "status": "error",
+                        "message": "The author returned no sections."})
+
+                text = document_to_markdown(doc_title, sections)
+                name = filename or "technical_document.md"
+                if not name.endswith(".md"):
+                    name += ".md"
+                out = self._output_dir() / name
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(text)
+
+                from .user_interface import format_path, record_deliverable
+                record_deliverable(self.orch.base_dir, out, doc_title,
+                                   deliverable=True)
+                print(f"    📄 Document saved: {format_path(out)}")
+                res = {"status": "success", "path": str(out),
+                       "title": doc_title,
+                       "sections": [s.get("heading") for s in sections
+                                    if isinstance(s, dict)],
+                       "words": len(text.split()),
+                       "literature_used": bool(lit),
+                       "sources_used": len(sources)}
+                if missing:
+                    res["source_files_not_found"] = missing
+                return json.dumps(res)
+            except Exception as e:
+                logging.error(f"Document authoring error: {e}", exc_info=True)
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=write_technical_document,
+            name="write_technical_document",
+            description=(
+                "Author a grounded technical DOCUMENT and save it as the "
+                "deliverable: a roadmap, staging or build plan, cost or "
+                "footprint estimate, consolidation memo, brief, summary or "
+                "review. USE THIS — not generate_initial_plan — whenever the "
+                "user says 'plan' in the everyday sense of a course of "
+                "action ('plan how we build the facility', 'outline the "
+                "stages', 'estimate the space we need'). "
+                "generate_initial_plan is only for an EXPERIMENT: a testable "
+                "hypothesis with measurements. Grounds the document in the "
+                "campaign's literature and in prior session documents you "
+                "name, so you get retrieval-backed authoring rather than "
+                "writing it unaided into save_file. Use save_file for short "
+                "notes and for content you have already composed."
+            ),
+            parameters={
+                "request": {
+                    "type": "string",
+                    "description": (
+                        "What the document must cover, in full — the user's "
+                        "ask plus any structure, constraints, audience or "
+                        "sections it must have. This is the authoring brief."
+                    ),
+                },
+                "filename": {
+                    "type": "string",
+                    "description": (
+                        "File to write, e.g. 'build_roadmap.md'. Defaults to "
+                        "technical_document.md; give it a descriptive name."
+                    ),
+                },
+                "title": {
+                    "type": "string",
+                    "description": (
+                        "Document title, also the label shown beside the "
+                        "file, e.g. 'cdoc staged build roadmap'."
+                    ),
+                },
+                "source_files": {
+                    "type": "string",
+                    "description": (
+                        "Comma-separated files this document should build on "
+                        "— a roadmap you are revising, two documents you are "
+                        "merging. Names of files in the session are resolved "
+                        "for you. Omit for a fresh document."
+                    ),
+                },
+                "use_literature": {
+                    "type": "boolean",
+                    "description": (
+                        "Ground in the campaign's most recent literature "
+                        "search (default true). Set false for a document "
+                        "that is purely internal, e.g. merging two documents "
+                        "you already wrote."
+                    ),
+                },
+            },
+            required=["request"]
+        )
 
         self._register_tool(
             func=update_skill,

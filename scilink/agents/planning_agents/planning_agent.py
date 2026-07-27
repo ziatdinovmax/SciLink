@@ -21,6 +21,8 @@ from .repo_loader import clone_git_repository
 
 from .instruct import (
     HYPOTHESIS_GENERATION_INSTRUCTIONS,
+    HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK,
+    IDEATION_OUTPUT_RULES,
     WHITE_PAPER_INSTRUCTIONS,
     TEA_INSTRUCTIONS
 )
@@ -512,6 +514,12 @@ class PlanningAgent(BaseAgent):
         cur = (self.state or {}).get("current_plan") or {}
         if cur.get("type") == "ideation":
             return True
+        # An explicit lab stamp is the caller saying "this plan is a bench
+        # plan" and outranks the campaign — the case is a campaign that
+        # ideated, then was asked for the runnable protocol of the direction
+        # that won. Other types (TEA) still fall through, as before.
+        if cur.get("type") == "lab":
+            return False
         if (self.state or {}).get("plan_kind") == "ideation":
             return True
         pc = (self.state or {}).get("plan_candidates") or {}
@@ -1128,9 +1136,24 @@ class PlanningAgent(BaseAgent):
                 "reports": bestofn_reports,
             }
         else:
+            # The portfolio OUTPUT contract rides the campaign, not the
+            # best-of-N knob. It used to be injected only when
+            # `selection_profile == "ideation"`, which the tool documents as
+            # best-of-N only — so every single-plan follow-up in an ideation
+            # campaign authored without it. Live: a consolidation delegation
+            # then encoded its portfolio as 56 `experimental_steps` document
+            # sections, while the best-of-N delegations either side of it
+            # emitted clean `concepts` lists. Passed on both tiers, since a
+            # fallback run reverts to cramming otherwise.
+            _ideation_out = (selection_profile == "ideation"
+                             or self._is_ideation_campaign())
             res, author_context = perform_science_rag(
                 objective=objective,
-                instructions=HYPOTHESIS_GENERATION_INSTRUCTIONS,
+                instructions=(HYPOTHESIS_GENERATION_INSTRUCTIONS
+                              + (IDEATION_OUTPUT_RULES if _ideation_out else "")),
+                fallback_instructions=(
+                    HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK
+                    + IDEATION_OUTPUT_RULES) if _ideation_out else None,
                 task_name="Experimental Plan",
                 kb_docs=self.kb_docs,
                 model=self.model,
