@@ -22,6 +22,8 @@ from .instruct import (
     BESTOFN_SELECTION_PROFILE_IDEATION,
     IDEATION_AUTHOR_OVERRIDE,
     IDEATION_OUTPUT_RULES,
+    TECHNICAL_DOCUMENT_INSTRUCTIONS,
+    TECHNICAL_DOCUMENT_INSTRUCTIONS_FALLBACK,
     CONSTRAINT_COVERAGE_NOTE
 )
 
@@ -1047,3 +1049,63 @@ def refine_code_with_feedback(result: Dict[str, Any],
     except Exception as e:
         print(f"    - ❌ Error during code refinement: {e}")
         return result
+
+def author_technical_document(request: str,
+                              kb_docs: Any,
+                              model: Any,
+                              generation_config: Any,
+                              *,
+                              external_context: Optional[str] = None,
+                              source_documents: Optional[str] = None,
+                              additional_context: Optional[str] = None,
+                              skill_context: Optional[str] = None,
+                              task_name: str = "Technical Document"
+                              ) -> Dict[str, Any]:
+    """Author a grounded technical document (roadmap, estimate, memo, brief).
+
+    Same retrieval path as plan generation, different contract: the model
+    returns SECTIONS, not an experiment. Sections rather than one markdown
+    blob because these documents run to thousands of words, and a single
+    JSON string that long is the shape that has truncated on us before.
+
+    Returns ``{"sections": [...]}`` or ``{"error": ...}``; the caller
+    assembles the markdown.
+    """
+    parts = []
+    if source_documents:
+        parts.append("## PRIOR SESSION DOCUMENTS (build on these, do not "
+                     "restate them wholesale):\n" + source_documents)
+    if additional_context:
+        parts.append(additional_context)
+
+    result = run_rag(
+        query=request,
+        instructions=TECHNICAL_DOCUMENT_INSTRUCTIONS,
+        fallback_instructions=TECHNICAL_DOCUMENT_INSTRUCTIONS_FALLBACK,
+        kb=kb_docs,
+        model=model,
+        generation_config=generation_config,
+        external_context=external_context,
+        additional_context="\n\n".join(parts) if parts else None,
+        skill_context=skill_context,
+        task_name=task_name,
+    )
+    if not isinstance(result, dict):
+        return {"error": f"Document generation returned {type(result).__name__}"}
+    return result
+
+
+def document_to_markdown(title: str, sections: List[Dict[str, Any]]) -> str:
+    """Assemble authored sections into a markdown document."""
+    out = [f"# {title}", ""]
+    for sec in sections or []:
+        if not isinstance(sec, dict):
+            out += [str(sec), ""]
+            continue
+        heading = str(sec.get("heading") or "").strip()
+        body = str(sec.get("body") or "").strip()
+        if heading:
+            out += [f"## {heading}", ""]
+        if body:
+            out += [body, ""]
+    return "\n".join(out).rstrip() + "\n"

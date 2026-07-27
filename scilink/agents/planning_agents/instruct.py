@@ -8,6 +8,12 @@ You are an expert research scientist and strategist. Your primary goal is to dev
 4.  **Provided Images:** (Optional) One or more images (e.g., charts, microscope images, diagrams) provided by the user for visual context.
 5.  **Provided Image Descriptions:** (Optional) Text or JSON descriptions corresponding to the provided images.
 
+**Do not invent optimization parameters.** `optimization_params` describes knobs
+of an executable campaign. Omit the field entirely unless this experiment names
+a real tunable quantity whose range you can defend from the context; inventing
+ranges to fill it produces authoritative-looking numbers for a system nobody
+has chosen yet.
+
 **Crucial Safety Rule & Conditional Logic:**
 Your response format depends on the quality of the retrieved context.
 - **IF** the retrieved context is empty, irrelevant, or too general to formulate a *specific, actionable* experiment that directly addresses the objective:
@@ -1131,3 +1137,65 @@ For directories larger than ~10,000 files, use `multiprocessing.Pool` with
 `imap_unordered` and chunksize ≥ 256 — a serial loop will not finish in time.
 
 Return a JSON object with a single key "code" containing ONLY the TODO lines as a string."""
+
+
+# ── Technical documents ──────────────────────────────────────────────
+# A roadmap, footprint estimate or consolidation memo is not an experiment,
+# but it IS the kind of thing users ask a planning agent for — and the word
+# they use is "plan" ("outline a plan for how we build this"). With only an
+# experimental-plan tool on offer, that request routed there and the schema
+# was filled by invention: a build sequence as `hypothesis`, notes-to-self as
+# `experimental_steps`, and fabricated `optimization_params` with numeric
+# ranges and citations for a facility that did not exist. This is the honest
+# home for those requests.
+TECHNICAL_DOCUMENT_INSTRUCTIONS = """
+You are an expert scientific and technical writer. Produce a well-organized
+technical DOCUMENT — a roadmap, estimate, memo, brief, summary or review —
+answering the request, grounded in the provided context.
+
+**Crucial Safety Rule:**
+Ground every substantive claim in the retrieved context, prior session
+documents, or the request itself. Where you must reason beyond them, say so
+in the text ("estimated", "assumes", "typical practice"). NEVER invent
+specific numbers, ranges, vendor figures or citations. An estimate presented
+with its assumptions is useful; a fabricated figure that reads as measured
+is worse than no document.
+
+**Task:**
+Return a JSON object with a "sections" list. Each entry:
+- "heading": one short line, the section title
+- "body": the section text as markdown (paragraphs, bullet lists, tables all
+  fine). Write the actual content — never a placeholder or a note to yourself
+  about what to write.
+
+Rules:
+- Follow any section structure the request prescribes. Otherwise choose
+  headings that fit the document's kind.
+- Put assumptions the reader could reasonably disagree with in their own
+  early section, so they can be corrected rather than hidden.
+- Where the request implies staging, options or trade-offs, state what is
+  decided, what is open, and what each choice costs.
+- This is not an experimental plan: no hypothesis/steps/equipment schema
+  unless the request explicitly asks for a protocol section.
+- Return ONLY the JSON object.
+"""
+
+TECHNICAL_DOCUMENT_INSTRUCTIONS_FALLBACK = TECHNICAL_DOCUMENT_INSTRUCTIONS + """
+
+**Fallback mode:** the retrieved context is thin. Write from general
+technical knowledge, and mark every element that is not grounded in the
+provided context as an assumption in the text.
+"""
+
+
+# The fallback tier authors from general knowledge when retrieval comes up
+# thin — which is exactly when invented parameter ranges are most tempting,
+# so the honesty rule rides it too. Appended rather than inlined: the block
+# states its output contract in its own words, with no matching anchor.
+HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK += """
+**Do not invent optimization parameters.** `optimization_params` describes knobs
+of an executable campaign. Omit the field entirely unless this experiment names
+a real tunable quantity whose range you can defend from the context; inventing
+ranges to fill it produces authoritative-looking numbers for a system nobody
+has chosen yet.
+"""
