@@ -136,6 +136,34 @@ cdoc replay, compared against the recorded session.
 
 Estimate: **6–8 working days**, dominated by phase 3.
 
+## Implementation status
+
+Phases 1, 2, 3, 4 and 5 are implemented on
+`fix-planning-kb-scope-and-tool-args`. Deviations from the plan above, and
+why:
+
+- **The transition shim** (see the amendment) replaced the "port 53 sites"
+  reading of phase 3. Every phase boundary is shippable as a result.
+- **Phase 3's consumers needed almost no porting.** The white paper, the
+  dossier, the console and the candidate cards all read `concepts`, which
+  the shim provides, so they rendered a portfolio correctly on the first
+  live run. The real phase-3 work turned out to be the *portfolio HTML
+  template*, which did not exist — that is why `plan.html` had been
+  suppressed for ideation rather than fixed.
+- **Phase 4 split.** 4a is `resync_portfolio`: through the transition a
+  portfolio carries its directions twice, every re-emitting pass edits the
+  shim copy, and the accessor resolves top-level first — so a refined
+  portfolio would have served stale directions. Found by reading the refine
+  prompt, not by a test. 4b is the refinement verbs.
+- **A boundary discovered live, not planned:** with a document tool in the
+  inventory, "give me the runnable bench protocol for direction X" was
+  authored as prose — the mirror of the original bug, losing conformance,
+  critic and refine-with-results. Both tool descriptions now state what they
+  are NOT.
+- **Phase 6 (removing the shim) is not done** and should wait until stored
+  sessions no longer need it. `test_no_new_direct_readers_of_the_experiment
+  _schema` ratchets the count so the work does not grow in the meantime.
+
 ## Risks
 
 - **Lab-mode regression** is the main one: 53 shared sites. Mitigation is

@@ -164,3 +164,46 @@ def test_resync_leaves_experiments_alone():
     p = dict(LAB)
     resync_portfolio(p)
     assert p == LAB
+
+
+# ── ratchet ──────────────────────────────────────────────────────────
+
+# Direct readers of the experiment schema, per file, as of the portfolio
+# work. The shim keeps every one of them CORRECT for a portfolio, so these
+# are not bugs — but each is a place that would need porting when the shim is
+# removed, and new ones must not appear by accident. Raise a number here only
+# with a reason; lower them freely.
+_SCHEMA_READERS = {
+    "html_generator.py": 2,
+    "instruct.py": 3,
+    "orchestrator_tools.py": 14,
+    "parser_utils.py": 13,     # the accessors themselves live here
+    "planning_agent.py": 23,
+    "planning_rag.py": 14,
+    "user_interface.py": 2,
+}
+
+
+def test_no_new_direct_readers_of_the_experiment_schema():
+    """A ratchet, not a ban. Anything reading `proposed_experiments` to get
+    at DIRECTIONS should call plan_directions instead; the count going up is
+    the signal that someone taught a new consumer the wrong shape."""
+    root = Path("scilink/agents/planning_agents")
+    actual = {f.name: f.read_text().count("proposed_experiments")
+              for f in sorted(root.glob("*.py"))
+              if f.read_text().count("proposed_experiments")}
+
+    grown = {k: (v, _SCHEMA_READERS.get(k, 0))
+             for k, v in actual.items() if v > _SCHEMA_READERS.get(k, 0)}
+    assert not grown, (
+        "new direct readers of the experiment schema — use plan_directions() "
+        f"or update the ratchet with a reason: {grown}")
+
+    # and nothing outside plan mode may read it at all: the meta consumes
+    # `campaign_state` and run_task's contract, never the payload.
+    for other in (Path("scilink/agents/meta_agent"), Path("scilink/ui")):
+        if not other.exists():
+            continue
+        for f in other.rglob("*.py"):
+            assert "proposed_experiments" not in f.read_text(), \
+                f"{f} reaches into the plan payload"
