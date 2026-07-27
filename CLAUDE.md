@@ -122,6 +122,44 @@ technique is, how to plan a use of it, how to write the code, how to
 read the output, and how to verify it. New skills should use this
 ordering; legacy `analysis` is accepted by the loader for backcompat.
 
+## Plan mode produces three kinds of thing, not one
+
+`generate_initial_plan` designs **lab experiments**. For a long time it was
+also the only authoring path in plan mode, so two other kinds of request rode
+its schema and were filled by invention:
+
+| the ask | tool | payload |
+|---|---|---|
+| "design an experiment to test X" | `generate_initial_plan` | `proposed_experiments` — hypothesis, steps, equipment |
+| "what directions are worth pursuing" | `generate_ideation_portfolio` | `directions` — id, title, tier, hypothesis, rationale, novelty |
+| "write me a roadmap / estimate / memo" | `write_technical_document` | markdown sections; no campaign state at all |
+
+The rule: **if there is no hypothesis to test and nothing to measure, it is
+not an experimental plan.** A portfolio forced through the experiment schema
+comes back with its directions flattened into `experimental_steps`; a
+document forced through it invents `optimization_params` with ranges and
+citations for a system nobody has chosen yet. Both were observed live.
+
+**One engine, two contracts.** Ideation is not a new agent or a fourth mode.
+`generate_plan(kind="portfolio")` reuses retrieval, best-of-N, the judge, the
+critic, campaign scoping, checkpointing and the deliverables ledger, and
+swaps only what a candidate *is* — `generate_plan_candidates` takes a
+`contract` for that; absent one it is the experiment path unchanged.
+
+**Reading directions.** Never read the payload shape directly. `parser_utils`
+exposes `plan_directions` / `plan_is_portfolio` / `plan_thesis`, resolving
+top-level `directions` → `proposed_experiments[*].concepts` (PR #394) → a
+direction synthesised from the experiment fields (pre-`concepts` plans). That
+fallback ladder is what keeps old checkpoints restorable.
+
+**The transition shim.** A portfolio currently carries BOTH shapes:
+`directions` as the payload plus a one-entry `proposed_experiments` shim, so
+the ~50 legacy readers stay correct instead of seeing a plan with no
+experiments (which their validity gates read as *failed*). Consequence worth
+remembering: every pass that re-emits a plan edits the shim, so
+`resync_portfolio` (called from `_stamp_campaign`) makes the nested copy
+authoritative — otherwise a refined portfolio serves stale directions.
+
 ## Plan-mode capability boundaries
 
 Two settled conventions on where capability lives in plan mode:
