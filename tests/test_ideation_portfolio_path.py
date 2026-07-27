@@ -236,3 +236,23 @@ def test_html_still_renders_an_experiment_as_a_protocol():
     assert "Organizing thesis" not in h
     # NB: required_equipment is absent from the single-plan template on main
     # too — a pre-existing gap, not something this change introduced.
+
+
+def test_a_portfolio_edit_has_a_findable_tool():
+    """Live: "drop the weakest direction" went to write_technical_document,
+    which wrote a document ABOUT the revised portfolio and left the
+    portfolio itself untouched. refine_plan_with_results reaches the right
+    engine but its name promises results, which a drop does not have."""
+    src = Path("scilink/agents/planning_agents/orchestrator_tools.py").read_text()
+    assert 'name="refine_portfolio"' in src
+    i = src.index('name="refine_portfolio"')
+    desc = src[i:i + 1500]
+    for verb in ("HARDEN", "DROP", "ADD", "RE-RANK", "CONSOLIDATE"):
+        assert verb in desc
+    assert "preserved verbatim" in desc
+    # it must warn off both wrong turns seen live
+    assert "do NOT write a document" in desc
+    assert "generate_ideation_portfolio" in desc
+    # and the document tool declines the job
+    j = src.index('name="write_technical_document"')
+    assert "belong in refine_portfolio" in src[j:j + 3000]

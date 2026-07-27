@@ -6316,7 +6316,11 @@ class OrchestratorTools:
                 "protocol for direction X' — is generate_initial_plan with "
                 "selection_profile='lab', which gives it conformance "
                 "checking, the critic, and refinement against results later. "
-                "A document cannot be refined with results."
+                "A document cannot be refined with results. NOT for editing "
+                "a research portfolio either — 'drop the weakest direction', "
+                "'harden this one', 'consolidate these' all change the "
+                "portfolio itself and belong in refine_portfolio; a document "
+                "about the revised portfolio leaves the portfolio unrevised."
             ),
             parameters={
                 "request": {
@@ -6472,6 +6476,66 @@ class OrchestratorTools:
                 },
             },
             required=["specific_objective"]
+        )
+
+        def refine_portfolio(request: str, literature_context: str = None,
+                             additional_context: str = None):
+            """Revise a research PORTFOLIO: harden, drop, add, re-rank,
+            consolidate.
+
+            Same refinement engine as refine_plan_with_results — which is
+            reachable but not FINDABLE for this: its name promises results,
+            and dropping a direction has none. Live, "drop the weakest
+            direction" went to write_technical_document instead, which wrote
+            a document ABOUT the revised portfolio and left the portfolio
+            itself untouched.
+            """
+            return refine_plan_with_results(
+                result_data=request,
+                use_literature_rag=False,
+                literature_context=literature_context,
+                additional_context=additional_context,
+            )
+
+        self._register_tool(
+            func=refine_portfolio,
+            name="refine_portfolio",
+            description=(
+                "Revise the current research PORTFOLIO in place. Use for any "
+                "edit to the set of directions, none of which needs "
+                "experimental results: HARDEN one (sharpen its hypothesis, "
+                "name its failure mode), DROP one, ADD one, RE-RANK them, or "
+                "CONSOLIDATE several into a single class. Directions the "
+                "request does not touch are preserved verbatim. This is the "
+                "tool for 'drop the weakest', 'harden class 2', 'consolidate "
+                "these threads into one class' — do NOT write a document "
+                "about the revised portfolio instead, and do not re-author "
+                "the whole portfolio with generate_ideation_portfolio, which "
+                "would lose the directions you are keeping. Use "
+                "refine_plan_with_results instead when actual experimental "
+                "results are what is driving the change."
+            ),
+            parameters={
+                "request": {
+                    "type": "string",
+                    "description": (
+                        "What to change, naming the directions by id where "
+                        "the user did — e.g. 'harden DIR-1: sharpen its "
+                        "hypothesis and name its dominant failure mode; "
+                        "leave the others unchanged' or 'drop DIR-4 and "
+                        "re-rank the rest by feasibility'."
+                    ),
+                },
+                "literature_context": {
+                    "type": "string",
+                    "description": "Optional path to a literature file to ground the revision in.",
+                },
+                "additional_context": {
+                    "type": "string",
+                    "description": "Constraints or preferences to honour in the revision.",
+                },
+            },
+            required=["request"]
         )
 
         self._register_tool(
