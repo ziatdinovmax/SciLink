@@ -170,6 +170,61 @@ def _load_components_manifest(structure_path: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _run_short_npt_density(psystem, working_dir, engine, executor, run_command):
+    """Short NPT on a parameterized pure component; returns mass density
+    (g/cm^3) or None.
+
+    LIVE-ENV SEAM (not yet implemented): write engine inputs via
+    ``write_md_inputs``, author a brief NPT deck through the engine skill, run it
+    through ``executor`` with ``run_command``, and read the equilibrated density
+    from the run snapshot. Until implemented it returns None, so the measurement
+    is recorded as unmeasured and the gate stays inert (fails open).
+    """
+    _ = (psystem, working_dir, engine, executor, run_command)
+    return None
+
+
+def _reference_check(components, system_description, psystem, ff_agent, *,
+                     api_key, base_url, model_name, executor, run_command,
+                     engine, working_dir):
+    """Run the pre-run reference-property validation; return its result dict.
+
+    Builds the selector + critic and a density measurer bound to the SAME
+    force-field backend the production run uses (through ``ff_agent``), then runs
+    the composed :func:`reference_validation.run_reference_check`. Module-level so
+    tests and callers can substitute it.
+    """
+    from .critics import ReferencePropertyCritic, ReferencePropertySelector
+    from .reference_measurement import measure_pure_component_density
+    from .reference_validation import run_reference_check
+
+    selector = ReferencePropertySelector(api_key=api_key, base_url=base_url,
+                                         model_name=model_name)
+    critic = ReferencePropertyCritic(api_key=api_key, base_url=base_url,
+                                     model_name=model_name)
+
+    def _measure(component, prop):
+        if prop and "densit" not in prop.lower():
+            return {"error": f"no pure-component measurer for '{prop}' yet"}
+        name = component.get("name") or component.get("smiles") or "component"
+        slug = "".join(c if c.isalnum() else "_" for c in str(name))
+        wd = os.path.join(working_dir, "reference_check", slug)
+        return measure_pure_component_density(
+            component, wd,
+            parameterize_fn=lambda comps, coords, w: ff_agent.parameterize(
+                components=comps, coordinates_file=coords, working_dir=w),
+            run_npt_fn=lambda ps, w: _run_short_npt_density(
+                ps, w, engine, executor, run_command),
+        )
+
+    return run_reference_check(
+        components, system_description,
+        select_fn=lambda comps, sd: selector.select(comps, system_description=sd),
+        measure_fn=_measure,
+        judge_fn=lambda meas, sd: critic.assess(meas, system_description=sd),
+    )
+
+
 def _run_workflow_once(
     user_request: str,
     *,
@@ -194,6 +249,7 @@ def _run_workflow_once(
     structure_file: Optional[str] = None,
     force_field_files: Optional[Dict[str, str]] = None,
     staged: bool = False,
+    reference_check: bool = False,
 ) -> Dict[str, Any]:
     """Run the full structure → inputs → validation pipeline for any scale.
 
@@ -326,6 +382,33 @@ def _run_workflow_once(
                     "total_charge": psystem.total_charge,
                 }
                 result["steps_completed"].append("force_field")
+
+                # Pre-run reference-property validation — the pre-PRODUCTION
+                # catch. Validate the force field against known constituent
+                # properties now, before spending production compute. A 'poor'
+                # verdict means the model is untrustworthy, so stop here rather
+                # than run (and later discard) an expensive campaign.
+                if reference_check:
+                    ref = _reference_check(
+                        manifest["components"], user_request, psystem, ff_agent,
+                        api_key=api_key, base_url=base_url, model_name=model_name,
+                        executor=executor, run_command=run_command,
+                        engine=software, working_dir=output_dir,
+                    )
+                    result["reference_validation"] = ref
+                    result["steps_completed"].append("reference_validation")
+                    if (ref.get("verdict") or {}).get("verdict") == "poor":
+                        cause = ((ref["verdict"] or {}).get("failure_class")
+                                 or "force_field").replace("_", " ")
+                        result["force_field_flagged"] = True
+                        result.setdefault("warnings", []).append(
+                            f"Pre-run reference-property validation flagged the "
+                            f"{cause}: a pure-component property contradicts known "
+                            "behaviour. Production was NOT run — the model needs "
+                            "reparameterization first."
+                        )
+                        result["final_status"] = "reference_validation_failed"
+                        return result
             except Exception as e:
                 result["final_status"] = "failed_force_field"
                 result["force_field"] = {"status": "error", "message": str(e)}

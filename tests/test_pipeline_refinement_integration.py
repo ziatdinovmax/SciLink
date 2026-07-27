@@ -41,6 +41,78 @@ class TestWorkflowComposition:
             }
         monkeypatch.setattr(sp, "_generate_inputs", fake_generate_inputs)
 
+    def _setup_md_with_manifest(self, tmp_path, monkeypatch):
+        """Structure + components.json + faked FF parameterization, so the
+        reference-check gate is reachable without real OpenFF."""
+        import json
+        self._stub_generation(monkeypatch)
+        structure = tmp_path / "system.data"
+        structure.write_text("dummy")
+        (tmp_path / "components.json").write_text(json.dumps(
+            {"components": [{"name": "water", "smiles": "O", "count": 100},
+                            {"name": "EIS", "smiles": "CCS(=O)(=O)C(C)C",
+                             "count": 10}]}))
+
+        class FakePSystem:
+            backend, n_atoms, total_charge = "openff", 330, 0.0
+
+        class FakeFFAgent:
+            def __init__(self, **kw):
+                pass
+
+            def parameterize(self, **kw):
+                return FakePSystem()
+
+        import scilink.agents.sim_agents._engine_inputs as ei
+        import scilink.agents.sim_agents.force_field_agent as ffa
+        monkeypatch.setattr(ffa, "ForceFieldAgent", FakeFFAgent)
+        monkeypatch.setattr(ei, "write_md_inputs",
+                            lambda ps, sw, wd: {"structure_file": str(structure),
+                                                "force_field_files": {}})
+        return structure
+
+    def test_reference_check_gate_blocks_production_on_poor(self, tmp_path,
+                                                            monkeypatch):
+        structure = self._setup_md_with_manifest(tmp_path, monkeypatch)
+        monkeypatch.setattr(sp, "_reference_check", lambda *a, **k: {
+            "selections": [], "measurements": [],
+            "verdict": {"verdict": "poor", "failure_class": "force_field"}})
+        result = sp.run_complete_workflow(
+            "aqueous sulfone electrolyte density",
+            scale="molecular_dynamics", software="lammps",
+            structure_file=str(structure), output_dir=str(tmp_path / "out"),
+            api_key="fake-do-not-bill", validate=False,
+            executor=LocalExecutor(timeout=30), run_command="true",
+            reference_check=True)
+        # Caught before production: gate ran, campaign did NOT.
+        assert result["final_status"] == "reference_validation_failed"
+        assert result.get("force_field_flagged") is True
+        assert "reference_validation" in result["steps_completed"]
+        assert "refinement" not in result["steps_completed"]
+        assert any("reparameteriz" in w.lower()
+                   for w in result.get("warnings", []))
+
+    def test_reference_check_good_proceeds_to_production(self, tmp_path,
+                                                         monkeypatch):
+        structure = self._setup_md_with_manifest(tmp_path, monkeypatch)
+        monkeypatch.setattr(sp, "_reference_check", lambda *a, **k: {
+            "selections": [], "measurements": [],
+            "verdict": {"verdict": "good", "failure_class": None}})
+        import scilink.agents.sim_agents.refinement as rf
+        monkeypatch.setattr(rf, "run_campaign", lambda *a, **k: {
+            "status": "success", "phases": [], "stages": [], "history": []})
+        result = sp.run_complete_workflow(
+            "aqueous electrolyte density",
+            scale="molecular_dynamics", software="lammps",
+            structure_file=str(structure), output_dir=str(tmp_path / "out2"),
+            api_key="fake-do-not-bill", validate=False,
+            executor=LocalExecutor(timeout=30), run_command="true",
+            reference_check=True)
+        # Good verdict: gate ran and passed; production proceeded.
+        assert result.get("force_field_flagged") is not True
+        assert "reference_validation" in result["steps_completed"]
+        assert "refinement" in result["steps_completed"]
+
     def test_executor_path_fail_fix_succeed(self, tmp_path, monkeypatch):
         self._stub_generation(monkeypatch)
 
