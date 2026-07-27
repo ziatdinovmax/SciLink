@@ -1221,3 +1221,123 @@ class ReferencePropertySelector(_CriticBase):
         report.setdefault("status", "success")
         report.setdefault("selections", [])
         return report
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# ReparameterizationAdvisor
+# ──────────────────────────────────────────────────────────────────────────
+
+_REPARAM_ADVISOR_PROMPT = """\
+A pre-run validation flagged the force field: one or more pure-component
+reference properties contradict known behaviour, so the model is untrustworthy
+for production. Recommend a concrete corrective action so it can be fixed and
+re-validated before the run — no production compute is spent until it passes.
+
+{skill_context}
+
+=== System ===
+{system_description}
+
+=== Current force-field backend ===
+{backend}
+
+=== Flagged reference properties ===
+{flagged_block}
+
+Reason about the LIKELY cause of each flagged value — partial charges, van der
+Waals / Lennard-Jones terms, bonded/torsion terms, or a chemistry the base force
+field does not really cover — and recommend ONE concrete corrective action:
+- "add_force_field": supplement or replace the offending component's parameters
+  with a validated set (e.g. a literature model for that chemistry), supplied
+  through the backend's extra-force-field channel.
+- "adjust_parameters": change specific named terms — for a targeted issue.
+- "switch_backend": use a backend that covers this chemistry better.
+- "escalate": no confident automatic fix — hand to the human with the diagnosis.
+
+Recommend the human confirm or supply the concrete parameters unless the fix is
+unambiguous; a wrong "fix" that still fails wastes another validation cycle.
+
+Return a JSON object:
+  status              "success"
+  diagnosis           which component/property, and the likely force-field cause
+  recommended_action  one of "add_force_field" | "adjust_parameters" |
+                      "switch_backend" | "escalate"
+  detail              concrete specifics (what to add / change / switch to)
+  requires_human      true|false — whether a human must supply or approve the fix
+  rationale           short prose
+"""
+
+
+class ReparameterizationAdvisor(_CriticBase):
+    """Recommends how to fix a force field that the pre-run check flagged.
+
+    Given the flagged pure-component reference properties (the inconsistent
+    entries from :class:`ReferencePropertyCritic`), it reasons about the likely
+    parameter-level cause and proposes a concrete corrective action —
+    supplementing the component's parameters, adjusting named terms, switching
+    backend, or escalating to a human when there is no confident automatic fix.
+    It advises; it does not apply the fix, and (matching the human-in-the-loop
+    use-case contract) flags when a human must supply or approve it.
+    """
+
+    SKILL_SECTION = "validation"
+    BASELINE_PROMPT_TEMPLATE = _REPARAM_ADVISOR_PROMPT
+
+    def advise(
+        self,
+        flagged: List[Dict[str, Any]],
+        system_description: str = "",
+        backend: str = "",
+        skill: Optional[str] = None,
+        domain: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Recommend a corrective action for the flagged reference properties.
+
+        Args:
+            flagged: The inconsistent measurements — each
+                ``{"component", "property", "reasoning", ...}`` (the ``poor``
+                entries the critic returned).
+            system_description: What is being simulated.
+            backend: The force-field backend in use (e.g. ``"openff"``).
+            skill, domain: Optional skill bundle whose ``validation`` section
+                supplies domain guidance on likely causes and fixes.
+
+        Returns:
+            ``{"status", "diagnosis", "recommended_action", "detail",
+            "requires_human", "rationale"}``. When ``flagged`` is empty, returns
+            a no-op ``escalate`` with no LLM call.
+        """
+        if skill and not domain:
+            raise ValueError(
+                "domain is required when skill is provided (e.g. 'lammps' with "
+                "'molecular_dynamics')."
+            )
+        if not flagged:
+            return {
+                "status": "success",
+                "diagnosis": "No flagged properties supplied.",
+                "recommended_action": "escalate",
+                "detail": "Nothing to fix.",
+                "requires_human": True,
+                "rationale": "Advisor called with no flagged measurements.",
+            }
+
+        lines = []
+        for m in flagged:
+            prop = f" — {m['property']}" if m.get("property") else ""
+            why = f": {m['reasoning']}" if m.get("reasoning") else ""
+            lines.append(f"- {m.get('component')}{prop}{why}")
+        flagged_block = "\n".join(lines)
+
+        skill_context = self._load_skill_section(skill, domain or "")
+        prompt = self.BASELINE_PROMPT_TEMPLATE.format(
+            skill_context=skill_context or "(no engine skill loaded)",
+            system_description=system_description or "(not provided)",
+            backend=backend or "(not specified)",
+            flagged_block=flagged_block,
+        )
+        report = self._generate_json(prompt)
+        report.setdefault("status", "success")
+        report.setdefault("recommended_action", "escalate")
+        report.setdefault("requires_human", True)
+        return report
