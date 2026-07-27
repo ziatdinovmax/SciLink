@@ -14,6 +14,7 @@ from scilink.knowledge import KnowledgeBase
 from .parser_utils import (
     plan_directions,
     portfolio_to_experiment_shim,
+    resync_portfolio,
     plan_is_portfolio,
     plan_thesis,
     generate_repo_map,
@@ -545,6 +546,10 @@ class PlanningAgent(BaseAgent):
             kind = self.state.get("plan_kind")
             if kind and not plan_dict.get("type"):
                 plan_dict["type"] = kind
+            # Every snapshot that becomes current_plan passes through here,
+            # which makes it the one place a refined portfolio can be kept
+            # self-consistent.
+            resync_portfolio(plan_dict)
         return plan_dict
 
     def _finalize_literature(self, plan_dict: Dict[str, Any],

@@ -480,3 +480,29 @@ def portfolio_to_experiment_shim(plan: Dict[str, Any]) -> Dict[str, Any]:
         "_direction_titles": [t for t in titles if t],
     }]
     return plan
+
+
+def resync_portfolio(plan: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Keep a portfolio's two copies of its directions consistent.
+
+    Through the transition a portfolio carries `directions` (the payload) and
+    a shimmed copy under `proposed_experiments[0].concepts` (for the legacy
+    readers). Every pass that RE-EMITS a plan — conformance, critic,
+    refinement — is shown the whole dict and told to return the same
+    structure, and those prompts name `proposed_experiments` explicitly. So
+    the nested copy is the one that reliably gets edited, while a stale
+    top-level `directions` would silently outrank it in plan_directions.
+
+    The nested copy therefore wins whenever both exist and differ. On the
+    authoring path they are identical and this is a no-op.
+    """
+    if not isinstance(plan, dict) or not plan.get("directions"):
+        return plan
+    nested = []
+    for exp in plan.get("proposed_experiments") or []:
+        if isinstance(exp, dict):
+            nested.extend(c for c in (exp.get("concepts") or [])
+                          if isinstance(c, dict))
+    if nested and nested != plan["directions"]:
+        plan["directions"] = nested
+    return plan

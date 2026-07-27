@@ -120,3 +120,47 @@ def test_recorded_sessions_still_resolve(session):
         else:
             assert plan_directions(plan) == []
     assert seen, "expected recorded plans"
+
+
+# ── refinement keeps the two copies consistent ───────────────────────
+
+def _refined(nested):
+    """What a refine pass returns: it edited the nested copy it was shown."""
+    return {"type": "ideation", "directions": [{"id": "OLD", "title": "stale"}],
+            "proposed_experiments": [{"concepts": nested, "_portfolio_shim": True}]}
+
+
+def test_a_refined_portfolio_does_not_serve_stale_directions():
+    """The prompts name `proposed_experiments`, so that is the copy an
+    editor reliably updates — a stale top-level would silently outrank it."""
+    from scilink.agents.planning_agents.parser_utils import resync_portfolio
+    p = _refined([{"id": "NEW", "title": "hardened"}])
+    resync_portfolio(p)
+    assert [d["id"] for d in plan_directions(p)] == ["NEW"]
+    assert p["directions"] == p["proposed_experiments"][0]["concepts"]
+
+
+def test_resync_is_a_no_op_when_they_agree():
+    from scilink.agents.planning_agents.parser_utils import resync_portfolio
+    same = [{"id": "A", "title": "One"}]
+    p = {"type": "ideation", "directions": same,
+         "proposed_experiments": [{"concepts": same}]}
+    before = json.dumps(p, sort_keys=True)
+    resync_portfolio(p)
+    assert json.dumps(p, sort_keys=True) == before
+
+
+def test_resync_never_empties_a_portfolio():
+    """A pass that DROPPED concepts must not take the directions with it."""
+    from scilink.agents.planning_agents.parser_utils import resync_portfolio
+    p = {"type": "ideation", "directions": [{"id": "A"}],
+         "proposed_experiments": [{"hypothesis": "h"}]}
+    resync_portfolio(p)
+    assert [d["id"] for d in plan_directions(p)] == ["A"]
+
+
+def test_resync_leaves_experiments_alone():
+    from scilink.agents.planning_agents.parser_utils import resync_portfolio
+    p = dict(LAB)
+    resync_portfolio(p)
+    assert p == LAB
