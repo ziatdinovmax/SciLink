@@ -20,6 +20,11 @@ Verification subgraph state
 
     VerificationState               (self-contained; used by graphs/verification.py)
 
+Refinement subgraph state
+--------------------------
+
+    RefinementState                 (self-contained; used by graphs/refinement.py)
+
 All state TypedDicts are defined here so the graph definitions stay clean and
 state shape is a single authoritative source.
 """
@@ -370,3 +375,77 @@ class VerificationState(MessagesState):
     r2_threshold: float
     best_ever_rejected: bool
     best_verification: Optional[Dict[str, Any]]
+
+
+# ---------------------------------------------------------------------------
+# Refinement subgraph
+# ---------------------------------------------------------------------------
+
+
+class RefinementState(MessagesState):
+    """
+    Self-contained state for the generic human-feedback refinement subgraph.
+
+    Replaces the ``while iteration < self.max_iterations`` accept/refine loops
+    that appear (independently of the quality-verification loop) in:
+
+        image_analysis_controllers.py:PlanningStep.execute
+        curve_fitting_controllers.py:PlanningStep.execute
+        fft_microscopy_controllers.py (param refinement)
+        sam_microscopy_controllers.py (param refinement)
+
+    Unlike ``VerificationState`` this loop has no LLM quality score, no
+    annealing, and no judge — it is a plain "show the user the current
+    payload, take one round of feedback, apply it or stop" loop.
+
+    Fields
+    ------
+    payload
+        The thing being refined this round (a plan dict, a params dict, …).
+        Opaque to the subgraph; only ``apply_fn``/``feedback_fn`` interpret it.
+
+    iteration
+        Number of refinement rounds applied so far (0-based, incremented only
+        when a round actually refines — mirrors the imperative loops, which
+        only increment on the refine branch, not on accept).
+
+    max_iterations
+        Upper bound on refinement rounds (mirrors ``self.max_iterations`` /
+        ``self.max_refinement_iterations`` on the controllers).
+
+    action
+        Set by ``collect_feedback`` each round: ``"accept"`` or ``"refine"``.
+
+    accepted
+        ``True`` once the user accepts the current payload.
+
+    locked_payload
+        The final payload to use downstream — set on the accept path, the
+        max-iterations-exhausted path, and the aborted path (mirrors each
+        controller's "max iterations reached, proceeding with current"
+        fallback, and the abrupt-break case below).
+
+    aborted
+        ``True`` when ``apply_fn`` signals an unrecoverable failure mid-round
+        (e.g. a re-analysis call raised). Ends the loop immediately without
+        setting ``accepted`` — mirrors the ``except Exception: break`` path
+        in ``sam_microscopy_controllers.HumanFeedbackRefinementController``,
+        which stops without running either the accept or the
+        max-iterations-reached branch. Callers must check this before
+        treating a non-accepted result as "max iterations reached".
+
+    history
+        Optional per-round record list for sites that track iteration
+        history (e.g. SAM's ``refinement_history``). Uses
+        ``Annotated[list, operator.add]`` so nodes only need to return the
+        new record(s), not the accumulated list.
+    """
+
+    payload: Dict[str, Any]
+    iteration: int
+    max_iterations: int
+    action: str
+    accepted: bool
+    locked_payload: Optional[Dict[str, Any]]
+    aborted: bool
+    history: Annotated[List[Dict[str, Any]], operator.add]

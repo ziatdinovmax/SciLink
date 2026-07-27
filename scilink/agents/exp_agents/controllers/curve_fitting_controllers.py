@@ -1853,6 +1853,34 @@ class CurveFittingPlanningController:
         self.output_dir = Path(output_dir)
         self.enable_human_feedback = enable_human_feedback
         self.max_iterations = max_iterations
+        self._refinement_subgraph = self._build_refinement_subgraph()
+
+    def _build_refinement_subgraph(self):
+        """Build the plan-refinement subgraph once at init."""
+        from scilink.graphs.refinement import build_refinement_subgraph
+        from langgraph.checkpoint.memory import MemorySaver
+        return build_refinement_subgraph(
+            feedback_fn=self._rsg_feedback,
+            apply_fn=self._rsg_apply,
+            max_iterations=self.max_iterations,
+            checkpointer=MemorySaver(),
+        )
+
+    def _rsg_feedback(self, rstate: dict) -> dict:
+        """Subgraph feedback_fn adapter — wraps self._get_human_feedback."""
+        plan_state = self._get_human_feedback(dict(rstate.get("payload", {})))
+        if plan_state.pop("_refine_requested", False):
+            plan_state["_pending_feedback"] = plan_state.pop("_refine_feedback", "")
+            return {"action": "refine", "payload": plan_state}
+        return {"action": "accept", "payload": plan_state}
+
+    def _rsg_apply(self, rstate: dict) -> dict:
+        """Subgraph apply_fn adapter — wraps self._refine_plan."""
+        plan_state = dict(rstate.get("payload", {}))
+        feedback = plan_state.pop("_pending_feedback", "")
+        self.logger.info(f"  Refining with feedback: {feedback}")
+        print("\n🔄 Refining plan...\n")
+        return {"payload": self._refine_plan(plan_state, feedback)}
 
     def _display_plan(self, state: dict) -> None:
         is_single = state.get("is_single_spectrum", True)
@@ -2525,21 +2553,27 @@ class CurveFittingPlanningController:
             # it is pointless interruption. Planning still ran above (downstream
             # stages need its fields); we only skip the display/approval gate.
             if self.enable_human_feedback and not state.get("reuse_locked_script"):
-                iteration = 0
-                while iteration < self.max_iterations:
-                    state = self._get_human_feedback(state)
-                    if state.pop("_refine_requested", False):
-                        feedback = state.pop("_refine_feedback", "")
-                        if feedback:
-                            state.setdefault("human_feedback_log", []).append(str(feedback))
-                        self.logger.info(f"  Refining with feedback: {feedback}")
-                        print("\n🔄 Refining plan...\n")
-                        state = self._refine_plan(state, feedback)
-                        iteration += 1
-                    else:
-                        break
+                import uuid as _uuid
+                from scilink.graphs.refinement import sanitize_for_checkpoint
+                rsg_initial = {
+                    "messages": [],
+                    "payload": sanitize_for_checkpoint(state),
+                    "iteration": 0,
+                    "max_iterations": self.max_iterations,
+                    "action": "",
+                    "accepted": False,
+                    "locked_payload": None,
+                    "aborted": False,
+                    "history": [],
+                }
+                rsg_thread = f"cf-plan-refine-{_uuid.uuid4().hex[:8]}"
+                rsg_result = self._refinement_subgraph.invoke(
+                    rsg_initial,
+                    config={"configurable": {"thread_id": rsg_thread}},
+                )
+                state = rsg_result.get("locked_payload") or state
 
-                if iteration >= self.max_iterations:
+                if not rsg_result.get("accepted", False):
                     self.logger.warning("  Max iterations reached.")
                     print("⚠️  Max refinements reached. Proceeding with current plan.")
 
