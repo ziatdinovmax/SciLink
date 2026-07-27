@@ -27,8 +27,15 @@ class _Recorder:
                 return self._view
             if name == "container":
                 return contextlib.nullcontext()
+            if name == "columns":
+                n = a[0] if a else 1
+                n = n if isinstance(n, int) else len(n)
+                return [contextlib.nullcontext() for _ in range(n)]
             return None
         return _call
+
+    def labels(self, kind):
+        return [a[0] for name, a, _ in self.calls if name == kind]
 
     def kinds(self):
         return [c[0] for c in self.calls]
@@ -115,6 +122,36 @@ def test_clipping_never_leaves_a_fence_open(rec, tmp_path):
 def test_download_button_survives(rec, tmp_path):
     file_viewer.render_file_preview(_md(tmp_path, "# Title\n"))
     assert "download_button" in rec.kinds()
+
+
+def test_markdown_offers_a_pdf_alongside_the_source(rec, tmp_path):
+    file_viewer.render_file_preview(_md(tmp_path, "# Title\n\nBody.\n"))
+
+    assert rec.labels("download_button") == ["Download", "Download PDF"]
+    pdf = [kw for name, a, kw in rec.calls
+           if name == "download_button" and a[0] == "Download PDF"][0]
+    assert pdf["file_name"] == "report.pdf"
+    assert pdf["mime"] == "application/pdf"
+    assert pdf["data"][:5] == b"%PDF-", "must hand over a real PDF"
+
+
+def test_non_markdown_gets_no_pdf_button(rec, tmp_path):
+    file_viewer.render_file_preview(_md(tmp_path, "plain\n", name="n.txt"))
+    assert rec.labels("download_button") == ["Download"]
+
+
+def test_a_failing_conversion_never_breaks_the_preview(monkeypatch, tmp_path):
+    """The markdown download and the rendered document must still be there."""
+    import scilink.utils.md_to_pdf as m
+    monkeypatch.setattr(m, "markdown_text_to_pdf", lambda *a, **k: 1 / 0)
+    r = _Recorder()
+    monkeypatch.setattr(file_viewer, "st", r)
+    file_viewer.render_file_preview(_md(tmp_path, "# Title\n"))
+
+    assert r.labels("download_button") == ["Download"]
+    assert r.doc_markdown(), "the document itself must still render"
+    assert any("PDF export unavailable" in str(a[0])
+               for name, a, _ in r.calls if name == "caption")
 
 
 def test_other_text_files_still_use_the_code_view(rec, tmp_path):

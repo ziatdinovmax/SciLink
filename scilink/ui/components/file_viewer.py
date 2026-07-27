@@ -8,6 +8,10 @@ import streamlit as st
 # literature dump) would stall the page. Matches the code-preview clip.
 _MD_MAX_CHARS = 100_000
 
+# Rasterising every page of a long report would stall the pane; the rest is a
+# download away.
+_PDF_MAX_PAGES = 25
+
 # Streamlit paints the SELECTED segment by tinting its text and border with
 # the theme's primaryColor and leaving the fill transparent — and our primary
 # is #6200EE, a deep purple that is barely legible against the dark pane.
@@ -41,14 +45,59 @@ def render_file_preview(file_path: Path) -> None:
 
     st.subheader(file_path.name)
 
-    # Download button
-    with open(file_path, "rb") as fh:
-        st.download_button(
-            "Download",
-            data=fh.read(),
-            file_name=file_path.name,
-            key=f"dl_{file_path}",
-        )
+    # Download button. Markdown gets a PDF twin beside it — a plan or white
+    # paper is written as markdown but forwarded as a PDF. Conversion is
+    # ~15 ms for a typical paper, so it runs eagerly rather than behind a
+    # "prepare" click; if it fails, the markdown download is still there and
+    # the reason is stated rather than swallowed.
+    # The trailing spacer keeps the two buttons beside each other instead of
+    # spread to the edges of a wide preview pane.
+    if suffix == ".md":
+        dl_col, pdf_col, _ = st.columns([1, 1.15, 3])
+    else:
+        dl_col, pdf_col = st.container(), None
+    with dl_col:
+        with open(file_path, "rb") as fh:
+            st.download_button(
+                "Download",
+                data=fh.read(),
+                file_name=file_path.name,
+                key=f"dl_{file_path}",
+            )
+    if pdf_col is not None:
+        with pdf_col:
+            try:
+                from scilink.utils.md_to_pdf import markdown_text_to_pdf
+                import tempfile
+                with tempfile.TemporaryDirectory() as td:
+                    pdf = markdown_text_to_pdf(
+                        file_path.read_text(errors="replace"),
+                        Path(td) / f"{file_path.stem}.pdf",
+                        title=file_path.stem)
+                    data = pdf.read_bytes()
+                st.download_button(
+                    "Download PDF", data=data,
+                    file_name=f"{file_path.stem}.pdf", mime="application/pdf",
+                    key=f"dlpdf_{file_path}",
+                )
+            except Exception as exc:  # noqa: BLE001 - never break the preview
+                st.caption(f"PDF export unavailable: {exc}")
+
+    # PDF — page images, since agents now emit PDFs of their own
+    if suffix == ".pdf":
+        try:
+            import fitz
+            doc = fitz.open(file_path)
+            st.caption(f"{doc.page_count} page"
+                       f"{'s' if doc.page_count != 1 else ''}")
+            for page in doc.pages(0, min(doc.page_count, _PDF_MAX_PAGES)):
+                st.image(page.get_pixmap(dpi=110).tobytes("png"))
+            if doc.page_count > _PDF_MAX_PAGES:
+                st.caption(f"Showing the first {_PDF_MAX_PAGES} pages — "
+                           f"download for the rest.")
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not preview PDF: {exc}")
+        return
 
     # Image
     if suffix in (".png", ".jpg", ".jpeg"):

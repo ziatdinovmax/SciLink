@@ -776,6 +776,17 @@ class OrchestratorTools:
         record_deliverable(self.orch.base_dir, wp_path,
                            "White paper", deliverable=True)
         print(f"    📄 White paper saved: {format_path(wp_path)}")
+        # A PDF twin, because this is the one document that gets forwarded.
+        # Recorded as an ordinary produced file, not a second deliverable —
+        # the markdown stays the single thing the session points at. Failure
+        # here must not lose the white paper that was just written.
+        try:
+            from ...utils.md_to_pdf import markdown_to_pdf
+            pdf_path = markdown_to_pdf(wp_path, title="White paper")
+            record_deliverable(self.orch.base_dir, pdf_path, "White paper PDF")
+            print(f"    📄 PDF version: {format_path(pdf_path)}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"    ⚠️  PDF version unavailable: {exc}")
         return str(wp_path)
 
     @staticmethod
