@@ -71,8 +71,8 @@ class TestWorkflowComposition:
                                                 "force_field_files": {}})
         return structure
 
-    def test_reference_check_gate_blocks_production_on_poor(self, tmp_path,
-                                                            monkeypatch):
+    def test_reference_check_catch_only_blocks_production(self, tmp_path,
+                                                          monkeypatch):
         structure = self._setup_md_with_manifest(tmp_path, monkeypatch)
         monkeypatch.setattr(sp, "_reference_check", lambda *a, **k: {
             "selections": [], "measurements": [],
@@ -83,14 +83,59 @@ class TestWorkflowComposition:
             structure_file=str(structure), output_dir=str(tmp_path / "out"),
             api_key="fake-do-not-bill", validate=False,
             executor=LocalExecutor(timeout=30), run_command="true",
-            reference_check=True)
-        # Caught before production: gate ran, campaign did NOT.
+            reference_check=True, auto_fix=False)
+        # Catch-only (no fix attempt): gate ran, campaign did NOT.
         assert result["final_status"] == "reference_validation_failed"
         assert result.get("force_field_flagged") is True
         assert "reference_validation" in result["steps_completed"]
         assert "refinement" not in result["steps_completed"]
-        assert any("reparameteriz" in w.lower()
-                   for w in result.get("warnings", []))
+
+    def test_auto_fix_reparameterizes_and_proceeds(self, tmp_path, monkeypatch):
+        structure = self._setup_md_with_manifest(tmp_path, monkeypatch)
+        monkeypatch.setattr(sp, "_reference_check", lambda *a, **k: {
+            "selections": [], "measurements": [],
+            "verdict": {"verdict": "poor", "failure_class": "force_field",
+                        "per_measurement": [
+                            {"component": "EIS", "property": "density",
+                             "consistent": False, "reasoning": "under-dense"}]}})
+        monkeypatch.setattr(sp, "_reparameterize", lambda *a, **k: {
+            "status": "fixed",
+            "candidate": {"extra_force_fields": ["sulfone.offxml"]}})
+        import scilink.agents.sim_agents.refinement as rf
+        monkeypatch.setattr(rf, "run_campaign", lambda *a, **k: {
+            "status": "success", "phases": [], "stages": [], "history": []})
+        result = sp.run_complete_workflow(
+            "aqueous sulfone electrolyte density",
+            scale="molecular_dynamics", software="lammps",
+            structure_file=str(structure), output_dir=str(tmp_path / "out_fix"),
+            api_key="fake-do-not-bill", validate=False,
+            executor=LocalExecutor(timeout=30), run_command="true",
+            reference_check=True)
+        # Flagged -> fixed -> reparameterized -> production ran with the fix.
+        assert "reparameterization" in result["steps_completed"]
+        assert result["force_field"].get("reparameterized") is True
+        assert "refinement" in result["steps_completed"]
+        assert result.get("force_field_flagged") is not True
+
+    def test_auto_fix_escalation_still_blocks(self, tmp_path, monkeypatch):
+        structure = self._setup_md_with_manifest(tmp_path, monkeypatch)
+        monkeypatch.setattr(sp, "_reference_check", lambda *a, **k: {
+            "selections": [], "measurements": [],
+            "verdict": {"verdict": "poor", "failure_class": "force_field",
+                        "per_measurement": []}})
+        monkeypatch.setattr(sp, "_reparameterize",
+                            lambda *a, **k: {"status": "escalated"})
+        result = sp.run_complete_workflow(
+            "aqueous sulfone electrolyte density",
+            scale="molecular_dynamics", software="lammps",
+            structure_file=str(structure), output_dir=str(tmp_path / "out_esc"),
+            api_key="fake-do-not-bill", validate=False,
+            executor=LocalExecutor(timeout=30), run_command="true",
+            reference_check=True)
+        # No validated fix -> still stops before production.
+        assert result["final_status"] == "reference_validation_failed"
+        assert "reparameterization" in result["steps_completed"]
+        assert "refinement" not in result["steps_completed"]
 
     def test_reference_check_good_proceeds_to_production(self, tmp_path,
                                                          monkeypatch):
