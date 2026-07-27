@@ -1,18 +1,20 @@
-"""Pure-component reference measurement (density) on the engine-neutral rails.
+"""Pure-component reference measurement on the engine-neutral rails.
 
-The measurement half of the pre-run force-field validation: given ONE component,
-build a small pure-component box, parameterize it through the SAME force-field
-backend the production run uses, run a short simulation, and read the property
-back. This is the hardened helper for the hot property (density); other
-properties ride runtime-generated measurements (see the design proposal).
+The measurement half of the pre-run force-field validation: given ONE component
+and a chosen reference PROPERTY, build a small pure-component reference, param-
+eterize it through the SAME force-field backend the production run uses, run a
+short simulation to measure that property, and read the value back. Property-
+general — density, a lattice constant, a bond length are all just the ``property``
+argument; the measuring run (a short generated simulation) produces whatever it
+names, so a new property needs no new code here.
 
-Backend/engine-neutral by construction. The two operations that touch a specific
-backend or engine — parameterization and the short run — are passed in as
+Backend/engine-neutral by construction. The operations that touch a specific
+backend or engine — parameterization and the measuring run — are passed in as
 callables (``parameterize_fn`` yields a ``ParameterizedSystem`` for any backend;
-``run_npt_fn`` runs it on any engine and returns the density), so a new backend
-or engine needs no change here. Packing a pure single-component box is a local
-helper; it will be replaced by the shared ``build_box`` packer once that lands
-on main.
+``run_measure_fn`` runs it on any engine and returns the value). Building the
+pure-component reference is a local liquid-box packer for now; it is injectable
+(``build_fn``) for other system types, and will be replaced by the shared
+``build_box`` once that lands on main.
 """
 
 import logging
@@ -98,67 +100,77 @@ def _pack_pure_box(smiles: str, n_molecules: int, init_density: float,
         return None
 
 
-def measure_pure_component_density(
+def measure_pure_component_property(
     component: Dict[str, Any],
+    property: str,
     working_dir: str,
     *,
     parameterize_fn: Callable[[List[Dict[str, Any]], str, str], Any],
-    run_npt_fn: Callable[[Any, str], Optional[float]],
+    run_measure_fn: Callable[[Any, str, str], Optional[Dict[str, Any]]],
     n_molecules: int = 200,
     init_density: float = 0.85,
-    pack_fn: Callable[..., Optional[str]] = _pack_pure_box,
+    build_fn: Callable[..., Optional[str]] = _pack_pure_box,
 ) -> Optional[Dict[str, Any]]:
-    """Measure one component's bulk density with the production force field.
+    """Measure one component's chosen reference PROPERTY with the production model.
 
-    Orchestration only — engine/backend specifics live in the injected
-    callables:
+    Property-general orchestration — nothing here is specific to density or to a
+    single engine. Build a small pure-component reference structure, parameterize
+    it through the production force-field backend, then hand it to
+    ``run_measure_fn`` to run a short simulation for ``property`` and read the
+    value back. Density, a lattice constant, a bond length: the property is just
+    passed through, and ``run_measure_fn`` (a short generated run) produces
+    whatever it names — so a new property needs no new code here.
+
+    Backend/engine-neutral: parameterization and the measuring run are injected
+    (``parameterize_fn`` via ParameterizedSystem, ``run_measure_fn`` via any
+    engine). ``build_fn`` constructs the pure-component reference — a packed
+    liquid box by default; injectable for a crystal cell or other system types.
 
     Args:
         component: ``{"name", "smiles", ...}`` for the single pure component.
+        property: The reference property to measure (e.g. ``"density"``).
         working_dir: Scratch directory for this measurement.
         parameterize_fn: ``(components, coordinates_file, working_dir) ->
-            ParameterizedSystem`` — the FF backend (e.g. a wrapper over
-            ``ForceFieldAgent.parameterize``).
-        run_npt_fn: ``(parameterized_system, working_dir) -> density | None`` —
-            runs a short NPT on any engine and returns the mass density in
-            g/cm^3 (None if the run/read failed).
-        n_molecules, init_density: pure-box packing size and initial density.
-        pack_fn: box packer (defaults to the local pure-component packmol
-            helper; injectable for tests and for swapping in ``build_box``).
+            ParameterizedSystem``.
+        run_measure_fn: ``(parameterized_system, property, working_dir) ->
+            {"value": float, "units": str} | None`` — runs a short simulation to
+            measure ``property`` and reads it (None if the run/read failed).
+        n_molecules, init_density: default liquid-box packing size / density.
+        build_fn: pure-component reference builder (default the liquid packer).
 
     Returns:
-        ``{"property": "density", "value": float, "units": "g/cm^3",
-        "n_molecules": int}`` on success, or ``{"error": str}`` if any step
-        could not complete. Never raises — a failed measurement is recorded as
-        unmeasured upstream, not fatal.
+        ``{"property", "value", "units", "n_molecules"}`` on success, or
+        ``{"error": str}`` if any step could not complete. Never raises — a
+        failed measurement is recorded as unmeasured upstream, not fatal.
     """
     smiles = component.get("smiles")
     name = component.get("name") or smiles
     if not smiles:
-        return {"error": "component has no SMILES to build a pure box from"}
+        return {"error": "component has no SMILES to build a pure structure from"}
 
-    box = pack_fn(smiles, n_molecules, init_density, working_dir)
-    if not box:
-        return {"error": "could not pack a pure-component box "
+    structure = build_fn(smiles, n_molecules, init_density, working_dir)
+    if not structure:
+        return {"error": "could not build a pure-component reference structure "
                          "(needs RDKit + packmol)"}
     try:
         psystem = parameterize_fn(
             [{"name": name, "smiles": smiles, "count": n_molecules}],
-            box, working_dir,
+            structure, working_dir,
         )
     except Exception as e:
         return {"error": f"parameterization failed: {e}"}
 
     try:
-        density = run_npt_fn(psystem, working_dir)
+        result = run_measure_fn(psystem, property, working_dir)
     except Exception as e:
         return {"error": f"measurement run failed: {e}"}
-    if density is None:
-        return {"error": "measurement run produced no density"}
+    if not result or result.get("value") is None:
+        return {"error": (result or {}).get(
+            "error", f"measurement run produced no {property}")}
 
     return {
-        "property": "density",
-        "value": round(float(density), 4),
-        "units": "g/cm^3",
+        "property": property,
+        "value": round(float(result["value"]), 4),
+        "units": result.get("units"),
         "n_molecules": n_molecules,
     }

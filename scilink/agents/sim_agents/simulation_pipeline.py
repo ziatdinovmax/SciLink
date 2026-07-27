@@ -170,17 +170,22 @@ def _load_components_manifest(structure_path: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _run_short_npt_density(psystem, working_dir, engine, executor, run_command):
-    """Short NPT on a parameterized pure component; returns mass density
-    (g/cm^3) or None.
+def _measure_property_via_short_run(psystem, property, working_dir, engine,
+                                    executor, run_command):
+    """Measure a pure component's reference ``property`` with a short run.
+
+    Returns ``{"value": float, "units": str}`` or None. Property-general: the
+    property is a goal, not a hardcoded routine — a density is a short NPT, a
+    lattice constant is a relaxation, etc.
 
     LIVE-ENV SEAM (not yet implemented): write engine inputs via
-    ``write_md_inputs``, author a brief NPT deck through the engine skill, run it
-    through ``executor`` with ``run_command``, and read the equilibrated density
-    from the run snapshot. Until implemented it returns None, so the measurement
-    is recorded as unmeasured and the gate stays inert (fails open).
+    ``write_md_inputs``, generate a short run to measure ``property`` through the
+    normal input-generation path (so it works for any property/engine — no
+    per-property code), run it through ``executor`` with ``run_command``, and
+    read the value from the run snapshot. Until implemented it returns None, so
+    the measurement is recorded as unmeasured and the gate fails open.
     """
-    _ = (psystem, working_dir, engine, executor, run_command)
+    _ = (psystem, property, working_dir, engine, executor, run_command)
     return None
 
 
@@ -197,7 +202,7 @@ def _reference_check(components, system_description, psystem, ff_agent, *,
     parameterization too — so re-checking a candidate fix actually measures it.
     """
     from .critics import ReferencePropertyCritic, ReferencePropertySelector
-    from .reference_measurement import measure_pure_component_density
+    from .reference_measurement import measure_pure_component_property
     from .reference_validation import run_reference_check
 
     selector = ReferencePropertySelector(api_key=api_key, base_url=base_url,
@@ -206,18 +211,16 @@ def _reference_check(components, system_description, psystem, ff_agent, *,
                                      model_name=model_name)
 
     def _measure(component, prop):
-        if prop and "densit" not in prop.lower():
-            return {"error": f"no pure-component measurer for '{prop}' yet"}
         name = component.get("name") or component.get("smiles") or "component"
         slug = "".join(c if c.isalnum() else "_" for c in str(name))
         wd = os.path.join(working_dir, "reference_check", slug)
-        return measure_pure_component_density(
-            component, wd,
+        return measure_pure_component_property(
+            component, prop or "density", wd,
             parameterize_fn=lambda comps, coords, w: ff_agent.parameterize(
                 components=comps, coordinates_file=coords, working_dir=w,
                 **(ff_kwargs or {})),
-            run_npt_fn=lambda ps, w: _run_short_npt_density(
-                ps, w, engine, executor, run_command),
+            run_measure_fn=lambda ps, p, w: _measure_property_via_short_run(
+                ps, p, w, engine, executor, run_command),
         )
 
     return run_reference_check(
