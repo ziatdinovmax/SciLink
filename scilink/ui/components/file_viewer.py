@@ -8,6 +8,32 @@ import streamlit as st
 # literature dump) would stall the page. Matches the code-preview clip.
 _MD_MAX_CHARS = 100_000
 
+# Streamlit paints the SELECTED segment by tinting its text and border with
+# the theme's primaryColor and leaving the fill transparent — and our primary
+# is #6200EE, a deep purple that is barely legible against the dark pane.
+# Give it the filled-pill treatment the app already uses for primary buttons
+# (theme.py: purple fill, white label), which reads the same in both themes.
+# Scoped to this widget's keyed container so no other control is restyled;
+# the inner span carries its own colour, hence the descendant rule.
+_MD_TOGGLE_KEY = "md_view_toggle"
+_MD_TOGGLE_CSS = """<style>
+.st-key-md_view_toggle button[kind="segmented_controlActive"] {
+    background-color: #6200EE !important;
+    border-color: #6200EE !important;
+}
+.st-key-md_view_toggle button[kind="segmented_controlActive"],
+.st-key-md_view_toggle button[kind="segmented_controlActive"] * {
+    color: #FFFFFF !important;
+}
+/* The UNSELECTED segment keeps the dark backgroundColor from config.toml
+   even in light mode, where the label flips dark — #212121 on #252D38, a
+   contrast ratio of about 1.1:1, i.e. invisible. Dropping the fill lets it
+   sit on the pane and inherit a legible label in both themes. */
+.st-key-md_view_toggle button[kind="segmented_control"] {
+    background-color: transparent !important;
+}
+</style>"""
+
 
 def render_file_preview(file_path: Path) -> None:
     """Display an appropriate preview for the given file and a download button."""
@@ -123,10 +149,12 @@ def render_file_preview(file_path: Path) -> None:
             # Clipping mid-fence would render the whole tail as code.
             if clipped.count("```") % 2:
                 clipped += "\n```"
-        view = st.segmented_control(
-            "View", ["Rendered", "Source"], default="Rendered",
-            key=f"mdview_{file_path}", label_visibility="collapsed",
-        )
+        st.markdown(_MD_TOGGLE_CSS, unsafe_allow_html=True)
+        with st.container(key=_MD_TOGGLE_KEY):
+            view = st.segmented_control(
+                "View", ["Rendered", "Source"], default="Rendered",
+                key=f"mdview_{file_path}", label_visibility="collapsed",
+            )
         # A segmented control can be deselected back to None; that is not a
         # request for raw source, so anything but an explicit Source renders.
         if view == "Source":
