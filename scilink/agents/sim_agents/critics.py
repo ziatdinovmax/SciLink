@@ -1007,7 +1007,12 @@ basis. A value that clearly contradicts known behaviour means the underlying
 model is miscalibrated, and any prediction built on it is untrustworthy — no
 change to the run settings can fix that. If a value is only mildly off, or you
 are unsure, treat it as consistent: this gate must not veto a sound model over a
-surprising-but-plausible number.
+surprising-but-plausible number. But judge whether the VALUE is correct, not
+whether its error is surprising: a value that is clearly wrong is inconsistent
+even when the error is a well-known or expected limitation of this class of model
+— "expected" is not "acceptable", because the prediction built on it is still
+untrustworthy. The benefit of the doubt is only for values genuinely close to
+correct, or surprising but real — never for a large, confirmed error.
 
 Return a JSON object:
   status           "success"

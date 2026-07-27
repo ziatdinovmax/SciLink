@@ -48,6 +48,8 @@ def test_measurements_reach_the_prompt():
     assert "aqueous sulfone electrolyte" in prompt
     # The conservative guard against vetoing surprising-but-sound results is present.
     assert "must not veto" in prompt
+    # ...but a known/expected model limitation does not excuse a wrong value.
+    assert 'is not "acceptable"' in prompt
 
 
 def test_inconsistent_value_flags_the_model_cause():
