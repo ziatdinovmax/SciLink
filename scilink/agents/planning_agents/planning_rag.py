@@ -10,6 +10,7 @@ except Exception:  # Pillow optional — critic degrades to text-only evidence
 
 from scilink.parsers import parse_adaptive_excel
 from scilink.knowledge import run_rag, parse_json_from_response
+from .parser_utils import plan_is_portfolio
 from .instruct import (
     HYPOTHESIS_GENERATION_INSTRUCTIONS,
     TEA_INSTRUCTIONS,
@@ -24,6 +25,7 @@ from .instruct import (
     IDEATION_OUTPUT_RULES,
     TECHNICAL_DOCUMENT_INSTRUCTIONS,
     IDEATION_PORTFOLIO_INSTRUCTIONS,
+    PORTFOLIO_REFINEMENT_RULES,
     IDEATION_PORTFOLIO_INSTRUCTIONS_FALLBACK,
     TECHNICAL_DOCUMENT_INSTRUCTIONS_FALLBACK,
     CONSTRAINT_COVERAGE_NOTE
@@ -926,6 +928,13 @@ def refine_plan_with_feedback(original_result: Dict[str, Any],
     **Output:**
     A single valid JSON object containing the updated plan.
     """
+
+    # A portfolio refines against judgement, not measurement — see
+    # PORTFOLIO_REFINEMENT_RULES.
+    if plan_is_portfolio(original_result) or any(
+            (e or {}).get("concepts")
+            for e in (original_result.get("proposed_experiments") or [])):
+        refinement_prompt += PORTFOLIO_REFINEMENT_RULES
 
     prompt_parts = [refinement_prompt]
 

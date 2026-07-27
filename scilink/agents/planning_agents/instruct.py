@@ -1268,3 +1268,28 @@ IDEATION_PORTFOLIO_INSTRUCTIONS_FALLBACK = (
 knowledge and mark every direction's context-external elements as
 (speculative). Do not decline.
 """)
+
+
+# Portfolio refinement verbs. A bench plan is refined against RESULTS ("the
+# yield was low, fix it"); a portfolio is refined against JUDGEMENT — drop a
+# direction, harden one, re-rank them, fold in a critique, consolidate
+# several into one class. The generic block speaks of experiments and
+# results, which reads as an instruction to turn the portfolio into a
+# protocol.
+PORTFOLIO_REFINEMENT_RULES = """
+
+**THIS PLAN IS A RESEARCH PORTFOLIO, NOT A BENCH PLAN.**
+The feedback is a judgement about DIRECTIONS, not a measurement. Apply it
+with the portfolio verbs:
+- HARDEN a direction: strengthen its hypothesis, name its dominant failure
+  mode, state what would refute it. Keep its id.
+- DROP a direction: remove the entry. Do not leave a stub.
+- ADD a direction: a genuinely distinct one, with its own id and title.
+- RE-RANK: change `tier` / order. Do not rewrite content you were not asked
+  to change.
+- CONSOLIDATE: merge several directions into one, keeping what made each
+  worth having and naming the thesis that now unites them.
+Preserve every direction the feedback did not touch, verbatim. Do not invent
+`experimental_steps`, `required_equipment` or `optimization_params` — a
+portfolio names directions; benchwork is designed later, once one is chosen.
+"""

@@ -152,3 +152,31 @@ def test_the_orchestrator_prompt_teaches_the_new_path():
     assert 'generate_initial_plan(..., literature_context=..., selection_profile="ideation")' \
         not in src
     assert "flattened into protocol steps" in src
+
+
+# ── refinement verbs ─────────────────────────────────────────────────
+
+def test_portfolio_refinement_uses_portfolio_verbs():
+    """A bench plan is refined against RESULTS; a portfolio against
+    JUDGEMENT. The generic block speaks of experiments and results, which
+    reads as an instruction to turn the portfolio into a protocol."""
+    from scilink.agents.planning_agents.instruct import (
+        PORTFOLIO_REFINEMENT_RULES as R)
+    for verb in ("HARDEN", "DROP", "ADD", "RE-RANK", "CONSOLIDATE"):
+        assert verb in R
+    assert "Preserve every direction the feedback did not touch" in R
+    # and it re-states the ban, because refinement is where invented
+    # protocol crept back in before
+    for banned in ("experimental_steps", "required_equipment",
+                   "optimization_params"):
+        assert banned in R
+
+
+def test_the_verbs_are_injected_only_for_portfolios():
+    import inspect
+    src = inspect.getsource(pr.refine_plan_with_feedback)
+    flat = " ".join(src.split())
+    assert "if plan_is_portfolio(original_result) or any(" in flat
+    assert "refinement_prompt += PORTFOLIO_REFINEMENT_RULES" in flat
+    # the shim shape counts too — a portfolio in flight carries concepts
+    assert '(e or {}).get("concepts")' in flat
