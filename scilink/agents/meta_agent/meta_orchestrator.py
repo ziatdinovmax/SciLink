@@ -1830,9 +1830,10 @@ class MetaOrchestratorAgent:
                     "received). The tool was NOT executed, and the arguments "
                     "you sent were never seen — this is NOT a missing-argument "
                     "error, so re-sending the same call will fail the same "
-                    "way. Send a SHORTER call: keep the essential instruction "
-                    "in `task` and move supporting detail into `context`, or "
-                    "split the work across several delegations."
+                    "way. Send a SHORTER call: for a delegation keep the "
+                    "essential instruction in `task` and move supporting "
+                    "detail into `context`; otherwise split the work across "
+                    "several smaller calls."
                 ),
             })
 

@@ -322,15 +322,31 @@ class MetaOrchestratorTools:
         if missing:
             logging.warning(f"Tool {tool_name}: missing {missing} "
                             "(likely a truncated tool call)")
+            # Advice has to fit the tool. The delegate_* tools carry a long
+            # free-text brief and can shed weight into `context`; view_document
+            # (paths) and run_fanout (branches) cannot, and telling them to
+            # would be nonsense.
+            import inspect as _inspect
+            try:
+                accepted = set(_inspect.signature(
+                    self.functions_map[tool_name]).parameters)
+            except (TypeError, ValueError):
+                accepted = set()
+            if {"task", "context"} <= accepted:
+                how = ("Re-send it SHORTER: keep the essential instruction in "
+                       "`task` and move supporting detail into `context`, "
+                       "rather than re-sending the same text.")
+            else:
+                how = ("Re-send the call with every required argument. If the "
+                       "payload is large, split the work across several "
+                       "smaller calls rather than repeating this one.")
             return json.dumps({
                 "status": "error",
                 "tool": tool_name,
                 "message": (
                     f"Missing required argument(s): {', '.join(missing)}. "
-                    "The call was most likely truncated by the response "
-                    "length limit. Re-send it SHORTER: put the essential "
-                    "instruction in `task` and move supporting detail into "
-                    "`context`, rather than re-sending the same text."
+                    f"The call was most likely truncated by the response "
+                    f"length limit. {how}"
                 ),
             })
 

@@ -22,8 +22,11 @@ def tools():
     t.openai_schemas = [{"function": {
         "name": "delegate_to_planning",
         "parameters": {"required": ["task", "label"]}}}]
+    t.openai_schemas.append({"function": {
+        "name": "view_document", "parameters": {"required": ["paths"]}}})
     t.functions_map = {
         "delegate_to_planning": lambda task, label, context=None: "ok",
+        "view_document": lambda paths, page=None: "ok",
         "boom": lambda: (_ for _ in ()).throw(ValueError("real failure")),
     }
     return t
@@ -41,6 +44,18 @@ def test_truncated_call_is_named_and_told_to_shorten(tools):
     # re-sending the same text would truncate again — the advice must be to
     # restructure, not to retry
     assert "SHORTER" in out["message"] and "context" in out["message"]
+
+
+def test_advice_fits_the_tool_it_is_given_to(tools):
+    """The guards cover every meta tool — analysis and simulation
+    delegations, fan-out, document viewing. `view_document` takes `paths`,
+    so telling it to move detail into `context` would be nonsense."""
+    delegation = _run(tools, "delegate_to_planning", label="x")["message"]
+    other = _run(tools, "view_document")["message"]
+
+    assert "`context`" in delegation
+    assert "context" not in other
+    assert "paths" in other and "split the work" in other
 
 
 def test_every_missing_required_argument_is_listed(tools):
