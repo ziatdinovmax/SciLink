@@ -1784,10 +1784,13 @@ class MetaOrchestratorAgent:
 
             for tool_call in message.tool_calls:
                 func_name = tool_call.function.name
-                try:
-                    args = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError:
-                    args = {}
+                args, arg_error = self._parse_tool_args(
+                    tool_call, getattr(response.choices[0], "finish_reason", None))
+                if arg_error is not None:
+                    print(f"  ⚠️  {func_name}: arguments discarded (see above)")
+                    self.messages.append(
+                        self._tool_message(tool_call.id, arg_error))
+                    continue
 
                 print(f"  🔧 Calling tool: {func_name}")
                 result = self.tools.execute_tool(func_name, **args)
@@ -1796,6 +1799,42 @@ class MetaOrchestratorAgent:
 
         self._last_chat_hit_iter_cap = True
         return "⚠️ Maximum tool iterations reached. Please simplify your request."
+
+    @staticmethod
+    def _parse_tool_args(tool_call, finish_reason=None):
+        """Parse a tool call's JSON arguments, failing loud on bad input.
+
+        Returns (args, None) on success, or (None, error_json) when the
+        arguments are malformed or truncated. Ported from the planning
+        orchestrator (#270), where the same silent ``args = {}`` fallback
+        was found to hide the real cause: the tool then raises about a
+        MISSING argument, so the model "resubmits with the full task" —
+        fixing the wrong thing — and loops. Seen live on the meta four times
+        in a row for one delegate_to_planning call.
+        """
+        try:
+            return json.loads(tool_call.function.arguments), None
+        except json.JSONDecodeError:
+            raw = getattr(tool_call.function, "arguments", "") or ""
+            if finish_reason == "length":
+                cause = ("the arguments JSON was truncated — the response hit "
+                         "the output-token limit")
+            else:
+                cause = ("the arguments string was not valid JSON — typically "
+                         "broken escaping of quotes or newlines inside a large "
+                         "string value")
+            return None, json.dumps({
+                "status": "error",
+                "message": (
+                    f"Tool call discarded: {cause} ({len(raw)} characters "
+                    "received). The tool was NOT executed, and the arguments "
+                    "you sent were never seen — this is NOT a missing-argument "
+                    "error, so re-sending the same call will fail the same "
+                    "way. Send a SHORTER call: keep the essential instruction "
+                    "in `task` and move supporting detail into `context`, or "
+                    "split the work across several delegations."
+                ),
+            })
 
     def _print_assistant_reasoning(self, content) -> None:
         """Surface the LLM's interim reasoning that accompanies a tool call.
@@ -1898,10 +1937,13 @@ class MetaOrchestratorAgent:
 
             for tool_call in tool_calls:
                 func_name = tool_call.function.name
-                try:
-                    args = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError:
-                    args = {}
+                args, arg_error = self._parse_tool_args(
+                    tool_call, locals().get("finish_reason"))
+                if arg_error is not None:
+                    print(f"  ⚠️  {func_name}: arguments discarded (see above)")
+                    self.messages.append(
+                        self._tool_message(tool_call.id, arg_error))
+                    continue
 
                 print(f"  🔧 Calling tool: {func_name}")
                 result = self.tools.execute_tool(func_name, **args)

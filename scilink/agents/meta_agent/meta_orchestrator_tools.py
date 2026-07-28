@@ -309,8 +309,55 @@ class MetaOrchestratorTools:
                 "status": "error",
                 "message": f"Tool '{tool_name}' not found",
             })
+
+        # A tool call whose arguments hit the output-token cap mid-generation
+        # arrives as VALID but incomplete JSON — later keys simply absent —
+        # and dispatching it raises a bare TypeError about a missing
+        # positional argument. Seen repeatedly on delegate_to_planning, whose
+        # `task` brief runs to thousands of words: the model spends a whole
+        # round trip re-emitting the same oversized call. The planning
+        # orchestrator has guarded this for a while; the meta had not.
+        missing = [p for p in self._required_params(tool_name)
+                   if p not in kwargs]
+        if missing:
+            logging.warning(f"Tool {tool_name}: missing {missing} "
+                            "(likely a truncated tool call)")
+            return json.dumps({
+                "status": "error",
+                "tool": tool_name,
+                "message": (
+                    f"Missing required argument(s): {', '.join(missing)}. "
+                    "The call was most likely truncated by the response "
+                    "length limit. Re-send it SHORTER: put the essential "
+                    "instruction in `task` and move supporting detail into "
+                    "`context`, rather than re-sending the same text."
+                ),
+            })
+
         try:
             return self.functions_map[tool_name](**kwargs)
+        except TypeError as e:
+            if "unexpected keyword argument" in str(e):
+                import inspect as _inspect
+                try:
+                    accepted = list(_inspect.signature(
+                        self.functions_map[tool_name]).parameters)
+                except (TypeError, ValueError):
+                    accepted = []
+                logging.warning(f"Tool {tool_name}: {e}")
+                return json.dumps({
+                    "status": "error",
+                    "tool": tool_name,
+                    "message": (f"{e}. Accepted arguments: "
+                                f"{', '.join(accepted) or 'unknown'}. "
+                                "Re-send the call using only those."),
+                })
+            logging.error(f"Tool execution error ({tool_name}): {e}", exc_info=True)
+            return json.dumps({
+                "status": "error",
+                "message": str(e),
+                "tool": tool_name,
+            })
         except Exception as e:
             logging.error(f"Tool execution error ({tool_name}): {e}", exc_info=True)
             return json.dumps({
@@ -318,6 +365,14 @@ class MetaOrchestratorTools:
                 "message": str(e),
                 "tool": tool_name,
             })
+
+    def _required_params(self, tool_name: str) -> list:
+        """Schema-declared required parameter names for a tool."""
+        for schema in getattr(self, "openai_schemas", []) or []:
+            fn = schema.get("function", {})
+            if fn.get("name") == tool_name:
+                return fn.get("parameters", {}).get("required", []) or []
+        return []
 
     def _register_all_tools(self):
         """Register the meta-agent's delegation and introspection tools."""
