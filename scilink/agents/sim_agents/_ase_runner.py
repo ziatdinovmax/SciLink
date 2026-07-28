@@ -47,8 +47,9 @@ def generate_ase_script(
         supplies the import + construction; the rest of the script is
         backend-agnostic.
     structure_file:
-        Path the generated script reads at run time (LAMMPS data
-        format — written by the MD agent next to the script).
+        Path the generated script reads at run time. Accepts any
+        ASE-readable format (CIF, XYZ, EXTXYZ, POSCAR, PDB, …) as
+        well as LAMMPS data files (.data/.lammps/.lmp).
     task:
         ``"md"`` — MaxwellBoltzmann init + Langevin (NVT) or NPT
         dynamics, writing a trajectory + thermo log.
@@ -77,29 +78,39 @@ Run:
     {spec.device_env_var}=cpu python {{script}}    # force CPU
 """
 import os
+import pathlib
 import time
 
 from ase import units
-from ase.io.lammpsdata import read_lammps_data
+from ase.io import read as _ase_read
 {spec.import_line}
 
 ELEMENTS = [{el_repr}]
 DEVICE = os.environ.get({spec.device_env_var!r}, {device!r})
 
+# LAMMPS data files are not auto-detected by extension; everything else
+# (CIF, XYZ, EXTXYZ, POSCAR, PDB, …) is handled by ase.io.read.
+_LAMMPS_EXTS = {{".data", ".lammps", ".lmp"}}
+
 
 def _load_structure():
-    atoms = read_lammps_data({structure_file!r}, atom_style="atomic", sort_by_id=True)
-    if ELEMENTS:
-        # write_lammps_data(masses=True) lets ASE infer real elements from
-        # masses on read, so atoms.numbers are true Zs in the typical case.
-        # Only fall back to type-index remap if mass-based inference didn't
-        # recover the expected element set.
-        actual = sorted(set(atoms.get_chemical_symbols()))
-        expected = sorted(set(ELEMENTS))
-        if actual != expected:
-            type_to_sym = {{i + 1: ELEMENTS[i] for i in range(len(ELEMENTS))}}
-            nums = atoms.get_atomic_numbers()
-            atoms.set_chemical_symbols([type_to_sym[int(n)] for n in nums])
+    _path = {structure_file!r}
+    if pathlib.Path(_path).suffix.lower() in _LAMMPS_EXTS:
+        from ase.io.lammpsdata import read_lammps_data
+        atoms = read_lammps_data(_path, atom_style="atomic", sort_by_id=True)
+        if ELEMENTS:
+            # write_lammps_data(masses=True) lets ASE infer real elements from
+            # masses on read, so atoms.numbers are true Zs in the typical case.
+            # Only fall back to type-index remap if mass-based inference didn't
+            # recover the expected element set.
+            actual = sorted(set(atoms.get_chemical_symbols()))
+            expected = sorted(set(ELEMENTS))
+            if actual != expected:
+                type_to_sym = {{i + 1: ELEMENTS[i] for i in range(len(ELEMENTS))}}
+                nums = atoms.get_atomic_numbers()
+                atoms.set_chemical_symbols([type_to_sym[int(n)] for n in nums])
+    else:
+        atoms = _ase_read(_path)
     return atoms
 '''
 

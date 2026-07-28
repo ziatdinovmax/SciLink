@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_ENGINE = {
     "periodic_dft": "vasp",
     "molecular_dynamics": "lammps",
+    "machine_learning_potentials": "mace",
 }
 
 
@@ -136,6 +137,41 @@ def _generate_inputs(
             }
         if script_path:
             result["entry_file"] = Path(script_path).name
+        result.setdefault("status", "success")
+        return result
+
+    if scale == "machine_learning_potentials":
+        from .mlip_agent import MLIPAgent
+        # ``software`` is the MLIP backend name (mace, chgnet, deepmd, …).
+        # The structure file is the absorbing structure; system_info is
+        # inferred from it by MLIPAgent. ``request`` drives backend and
+        # model selection when no explicit backend is forced.
+        agent = MLIPAgent(
+            working_dir=output_dir,
+            api_key=api_key, base_url=base_url, model_name=model_name,
+        )
+        from ase.io import read as _ase_read
+        try:
+            atoms = _ase_read(structure_file)
+            elements = sorted(set(atoms.get_chemical_symbols()))
+            n_atoms = len(atoms)
+        except Exception:
+            elements = []
+            n_atoms = 0
+        system_info = {"elements": {e: None for e in elements}, "n_atoms": n_atoms}
+        result = agent.deploy_pretrained(
+            system_info=system_info,
+            research_goal=request,
+            structure_file=structure_file,
+            backend=software if software != _DEFAULT_ENGINE["machine_learning_potentials"] else None,
+            runner="ase",
+        )
+        # Normalize to the common input_files shape: the generated run
+        # script is the single input artifact.
+        run_path = result.get("run_path") or result.get("script_path")
+        if run_path and Path(run_path).exists():
+            result.setdefault("input_files", {Path(run_path).name: run_path})
+            result.setdefault("entry_file", Path(run_path).name)
         result.setdefault("status", "success")
         return result
 
