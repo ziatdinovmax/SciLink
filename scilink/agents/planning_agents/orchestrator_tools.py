@@ -6290,7 +6290,17 @@ class OrchestratorTools:
                         else:
                             missing.append(raw)
 
-                doc_title = title or (request[:70].strip() or "Technical document")
+                # A revision inherits the document's OWN name: falling back
+                # to the request titled the deliverable with the instruction
+                # ("Revise this brief with two targeted changes...") and
+                # replaced its real name in the files list. Live.
+                doc_title = title
+                if not doc_title and current:
+                    m = re.search(r"^#\s+(.+)$", current, re.M)
+                    doc_title = (m.group(1).strip() if m
+                                 else rp.stem.replace("_", " "))
+                doc_title = doc_title or (request[:70].strip()
+                                          or "Technical document")
                 result = author_technical_document(
                     request=request,
                     kb_docs=planner.kb_docs,
@@ -6338,10 +6348,14 @@ class OrchestratorTools:
                         bak.write_text(current or "")
                         # Listed (not starred) so the replaced version shows
                         # up in the files block rather than only on disk.
+                        # Under the meta this is the delegation slug; in a
+                        # standalone session it is just the session dir, and
+                        # "revised by session" says nothing.
+                        who = ("" if d.resolve() == root
+                               else f" (revised by {d.name})")
                         record_deliverable(
                             self.orch.base_dir, bak,
-                            f"Pre-revision copy of {rp.name} "
-                            f"(revised by {d.name})")
+                            f"Pre-revision copy of {rp.name}{who}")
                     except Exception as e:  # noqa: BLE001 - never block the edit
                         logging.warning(f"Pre-revision copy failed: {e}")
                         bak = None

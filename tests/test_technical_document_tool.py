@@ -306,3 +306,52 @@ def test_the_revision_is_traceable_without_reading_the_disk(tmp_path,
     assert "revised by 04_revise" in trail[0]
     # the audit copy is listed, never starred over the real deliverable
     assert entries[trail[0]]["deliverable"] is False
+
+
+def test_a_revision_keeps_the_documents_own_name(tmp_path, monkeypatch):
+    """Live: with no explicit title the deliverable was renamed after the
+    INSTRUCTION — "Revise this brief with two targeted changes, keeping ALL
+    other content" replaced its real name in the files list."""
+    from scilink.agents.planning_agents.user_interface import load_deliverables
+    orig = tmp_path / "delegations" / "02_author" / "paper.md"
+    orig.parent.mkdir(parents=True)
+    orig.write_text("# Commissioning Brief\n\n" + "Body text. " * 400)
+
+    t = _doc_tool(tmp_path, monkeypatch,
+                  [{"heading": "S", "body": "Body " * 900}])
+    OrchestratorTools._register_all_tools(t)
+    out = json.loads(t.functions_map["write_technical_document"](
+        request="Revise this brief with two targeted changes, keeping ALL "
+                "other content exactly as it is",
+        revise_path=str(orig)))
+
+    assert out["title"] == "Commissioning Brief"
+    titles = [e["title"] for e in load_deliverables(tmp_path)]
+    assert "Commissioning Brief" in titles
+    assert not any(x.startswith("Revise this brief") for x in titles)
+
+
+def test_a_titleless_document_falls_back_to_its_filename(tmp_path,
+                                                          monkeypatch):
+    orig = tmp_path / "delegations" / "02_author" / "build_roadmap.md"
+    orig.parent.mkdir(parents=True)
+    orig.write_text("No heading here.\n" + "Body text. " * 400)
+
+    t = _doc_tool(tmp_path, monkeypatch,
+                  [{"heading": "S", "body": "Body " * 900}])
+    OrchestratorTools._register_all_tools(t)
+    out = json.loads(t.functions_map["write_technical_document"](
+        request="tighten it", revise_path=str(orig)))
+    assert out["title"] == "build roadmap"
+
+
+def test_an_explicit_title_still_wins(tmp_path, monkeypatch):
+    orig = tmp_path / "delegations" / "02_author" / "paper.md"
+    orig.parent.mkdir(parents=True)
+    orig.write_text("# Old Name\n\n" + "Body text. " * 400)
+    t = _doc_tool(tmp_path, monkeypatch,
+                  [{"heading": "S", "body": "Body " * 900}])
+    OrchestratorTools._register_all_tools(t)
+    out = json.loads(t.functions_map["write_technical_document"](
+        request="rename it", title="New Name", revise_path=str(orig)))
+    assert out["title"] == "New Name"
