@@ -815,7 +815,13 @@ else:
             render_pre_chat_uploads(_start_task)
     
         _avatars = {"user": AVATAR_USER, "assistant": AVATAR_AGENT}
-        for msg in st.session_state.chat_messages:
+        # Enumerated because widget keys below must be unique per
+        # MESSAGE, not per path: a document revised in place is
+        # re-embedded in a later message under the SAME path, and a
+        # path-only key then collides and crashes the app with
+        # StreamlitDuplicateElementKey (live, after a white paper was
+        # revised via write_technical_document(revise_path=...)).
+        for _mi, msg in enumerate(st.session_state.chat_messages):
             with st.chat_message(msg["role"], avatar=_avatars.get(msg["role"])):
                 # Escape tildes outside LaTeX blocks to prevent Markdown strikethrough
                 _content = _escape_tildes(msg["content"]) if msg["role"] == "assistant" else msg["content"]
@@ -844,7 +850,7 @@ else:
                             data=p.read_bytes(),
                             file_name=p.name,
                             mime="text/html",
-                            key=f"dl_html_{html_path}",
+                            key=f"dl_html_{_mi}_{html_path}",
                         )
                 for md_path in msg.get("md_reports", []):
                     p = Path(md_path)
@@ -859,7 +865,7 @@ else:
                             data=p.read_bytes(),
                             file_name=p.name,
                             mime="text/markdown",
-                            key=f"dl_md_{md_path}",
+                            key=f"dl_md_{_mi}_{md_path}",
                         )
                 if msg.get("verbose"):
                     with st.expander("Verbose output"):
