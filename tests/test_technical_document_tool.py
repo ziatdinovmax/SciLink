@@ -256,3 +256,53 @@ def test_the_revising_delegation_keeps_what_it_replaced(tmp_path, monkeypatch):
     # ...next to the delegation that changed it, not next to the original
     assert bak.parent != orig.parent
     assert orig.read_text() != ORIGINAL, "the canonical file was updated"
+
+
+def test_repeated_revisions_never_lose_the_original(tmp_path, monkeypatch):
+    """The hole in a single fixed backup name: revise twice from one
+    delegation and the ORIGINAL — the version the user approved — is the
+    copy that vanishes."""
+    orig = tmp_path / "delegations" / "02_author" / "paper.md"
+    orig.parent.mkdir(parents=True)
+    orig.write_text(ORIGINAL)
+
+    t = _doc_tool(tmp_path, monkeypatch,
+                  [{"heading": "S", "body": "Body " * 900}])
+    OrchestratorTools._register_all_tools(t)
+    fn = t.functions_map["write_technical_document"]
+
+    first = json.loads(fn(request="add references", revise_path=str(orig)))
+    v2 = orig.read_text()
+    second = json.loads(fn(request="tighten it", revise_path=str(orig)))
+
+    assert first["status"] == second["status"] == "success"
+    baks = sorted(p.name for p in t._output_dir().glob("*before_revision*"))
+    assert len(baks) == 2, baks
+    contents = {(t._output_dir() / b).read_text() for b in baks}
+    assert ORIGINAL in contents, "the original must still exist somewhere"
+    assert v2 in contents
+
+
+def test_the_revision_is_traceable_without_reading_the_disk(tmp_path,
+                                                            monkeypatch):
+    """Who changed what, visible in the result and in the files ledger."""
+    from scilink.agents.planning_agents.user_interface import load_deliverables
+    orig = tmp_path / "delegations" / "02_author" / "paper.md"
+    orig.parent.mkdir(parents=True)
+    orig.write_text(ORIGINAL)
+
+    t = _doc_tool(tmp_path, monkeypatch,
+                  [{"heading": "S", "body": "Body " * 900}])
+    OrchestratorTools._register_all_tools(t)
+    out = json.loads(t.functions_map["write_technical_document"](
+        request="add references", revise_path=str(orig)))
+
+    assert out["revised_by"] == "04_revise"
+    assert out["previous_version"] and Path(out["previous_version"]).exists()
+
+    entries = {e["title"]: e for e in load_deliverables(tmp_path)}
+    trail = [k for k in entries if k.startswith("Pre-revision copy")]
+    assert trail, entries
+    assert "revised by 04_revise" in trail[0]
+    # the audit copy is listed, never starred over the real deliverable
+    assert entries[trail[0]]["deliverable"] is False

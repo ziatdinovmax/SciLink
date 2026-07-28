@@ -6242,6 +6242,7 @@ class OrchestratorTools:
                 # it with `../../`, which save_file's sandbox collapses to a
                 # subfolder name, so it rebuilt the file by hand in chunks
                 # and truncated it doing so (live).
+                from .user_interface import format_path, record_deliverable
                 current = None
                 if revise_path:
                     rp = Path(revise_path)
@@ -6321,13 +6322,29 @@ class OrchestratorTools:
                     # change keeps the version it replaced. The canonical file
                     # stays canonical; the evidence lives where the edit
                     # happened.
+                    bak = None
                     try:
-                        bak = (self._output_dir()
-                               / f"{rp.stem}.before_revision{rp.suffix}")
-                        bak.parent.mkdir(parents=True, exist_ok=True)
+                        d = self._output_dir()
+                        d.mkdir(parents=True, exist_ok=True)
+                        # Never clobber an earlier backup: revising the same
+                        # document twice from one delegation would otherwise
+                        # leave only the second-to-last version, and the
+                        # original — the one the user actually approved —
+                        # would be the copy that vanished.
+                        n, bak = 1, d / f"{rp.stem}.before_revision{rp.suffix}"
+                        while bak.exists():
+                            n += 1
+                            bak = d / f"{rp.stem}.before_revision{n}{rp.suffix}"
                         bak.write_text(current or "")
+                        # Listed (not starred) so the replaced version shows
+                        # up in the files block rather than only on disk.
+                        record_deliverable(
+                            self.orch.base_dir, bak,
+                            f"Pre-revision copy of {rp.name} "
+                            f"(revised by {d.name})")
                     except Exception as e:  # noqa: BLE001 - never block the edit
                         logging.warning(f"Pre-revision copy failed: {e}")
+                        bak = None
                     # A revision that came back shorter than the original is
                     # nearly always the model summarising instead of
                     # revising. Refuse rather than overwrite the good copy.
@@ -6350,12 +6367,23 @@ class OrchestratorTools:
                 out.parent.mkdir(parents=True, exist_ok=True)
                 out.write_text(text)
 
-                from .user_interface import format_path, record_deliverable
                 record_deliverable(self.orch.base_dir, out, doc_title,
                                    deliverable=True)
-                print(f"    📄 Document saved: {format_path(out)}")
+                if revise_path:
+                    # The transcript is the first place anyone looks, so the
+                    # cross-delegation edit is named there, not just on disk.
+                    print(f"    ✏️  Revised IN PLACE: {format_path(out)}")
+                    if bak:
+                        print(f"    ↩️  Previous version kept: "
+                              f"{format_path(bak)}")
+                else:
+                    print(f"    📄 Document saved: {format_path(out)}")
                 res = {"status": "success", "path": str(out),
                        "revised_in_place": bool(revise_path),
+                       "previous_version": (str(bak) if revise_path and bak
+                                            else None),
+                       "revised_by": (self._output_dir().name if revise_path
+                                      else None),
                        "title": doc_title,
                        "sections": [s.get("heading") for s in sections
                                     if isinstance(s, dict)],
