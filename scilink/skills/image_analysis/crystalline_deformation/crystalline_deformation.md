@@ -524,20 +524,20 @@ them when the objective asks for strain fields, Burgers vectors, or
 dislocation character (edge/screw/mixed).
 
 ```python
-from scilink.skills.image_analysis.crystalline_deformation.gpa_tools import compute_gpa_strain, burgers_from_gpa
+from scilink.skills._shared.strain import gpa_strain_map
+from scilink.skills.image_analysis.crystalline_deformation.gpa_tools import burgers_from_gpa
 
-# Step 1: GPA strain mapping from the raw image
-# calib = pixel size in nm (get from metadata or FFT lattice spacing)
-gpa_result = compute_gpa_strain(image, calib=pixel_size_nm,
-                                 calib_units="nm", auto_spots=True)
-e_xx = gpa_result['e_xx']  # normal strain X
-e_yy = gpa_result['e_yy']  # normal strain Y
-e_th = gpa_result['e_th']  # rotation (omega_z)
-e_dg = gpa_result['e_dg']  # shear strain (epsilon_xy)
+# Step 1: GPA strain mapping — use the SHARED, validated tool.
+gpa = gpa_strain_map(image)          # auto reflections + auto reference
+e_xx = gpa['exx']                    # normal strain X
+e_yy = gpa['eyy']                    # normal strain Y
+e_xy = gpa['exy']                    # shear strain (epsilon_xy)
+w_z  = gpa['wxy']                    # rigid rotation omega_z — use + sign as-is
+valid = gpa['valid_mask']            # exclude invalid pixels from interpretation
 
 # Step 2: Burgers vectors from strain maps
 # Option A — per-dislocation (if you know core positions from PTM/CoS):
-bv = burgers_from_gpa(e_xx, e_yy, e_xy=e_dg, w_z=e_th,
+bv = burgers_from_gpa(e_xx, e_yy, e_xy=e_xy, w_z=w_z,
                       pixel_size=pixel_size_nm,
                       dislocation_positions=[(row, col), ...],
                       circuit_half_width=10)
@@ -545,7 +545,7 @@ for d in bv['burgers_vectors']:
     print(d['b_vector'], d['b_magnitude'], d['b_direction'])
 
 # Option B — full-field (auto-detect dislocations):
-bv = burgers_from_gpa(e_xx, e_yy, e_xy=e_dg, w_z=e_th,
+bv = burgers_from_gpa(e_xx, e_yy, e_xy=e_xy, w_z=w_z,
                       pixel_size=pixel_size_nm,
                       compute_field=True, field_half_width=5,
                       field_cutoff=0.01)
@@ -553,6 +553,9 @@ cores = bv['cores']       # (N, 2) dislocation positions
 b_field = bv['b_field']   # (Ny, Nx, 2) vector field
 b_mag = bv['b_mag']       # (Ny, Nx) magnitude map
 ```
+
+Sign convention: `w_z` is `gpa_strain_map`'s `wxy` passed with the +
+sign (omega_z = 0.5*(duy/dx − dux/dy)). Do not negate it.
 
 **Dislocation character from Burgers vector:**
 Once you have the Burgers vector **b** and the dislocation line
@@ -564,11 +567,13 @@ direction **t** (from the PTM boundary trace or CoS ridge):
   α=0° → pure screw.
 
 **GPA workflow notes:**
-- GPA needs a reference region of unstrained crystal. The auto mode
-  uses the central 25% of the image. For images with a defect at
-  center, manually specify ref_region as a slice in a defect-free area.
-- auto_spots detects Bragg peaks from FFT. If it picks wrong spots,
-  pass spot1, spot2 manually from the FFT peak positions.
+- GPA needs an undistorted reference region. `gpa_strain_map`'s
+  `reference_roi="auto"` finds one; for images with a defect at center,
+  pass `reference_roi=(x, y, w, h)` in a defect-free area.
+- Reflections are auto-selected from the FFT; if the wrong pair is
+  picked, pass `reflections=[(gx1, gy1), (gx2, gy2)]` explicitly.
+- Respect `valid_mask` / `valid_fraction` in the returned dict — cores,
+  vacuum, and edges are marked invalid and must not be interpreted.
 - The image does NOT need to be square — rectangular images work.
 - GPA produces strain at every pixel, not just at atom positions.
   It complements PTM (which gives per-atom classification).
