@@ -4653,11 +4653,19 @@ class OrchestratorTools:
         # =====================================================================
         # READ FILE (non-destructive inspection)
         # =====================================================================
-        def read_file(file_path: str, max_lines: int = 200) -> str:
+        def read_file(file_path: str, max_lines: int = 200,
+                      tail: bool = False, search: str = None) -> str:
             """
             Read and return the contents of a file. Use this to inspect
             plans, protocols, configs, logs, or any text/JSON file without
             triggering analysis pipelines.
+
+            Reading from the top was the only mode, and the truncation notice
+            named what was missing without naming a way to get it — so a
+            question about the END of a long document ("does this paper close
+            with a References section?") had no answer at any parameter value.
+            Live, an agent asked it five times and gave up. `tail` and
+            `search` answer those questions in one call.
             """
             print(f"  ⚡ Tool: Reading file '{file_path}'...")
 
@@ -4729,11 +4737,68 @@ class OrchestratorTools:
                 else:
                     with open(path, 'r', encoding='utf-8', errors='replace') as f:
                         lines = f.readlines()
-                    if len(lines) > max_lines:
-                        content = "".join(lines[:max_lines])
-                        content += f"\n... ({len(lines) - max_lines} more lines truncated)"
+                    total = len(lines)
+
+                    if search:
+                        # The real question behind most repeat reads is "is X
+                        # in here, and where" — a search, not a read. Answering
+                        # it directly costs one call and stays cheap however
+                        # long the file is.
+                        try:
+                            rx = re.compile(search, re.I)
+                        except re.error as e:
+                            return json.dumps({
+                                "status": "error",
+                                "message": f"Invalid search pattern: {e}"})
+                        hits = [i for i, ln in enumerate(lines) if rx.search(ln)]
+                        CAP = 40
+                        shown, out = hits[:CAP], []
+                        for i in shown:
+                            lo, hi = max(0, i - 1), min(total, i + 2)
+                            out.append(f"@@ line {i + 1}\n"
+                                       + "".join(lines[lo:hi]).rstrip("\n"))
+                        body = "\n\n".join(out) if out else "(no matches)"
+                        note = (f"{len(hits)} matching line(s) in {total} total"
+                                + (f"; showing the first {CAP}" if len(hits) > CAP
+                                   else ""))
+                        return json.dumps({
+                            "status": "success",
+                            "file_path": str(path),
+                            "mode": "search",
+                            "pattern": search,
+                            "matches": len(hits),
+                            "match_lines": [i + 1 for i in shown],
+                            "total_lines": total,
+                            "content": f"{note}\n\n{body}",
+                        })
+
+                    if total > max_lines:
+                        if tail:
+                            shown = lines[-max_lines:]
+                            first, last = total - max_lines + 1, total
+                            more = (f"... ({first - 1} earlier lines not shown; "
+                                    f"omit tail to read from the top)")
+                            content = more + "\n" + "".join(shown)
+                        else:
+                            shown = lines[:max_lines]
+                            first, last = 1, max_lines
+                            content = "".join(shown) + (
+                                f"\n... ({total - max_lines} more lines not "
+                                f"shown. To see the END of the file call again "
+                                f"with tail=true; to find something specific "
+                                f"use search='<pattern>'; or raise max_lines.)")
                     else:
-                        content = "".join(lines)
+                        first, last, content = 1, total, "".join(lines)
+
+                    return json.dumps({
+                        "status": "success",
+                        "file_path": str(path),
+                        "mode": "tail" if tail else "head",
+                        "total_lines": total,
+                        "shown_lines": f"{first}-{last}",
+                        "truncated": total > max_lines,
+                        "content": content,
+                    })
 
                 return json.dumps({
                     "status": "success",
@@ -4751,9 +4816,13 @@ class OrchestratorTools:
             func=read_file,
             name="read_file",
             description=(
-                "Read and return the contents of a text or JSON file. "
-                "Use this to inspect plans, protocols, scripts, configs, or logs. "
-                "Do NOT use analyze_file for reading — that triggers the scalarizer pipeline."
+                "Read a text or JSON file — plans, protocols, scripts, "
+                "configs, logs, documents. Reads from the TOP by default. "
+                "For a long file do not read it repeatedly hoping to see more: "
+                "use search='<pattern>' to find where something is (and "
+                "whether it is there at all), or tail=true to read the END. "
+                "Do NOT use analyze_file for reading — that triggers the "
+                "scalarizer pipeline."
             ),
             parameters={
                 "file_path": {
@@ -4762,8 +4831,29 @@ class OrchestratorTools:
                 },
                 "max_lines": {
                     "type": "integer",
-                    "description": "Maximum lines to return for large files (default: 200)"
-                }
+                    "description": "Maximum lines to return (default: 200)"
+                },
+                "tail": {
+                    "type": "boolean",
+                    "description": (
+                        "Read the LAST max_lines lines instead of the first. "
+                        "Use to check how a long document ENDS — that it "
+                        "closes with the References section you added, that a "
+                        "log ends in success, that a file was not truncated."
+                    ),
+                },
+                "search": {
+                    "type": "string",
+                    "description": (
+                        "Case-insensitive regex. Returns every matching line "
+                        "with its line number and one line of context either "
+                        "side, plus the total match count — instead of the "
+                        "file body. The right tool for 'is there a References "
+                        "section', 'which lines cite Boettiger', 'did this log "
+                        "raise'. Far cheaper than reading a long file, and it "
+                        "answers presence/absence definitively."
+                    ),
+                },
             },
             required=["file_path"]
         )
