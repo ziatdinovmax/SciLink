@@ -1349,3 +1349,132 @@ class ReparameterizationAdvisor(_CriticBase):
         report.setdefault("recommended_action", "escalate")
         report.setdefault("requires_human", True)
         return report
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# TrendCritic
+# ──────────────────────────────────────────────────────────────────────────
+
+_TREND_CRITIC_PROMPT = """\
+You are validating a simulation by checking whether a computed TREND across a
+swept parameter is physically sensible — the check that catches a model error no
+single run can show. Judge the DIRECTION and shape of the trend against known
+behaviour, not the absolute value of any single point.
+
+{skill_context}
+
+=== System ===
+{system_description}
+
+=== Swept parameter ===
+{parameter}
+
+=== Observed trend ({quantity}) ===
+{trend_block}
+
+=== Known reference behaviour (literature / constituent properties) ===
+{reference_context}
+
+Reason about which way {quantity} SHOULD move as the parameter increases, using
+the known behaviour of the components — a value provided above is a sourced
+anchor, not a guess. Then compare to the observed trend. A trend whose DIRECTION
+contradicts well-established behaviour means the model is miscalibrated: a strong,
+unambiguous signal even when individual values look plausible. A merely
+surprising-but-real trend (a genuine anomaly) is NOT a failure — flag only a
+clear contradiction.
+
+Return a JSON object:
+  status              "success"
+  expected_direction  "increasing" | "decreasing" | "non-monotonic" | "unclear"
+  observed_direction  "increasing" | "decreasing" | "non-monotonic" | "flat"
+  consistent          true|false — does the observed trend match expectation
+  verdict             "good" (consistent) | "poor" (clear contradiction)
+  failure_class       when "poor", the miscalibrated model in the system's own
+                      terms ("force_field" | "functional" | "potential"), else null
+  reasoning           short prose (which way it should go, which way it went, why)
+"""
+
+
+class TrendCritic(_CriticBase):
+    """Judges whether a property-vs-parameter trend is physically sensible.
+
+    The reliable catch for a swept series (e.g. a composition series): a single
+    run's value can look plausible while the TREND across the sweep is
+    physically backwards. Grounded in the sourced constituent properties (a
+    denser-than-water cosolvent should raise mixture density, so a falling trend
+    is wrong), it flags a direction that contradicts known behaviour and names
+    the miscalibrated model — the same cause vocabulary the other critics use.
+    Conservative on genuine anomalies: only a clear contradiction is flagged.
+    """
+
+    SKILL_SECTION = "validation"
+    BASELINE_PROMPT_TEMPLATE = _TREND_CRITIC_PROMPT
+
+    def assess(
+        self,
+        series: List[Dict[str, Any]],
+        quantity: str = "the property",
+        parameter: str = "the swept parameter",
+        system_description: str = "",
+        reference_context: str = "",
+        units: str = "",
+        skill: Optional[str] = None,
+        domain: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Assess a swept trend and return a verdict.
+
+        Args:
+            series: The trend as ordered points, each ``{"point": <parameter
+                value or label>, "value": <measured value>}``.
+            quantity: What is plotted on the trend (e.g. ``"mass density"``).
+            parameter: What is swept (e.g. ``"ethyl-isopropyl-sulfone mole
+                fraction"``).
+            system_description: What is being simulated.
+            reference_context: Known reference behaviour to reason against — the
+                literature-sourced constituent properties that fix the expected
+                direction (e.g. "pure EIS density 1.13 g/cm^3 > water 1.00").
+            units: Units of the trend values (appended to each point).
+            skill, domain: Optional skill bundle for domain guidance.
+
+        Returns:
+            ``{"status", "expected_direction", "observed_direction",
+            "consistent", "verdict", "failure_class", "reasoning"}``. A series
+            with fewer than two points has no trend to judge and returns a
+            non-blocking ``good`` with no LLM call.
+        """
+        if skill and not domain:
+            raise ValueError(
+                "domain is required when skill is provided (e.g. 'lammps' with "
+                "'molecular_dynamics')."
+            )
+        points = [p for p in (series or []) if p.get("value") is not None]
+        if len(points) < 2:
+            return {
+                "status": "success",
+                "expected_direction": "unclear",
+                "observed_direction": "flat",
+                "consistent": True,
+                "verdict": "good",
+                "failure_class": None,
+                "reasoning": "Fewer than two points — no trend to assess.",
+            }
+
+        unit = f" {units}" if units else ""
+        trend_block = "\n".join(
+            f"- {p.get('point')}: {p['value']}{unit}" for p in points)
+
+        skill_context = self._load_skill_section(skill, domain or "")
+        prompt = self.BASELINE_PROMPT_TEMPLATE.format(
+            skill_context=skill_context or "(no engine skill loaded)",
+            system_description=system_description or "(not provided)",
+            parameter=parameter,
+            quantity=quantity,
+            trend_block=trend_block,
+            reference_context=reference_context or "(none provided)",
+        )
+        report = self._generate_json(prompt)
+        report.setdefault("status", "success")
+        report.setdefault("verdict", "good")
+        report.setdefault("failure_class", None)
+        report.setdefault("consistent", report.get("verdict") != "poor")
+        return report
