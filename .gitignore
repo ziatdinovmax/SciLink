@@ -194,6 +194,12 @@ kb_storage/
 test_*/
 tests/_e2e_runs/
 tests/_simulate_runs/
+# Live-test OUTPUT directories. Every one of these is written by a test
+# (base = Path("tests/_x_runs").resolve()), never read as a fixture — 1,681
+# of them reached a PR through a broad `git add -A tests/`. One glob so the
+# next harness is covered without another edit.
+tests/_*_runs/
+tests/_*_live_runs/
 benchmark_suite_*/
 
 # Office autosave temp files (Word/Excel/PowerPoint)
