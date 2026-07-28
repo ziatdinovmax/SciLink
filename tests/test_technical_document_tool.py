@@ -126,3 +126,133 @@ def test_an_experimental_protocol_is_not_a_document():
     # save_file must not advertise protocols as its own either
     j = src.index('name="save_file"')
     assert "protocols, notes" not in src[j - 1200:j + 400]
+
+
+# ── revision in place ────────────────────────────────────────────────
+
+ORIGINAL = ("# CDOC Class 1 White Paper\n\n## Significance\n"
+            + "Body text that must survive the revision. " * 40
+            + "\n\n## Approach\n" + "More body. " * 40 + "\n")
+
+
+def _doc_tool(tmp_path, monkeypatch, sections, captured=None):
+    from types import SimpleNamespace
+    def fake_author(request, kb_docs, model, generation_config, **kw):
+        if captured is not None:
+            captured.update(request=request, **kw)
+        return {"sections": sections}
+    monkeypatch.setattr(ot, "author_technical_document", fake_author)
+    t = OrchestratorTools.__new__(OrchestratorTools)
+    t.functions_map = {}
+    t.orch = SimpleNamespace(
+        base_dir=tmp_path, _active_output_subdir=None,
+        planner=SimpleNamespace(kb_docs=None, model=None, generation_config=None,
+                                _build_skill_context=lambda s: None))
+    t._output_dir = lambda: tmp_path / "delegations" / "04_revise"
+    t._output_dir().mkdir(parents=True, exist_ok=True)
+    t._latest_literature_file = lambda: None
+    t._register_tool = lambda func, name, **kw: t.functions_map.setdefault(name, func)
+    return t
+
+
+def test_revision_writes_back_over_the_same_path(tmp_path, monkeypatch):
+    """Live: 'revise the paper you wrote' authored into the CURRENT
+    delegation folder while the original sat untouched, and the agent then
+    rebuilt the file by hand in chunks."""
+    orig = tmp_path / "delegations" / "02_author" / "paper.md"
+    orig.parent.mkdir(parents=True)
+    orig.write_text(ORIGINAL)
+
+    cap = {}
+    t = _doc_tool(tmp_path, monkeypatch,
+                  [{"heading": "Significance", "body": "Body " * 900},
+                   {"heading": "References", "body": "[1] Maeda 2012"}], cap)
+    OrchestratorTools._register_all_tools(t)
+    out = json.loads(t.functions_map["write_technical_document"](
+        request="add references", revise_path=str(orig)))
+
+    assert out["status"] == "success" and out["revised_in_place"] is True
+    assert Path(out["path"]) == orig.resolve(), "must not spawn a new copy"
+    assert "[1] Maeda 2012" in orig.read_text()
+    # the author saw the document it was revising
+    assert cap["revise_document"].startswith("# CDOC Class 1 White Paper")
+
+
+def test_a_shrinking_revision_is_refused(tmp_path, monkeypatch):
+    """A revision that comes back much shorter is the model summarising
+    instead of revising — overwriting the good copy with it is the failure
+    the live session hit by hand (5,816 bytes left of a 22 KB paper)."""
+    orig = tmp_path / "delegations" / "02_author" / "paper.md"
+    orig.parent.mkdir(parents=True)
+    orig.write_text(ORIGINAL)
+
+    t = _doc_tool(tmp_path, monkeypatch,
+                  [{"heading": "Summary", "body": "tiny"}])
+    OrchestratorTools._register_all_tools(t)
+    out = json.loads(t.functions_map["write_technical_document"](
+        request="add references", revise_path=str(orig)))
+
+    assert out["status"] == "error" and "Revision aborted" in out["message"]
+    assert orig.read_text() == ORIGINAL, "the original must be untouched"
+
+
+def test_revision_cannot_escape_the_session(tmp_path, monkeypatch):
+    t = _doc_tool(tmp_path, monkeypatch, [{"heading": "H", "body": "B"}])
+    OrchestratorTools._register_all_tools(t)
+    out = json.loads(t.functions_map["write_technical_document"](
+        request="x", revise_path="/etc/hosts"))
+    assert out["status"] == "error" and "session directory" in out["message"]
+
+
+def test_missing_revision_target_is_reported(tmp_path, monkeypatch):
+    t = _doc_tool(tmp_path, monkeypatch, [{"heading": "H", "body": "B"}])
+    OrchestratorTools._register_all_tools(t)
+    out = json.loads(t.functions_map["write_technical_document"](
+        request="x", revise_path=str(tmp_path / "nope.md")))
+    assert out["status"] == "error" and "No such document" in out["message"]
+
+
+def test_the_schema_steers_away_from_hand_rebuilding():
+    src = Path("scilink/agents/planning_agents/orchestrator_tools.py").read_text()
+    i = src.index('"revise_path"')
+    desc = src[i:i + 1400]
+    assert "IN PLACE" in desc and "SAME path" in desc
+    assert "save_file" in desc and "truncates" in desc
+
+
+def test_citations_must_be_carried_not_dropped():
+    """Splitting a referenced paper in two produced two unreferenced papers:
+    the contract said only NEVER INVENT, so dropping them read as caution."""
+    from scilink.agents.planning_agents.instruct import (
+        TECHNICAL_DOCUMENT_INSTRUCTIONS as T,
+        TECHNICAL_DOCUMENT_REVISION_RULES as R)
+    flat = " ".join(T.split())
+    assert "CARRY ITS REFERENCES THROUGH" in flat
+    assert 'numbered "References" section' in flat
+    assert "NEVER invent" in T          # the prohibition survives
+    # a revision returns the whole document, because it overwrites
+    assert "COMPLETE revised document" in R and "verbatim" in R
+
+
+def test_the_revising_delegation_keeps_what_it_replaced(tmp_path, monkeypatch):
+    """Revising in place crosses delegation isolation, which exists so a
+    reused child cannot clobber earlier outputs by accident. An explicit
+    revision is not that — but the record still has to survive, so the
+    delegation that made the change keeps the version it replaced."""
+    orig = tmp_path / "delegations" / "02_author" / "paper.md"
+    orig.parent.mkdir(parents=True)
+    orig.write_text(ORIGINAL)
+
+    t = _doc_tool(tmp_path, monkeypatch,
+                  [{"heading": "Significance", "body": "Body " * 900}])
+    OrchestratorTools._register_all_tools(t)
+    out = json.loads(t.functions_map["write_technical_document"](
+        request="add references", revise_path=str(orig)))
+    assert out["status"] == "success"
+
+    bak = t._output_dir() / "paper.before_revision.md"
+    assert bak.exists(), "the replaced version must survive somewhere"
+    assert bak.read_text() == ORIGINAL
+    # ...next to the delegation that changed it, not next to the original
+    assert bak.parent != orig.parent
+    assert orig.read_text() != ORIGINAL, "the canonical file was updated"

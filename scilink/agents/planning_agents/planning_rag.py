@@ -28,6 +28,7 @@ from .instruct import (
     PORTFOLIO_REFINEMENT_RULES,
     IDEATION_PORTFOLIO_INSTRUCTIONS_FALLBACK,
     TECHNICAL_DOCUMENT_INSTRUCTIONS_FALLBACK,
+    TECHNICAL_DOCUMENT_REVISION_RULES,
     CONSTRAINT_COVERAGE_NOTE
 )
 
@@ -1083,6 +1084,7 @@ def author_technical_document(request: str,
                               source_documents: Optional[str] = None,
                               additional_context: Optional[str] = None,
                               skill_context: Optional[str] = None,
+                              revise_document: Optional[str] = None,
                               task_name: str = "Technical Document"
                               ) -> Dict[str, Any]:
     """Author a grounded technical document (roadmap, estimate, memo, brief).
@@ -1096,16 +1098,24 @@ def author_technical_document(request: str,
     assembles the markdown.
     """
     parts = []
+    if revise_document:
+        parts.append("## THE CURRENT DOCUMENT (revise THIS, in full):\n"
+                     + revise_document)
     if source_documents:
         parts.append("## PRIOR SESSION DOCUMENTS (build on these, do not "
                      "restate them wholesale):\n" + source_documents)
     if additional_context:
         parts.append(additional_context)
 
+    _instr = TECHNICAL_DOCUMENT_INSTRUCTIONS
+    _fallback = TECHNICAL_DOCUMENT_INSTRUCTIONS_FALLBACK
+    if revise_document:
+        _instr += TECHNICAL_DOCUMENT_REVISION_RULES
+        _fallback += TECHNICAL_DOCUMENT_REVISION_RULES
     result = run_rag(
         query=request,
-        instructions=TECHNICAL_DOCUMENT_INSTRUCTIONS,
-        fallback_instructions=TECHNICAL_DOCUMENT_INSTRUCTIONS_FALLBACK,
+        instructions=_instr,
+        fallback_instructions=_fallback,
         kb=kb_docs,
         model=model,
         generation_config=generation_config,

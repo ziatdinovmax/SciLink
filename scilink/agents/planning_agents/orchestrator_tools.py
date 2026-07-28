@@ -6224,6 +6224,7 @@ class OrchestratorTools:
             title: str = None,
             source_files: str = None,
             use_literature: bool = True,
+            revise_path: str = None,
         ):
             """Author a grounded technical document and save it.
 
@@ -6234,6 +6235,30 @@ class OrchestratorTools:
             """
             try:
                 planner = self.orch.planner
+                # REVISION: read the document, rewrite it whole, put it back
+                # where it was. Without this, "revise the paper you wrote"
+                # authored into the CURRENT delegation folder while the
+                # original sat untouched — and the agent then tried to reach
+                # it with `../../`, which save_file's sandbox collapses to a
+                # subfolder name, so it rebuilt the file by hand in chunks
+                # and truncated it doing so (live).
+                current = None
+                if revise_path:
+                    rp = Path(revise_path)
+                    if not rp.is_absolute():
+                        rp = self._output_dir() / rp
+                    rp = rp.resolve()
+                    root = Path(self.orch.base_dir).resolve()
+                    if root not in rp.parents:
+                        return json.dumps({
+                            "status": "error",
+                            "message": (f"revise_path must be inside the "
+                                        f"session directory ({root}).")})
+                    if not rp.exists():
+                        return json.dumps({
+                            "status": "error",
+                            "message": f"No such document: {rp}"})
+                    current = rp.read_text(errors="replace")
                 lit = None
                 if use_literature:
                     lit_file = self._latest_literature_file()
@@ -6273,7 +6298,9 @@ class OrchestratorTools:
                     external_context=lit,
                     source_documents=("\n\n".join(sources) if sources else None),
                     skill_context=planner._build_skill_context("planning"),
-                    task_name="Technical Document",
+                    revise_document=current,
+                    task_name=("Technical Document (revision)" if current
+                               else "Technical Document"),
                 )
                 if result.get("error"):
                     return json.dumps({"status": "error",
@@ -6285,10 +6312,41 @@ class OrchestratorTools:
                         "message": "The author returned no sections."})
 
                 text = document_to_markdown(doc_title, sections)
-                name = filename or "technical_document.md"
-                if not name.endswith(".md"):
-                    name += ".md"
-                out = self._output_dir() / name
+                if revise_path:
+                    out = rp
+                    # Revising in place crosses delegation isolation, which
+                    # exists so a reused child cannot clobber earlier outputs
+                    # by accident. An explicit revision is not that — but the
+                    # audit trail still matters, so the delegation MAKING the
+                    # change keeps the version it replaced. The canonical file
+                    # stays canonical; the evidence lives where the edit
+                    # happened.
+                    try:
+                        bak = (self._output_dir()
+                               / f"{rp.stem}.before_revision{rp.suffix}")
+                        bak.parent.mkdir(parents=True, exist_ok=True)
+                        bak.write_text(current or "")
+                    except Exception as e:  # noqa: BLE001 - never block the edit
+                        logging.warning(f"Pre-revision copy failed: {e}")
+                    # A revision that came back shorter than the original is
+                    # nearly always the model summarising instead of
+                    # revising. Refuse rather than overwrite the good copy.
+                    if len(text) < 0.5 * len(current or ""):
+                        return json.dumps({
+                            "status": "error",
+                            "message": (
+                                f"Revision aborted: the rewritten document is "
+                                f"{len(text)} chars against the original's "
+                                f"{len(current)}. A revision must return the "
+                                "WHOLE document with untouched sections "
+                                "verbatim. The original is unchanged — retry, "
+                                "reproducing every section."),
+                        })
+                else:
+                    name = filename or "technical_document.md"
+                    if not name.endswith(".md"):
+                        name += ".md"
+                    out = self._output_dir() / name
                 out.parent.mkdir(parents=True, exist_ok=True)
                 out.write_text(text)
 
@@ -6297,6 +6355,7 @@ class OrchestratorTools:
                                    deliverable=True)
                 print(f"    📄 Document saved: {format_path(out)}")
                 res = {"status": "success", "path": str(out),
+                       "revised_in_place": bool(revise_path),
                        "title": doc_title,
                        "sections": [s.get("heading") for s in sections
                                     if isinstance(s, dict)],
@@ -6377,6 +6436,23 @@ class OrchestratorTools:
                         "search (default true). Set false for a document "
                         "that is purely internal, e.g. merging two documents "
                         "you already wrote."
+                    ),
+                },
+                "revise_path": {
+                    "type": "string",
+                    "description": (
+                        "REVISE an existing document IN PLACE: pass its path "
+                        "(any document in this session, including one written "
+                        "by an earlier delegation). The file is read, the "
+                        "whole document is rewritten with your change "
+                        "applied, and it is written back over the SAME path — "
+                        "so use this for 'add references to the paper you "
+                        "wrote', 'tighten section 3', 'split this in two'. "
+                        "Do NOT rebuild an existing document by hand with "
+                        "save_file/append_file chunks: that writes into the "
+                        "current delegation folder instead, and a save_file "
+                        "call truncates what is already there. Omit for a new "
+                        "document; `filename` is ignored when this is set."
                     ),
                 },
             },

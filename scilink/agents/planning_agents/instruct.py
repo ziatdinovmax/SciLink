@@ -1161,6 +1161,14 @@ specific numbers, ranges, vendor figures or citations. An estimate presented
 with its assumptions is useful; a fabricated figure that reads as measured
 is worse than no document.
 
+**Citations you were GIVEN are different from citations you invent.** When the
+retrieved literature or a source document carries real references, cite them
+inline at the claims they support and close with a numbered "References"
+section. Reproduce only the bibliographic detail the source actually provides
+— if it gives a key and a year but no DOI, say that rather than filling the
+gap. Splitting or rewriting a referenced document must CARRY ITS REFERENCES
+THROUGH: silently dropping them is a loss, not caution.
+
 **Task:**
 Return a JSON object with a "sections" list. Each entry:
 - "heading": one short line, the section title
@@ -1292,4 +1300,20 @@ with the portfolio verbs:
 Preserve every direction the feedback did not touch, verbatim. Do not invent
 `experimental_steps`, `required_equipment` or `optimization_params` — a
 portfolio names directions; benchwork is designed later, once one is chosen.
+"""
+
+
+# Revision mode for write_technical_document. Authoring a fresh document and
+# revising one are different jobs: a revision must preserve everything it was
+# not asked to change, and must return the WHOLE document, because the tool
+# writes it back atomically over the original rather than appending to it.
+TECHNICAL_DOCUMENT_REVISION_RULES = """
+
+**THIS IS A REVISION.** The current document is provided above. Apply the
+requested change and return the COMPLETE revised document as sections — not a
+diff, not only the changed part. Everything the request does not touch must
+come through verbatim: same sections, same order, same wording. The result
+replaces the original file in place, so anything you omit is deleted.
+If the document carries references, keep them and keep their numbering
+consistent with any citations you add.
 """
