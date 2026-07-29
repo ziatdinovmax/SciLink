@@ -58,10 +58,34 @@ TOOL_SPEC = ToolSpec(
         "engine": {
             "type": "str",
             "description": (
-                "Simulation backend. 'pymatgen' (default, kinematic, always "
-                "available; sufficient for peak-list identification). Additional "
-                "engines (e.g. GSAS-II) register in this module and return the "
-                "same contract, so scoring is unaffected by the choice."
+                "Simulation backend. 'pymatgen' (default, kinematic peak list, "
+                "always available; sufficient for peak-list identification). "
+                "'gsas' — GSAS-II full-profile simulation with realistic "
+                "instrument/sample broadening (optional 'gsas' extra); returns "
+                "the same core keys PLUS 'profile_two_theta'/'profile_intensities' "
+                "(the continuous pattern), for full-pattern matching. Scoring on "
+                "the shared core keys is unaffected by the choice."
+            ),
+        },
+        "crystallite_um": {
+            "type": "float",
+            "description": (
+                "GSAS-II engine only (ignored by pymatgen). Isotropic crystallite "
+                "size in micrometres for size broadening. LOWER it toward a "
+                "nanocrystalline sample to broaden the peaks (e.g. 0.05 = 50 nm "
+                "gives visibly broad lines); RAISE it for sharp lines. Default "
+                "~10 µm (essentially sharp). Set this whenever you want the "
+                "profile to reflect a realistic finite crystallite size."
+            ),
+        },
+        "peak_rel_height": {
+            "type": "float",
+            "description": (
+                "GSAS-II engine only (ignored by pymatgen). Peak-pick threshold "
+                "for the returned discrete peak list, as a fraction of the max "
+                "profile intensity (default 0.01). LOWER to report weaker "
+                "reflections in 'two_theta'/'intensities'; RAISE to keep only "
+                "strong peaks. Does not affect the continuous profile."
             ),
         },
     },
@@ -70,7 +94,9 @@ TOOL_SPEC = ToolSpec(
         "dict with 'two_theta' (list[float]), 'intensities' (list[float]; "
         "normalized so max = 100), 'hkls' (list[list[int]]; primary "
         "reflection per peak), 'd_spacings' (list[float]), 'wavelength' "
-        "(Å), 'structure_path' (echo), 'engine' (which simulator produced it)."
+        "(Å), 'structure_path' (echo), 'engine' (which simulator produced it). "
+        "The 'gsas' engine additionally returns 'profile_two_theta' and "
+        "'profile_intensities' (the continuous broadened pattern)."
     ),
     when_to_use=(
         "After search_structures, to generate a simulated pattern from each "
@@ -85,17 +111,23 @@ def simulate_xrd_pattern(
     wavelength: Union[str, float] = "CuKa",
     two_theta_range: tuple = (10, 90),
     engine: str = "pymatgen",
+    crystallite_um: float = None,
+    peak_rel_height: float = None,
 ) -> dict[str, Any]:
     """Compute an XRD pattern from a crystal structure. See ``TOOL_SPEC``.
 
     ``engine`` selects the simulation backend ('pymatgen' default). All engines
-    return the SAME dict contract (two_theta / intensities / hkls / d_spacings /
-    wavelength), so everything downstream — scoring, lattice-scale alignment,
-    matching — is engine-agnostic. Swapping in a different simulator (e.g.
-    GSAS-II) is therefore localized to this module: implement a function with
-    the ``(structure_path, wavelength, two_theta_range) -> dict`` signature and
-    register it in ``_ENGINES`` (optional dependency, lazy-imported). No caller
-    changes."""
+    return the SAME core dict contract (two_theta / intensities / hkls /
+    d_spacings / wavelength), so everything downstream — scoring, lattice-scale
+    alignment, matching — is engine-agnostic. Swapping in a different simulator
+    (e.g. GSAS-II) is localized to this module: implement a function with the
+    ``(structure_path, wavelength, two_theta_range, **kwargs) -> dict`` signature
+    and register it in ``_ENGINES`` (optional dependency, lazy-imported).
+
+    ``crystallite_um`` / ``peak_rel_height`` are engine-specific knobs applied
+    only by engines that use them (the 'gsas' full-profile engine); the pymatgen
+    peak-list engine ignores them. Left as ``None`` they take the engine
+    default."""
     try:
         backend = _ENGINES[engine]
     except KeyError:
@@ -104,12 +136,16 @@ def simulate_xrd_pattern(
             f"{sorted(_ENGINES)}. Register a new engine in "
             f"scilink.skills.structure_matching.xrd.simulate_xrd._ENGINES."
         )
-    result = backend(structure_path, wavelength, two_theta_range)
+    # forward only the engine knobs the caller actually set (None -> engine default)
+    kwargs = {k: v for k, v in
+              {"crystallite_um": crystallite_um, "peak_rel_height": peak_rel_height}.items()
+              if v is not None}
+    result = backend(structure_path, wavelength, two_theta_range, **kwargs)
     result["engine"] = engine
     return result
 
 
-def _simulate_pymatgen(structure_path, wavelength, two_theta_range) -> dict[str, Any]:
+def _simulate_pymatgen(structure_path, wavelength, two_theta_range, **_ignored) -> dict[str, Any]:
     """Default engine: pymatgen's kinematic ``XRDCalculator`` (always available
     with the structure-matching extra; sufficient for peak-list identification)."""
     if not PYMATGEN_XRD_AVAILABLE:
@@ -134,13 +170,27 @@ def _simulate_pymatgen(structure_path, wavelength, two_theta_range) -> dict[str,
     }
 
 
+def _simulate_gsas(structure_path, wavelength, two_theta_range, **kwargs) -> dict[str, Any]:
+    """Optional engine: GSAS-II full-profile simulation (``gsas`` extra).
+
+    Lazy-imported so the module stays importable without GSAS-II. Returns the
+    same core contract keys as the pymatgen engine (peak-picked from the profile)
+    plus the continuous ``profile_two_theta`` / ``profile_intensities`` that
+    GSAS-II uniquely provides — see ``_gsas_engine`` for the design rationale.
+    ``kwargs`` forwards engine knobs (crystallite_um, peak_rel_height)."""
+    from ._gsas_engine import simulate_gsas
+    return simulate_gsas(structure_path, wavelength, tuple(two_theta_range), **kwargs)
+
+
 # XRD simulation-engine registry — the swap point. Each entry maps an engine
 # name to a callable with the same signature and return contract as
-# ``_simulate_pymatgen``. A heavier optional engine (e.g. GSAS-II via
-# GSASIIscriptable) registers here behind a lazy import + optional extra, and
-# downstream code is unaffected because the output dict is identical.
+# ``_simulate_pymatgen``. The GSAS-II engine (optional ``gsas`` extra) is
+# lazy-imported inside ``_simulate_gsas`` so this module stays importable
+# without it; peak-based downstream code is unaffected because the core output
+# keys are identical (GSAS only *adds* the continuous-profile keys).
 _ENGINES = {
     "pymatgen": _simulate_pymatgen,
+    "gsas": _simulate_gsas,
 }
 
 

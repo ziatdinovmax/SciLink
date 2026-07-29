@@ -92,8 +92,10 @@ DEFAULT_CASES: List[BenchmarkCase] = [
 # EDIT THESE when running on a cluster other than deception:
 SLURM_DEFAULT_PSEUDO_DIR = "/path/to/potpaw_PBE.54"  # replace with cluster-specific path
 SLURM_DEFAULT_MODULES = """\
-# module purge
-# module load vasp/6.4.2 intel-mpi/2021"""
+module purge
+module load intel/2022.1.0
+module load mkl/2023.0.0
+module load openmpi/5.0.7"""
 SLURM_DEFAULT_VASP_CMD = "mpirun vasp_std"
 
 

@@ -244,11 +244,15 @@ fourth mode**; it's an orchestrator-of-orchestrators with a different role
 (`MetaOrchestratorAgent` + `MetaOrchestratorTools`), copying the
 `AnalysisOrchestratorAgent` chat-loop shape.
 
-**v1 scope: analysis + planning.** Simulation delegation is deferred —
-`scilink.agents.sim_agents` hard-imports `ase` (an optional dependency), so
-the meta module must stay importable without it. `delegate_to_simulation`
-is a documented lazy seam: when added, its body does a guarded import
-*inside the function*, never at module scope.
+**Scope: analysis + planning + simulation.** Simulation delegation is now
+wired (`delegate_to_simulation`). Because `scilink.agents.sim_agents`
+hard-imports `ase` (an optional dependency), the meta module must stay
+importable without it: the tool's body and the orchestrator's
+`_get_simulation_child` / `_delegate` "simulation" branch all do the
+`simulation_orchestrator` import *inside the function*, never at module scope,
+and the tool returns a clean "install scilink[sim]" error if `ase` is absent.
+The simulation child is structure-centric, so — unlike the planning child — it
+needs no `data_dir` at construction; it lives in `<meta_session>/simulation/`.
 
 ### Pattern: agent-as-tool
 
@@ -256,9 +260,9 @@ is a documented lazy seam: when added, its body does a guarded import
 Meta tool registry
   delegate_to_analysis(task, context)   → AnalysisOrchestratorAgent.run_task
   delegate_to_planning(task, context)   → PlanningOrchestratorAgent.run_task
+  delegate_to_simulation(task, context) → SimulationOrchestratorAgent.run_task
   summarize_session_state()             → cross-specialist status
   get_delegation_history(limit)         → the delegation ledger
-  delegate_to_simulation(...)           → deferred lazy seam (not built)
 ```
 
 There is **no `bridge_context` tool**. `run_task` already accepts a
@@ -451,6 +455,21 @@ This yields a three-rung reliability ladder for a skill's
   must run verbatim/deterministically, it's long or numerically
   sensitive, or it's a reusable stage you want tested and called
   identically every time (and you can contribute it to the package).
+
+**Expose a `TOOL_SPEC` helper's tunable parameters to the LLM — robust
+defaults, but no locked knobs.** A tool with hidden parameters forces its
+defaults on every dataset and is brittle; a tool whose knobs are *surfaced
+and explained* lets the agent adapt it to data the defaults don't suit, which
+is what makes the tool general rather than overfit to the cases it was built
+on. The `TOOL_SPEC.parameters` dict is the only surface the LLM sees, so put
+**every meaningful tunable parameter there**, each described by *what it does
+and which direction to turn it for which symptom* — e.g. "improve_thresh —
+parsimony knob: LOWER to recover weak shoulders, RAISE if adding spurious
+peaks", not just a name. Keep the adaptive logic and safe defaults inside the
+tool (so a no-arg call still works), and add a test asserting a knob actually
+changes behavior. This complements the "adaptive logic in the tool, not prompt
+prose" rule: the tool *defaults* are the adaptation, the *exposed knobs* are
+the escape hatch when the data needs them.
 
 Note the packaging boundary: `TOOL_SPEC` tools are discovered only from
 skills *inside the installed package* (`_registry` walks `_SKILLS_DIR`

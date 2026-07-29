@@ -10,8 +10,49 @@ MAX_IMG_DIM = 1024
 logger = logging.getLogger(__name__)
 
 
-def load_image(image_path):
-    """Load an image from file (PNG, JPG, TIF, .npy, or .h5/.hdf5/.nxs)."""
+def _normalize_to_uint8(img_array, p_low=0.5, p_high=99.5):
+    """Normalize a non-uint8 array to uint8 for display (no-op if already uint8).
+
+    Uses PERCENTILE clipping (default 0.5-99.5), not raw min-max: a single hot
+    or dead pixel — extremely common in scientific float TIFFs (X-ray spikes,
+    detector defects) — makes plain min-max collapse the whole image to near-
+    black. Percentile clipping is what makes float-encoded STEM/TEM data render
+    as a visible image instead of a blank frame.
+    """
+    if img_array.dtype == np.uint8:
+        return img_array
+    float_array = img_array.astype(np.float64)
+    # Guard against NaN/Inf (common in float-encoded scientific TIFFs)
+    if not np.all(np.isfinite(float_array)):
+        finite = float_array[np.isfinite(float_array)]
+        fill = float(np.min(finite)) if finite.size else 0.0
+        hi = float(np.max(finite)) if finite.size else 0.0
+        float_array = np.nan_to_num(float_array, nan=fill, posinf=hi, neginf=fill)
+    lo, hi = np.percentile(float_array, [p_low, p_high])
+    # Exact-zero guards, not absolute epsilons: a physically real image whose
+    # native scale is tiny (STM topography in meters — full range ~1e-9) has
+    # hi - lo far below any fixed epsilon and was rendered solid black. Float
+    # division is happy with any nonzero range; only a truly constant image
+    # falls through to zeros.
+    if hi - lo > 0:
+        normalized_array = np.clip((float_array - lo) / (hi - lo), 0.0, 1.0)
+    else:                                    # flat image: fall back to min-max
+        mn, mx = float(float_array.min()), float(float_array.max())
+        normalized_array = ((float_array - mn) / (mx - mn)
+                            if mx - mn > 0 else np.zeros_like(float_array))
+    return (normalized_array * 255).astype(np.uint8)
+
+
+def load_image(image_path, raw: bool = False):
+    """Load an image from file (PNG, JPG, TIF, .npy, or .h5/.hdf5/.nxs).
+
+    ``raw=False`` (default) returns a display-ready uint8 rendering
+    (percentile-normalized). ``raw=True`` returns the file's native values
+    untouched — REQUIRED when the array is a numerical operand (reference
+    division, correlation against another map): the display rendering
+    quantizes to 256 levels and discards the physical scale, which corrupts
+    any arithmetic done on it.
+    """
     try:
         _, ext = os.path.splitext(image_path)
         ext = ext.lower()
@@ -22,26 +63,42 @@ def load_image(image_path):
             else:
                 from scilink.utils.hdf5_utils import load_hdf5_signal
                 img_array = load_hdf5_signal(image_path)
-            if img_array.dtype == np.uint8:
-                return img_array
-            else:
-                # Normalize float arrays to uint8
-                float_array = img_array.astype(np.float64)
-                min_val, max_val = np.min(float_array), np.max(float_array)
-                if max_val - min_val > 1e-6:
-                    normalized_array = (float_array - min_val) / (max_val - min_val)
-                else:
-                    normalized_array = np.zeros_like(float_array)
-                uint8_array = (normalized_array * 255).astype(np.uint8)
-                return uint8_array
+            return img_array if raw else _normalize_to_uint8(img_array)
+        elif ext in ('.tif', '.tiff'):
+            # Scientific TIFFs (32-bit float, compressed, multi-page, BigTIFF)
+            # are read most reliably by tifffile; OpenCV's TIFF path silently
+            # returns None on 32-bit-float samples ("can not handle images with
+            # 32-bit samples") — the exact failure that renders LLTO/HAADF data
+            # as a blank frame to the vision model. Fall back to cv2 only if
+            # tifffile is unavailable.
+            try:
+                import tifffile
+                img = tifffile.imread(image_path)
+                if img.ndim == 3 and img.shape[-1] == 1:
+                    img = img[..., 0]                 # singleton channel -> 2-D
+            except ImportError:
+                img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+                if img is None:
+                    raise ValueError(f"Could not load image from {image_path}")
+            return img if raw else _normalize_to_uint8(img)
         else:
-            # Standard image loading
-            img = cv2.imread(image_path)
+            # Standard 8-bit formats (PNG/JPG/BMP). IMREAD_UNCHANGED preserves
+            # bit depth and channel count.
+            img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
             if img is None:
                 raise ValueError(f"Could not load image from {image_path}")
-            # Convert OpenCV's BGR to standard RGB
-            return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    
+            # Convert OpenCV's BGR to standard RGB for colour images;
+            # grayscale (2-D) and 2-channel images are left as-is.
+            if img.ndim == 3 and img.shape[2] == 3:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            elif img.ndim == 3 and img.shape[2] == 4:
+                img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
+            if raw:
+                return img
+            # Float / high-bit-depth arrays must be normalized to uint8 so
+            # downstream PIL/JPEG encoding works (mode 'F' has no JPEG path).
+            return _normalize_to_uint8(img)
+
     except Exception as e:
         print(f"Error loading image: {e}")
         raise
@@ -75,9 +132,25 @@ def preprocess_image(image: np.ndarray, max_dim: int = MAX_IMG_DIM) -> tuple[np.
     return denoised, scale_factor
 
 def convert_numpy_to_jpeg_bytes(image_array: np.ndarray, quality: int = 85) -> bytes:
-    """Converts a NumPy array into compressed JPEG bytes."""
+    """Converts a NumPy array into compressed JPEG bytes.
+
+    JPEG holds 8-bit samples only, so higher-depth scientific frames
+    (uint16 cameras, int32/float detectors) are percentile-normalized to
+    uint8 first — PIL otherwise refuses ("cannot write mode I;16 as
+    JPEG") or emits a broken data stream, which blocked an entire
+    hologram-stack analysis live."""
     try:
-        pil_img = Image.fromarray(image_array)
+        arr = np.asarray(image_array)
+        if arr.dtype != np.uint8 and not (arr.ndim == 3 and arr.dtype == np.uint8):
+            a = arr.astype(np.float32)
+            a = np.nan_to_num(a, nan=0.0, posinf=0.0, neginf=0.0)
+            lo, hi = np.percentile(a, (1.0, 99.5))
+            if hi <= lo:
+                lo, hi = float(a.min()), float(max(a.max(), a.min() + 1))
+            arr = np.clip((a - lo) / (hi - lo) * 255.0, 0, 255).astype(np.uint8)
+        pil_img = Image.fromarray(arr)
+        if pil_img.mode not in ("L", "RGB"):
+            pil_img = pil_img.convert("RGB" if arr.ndim == 3 else "L")
         buffered = BytesIO()
         pil_img.save(buffered, format="JPEG", quality=quality)
         return buffered.getvalue()
@@ -151,7 +224,7 @@ def calculate_global_fft(image_array: np.ndarray, save_path: str | None = None) 
                 # Ensure directory exists
                 os.makedirs(os.path.dirname(save_path), exist_ok=True)
                 
-                plt.savefig(save_path, dpi=150, bbox_inches='tight')
+                fig.savefig(save_path, dpi=150, bbox_inches='tight')
                 plt.close(fig)
                 logger.info(f"   (Tool Info: ✅ Saved Global FFT plot to: {save_path})")
                 
@@ -265,11 +338,11 @@ def create_multi_abundance_overlays(structure_image: np.ndarray,
     for i in range(total_plots, len(axes)):
         axes[i].axis('off')
     
-    plt.tight_layout()
+    fig.tight_layout()
     
     # Convert to bytes
     buf = BytesIO()
-    plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
-    plt.close()
+    fig.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
+    plt.close(fig)
     buf.seek(0)
     return buf.getvalue()

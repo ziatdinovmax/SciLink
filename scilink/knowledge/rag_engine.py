@@ -172,7 +172,8 @@ def run_rag(query: str,
             skill_context: Optional[str] = None,
             fallback_instructions: Optional[str] = None,
             task_name: str = "RAG",
-            return_context: bool = False) -> Any:
+            return_context: bool = False,
+            mode_key: Optional[str] = None) -> Any:
     """Generic RAG generation loop.
 
     Retrieves context for ``query`` from ``kb``, builds a multimodal prompt
@@ -200,6 +201,10 @@ def run_rag(query: str,
             so callers can reuse the exact grounding evidence the generation
             saw (e.g. a downstream critic). Default False preserves the
             original ``result``-only return for all existing callers.
+        mode_key: When set, stamp the returned dict with
+            ``result[mode_key] = "fallback" | "strict"`` so the caller can
+            tell which instruction tier actually produced the plan. Off by
+            default — existing callers' results are untouched.
 
     Returns:
         The parsed JSON dict (or ``{"error": ...}`` on failure). When
@@ -271,6 +276,7 @@ def run_rag(query: str,
             result.get("error") and "Insufficient" in str(result.get("error"))
         )
 
+        used_fallback = False
         if needs_fallback:
             print(f"    - ⚠️ Strict generation failed: {result.get('error')}")
             if not fallback_instructions:
@@ -285,7 +291,10 @@ def run_rag(query: str,
             if error_msg_fb:
                 return _ret({"error": f"Fallback JSON Parsing Error: {error_msg_fb}"})
             print("    - ✅ Fallback generation successful.")
+            used_fallback = True
 
+        if mode_key and isinstance(result, dict):
+            result[mode_key] = "fallback" if used_fallback else "strict"
         return _ret(result)
 
     except Exception as e:

@@ -76,7 +76,7 @@ def _render_analyze_uploads(start_task_fn) -> None:
 
     # Show "Analyze" button once data is uploaded
     if st.session_state.uploaded_data_path:
-        if st.button("Analyze", type="primary", use_container_width=True):
+        if st.button("Analyze", type="primary", width="stretch"):
             data_path = st.session_state.uploaded_data_path
             meta_path = st.session_state.uploaded_metadata_path
             has_sidecars = st.session_state.get("uploaded_sidecar_metadata", False)
@@ -190,7 +190,7 @@ def _render_planning_uploads(start_task_fn) -> None:
     if st.button(
         "Start Planning",
         type="primary",
-        use_container_width=True,
+        width="stretch",
         disabled=not can_start,
     ):
         parts = []
@@ -352,7 +352,7 @@ def _render_meta_uploads(start_task_fn) -> None:
     if st.button(
         "Start",
         type="primary",
-        use_container_width=True,
+        width="stretch",
         disabled=not can_start,
     ):
         parts = []

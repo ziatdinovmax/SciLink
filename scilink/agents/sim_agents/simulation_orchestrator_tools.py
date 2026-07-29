@@ -251,11 +251,12 @@ class SimulationOrchestratorTools:
                 "are loaded, (2) which engines the user has installed "
                 "(per their `available_software.yaml`), (3) the LLM's "
                 "judgment on which scale fits the user's physics goal. "
-                "If the decision picks an engine you don't have a "
-                "concrete dispatch path for (anything other than VASP "
-                "today — LAMMPS / MLIP wiring is in progress), tell the "
-                "user explicitly that the routing matched but the "
-                "dispatch is the next-step follow-up."
+                "Supported dispatch paths: periodic_dft (VASP, QE) via "
+                "generate_dft_inputs; molecular_dynamics (LAMMPS) via "
+                "generate_dft_inputs; machine_learning_potentials (MACE, "
+                "CHGNet, DeePMD, UMA, orb) via run_mlip_simulation. "
+                "For EXAFS workflows use run_exafs_workflow directly — "
+                "it handles routing, MLIP deployment, and FEFF setup."
             ),
             parameters={
                 "user_goal": {
@@ -781,9 +782,11 @@ class SimulationOrchestratorTools:
             outstanding_issues = val_result.get("all_identified_issues", []) or []
 
             # Engine-neutral: take the structure path from the result and
-            # build the input-files map from the generated inputs.
+            # build the input-files map from the generated inputs. The defensive
+            # fallback uses the engine-neutral default filename (generation emits
+            # extended XYZ), not a VASP POSCAR.
             structure_path = Path(
-                structure_gen.get("final_structure_path") or (workdir / "POSCAR")
+                structure_gen.get("final_structure_path") or (workdir / "structure.extxyz")
             )
             input_generation = result.get("input_generation", {}) or {}
             input_files = {
@@ -848,6 +851,155 @@ class SimulationOrchestratorTools:
                         "How to produce INCAR/KPOINTS. 'llm' (default) is "
                         "more flexible; 'atomate2' is rule-based and faster."
                     ),
+                },
+            },
+            required=["description"],
+        )
+
+        # =====================================================================
+        # 10b. RUN SIMULATION (engine-neutral one-shot, WITH execution)
+        # =====================================================================
+        def run_simulation(description: str, run_command: str = None,
+                           scale: str = None, software: str = None,
+                           max_refinement_cycles: int = 4,
+                           max_run_cycles: int = 3,
+                           run_timeout: int = 3600) -> str:
+            from .simulation_pipeline import run_complete_workflow
+
+            # 1. Route (scale, engine) if not supplied — reuse a prior routing
+            #    decision so we don't re-route every call. Engine-neutral: any
+            #    engine the router picks flows through run_complete_workflow.
+            if not (scale and software):
+                decision = getattr(self.orch, "routing_decision", None)
+                if not decision:
+                    from .simulation_router import SimulationRouter
+                    decision = SimulationRouter(model=self.orch.model).route(
+                        user_goal=description)
+                    self.orch.routing_decision = decision
+                scale = scale or decision.get("scale")
+                software = software or decision.get("engine")
+
+            # 2. run_command: user-provided > the engine skill's declared default
+            #    (`default_run_command`) > None. The engine's own launch command
+            #    lives in its skill bundle — never hardcoded here.
+            rc_source = "user" if run_command else None
+            if run_command is None and software:
+                try:
+                    from ...skills._shared._registry import get_tool_function
+                    get_rc = get_tool_function("default_run_command",
+                                               active_skills=[software])
+                    run_command = get_rc()
+                    rc_source = "skill" if run_command else None
+                except Exception:
+                    run_command = None
+
+            # 3. Executor: local when a run_command is available and no HPC
+            #    connection is attached. (HPC-submission via hpc_connection is a
+            #    follow-up; with no executor the workflow still generates +
+            #    validates inputs, it just does not run them.)
+            executor = None
+            if run_command and getattr(self.orch, "hpc_connection", None) is None:
+                from .refinement import LocalExecutor
+                executor = LocalExecutor(timeout=run_timeout)
+
+            slug = self._make_slug(description)
+            workdir = self.orch.structures_dir / slug
+            workdir.mkdir(parents=True, exist_ok=True)
+
+            try:
+                result = run_complete_workflow(
+                    description,
+                    scale=scale, software=software,
+                    output_dir=str(workdir),
+                    api_key=self.orch.api_key, base_url=self.orch.base_url,
+                    model_name=self.orch.model_name,
+                    futurehouse_api_key=self.orch.futurehouse_api_key,
+                    mp_api_key=self.orch.mp_api_key,
+                    max_refinement_cycles=max_refinement_cycles,
+                    max_run_cycles=max_run_cycles,
+                    executor=executor, run_command=run_command,
+                )
+            except Exception as e:
+                return json.dumps({
+                    "status": "error", "scale": scale, "engine": software,
+                    "message": f"Simulation workflow failed: {e}",
+                })
+
+            final_status = result.get("final_status")
+            structure_gen = result.get("structure_generation", {}) or {}
+            structure_path = Path(
+                structure_gen.get("final_structure_path")
+                or (workdir / "structure.extxyz")
+            )
+            if structure_path.exists():
+                self.orch.generated_structures.append({
+                    "slug": slug, "description": description,
+                    "structure_dir": str(workdir),
+                    "structure_path": str(structure_path),
+                    "scale": scale, "engine": software,
+                    "created_at": datetime.now().isoformat(),
+                })
+
+            refinement = result.get("refinement") or {}
+            executed = executor is not None
+            return json.dumps({
+                "status": final_status if final_status else "error",
+                "scale": scale, "engine": software,
+                "executed": executed,
+                "run_command_source": rc_source,
+                "refinement_status": refinement.get("status"),
+                "output_directory": str(workdir),
+                "note": (
+                    None if executed else
+                    "No run_command available (no engine binary on PATH and none "
+                    "supplied) — generated and validated inputs only, did NOT "
+                    "run. Pass run_command to execute."
+                ),
+            })
+
+        self._register_tool(
+            func=run_simulation,
+            name="run_simulation",
+            description=(
+                "Engine-neutral one-shot: build + validate the structure, "
+                "generate engine inputs, and RUN + refine the simulation — for "
+                "any scale/engine (periodic DFT, classical MD, MLIP-MD). Routes "
+                "(scale, engine) from the description when not given. Executes "
+                "locally via the engine's own run command (from its skill "
+                "bundle); pass `run_command` to override or if the skill's binary "
+                "isn't found. Use this when the user wants the simulation "
+                "actually RUN, not just its inputs prepared. Returns JSON "
+                "(status, scale, engine, executed, refinement_status, "
+                "output_directory)."
+            ),
+            parameters={
+                "description": {
+                    "type": "string",
+                    "description": "Natural-language system + goal to simulate.",
+                },
+                "run_command": {
+                    "type": "string",
+                    "description": (
+                        "Optional run-command template with a `{script}` "
+                        "placeholder (e.g. 'lmp -in {script}'). Overrides the "
+                        "engine skill's default; supply this if the default "
+                        "binary is missing or fails."
+                    ),
+                },
+                "scale": {
+                    "type": "string",
+                    "description": ("Optional scale override "
+                                    "('periodic_dft' | 'molecular_dynamics'); "
+                                    "routed from the description if omitted."),
+                },
+                "software": {
+                    "type": "string",
+                    "description": ("Optional engine override "
+                                    "('vasp' | 'lammps'); routed if omitted."),
+                },
+                "max_run_cycles": {
+                    "type": "integer",
+                    "description": "Max run → assess → fix cycles per phase (default 3).",
                 },
             },
             required=["description"],
@@ -1883,6 +2035,441 @@ class SimulationOrchestratorTools:
                 },
             },
             required=["structure_slug"],
+        )
+
+        # =====================================================================
+        # 16. RUN MLIP SIMULATION
+        # =====================================================================
+        def run_mlip_simulation(
+            structure_path: str,
+            research_goal: str,
+            backend: str = None,
+            model_name: str = None,
+            task: str = "md",
+            temperature: float = 300.0,
+            n_steps: int = 10000,
+            device: str = "cpu",
+        ) -> str:
+            if not Path(structure_path).exists():
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Structure file not found: {structure_path}",
+                })
+
+            slug = self._make_slug(research_goal)
+            workdir = self.orch.structures_dir / slug
+            workdir.mkdir(parents=True, exist_ok=True)
+
+            try:
+                from .mlip_agent import MLIPAgent
+                from ase.io import read as _ase_read
+                atoms = _ase_read(structure_path)
+                elements = sorted(set(atoms.get_chemical_symbols()))
+                system_info = {
+                    "elements": {e: None for e in elements},
+                    "n_atoms": len(atoms),
+                }
+                agent = MLIPAgent(
+                    working_dir=str(workdir),
+                    api_key=self.orch.api_key,
+                    base_url=self.orch.base_url,
+                    model_name=self.orch.model_name,
+                )
+                sim_params = {
+                    "task": task,
+                    "temperature": temperature,
+                    "n_steps": n_steps,
+                    "device": device,
+                }
+                result = agent.deploy_pretrained(
+                    system_info=system_info,
+                    research_goal=research_goal,
+                    structure_file=structure_path,
+                    backend=backend,
+                    model_name=model_name,
+                    simulation_params=sim_params,
+                    runner="ase",
+                )
+            except Exception as e:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"MLIP simulation failed: {e}",
+                })
+
+            run_path = result.get("run_path") or result.get("script_path")
+            record = {
+                "slug": slug,
+                "description": research_goal,
+                "structure_dir": str(workdir),
+                "structure_path": structure_path,
+                "script_path": run_path,
+                "script_content": None,
+                "input_files": {Path(run_path).name: run_path} if run_path else {},
+                "summary": (
+                    f"MLIP {result.get('backend', '')} {result.get('model_name', '')} "
+                    f"{task} at {temperature} K, {n_steps} steps"
+                ),
+                "validation": None,
+                "created_at": datetime.now().isoformat(),
+                "mlip_backend": result.get("backend"),
+                "mlip_model": result.get("model_name"),
+            }
+            self.orch.generated_structures.append(record)
+
+            return json.dumps({
+                "status": "success",
+                "slug": slug,
+                "backend": result.get("backend"),
+                "model_name": result.get("model_name"),
+                "run_script": run_path,
+                "workdir": str(workdir),
+                "task": task,
+                "next_steps": (
+                    f"Run the script: python {run_path}\n"
+                    "Then call analyze_output(workdir, research_goal) to assess "
+                    "the trajectory, or run_exafs_workflow(trajectory_path, ...) "
+                    "to compute EXAFS spectra from the trajectory."
+                ),
+            })
+
+        self._register_tool(
+            func=run_mlip_simulation,
+            name="run_mlip_simulation",
+            description=(
+                "Deploy an MLIP (machine-learning interatomic potential) and "
+                "generate a run script for relaxation or NVT molecular dynamics. "
+                "Selects the best pretrained foundation model for the system "
+                "(MACE, CHGNet, orb, UMA, …) unless `backend` is specified. "
+                "Writes an ASE run script to a session-managed directory. "
+                "Returns the script path — the user runs it, then calls "
+                "analyze_output or run_exafs_workflow on the resulting trajectory. "
+                "For EXAFS simulations, use run_exafs_workflow which calls this "
+                "step internally."
+            ),
+            parameters={
+                "structure_path": {
+                    "type": "string",
+                    "description": "Absolute path to the input structure (CIF, POSCAR, extxyz, etc.).",
+                },
+                "research_goal": {
+                    "type": "string",
+                    "description": (
+                        "What the simulation should achieve "
+                        "(e.g. 'NVT MD at 300 K for EXAFS thermal sampling of Fe2O3')."
+                    ),
+                },
+                "backend": {
+                    "type": "string",
+                    "description": (
+                        "Optional MLIP backend override: 'mace', 'chgnet', 'deepmd', "
+                        "'uma', 'orb'. When omitted, the best available backend for "
+                        "the system is selected automatically."
+                    ),
+                },
+                "model_name": {
+                    "type": "string",
+                    "description": (
+                        "Optional foundation-model identifier within the backend "
+                        "(e.g. 'mace-omat-0', 'mace-off23'). Defaults to the "
+                        "backend's recommended foundation model."
+                    ),
+                },
+                "task": {
+                    "type": "string",
+                    "enum": ["md", "relax"],
+                    "description": "'md' for NVT molecular dynamics (default), 'relax' for cell + geometry optimization.",
+                },
+                "temperature": {
+                    "type": "number",
+                    "description": "Simulation temperature in Kelvin (default: 300).",
+                },
+                "n_steps": {
+                    "type": "integer",
+                    "description": "Number of MD or optimization steps (default: 10000).",
+                },
+                "device": {
+                    "type": "string",
+                    "description": "'cpu' (default) or 'cuda'. Use 'cuda' when a GPU is available.",
+                },
+            },
+            required=["structure_path", "research_goal"],
+        )
+
+        # =====================================================================
+        # 17. RUN EXAFS WORKFLOW
+        # =====================================================================
+        def run_exafs_workflow(
+            structure_path: str,
+            absorber_element: str,
+            edge: str = "K",
+            rmax: float = 6.0,
+            temperature: float = 300.0,
+            n_md_steps: int = 83500,
+            md_step_size: int = 250,
+            backend: str = None,
+            device: str = "cpu",
+            feff_binary: str = None,
+        ) -> str:
+            if not Path(structure_path).exists():
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Structure file not found: {structure_path}",
+                })
+
+            slug = self._make_slug(f"exafs_{absorber_element}_{Path(structure_path).stem}")
+            workdir = self.orch.structures_dir / slug
+            workdir.mkdir(parents=True, exist_ok=True)
+
+            # ── Step 1: MLIP deployment + run script generation ───────────
+            try:
+                from .mlip_agent import MLIPAgent
+                from ase.io import read as _ase_read
+                atoms = _ase_read(structure_path)
+                elements = sorted(set(atoms.get_chemical_symbols()))
+                system_info = {
+                    "elements": {e: None for e in elements},
+                    "n_atoms": len(atoms),
+                }
+                agent = MLIPAgent(
+                    working_dir=str(workdir),
+                    api_key=self.orch.api_key,
+                    base_url=self.orch.base_url,
+                    model_name=self.orch.model_name,
+                )
+                research_goal = (
+                    f"NVT MD at {temperature} K for EXAFS thermal sampling of "
+                    f"{absorber_element} {edge}-edge in {Path(structure_path).stem}"
+                )
+                sim_params = {
+                    "task": "md",
+                    "temperature": temperature,
+                    "n_steps": n_md_steps,
+                    "device": device,
+                }
+                mlip_result = agent.deploy_pretrained(
+                    system_info=system_info,
+                    research_goal=research_goal,
+                    structure_file=structure_path,
+                    backend=backend,
+                    simulation_params=sim_params,
+                    runner="ase",
+                )
+            except Exception as e:
+                return json.dumps({
+                    "status": "error",
+                    "stage": "mlip_deploy",
+                    "message": f"MLIP deployment failed: {e}",
+                })
+
+            run_script = mlip_result.get("run_path") or mlip_result.get("script_path")
+
+            # ── Step 2: locate absorber index ─────────────────────────────
+            try:
+                from ase.io import read as _ase_read2
+                struct = _ase_read2(structure_path)
+                absorber_indices = [
+                    i for i, sym in enumerate(struct.get_chemical_symbols())
+                    if sym == absorber_element
+                ]
+                if not absorber_indices:
+                    return json.dumps({
+                        "status": "error",
+                        "stage": "absorber_search",
+                        "message": (
+                            f"Element '{absorber_element}' not found in structure. "
+                            f"Elements present: {sorted(set(struct.get_chemical_symbols()))}"
+                        ),
+                    })
+                target_atom = absorber_indices[0]
+            except Exception as e:
+                return json.dumps({
+                    "status": "error",
+                    "stage": "absorber_search",
+                    "message": f"Failed to parse structure for absorber: {e}",
+                })
+
+            # ── Step 3: detect FEFF binary ────────────────────────────────
+            import os as _os
+            import shutil as _shutil
+            _FEFF_NAMES = ("feff.x", "feff9", "feff8", "feff7", "feff8l", "feff6l", "feff")
+            feff_exe = feff_binary
+            if not feff_exe:
+                explicit = _os.environ.get("FEFF_BIN", "").strip()
+                if explicit and _os.path.isfile(explicit):
+                    feff_exe = explicit
+                elif _os.environ.get("FEFF_DIR", "").strip():
+                    feff_dir = _os.environ["FEFF_DIR"].strip()
+                    for _name in _FEFF_NAMES:
+                        _c = _os.path.join(feff_dir, _name)
+                        if _os.path.isfile(_c):
+                            feff_exe = _c
+                            break
+                if not feff_exe:
+                    for _name in _FEFF_NAMES:
+                        _found = _shutil.which(_name)
+                        if _found:
+                            feff_exe = _found
+                            break
+                if not feff_exe:
+                    _site = "/share/feff/feff90_binaries/feff.x"
+                    if _os.path.isfile(_site):
+                        feff_exe = _site
+
+            # ── Step 4: HOLE card from edge ───────────────────────────────
+            _HOLE_MAP = {"K": 1, "L1": 2, "L2": 3, "L3": 4, "M1": 5}
+            hole = _HOLE_MAP.get(edge.upper(), 1)
+
+            # Assemble the plan output ─────────────────────────────────────
+            record = {
+                "slug": slug,
+                "description": f"EXAFS {absorber_element} {edge}-edge in {Path(structure_path).stem}",
+                "structure_dir": str(workdir),
+                "structure_path": structure_path,
+                "script_path": run_script,
+                "script_content": None,
+                "input_files": {Path(run_script).name: run_script} if run_script else {},
+                "summary": (
+                    f"EXAFS workflow: {absorber_element} {edge}-edge, "
+                    f"MLIP={mlip_result.get('backend')}/{mlip_result.get('model_name')}, "
+                    f"T={temperature} K, rmax={rmax} Å"
+                ),
+                "validation": None,
+                "created_at": datetime.now().isoformat(),
+                "exafs": {
+                    "absorber_element": absorber_element,
+                    "absorber_index": target_atom,
+                    "edge": edge,
+                    "hole": hole,
+                    "rmax": rmax,
+                    "temperature": temperature,
+                    "n_md_steps": n_md_steps,
+                    "md_step_size": md_step_size,
+                    "feff_binary": feff_exe,
+                    "mlip_backend": mlip_result.get("backend"),
+                    "mlip_model": mlip_result.get("model_name"),
+                },
+            }
+            self.orch.generated_structures.append(record)
+
+            feff_note = (
+                f"FEFF binary located: {feff_exe}"
+                if feff_exe
+                else (
+                    "WARNING: No FEFF binary found. Download a free version "
+                    "(FEFF6-lite or FEFF8-lite) from "
+                    "https://feff.phys.washington.edu/feffproject-feff-download.html "
+                    "and set $FEFF_BIN before running Stage 3."
+                )
+            )
+
+            return json.dumps({
+                "status": "success",
+                "slug": slug,
+                "workdir": str(workdir),
+                "mlip_backend": mlip_result.get("backend"),
+                "mlip_model": mlip_result.get("model_name"),
+                "run_script": run_script,
+                "absorber_element": absorber_element,
+                "absorber_index": target_atom,
+                "edge": edge,
+                "hole": hole,
+                "rmax": rmax,
+                "feff_binary": feff_exe,
+                "feff_note": feff_note,
+                "next_steps": (
+                    f"1. Run the MD script to generate a trajectory:\n"
+                    f"   python {run_script}\n"
+                    f"2. Generate FEFF inputs from the trajectory:\n"
+                    f"   from scilink.skills.exafs_simulation.exafs_workflow.feff_tools "
+                    f"import generate_feff_inputs_from_trajectory\n"
+                    f"   result = generate_feff_inputs_from_trajectory(\n"
+                    f"       trajectory_path='md_trajectory.xyz',\n"
+                    f"       target_atom={target_atom}, hole={hole},\n"
+                    f"       rmax={rmax}, scf='6.0 0 30 0.2 1',\n"
+                    f"       step_size={md_step_size})\n"
+                    f"3. Run FEFF batch jobs on the generated inputs.\n"
+                    f"4. Average chi(k):\n"
+                    f"   from scilink.skills.exafs_simulation.exafs_workflow.feff_tools "
+                    f"import average_chi\n"
+                    f"   average_chi(result['output_dir'], 'exafs_output')\n"
+                    + (f"\n{feff_note}" if not feff_exe else "")
+                ),
+            })
+
+        self._register_tool(
+            func=run_exafs_workflow,
+            name="run_exafs_workflow",
+            description=(
+                "Set up a complete EXAFS simulation workflow: deploys an MLIP "
+                "for the structure, generates a run script for NVT MD thermal "
+                "sampling, detects any installed FEFF binary, and returns a "
+                "step-by-step plan with the correct parameters (absorber index, "
+                "HOLE card, rmax, step_size) pre-filled. The user runs the MD "
+                "script to produce a trajectory, then calls "
+                "generate_feff_inputs_from_trajectory and average_chi (provided "
+                "as TOOL_SPEC helpers in the exafs_simulation skill). "
+                "Co-loads the exafs_simulation skill automatically — no need to "
+                "call route_simulation first for EXAFS workflows."
+            ),
+            parameters={
+                "structure_path": {
+                    "type": "string",
+                    "description": "Absolute path to the input crystal structure (CIF, POSCAR, extxyz, etc.).",
+                },
+                "absorber_element": {
+                    "type": "string",
+                    "description": (
+                        "Chemical symbol of the X-ray absorbing element "
+                        "(e.g. 'Fe', 'Cu', 'Ni'). First atom of this species is used."
+                    ),
+                },
+                "edge": {
+                    "type": "string",
+                    "description": (
+                        "X-ray absorption edge: 'K' (default), 'L1', 'L2', 'L3', 'M1'. "
+                        "Use K for 3d metals, L3 for 4d/5d metals."
+                    ),
+                },
+                "rmax": {
+                    "type": "number",
+                    "description": (
+                        "FEFF RMAX path cutoff in Angstroms (default: 6.0). "
+                        "Use 6–8 Å for 2–4 coordination shells."
+                    ),
+                },
+                "temperature": {
+                    "type": "number",
+                    "description": "MD temperature in Kelvin (default: 300). Match experimental conditions.",
+                },
+                "n_md_steps": {
+                    "type": "integer",
+                    "description": "Total number of MD timesteps (default: 83500 ≈ 20 ps at 0.24 fs/step).",
+                },
+                "md_step_size": {
+                    "type": "integer",
+                    "description": "Sample one FEFF input per this many MD frames (default: 250).",
+                },
+                "backend": {
+                    "type": "string",
+                    "description": (
+                        "Optional MLIP backend override: 'mace', 'chgnet', 'deepmd', 'uma', 'orb'. "
+                        "When omitted, the best available backend for the system is selected."
+                    ),
+                },
+                "device": {
+                    "type": "string",
+                    "description": "'cpu' (default) or 'cuda'.",
+                },
+                "feff_binary": {
+                    "type": "string",
+                    "description": (
+                        "Optional explicit path to a FEFF binary. When omitted, "
+                        "the tool searches $FEFF_BIN, $FEFF_DIR, $PATH, and the "
+                        "site default /share/feff/feff90_binaries/feff.x."
+                    ),
+                },
+            },
+            required=["structure_path", "absorber_element"],
         )
 
         # ↓↓↓ CLI flesh-out (step 5), run_task (step 6), tests (step 7).

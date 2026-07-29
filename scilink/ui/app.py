@@ -28,27 +28,65 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text or "")
 
 
+# 💭 reasoning colors. Meta and specialist both print the SAME 💭 glyph; a
+# meta-delegated specialist tags its line with an invisible U+2063 marker so its
+# reasoning renders in a distinct (warm) color from the meta's own (cool) 💭,
+# without changing the visible glyph. The marker is stripped before display.
+_THOUGHT_MARK = "\u2063"           # INVISIBLE SEPARATOR — specialist source tag
+_META_THOUGHT_COLOR = "#6ec1e4"    # muted cyan — meta's own deliberation
+_SPECIALIST_THOUGHT_COLOR = "#c9a06a"  # muted amber — a delegated specialist
+_HANDOFF_COLOR = "#f0c674"         # bright gold — meta -> specialist handoff banner
+
+# Meta handoff announcements (printed by MetaOrchestratorTools): the meta
+# delegating to / fusing specialists. Matched on emoji+phrase so a generic
+# 🧪/📋 structural header elsewhere is not mistaken for a handoff.
+_HANDOFF_PREFIXES = ("🧪 Delegating to", "📋 Delegating to", "🧬 Fusing delegations")
+
+
 def _log_to_html(text: str) -> str:
     """ANSI-strip a captured log and HTML-escape it. The agent's 💭 reasoning
-    lines render dim+italic (a muted aside); the 🤖 answer header renders
-    bold+bright (the deliverable) — the HTML equivalents of the terminal styling."""
+    lines render dim+italic (a muted aside) and the 🤖 answer header bold+bright
+    — cool cyan for the meta, warm amber for a meta-delegated specialist (both
+    tagged by an invisible U+2063 marker, so a specialist's reasoning AND answer
+    header match its color)."""
     import html as _html
 
-    out, in_thought = [], False
+    out, in_thought, thought_color = [], False, _META_THOUGHT_COLOR
     for line in _strip_ansi(text).split("\n"):
         stripped = line.lstrip()
         if stripped.startswith("🤖"):
-            # Final-answer header — emphasized, and it ends any reasoning block.
+            # Answer header — emphasized, and it ends any reasoning block. A
+            # delegated specialist's header carries the marker -> specialist
+            # color (matching its reasoning); the meta's own stays bright cyan.
             in_thought = False
-            out.append(f'<span style="color:#7fdfff;font-weight:bold">{_html.escape(line)}</span>')
+            ans_color = (_SPECIALIST_THOUGHT_COLOR if _THOUGHT_MARK in line
+                         else "#7fdfff")
+            clean = _html.escape(line.replace(_THOUGHT_MARK, ""))
+            out.append(f'<span style="color:{ans_color};font-weight:bold">{clean}</span>')
+            continue
+        if stripped.startswith(_HANDOFF_PREFIXES):
+            # Meta -> specialist handoff — a pronounced section divider so the
+            # transition into (and back out of) a delegation is obvious. Rendered
+            # as a banded row (bold gold on a faint tint with a left rule), which
+            # the <pre> log pane supports. Ends any reasoning block.
+            in_thought = False
+            out.append(
+                f'<span style="display:inline-block;color:{_HANDOFF_COLOR};'
+                f"font-weight:bold;background:#2e2a1f;border-left:3px solid "
+                f'{_HANDOFF_COLOR};padding:1px 8px">{_html.escape(stripped)}</span>'
+            )
             continue
         if stripped.startswith("💭"):
             in_thought = True
+            # A specialist's first thought line carries the invisible marker; pick
+            # the color from it and hold it across this block's continuation lines.
+            thought_color = (_SPECIALIST_THOUGHT_COLOR if _THOUGHT_MARK in line
+                             else _META_THOUGHT_COLOR)
         elif in_thought and not line.startswith("     "):
             in_thought = False
-        esc = _html.escape(line)
+        esc = _html.escape(line.replace(_THOUGHT_MARK, ""))  # drop the source tag
         if in_thought:
-            esc = f'<span style="color:#6ec1e4;font-style:italic">{esc}</span>'
+            esc = f'<span style="color:{thought_color};font-style:italic">{esc}</span>'
         out.append(esc)
     return "\n".join(out)
 
@@ -62,6 +100,31 @@ def _escape_tildes(text: str) -> str:
         if i % 2 == 0:
             parts[i] = part.replace("~", "\\~")
     return "".join(parts)
+
+
+def _render_fanout_confirm(ctx: str) -> None:
+    """Clean confirmation panel for the meta fan-out launch — replaces the raw
+    monospace stdout dump with readable markdown (verdict, join axis, the
+    branch list; the long rationale tucked into an expander)."""
+    def _g(pat):
+        m = re.search(pat, ctx or "")
+        return re.sub(r"\s{2,}", " ", m.group(1).strip()) if m else None
+    verdict = _g(r"Complementarity verdict\s*:\s*(.+)")
+    join = _g(r"Join axis\s*:\s*(.+)")
+    rationale = _g(r"Rationale\s*:\s*(.+)")
+    branches = [re.sub(r"\s{2,}", " ", b.strip())
+                for b in re.findall(r"•\s*(.+)", ctx or "")]
+    st.markdown("#### 🔀 Launch parallel multi-dataset analysis?")
+    if verdict:
+        st.markdown(f"**Complementarity:** {verdict}")
+    if join:
+        st.markdown(f"**Join axis:** {join}")
+    if branches:
+        st.markdown("**Branches** — run concurrently, each seeing the others "
+                    "as auxiliary:\n" + "\n".join(f"- {b}" for b in branches))
+    if rationale:
+        st.markdown(f"**Why:** {rationale}")
+    st.caption("Branches run autonomously — no per-branch approval pauses.")
 
 
 _LOGO_DIR = Path(__file__).resolve().parent / "assets"
@@ -225,7 +288,14 @@ def _find_code_review_files() -> list[tuple[str, str]]:
 
 
 def _find_new_html_reports() -> list[str]:
-    """Return HTML report paths in the session dir not yet shown."""
+    """Return HTML report paths in the session dir not yet shown.
+
+    Best-of-N candidate reports (``plan_candidates/``) are deliberately
+    excluded from the chat message: they are side artifacts reviewed at the
+    selection prompt and browsable in the File Explorer, and stacking N of
+    them next to the winner's ``plan.html`` buries the actual deliverable.
+    They are still marked known so they never leak into a later message.
+    """
     session_dir = st.session_state.session_dir
     if session_dir is None:
         return []
@@ -234,8 +304,97 @@ def _find_new_html_reports() -> list[str]:
         s = str(p)
         if s not in st.session_state.known_images:  # reuse the same set
             st.session_state.known_images.add(s)
+            if p.parent.name == "plan_candidates":
+                continue
             new.append(s)
     return new
+
+
+def _parse_bestofn_review(context: str, prompt: str):
+    """Parse the best-of-N candidate review from captured stdout.
+
+    Returns ``(candidates, default_idx)`` where ``candidates`` is a list of
+    ``{"idx": int, "label": str}`` for the MOST RECENT review block and
+    ``default_idx`` is the judge's pick. Returns ``None`` when the buffer is
+    not a best-of-N review — the modal then falls back to the generic text
+    box, so any parse miss degrades gracefully (no regression). Works for both
+    curve (``R²=``) and image (``score=``) reviews; the agent-side
+    ``_get_bestofn_join_approval`` contract is unchanged (the chosen index is
+    sent as the same bare digit it already parses).
+    """
+    # Gate on the CURRENT input() prompt — only the best-of-N choice prompt
+    # contains "accept candidate". This prevents a stale review block left in
+    # the accumulated session buffer from hijacking a later, unrelated feedback
+    # prompt (plan/code/scalarizer/etc.).
+    if not prompt or "accept candidate" not in prompt:
+        return None
+    if not context or "BEST-OF-N CANDIDATES" not in context:
+        return None
+    import re
+    # Only the latest review block (the buffer accumulates the whole session).
+    block = context[context.rfind("BEST-OF-N CANDIDATES"):]
+    cands: dict[int, str] = {}
+    pick = None
+    for m in re.finditer(
+        r"Candidate (\d+):\s*([^=]+)=([0-9.eE+\-]+),\s*approved=(\w+),"
+        r"\s*iterations=(\d+)(.*)", block):
+        idx = int(m.group(1))
+        metric, value = m.group(2).strip(), m.group(3)
+        approved = m.group(4).lower() == "true"
+        iters = m.group(5)
+        mark = "✓ approved" if approved else "✗ below gate"
+        cands[idx] = f"Candidate {idx} — {metric}={value} · {mark} · {iters} iter"
+        if "judge pick" in m.group(6).lower():
+            pick = idx
+    if not cands:
+        return None
+    if pick is None:
+        pm = re.search(r"accept candidate (\d+)", prompt or "")
+        pick = int(pm.group(1)) if pm else min(cands)
+    ordered = [{"idx": i, "label": cands[i]} for i in sorted(cands)]
+    return ordered, pick
+
+
+def _parse_plan_candidate_review(context: str, prompt: str):
+    """Parse the best-of-N PLAN candidate review from captured stdout.
+
+    Sibling of ``_parse_bestofn_review`` for plan mode: gated on its own
+    marker strings ("accept plan candidate" in the prompt, "PLAN CANDIDATES"
+    in the buffer) so neither parser can hijack the other's review, and with
+    its own card grammar — plan candidates carry judge scores, not the
+    ``metric=value`` scalar the analysis regex expects. Returns
+    ``(candidates, judge_pick)`` with ``candidates`` a list of
+    ``{"idx": int, "label": str}``, or ``None`` to fall back to the generic
+    text box (graceful degradation on any parse miss). The full summary cards
+    themselves render via the existing context box; this parser only powers
+    the radio selector. Reply contract matches ``get_candidate_selection``:
+    bare digit to override, "" to accept the judge's pick.
+    """
+    if not prompt or "accept plan candidate" not in prompt:
+        return None
+    if not context or "PLAN CANDIDATES" not in context:
+        return None
+    import re
+    block = context[context.rfind("PLAN CANDIDATES"):]
+    cands: dict[int, str] = {}
+    pick = None
+    for m in re.finditer(r"── Candidate (\d+): (.+?) ──(.*)", block):
+        idx = int(m.group(1))
+        name = m.group(2).strip()
+        # Generous cap: experiment names are the radio's primary signal and
+        # the row has the full content width — clip only pathological ones.
+        if len(name) > 120:
+            name = name[:117] + "…"
+        cands[idx] = f"Candidate {idx} — {name}"
+        if "judge pick" in m.group(3).lower():
+            pick = idx
+    if not cands:
+        return None
+    if pick is None:
+        pm = re.search(r"accept plan candidate (\d+)", prompt)
+        pick = int(pm.group(1)) if pm else min(cands)
+    ordered = [{"idx": i, "label": cands[i]} for i in sorted(cands)]
+    return ordered, pick
 
 
 def _run_agent_chat(task: ChatTask, agent, user_input: str) -> None:
@@ -284,7 +443,28 @@ def _run_agent_chat(task: ChatTask, agent, user_input: str) -> None:
     log_handler.setLevel(logging.INFO)
     log_handler.setFormatter(logging.Formatter("%(message)s"))
     _this_thread = threading.get_ident()
-    log_handler.addFilter(lambda record: record.thread == _this_thread)
+    # Best-of-N candidate attempts run in worker threads spawned by this
+    # chat thread; effective_thread maps them back so their narration stays
+    # in the verbose panel without admitting other sessions' threads. During
+    # a CONCURRENT fan-out, keep_in_fanout_panel trims each candidate's
+    # per-attempt detail to milestones (executing / verification / outcome) so
+    # the panel stays readable; a lone attempt and the CLI keep full detail.
+    from scilink.utils.log_context import effective_thread, keep_in_fanout_panel
+
+    def _panel_filter(record):
+        if effective_thread(record.thread) != _this_thread:
+            return False
+        # Stop propagation for logging-heavy phases: much of the agents'
+        # narration goes through logging (not print), so without this check
+        # a stopped run would only abort on its next print(). Filters run in
+        # the emitting thread, so the raise lands in the agent/worker thread.
+        if cap.stop_requested:
+            raise AgentStoppedError("Agent stopped by user")
+        return keep_in_fanout_panel(
+            record.thread, record.getMessage(), record.levelno
+        )
+
+    log_handler.addFilter(_panel_filter)
     root_logger = logging.getLogger()
     # Lower root to INFO so agent logger.info() messages (execution
     # details, verification steps, R² values) reach the handler.
@@ -388,7 +568,7 @@ if not st.session_state.agent_initialized:
     with col_c:
         # Mode selector — centered above the logo
         if st.session_state.app_mode is None:
-            st.session_state.app_mode = "analyze"
+            st.session_state.app_mode = "meta"
         # Fall back if a stale session_state still says "simulate" but the
         # [sim] extras are no longer installed.
         if st.session_state.app_mode == "simulate" and not simulate_enabled():
@@ -398,24 +578,22 @@ if not st.session_state.agent_initialized:
         _modes = [m for m in APP_MODES
                   if m["key"] != "simulate" or simulate_enabled()]
         st.markdown('<div class="mode-selector-anchor"></div>', unsafe_allow_html=True)
-        # Side padding shrinks when [sim] extras add a 4th button so each
-        # button keeps the same fraction of the center column; the fixed 1.5
-        # padding squeezed 4 buttons tight enough that their styled borders
-        # visually collided.
-        _pad = 1.5 if len(_modes) <= 3 else 0.75
-        _cols = st.columns([_pad] + [1.0] * len(_modes) + [_pad])
-        for _m, _col in zip(_modes, _cols[1:-1]):
+        # One equal column per mode (no side padding). The buttons size to their
+        # labels and the row centers/wraps via CSS, so they never truncate or
+        # collide regardless of window width or OS display scaling.
+        _cols = st.columns(len(_modes))
+        for _m, _col in zip(_modes, _cols):
             with _col:
                 _btype = ("primary" if st.session_state.app_mode == _m["key"]
                           else "secondary")
-                if st.button(_m["label"], type=_btype, use_container_width=True,
+                if st.button(_m["label"], type=_btype, width="stretch",
                              key=f"mode_{_m['key']}"):
                     st.session_state.app_mode = _m["key"]
                     st.rerun()
         _cur_mode = _mode_map[st.session_state.app_mode]
         _cur_desc = _cur_mode["description"]
         if _cur_mode.get("beta"):
-            _cur_desc = f"BETA · {_cur_desc}"
+            _cur_desc = f"Mission Control · {_cur_desc}"
         st.markdown(
             f'<p style="text-align:center;color:#6B7A8C;font-size:0.85em;'
             f'margin-top:-4px;margin-bottom:12px">'
@@ -584,7 +762,6 @@ else:
                 content = task.result if task.result is not None else f"Error: {task.error}"
                 # Strip markdown image tags with local file paths — images are
                 # rendered separately via st.image() from _find_new_images()
-                import re
                 content = re.sub(r"!\[[^\]]*\]\([^)]+\)\n?", "", content).strip()
                 new_images = _find_new_images()
                 new_reports = _find_new_html_reports()
@@ -618,7 +795,15 @@ else:
                     for img in previews:
                         st.session_state.known_images.add(img)
                 for img_path in st.session_state._feedback_preview_images:
-                    st.image(img_path)
+                    # Caption best-of-N candidate fits with their number so the
+                    # plot lines up with the radio selector below; other preview
+                    # images (single fit, hyperspectral grid) render as before.
+                    _bn = re.search(r"bestofn_candidate_(\d+)_review",
+                                    Path(img_path).name)
+                    if _bn:
+                        st.image(img_path, caption=f"Candidate {int(_bn.group(1))}")
+                    else:
+                        st.image(img_path)
     
                 # Show generated code files during code review
                 _ctx_tail_early = (req.context or "")[-1500:]
@@ -631,10 +816,13 @@ else:
                             with st.expander(f"📄 {fname}", expanded=len(code_files) == 1):
                                 st.code(content, language="python")
     
-                if req.context:
+                _is_fanout_confirm = ("parallel multi-dataset analysis"
+                                      in (req.context or "").lower())
+                if _is_fanout_confirm:
+                    _render_fanout_confirm(req.context)
+                elif req.context:
                     import html as _html
-                    import re
-    
+
                     display_ctx = req.context
                     lines = display_ctx.split("\n")
                     # Find the last separator block (===…) followed by a
@@ -690,6 +878,13 @@ else:
                 _ctx_tail = (req.context or "")[-1500:]
                 _prompt = req.prompt or ""
                 _is_keep_revert = "revert to original" in _ctx_tail.lower()
+                # Best-of-N candidate review: parse the candidate list so we can
+                # render a radio selector (scales to any N, unlike one button
+                # per candidate). None -> falls through to the generic text box.
+                _bestofn_data = _parse_bestofn_review(req.context or "", _prompt)
+                # Plan-mode best-of-N: same radio UX, its own parser/markers.
+                _plan_cand_data = _parse_plan_candidate_review(req.context or "", _prompt)
+                # (_is_fanout_confirm computed above, before the context render)
                 if "Context" in _prompt or "MISSING METADATA" in _ctx_tail:
                     _input_label = "Describe your data (optional):"
                     _submit_label = "Submit description"
@@ -723,6 +918,108 @@ else:
                             st.rerun(scope="app")
                     with col_revert:
                         if st.button("Revert to original fit", type="primary", width="stretch"):
+                            req.response = ""
+                            req.event.set()
+                            st.session_state.pop("_feedback_preview_images", None)
+                            st.session_state.pop("_code_review_files", None)
+                            st.rerun(scope="app")
+                # Fan-out launch confirmation: two clear buttons (Launch sends
+                # "y", Cancel sends "no" — matching _confirm_fanout's parsing),
+                # no text area (there is nothing to edit, only launch/abort).
+                elif _is_fanout_confirm:
+                    # Anchor so theme.py can force Cancel/Launch to identical
+                    # box size (equal columns fix width; this fixes height too).
+                    st.markdown(
+                        '<span class="fanout-actions-anchor"></span>',
+                        unsafe_allow_html=True,
+                    )
+                    col_cancel, col_go = st.columns(2)
+                    with col_cancel:
+                        if st.button("Cancel", type="secondary", width="stretch"):
+                            req.response = "no"
+                            req.event.set()
+                            st.session_state.pop("_feedback_preview_images", None)
+                            st.session_state.pop("_code_review_files", None)
+                            st.rerun(scope="app")
+                    with col_go:
+                        if st.button("🔀 Launch parallel analysis", type="primary",
+                                     width="stretch"):
+                            req.response = "y"
+                            req.event.set()
+                            st.session_state.pop("_feedback_preview_images", None)
+                            st.session_state.pop("_code_review_files", None)
+                            st.rerun(scope="app")
+                # Best-of-N review: a radio over the candidates (scales to any N)
+                # + "Use selected" / "Accept judge's pick". Sends the chosen
+                # index as the bare digit _get_bestofn_join_approval parses, or
+                # "" to accept the pick — identical to the text-box contract.
+                elif _bestofn_data:
+                    _cands, _pick = _bestofn_data
+                    _opts = [c["idx"] for c in _cands]
+                    _labels = {c["idx"]: c["label"] for c in _cands}
+                    _default = _opts.index(_pick) if _pick in _opts else 0
+                    _choice = st.radio(
+                        "Select the candidate to lock:",
+                        _opts, index=_default,
+                        format_func=lambda i: _labels.get(i, f"Candidate {i}"),
+                        key="bestofn_choice",
+                    )
+                    # Pin both action buttons to equal height/shape (theme.py);
+                    # the secondary "Accept" otherwise renders taller than the
+                    # primary "Use selected".
+                    st.markdown(
+                        '<span class="bestofn-actions-anchor"></span>',
+                        unsafe_allow_html=True,
+                    )
+                    col_use, col_pick = st.columns(2)
+                    with col_use:
+                        if st.button("Use selected", type="primary", width="stretch"):
+                            req.response = str(_choice)
+                            req.event.set()
+                            st.session_state.pop("_feedback_preview_images", None)
+                            st.session_state.pop("_code_review_files", None)
+                            st.rerun(scope="app")
+                    with col_pick:
+                        if st.button(f"Accept judge's pick (Candidate {_pick})",
+                                     type="secondary", width="stretch"):
+                            req.response = ""
+                            req.event.set()
+                            st.session_state.pop("_feedback_preview_images", None)
+                            st.session_state.pop("_code_review_files", None)
+                            st.rerun(scope="app")
+                # Plan best-of-N selection: radio over candidate plans. The
+                # summary cards are already visible in the context box above;
+                # full per-candidate HTML reports live in plan_candidates/.
+                # Sends a bare digit (override) or "" (accept judge's pick) —
+                # the get_candidate_selection contract.
+                elif _plan_cand_data:
+                    _pcands, _ppick = _plan_cand_data
+                    _popts = [c["idx"] for c in _pcands]
+                    _plabels = {c["idx"]: c["label"] for c in _pcands}
+                    _pdefault = _popts.index(_ppick) if _ppick in _popts else 0
+                    _pchoice = st.radio(
+                        "Select the plan candidate to proceed with:",
+                        _popts, index=_pdefault,
+                        format_func=lambda i: _plabels.get(i, f"Candidate {i}"),
+                        key="plan_cand_choice",
+                    )
+                    st.markdown(
+                        '<span class="bestofn-actions-anchor"></span>',
+                        unsafe_allow_html=True,
+                    )
+                    col_puse, col_ppick = st.columns(2)
+                    with col_puse:
+                        if st.button("Use selected plan", type="primary",
+                                     width="stretch"):
+                            req.response = str(_pchoice)
+                            req.event.set()
+                            st.session_state.pop("_feedback_preview_images", None)
+                            st.session_state.pop("_code_review_files", None)
+                            st.rerun(scope="app")
+                    with col_ppick:
+                        if st.button(f"Accept judge's pick (Candidate {_ppick})",
+                                     type="secondary", width="stretch",
+                                     key="plan_cand_accept"):
                             req.response = ""
                             req.event.set()
                             st.session_state.pop("_feedback_preview_images", None)
@@ -991,7 +1288,7 @@ else:
                     # rerun, which re-evaluates the rglob below and shows
                     # any newly-created files.
                     if st.button("🔄 Refresh", key="files_refresh_btn",
-                                 use_container_width=True,
+                                 width="stretch",
                                  help="Re-scan the session directory for new files."):
                         st.rerun()
     
@@ -1031,7 +1328,7 @@ else:
                                 if st.button(
                                     f"{icon}  {display_name}  ({size})",
                                     key=f"fbtn_{f.relative_to(session_path)}",
-                                    use_container_width=True,
+                                    width="stretch",
                                     type=btn_type,
                                     help=f.name,
                                 ):

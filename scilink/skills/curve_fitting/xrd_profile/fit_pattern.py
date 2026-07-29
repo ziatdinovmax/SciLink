@@ -35,6 +35,7 @@ from scipy.optimize import curve_fit
 from scipy.signal import find_peaks
 
 from ..._shared._spec import ToolSpec
+from ..._shared._quality_metrics import peak_region_r2
 from .background import fit_background
 
 _logger = logging.getLogger(__name__)
@@ -59,7 +60,7 @@ TOOL_SPEC = ToolSpec(
         "background='snip', snip_iterations='auto', prominence_frac=0.02, "
         "max_peaks=30, min_distance_deg=0.15, init_fwhm_deg=0.2, "
         "center_leeway_deg=0.3, max_fwhm_deg=3.0, "
-        "peak_shape='split_pseudo_voigt') -> dict"
+        "peak_shape='split_pseudo_voigt', fit_range=None) -> dict"
     ),
     parameters={
         "exp_two_theta": {"type": "list[float]", "description": "Experimental 2-theta grid (degrees)."},
@@ -77,18 +78,36 @@ TOOL_SPEC = ToolSpec(
         "center_leeway_deg": {"type": "float", "description": "Each center may move +/- this much during the fit (degrees). Default 0.3."},
         "max_fwhm_deg": {"type": "float", "description": "Upper bound on fitted FWHM (degrees). Default 3.0."},
         "peak_shape": {"type": "str", "description": "'split_pseudo_voigt' (default) fits one extra width per peak to capture axial-divergence asymmetry — markedly lower residual on strong sharp lab-CuKa peaks, and it degenerates to symmetric when the data is symmetric (so it generalises safely). 'pseudo_voigt' forces a symmetric profile (fewer parameters; use only if asymmetry is known absent, e.g. synchrotron data)."},
+        "fit_range": {"type": "[float, float] | None", "description": "Restrict the analysis to a 2-theta window [lo, hi] (degrees); None (default) uses the whole pattern. Pass this to EXCLUDE a region that corrupts the fit — most often a steep low-angle air-scatter / beamstop upturn below ~5-6 deg, which makes SNIP background overshoot and starves prominence-based peak detection (symptom: only 1-2 peaks detected and a high R-squared on a near-empty fit). Also use it to exclude a detector artifact or a contaminant peak. Channels outside the window are excluded from background, detection, and the fit, and are marked as matched (zero residual) in the returned full-length arrays. Detection/fit/scores then behave as if the data were cropped, but the returned arrays stay the input length so downstream residual diagnostics still run."},
     },
     required=["exp_two_theta", "exp_intensity"],
     returns=(
         "dict with 'r_squared' (GLOBAL, over the whole corrected pattern), "
-        "'residual_rms_over_noise' (global residual RMS / estimated point "
-        "noise — the verifier's key statistic; < ~3 is clean), 'n_peaks', "
+        "'peak_region_r2' (R² over only the channels carrying diffracted "
+        "intensity — report this as the gate metric; a low global R² with a high "
+        "peak_region_r2 means a low-SNR pattern whose peaks are well fit, while a "
+        "low peak_region_r2 means real reflections are mis/un-fit), "
+        "'n_signal_points', 'residual_rms_over_noise' (global residual RMS / "
+        "estimated point noise — the verifier's key statistic; < ~3 is clean), "
+        "'max_abs_residual_over_noise' (the WORST single local misfit in noise "
+        "units — the complement of the averaged R²/peak_region_r2/RMS, which hide "
+        "a localized error such as a mis-shaped sharp apex on a high-dynamic-range "
+        "pattern. Read it AGAINST residual_rms_over_noise: much larger than the RMS "
+        "= the misfit is localized -> look at the residual figure there. Do NOT "
+        "use an absolute threshold: its scale rises with dynamic range, so a large "
+        "value is expected on very sharp intense peaks, NOT a verdict — the figure "
+        "decides accept (irreducible apex) vs refine (unmodelled feature)), "
+        "'n_peaks', "
         "'peaks' (list of dicts: center, fwhm (mean width; for Scherrer/W-H), "
         "amplitude (height), area, eta, sorted by 2-theta; split mode adds "
         "fwhm_left, fwhm_right, and asymmetry=(fwhm_right-fwhm_left)/sum), "
         "'peak_centers' (the centers actually fit — feed back as the locked "
-        "list for the next series frame), 'intensity_corrected', 'fit_curve' "
-        "(model evaluated on the full grid; use for the visualization), "
+        "list for the next series frame); when fit_range was used, 'fit_range' "
+        "(the kept window); 'intensity_corrected', 'fit_curve' (model on the "
+        "BACKGROUND-SUBTRACTED scale), 'fit_curve_raw' (model on the RAW scale = "
+        "fit_curve + background; SAVE THIS as the fit overlay / fit.npy so it "
+        "matches the raw data — do NOT save fit_curve, which plotted against raw "
+        "data makes a good fit look collapsed when the background is large), "
         "'background_method', 'peak_shape'."
     ),
     when_to_use=(
@@ -181,16 +200,36 @@ def fit_pattern(
     center_leeway_deg: float = 0.3,
     max_fwhm_deg: float = 3.0,
     peak_shape: str = "split_pseudo_voigt",
+    fit_range: Optional[Sequence[float]] = None,
 ) -> dict[str, Any]:
     if peak_shape not in ("split_pseudo_voigt", "pseudo_voigt"):
         raise ValueError(
             f"peak_shape must be 'split_pseudo_voigt' or 'pseudo_voigt'; got {peak_shape!r}")
-    x = np.asarray(exp_two_theta, dtype=float)
-    y = np.asarray(exp_intensity, dtype=float)
-    if x.shape != y.shape:
+    x_full = np.asarray(exp_two_theta, dtype=float)
+    y_full = np.asarray(exp_intensity, dtype=float)
+    if x_full.shape != y_full.shape:
         raise ValueError("exp_two_theta and exp_intensity must have the same length")
-    if x.size < 10:
+    if x_full.size < 10:
         raise ValueError("pattern too short to fit")
+
+    # fit_range excludes 2-theta channels OUTSIDE [lo, hi] from background
+    # subtraction, peak detection, and the fit — so a steep low-angle air-scatter
+    # / beamstop upturn (which makes SNIP overshoot and starves prominence-based
+    # detection) cannot corrupt the analysis. Cropping happens BEFORE background
+    # because SNIP itself fails on the raw upturn. The returned length-N arrays
+    # are padded back to the full input grid with the excluded region marked as
+    # matched (zero residual), so the verifier's residual diagnostics still run.
+    fit_mask = None
+    if fit_range is not None:
+        lo, hi = float(fit_range[0]), float(fit_range[1])
+        fit_mask = (x_full >= lo) & (x_full <= hi)
+        if int(fit_mask.sum()) < 10:
+            raise ValueError(
+                f"fit_range {(lo, hi)} keeps < 10 points; widen it or drop it")
+        x = x_full[fit_mask]
+        y = y_full[fit_mask]
+    else:
+        x, y = x_full, y_full
     step = float(np.median(np.diff(x)))
 
     centers_locked = (
@@ -258,6 +297,32 @@ def fit_pattern(
         best["background_method"] = f"snip(iterations={best.pop('_iters')})"
     else:
         raise ValueError(f"Unknown background: {background!r}")
+
+    if fit_mask is not None:
+        # Pad the length-N arrays back to the full input grid. Outside the window
+        # set BOTH intensity_corrected and fit_curve to 0, so a downstream
+        # raw-scale reconstruction (fit_raw = fit_curve + (intensity -
+        # intensity_corrected)) returns the raw data there -> zero residual; the
+        # excluded region is "matched", contributing nothing to the verifier's
+        # residual diagnostics. Scores (r_squared, peak_region_r2, residual) stay
+        # window-only. 'fit_range' records the kept window.
+        def _pad(vals):
+            full = np.zeros(x_full.shape[0], dtype=float)
+            full[fit_mask] = np.asarray(vals, dtype=float)
+            return [float(v) for v in full]
+        best["intensity_corrected"] = _pad(best["intensity_corrected"])
+        best["fit_curve"] = _pad(best["fit_curve"])
+        best["fit_range"] = [float(fit_range[0]), float(fit_range[1])]
+
+    # Raw-scale model = corrected model + the background that was subtracted
+    # (background = input intensity - corrected intensity). SAVE THIS as the fit
+    # overlay, NOT fit_curve: fit_curve is on the background-subtracted scale, so
+    # plotting it against the RAW data makes a good fit look collapsed (peaks at a
+    # fraction of height, gaps dropping to ~0) on patterns with a large
+    # background. Returning it ready-made removes that reconstruction error.
+    _ic = np.asarray(best["intensity_corrected"], dtype=float)
+    _fc = np.asarray(best["fit_curve"], dtype=float)
+    best["fit_curve_raw"] = [float(v) for v in (_fc + (y_full - _ic))]
 
     return best
 
@@ -340,6 +405,24 @@ def _fit_corrected(
     ss_tot = float(np.sum((ycorr - ycorr.mean()) ** 2))
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
     rms_over_noise = float(np.sqrt(np.mean(resid ** 2)) / noise)
+    # Worst LOCAL misfit, in noise units. The global R² / peak_region_r2 / RMS
+    # all AVERAGE over the pattern, so a localized but severe error — a mis-shaped
+    # sharp, intense apex on a high-dynamic-range pattern — is invisible to them
+    # (it scores ~0.999 while the apex residual is tens of sigma). This is the
+    # complementary signal: a 3-point-smoothed (single-channel spikes ignored)
+    # max |residual| / noise. Threshold-free: high here with a high R²/region
+    # means a localized shape misfit, not a clean fit. No tuned constants.
+    if resid.size >= 3:
+        smoothed = np.convolve(resid, np.ones(3) / 3.0, mode="same")
+    else:
+        smoothed = resid
+    max_resid_over_noise = float(np.max(np.abs(smoothed)) / noise)
+    # Peak-region R²: R² over the channels carrying diffracted intensity, so a
+    # correct fit of a weak/noisy pattern is not scored down by the noise-only
+    # background channels (global R² is kept too). The corrected pattern is fit
+    # about zero, so the baseline is zero. Equals the global R² on a high-SNR
+    # pattern and does NOT rescue a fit that misses real reflections.
+    region = peak_region_r2(x, ycorr, fit_curve, baseline=np.zeros_like(ycorr))
 
     stride = 5 if split else 4
     peaks = []
@@ -366,7 +449,10 @@ def _fit_corrected(
 
     return {
         "r_squared": float(r2),
+        "peak_region_r2": float(region["peak_region_r2"]),
+        "n_signal_points": int(region["n_signal_points"]),
         "residual_rms_over_noise": rms_over_noise,
+        "max_abs_residual_over_noise": max_resid_over_noise,
         "n_peaks": len(centers),
         "peaks": peaks,
         "peak_centers": [p["center"] for p in peaks],

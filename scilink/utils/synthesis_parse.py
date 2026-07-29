@@ -82,3 +82,26 @@ def salvage_synthesis_fields(raw_text: str) -> Optional[dict]:
         if arr is not None:
             recovered[key] = arr
     return recovered
+
+
+def salvage_synthesis_from_response(response) -> Optional[dict]:
+    """Salvage synthesis fields directly from a raw model response object.
+
+    Extracts the text (``.text`` / ``.content`` / ``.choices[0].message.content``)
+    then delegates to :func:`salvage_synthesis_fields`. This mirrors
+    ``BaseAnalysisAgent._salvage_synthesis_fields`` for use by the standalone
+    synthesis CONTROLLERS, which do not inherit that method. Returns ``None`` on
+    any extraction failure or unrecoverable narrative.
+    """
+    try:
+        if hasattr(response, "text"):
+            raw = response.text
+        elif hasattr(response, "content"):
+            raw = response.content
+        elif getattr(response, "choices", None):
+            raw = response.choices[0].message.content
+        else:
+            raw = str(response)
+    except Exception:  # noqa: BLE001 - any odd response shape -> no salvage
+        return None
+    return salvage_synthesis_fields(raw or "")

@@ -247,6 +247,32 @@ class HTMLReportGenerator:
         </div>
         """
 
+    def generate_single_plan(self, plan: Dict[str, Any], output_path: str,
+                             title: str = "Candidate Plan"):
+        """Render ONE plan dict (not the session history) to a standalone HTML
+        report — used for best-of-N candidate reports, where each candidate
+        gets its own persisted page under ``plan_candidates/``."""
+        content_html = "".join(
+            self._render_experiment(exp, x + 1)
+            for x, exp in enumerate(plan.get('proposed_experiments', []))
+        )
+        html_content = f"""
+        <!DOCTYPE html><html><head><meta charset="UTF-8"><title>{html.escape(title)}</title>{self._get_css()}</head>
+        <body><div class="container">
+            <header>
+                <h1>🔭 {html.escape(title)}</h1>
+                <div class="objective"><strong>Objective:</strong> {html.escape(self.state.get('objective', '') or '')}</div>
+            </header>
+            <div class="step">
+                <div class="step-header"><span class="badge plan">EXPERIMENTAL STRATEGY</span></div>
+                {content_html}
+            </div>
+            <footer>{self.generated_by}</footer>
+        </div></body></html>
+        """
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+
     def generate(self, output_path: str):
         date_str = self.state.get('start_time', datetime.now().isoformat())
         

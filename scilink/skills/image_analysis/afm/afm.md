@@ -59,6 +59,17 @@ Record the new pixel size (nm/px) in the analysis state; all later
 length-scale measurements must use it. When displaying, preserve
 true aspect ratio — do not stretch images to fill subplot shapes.
 
+**Defects in a periodic self-assembly (honeycomb / lattice of
+molecules, proteins, particles):** once the image is row-aligned,
+leveled and on square pixels (steps 1–2 above), the registered tool
+`fft_defect_map` (`scilink.skills._shared.fft_defect`) locates point
+defects — both protrusions (bright/`excess`) and missing units
+(`deficit` vacancies) — by reconstructing the perfect lattice and
+mapping null-gated residual anomalies. It needs that preprocessing
+done first: it does **no** leveling or resampling, and a tilted or
+anisotropic input gives wrong geometry. Pass the square-pixel size in
+nm. Read `pattern_period_nm` for the self-assembly lattice parameter.
+
 **3. Intensity is physical — track the mapping.**
 AFM intensity is not arbitrary. It is height (nm), voltage (V),
 phase (deg), current (A), etc. Whenever the image is stored or

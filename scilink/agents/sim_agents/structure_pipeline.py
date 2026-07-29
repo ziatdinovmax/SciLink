@@ -271,9 +271,10 @@ class StructurePipeline:
             ``structure_class`` skill when not supplied (and ``structure_class``
             is set).
         output_format : str, optional
-            Structure file format to request (``POSCAR`` / ``xyz`` / ``pdb`` / ...).
+            Structure file format to request (``extxyz`` / ``xyz`` / ``pdb`` / ...).
             Defaults to the ``output_format`` frontmatter of the ``structure_class``
-            skill, else ``POSCAR``.
+            skill, else the engine-neutral ``extxyz`` (portable coordinates; the
+            engine-native input is written downstream by the engine step).
         constraints : str, optional
             A build-constraints block appended to the generation request (e.g. from
             ``StructureSpec.as_constraints_text()`` — target size / periodicity /
@@ -306,7 +307,11 @@ class StructurePipeline:
 
         if output_format is None and structure_class is not None:
             output_format = self._load_output_format(structure_class)
-        output_format = output_format or "POSCAR"
+        # Engine-neutral default: structure generation emits portable coordinates
+        # (extended XYZ carries cell + PBC); the engine-native input is written
+        # downstream by the engine step. Per-class skills may override via their
+        # output_format frontmatter (xyz for isolated molecules, pdb for biomolecules).
+        output_format = output_format or "extxyz"
         request = f"{user_request}. Save the structure in {output_format} format."
         if constraints:
             request += "\n\n" + constraints

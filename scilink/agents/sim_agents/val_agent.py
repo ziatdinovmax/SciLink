@@ -136,7 +136,7 @@ class StructureValidatorAgent:
             self.logger.warning(f"Could not parse structure for stats: {e}")
             return ""
 
-        lines = ["", "## STRUCTURE STATS (computed from POSCAR — verify these against expectations):"]
+        lines = ["", "## STRUCTURE STATS (computed from the structure file — verify these against expectations):"]
 
         syms = atoms.get_chemical_symbols()
         comp = Counter(syms)

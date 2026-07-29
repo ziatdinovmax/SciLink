@@ -61,12 +61,11 @@ SciLink provides three complementary agent systems that cover the full scientifi
 ```bash
 pip install scilink
 
-# With web UI
-pip install scilink[ui]
-
 # With simulation dependencies (ASE, atomate2, etc.)
 pip install scilink[sim]
 ```
+
+The web UI (`scilink ui`) is included in the default installation.
 
 The analysis agents work without additional dependencies, but installing Meta's [Segment Anything Model](https://github.com/facebookresearch/segment-anything) (SAM) enables more advanced particle and grain segmentation. SAM is not available on PyPI and must be installed from source:
 
@@ -115,8 +114,6 @@ scilink analyze --data ./sample.tif --metadata ./metadata.json
 ```bash
 scilink ui
 ```
-
-Requires `pip install scilink[ui]`.
 
 ### MCP Server
 
@@ -179,6 +176,9 @@ Connect external MCP servers to extend SciLink with additional tools:
 ```bash
 # Python MCP server (e.g., arXiv paper search)
 scilink analyze --mcp stdio:arxiv:python,-m,arxiv_mcp_server,--storage-path,/tmp/papers
+
+# Remote streamable-HTTP server (e.g., a hosted lab platform with token auth)
+scilink analyze --mcp mcp_config.json   # {"url": "...", "transport": "http", "headers": {...}}
 ```
 
 Programmatically:
@@ -189,9 +189,17 @@ tool_count = orchestrator.connect_mcp_server(
     server_name="arxiv",
     command=["python", "-m", "arxiv_mcp_server", "--storage-path", "/tmp/papers"]
 )
+
+# or a remote server over streamable HTTP with bearer-token auth
+tool_count = orchestrator.connect_mcp_server(
+    server_name="lab-platform",
+    url="https://mcp.example.com/mcp",
+    transport="http",
+    headers={"Authorization": f"Bearer {os.environ['LAB_PLATFORM_API_KEY']}"},
+)
 ```
 
-In the **web UI**, go to the **Tools** tab > **MCP Servers** section, select a transport (stdio/SSE), enter the server name and command, and click **Connect**.
+In the **web UI**, go to the **Tools** tab > **MCP Servers** section, select a transport (stdio/SSE/HTTP), enter the server name and command or URL (plus optional headers for authenticated servers), and click **Connect**.
 
 See [docs/mcp_client_integration.md](docs/mcp_client_integration.md) for the full MCP guide.
 

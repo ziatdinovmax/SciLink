@@ -37,12 +37,19 @@ def _unregister_subprocess(proc: subprocess.Popen) -> None:
 
 
 def kill_subprocesses_for_thread(tid: int) -> None:
-    """Terminate all subprocesses registered by a given thread.
+    """Terminate all subprocesses registered by a given thread — including
+    subprocesses of fan-out worker threads registered (via
+    ``log_context.register_worker``) as children of that thread, so a
+    best-of-N candidate's running script is also stopped.
 
     Safe to call from any thread (e.g. the Streamlit UI thread).
     """
+    from scilink.utils.log_context import effective_thread
     with _active_subprocesses_lock:
-        procs = list(_active_subprocesses.pop(tid, []))
+        target_tids = [t for t in _active_subprocesses
+                       if t == tid or effective_thread(t) == tid]
+        procs = [p for t in target_tids
+                 for p in _active_subprocesses.pop(t, [])]
     for proc in procs:
         try:
             proc.terminate()          # SIGTERM first
@@ -285,14 +292,25 @@ class ScriptExecutor:
         
         logging.info(f"ScriptExecutor initialized (timeout: {self.timeout}s)")
 
-    def execute_script(self, script_content: str, working_dir: str = None) -> dict:
+    def execute_script(self, script_content: str, working_dir: str = None,
+                       timeout: int | None = None) -> dict:
         """Execute a Python script.
 
         Thread-safe: the subprocess's CWD is set via ``Popen(cwd=...)`` and the
         caller's process CWD is never mutated, so concurrent calls from
         different threads do not race on a shared global.
+
+        Args:
+            script_content: Python source to execute.
+            working_dir: Directory to use as the subprocess's CWD (and where
+                the temp script file is written). Defaults to current CWD.
+            timeout: Per-call timeout in seconds. When ``None`` (the default),
+                uses ``self.timeout`` from construction. Callers that need an
+                adaptive-timeout escalation pattern pass the override here
+                without mutating shared executor state.
         """
-        logging.info("   Executing Python script...")
+        effective_timeout = self.timeout if timeout is None else timeout
+        logging.info(f"   Executing Python script (timeout: {effective_timeout}s)...")
 
         if working_dir:
             os.makedirs(working_dir, exist_ok=True)
@@ -318,11 +336,11 @@ class ScriptExecutor:
             # Register so OutputCapture.kill_subprocesses() can terminate it.
             _register_subprocess(proc)
             try:
-                stdout, stderr = proc.communicate(timeout=self.timeout)
+                stdout, stderr = proc.communicate(timeout=effective_timeout)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
-                return {"status": "error", "message": f"Script execution timed out after {self.timeout} seconds."}
+                return {"status": "error", "message": f"Script execution timed out after {effective_timeout} seconds."}
             finally:
                 _unregister_subprocess(proc)
 

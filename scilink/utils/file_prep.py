@@ -30,6 +30,7 @@ import ast
 import hashlib
 import json
 import re
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -69,6 +70,10 @@ decide):
   or `key = value` pairs, a units row) ABOVE the numeric data rows.
 - A MATLAB `.mat` (or `.npz`/HDF5) where some keys are arrays (data) and others
   are scalars/strings (metadata).
+- A pickled `.npy` object array wrapping a dict — some keys numeric arrays
+  (data), others scalars/strings (metadata). Load it with
+  `numpy.load(_PREP["input"], allow_pickle=True)` and unwrap the 0-d array
+  with `.item()`.
 - An HDF5/NeXus dataset carrying metadata in attributes alongside the array.
 - A `.tif`/`.tiff` carrying acquisition metadata in TIFF tags / ImageDescription
   (ImageJ `key=value` block or OME-XML) alongside the pixel array.
@@ -318,8 +323,16 @@ def _roundtrip_ok(original: Path, recon: Path) -> bool:
     ext = original.suffix.lower()
     try:
         if ext == ".npy":
-            return _members_equal(np.load(original, allow_pickle=True),
-                                  np.load(recon, allow_pickle=True))
+            a = np.load(original, allow_pickle=True)
+            b = np.load(recon, allow_pickle=True)
+            if (getattr(a, "dtype", None) == object
+                    or getattr(b, "dtype", None) == object):
+                # Pickled container: element-wise ndarray comparison would
+                # raise on dict members. Compare the unwrapped Python objects
+                # structurally instead.
+                return _pyobj_equal(_unwrap_object_array(a),
+                                    _unwrap_object_array(b))
+            return _members_equal(a, b)
         if ext == ".npz":
             a, b = np.load(original, allow_pickle=True), np.load(recon, allow_pickle=True)
             return set(a.files) == set(b.files) and all(
@@ -406,19 +419,263 @@ def _file_paths(input_path: Path, output_dir: Path) -> dict:
     """
     stem = re.sub(r"[^0-9A-Za-z_-]", "_", input_path.stem) or "input"
     key = hashlib.sha1(str(input_path.resolve()).encode()).hexdigest()[:8]
-    file_out = Path(output_dir) / f"{stem}_{key}"
+    file_out = (Path(output_dir) / f"{stem}_{key}").resolve()
     file_out.mkdir(parents=True, exist_ok=True)
     return {
-        "input": str(input_path),
+        # Resolved: the generated script executes with cwd=out_dir, where a
+        # relative input path would not resolve.
+        "input": str(input_path.resolve()),
         "out_dir": str(file_out),
         "metadata_out": str(file_out / f"{stem}_metadata.json"),
         "recon_out": str(file_out / f"{stem}_reconstructed{input_path.suffix}"),
     }
 
 
+# =============================================================================
+# Deterministic metadata-only split for pickled .npy containers (issue #380)
+#
+# Instrument headers routinely arrive as a dict saved via np.save — a 0-d
+# object array that allow_pickle=False cannot read, so it probes as
+# "unreadable" and the codegen split can never satisfy _verify (there is no
+# numerical data leg to write). When a DETERMINISTIC member scan proves the
+# container holds no data member, the split degenerates to "serialize the
+# container to the metadata JSON" — our own vetted code, no LLM, no
+# round-trip needed.
+#
+# Safety: the scan is code-computed (the model cannot hallucinate "no data
+# here"), and it is biased toward extraction — ANY numeric ndarray member,
+# regardless of size, disqualifies the metadata-only path and routes the file
+# through the normal codegen split. Burying real data in a metadata sidecar
+# is the expensive error; over-extracting a small axis vector is harmless.
+# =============================================================================
+
+# A plain Python list/tuple must carry at least this many numeric elements to
+# count as a DATA member. Small parameter tuples ([168, 168] grid dims, an
+# (x, y) position) are metadata; a stored spectrum/axis is data.
+_LIST_DATA_MIN_ELEMS = 32
+
+
+def _is_data_member(v) -> bool:
+    """True if a container member looks like numerical DATA rather than a
+    scalar/string/small-tuple metadata value. Extraction-biased: any numeric
+    ndarray qualifies regardless of size."""
+    if isinstance(v, np.ndarray):
+        return (v.dtype != object and np.issubdtype(v.dtype, np.number)
+                and v.ndim >= 1 and v.size > 0)
+    if isinstance(v, (list, tuple)) and v:
+        try:
+            arr = np.asarray(v)
+        except Exception:  # noqa: BLE001 - ragged/mixed → not a numeric block
+            return False
+        return (arr.dtype != object and np.issubdtype(arr.dtype, np.number)
+                and arr.size >= _LIST_DATA_MIN_ELEMS)
+    return False
+
+
+def _find_data_members(obj, _path: str = "") -> list:
+    """Recursively collect dotted paths of members that qualify as DATA."""
+    hits = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            p = f"{_path}.{k}" if _path else str(k)
+            if _is_data_member(v):
+                hits.append(p)
+            elif isinstance(v, (dict, list, tuple)):
+                # Recurse into lists too: a list judged non-data as a WHOLE
+                # (small, or ragged → object dtype) can still hold ndarray
+                # elements, which the any-size rule must catch.
+                hits.extend(_find_data_members(v, p))
+            elif isinstance(v, np.ndarray) and v.dtype == object:
+                hits.extend(_find_data_members(list(v.ravel()), p))
+    elif isinstance(obj, (list, tuple)):
+        # Also reached for a list member judged non-data as a whole; its
+        # elements get their own per-type judgment below.
+        for i, v in enumerate(obj):
+            p = f"{_path}[{i}]"
+            if _is_data_member(v):
+                hits.append(p)
+            elif isinstance(v, (dict, list, tuple)):
+                hits.extend(_find_data_members(v, p))
+            elif isinstance(v, np.ndarray) and v.dtype == object:
+                hits.extend(_find_data_members(list(v.ravel()), p))
+    elif _is_data_member(obj):
+        hits.append(_path or "<root>")
+    return hits
+
+
+def _unwrap_object_array(obj):
+    """Undo the object-array wrapper np.save puts around a Python object."""
+    if isinstance(obj, np.ndarray) and obj.dtype == object:
+        if obj.ndim == 0:
+            return obj.item()
+        if obj.size == 1:
+            return obj.ravel()[0]
+        return list(obj.ravel())
+    return obj
+
+
+def _load_pickled_container(path: Path):
+    """np.load(allow_pickle=True) with the conventional 0-d/1-element unwrap."""
+    return _unwrap_object_array(np.load(path, allow_pickle=True))
+
+
+def _pyobj_equal(a, b) -> bool:
+    """Structural equality for unpickled containers (dicts holding ndarrays
+    raise inside a naive ``==``); numeric leaves compare within tolerance."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        return set(a) == set(b) and all(_pyobj_equal(a[k], b[k]) for k in a)
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        return len(a) == len(b) and all(_pyobj_equal(x, y) for x, y in zip(a, b))
+    if isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
+        try:
+            return _members_equal(a, b)
+        except Exception:  # noqa: BLE001 - mixed/object dtypes
+            return False
+    if isinstance(a, float) and isinstance(b, float):
+        return bool(np.isclose(a, b, equal_nan=True))
+    return a == b
+
+
+def _jsonify_metadata(v):
+    """Total (never-raising) JSON coercion for header-dict values."""
+    if isinstance(v, dict):
+        return {str(k): _jsonify_metadata(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_jsonify_metadata(x) for x in v]
+    if isinstance(v, np.ndarray):
+        return _jsonify_metadata(v.tolist())
+    if isinstance(v, np.generic):
+        return v.item()
+    if isinstance(v, bytes):
+        return v.decode("utf-8", errors="replace")
+    if v is None or isinstance(v, (str, int, float, bool)):
+        return v
+    return str(v)
+
+
+def probe_pickled_npy(path, max_keys: int = 40) -> dict:
+    """Structural probe of a pickled object-array .npy (trusted local upload).
+
+    Unpickles the container — the same trust level as every other format the
+    upload probe parses — and reports its shape: container type, top-level
+    keys, and which members the deterministic scan classifies as DATA. Used
+    by the meta's ``_probe_file`` so codegen sees structure instead of
+    "unreadable", and by callers deciding whether the metadata-only split
+    applies. Raises on unpicklable input (caller handles).
+    """
+    container = _load_pickled_container(Path(path))
+    info = {"kind": "object_array", "container": type(container).__name__}
+    if isinstance(container, dict):
+        info["top_level_keys"] = [str(k) for k in list(container)[:max_keys]]
+    data_members = _find_data_members(container)
+    info["data_members"] = data_members[:max_keys]
+    info["metadata_only"] = not data_members
+    return info
+
+
+def split_pickled_metadata_only(input_path, paths: dict, logger=None):
+    """Deterministic, no-LLM split for a METADATA-ONLY pickled .npy container.
+
+    Eligibility (all code-computed): the file is a .npy that allow_pickle=False
+    rejects, it unpickles to a container, and :func:`_find_data_members` finds
+    NOTHING array-shaped in it. Then the container is serialized losslessly to
+    ``paths["metadata_out"]`` and a success result with ``data_path=None`` is
+    returned — the honest outcome the codegen contract cannot express (its
+    verifier requires a numerical data leg).
+
+    Returns the result dict, or ``None`` when the file is not eligible — the
+    caller then proceeds with the normal codegen split (which, per the
+    extraction bias, is ALWAYS the route for a container holding any array).
+    """
+    input_path = Path(input_path)
+    if input_path.suffix.lower() != ".npy":
+        return None
+    try:
+        np.load(input_path, mmap_mode="r", allow_pickle=False)
+        return None  # plain numeric array — a normal combined-split candidate
+    except ValueError:
+        pass  # object dtype → pickled container, continue
+    except Exception:
+        return None  # unreadable for other reasons → let the normal path report
+    try:
+        container = _load_pickled_container(input_path)
+    except Exception as e:  # noqa: BLE001
+        if logger:
+            logger.warning(f"📦 Pickled .npy could not be unpickled: {e}")
+        return None
+    data_members = _find_data_members(container)
+    if data_members:
+        if logger:
+            logger.info(
+                f"📦 Pickled container holds data member(s) "
+                f"{data_members[:5]} — routing through the codegen split."
+            )
+        return None
+    meta = _jsonify_metadata(container)
+    if not isinstance(meta, dict):
+        meta = {"value": meta}
+    if not meta:
+        return None  # empty container — nothing to emit, report via normal path
+    meta_out = Path(paths["metadata_out"])
+    meta_out.write_text(json.dumps(meta, indent=2, default=str))
+    json.loads(meta_out.read_text())  # self-check: valid JSON round-trip
+    if logger:
+        logger.info(f"✅ Metadata-only split (deterministic): {meta_out}")
+    return {
+        "status": "success",
+        "data_path": None,
+        "metadata_path": str(meta_out),
+        "attempts": 0,
+        "metadata_only": True,
+        "note": ("Metadata-only pickled container: no numerical data member "
+                 "found, so there is no data leg — the whole container was "
+                 "serialized to the metadata JSON."),
+    }
+
+
+# Extensions whose bytes are human-readable text worth showing the split LLM
+# verbatim. Binary containers (.npy/.npz/.h5/.mat/.tif) surface their metadata
+# structurally in the probe, so a "raw head" is meaningless for them.
+_TEXT_HEAD_EXTS = {".csv", ".tsv", ".dat", ".txt", ".asc", ".xy", ".prn"}
+_HEAD_MAX_LINES = 60
+_HEAD_MAX_CHARS = 4000
+
+
+def _raw_text_head(input_path: Path) -> str:
+    """First lines of a text-like file, verbatim, for the split prompt.
+
+    Lets the codegen LLM SEE the metadata/comment block and the column-name row
+    (which the structural probe omits), so the generated split can separate data
+    from metadata and preserve column names instead of writing the script blind.
+    Returns "" for binary/container formats (their metadata is in the probe) or
+    on read error. Capped by lines AND chars so the head stays small regardless
+    of file size — the LLM reads STRUCTURE here, never bulk data values."""
+    if input_path.suffix.lower() not in _TEXT_HEAD_EXTS:
+        return ""
+    try:
+        lines = []
+        with open(input_path, "r", errors="replace") as fh:
+            for _ in range(_HEAD_MAX_LINES):
+                ln = fh.readline()
+                if not ln:
+                    break
+                lines.append(ln.rstrip("\n"))
+        return "\n".join(lines)[:_HEAD_MAX_CHARS]
+    except OSError:
+        return ""
+
+
 def _build_prompt(probe, input_path: Path) -> str:
     probe_str = json.dumps(probe, indent=2, default=str) if probe else \
         f"(no probe) extension={input_path.suffix}, size={input_path.stat().st_size} bytes"
+    head = _raw_text_head(input_path)
+    if head:
+        probe_str += (
+            "\n\nRaw file head (first lines, verbatim — use it to locate the "
+            "metadata/comment block, the column-name row, and where the numeric "
+            "data starts, and to preserve column names; do NOT assume the data "
+            "continues in this exact form beyond the head):\n" + head
+        )
     return _PROMPT.format(probe=probe_str)
 
 
@@ -441,8 +698,9 @@ def _generate_split_script(prompt: str, model) -> tuple:
     if guard:
         return None, guard
     if "_PREP" not in script:
-        return None, ("script must read paths from the _PREP dict, not hardcode "
-                      "them — reference _PREP['input'/'out_dir'/'metadata_out'/'recon_out']")
+        return None, ("the split script must reference the runtime `_PREP` dict "
+                      "for every path — _PREP['input'/'out_dir'/'metadata_out'/"
+                      "'recon_out'] — with no literal path strings")
     return script, ""
 
 
@@ -521,6 +779,9 @@ def prepare_inputs(input_path, model, executor, output_dir, probe=None,
     """
     input_path = Path(input_path)
     paths = _file_paths(input_path, Path(output_dir))
+    det = split_pickled_metadata_only(input_path, paths, logger)
+    if det is not None:
+        return det
     base_prompt = _build_prompt(probe, input_path)
     result, _ = _prepare_one(input_path, paths, base_prompt, model, executor,
                              logger, max_retries)
@@ -573,15 +834,24 @@ def prepare_inputs_batch(input_paths, model, executor, output_dir, probes=None,
         probes = [None] * len(input_paths)
     output_dir = Path(output_dir)
 
+    results = [None] * len(input_paths)
+    n_codegens = n_reused = n_fallback = 0
+
+    # Metadata-only pickled containers are handled deterministically (no LLM,
+    # no clustering); everything else proceeds through the codegen machinery.
+    for i, p in enumerate(input_paths):
+        det = split_pickled_metadata_only(p, _file_paths(p, output_dir), logger)
+        if det is not None:
+            results[i] = {"file": str(p), "reused": False, **det}
+
     clusters: dict = {}
     for i, pr in enumerate(probes):
+        if results[i] is not None:
+            continue
         sig = _signature(pr)
         if sig is None:                       # no structural confidence → solo
             sig = ("__solo__", i)
         clusters.setdefault(sig, []).append(i)
-
-    results = [None] * len(input_paths)
-    n_codegens = n_reused = n_fallback = 0
 
     for idxs in clusters.values():
         first = idxs[0]
@@ -624,3 +894,45 @@ def prepare_inputs_batch(input_paths, model, executor, output_dir, probes=None,
             "n_fallback": n_fallback, "n_failed": n_failed,
         },
     }
+
+
+def stage_pairs_flat(results: list, flat_dir) -> dict:
+    """Stage a batch's verified (data, metadata) pairs into ONE flat directory
+    with stem-matched names, so a series consumer can ingest the whole batch as a
+    directory and pair each data file with its sidecar by stem.
+
+    The per-file split machinery writes each pair into its own collision-safe
+    subdir with mismatched stems (``<stem>_data.csv`` + ``<stem>_metadata.json``)
+    — correct for the split/verify step but unusable by the directory-based series
+    loader, which excludes ``.json`` as metadata and pairs sidecars by EXACT stem
+    (``spec_00.csv`` ↔ ``spec_00.json``). This copies (never moves — the originals
+    and their round-trip provenance stay intact) each successful pair to
+    ``flat_dir/<input_stem><data_suffix>`` + ``flat_dir/<input_stem>.json``, using
+    the ORIGINAL input filename as the stem (meaningful ``unit`` rows downstream)
+    and disambiguating only on collision. Failed splits are skipped.
+
+    Returns ``{"staged_dir": str, "pairs": [{"data", "metadata"}], "n": int}``.
+    """
+    flat = Path(flat_dir)
+    flat.mkdir(parents=True, exist_ok=True)
+    pairs: list = []
+    used: set = set()
+    for r in results or []:
+        if r.get("status") != "success":
+            continue
+        # data_path is None for a metadata-only split — no data leg to stage.
+        dp, mp = Path(r.get("data_path") or ""), Path(r.get("metadata_path") or "")
+        if not (dp.is_file() and mp.is_file()):
+            continue
+        base = re.sub(r"[^0-9A-Za-z_-]", "_", Path(r.get("file") or dp).stem) or "input"
+        stem, n = base, 1
+        while (stem in used or (flat / f"{stem}{dp.suffix}").exists()
+               or (flat / f"{stem}.json").exists()):
+            n += 1
+            stem = f"{base}_{n}"
+        used.add(stem)
+        data_dst, meta_dst = flat / f"{stem}{dp.suffix}", flat / f"{stem}.json"
+        shutil.copy2(dp, data_dst)
+        shutil.copy2(mp, meta_dst)
+        pairs.append({"data": str(data_dst), "metadata": str(meta_dst)})
+    return {"staged_dir": str(flat), "pairs": pairs, "n": len(pairs)}

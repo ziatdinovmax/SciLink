@@ -1,5 +1,10 @@
 ---
 description: VASP DFT input generation — INCAR parameter selection (functional, smearing, spin polarization, parallelization) and KPOINTS conventions for metals, semiconductors, slabs, molecules, and NEB calculations.
+# Engine-native coordinate file: VASP reads the structure from a separate POSCAR.
+# The agent writes it deterministically (via ASE, format below) from the generated
+# coordinates, so the LLM never transcribes positions and the file is guaranteed.
+structure_file: POSCAR
+structure_format: vasp
 detect:
   binaries: [vasp_std, vasp_gam, vasp_ncl, vasp]
   env_vars: [VASP_HOME, VASP_DIR]

@@ -1,12 +1,12 @@
 ---
-description: Condensed-phase / solvated-box structure generation — liquids, solutions, explicitly-solvated solutes, amorphous cells, and interfaces at a target density via Packmol (incl. pymatgen's wrapper) / OpenMM / mBuild / ASE, written as a periodic VASP5 POSCAR. For classical MD (LAMMPS, GROMACS, OpenMM).
-output_format: POSCAR
+description: Condensed-phase / solvated-box structure generation — liquids, solutions, explicitly-solvated solutes, amorphous cells, and interfaces at a target density via Packmol (incl. pymatgen's wrapper) / OpenMM / mBuild / ASE, written as engine-neutral extended XYZ. For classical MD (LAMMPS, GROMACS, OpenMM).
+output_format: extxyz
 ---
 ## Overview
 
 Build **periodic condensed-phase** systems for classical MD (LAMMPS, GROMACS, OpenMM): bulk
 liquids, solutions, explicitly-solvated solutes, amorphous cells, and liquid/solid interfaces.
-Output a periodic **POSCAR** (orthorhombic/cubic cell + all atoms). The goal is the right
+Output periodic **extended XYZ** (orthorhombic/cubic cell + PBC + all atoms). The goal is the right
 number of molecules at a realistic **density**, packed into a periodic box with no severe
 overlaps — a sound *initial* configuration that MD equilibration will relax.
 
@@ -35,22 +35,42 @@ rather than packed here. Pack explicitly here for generic liquids / solutions / 
 
 ## Implementation
 
-Prefer whatever is installed (the generation loop will fall back if an import is missing):
+Prefer whatever is installed (check the AVAILABLE LIBRARIES list in the prompt). For any
+**multi-component** box — solutions, ions in solvent, mixtures — strongly prefer a dedicated
+packing tool (Packmol, OpenMM, mBuild) over a hand-rolled placement loop: these enforce the
+minimum separation across **all** atom pairs, whereas ad-hoc loops routinely check only
+heavy-atom centres and let hydrogens of neighbouring molecules overlap. Reserve the ASE/numpy
+fallback for when no packing library is available.
 
-- **Packmol** — the de-facto packing tool. Drive it from Python via **pymatgen**
-  (`pymatgen.io.packmol.PackmolBoxGen`), which writes the Packmol input, runs it, and returns a
-  structure; or write a Packmol input file and call the `packmol` binary via `subprocess`
-  (place N copies per species with a `tolerance` ≈ 2.0 Å minimum separation).
+- **Packmol** — the de-facto packing tool, and the default choice for solvated / multi-component
+  boxes. Drive it from Python via **pymatgen** (`pymatgen.io.packmol.PackmolBoxGen`), which writes
+  the Packmol input, runs it, and returns a structure; or write a Packmol input file and call the
+  `packmol` binary via `subprocess` (place N copies per species with a `tolerance` ≈ 2.0 Å minimum
+  separation). Packmol checks every atom pair, so ions and solvent are packed without the
+  hydrogen-overlap clashes a manual loop produces.
 - **OpenMM `Modeller.addSolvent()`** (often with **PDBFixer**) — adds a water box + neutralizing
   ions in a few lines; convenient for solvating a solute.
 - **mBuild (MoSDeF)** — programmatic construction of complex / multi-component / polymeric boxes
   (`mbuild.fill_box`).
 - **ASE / numpy fallback** — build each molecule once (ASE / RDKit), then insert copies at random
-  positions/orientations into the cell, rejecting placements closer than a minimum distance.
+  positions/orientations into the cell, rejecting placements closer than a minimum distance. The
+  rejection test must compare **every atom** of the trial molecule (hydrogens included) against
+  **every** already-placed atom under the minimum image — checking only heavy-atom or
+  molecular-centre distances lets light atoms of neighbouring molecules interpenetrate. Wrap each
+  molecule into the cell as a rigid unit (shift by one reference atom's image), never per-atom
+  (`positions % L` applied atom-by-atom splits a molecule across the boundary).
 - **Cell & PBC:** set an orthorhombic/cubic `cell` and `pbc=True` sized to the target density.
-- **Output:** write a periodic POSCAR, e.g.
-  `ase.io.write("POSCAR", atoms, format="vasp", vasp5=True, direct=True)`, then print the exact
-  line `STRUCTURE_SAVED:POSCAR`.
+- **Output:** write engine-neutral periodic **extended XYZ** (carries the cell + PBC), e.g.
+  `ase.io.write("structure.extxyz", atoms, format="extxyz")`, then print the exact
+  line `STRUCTURE_SAVED:structure.extxyz`. Do not write a VASP POSCAR here — the engine-native
+  input (e.g. a LAMMPS data file) is produced by the downstream force-field / engine step.
+- **Components manifest (required):** also write `components.json` next to the structure, listing
+  each distinct species and its count **in the same order the atoms appear in the coordinate
+  file**, with a SMILES per species — e.g.
+  `{"components": [{"name": "water", "smiles": "O", "count": 500}, {"name": "Na+", "smiles":
+  "[Na+]", "count": 9}, {"name": "Cl-", "smiles": "[Cl-]", "count": 9}]}`. The downstream
+  force-field step needs this to know which molecule each atom belongs to (a packed box is only
+  coordinates); the component order and counts must match the packing exactly.
 
 ## Validation
 

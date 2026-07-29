@@ -151,7 +151,8 @@ class PeriodicDFTAgent:
 
     def _build_prompt(self, structure_content: str, request: str,
                       software: str,
-                      skill_sections: Optional[dict] = None) -> str:
+                      skill_sections: Optional[dict] = None,
+                      native_structure_file: Optional[str] = None) -> str:
         """
         Build the full prompt, injecting skill content if available.
 
@@ -207,6 +208,14 @@ class PeriodicDFTAgent:
             f"expects (e.g. INCAR + KPOINTS for VASP, qe.in for QE, "
             f"<name>.abi for ABINIT). Filenames are case-sensitive."
         )
+        if native_structure_file:
+            base += (
+                f"\n\nThe structure/coordinate file (`{native_structure_file}`) is "
+                f"written automatically from the structure above — do NOT emit "
+                f"`{native_structure_file}` yourself; generate only the remaining "
+                f"input files (calculation settings, k-points, etc.). The structure "
+                f"above is provided so you can choose those settings appropriately."
+            )
         if skill_parts:
             return "\n\n".join(skill_parts) + "\n\n---\n\n" + base
         return base
@@ -241,6 +250,41 @@ class PeriodicDFTAgent:
                 pass
 
         raise ValueError(f"Could not parse JSON from LLM response: {text[:200]}...")
+
+    @staticmethod
+    def _native_structure_spec(skill_state) -> tuple:
+        """(filename, ASE format) for the engine's separate coordinate file, as
+        declared in the skill frontmatter, or (None, None). Engines that embed
+        coordinates in their main input (e.g. QE) declare neither."""
+        meta = ((skill_state or {}).get("skill_sections") or {}).get("meta") or {}
+        return meta.get("structure_file"), meta.get("structure_format")
+
+    def _inject_native_structure(self, result: dict, structure_file: str,
+                                 skill_state) -> None:
+        """Write the engine-native coordinate file deterministically from the
+        generated structure (via ASE), overwriting any LLM-authored copy.
+
+        Structure generation emits portable coordinates (extended XYZ); the
+        engine's coordinate input (e.g. a VASP POSCAR) is produced here, exactly,
+        rather than relying on the LLM to transcribe positions. No-op for engines
+        whose skill declares no separate coordinate file (e.g. QE embeds the
+        geometry in its main input)."""
+        fname, fmt = self._native_structure_spec(skill_state)
+        if not (fname and fmt) or not isinstance(result.get("input_files"), dict):
+            return
+        try:
+            import io
+            from ase.io import read as _ase_read, write as _ase_write
+            atoms = _ase_read(structure_file)
+            buf = io.StringIO()
+            _ase_write(buf, atoms, format=fmt)
+            result["input_files"][fname] = buf.getvalue()
+            self.logger.info(
+                f"Wrote deterministic {fname} ({fmt}) from "
+                f"{os.path.basename(structure_file)}"
+            )
+        except Exception as e:
+            self.logger.warning(f"Could not write deterministic {fname}: {e}")
 
     def generate_inputs(self, structure_file: str,
                         request: str,
@@ -291,16 +335,19 @@ class PeriodicDFTAgent:
             }
 
         skill_sections = None
+        skill_state = None
         chosen_skill = skill if skill is not None else software
         if chosen_skill:
             skill_state = self._load_skill(chosen_skill)
             skill_sections = skill_state.get("skill_sections")
 
+        native_file, _ = self._native_structure_spec(skill_state)
         prompt = self._build_prompt(
             structure_content=structure_content,
             request=request,
             software=software,
             skill_sections=skill_sections,
+            native_structure_file=native_file,
         )
 
         try:
@@ -378,6 +425,9 @@ class PeriodicDFTAgent:
         except Exception as exc:
             # Syntax check is advisory — never block generation on it.
             self.logger.warning("input syntax check failed: %s", exc)
+
+        # Deterministic engine-native coordinate file (exact coordinates).
+        self._inject_native_structure(result, structure_file, skill_state)
 
         result["status"] = "success"
         result["software"] = software
@@ -489,16 +539,19 @@ class PeriodicDFTAgent:
         improvement_instructions = "\n".join(improvement_lines)
 
         skill_sections = None
+        skill_state = None
         chosen_skill = skill if skill is not None else software
         if chosen_skill:
             skill_state = self._load_skill(chosen_skill)
             skill_sections = skill_state.get("skill_sections")
 
+        native_file, _ = self._native_structure_spec(skill_state)
         base_prompt = self._build_prompt(
             structure_content=structure_content,
             request=request,
             software=software,
             skill_sections=skill_sections,
+            native_structure_file=native_file,
         )
 
         original_block = "\n\n".join(
@@ -542,6 +595,10 @@ class PeriodicDFTAgent:
                 "message": "No input_files in LLM response",
                 "raw_result": result,
             }
+
+        # Keep the engine-native coordinate file exact (overwrite any LLM copy)
+        # before writing the improved set to disk.
+        self._inject_native_structure(result, structure_file, skill_state)
 
         os.makedirs(output_dir, exist_ok=True)
         improved_paths = {}

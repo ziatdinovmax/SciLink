@@ -137,7 +137,7 @@ def _render_hpc_connection() -> None:
             if st.button(
                 "Disconnect",
                 key="sidebar_hpc_disconnect",
-                use_container_width=True,
+                width="stretch",
             ):
                 conn.disconnect()
                 st.session_state.hpc_connection = None
@@ -202,7 +202,7 @@ def _render_hpc_connection() -> None:
         if st.button(
             "Connect",
             disabled=not (hostname and username),
-            use_container_width=True,
+            width="stretch",
             key="sidebar_hpc_connect",
         ):
             profile = HPCProfile(
@@ -433,7 +433,7 @@ def render_sidebar() -> None:
                     if st.button(
                         "Resume Session",
                         disabled=not consent,
-                        use_container_width=True,
+                        width="stretch",
                         key="resume_session_btn",
                     ):
                         _r_embed_preset = st.session_state.get("cfg_embedding_preset", "")
@@ -523,7 +523,7 @@ def render_sidebar() -> None:
 
         # ── Quit button (always visible at bottom) ────────────
         st.divider()
-        if st.button("Quit App", use_container_width=True):
+        if st.button("Quit App", width="stretch"):
             # Stop any running agent thread
             task = st.session_state.get("chat_task")
             if task and task.is_running:
@@ -533,8 +533,13 @@ def render_sidebar() -> None:
                 if task.feedback_request is not None:
                     task.feedback_request.response = ""
                     task.feedback_request.event.set()
-            # Inject JS to replace the page with a goodbye message,
-            # then kill the server after a short delay.
+            # Inject JS to replace the page with a goodbye message, then kill the
+            # server after a short delay. Uses the (deprecated-in-1.58) iframed
+            # components.html on purpose: its <script> executes in an iframe, so
+            # window.parent.document.body reliably replaces the app page before
+            # SIGTERM. The st.html(unsafe_allow_javascript=True) replacement does
+            # not run this script in time, leaving the user on a dead-server
+            # connection error instead of the goodbye screen.
             import streamlit.components.v1 as components
             components.html(
                 '<script>'
@@ -1153,9 +1158,13 @@ def resume_session(
 def _reset_session() -> None:
     # Stop the agent thread if it's still running
     task = st.session_state.get("chat_task")
-    if task and task.is_running and task.feedback_request is not None:
-        task.feedback_request.response = ""
-        task.feedback_request.event.set()
+    if task and task.is_running:
+        task.stopped = True
+        if task.live_capture:
+            task.live_capture.request_stop()
+        if task.feedback_request is not None:
+            task.feedback_request.response = ""
+            task.feedback_request.event.set()
 
     # Disconnect MCP servers to avoid orphaned subprocesses
     agent = st.session_state.get("agent")

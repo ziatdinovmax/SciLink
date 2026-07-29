@@ -512,6 +512,24 @@ run 1000
 """
 
 
+VALID_CREATE_ATOMS_SCRIPT = """\
+units lj
+atom_style atomic
+boundary p p p
+lattice fcc 0.8442
+region box block 0 10 0 10 0 10
+create_box 1 box
+create_atoms 1 box
+mass 1 1.0
+velocity all create 1.44 87287 loop geom
+pair_style lj/cut 2.5
+pair_coeff 1 1 1.0 1.0 2.5
+fix 1 all nve
+timestep 0.005
+run 250
+"""
+
+
 # ─── Pytest Fixtures ─────────────────────────────────────────────────
 
 @pytest.fixture
@@ -541,6 +559,7 @@ def fixtures_dir(tmp_path):
         "valid_bio.lammps": VALID_BIOMOLECULAR_SCRIPT,
         "valid_ionic.lammps": VALID_IONIC_SCRIPT,
         "valid_slab.lammps": VALID_SLAB_SCRIPT,
+        "valid_create_atoms.lammps": VALID_CREATE_ATOMS_SCRIPT,
     }
     for name, content in valid_scripts.items():
         (script_dir / name).write_text(content)

@@ -289,9 +289,13 @@ def test_6_full_workflow(model_name: str):
         print("   ⚠️  Script did not use MPRester — model may have ignored the "
               "resolved block or rebuilt the structure from scratch. Inspect "
               f"{scripts[-1]}")
-    poscar = RUN_DIR / "POSCAR"
-    assert poscar.exists(), "POSCAR not produced"
-    print(f"   ✅ Workflow produced POSCAR at {poscar}")
+    # Structure generation emits engine-neutral coordinates (extended XYZ); the
+    # engine-native VASP inputs are written downstream. Assert a structure file
+    # was produced, format-agnostically, rather than a specific filename.
+    structs = (list(RUN_DIR.glob("*.extxyz")) + list(RUN_DIR.glob("*.xyz"))
+               + list(RUN_DIR.glob("*.cif")) + list(RUN_DIR.glob("POSCAR")))
+    assert structs, "no structure file produced"
+    print(f"   ✅ Workflow produced structure at {structs[0]}")
 
 
 # ---------------------------------------------------------------------------

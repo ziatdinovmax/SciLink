@@ -375,7 +375,7 @@ def _render_remote_file_picker(
                 key=f"_rfp_{key_prefix}_path_input",
                 label_visibility="collapsed",
             )
-            if st.form_submit_button("Go", use_container_width=True):
+            if st.form_submit_button("Go", width="stretch"):
                 if typed_path != st.session_state[PATH_KEY]:
                     st.session_state[PATH_KEY] = typed_path
                     st.rerun()
@@ -419,7 +419,7 @@ def _render_remote_file_picker(
                 if st.button(
                     f"📁 {name}/",
                     key=f"rfp_d_{key_prefix}_{cwd}_{name}",
-                    use_container_width=True,
+                    width="stretch",
                 ):
                     st.session_state[PATH_KEY] = full_path
                     st.rerun()
@@ -1001,7 +1001,7 @@ def _render_review_scripts() -> None:
 
     c_submit, c_back = st.columns(2)
     with c_back:
-        if st.button("← Back to configure", key="hpc_review_back", use_container_width=True):
+        if st.button("← Back to configure", key="hpc_review_back", width="stretch"):
             st.session_state.hpc_workflow_phase = "configure"
             st.rerun()
 
@@ -1010,7 +1010,7 @@ def _render_review_scripts() -> None:
             "🚀 Upload & Submit",
             type="primary",
             key="hpc_review_submit",
-            use_container_width=True,
+            width="stretch",
         ):
             conn = st.session_state.get("hpc_connection")
             sched = st.session_state.get("hpc_scheduler")
@@ -1209,7 +1209,7 @@ def _render_monitoring() -> None:
                 "📋 View Results",
                 type="primary",
                 key="mon_to_results",
-                use_container_width=True,
+                width="stretch",
             ):
                 st.session_state.hpc_workflow_phase = "results"
                 st.rerun()
@@ -1217,7 +1217,7 @@ def _render_monitoring() -> None:
             if st.button(
                 "🔄 New Simulation",
                 key="mon_new_sim",
-                use_container_width=True,
+                width="stretch",
             ):
                 st.session_state.hpc_workflow_phase = "configure"
                 st.rerun()
@@ -1396,12 +1396,12 @@ def _render_results() -> None:
     st.markdown("---")
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("🔄 New Simulation", key="res_new", use_container_width=True):
+        if st.button("🔄 New Simulation", key="res_new", width="stretch"):
             _cleanup_monitoring_state()
             st.session_state.hpc_workflow_phase = "configure"
             st.rerun()
     with c2:
-        if st.button("📡 Back to Monitor", key="res_to_mon", use_container_width=True):
+        if st.button("📡 Back to Monitor", key="res_to_mon", width="stretch"):
             st.session_state.hpc_workflow_phase = "monitoring"
             st.rerun()
 

@@ -48,13 +48,19 @@ def _make_controller():
 def _state_with_gate(metric: str = "figure_of_merit",
                      accept: float = 0.70,
                      hard_reject: float = 0.40,
-                     direction: str = "higher_is_better") -> dict:
+                     direction: str = "higher_is_better",
+                     physical_review: bool = False) -> dict:
+    # The synthetic-verdict short-circuit fires for WORKFLOW-scoring gates
+    # (physical_review=False) — their own scoring tool is the verification.
+    # figure_of_merit / mip_cost are such metrics, so default physical_review
+    # to False here.
     return {
         "quality_gate": QualityGate(
             metric=metric,
             accept_threshold=accept,
             hard_reject_threshold=hard_reject,
             direction=direction,
+            physical_review=physical_review,
         ),
     }
 
@@ -172,5 +178,26 @@ def test_r_squared_path_does_not_short_circuit():
     # No viz → existing R² path returns None (line 2304)
     verdict = ctrl._verify_fit_with_llm(
         state, {"fit_quality": {"r_squared": 0.95}, "visualization_bytes": None},
+    )
+    assert verdict is None
+
+
+def test_goodness_of_fit_nonR2_gate_does_not_short_circuit():
+    """A non-R² *goodness-of-fit* gate (physical_review=True, e.g.
+    peak_region_r2) must NOT take the workflow short-circuit — it runs the
+    LLM physics verifier like the R² path. The bypass is keyed on
+    physical_review, not on the metric name."""
+    ctrl = _make_controller()
+    state = {
+        "quality_gate": QualityGate(
+            metric="peak_region_r2", accept_threshold=0.85,
+            hard_reject_threshold=0.30,  # physical_review defaults True
+        )
+    }
+    # No viz → falls through to the existing verifier path and returns None,
+    # proving the workflow short-circuit did NOT fire (which would have
+    # returned a structured verdict regardless of viz).
+    verdict = ctrl._verify_fit_with_llm(
+        state, {"fit_quality": {"peak_region_r2": 0.40}, "visualization_bytes": None},
     )
     assert verdict is None

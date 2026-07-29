@@ -47,6 +47,9 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
     """
 
     MAX_SCRIPT_ATTEMPTS = 3
+    # Cumulative wall-clock budget for the custom-script retry
+    # loop (#358); falsy disables.
+    SCRIPT_LOOP_TIME_BUDGET_S = 900.0
 
     def __init__(self, *args,
                  output_dir: str = "preprocessing_output",
@@ -115,19 +118,22 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
         
         signal = stats["p99"]
         noise = stats["p50"]
-        
-        # Avoid division by zero if median is 0
-        if noise > 1e-9:
-            snr = (signal - noise) / noise
-            reasoning = f"Calculated as (P99 - P50) / P50: ({signal:.2e} - {noise:.2e}) / {noise:.2e}"
+
+        # Zero-only division guards, on purpose: an absolute epsilon here
+        # (1e-9) declares real but tiny-scale data (amperes-scale STS,
+        # normalized signals) "signalless" — the same absolute-threshold
+        # trap as the unmixer mask (#381). |P50| so a signed-signal median
+        # scales the ratio without flipping its sign.
+        if abs(noise) > 0:
+            snr = (signal - noise) / abs(noise)
+            reasoning = f"Calculated as (P99 - P50) / |P50|: ({signal:.2e} - {noise:.2e}) / {abs(noise):.2e}"
+        elif stats["std"] > 0:
+            # Fallback if median is exactly zero: use std dev
+            snr = signal / stats["std"]
+            reasoning = f"Calculated as P99 / Std (P50 was zero): {signal:.2e} / {stats['std']:.2e}"
         else:
-            # Fallback if median is zero: use std dev (less ideal but won't crash)
-            if stats["std"] > 1e-9:
-                snr = signal / stats["std"]
-                reasoning = f"Calculated as P99 / Std (P50 was zero): {signal:.2e} / {stats['std']:.2e}"
-            else:
-                snr = 0.0 # No signal or no variance
-                reasoning = "SNR is 0.0 (no variance or signal)"
+            snr = 0.0  # truly constant data
+            reasoning = "SNR is 0.0 (no variance or signal)"
 
         # Cap SNR at a reasonable max to avoid infinity/huge numbers
         snr = min(max(snr, 0.0), 1000.0) 
@@ -299,6 +305,30 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
                 "axis_spec.signal_is_nonnegative is False — preserving signed values."
             )
 
+        # 2b. Spatial binning (the SIZE GUARD): mean-bin the two spatial axes
+        # by the strategy's factor so downstream decomposition / per-pixel
+        # fitting scale with the science, not the sensor. Spectra are never
+        # binned; skipped when the leading axes are not spatial.
+        bin_f = int(strategy.get('spatial_bin_factor', 1) or 1)
+        if bin_f > 1 and leading_axes_are_spatial:
+            h0, w0, e0 = data_to_process.shape
+            hb, wb = (h0 // bin_f) * bin_f, (w0 // bin_f) * bin_f
+            data_to_process = data_to_process[:hb, :wb].reshape(
+                hb // bin_f, bin_f, wb // bin_f, bin_f, e0).mean(axis=(1, 3))
+            self.logger.info(
+                f"Applied {bin_f}x{bin_f} spatial mean-binning (size guard): "
+                f"({h0}, {w0}, {e0}) -> {data_to_process.shape}; "
+                "spectra unmodified")
+        elif bin_f > 1:
+            self.logger.info(
+                "spatial_bin_factor > 1 ignored: leading axes are not spatial.")
+        else:
+            # Log the no-binning decision too — otherwise "guard chose 1" and
+            # "preprocessing never ran" are indistinguishable in a session log.
+            self.logger.info(
+                f"Size guard: spatial_bin_factor=1 (no binning) for shape "
+                f"{data_to_process.shape}.")
+
         # 3. Calculate Masking strategy
         if strategy.get('apply_masking', False):
             total_intensities = np.sum(data_to_process, axis=2) # (h, w)
@@ -353,7 +383,7 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
         
         prompt = CUSTOM_PREPROCESSING_SCRIPT_INSTRUCTIONS.format(
             instruction=instruction,
-            stats_json=json.dumps(stats, indent=2),
+            stats_json=json.dumps(stats, indent=2, default=str),
             input_filename=input_filename
         )
         
@@ -371,7 +401,20 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
         last_error = "No script generated yet."
         custom_script = None
 
+        # Cumulative wall-clock budget across ALL attempts (#358): each
+        # attempt can run up to the executor timeout, so the attempt cap
+        # alone does not bound total time.
+        import time as _time
+        _t0 = _time.monotonic()
+
         for attempt in range(1, self.MAX_SCRIPT_ATTEMPTS + 1):
+            if (attempt > 1 and self.SCRIPT_LOOP_TIME_BUDGET_S
+                    and _time.monotonic() - _t0 > self.SCRIPT_LOOP_TIME_BUDGET_S):
+                last_error = (f"custom-script wall-clock budget exceeded "
+                              f"({int(self.SCRIPT_LOOP_TIME_BUDGET_S)}s) "
+                              f"after {attempt - 1} attempt(s)")
+                self.logger.warning(last_error)
+                break
             try:
                 if attempt == 1:
                     self.logger.info(f"Attempt {attempt}/{self.MAX_SCRIPT_ATTEMPTS}: Generating initial script...")
@@ -491,6 +534,9 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
     """
     
     MAX_SCRIPT_ATTEMPTS = 5
+    # Cumulative wall-clock budget for the custom-script retry
+    # loop (#358); falsy disables.
+    SCRIPT_LOOP_TIME_BUDGET_S = 900.0
     MAX_MODEL_ATTEMPTS = 5
 
     def __init__(self, *args,
@@ -782,7 +828,7 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
         
         prompt = CUSTOM_PREPROCESSING_SCRIPT_1D_INSTRUCTIONS.format(
             instruction=instruction,
-            stats_json=json.dumps(stats, indent=2),
+            stats_json=json.dumps(stats, indent=2, default=str),
             input_filename=input_filename
         )
         
@@ -802,7 +848,20 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
         last_error = "No script generated yet."
         custom_script = None
 
+        # Cumulative wall-clock budget across ALL attempts (#358): each
+        # attempt can run up to the executor timeout, so the attempt cap
+        # alone does not bound total time.
+        import time as _time
+        _t0 = _time.monotonic()
+
         for attempt in range(1, self.MAX_SCRIPT_ATTEMPTS + 1):
+            if (attempt > 1 and self.SCRIPT_LOOP_TIME_BUDGET_S
+                    and _time.monotonic() - _t0 > self.SCRIPT_LOOP_TIME_BUDGET_S):
+                last_error = (f"custom-script wall-clock budget exceeded "
+                              f"({int(self.SCRIPT_LOOP_TIME_BUDGET_S)}s) "
+                              f"after {attempt - 1} attempt(s)")
+                self.logger.warning(last_error)
+                break
             try:
                 if attempt == 1:
                     custom_script = self._generate_custom_script_1d(stats, instruction, input_filename)

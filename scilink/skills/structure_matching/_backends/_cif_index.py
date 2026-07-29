@@ -319,12 +319,16 @@ def filter_index(
     lattice_param_ranges: Optional[dict[str, tuple[float, float]]] = None,
     top_n: Optional[int] = None,
 ) -> list[str]:
-    """Return CIF paths matching the spec. Empty list when no rows match."""
+    """Return CIF paths matching the spec. Empty list when no rows match.
+
+    ``chemistry`` may be empty for a cell-only (blind) query — then no element
+    filter is applied and the lattice / space-group filters do the selection."""
     if df is None or df.empty:
         return []
-    target_set_key = "-".join(sorted(chemistry))
-    mask = df["elements"] == target_set_key
-    filtered = df[mask]
+    if chemistry:
+        filtered = df[df["elements"] == "-".join(sorted(chemistry))]
+    else:
+        filtered = df
     if space_group_hints:
         filtered = filtered[filtered["spacegroup_number"].isin(space_group_hints)]
     if lattice_param_ranges:

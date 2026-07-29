@@ -146,7 +146,7 @@ def _ledger_table(delegations: list) -> None:
             "started": _short_time(d.get("timestamp")),
             "completed": _short_time(d.get("completed_at")),
         })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
 
 # ── tool sequence ────────────────────────────────────────────────────
@@ -214,7 +214,7 @@ def _tool_sequence_section(sequence: dict) -> None:
             "output": _type_summary(c.get("result")),
             "status": c.get("status", "—"),
         } for i, c in enumerate(calls, 1)]
-        st.dataframe(pd.DataFrame(rows), use_container_width=True,
+        st.dataframe(pd.DataFrame(rows), width="stretch",
                      hide_index=True)
         src = entry.get("source")
         if src and Path(src).is_file():

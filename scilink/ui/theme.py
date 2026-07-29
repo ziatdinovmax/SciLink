@@ -123,17 +123,25 @@ div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) {
 div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div {
     margin-top: -2rem !important;
 }
-/* Mode selector — keep the buttons on one row.
-   Streamlit columns are flex items with a built-in min-width and the row
-   wraps by default; at higher OS display scaling / narrower windows the
-   buttons' combined min-width exceeds the centered column and the row wraps
-   (reproduces on some machines, not others). Force no-wrap and let the
-   columns shrink so the buttons stay on a single line. */
+/* Mode selector — full labels at EVERY width.
+   Each button sizes to its label (never narrower, so no "Analyze"->"Analy"
+   truncation or icon-cramming), and the row centers and wraps to a second
+   line only when the window is genuinely too narrow to fit them — rather than
+   forcing them onto one line and shrinking them into a mess. */
 div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div [data-testid="stHorizontalBlock"] {
-    flex-wrap: nowrap !important;
+    flex-wrap: wrap !important;
+    justify-content: center !important;
+    gap: 8px !important;
 }
 div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
-    min-width: 0 !important;
+    flex: 0 0 auto !important;
+    width: auto !important;
+    min-width: max-content !important;
+}
+div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div .stButton > button {
+    white-space: nowrap !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
 }
 /* Sidebar buttons — original purple */
 section[data-testid="stSidebar"] .stButton > button {
@@ -170,6 +178,36 @@ div:has(> [data-testid="stMarkdown"] .theme-toggle-anchor) + div button:hover {
     background-color: #4A5568 !important;
     color: #E0E0E0 !important;
     box-shadow: none !important;
+}
+/* Fan-out confirm — force Cancel/Launch to IDENTICAL box size and shape.
+   Equal st.columns fixes width; the secondary (Cancel) and primary (Launch)
+   otherwise differ in height/box-model, so pin both to one height + padding. */
+div:has(> [data-testid="stMarkdown"] .fanout-actions-anchor) + div .stButton > button,
+div:has(> [data-testid="stMarkdown"] .bestofn-actions-anchor) + div .stButton > button {
+    min-height: 2.75rem !important;
+    height: 2.75rem !important;
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+}
+/* Fan-out Cancel (secondary) gets a solid neutral fill so it reads as the SAME
+   box as the purple primary Launch — grey = abort, purple = go. */
+div:has(> [data-testid="stMarkdown"] .fanout-actions-anchor) + div .stButton > button[kind="secondary"] {
+    background-color: #3A4556 !important;
+    color: #C7D0DC !important;
+}
+/* Best-of-N "Accept judge's pick" (secondary) goes GREEN — trusting the AI's
+   recommendation is a positive/confirm action — vs the purple primary
+   "Use selected" (manual override). Equal box, color carries the meaning. */
+div:has(> [data-testid="stMarkdown"] .bestofn-actions-anchor) + div .stButton > button[kind="secondary"] {
+    background-color: #2E7D46 !important;
+    color: #E8F5E9 !important;
+}
+div:has(> [data-testid="stMarkdown"] .bestofn-actions-anchor) + div .stButton > button[kind="secondary"]:hover {
+    background-color: #388E4F !important;
+    box-shadow: 0 2px 8px rgba(46, 125, 70, 0.35) !important;
 }
 /* File explorer tree buttons — soft gray, blue on selection */
 [data-testid="stExpander"] .stButton > button,
@@ -657,17 +695,25 @@ div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) {
 div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div {
     margin-top: -2rem !important;
 }
-/* Mode selector — keep the buttons on one row.
-   Streamlit columns are flex items with a built-in min-width and the row
-   wraps by default; at higher OS display scaling / narrower windows the
-   buttons' combined min-width exceeds the centered column and the row wraps
-   (reproduces on some machines, not others). Force no-wrap and let the
-   columns shrink so the buttons stay on a single line. */
+/* Mode selector — full labels at EVERY width.
+   Each button sizes to its label (never narrower, so no "Analyze"->"Analy"
+   truncation or icon-cramming), and the row centers and wraps to a second
+   line only when the window is genuinely too narrow to fit them — rather than
+   forcing them onto one line and shrinking them into a mess. */
 div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div [data-testid="stHorizontalBlock"] {
-    flex-wrap: nowrap !important;
+    flex-wrap: wrap !important;
+    justify-content: center !important;
+    gap: 8px !important;
 }
 div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
-    min-width: 0 !important;
+    flex: 0 0 auto !important;
+    width: auto !important;
+    min-width: max-content !important;
+}
+div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div .stButton > button {
+    white-space: nowrap !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
 }
 /* Mode selector secondary buttons — outlined purple */
 div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div .stButton > button[kind="secondary"] {
@@ -1380,15 +1426,14 @@ _COLLISION_JS = """
 
 def inject_theme() -> None:
     """Inject the Material Design CSS into the current page."""
-    import streamlit.components.v1 as components
-
     theme_mode = st.session_state.get("theme_mode", "dark")
     css = _MATERIAL_CSS_DARK if theme_mode == "dark" else _MATERIAL_CSS_LIGHT
     st.markdown(css, unsafe_allow_html=True)
 
-    # Force-restyle widgets via JS injected through components.html()
-    # (st.markdown strips <script> tags; components.html() runs in an
-    # iframe so we reach the parent document via window.parent.document).
+    # Force-restyle widgets via JS injected through st.html(unsafe_allow_javascript=True)
+    # (st.markdown strips <script> tags). st.html runs inline in the main
+    # document — not an iframe — so window.parent resolves to the app window
+    # and window.parent.document is the app document itself.
     if theme_mode == "light":
         _LIGHT_WIDGET_JS = """<script>
 (function(){
@@ -1420,11 +1465,11 @@ def inject_theme() -> None:
         .observe(doc.body, {childList:true, subtree:true, attributes:true});
 })();
 </script>"""
-        components.html(_LIGHT_WIDGET_JS, height=1)
+        st.html(_LIGHT_WIDGET_JS, unsafe_allow_javascript=True)
     else:
         # Keep DOM slot count stable; also undo any inline styles
         # left by the light-mode observer on the stop button.
-        components.html("""<script>
+        st.html("""<script>
 (function(){
     var doc = window.parent.document;
     function cleanup(){
@@ -1440,7 +1485,7 @@ def inject_theme() -> None:
     new MutationObserver(cleanup)
         .observe(doc.body, {childList:true, subtree:true});
 })();
-</script>""", height=1)
+</script>""", unsafe_allow_javascript=True)
 
     vibe = st.session_state.get("vibe_theme", "Professional")
 
@@ -1467,7 +1512,7 @@ def inject_theme() -> None:
         unsafe_allow_html=True,
     )
     # Slot 2: collision JS (always present, no-op script when inactive)
-    components.html(
+    st.html(
         _COLLISION_JS if use_collision_js else "<script>/* noop */</script>",
-        height=1,
+        unsafe_allow_javascript=True,
     )

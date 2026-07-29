@@ -31,6 +31,7 @@ orchestrator class, and no hardcoded engine filenames anywhere.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -45,6 +46,7 @@ _DEFAULT_ENGINE = {
     "periodic_dft": "vasp",
     "molecular_qc": "nwchem",
     "molecular_dynamics": "lammps",
+    "machine_learning_potentials": "mace",
 }
 
 
@@ -153,6 +155,41 @@ def _generate_inputs(
         result.setdefault("status", "success")
         return result
 
+    if scale == "machine_learning_potentials":
+        from .mlip_agent import MLIPAgent
+        # ``software`` is the MLIP backend name (mace, chgnet, deepmd, …).
+        # The structure file is the absorbing structure; system_info is
+        # inferred from it by MLIPAgent. ``request`` drives backend and
+        # model selection when no explicit backend is forced.
+        agent = MLIPAgent(
+            working_dir=output_dir,
+            api_key=api_key, base_url=base_url, model_name=model_name,
+        )
+        from ase.io import read as _ase_read
+        try:
+            atoms = _ase_read(structure_file)
+            elements = sorted(set(atoms.get_chemical_symbols()))
+            n_atoms = len(atoms)
+        except Exception:
+            elements = []
+            n_atoms = 0
+        system_info = {"elements": {e: None for e in elements}, "n_atoms": n_atoms}
+        result = agent.deploy_pretrained(
+            system_info=system_info,
+            research_goal=request,
+            structure_file=structure_file,
+            backend=software if software != _DEFAULT_ENGINE["machine_learning_potentials"] else None,
+            runner="ase",
+        )
+        # Normalize to the common input_files shape: the generated run
+        # script is the single input artifact.
+        run_path = result.get("run_path") or result.get("script_path")
+        if run_path and Path(run_path).exists():
+            result.setdefault("input_files", {Path(run_path).name: run_path})
+            result.setdefault("entry_file", Path(run_path).name)
+        result.setdefault("status", "success")
+        return result
+
     raise ValueError(
         f"Unsupported simulation scale: {scale!r}. "
         f"Supported: {sorted(_DEFAULT_ENGINE)}. Adding a scale means a new "
@@ -160,7 +197,31 @@ def _generate_inputs(
     )
 
 
-def run_complete_workflow(
+def _load_components_manifest(structure_path: str) -> Optional[Dict[str, Any]]:
+    """Load a ``components.json`` manifest sitting next to a generated structure.
+
+    Condensed structure generation writes this alongside the coordinate file:
+    ``{"components": [{"name", "smiles", "count"}, ...]}`` in coordinate order.
+    It is the force-field step's bridge from a packed box to per-species
+    chemistry. Returns the manifest dict, or None when absent / unreadable (a
+    crystal/molecular structure, an MLIP-MD run, or a caller-supplied data file
+    has none — the FF step is then skipped).
+    """
+    if not structure_path:
+        return None
+    manifest = os.path.join(os.path.dirname(os.path.abspath(structure_path)),
+                            "components.json")
+    if not os.path.isfile(manifest):
+        return None
+    try:
+        with open(manifest) as fh:
+            data = json.load(fh)
+        return data if data.get("components") else None
+    except Exception:
+        return None
+
+
+def _run_workflow_once(
     user_request: str,
     *,
     scale: str = "periodic_dft",
@@ -180,6 +241,7 @@ def run_complete_workflow(
     run_command: Optional[str] = None,
     autonomy: str = "autonomous",
     max_run_cycles: int = 3,
+    coverage_votes: int = 1,
     structure_file: Optional[str] = None,
     force_field_files: Optional[Dict[str, str]] = None,
     staged: bool = False,
@@ -221,6 +283,11 @@ def run_complete_workflow(
         autonomy: Autonomy level for the refinement loop (``"co-pilot"`` /
             ``"autopilot"`` / ``"autonomous"``); selects the built-in policy.
         max_run_cycles: Maximum run → assess → fix cycles per phase.
+        coverage_votes: Number of independent observable-coverage checks the
+            pre-run gate majority-votes before blocking a deck that omits a
+            required output (e.g. the stress log a viscosity goal needs). ``1``
+            is a single check; larger values damp the stochastic coverage
+            decision on borderline transport-property cases.
         structure_file: Optional path to an already-built structure. When
             provided, structure generation is skipped and this file is used
             directly — for callers that already have a structure and only want
@@ -278,6 +345,49 @@ def run_complete_workflow(
             return result
         result["steps_completed"].append("structure_generation")
         structure_path = structure_result["final_structure_path"]
+
+    # ── Step 1.5: force-field parameterization (MD, force-field-based only) ──
+    # Turn a packed box of coordinates into an engine-native, parameterized
+    # input (e.g. a typed LAMMPS data file) via the engine-neutral FF stack:
+    # ForceFieldAgent.parameterize -> ParameterizedSystem -> write_md_inputs.
+    # Gated on a components.json manifest, so MLIP-driven MD (potential-based,
+    # no manifest), pre-built data files, and non-MD scales are untouched. When
+    # the caller already supplied force_field_files, respect them.
+    if (scale == "molecular_dynamics" and force_field_files is None):
+        manifest = _load_components_manifest(structure_path)
+        if manifest:
+            try:
+                from .force_field_agent import ForceFieldAgent
+                from ._engine_inputs import write_md_inputs
+                ff_agent = ForceFieldAgent(
+                    working_dir=output_dir, api_key=api_key,
+                    base_url=base_url, model_name=model_name,
+                )
+                psystem = ff_agent.parameterize(
+                    components=manifest["components"],
+                    coordinates_file=structure_path,
+                    working_dir=output_dir,
+                )
+                written = write_md_inputs(psystem, software, output_dir)
+                structure_path = written["structure_file"]
+                force_field_files = written["force_field_files"] or None
+                result["force_field"] = {
+                    "status": "success", "backend": psystem.backend,
+                    "n_atoms": psystem.n_atoms,
+                    "total_charge": psystem.total_charge,
+                }
+                result["steps_completed"].append("force_field")
+            except Exception as e:
+                result["final_status"] = "failed_force_field"
+                result["force_field"] = {"status": "error", "message": str(e)}
+                return result
+        else:
+            result.setdefault("warnings", []).append(
+                "molecular_dynamics run with no components.json manifest next to "
+                "the structure and no force_field_files supplied — skipping "
+                "force-field parameterization; the deck may read raw coordinates "
+                "and fail to run."
+            )
 
     # ── Step 2: input generation (routed to the scale's foundation agent) ──
     try:
@@ -340,7 +450,7 @@ def run_complete_workflow(
     ctx = RefinementContext(
         research_goal=user_request, scale=scale, engine=software,
         skill=software, domain=scale, autonomy=autonomy,
-        max_cycles=max_run_cycles,
+        max_cycles=max_run_cycles, coverage_votes=coverage_votes,
     )
     run_critic = RunCritic(
         api_key=api_key, base_url=base_url, model_name=model_name,
@@ -355,6 +465,44 @@ def run_complete_workflow(
         "success" if refinement.get("status") == "success"
         else f"refinement_{refinement.get('status', 'failed')}"
     )
+    return result
+
+
+def run_complete_workflow(
+    user_request: str,
+    *,
+    max_structure_retries: int = 0,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Run the full pipeline, regenerating the structure on a structure-caused failure.
+
+    Thin wrapper over :func:`_run_workflow_once`. The refinement loop can only
+    rewrite the run inputs, so it cannot recover from a broken *initial
+    structure* (a bad packmol pack that blows up at step 0 — the critic marks it
+    ``failure_class="structure"``), nor from structure generation failing
+    outright. When either happens and ``max_structure_retries`` remain, the
+    structure is regenerated (a fresh stochastic pack) and the whole workflow is
+    retried, since no deck edit can fix a broken configuration. ``0`` (default)
+    preserves the single-attempt behavior. All other arguments are forwarded
+    unchanged — see :func:`_run_workflow_once`.
+    """
+    caller_supplied_structure = kwargs.get("structure_file") is not None
+    result: Dict[str, Any] = {}
+    for attempt in range(max(0, max_structure_retries) + 1):
+        result = _run_workflow_once(user_request, **kwargs)
+        structure_caused = (
+            result.get("final_status") == "failed_structure_generation"
+            or (result.get("refinement") or {}).get("failure_class") == "structure"
+        )
+        if (structure_caused and not caller_supplied_structure
+                and attempt < max_structure_retries):
+            logger.info(
+                "structure-caused failure (%s); regenerating structure and "
+                "retrying (%d/%d)",
+                result.get("final_status"), attempt + 1, max_structure_retries,
+            )
+            continue
+        return result
     return result
 
 
@@ -406,6 +554,7 @@ def _collect_phases(
             input_files=spec.get("input_files") or {},
             run_command=cmd,
             run_dir=str(run_dir),
+            entry_file=entry or "",
         ))
     return phases
 
@@ -463,6 +612,7 @@ def _collect_stages(
             input_files=spec.get("input_files") or {},
             run_command=_command(entry, spec.get("run_command")),
             run_dir=str(rdir),
+            entry_file=entry or "",
         )
 
     stages = []

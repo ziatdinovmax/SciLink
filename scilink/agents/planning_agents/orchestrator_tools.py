@@ -68,6 +68,62 @@ def _build_planning_skill_description(custom_skills: dict = None) -> str:
     return " ".join(parts)
 
 
+def _build_optimization_skill_description() -> str:
+    """Build the ``skill`` parameter description for ``run_optimization``.
+
+    Lists the available optimization skill bundles (``domain="optimization"``)
+    so the orchestrator LLM can activate one by name. Mirrors the planning
+    helper above, scoped to the optimization domain.
+    """
+    parts = [
+        "Optional optimization skill: a built-in optimization skill name. When "
+        "set, the skill's guidance is injected into the BO strategy and "
+        "inspection stages, and any surrogate/acquisition the skill contributes "
+        "becomes selectable. Pass when the user's problem matches a skill below."
+    ]
+    try:
+        names = list_skills(domain="optimization")
+    except Exception:
+        names = []
+
+    skill_descs = []
+    for name in names:
+        try:
+            parsed = load_skill(name, domain="optimization")
+            desc = (parsed.get("meta") or {}).get("description")
+            if not desc:
+                desc = parsed.get("overview", "").split("\n")[0].strip()
+            desc = desc.rstrip(".;,") if desc else desc
+            skill_descs.append(f"'{name}' — {desc}" if desc else f"'{name}'")
+        except Exception:
+            skill_descs.append(f"'{name}'")
+    if skill_descs:
+        parts.append(f"Available optimization skills: {'; '.join(skill_descs)}.")
+
+    return " ".join(parts)
+
+
+def resolve_n_candidates(requested, planner_state) -> int:
+    """
+    Best-of-N default policy for ``generate_initial_plan`` (issue #377).
+
+    An explicit request always wins (clamped 1-4; pass 1 for a single plan).
+    When the caller omits it, a campaign's FIRST plan defaults to best-of-3 —
+    two rounds of live meta testing showed the opt-in default never fired
+    because upstream routing narrows the objective before delegating, so
+    "raise N when open-ended" prompt guidance never triggered. Any later
+    plan in the campaign defaults to 1: follow-ups iterate on a committed
+    strategy, and the runner-up fallback already covers plan replacement.
+    """
+    if requested is not None:
+        try:
+            return max(1, min(int(requested), 4))
+        except (TypeError, ValueError):
+            return 1
+    is_first_plan = not (planner_state or {}).get("current_plan")
+    return 3 if is_first_plan else 1
+
+
 class OrchestratorTools:
     """
     Manages tool definitions, schemas, and execution for the OrchestratorAgent.
@@ -124,8 +180,12 @@ class OrchestratorTools:
 
         Filters to declared input columns only; missing entries default to
         "continuous" downstream. No-op when column_roles has no input_types
-        field (backward-compat with older scalarizer outputs).
+        field (backward-compat with older scalarizer outputs). Also captures the
+        optional fidelity role (multi-fidelity) declared in the same column_roles.
         """
+        # Capture the optional fidelity role first — it is independent of
+        # input_types and must run even when input_types is absent.
+        self._capture_fidelity_spec(column_roles, input_columns)
         if not input_columns:
             return
         types_in = (column_roles or {}).get("input_types") or {}
@@ -134,6 +194,30 @@ class OrchestratorTools:
         filtered = {c: types_in[c] for c in input_columns if c in types_in}
         if filtered:
             self.orch.expected_input_types = filtered
+
+    def _capture_fidelity_spec(self, column_roles: Dict, input_columns: List[str]) -> None:
+        """Persist an optional scalarizer-declared fidelity column (multi-fidelity).
+
+        A fidelity column is a normal input that also indexes evaluation
+        cost/accuracy. Sets ``orch.fidelity_spec`` to a validated
+        {column, target_fidelity?, costs?} dict when the scalarizer declares one
+        whose column is among the inputs; otherwise resets it to None (standard
+        single-fidelity BO). Backward-compatible: older scalarizer outputs that
+        omit the field reset to None.
+        """
+        spec = (column_roles or {}).get("fidelity")
+        col = spec.get("column") if isinstance(spec, dict) else None
+        if col and input_columns and col in input_columns:
+            clean = {"column": col}
+            if spec.get("target_fidelity") is not None:
+                clean["target_fidelity"] = spec["target_fidelity"]
+            if isinstance(spec.get("costs"), dict) and spec["costs"]:
+                clean["costs"] = spec["costs"]
+            self.orch.fidelity_spec = clean
+            print(f"    📶  Fidelity axis declared: '{col}'"
+                  + (f" (target={clean['target_fidelity']})" if "target_fidelity" in clean else ""))
+        else:
+            self.orch.fidelity_spec = None
 
     def _compute_file_hash(self, file_path: str) -> str:
         """Compute MD5 hash of file content for deduplication."""
@@ -444,7 +528,7 @@ class OrchestratorTools:
                 try:
                     df = pd.read_csv(self.orch.bo_data_path)
                     data_count = len(df)
-                except:
+                except Exception:
                     pass
             
             return json.dumps({
@@ -475,47 +559,92 @@ class OrchestratorTools:
                     "message": "Literature search not available (no FutureHouse API key configured)"
                 })
 
-            valid_types = ("hypothesis_context", "economic_data", "fitting_models")
-            if search_type not in valid_types:
+            search_methods = {
+                "hypothesis_context": self.orch.lit_agent.search_for_hypothesis_context,
+                "cross_domain": self.orch.lit_agent.search_for_cross_domain,
+                "economic_data": self.orch.lit_agent.search_for_economic_data,
+                "fitting_models": self.orch.lit_agent.search_for_fitting_models,
+            }
+            # Multiple types run CONCURRENTLY: each Edison call is minutes of
+            # waiting, so a serial pair doubles the user's wait for no reason.
+            types = [t.strip() for t in str(search_type).split(",") if t.strip()]
+            bad = [t for t in types if t not in search_methods]
+            if bad or not types:
                 return json.dumps({
                     "status": "error",
-                    "message": f"Invalid search_type '{search_type}'. Must be one of: {', '.join(valid_types)}"
+                    "message": (f"Invalid search_type '{search_type}'. Use one or more "
+                                f"(comma-separated) of: {', '.join(search_methods)}")
                 })
 
-            print(f"  ⚡ Tool: Searching literature ({search_type}) for '{objective[:80]}...'")
+            label = "+".join(types)
+            print(f"  ⚡ Tool: Searching literature ({label}) for '{objective[:80]}...'"
+                  + (" [parallel]" if len(types) > 1 else ""))
 
             try:
                 clean_query = optimize_search_query(
                     objective=objective, model=self.orch.planner.model
                 )
 
-                search_methods = {
-                    "hypothesis_context": self.orch.lit_agent.search_for_hypothesis_context,
-                    "economic_data": self.orch.lit_agent.search_for_economic_data,
-                    "fitting_models": self.orch.lit_agent.search_for_fitting_models,
-                }
-                lit_res = search_methods[search_type](clean_query)
+                if len(types) == 1:
+                    results = {types[0]: search_methods[types[0]](clean_query)}
+                else:
+                    from concurrent.futures import ThreadPoolExecutor
+                    with ThreadPoolExecutor(max_workers=len(types)) as ex:
+                        futures = {t: ex.submit(search_methods[t], clean_query)
+                                   for t in types}
+                        results = {t: f.result() for t, f in futures.items()}
 
-                if lit_res['status'] != 'success':
+                ok = {t: r for t, r in results.items() if r.get("status") == "success"}
+                if not ok:
+                    first = next(iter(results.values()))
                     return json.dumps({
-                        "status": lit_res['status'],
-                        "message": lit_res.get('message', 'Literature search did not succeed')
+                        "status": first.get("status", "error"),
+                        "message": first.get("message", "Literature search did not succeed")
                     })
 
-                # Save to file (distinct per search_type to avoid overwrites)
-                lit_path = self._output_dir() / f"literature_search_{search_type}.md"
+                # Sections are LABELLED, not concatenated: candidates must be
+                # able to tell established results in this field (usable as
+                # constraints) from cross-domain analogies (usable as
+                # mechanism inspiration, but not established here).
+                SECTION = {
+                    "hypothesis_context": "## ESTABLISHED IN THIS FIELD (known methods, "
+                                          "parameter ranges, failure modes)",
+                    "cross_domain": "## TRANSFERABLE MECHANISMS FROM OTHER DOMAINS "
+                                    "(analogies — NOT established results in this field)",
+                    "economic_data": "## ECONOMIC CONTEXT",
+                    "fitting_models": "## MODELS AND EQUATIONS",
+                }
+                parts = [f"{SECTION.get(t, '## ' + t.upper())}\n{ok[t]['content']}"
+                         for t in types if t in ok]
+                content = "\n\n".join(parts)
+
+                lit_path = self._output_dir() / f"literature_search_{label}.md"
                 with open(lit_path, 'w') as f:
-                    f.write(f"# Literature Search Results ({search_type})\n\n")
-                    f.write(lit_res['content'])
+                    f.write(f"# Literature Search Results ({label})\n\n")
+                    f.write(content)
 
-                print(f"  ✅ Literature search completed. Saved to {lit_path.name}")
+                failed = [t for t in types if t not in ok]
+                print(f"  ✅ Literature search completed ({len(ok)}/{len(types)}). "
+                      f"Saved to {lit_path.name}")
 
-                return json.dumps({
+                out = {
                     "status": "success",
+                    "searches_run": list(ok),
                     "file_path": str(lit_path),
-                    "content_preview": lit_res['content'][:500] + "..." if len(lit_res['content']) > 500 else lit_res['content'],
-                    "hint": "Pass file_path as literature_context to generate_initial_plan()"
-                })
+                    "content_preview": content[:500] + "..." if len(content) > 500 else content,
+                    "hint": "Pass file_path as literature_context to generate_initial_plan()",
+                }
+                if failed:
+                    out["failed_searches"] = failed
+                if ok:
+                    out["caveat"] = ("Literature context of any type was measured to "
+                                     "reduce constraint COVERAGE — plans stay on-topic "
+                                     "but silently omit individual requirements. When "
+                                     "the objective carries hard equipment/process "
+                                     "constraints, pass them as additional_context so "
+                                     "each is mapped to a named step; do not withhold "
+                                     "the literature.")
+                return json.dumps(out)
 
             except Exception as e:
                 logging.error(f"Literature search error: {e}", exc_info=True)
@@ -527,14 +656,26 @@ class OrchestratorTools:
             description=(
                 "Searches scientific literature via FutureHouse Edison API. "
                 "Call BEFORE generate_initial_plan() to enrich the plan with external context. "
-                "Pass the returned file_path as literature_context to generate_initial_plan()."
+                "Pass the returned file_path as literature_context to generate_initial_plan(). "
+                "Several search types can be requested at once as a comma-separated "
+                "list — they run CONCURRENTLY and are merged into one labelled "
+                "document, so two searches cost roughly the wait of one."
             ),
             parameters={
                 "objective": {"type": "string", "description": "Research objective or question to search for"},
                 "search_type": {
                     "type": "string",
-                    "description": "Type of search: 'hypothesis_context' (default, for planning), 'economic_data' (for TEA), or 'fitting_models' (for curve fitting)",
-                    "enum": ["hypothesis_context", "economic_data", "fitting_models"]
+                    "description": (
+                        "One type, or several comma-separated (run in parallel). "
+                        "'hypothesis_context' (default): established methods, "
+                        "parameter ranges and pitfalls in the problem's own field — "
+                        "the grounding a runnable plan needs. "
+                        "'cross_domain': mechanisms from ADJACENT/UNRELATED fields "
+                        "that could transfer — use for IDEATION (pair it with "
+                        "hypothesis_context: 'hypothesis_context,cross_domain'). "
+                        "'economic_data' (TEA); 'fitting_models' "
+                        "(curve fitting)."
+                    ),
                 }
             },
             required=["objective"]
@@ -613,7 +754,9 @@ class OrchestratorTools:
             additional_context: str = None,
             skill: str = None,
             literature_context: str = None,
-            molecule_context: str = None
+            molecule_context: str = None,
+            n_candidates: int = None,
+            selection_profile: str = "lab"
         ):
             """
             Generates experimental plan (science strategy only, no code).
@@ -731,6 +874,11 @@ class OrchestratorTools:
             ext_ctx = "\n\n".join(external_context_parts) if external_context_parts else None
 
             try:
+                n_cand = resolve_n_candidates(
+                    n_candidates, self.orch.planner.state)
+                if n_candidates is None and n_cand > 1:
+                    print(f"    🧭 New campaign — defaulting to best-of-{n_cand} "
+                          "candidate plans (pass n_candidates=1 for a single plan).")
                 plan = self.orch.planner.generate_plan(
                     objective=obj,
                     knowledge_paths=knowledge_list,
@@ -739,7 +887,13 @@ class OrchestratorTools:
                     enable_human_feedback=self._get_human_feedback_enabled(),
                     reset_state=False,
                     skill=effective_skill,
-                    external_context=ext_ctx
+                    external_context=ext_ctx,
+                    n_candidates=n_cand,
+                    candidate_report_dir=(str(self._output_dir() / "plan_candidates")
+                                          if n_cand > 1 else None),
+                    selection_profile=(selection_profile
+                                       if selection_profile in ("lab", "ideation")
+                                       else "lab")
                 )
 
                 # Store skill on orchestrator for downstream tools
@@ -790,6 +944,17 @@ class OrchestratorTools:
                 }
                 if saved_extras:
                     result["external_results_files"] = saved_extras
+                pc = (self.orch.planner.state or {}).get("plan_candidates")
+                if n_cand > 1 and pc:
+                    result["best_of_n"] = {
+                        "requested": n_cand,
+                        "produced": len(pc.get("candidates", [])),
+                        "selected_candidate": pc.get("selected_index"),
+                        "human_override": pc.get("human_override", False),
+                        "tier": pc.get("tier"),
+                        "judge_reasoning": (pc.get("judge") or {}).get("reasoning", ""),
+                        "candidate_reports": pc.get("reports", []),
+                    }
                 return json.dumps(result)
                 
             except Exception as e:
@@ -830,7 +995,45 @@ class OrchestratorTools:
                     ),
                 },
                 "literature_context": {"type": "string", "description": "File path or text from search_literature() tool. Provides external scientific literature context."},
-                "molecule_context": {"type": "string", "description": "File path or text from query_molecules() tool. Provides molecular design / synthesis context."}
+                "molecule_context": {"type": "string", "description": "File path or text from query_molecules() tool. Provides molecular design / synthesis context."},
+                "n_candidates": {
+                    "type": "integer",
+                    "description": (
+                        "Best-of-N width (1-4). OMITTED: a campaign's FIRST "
+                        "plan defaults to best-of-3 (distinct candidate "
+                        "strategies, LLM judge picks, human can override); "
+                        "later plans default to 1. Pass 1 explicitly when "
+                        "the user wants a single plan; pass 2-4 to set the "
+                        "width. A cap, not a quota: generation stops early "
+                        "when the evidence supports no further distinct "
+                        "approach. Keep specific_objective about ONE "
+                        "scientific goal — do NOT ask for multiple "
+                        "plans/strategies in the objective text; this "
+                        "parameter provides the multiplicity."
+                    ),
+                },
+                "selection_profile": {
+                    "type": "string",
+                    "enum": ["lab", "ideation"],
+                    "description": (
+                        "How the best-of-N judge weights its pick. 'lab' "
+                        "(default): feasibility/actionability first — use "
+                        "when the plan will actually be executed on stated "
+                        "equipment. 'ideation': information gain and "
+                        "mechanistic novelty first, feasibility only as a "
+                        "tiebreaker — SWITCH to this when the user is "
+                        "brainstorming, ideating, or asking for the most "
+                        "scientifically interesting direction rather than "
+                        "tomorrow's runnable protocol. Same candidates and "
+                        "scores either way; only the authoring latitude and "
+                        "the pick's weighting change, and the human can "
+                        "still override. NOTE: ideation requires "
+                        "n_candidates >= 2 — with a single plan there is "
+                        "nothing to select and the profile has no effect, "
+                        "so never pass n_candidates=1 together with "
+                        "ideation."
+                    ),
+                },
             },
             required=[]
         )
@@ -2491,7 +2694,8 @@ class OrchestratorTools:
             physical_constraints: str = None,
             experimental_budget: int = None,
             targets: list[str] = None,
-            strategy_hint: str = None
+            strategy_hint: str = None,
+            skill: str = None
         ):
             """
             Runs Bayesian Optimization to suggest next parameters.
@@ -2838,6 +3042,24 @@ class OrchestratorTools:
                 bo_objective = self._distill_objective_for_bo(
                     self.orch.expected_target_columns
                 )
+
+                # Multi-fidelity: if the scalarizer declared a fidelity column
+                # (and it survives into the final input set), translate it to a
+                # fidelity_config keyed by the column's index in input_cols. None
+                # otherwise -> standard single-fidelity BO (unchanged behavior).
+                fidelity_config = None
+                fspec = getattr(self.orch, "fidelity_spec", None)
+                if fspec and fspec.get("column") in (self.orch.expected_input_columns or []):
+                    fidelity_config = {
+                        "fidelity_col": self.orch.expected_input_columns.index(fspec["column"])
+                    }
+                    if fspec.get("target_fidelity") is not None:
+                        fidelity_config["target_fidelity"] = fspec["target_fidelity"]
+                    if fspec.get("costs"):
+                        fidelity_config["fidelity_costs"] = fspec["costs"]
+                    print(f"    📶  Multi-fidelity active: column '{fspec['column']}' "
+                          f"(index {fidelity_config['fidelity_col']})")
+
                 res = self.orch.bo.run_optimization_loop(
                     data_path=bo_data_path_for_run,
                     objective_text=bo_objective,
@@ -2853,6 +3075,8 @@ class OrchestratorTools:
                     plot_acq=True,
                     save_acq=True,
                     cat_dims=cat_dims if cat_dims else None,
+                    skill=skill,
+                    fidelity_config=fidelity_config,
                 )
                 
                 if res.get("status") != "success":
@@ -2993,6 +3217,10 @@ class OrchestratorTools:
                         "'switch to Matern-1.5', 'use UCB with high exploration'. "
                         "The hint is respected unless it conflicts with budget constraints."
                     )
+                },
+                "skill": {
+                    "type": "string",
+                    "description": _build_optimization_skill_description()
                 }
             },
             required=[]
@@ -3041,9 +3269,13 @@ class OrchestratorTools:
             func=save_file,
             name="save_file",
             description=(
-                "Save text content (code, protocols, scripts, notes) to a file "
-                "in the session directory. Use this to persist generated code, "
-                "instrument protocols, or any text artifact."
+                "Save text content (protocols, notes, small scripts) to a file "
+                "in the session directory. Large content may not survive the "
+                "trip as a single tool-call argument — for anything long "
+                "(roughly >100 lines), save the first chunk with save_file and "
+                "the rest with append_file. For executable analysis/"
+                "optimization code, prefer generate_implementation_code, which "
+                "generates and persists the script itself."
             ),
             parameters={
                 "filename": {
@@ -3056,6 +3288,75 @@ class OrchestratorTools:
                 "content": {
                     "type": "string",
                     "description": "The text content to write to the file.",
+                },
+                "subfolder": {
+                    "type": "string",
+                    "description": (
+                        "Optional subfolder within the session directory, "
+                        "e.g. 'protocols' or 'scripts'. Created if it doesn't exist."
+                    ),
+                },
+            },
+            required=["filename", "content"],
+        )
+
+        # 9b. APPEND FILE
+        def append_file(filename: str, content: str, subfolder: str = ""):
+            """
+            Append text content to a file in the session directory (created
+            if it doesn't exist). Companion to save_file for chunked writes
+            of large content.
+            """
+            print(f"  ⚡ Tool: Appending to file '{filename}'...")
+
+            safe_name = Path(filename).name
+            if not safe_name:
+                return json.dumps({
+                    "status": "error",
+                    "message": "Invalid filename.",
+                })
+
+            target_dir = self.orch.base_dir
+            if subfolder:
+                safe_sub = Path(subfolder).name
+                target_dir = target_dir / safe_sub
+            target_dir.mkdir(parents=True, exist_ok=True)
+            dest = target_dir / safe_name
+
+            try:
+                with open(dest, "a", encoding="utf-8") as f:
+                    f.write(content)
+                print(f"    💾 Appended: {dest}")
+                return json.dumps({
+                    "status": "success",
+                    "path": str(dest),
+                    "size_bytes": dest.stat().st_size,
+                })
+            except Exception as e:
+                logging.error(f"append_file failed: {e}")
+                return json.dumps({
+                    "status": "error",
+                    "message": str(e),
+                })
+
+        self._register_tool(
+            func=append_file,
+            name="append_file",
+            description=(
+                "Append text content to a file in the session directory "
+                "(created if it doesn't exist). Use together with save_file "
+                "to write large files in chunks — save_file for the first "
+                "chunk, then append_file for each subsequent chunk — keeping "
+                "every chunk small enough to pass reliably as a tool argument."
+            ),
+            parameters={
+                "filename": {
+                    "type": "string",
+                    "description": "Name of the file to append to.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The text content to append to the file.",
                 },
                 "subfolder": {
                     "type": "string",
@@ -3082,7 +3383,7 @@ class OrchestratorTools:
                 try:
                     df = pd.read_csv(self.orch.bo_data_path)
                     data_points = len(df)
-                except:
+                except Exception:
                     pass
             
             # Get message count (handle both OpenAI and Gemini)
@@ -3093,7 +3394,7 @@ class OrchestratorTools:
                 # Gemini: history is in chat_session
                 try:
                     message_count = len(self.orch.chat_session.history) if hasattr(self.orch.chat_session, 'history') else 0
-                except:
+                except Exception:
                     message_count = 0
             
             state = {

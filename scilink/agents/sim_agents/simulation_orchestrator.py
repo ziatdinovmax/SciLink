@@ -29,6 +29,7 @@ from ...auth import (
     APIKeyNotFoundError, get_api_key, get_internal_proxy_key, infer_provider,
     require_vendor_credentials,
 )
+from ...utils.tool_media import repair_dangling_tool_calls
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .simulation_orchestrator_tools import SimulationOrchestratorTools
@@ -455,7 +456,11 @@ class SimulationOrchestratorAgent:
         #      loop in BOTH handlers (the two `for tool_call in …` sites in
         #      `_handle_openai_chat` / `_handle_litellm_chat`). Shows the interim
         #      reasoning dim+italic so a deliberate step doesn't read as a silent
-        #      jump to "🔧 Calling tool".
+        #      jump to "🔧 Calling tool". Mirror the analysis/planning copy
+        #      exactly, including the invisible U+2063 specialist marker
+        #      (`mark = "\u2063" if _agent_label != "Agent" else ""`,
+        #      printed as `💭{mark} …`) so a meta-delegated sim run's reasoning
+        #      gets the specialist color in the UI; standalone keeps a plain 💭.
         #   2. 🤖 Answer — copy `_print_agent_answer(self, text)` and call
         #      `self._print_agent_answer(response)` just before `return response`
         #      below. NB: unlike analysis/planning (which print "🤖 Agent:" in
@@ -466,7 +471,8 @@ class SimulationOrchestratorAgent:
         #      `child._agent_label = "Simulation specialist"` (mirrors the
         #      analysis/planning children in MetaOrchestratorAgent).
         #   4. UI — no change needed; `ui/app.py::_log_to_html` already styles 💭
-        #      (dim italic) and the 🤖 header (bold) regardless of source.
+        #      (dim italic, cool meta / warm specialist by the U+2063 marker) and
+        #      the 🤖 header (bold) regardless of source.
         self._last_chat_hit_iter_cap = False
         if self.use_openai:
             response = self._handle_openai_chat(user_input)
@@ -791,6 +797,9 @@ class SimulationOrchestratorAgent:
             timeout=120.0,
         )
 
+        # Repair any tool_use left unanswered by a mid-run user Stop
+        # (or a trim slicing a pair apart) before extending history.
+        self.messages = repair_dangling_tool_calls(self.messages)
         self.messages.append({"role": "user", "content": user_input})
 
         if len(self.messages) > 120:
@@ -871,6 +880,9 @@ class SimulationOrchestratorAgent:
         import litellm
         from ...wrappers.litellm_wrapper import litellm_completion
 
+        # Repair any tool_use left unanswered by a mid-run user Stop
+        # (or a trim slicing a pair apart) before extending history.
+        self.messages = repair_dangling_tool_calls(self.messages)
         self.messages.append({"role": "user", "content": user_input})
 
         if len(self.messages) > 120:

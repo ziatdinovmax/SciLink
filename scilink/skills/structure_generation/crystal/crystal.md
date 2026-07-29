@@ -1,13 +1,15 @@
 ---
-description: Crystalline / periodic structure generation — bulk crystals, supercells, point defects (vacancies, substitutions, interstitials), surface slabs, and 2D monolayers via ASE / pymatgen / Materials Project, written as a VASP5 POSCAR.
-output_format: POSCAR
+description: Crystalline / periodic structure generation — bulk crystals, supercells, point defects (vacancies, substitutions, interstitials), surface slabs, and 2D monolayers via ASE / pymatgen / Materials Project, written as engine-neutral extended XYZ.
+output_format: extxyz
 ---
 ## Overview
 
 Build **periodic crystalline** structures for periodic-DFT and solid-state MD: bulk unit
 cells, supercells, point defects, surface slabs, and (extracted) 2D monolayers. Prefer ASE
 and pymatgen primitives, and fetch known compounds from the Materials Project when a key is
-available. Output a VASP5 POSCAR (element-symbol line present) with fractional coordinates.
+available. Output engine-neutral extended XYZ (cell + PBC + coordinates, and any
+selective-dynamics constraints as a per-atom column); the downstream engine step writes the
+engine-native input (POSCAR, etc.) from these coordinates.
 The goal is a periodic cell that is stoichiometric, physically reasonable (no atom overlaps),
 and faithful to the requested phase / supercell / defect.
 
@@ -52,9 +54,11 @@ otherwise). Note the target spacegroup/phase so it can be checked later.
   Freeze bottom layers with selective-dynamics flags when a relaxation is implied.
 - **Monolayers:** find the layer spacing/gap, select one layer's atoms, and **assert the
   layer composition matches the bulk formula ratio before** building the supercell.
-- **Output:** write `POSCAR` in VASP5 format with the element-symbol line, e.g.
-  `ase.io.write("POSCAR", atoms, format="vasp", vasp5=True, direct=True)` (or pymatgen
-  `Poscar(structure).write_file("POSCAR")`).
+- **Output:** write engine-neutral **extended XYZ**, which carries the cell, PBC, and any
+  per-atom constraints (`FixAtoms` → a selective-dynamics column), e.g.
+  `ase.io.write("structure.extxyz", atoms, format="extxyz")`, then print the exact line
+  `STRUCTURE_SAVED:structure.extxyz`. Do not write a VASP POSCAR here — the engine-native input
+  is produced by the downstream engine step from these coordinates.
 
 ## Validation
 

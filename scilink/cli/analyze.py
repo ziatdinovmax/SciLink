@@ -178,9 +178,12 @@ Metadata Options:
         metavar='MCP_CONFIG',
         help=(
             'MCP server configurations. Each entry can be:\n'
-            '  - A JSON config file ({"name":"...", "command":["..."], "env":{}})\n'
+            '  - A JSON config file ({"name":"...", "command":["..."], "url":"...", '
+            '"transport":"sse|http", "headers":{...}, "env":{}}; ${VAR} in header '
+            'values is expanded from the environment)\n'
             '  - stdio shorthand:  stdio:name:command,arg1,arg2\n'
             '  - SSE shorthand:    sse:name:http://host:port/sse\n'
+            '  - Streamable HTTP shorthand: http:name:https://host/mcp\n'
             'Example: scilink analyze --mcp stdio:fs:npx,-y,@modelcontextprotocol/server-filesystem,/tmp'
         )
     )
@@ -417,6 +420,21 @@ Supported data types:
                     if not api_key:
                         print("❌ Cannot proceed without API key for internal proxy.")
                         sys.exit(1)
+            elif model_name.lower().startswith("bedrock/"):
+                # Bedrock credentials ride env vars (bearer token or AWS
+                # keys); api_key stays None — LiteLLM reads the environment.
+                # Without this branch the model name matches 'claude' and the
+                # CLI wrongly prompts for an ANTHROPIC_API_KEY.
+                if not (os.getenv("AWS_BEARER_TOKEN_BEDROCK")
+                        or os.getenv("AWS_ACCESS_KEY_ID")):
+                    print("\n⚠️  No AWS Bedrock credentials found "
+                          "(AWS_BEARER_TOKEN_BEDROCK or AWS_ACCESS_KEY_ID).")
+                    token = input(
+                        "Enter your Bedrock bearer token (or Enter to "
+                        "proceed with default AWS credential discovery): "
+                    ).strip()
+                    if token:
+                        os.environ["AWS_BEARER_TOKEN_BEDROCK"] = token
             else:
                 provider_name, env_var_hint, env_vars = self._infer_provider(model_name)
                 api_key = self._get_api_key_from_env(env_vars)
@@ -686,18 +704,40 @@ Supported data types:
                     count = self.agent.connect_mcp_server(name, url=url)
                     print(f"   ✅ Registered {count} tool(s) from '{name}'")
 
+                elif entry.startswith("http:"):
+                    # http:name:https://host/mcp  (streamable HTTP)
+                    parts = entry[len("http:"):].split(":", 1)
+                    name = parts[0]
+                    url = parts[1] if len(parts) > 1 else ""
+                    print(f"\n🔌 Connecting to MCP server '{name}' "
+                          "(streamable HTTP)...")
+                    count = self.agent.connect_mcp_server(
+                        name, url=url, transport="http"
+                    )
+                    print(f"   ✅ Registered {count} tool(s) from '{name}'")
+
                 else:
                     # JSON config file
                     path = Path(entry).resolve()
                     with open(path) as f:
                         cfg = _json.load(f)
                     name = cfg.get("name", path.stem)
+                    headers = cfg.get("headers")
+                    if headers:
+                        # ${VAR} in header values is expanded so tokens stay
+                        # in the environment, not in the JSON file.
+                        headers = {
+                            k: os.path.expandvars(v)
+                            for k, v in headers.items()
+                        }
                     print(f"\n🔌 Connecting to MCP server '{name}'...")
                     count = self.agent.connect_mcp_server(
                         name,
                         command=cfg.get("command"),
                         url=cfg.get("url"),
                         env=cfg.get("env"),
+                        transport=cfg.get("transport"),
+                        headers=headers,
                     )
                     print(f"   ✅ Registered {count} tool(s) from '{name}'")
 

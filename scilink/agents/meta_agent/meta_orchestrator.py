@@ -17,12 +17,16 @@ this development stage — see CLAUDE.md "Why no BaseChatOrchestrator refactor".
 import json
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from enum import Enum
 
 from ...auth import get_internal_proxy_key
+from ...utils.tool_media import (repair_dangling_tool_calls,
+                                 build_tool_message, provider_supports_tool_image,
+                                 sanitize_history_images)
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .meta_orchestrator_tools import MetaOrchestratorTools
@@ -81,8 +85,12 @@ and weave their results into one coherent response for the user.
 
 __SPECIALIST_CAPABILITIES__
 
-Computational simulation (DFT / MD) is NOT available in this build — do not
-attempt to delegate simulation work.
+Computational simulation — building atomic structures, generating and
+validating engine inputs, and RUNNING + refining DFT / classical-MD / MLIP
+simulations — is `delegate_to_simulation`, listed in SPECIALIST CAPABILITIES
+above when available (it needs the `scilink[sim]` extra; if it is absent from
+that inventory, simulation is unavailable in this build and you should say so
+rather than fabricate a result).
 
 **INSPECTING UPLOADED FILES:**
 - When the user refers to uploaded files — or points you at a folder — call
@@ -148,6 +156,14 @@ attempt to delegate simulation work.
 - If it is missing, ask the user for it conversationally FIRST, then put it
   into the delegation's `task` / `context`. Do not delegate a data task with
   no metadata and let the specialist stop midway to ask for it.
+- Per-file conditions given as a MANIFEST (a .txt/.csv/README mapping each data
+  file to its conditions, e.g. "filename, temperature, pH"), when the data files
+  have NO matching sidecar JSONs, do NOT become feature-table columns if you only
+  quote them in the task text — and the specialist will fall back to a positional
+  index. Read the mapping and call `materialize_sidecars({filename: {conditions}},
+  data_dir)` to write per-file sidecars FIRST, then delegate the folder; the
+  conditions then flow into the feature table as columns (which downstream
+  optimization needs as inputs).
 
 **EQUIPMENT & SETUP — A HARD PRE-DELEGATION GATE:**
 - This gate applies to any task whose output guides what the user does next
@@ -184,16 +200,42 @@ attempt to delegate simulation work.
   clear, ask the user before treating them as one. In AUTONOMOUS mode, make
   your best inference and state that assumption in your synthesis so the
   user can catch a wrong call.
-- For a confirmed shared system: analyze each modality with its proper
-  specialist agent, thread each result into the next delegation's `context`,
-  and end with ONE correlated interpretation across modalities — not N
-  separate reports.
+- For a confirmed shared system with TWO OR MORE datasets that each deserve
+  their own analysis, PREFER the parallel fan-out path over sequential
+  delegations: call `assess_complementarity` to confirm they are genuinely
+  complementary (same system, different information, a shared join axis), then
+  `delegate_to_analyses` to analyze them CONCURRENTLY — each branch routed to
+  its proper specialist and seeing the others as auxiliary — and finally
+  `fuse_delegations` to reconcile their findings into ONE correlated
+  interpretation. This both parallelizes the work and lets each analysis be
+  informed by the others.
+- Two cases do NOT take the fan-out path: (a) if `assess_complementarity` /
+  `delegate_to_analyses` DECLINES (the datasets are redundant or unrelated),
+  analyze them as independent `delegate_to_analysis` calls — do not force a
+  fused interpretation; (b) a pure REFERENCE / baseline / calibration dataset
+  (an I0, an empty-cell background, a dark frame) is an auxiliary, NOT its own
+  branch — pass it as a companion to a single `delegate_to_analysis` of the
+  measurement it calibrates, not as a fan-out branch.
+- Sequential `delegate_to_analysis` calls threaded through `context` remain the
+  fallback when fan-out is not appropriate; still end with ONE correlated
+  interpretation across modalities — not N separate reports.
+
+**ENSEMBLE / BEST-OF-N ON ONE DATASET (distinct from the above):**
+- Several INDEPENDENT analysis trajectories over the SAME single dataset,
+  judge-compared to cut run-to-run variance — the user asking to "run it 3
+  ways", "an ensemble of 3", or "best-of-N" — is NOT the dataset fan-out
+  (that needs MULTIPLE complementary datasets). Keep it a SINGLE
+  `delegate_to_analysis` and state the candidate count in its `task` (e.g.
+  "run as best-of-3: 3 independent candidate analyses"); the specialist maps
+  that to `run_analysis`'s `n_candidates`. This is the right answer when there
+  is only one dataset but the user wants multiple attempts — do NOT decline it
+  just because the dataset fan-out doesn't apply.
 
 **THE DELEGATION CONTRACT:**
-- `delegate_to_analysis(task, context)` and `delegate_to_planning(task,
-  context)` run the specialist and return a structured JSON result: status,
-  summary, key_findings, files_produced, suggested_followups, warnings,
-  delegation_index.
+- `delegate_to_analysis(task, context)`, `delegate_to_planning(task, context)`,
+  and `delegate_to_simulation(task, context)` run the specialist and return a
+  structured JSON result: status, summary, key_findings, files_produced,
+  suggested_followups, warnings, delegation_index.
 - The specialist runs in the SAME autonomy mode as you. In autopilot mode it
   pauses at its decision points for the user to approve or edit plans and
   outputs (via its own human-feedback prompts) — that is expected and good;
@@ -210,6 +252,12 @@ attempt to delegate simulation work.
   conversation. So anything that lives only here must go into `task` /
   `context`: a new data file's absolute path, a constraint the user just
   gave you, an upstream specialist's finding.
+- Carry the user's objective into `task` in their OWN words — quote the
+  scientific ask verbatim rather than paraphrasing it. You may add the data
+  path, upstream findings, and framing around that quote, but do not reword,
+  normalize, or reinterpret the quantity the user asked for: a paraphrase can
+  silently change the meaning (e.g. turning "X or Y" into "X, i.e. Y"), and
+  the specialist cannot see the original message to catch the drift.
 - Pass upstream findings via the `context` dict, not by re-typing them into
   `task`.
 - Give each call a short `label` (required) — a 2-5 word noun phrase, NOT a
@@ -373,10 +421,22 @@ class MetaOrchestratorAgent:
         self.checkpoint_path = self.base_dir / "checkpoint.json"
         self.analysis_dir = self.base_dir / "analysis"
         self.planning_dir = self.base_dir / "planning"
+        self.simulation_dir = self.base_dir / "simulation"
+        # Fan-out workers (ephemeral, one isolated analysis session per branch)
+        # and fused cross-dataset reports live in their own sub-trees, distinct
+        # from the persistent analysis/ and planning/ children. See fanout.py.
+        self.fanout_dir = self.base_dir / "fanout"
+        self.fusion_dir = self.base_dir / "fusion"
 
         # Session state — kept shallow; children own their deep state.
         self._children: Dict[str, Any] = {}          # "analysis"/"planning" -> agent
         self._delegation_ledger: List[Dict[str, Any]] = []
+        # Complementarity verdicts cached by frozenset of dataset paths, so the
+        # standalone assess_complementarity tool and the internal gate in
+        # run_fanout share one LLM call. Serializes ledger preallocation and
+        # fusion-entry appends across fan-out worker threads.
+        self._complementarity_cache: Dict[frozenset, Dict[str, Any]] = {}
+        self._fanout_lock = threading.Lock()
         # Auto-generated specialist capability inventory — built once on the
         # first chat turn (children must exist to read their tool registries).
         self._capabilities_block: Optional[str] = None
@@ -554,6 +614,43 @@ class MetaOrchestratorAgent:
             self._propagate_extensions_to_child(self._children["planning"])
         return self._children["planning"]
 
+    def _get_simulation_child(self):
+        """Lazily create (or restore) the persistent simulation child.
+
+        Structure-centric, so unlike planning it needs no data_dir at
+        construction — a simulate session starts from a natural-language goal,
+        not a data file. Built in the CO_PILOT resting mode; each delegation's
+        run_task sets the autonomy for that call to match the meta's. The
+        ``simulation_orchestrator`` import is done HERE (inside the method),
+        not at module scope, because ``scilink.agents.sim_agents`` hard-imports
+        the optional ``ase`` dependency and the meta module must stay importable
+        without it; ``delegate_to_simulation`` guards the ImportError.
+        """
+        if "simulation" not in self._children:
+            from ..sim_agents.simulation_orchestrator import (
+                SimulationOrchestratorAgent, SimulationMode,
+            )
+            restore = (self.simulation_dir / "checkpoint.json").exists()
+            self.logger.info(
+                f"🧩 {'Restoring' if restore else 'Creating'} simulation child "
+                f"at {self.simulation_dir}"
+            )
+            self._children["simulation"] = SimulationOrchestratorAgent(
+                base_dir=str(self.simulation_dir),
+                api_key=self.api_key,
+                model_name=self.model_name,
+                base_url=self.base_url,
+                futurehouse_api_key=self.futurehouse_api_key,
+                restore_checkpoint=restore,
+                simulation_mode=SimulationMode.CO_PILOT,
+                # mp_api_key not threaded from the meta (its constructor has
+                # none); MPRester falls back to the MP_API_KEY env var when a
+                # crystal-from-Materials-Project structure is requested.
+            )
+            self._children["simulation"]._agent_label = "Simulation specialist"
+            self._propagate_extensions_to_child(self._children["simulation"])
+        return self._children["simulation"]
+
     # =========================================================================
     # Shared extensions: skills, custom tools, MCP servers
     # =========================================================================
@@ -565,6 +662,8 @@ class MetaOrchestratorAgent:
         command: list = None,
         url: str = None,
         env: dict = None,
+        transport: str = None,
+        headers: dict = None,
     ) -> int:
         """Connect to an MCP server and register its tools on the meta and
         every specialist child.
@@ -579,8 +678,12 @@ class MetaOrchestratorAgent:
             server_name: Human-readable label for this server.
             command: Command + args for stdio transport,
                 e.g. ``["npx", "-y", "@mcp/server-filesystem", "/tmp"]``.
-            url: URL for SSE transport.
+            url: URL for a network transport (SSE or streamable HTTP).
             env: Optional environment variables for the subprocess.
+            transport: Transport for ``url`` — ``"sse"`` (default) or
+                ``"http"`` (streamable HTTP).
+            headers: Optional HTTP headers for the ``url`` transports,
+                e.g. ``{"Authorization": "Bearer <token>"}``.
 
         Returns:
             Number of tools registered on the meta from this server.
@@ -594,7 +697,10 @@ class MetaOrchestratorAgent:
             )
             return 0
 
-        conn = MCPConnection(server_name, command=command, url=url, env=env)
+        conn = MCPConnection(
+            server_name, command=command, url=url, env=env,
+            transport=transport, headers=headers,
+        )
         schemas = conn.connect()
 
         existing_names = {t["name"] for t in self._external_tools}
@@ -643,6 +749,7 @@ class MetaOrchestratorAgent:
         self._register_shared_extension({
             "kind": "mcp", "server_name": server_name,
             "command": command, "url": url, "env": env,
+            "transport": transport, "headers": headers,
         })
         return registered
 
@@ -771,6 +878,8 @@ class MetaOrchestratorAgent:
                     command=ext.get("command"),
                     url=ext.get("url"),
                     env=ext.get("env"),
+                    transport=ext.get("transport"),
+                    headers=ext.get("headers"),
                 )
         except Exception as e:  # noqa: BLE001
             self.logger.warning(
@@ -824,6 +933,26 @@ class MetaOrchestratorAgent:
         except Exception as e:  # noqa: BLE001
             self.logger.warning(f"planning capability probe failed: {e}")
 
+        # Simulation is optional (needs the `ase`-backed `scilink[sim]` extra).
+        # The probe constructs the sim child, which hard-imports `ase`; if that
+        # is absent the ImportError is swallowed here and the section is simply
+        # omitted, so the routing inventory honestly reflects what this build
+        # can do — matching the guarded `delegate_to_simulation` tool.
+        try:
+            simulation = self._get_simulation_child()
+            s_tools = _tool_lines(
+                getattr(getattr(simulation, "tools", None), "openai_schemas", []))
+            sections.append(
+                "`delegate_to_simulation` — RUN computational simulations end "
+                "to end (periodic DFT, classical MD, MLIP-driven MD): build the "
+                "atomic structure, generate + validate engine inputs, execute, "
+                "and refine on error/quality. Structure-centric — starts from a "
+                "natural-language system + goal, no data file. Tools:\n"
+                f"{s_tools}"
+            )
+        except Exception as e:  # noqa: BLE001
+            self.logger.warning(f"simulation capability probe skipped: {e}")
+
         if not sections:
             raise RuntimeError("no specialist capabilities could be read")
         return (
@@ -858,7 +987,9 @@ class MetaOrchestratorAgent:
 
     def _delegate(self, mode: str, task: str, context: Optional[dict] = None,
                   context_from: Optional[list] = None,
-                  label: Optional[str] = None) -> str:
+                  label: Optional[str] = None,
+                  data_path: Optional[str] = None,
+                  metadata: Optional[str] = None) -> str:
         """Run a task on a child orchestrator, record it, return a JSON summary.
 
         The child runs under the meta's own autonomy mode (mapped by enum
@@ -870,6 +1001,12 @@ class MetaOrchestratorAgent:
         A provisional 'running' ledger entry is opened before the child runs,
         so the UI delegation tree shows the delegation live; it is finalized
         with the result on completion.
+
+        ``data_path`` / ``metadata`` (analysis delegations) are stamped on the
+        ledger entry so a LATER ``fuse_delegations`` mixing this delegation
+        with others can re-run the complementarity gate — without them an
+        incremental fusion silently demotes to ungated (no computed
+        reconciliation).
         """
         if mode == "analysis":
             from ..exp_agents.analysis_orchestrator import AnalysisMode
@@ -877,6 +1014,12 @@ class MetaOrchestratorAgent:
         elif mode == "planning":
             from ..planning_agents.planning_orchestrator import AutonomyLevel
             get_child, autonomy_enum = self._get_planning_child, AutonomyLevel
+        elif mode == "simulation":
+            # Guarded import (optional `ase`): the delegate_to_simulation tool
+            # already returned a clean error if the [sim] extra is missing, so
+            # reaching here means the import succeeds.
+            from ..sim_agents.simulation_orchestrator import SimulationMode
+            get_child, autonomy_enum = self._get_simulation_child, SimulationMode
         else:
             return json.dumps({
                 "status": "error",
@@ -884,6 +1027,25 @@ class MetaOrchestratorAgent:
             })
 
         entry = self._open_delegation(mode, task, context, context_from, label)
+        if mode == "analysis" and data_path:
+            entry["data_path"] = str(data_path)
+            if metadata:
+                entry["metadata"] = str(metadata)
+        # A re-analysis guided by a prior fusion has effectively seen its
+        # companions' findings (stamped by _open_delegation). Bound the spend
+        # the same way steering is bounded: the guidance is additive-only.
+        # The ledger keeps the ACTUAL task sent, note included.
+        if entry.get("informed_via") == "fusion_feedback":
+            task = task + (
+                "\n\nNOTE — this re-analysis is guided by a prior "
+                "CROSS-DATASET FUSION, so you have effectively seen the "
+                "companion datasets' findings. That guidance is "
+                "ADDITIVE-ONLY: test the indicated hypotheses, but analyze "
+                "the FULL data range, never restrict your scope or relax an "
+                "acceptance criterion toward agreement, and report "
+                "disagreement with the fused picture plainly — it is a "
+                "valid, valuable outcome.")
+            entry["task"] = task
         try:
             child = get_child()
             result = child.run_task(
@@ -936,8 +1098,53 @@ class MetaOrchestratorAgent:
             "warnings": [],
             "error": None,
         }
+        # Independence provenance (#296): an analysis delegation that draws
+        # context from a FUSION entry has effectively seen every fused
+        # branch's findings — its later agreement with them is partly by
+        # construction. Stamp it mechanically so the next fusion discounts it.
+        if mode == "analysis" and sources:
+            by_index = {e["index"]: e for e in self._delegation_ledger}
+            fused_labels: list = []
+            for s in sources:
+                src = by_index.get(s)
+                if src and src.get("mode") == "fusion":
+                    fused_labels += [str(l) for l in (src.get("labels")
+                                                      or src.get("fused_labels")
+                                                      or [])
+                                     if str(l) not in fused_labels]
+            if fused_labels:
+                entry["informed_by"] = fused_labels
+                entry["informed_via"] = "fusion_feedback"
         self._delegation_ledger.append(entry)
         return entry
+
+    def _sweep_interrupted_delegations(self) -> None:
+        """Finalize ledger entries left 'running' by an aborted turn.
+
+        A user Stop (AgentStoppedError) unwinds the delegation stack without
+        reaching ``_close_delegation``, leaving the provisional entry
+        'running' forever — misleading the UI delegation tree,
+        ``summarize_session_state``, and a later ``fuse_delegations``.
+        Nothing runs between chat turns, so any 'running' entry seen at turn
+        start is by definition dead: close it as 'interrupted' (a non-success
+        status, so the existing degraded-branch machinery excludes it from
+        fusion), mirroring the wall-clock-abandon path.
+        """
+        for e in self._delegation_ledger:
+            if e.get("status") == "running":
+                self.logger.warning(
+                    f"delegation {e.get('index')} "
+                    f"('{e.get('label') or e.get('mode')}') was left running "
+                    "by an interrupted turn — marking it interrupted")
+                self._close_delegation(e, {
+                    "status": "interrupted",
+                    "error": "interrupted by user stop before completion",
+                    "summary": "", "key_findings": [], "files_produced": [],
+                    "suggested_followups": [],
+                    "warnings": ["delegation interrupted mid-run (user "
+                                 "stop); results are incomplete — "
+                                 "re-delegate if still needed"],
+                })
 
     def _close_delegation(self, entry: Dict[str, Any], result: dict) -> None:
         """Finalize a provisional ledger entry with the child's result."""
@@ -1071,6 +1278,30 @@ class MetaOrchestratorAgent:
         return json.dumps(ledger, indent=2, default=str)
 
     # =========================================================================
+    # Parallel multi-dataset analysis (fan-out) — see fanout.py
+    # =========================================================================
+
+    def _assess_complementarity(self, datasets: list) -> str:
+        """Partition datasets into complementary / redundant / unrelated."""
+        from .fanout import assess_complementarity
+        return json.dumps(assess_complementarity(self, datasets),
+                          indent=2, default=str)
+
+    def _run_fanout(self, branches: list,
+                    branch_time_budget_s: Optional[float] = None,
+                    figure_style: Optional[str] = None) -> str:
+        """Gate, confirm, then run analysis branches concurrently."""
+        from .fanout import run_fanout
+        return run_fanout(self, branches,
+                          branch_time_budget_s=branch_time_budget_s,
+                          figure_style=figure_style)
+
+    def _fuse_delegations(self, indices: list, focus: Optional[str] = None) -> str:
+        """Reconcile finished complementary branch findings into one narrative."""
+        from .fanout import fuse_delegations
+        return fuse_delegations(self, indices, focus)
+
+    # =========================================================================
     # Checkpoint / history
     # =========================================================================
 
@@ -1113,8 +1344,32 @@ class MetaOrchestratorAgent:
             with open(self.checkpoint_path, 'w') as f:
                 json.dump(checkpoint_data, f, indent=2, default=str)
             print(f"    ✅ Auto-checkpoint saved")
+            return True
         except Exception as e:
             logging.warning(f"Auto-checkpoint failed: {e}")
+            return False
+
+    def save_checkpoint(self) -> str:
+        """Save the meta checkpoint on demand and reset the auto-save timer.
+
+        Children checkpoint themselves during delegations; this persists the
+        meta-level state (mode, message count, delegation ledger) so the
+        session can be resumed without waiting for the periodic auto-save.
+
+        Returns:
+            The checkpoint file path.
+
+        Raises:
+            RuntimeError: if the checkpoint could not be written.
+        """
+        if not self._auto_checkpoint():
+            raise RuntimeError(
+                f"Failed to write checkpoint to {self.checkpoint_path} "
+                "(see log for details)."
+            )
+        self.last_checkpoint_message_count = self.message_count
+        self._save_history()
+        return str(self.checkpoint_path)
 
     def _trim_history(self, history: List[Dict], max_messages: int = None) -> List[Dict]:
         """Keep only recent messages to avoid context window overflow."""
@@ -1151,10 +1406,20 @@ class MetaOrchestratorAgent:
             logging.warning(f"Failed to load history: {e}")
             return []
 
+    def _tool_message(self, tool_call_id: str, result: str) -> dict:
+        """Build the tool-result message, upgrading an image-bearing result to a
+        multimodal message on providers that render tool-result images (Claude/
+        Bedrock, Gemini — not the OpenAI-compatible path). Every non-image
+        result stays the exact plain-string message. Inert today (meta tools
+        return text), kept in sync with the mode orchestrators."""
+        allow = (not self.use_openai) and provider_supports_tool_image(self.model.model)
+        return build_tool_message(tool_call_id, result, allow_image=allow)
+
     def _save_history(self):
         """Save conversation history to disk."""
         try:
             history_data = [m for m in self.messages if m["role"] != "system"]
+            history_data = sanitize_history_images(history_data)
             with open(self.history_path, 'w') as f:
                 json.dump(history_data, f, indent=2)
         except Exception as e:
@@ -1177,6 +1442,9 @@ class MetaOrchestratorAgent:
         # First-turn: fill the system prompt's specialist-capability inventory
         # from the children's live tool registries (idempotent thereafter).
         self._inject_capabilities()
+
+        # Close out any delegation a mid-run Stop left dangling as 'running'.
+        self._sweep_interrupted_delegations()
 
         # Auto-checkpoint every N messages.
         if self.message_count - self.last_checkpoint_message_count >= self.CHECKPOINT_INTERVAL:
@@ -1218,6 +1486,9 @@ class MetaOrchestratorAgent:
             timeout=120.0,
         )
 
+        # Repair any tool_use left unanswered by a mid-run user Stop
+        # (or a trim slicing a pair apart) before extending history.
+        self.messages = repair_dangling_tool_calls(self.messages)
         self.messages.append({"role": "user", "content": user_input})
 
         if len(self.messages) > 120:
@@ -1291,11 +1562,7 @@ class MetaOrchestratorAgent:
                 print(f"  🔧 Calling tool: {func_name}")
                 result = self.tools.execute_tool(func_name, **args)
 
-                self.messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result,
-                })
+                self.messages.append(self._tool_message(tool_call.id, result))
 
         self._last_chat_hit_iter_cap = True
         return "⚠️ Maximum tool iterations reached. Please simplify your request."
@@ -1328,6 +1595,9 @@ class MetaOrchestratorAgent:
         import litellm
         from ...wrappers.litellm_wrapper import litellm_completion
 
+        # Repair any tool_use left unanswered by a mid-run user Stop
+        # (or a trim slicing a pair apart) before extending history.
+        self.messages = repair_dangling_tool_calls(self.messages)
         self.messages.append({"role": "user", "content": user_input})
 
         if len(self.messages) > 120:
@@ -1406,11 +1676,7 @@ class MetaOrchestratorAgent:
                 print(f"  🔧 Calling tool: {func_name}")
                 result = self.tools.execute_tool(func_name, **args)
 
-                self.messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result,
-                })
+                self.messages.append(self._tool_message(tool_call.id, result))
 
         self._last_chat_hit_iter_cap = True
         return "⚠️ Maximum tool iterations reached. Please simplify your request."

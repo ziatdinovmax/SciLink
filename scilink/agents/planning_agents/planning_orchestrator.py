@@ -9,6 +9,7 @@ from datetime import datetime
 from enum import Enum
 
 from ...auth import get_internal_proxy_key
+from ...utils.tool_media import repair_dangling_tool_calls
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .planning_agent import PlanningAgent
@@ -227,6 +228,17 @@ for each:
 
   search_literature(objective="...", search_type="hypothesis_context") → plan_lit_path
   generate_initial_plan(..., literature_context=plan_lit_path)
+
+Several search types can be requested at once (comma-separated) and run in
+parallel, costing roughly the wait of a single search. For IDEATION sessions
+— brainstorming, exploring approaches, "what are interesting directions" —
+pair grounding with cross-domain retrieval and select the ideation profile:
+  search_literature(objective="...", search_type="hypothesis_context,cross_domain")
+  generate_initial_plan(..., literature_context=..., selection_profile="ideation")
+Literature of any type reduces constraint COVERAGE — plans stay on-topic but
+omit individual requirements. When the objective carries hard equipment or
+process constraints, pass them as additional_context (each is then mapped to a
+named step) rather than withholding the literature.
 
 For refinement, reuse existing literature or run a new search as needed.
 
@@ -497,6 +509,8 @@ Assume user runs agent from project directory. For example, when user says "file
 **MCP OUTPUT PERSISTENCE:**
 - When an MCP tool returns generated code, protocols, or other text artifacts, call `save_file`
   to persist the output BEFORE calling any other tool.
+- Write large artifacts in chunks (`save_file` for the first chunk, `append_file` for the rest);
+  a single oversized tool argument can be truncated and lost.
 
 **BEHAVIOR:**
 - Extract ALL paths mentioned by user (papers, data, code, reports)
@@ -660,6 +674,7 @@ class PlanningOrchestratorAgent:
         self.target_directions = {}  # e.g. {"Yield": "maximize", "Defect_Density": "minimize"}
         self.expected_input_types = None  # {col: "continuous" | "categorical"} from scalarizer
         self.expected_input_levels = None  # {col: [level0, level1, ...]} for categorical inputs
+        self.fidelity_spec = None  # {column, target_fidelity?, costs?} when the data has a fidelity axis
         self.latest_tea_results = None
 
         # Per-delegation output isolation. Used only by run_task: the meta
@@ -1027,14 +1042,20 @@ class PlanningOrchestratorAgent:
         command: list = None,
         url: str = None,
         env: dict = None,
+        transport: str = None,
+        headers: dict = None,
     ) -> int:
         """Connect to an MCP server and register its tools.
 
         Args:
             server_name: Human-readable label for this server.
             command: Command + args for stdio transport.
-            url: URL for SSE transport.
+            url: URL for a network transport (SSE or streamable HTTP).
             env: Optional environment variables for the subprocess.
+            transport: Transport for ``url`` — ``"sse"`` (default) or
+                ``"http"`` (streamable HTTP).
+            headers: Optional HTTP headers for the ``url`` transports,
+                e.g. ``{"Authorization": "Bearer <token>"}``.
 
         Returns:
             Number of tools registered from this server.
@@ -1048,7 +1069,10 @@ class PlanningOrchestratorAgent:
             )
             return 0
 
-        conn = MCPConnection(server_name, command=command, url=url, env=env)
+        conn = MCPConnection(
+            server_name, command=command, url=url, env=env,
+            transport=transport, headers=headers,
+        )
         schemas = conn.connect()
 
         existing_names = {t["name"] for t in self._external_tools}
@@ -1142,6 +1166,7 @@ class PlanningOrchestratorAgent:
             self.target_directions = state.get("target_directions", {})
             self.expected_input_types = state.get("expected_input_types")
             self.expected_input_levels = state.get("expected_input_levels")
+            self.fidelity_spec = state.get("fidelity_spec")
             self.latest_tea_results = state.get("latest_tea_results")
             self._delegation_counter = state.get("delegation_counter", 0)
 
@@ -1444,6 +1469,7 @@ class PlanningOrchestratorAgent:
                 "target_directions": self.target_directions,
                 "expected_input_types": self.expected_input_types,
                 "expected_input_levels": self.expected_input_levels,
+                "fidelity_spec": self.fidelity_spec,
                 "data_points_collected": len(pd.read_csv(self.bo_data_path)) if self.bo_data_path.exists() else 0,
                 "planner_state": self.planner.state,
                 "message_count": self.message_count,
@@ -1466,6 +1492,38 @@ class PlanningOrchestratorAgent:
         except Exception as e:
             logging.warning(f"Auto-checkpoint failed: {e}")
 
+    @staticmethod
+    def _parse_tool_args(tool_call, finish_reason=None):
+        """Parse a tool call's JSON arguments, failing loud on bad input.
+
+        Returns (args, None) on success, or (None, error_json) when the
+        arguments string is malformed or truncated. The error_json is handed
+        back to the model as the tool result so it can recover (#270) —
+        silently substituting ``args = {}`` surfaces as a raw TypeError from
+        the tool itself, which hides the real cause and sends the model into
+        an unrecoverable retry loop.
+        """
+        try:
+            return json.loads(tool_call.function.arguments), None
+        except json.JSONDecodeError:
+            if finish_reason == "length":
+                cause = ("the arguments JSON was truncated — the response "
+                         "hit the output-token limit")
+            else:
+                cause = ("the arguments string was not valid JSON — "
+                         "typically broken escaping of quotes/newlines "
+                         "inside a large string value")
+            return None, json.dumps({
+                "status": "error",
+                "message": (
+                    f"Tool call discarded: {cause}. The tool was NOT "
+                    "executed. Do not retry with one large argument. For "
+                    "large text content, write the file in chunks: "
+                    "save_file with the first chunk, then append_file for "
+                    "each remaining chunk."
+                ),
+            })
+
     def _handle_openai_chat(self, user_input: str) -> str:
         """Handle chat with OpenAI-compatible models with manual function calling loop."""
         from openai import OpenAI
@@ -1475,6 +1533,9 @@ class PlanningOrchestratorAgent:
             base_url=self.model.base_url
         )
         
+        # Repair any tool_use left unanswered by a mid-run user Stop
+        # (or a trim slicing a pair apart) before extending history.
+        self.messages = repair_dangling_tool_calls(self.messages)
         self.messages.append({"role": "user", "content": user_input})
         
         if len(self.messages) > 120:
@@ -1530,13 +1591,20 @@ class PlanningOrchestratorAgent:
 
             self._print_assistant_reasoning(message.content)
 
+            finish_reason = getattr(response.choices[0], "finish_reason", None)
+
             for tool_call in message.tool_calls:
                 func_name = tool_call.function.name
-                args = json.loads(tool_call.function.arguments)
+                args, args_error = self._parse_tool_args(tool_call, finish_reason)
 
                 print(f"  🔧 Calling tool: {func_name}")
 
-                result = self.tools.execute_tool(func_name, **args)
+                if args_error is not None:
+                    print("    ⚠️ Malformed/truncated tool arguments — "
+                          "returning recovery hint to the model")
+                    result = args_error
+                else:
+                    result = self.tools.execute_tool(func_name, **args)
 
                 self.messages.append({
                     "role": "tool",
@@ -1562,10 +1630,22 @@ class PlanningOrchestratorAgent:
         if not text:
             return
         import sys
-        style, reset = (("\033[2;3;36m", "\033[0m")
+        # A meta-delegated run reasons in AMBER (33), the meta's own in CYAN (36),
+        # so the CLI distinguishes them the way the UI does (dim + italic either way).
+        specialist = getattr(self, "_agent_label", "Agent") != "Agent"
+        color = "33" if specialist else "36"
+        style, reset = ((f"\033[2;3;{color}m", "\033[0m")
                         if sys.stdout.isatty() else ("", ""))
         body = text.replace("\n", "\n     ")  # indent continuation lines
-        print(f"\n  {style}💭 {body}{reset}\n")
+        # Tag a meta-delegated run's reasoning with an INVISIBLE marker (U+2063)
+        # right after 💭 so the UI renders it a distinct color from the meta's
+        # own 💭 while the visible glyph stays identical. ANSI color can't carry
+        # this: the UI captures non-tty output (no ANSI emitted) and re-colors by
+        # the 💭 marker, so the source must ride in the text. Gated on
+        # `_agent_label` (the 🤖-answer attribution mechanism); a standalone
+        # session keeps a plain 💭, unchanged.
+        mark = "\u2063" if specialist else ""
+        print(f"\n  {style}💭{mark} {body}{reset}\n")
 
     def _print_agent_answer(self, text) -> None:
         """Print the agent's final answer — a deliverable, emphasized (bold +
@@ -1575,8 +1655,14 @@ class PlanningOrchestratorAgent:
         mistaken for the meta's own user-facing response."""
         import sys
         label = getattr(self, "_agent_label", "Agent")
-        bold, reset = ("\033[1;96m", "\033[0m") if sys.stdout.isatty() else ("", "")
-        print(f"\n{bold}🤖 {label}:{reset}")
+        # A delegated specialist's answer header takes the specialist color (bold
+        # AMBER, 33) to match its reasoning; the meta's own stays bold BRIGHT CYAN
+        # (96). The UI mirrors this via the invisible U+2063 marker after 🤖.
+        specialist = label != "Agent"
+        code = "1;33" if specialist else "1;96"
+        mark = "\u2063" if specialist else ""
+        bold, reset = (f"\033[{code}m", "\033[0m") if sys.stdout.isatty() else ("", "")
+        print(f"\n{bold}🤖{mark} {label}:{reset}")
         print(text if text is not None else "")
 
     def _handle_litellm_chat(self, user_input: str) -> str:
@@ -1584,6 +1670,9 @@ class PlanningOrchestratorAgent:
         import litellm
         from ...wrappers.litellm_wrapper import litellm_completion
         
+        # Repair any tool_use left unanswered by a mid-run user Stop
+        # (or a trim slicing a pair apart) before extending history.
+        self.messages = repair_dangling_tool_calls(self.messages)
         self.messages.append({"role": "user", "content": user_input})
         
         if len(self.messages) > 120:
@@ -1646,17 +1735,21 @@ class PlanningOrchestratorAgent:
 
             self._print_assistant_reasoning(content)
 
+            finish_reason = getattr(response.choices[0], "finish_reason", None)
+
             # Execute each tool call
             for tool_call in tool_calls:
                 func_name = tool_call.function.name
-                try:
-                    args = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError:
-                    args = {}
+                args, args_error = self._parse_tool_args(tool_call, finish_reason)
 
                 print(f"  🔧 Calling tool: {func_name}")
-                
-                result = self.tools.execute_tool(func_name, **args)
+
+                if args_error is not None:
+                    print("    ⚠️ Malformed/truncated tool arguments — "
+                          "returning recovery hint to the model")
+                    result = args_error
+                else:
+                    result = self.tools.execute_tool(func_name, **args)
                 
                 self.messages.append({
                     "role": "tool",

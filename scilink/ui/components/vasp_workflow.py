@@ -551,7 +551,7 @@ def _render_review_inputs() -> None:
         if st.button(
             "← Back to configure",
             key="vasp_review_back",
-            use_container_width=True,
+            width="stretch",
         ):
             st.session_state.hpc_workflow_phase = "configure"
             st.rerun()
@@ -561,7 +561,7 @@ def _render_review_inputs() -> None:
             "🚀 Upload & Submit",
             type="primary",
             key="vasp_review_submit",
-            use_container_width=True,
+            width="stretch",
         ):
             conn = st.session_state.get("hpc_connection")
             sched = st.session_state.get("hpc_scheduler")

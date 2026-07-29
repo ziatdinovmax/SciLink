@@ -31,6 +31,8 @@ flow through the same code; the quality check fires per phase.
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -96,6 +98,7 @@ class Phase:
     input_files: Dict[str, str]
     run_command: str
     run_dir: str
+    entry_file: str = ""   # the deck filename in input_files (for the dry-run gate)
 
 
 @dataclass
@@ -155,6 +158,8 @@ class _RunCriticLike(Protocol):
         skill: Optional[str] = ...,
         domain: Optional[str] = ...,
         fixes_mode: str = ...,
+        input_files: Optional[Dict[str, str]] = ...,
+        check_observables: bool = ...,
     ) -> Dict[str, Any]:
         ...
 
@@ -296,6 +301,8 @@ class RefinementContext:
             ``"autonomous"``).
         max_cycles: Maximum refine cycles per phase.
         cycle: Refine cycles spent on the current phase (loop-managed).
+        coverage_votes: Independent coverage checks to majority-vote in the
+            pre-run gate (1 = single check; >1 damps the stochastic decision).
         history: Per-cycle records appended by :meth:`record`.
         interact: Optional human-feedback handle; ``None`` for headless runs.
     """
@@ -308,6 +315,7 @@ class RefinementContext:
     autonomy: str = "autonomous"
     max_cycles: int = 3
     cycle: int = 0
+    coverage_votes: int = 1
     history: List[Dict[str, Any]] = field(default_factory=list)
     interact: Optional[InteractFn] = None
 
@@ -547,6 +555,7 @@ def _refine_phase(
             research_goal=ctx.research_goal,
             skill=ctx.skill,
             domain=ctx.domain,
+            input_files=inputs,
         )
         last_verdict = verdict
         ctx.record(phase, result, verdict)
@@ -577,6 +586,7 @@ def _refine_phase(
         "cycles": ctx.cycle + 1,
         "verdict": last_verdict.get("verdict"),
         "run_status": last_verdict.get("run_status"),
+        "failure_class": last_verdict.get("failure_class"),
     }
 
 
@@ -603,6 +613,7 @@ def _run_once_phase(
         research_goal=ctx.research_goal,
         skill=ctx.skill,
         domain=ctx.domain,
+        input_files=phase.input_files,
     )
     ctx.record(phase, result, verdict)
     return {
@@ -612,6 +623,193 @@ def _run_once_phase(
         "verdict": verdict.get("verdict"),
         "run_status": verdict.get("run_status"),
     }
+
+
+_MAX_DRYRUN_CYCLES = 5
+
+
+def _resolve_skill_callable(skill: Optional[str], domain: Optional[str],
+                            fn_name: str):
+    """Return a named callable from the active skill's module, or None.
+
+    Engine-neutral: imports the skill bundle by convention
+    (``scilink.skills.{domain}.{skill}.{skill}``) and looks up ``fn_name``.
+    No engine names appear here — an engine that does not provide the callable
+    simply yields None.
+    """
+    if not (skill and domain):
+        return None
+    import importlib
+    try:
+        mod = importlib.import_module(f"scilink.skills.{domain}.{skill}.{skill}")
+    except Exception:
+        return None
+    fn = getattr(mod, fn_name, None)
+    return fn if callable(fn) else None
+
+
+def _stage_dry_dir(run_dir: str, dry_dir: str, entry: str) -> None:
+    """Recreate ``dry_dir`` with the run's dependency files linked from
+    ``run_dir`` — everything except the deck itself and subdirs.
+
+    Symlinks the dependencies rather than copying them: the dry run only reads
+    the inputs (the deck is written fresh into ``dry_dir``), so re-copying large
+    inputs — e.g. a serialized force-field system — every gate cycle is wasted
+    I/O. Engine-neutral: it never inspects filenames, so it makes no assumption
+    about which files an engine reads. Falls back to a copy if the filesystem
+    refuses the link."""
+    if os.path.isdir(dry_dir):
+        shutil.rmtree(dry_dir)
+    os.makedirs(dry_dir, exist_ok=True)
+    for name in os.listdir(run_dir):
+        src = os.path.abspath(os.path.join(run_dir, name))
+        if name == entry or not os.path.isfile(src):
+            continue
+        dst = os.path.join(dry_dir, name)
+        try:
+            os.symlink(src, dst)
+        except OSError:
+            shutil.copy2(src, dst)
+
+
+def _dry_run_gate(
+    phase: Phase,
+    executor: Executor,
+    run_critic: _RunCriticLike,
+    ctx: RefinementContext,
+    max_cycles: int = _MAX_DRYRUN_CYCLES,
+) -> Optional[Dict[str, Any]]:
+    """Cheap setup-validation pre-flight before the expensive production run.
+
+    Runs a trimmed "dry-run" twin of the deck (engine setup only — see the
+    skill's ``prepare_dry_run``) and, while it fails to even start, fixes the
+    setup on the REAL deck until it does. This catches syntax/setup errors
+    (style/coeff mismatches, command ordering, kspace-vs-triclinic) in seconds
+    on the node, instead of one-per-expensive-run.
+
+    Engine-neutral: the active skill supplies ``prepare_dry_run``; an engine
+    without it (e.g. VASP, whose single SCF step is not cheap) skips the gate.
+    **Fail-open** — any internal error returns without touching the deck, so the
+    gate never blocks a run it could not validate.
+
+    The twin runs only to PRODUCE the engine's authoritative error; the critic
+    assesses and fixes against the REAL deck (placed in the judged directory), so
+    ``suggested_fixes`` patch the full deck — preserving run lengths and fixing
+    only setup — rather than the trimmed twin.
+
+    Returns a record dict, or None when the gate is skipped.
+    """
+    prepare = _resolve_skill_callable(ctx.skill, ctx.domain, "prepare_dry_run")
+    if prepare is None:
+        return None
+    entry = phase.entry_file
+    if not entry or entry not in (phase.input_files or {}):
+        return None
+    try:
+        return _run_dry_run_gate(phase, executor, run_critic, ctx, prepare,
+                                 entry, max_cycles)
+    except Exception as e:  # fail-open: never block a run we cannot validate
+        logger.warning("Dry-run gate skipped (internal error): %s", e)
+        return {"status": "skipped", "reason": f"gate error: {e}"}
+
+
+def _run_dry_run_gate(phase, executor, run_critic, ctx, prepare, entry,
+                      max_cycles) -> Dict[str, Any]:
+    dry_dir = os.path.join(phase.run_dir, "_dryrun")
+    history: List[Dict[str, Any]] = []
+    for cycle in range(max_cycles):
+        real_deck = phase.input_files[entry]
+        twin = prepare(real_deck)
+        # Stage deps (e.g. the data file) and run the trimmed twin to surface the
+        # engine's setup error.
+        _stage_dry_dir(phase.run_dir, dry_dir, entry)
+        result = executor.run({entry: twin}, phase.run_command, dry_dir)
+        out_dir = result.get("output_dir", dry_dir)
+        # Put the REAL deck where the critic judges, so a fix patches the full
+        # deck (run lengths preserved), not the run-0 twin.
+        with open(os.path.join(out_dir, entry), "w") as fh:
+            fh.write(real_deck)
+        # Coverage is a static (goal, deck) check independent of setup success:
+        # the trimmed twin never exercises observables, so a deck that starts
+        # cleanly but omits a required output still fails the gate and is fixed.
+        # The coverage decision is stochastic; ctx.coverage_votes>1 majority-votes
+        # it to damp the sampling variance (single call when <=1).
+        verdict = majority_coverage(
+            run_critic, getattr(ctx, "coverage_votes", 1),
+            output_dir=out_dir, research_goal=ctx.research_goal,
+            skill=ctx.skill, domain=ctx.domain,
+            input_files={entry: real_deck},
+        )
+        run_status = verdict.get("run_status")
+        missing = verdict.get("missing_observables") or []
+        history.append({"cycle": cycle, "run_status": run_status,
+                        "missing_observables": missing,
+                        "coverage_vote": verdict.get("coverage_vote")})
+        if run_status == "succeeded" and not missing:
+            return {"status": "passed", "cycles": cycle + 1, "history": history}
+        deck_fix = _select_deck_fix(verdict.get("suggested_fixes"), entry, real_deck)
+        if not deck_fix:
+            return {"status": "unfixed", "cycles": cycle + 1, "history": history}
+        phase.input_files[entry] = deck_fix
+    return {"status": "exhausted", "cycles": max_cycles, "history": history}
+
+
+def majority_coverage(run_critic, n_votes: int, **assess_kwargs):
+    """Aggregate the observable-coverage BLOCKING decision over repeated calls.
+
+    The coverage judgment is stochastic — a single call catches the clear cases
+    reliably but waffles on borderline ones. This runs
+    ``run_critic.assess(check_observables=True, **assess_kwargs)`` ``n_votes``
+    times and blocks only on a strict majority, damping the sampling variance
+    (it cannot correct a systematic bias — a wrongly-confident majority stays
+    wrong). ``n_votes <= 1`` is a single pass-through (no behavior change).
+
+    Returns one verdict dict: a representative blocking vote when the majority
+    blocks (``missing_observables`` / ``suggested_fixes`` intact), else a
+    non-blocking vote with ``missing_observables`` cleared. A ``coverage_vote``
+    summary ``{n_votes, n_blocked, agreement, split}`` is added — ``split`` marks
+    disagreement, the case a human-in-the-loop policy should escalate.
+    """
+    assess_kwargs.setdefault("check_observables", True)
+    n = max(1, int(n_votes))
+    verdicts = [run_critic.assess(**assess_kwargs) for _ in range(n)]
+    blocked = [bool(v.get("missing_observables")) for v in verdicts]
+    n_blocked = sum(blocked)
+    if n_blocked * 2 > n:                       # strict majority blocks
+        rep = dict(next(v for v, b in zip(verdicts, blocked) if b))
+    else:
+        rep = dict(next((v for v, b in zip(verdicts, blocked) if not b),
+                        verdicts[0]))
+        rep["missing_observables"] = []
+    rep["coverage_vote"] = {
+        "n_votes": n, "n_blocked": n_blocked,
+        "agreement": max(n_blocked, n - n_blocked) / n,
+        "split": 0 < n_blocked < n,
+    }
+    return rep
+
+
+def _select_deck_fix(fixes, entry: str, real_deck: str):
+    """Pick the corrected entry deck from a critic's ``suggested_fixes``.
+
+    Prefers a fix keyed by the entry filename. As a backstop for a critic
+    that keyed a full rewrite under a near-miss name (e.g. ``run.lammps`` ->
+    ``run.lammps_header_patch``), accepts a mis-keyed fix only when it is a
+    COMPLETE file — at least as long as the current deck. A short header or
+    patch fragment is rejected (applying it would drop the run commands),
+    leaving the gate to report ``unfixed``. Length is the only engine-neutral
+    signal available at this layer.
+    """
+    if not isinstance(fixes, dict):
+        return None
+    direct = fixes.get(entry)
+    if direct:
+        return direct
+    candidates = [
+        v for k, v in fixes.items()
+        if k != entry and isinstance(v, str) and len(v) >= len(real_deck)
+    ]
+    return max(candidates, key=len) if candidates else None
 
 
 def run_campaign(
@@ -664,6 +862,12 @@ def run_campaign(
         return {"status": "aborted", "reason": "pre-run inputs rejected",
                 "stages": [], "phases": [], "history": ctx.history}
     first_phase.input_files = gated
+
+    # ── Pre-run gate (2): cheap engine dry-run — converge the deck to a clean
+    #    setup before the expensive run. Engine-neutral (skipped when the active
+    #    skill provides no prepare_dry_run) and fail-open. Validates the first
+    #    phase's setup, which staged phases share.
+    dry_run_record = _dry_run_gate(first_phase, executor, run_critic, ctx)
 
     flat: List[Dict[str, Any]] = []
     stage_records: List[Dict[str, Any]] = []
@@ -728,8 +932,17 @@ def run_campaign(
             overall = "aborted" if status == "aborted" else "failed"
             break
 
-    return {"status": overall, "stages": stage_records, "phases": flat,
-            "history": ctx.history}
+    result = {"status": overall, "stages": stage_records, "phases": flat,
+              "history": ctx.history}
+    # Surface a structure-caused failure so the caller can regenerate the
+    # structure rather than re-editing a deck that cannot fix a broken pack.
+    if overall != "success" and any(
+        p.get("failure_class") == "structure" for p in flat
+    ):
+        result["failure_class"] = "structure"
+    if dry_run_record is not None:
+        result["dry_run"] = dry_run_record
+    return result
 
 
 def run_refinement(

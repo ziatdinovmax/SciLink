@@ -16,7 +16,10 @@ from .instruct import (
     SCRIPT_CORRECTION_FROM_VALIDATION_TEMPLATE,
     MODIFICATION_PROMPT_TEMPLATE,
 )
-from .utils import save_generated_script, MaterialsProjectHelper, MP_SEARCH_TOOL_SCHEMA
+from .utils import (
+    save_generated_script, MaterialsProjectHelper, MP_SEARCH_TOOL_SCHEMA,
+    detect_structure_build_tools, format_available_tools_block,
+)
 from ...executors import ScriptExecutor, DEFAULT_TIMEOUT
 from ...utils.codegen_parse import parse_codegen_response
 
@@ -99,12 +102,21 @@ class StructureGenerator:
 
         self.mp_helper = MaterialsProjectHelper(api_key=mp_api_key)
 
+        # Probe optional structure-building libraries once, so every generation
+        # prompt can tell the LLM what is importable here. Without this signal
+        # the model guesses and tends to write dependency-free hand-rolled code
+        # even when a purpose-built tool (e.g. packmol) is installed.
+        self._available_tools = detect_structure_build_tools()
+        self._tools_block = format_available_tools_block(self._available_tools)
+
         # Initialization message
         print(f"🔧 Structure Generator Ready ({model_name})")
         if self.mp_helper.enabled:
             print(f"   🗃️  Materials Project: Connected")
         else:
             print(f"   🗃️  Materials Project: Not configured")
+        present = sorted(n for n, ok in self._available_tools.items() if ok)
+        print(f"   🧰 Build libraries: {', '.join(present) if present else 'ASE only'}")
 
     @staticmethod
     def _format_skill_block(skill_content: Optional[str]) -> str:
@@ -131,7 +143,7 @@ class StructureGenerator:
             description=description,
             tool_name="ASE",
         )
-        base_prompt = base_prompt + self._format_skill_block(skill_content)
+        base_prompt = base_prompt + self._format_skill_block(skill_content) + self._tools_block
 
         # Pre-resolve any named materials in the request to mp-ids via tool
         # calls, then inject the resolved facts as ground truth before the
@@ -154,7 +166,7 @@ class StructureGenerator:
             description=description,
             tool_name="ASE",
         )
-        base_prompt = base_prompt + self._format_skill_block(skill_content)
+        base_prompt = base_prompt + self._format_skill_block(skill_content) + self._tools_block
         return base_prompt + JSON_OUTPUT_INSTRUCTION
 
     def _build_correction_prompt(self, original_request: str, failed_script: str,
@@ -171,7 +183,7 @@ class StructureGenerator:
             error_message=error_message,
             tool_name="ASE",
         )
-        base_prompt = base_prompt + self._format_skill_block(skill_content)
+        base_prompt = base_prompt + self._format_skill_block(skill_content) + self._tools_block
         return base_prompt + JSON_OUTPUT_INSTRUCTION
 
     def _build_validation_correction_prompt(self, original_request: str,
@@ -211,7 +223,7 @@ class StructureGenerator:
             prior_attempts_summary=prior_block,
             tool_name="ASE",
         )
-        base_prompt = base_prompt + self._format_skill_block(skill_content)
+        base_prompt = base_prompt + self._format_skill_block(skill_content) + self._tools_block
 
         return base_prompt + JSON_OUTPUT_INSTRUCTION
 
