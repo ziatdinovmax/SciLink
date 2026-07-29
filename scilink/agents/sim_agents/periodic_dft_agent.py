@@ -292,7 +292,15 @@ class PeriodicDFTAgent:
             from ase.io import read as _ase_read, write as _ase_write
             atoms = _ase_read(structure_file)
             buf = io.StringIO()
-            _ase_write(buf, atoms, format=fmt)
+            # VASP requires atoms grouped by species (one count per element on
+            # the POSCAR element line). A packmol-generated box is interleaved
+            # by molecule (e.g. O H O H ... Mg Na ...), which VASP rejects and
+            # which breaks any element-ordered POTCAR assembly. ASE's VASP
+            # writer sorts atoms by symbol when sort=True. Restricted to the
+            # vasp format so other engines' writers (which may not accept the
+            # kwarg) are unaffected.
+            write_kwargs = {"sort": True} if fmt == "vasp" else {}
+            _ase_write(buf, atoms, format=fmt, **write_kwargs)
             result["input_files"][fname] = buf.getvalue()
             self.logger.info(
                 f"Wrote deterministic {fname} ({fmt}) from "
