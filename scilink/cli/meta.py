@@ -102,6 +102,13 @@ Environment Variables:
                         help='Session directory for outputs (default: auto-generated)')
     parser.add_argument('--restore', action='store_true',
                         help='Restore from previous checkpoint in session directory')
+    parser.add_argument('--knowledge-dir', type=str, dest='knowledge_dir',
+                        help='Stable knowledge/KB for planning delegations: '
+                             'a directory (e.g. the ./kb_storage a plan '
+                             'session built) OR the name of a knowledge base '
+                             'from the persistent store (scilink kb list). '
+                             'Without it, planning uses a session-scoped KB '
+                             'and the meta offers any detected KBs in chat.')
 
     # Custom skills — shared with every specialist the meta delegates to
     parser.add_argument(
@@ -173,6 +180,9 @@ Environment Variables:
             if not tf.endswith('.py'):
                 parser.error(f"--tools file must be a .py file: {tf}")
 
+    if args.knowledge_dir and not Path(args.knowledge_dir).exists():
+        parser.error(f"--knowledge-dir path does not exist: {args.knowledge_dir}")
+
     config = {
         'model_name': args.model,
         'base_url': args.base_url,
@@ -184,6 +194,7 @@ Environment Variables:
         'initial_message': args.initial_message,
         'session_dir': args.session_dir,
         'restore': args.restore,
+        'knowledge_dir': args.knowledge_dir,
         'skill_files': args.skill_files or [],
         'tool_files': args.tool_files or [],
         'mcp_servers': args.mcp_servers or [],
@@ -329,6 +340,7 @@ a nested child sub-session under this meta session.
                 futurehouse_api_key=futurehouse_api_key,
                 restore_checkpoint=restore,
                 meta_mode=meta_mode,
+                knowledge_dir=self.config.get('knowledge_dir'),
             )
             print("✅ Meta-agent ready!")
         except Exception as e:

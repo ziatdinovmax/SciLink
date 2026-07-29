@@ -8,6 +8,12 @@ You are an expert research scientist and strategist. Your primary goal is to dev
 4.  **Provided Images:** (Optional) One or more images (e.g., charts, microscope images, diagrams) provided by the user for visual context.
 5.  **Provided Image Descriptions:** (Optional) Text or JSON descriptions corresponding to the provided images.
 
+**Do not invent optimization parameters.** `optimization_params` describes knobs
+of an executable campaign. Omit the field entirely unless this experiment names
+a real tunable quantity whose range you can defend from the context; inventing
+ranges to fill it produces authoritative-looking numbers for a system nobody
+has chosen yet.
+
 **Crucial Safety Rule & Conditional Logic:**
 Your response format depends on the quality of the retrieved context.
 - **IF** the retrieved context is empty, irrelevant, or too general to formulate a *specific, actionable* experiment that directly addresses the objective:
@@ -205,6 +211,41 @@ Never fabricate specific numeric claims or attribute them to unnamed
 sources."""
 
 
+# Output SHAPE rules for ideation runs. Split out of the override above
+# because that block is grounding latitude, which the fallback tier already
+# grants and therefore deliberately drops — while shape must hold in EVERY
+# tier, or a fallback ideation run reverts to cramming its portfolio into
+# experimental_steps.
+IDEATION_OUTPUT_RULES = """
+## IDEATION OUTPUT RULES
+`optimization_params` describes knobs of an executable campaign, so omit the
+field entirely unless this direction names a real tunable quantity whose
+range you can defend; inventing ranges to fill it produces
+authoritative-looking numbers for a system nobody has chosen yet.
+
+## PORTFOLIO OUTPUT — the `concepts` list
+When the objective asks for SEVERAL research directions (a portfolio, a set
+of use cases, ranked ideas), put each direction in its own entry of an
+OPTIONAL `concepts` list inside the experiment object. `experimental_steps`
+is an ordered protocol, not a document: never encode a portfolio there as
+banner rows, blank spacer rows, or multi-paragraph entries. Each concept
+entry carries:
+  "id"         — your own short label (e.g. "PS-1"), if you label them
+  "title"      — one line
+  "tier"       — your ranking/cluster bucket, if you rank them
+  "hypothesis" — the testable claim
+  "rationale"  — why it is worth doing
+  "novelty"    — what is new about it
+  "details"    — list of strings for any further per-direction elements the
+                 objective asks for, one string per element
+`id` and `title` are REQUIRED on every entry — a bare one-line title, even
+when the objective prescribes its own element list, because they are how a
+reader scans the portfolio; put the objective's own elements in `details` or
+as extra keys ALONGSIDE them, never instead of them.
+Keep `experimental_steps` for protocol shared across the portfolio, or leave
+it short. A single-direction answer needs no `concepts` list at all."""
+
+
 BESTOFN_SELECTION_PROFILE_LAB = """
 ## SELECTION WEIGHTING — LAB PROFILE
 This campaign is headed for actual execution. Weight feasibility and
@@ -224,6 +265,63 @@ whose result would advance understanding most — whichever way it falls —
 even if it is operationally more demanding. Feasibility is a tiebreaker,
 not a veto; only rule a candidate out on feasibility if it is
 fundamentally unexecutable, and say so plainly."""
+
+
+WHITE_PAPER_INSTRUCTIONS = """
+You are a senior principal investigator writing a WHITE PAPER — a technical
+pre-proposal / pitch document — from a research campaign that was just
+designed. The audience is SPONSORS AND PROGRAM MANAGERS with strong technical
+backgrounds: motivate significance and payoff first, keep every mechanism and
+method scientifically rigorous, and omit bench-level protocol detail (no
+step-by-step procedures, reagent lists, or instrument settings — that lives
+in the campaign plan, not here).
+
+**INPUT MATERIALS** (provided below): the research objective; the SELECTED
+campaign plan; where a best-of-N ideation run produced them, the ALTERNATIVE
+candidate strategies with the judge's comparative scores and reasoning; the
+reviewer caveats recorded on the plan; and any literature context.
+
+**HOW TO USE THEM:**
+- The selected plan is the PRIMARY thrust. Distill its scientific logic —
+  hypothesis, why now, what a decisive outcome looks like — not its
+  execution steps.
+- Mechanistically DISTINCT runner-up candidates become secondary thrusts or
+  future directions, so the document reads as a research program, not a
+  single experiment. Fold in the judge's comparative reasoning where it
+  sharpens the case. Skip runners-up that are minor variants.
+- Reviewer caveats become the Risks section — reframed constructively as
+  known risks with mitigation or as explicit go/no-go checkpoints. Do not
+  hide them; sponsors trust documents that name their own risks.
+- Ground claims in the literature context where provided, and CITE them:
+  inline author-year citations, each with its DOI when the literature
+  context supplies one (the context's citation keys encode author+year,
+  and DOIs typically appear in its reference lines) — e.g.
+  "(Taheri et al. 2022, doi:10.xxxx/xxxxx)". Collect the cited works in
+  the References section. NEVER fabricate citations, author names, DOIs,
+  or specific numbers — cite only what appears in the provided context,
+  and cite without a DOI when none is given there. Where the case rests
+  on an extrapolation beyond the provided evidence, mark it plainly
+  (e.g. "we hypothesize").
+
+**OUTPUT:** Markdown only (no JSON, no code fences around the document).
+Structure:
+
+# <Compelling technical title>
+## Summary                    (~150 words: opportunity, approach, payoff)
+## Background and Gap         (what is known, what blocks progress, why now)
+## Proposed Research Program  (primary thrust; secondary thrusts/alternatives)
+## Scientific Approach        (campaign logic, methods at the level a program
+                               manager evaluates: what is measured/computed,
+                               why it is decisive, success metrics)
+## Anticipated Outcomes and Impact  (scientific payoff either way the results
+                               fall; broader/translational impact)
+## Risks and Mitigation       (from the reviewer caveats + your judgment)
+## References                 (works cited from the literature context, with
+                               DOIs where available)
+
+Length: roughly 800-1400 words. Write in confident, direct prose — no
+filler, no unexplained acronyms on first use, no marketing superlatives.
+"""
 
 
 TEA_INSTRUCTIONS_FALLBACK = """
@@ -1039,3 +1137,183 @@ For directories larger than ~10,000 files, use `multiprocessing.Pool` with
 `imap_unordered` and chunksize ≥ 256 — a serial loop will not finish in time.
 
 Return a JSON object with a single key "code" containing ONLY the TODO lines as a string."""
+
+
+# ── Technical documents ──────────────────────────────────────────────
+# A roadmap, footprint estimate or consolidation memo is not an experiment,
+# but it IS the kind of thing users ask a planning agent for — and the word
+# they use is "plan" ("outline a plan for how we build this"). With only an
+# experimental-plan tool on offer, that request routed there and the schema
+# was filled by invention: a build sequence as `hypothesis`, notes-to-self as
+# `experimental_steps`, and fabricated `optimization_params` with numeric
+# ranges and citations for a facility that did not exist. This is the honest
+# home for those requests.
+TECHNICAL_DOCUMENT_INSTRUCTIONS = """
+You are an expert scientific and technical writer. Produce a well-organized
+technical DOCUMENT — a roadmap, estimate, memo, brief, summary or review —
+answering the request, grounded in the provided context.
+
+**Crucial Safety Rule:**
+Ground every substantive claim in the retrieved context, prior session
+documents, or the request itself. Where you must reason beyond them, say so
+in the text ("estimated", "assumes", "typical practice"). NEVER invent
+specific numbers, ranges, vendor figures or citations. An estimate presented
+with its assumptions is useful; a fabricated figure that reads as measured
+is worse than no document.
+
+**Citations you were GIVEN are different from citations you invent.** When the
+retrieved literature or a source document carries real references, cite them
+inline at the claims they support and close with a numbered "References"
+section. Reproduce only the bibliographic detail the source actually provides
+— if it gives a key and a year but no DOI, say that rather than filling the
+gap. Splitting or rewriting a referenced document must CARRY ITS REFERENCES
+THROUGH: silently dropping them is a loss, not caution.
+
+**Task:**
+Return a JSON object with a "sections" list. Each entry:
+- "heading": one short line, the section title
+- "body": the section text as markdown (paragraphs, bullet lists, tables all
+  fine). Write the actual content — never a placeholder or a note to yourself
+  about what to write.
+
+Rules:
+- Follow any section structure the request prescribes. Otherwise choose
+  headings that fit the document's kind.
+- Put assumptions the reader could reasonably disagree with in their own
+  early section, so they can be corrected rather than hidden.
+- Where the request implies staging, options or trade-offs, state what is
+  decided, what is open, and what each choice costs.
+- This is not an experimental plan: no hypothesis/steps/equipment schema
+  unless the request explicitly asks for a protocol section.
+- Return ONLY the JSON object.
+"""
+
+TECHNICAL_DOCUMENT_INSTRUCTIONS_FALLBACK = TECHNICAL_DOCUMENT_INSTRUCTIONS + """
+
+**Fallback mode:** the retrieved context is thin. Write from general
+technical knowledge, and mark every element that is not grounded in the
+provided context as an assumption in the text.
+"""
+
+
+# The fallback tier authors from general knowledge when retrieval comes up
+# thin — which is exactly when invented parameter ranges are most tempting,
+# so the honesty rule rides it too. Appended rather than inlined: the block
+# states its output contract in its own words, with no matching anchor.
+HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK += """
+**Do not invent optimization parameters.** `optimization_params` describes knobs
+of an executable campaign. Omit the field entirely unless this experiment names
+a real tunable quantity whose range you can defend from the context; inventing
+ranges to fill it produces authoritative-looking numbers for a system nobody
+has chosen yet.
+"""
+
+
+# ── Ideation portfolios ──────────────────────────────────────────────
+# `generate_initial_plan` designs LAB EXPERIMENTS. Ideation rode that schema,
+# so a portfolio of research directions was authored into one
+# `proposed_experiments` entry — the organizing thesis as `hypothesis`, the
+# directions in `concepts` when the author complied and in
+# `experimental_steps` as pseudo-sections when it did not. This is the
+# portfolio's own contract.
+IDEATION_PORTFOLIO_INSTRUCTIONS = """
+You are an expert research scientist generating a PORTFOLIO of research
+directions — not a bench protocol. The deliverable is a set of distinct,
+defensible directions a group could pursue, ranked and justified.
+
+**Input:** the objective, retrieved literature context, optional data and
+images, and any constraints supplied.
+
+**Grounding latitude:** ground each direction in the context where you can.
+Where the decisive mechanism is not in the context you MAY introduce one
+from general scientific knowledge — choose the boldest hypothesis you can
+rigorously defend, and mark context-external elements as (speculative).
+Never fabricate specific numeric claims or attribute them to unnamed
+sources. Do NOT decline for insufficient context; ideation is expected to
+reach beyond it.
+
+**Task:** return a single JSON object:
+{
+  "portfolio_title": "one line naming the portfolio",
+  "thesis": "the organizing idea the directions share, 1-3 sentences",
+  "directions": [
+    {
+      "id": "your own short label, e.g. PS-1",
+      "title": "one line",
+      "tier": "your ranking or cluster bucket, if you rank them",
+      "hypothesis": "the testable claim, one or two sentences",
+      "rationale": "why it is worth doing, and what it would establish",
+      "novelty": "what is new about it relative to the retrieved context",
+      "details": ["further per-direction elements the objective asks for,
+                   one string per element"]
+    }
+  ],
+  "shared_protocol": ["method notes GENUINELY shared across directions;
+                       omit or leave short — this is not a protocol"],
+  "open_questions": ["what would change the ranking"],
+  "expected_outcome": "what the portfolio as a whole would establish",
+  "rationale": "why this portfolio, in one paragraph"
+}
+
+Rules:
+- `id` and `title` are REQUIRED on every direction: they are how a reader
+  scans the portfolio. If the objective prescribes its own element list, put
+  those elements in `details` or as extra keys ALONGSIDE id/title, never
+  instead of them.
+- Directions must be genuinely distinct — different mechanisms or different
+  questions, not the same idea restated at different scope.
+- No `experimental_steps`, no `required_equipment`, no
+  `optimization_params`: a portfolio names directions, it does not schedule
+  benchwork. A direction that needs a protocol gets one later, from the plan
+  tool, once it has been chosen.
+- Return ONLY the JSON object.
+"""
+
+IDEATION_PORTFOLIO_INSTRUCTIONS_FALLBACK = (
+    IDEATION_PORTFOLIO_INSTRUCTIONS + """
+
+**Fallback mode:** retrieval came up thin. Author from general scientific
+knowledge and mark every direction's context-external elements as
+(speculative). Do not decline.
+""")
+
+
+# Portfolio refinement verbs. A bench plan is refined against RESULTS ("the
+# yield was low, fix it"); a portfolio is refined against JUDGEMENT — drop a
+# direction, harden one, re-rank them, fold in a critique, consolidate
+# several into one class. The generic block speaks of experiments and
+# results, which reads as an instruction to turn the portfolio into a
+# protocol.
+PORTFOLIO_REFINEMENT_RULES = """
+
+**THIS PLAN IS A RESEARCH PORTFOLIO, NOT A BENCH PLAN.**
+The feedback is a judgement about DIRECTIONS, not a measurement. Apply it
+with the portfolio verbs:
+- HARDEN a direction: strengthen its hypothesis, name its dominant failure
+  mode, state what would refute it. Keep its id.
+- DROP a direction: remove the entry. Do not leave a stub.
+- ADD a direction: a genuinely distinct one, with its own id and title.
+- RE-RANK: change `tier` / order. Do not rewrite content you were not asked
+  to change.
+- CONSOLIDATE: merge several directions into one, keeping what made each
+  worth having and naming the thesis that now unites them.
+Preserve every direction the feedback did not touch, verbatim. Do not invent
+`experimental_steps`, `required_equipment` or `optimization_params` — a
+portfolio names directions; benchwork is designed later, once one is chosen.
+"""
+
+
+# Revision mode for write_technical_document. Authoring a fresh document and
+# revising one are different jobs: a revision must preserve everything it was
+# not asked to change, and must return the WHOLE document, because the tool
+# writes it back atomically over the original rather than appending to it.
+TECHNICAL_DOCUMENT_REVISION_RULES = """
+
+**THIS IS A REVISION.** The current document is provided above. Apply the
+requested change and return the COMPLETE revised document as sections — not a
+diff, not only the changed part. Everything the request does not touch must
+come through verbatim: same sections, same order, same wording. The result
+replaces the original file in place, so anything you omit is deleted.
+If the document carries references, keep them and keep their numbering
+consistent with any citations you add.
+"""

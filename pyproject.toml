@@ -48,6 +48,9 @@ dependencies = [
     "nexusformat>=2.0",
     "pyyaml>=6.0",
     "streamlit>=1.37.0",
+    # Markdown -> PDF export (with pymupdf above). Arrives transitively via
+    # streamlit -> rich, but this is a direct import, so pin it directly.
+    "markdown-it-py>=2.2.0",
 ]
 
 [project.optional-dependencies]

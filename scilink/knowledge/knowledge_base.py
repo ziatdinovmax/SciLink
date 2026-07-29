@@ -254,6 +254,19 @@ class KnowledgeBase:
         print(f"  - ✅ Retrieved {len(retrieved_chunks)} chunks.")
         return retrieved_chunks
 
+    def retrieve_sparse(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+        """Keyword (BM25) retrieval over the loaded chunks — needs no
+        embedding model, so it works when the provider that built the index
+        is unavailable. Same return shape as :meth:`retrieve`. The tokenized
+        corpus is cached and invalidated when the chunk count changes."""
+        from .sparse_retrieval import bm25_top_k
+
+        cached = getattr(self, "_bm25_state", None)
+        hits, state = bm25_top_k(self.chunks, query, top_k=top_k, state=cached)
+        self._bm25_state = state
+        print(f"  - ✅ Retrieved {len(hits)} chunks via keyword (BM25) search.")
+        return hits
+
     def get_relevant_maps(self, retrieved_chunks: List[Dict]) -> str:
         """
         Dynamic Context Injection:

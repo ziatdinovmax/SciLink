@@ -357,6 +357,14 @@ class MetaOrchestratorAgent:
         restore_checkpoint: Whether to restore from a previous checkpoint.
         meta_mode: Autonomy level (AUTOPILOT or AUTONOMOUS). The meta has
             only these two — see MetaMode.
+        knowledge_dir: Optional stable knowledge/KB directory for the
+            planning child (documents plus its persisted embedding index,
+            e.g. the ``./kb_storage`` a standalone plan session built).
+            When set, planning delegations reuse that KB; when omitted, the
+            planning child gets a session-scoped KB so it can never inherit
+            a stale index from the launch directory. NOTE: querying a
+            prebuilt KB requires the same embedding provider it was built
+            with (a missing key degrades to no-retrieval with a warning).
     """
 
     # Configuration constants (match the child orchestrators).
@@ -376,6 +384,7 @@ class MetaOrchestratorAgent:
         restore_checkpoint: bool = False,
         meta_mode: MetaMode = MetaMode.AUTOPILOT,
         max_iterations: Optional[int] = None,
+        knowledge_dir: Optional[str] = None,
     ):
         self.logger = logging.getLogger(self.__class__.__name__)
 
@@ -407,6 +416,32 @@ class MetaOrchestratorAgent:
         self.futurehouse_api_key = (
             futurehouse_api_key or os.environ.get("FUTUREHOUSE_API_KEY")
         )
+        # knowledge_dir accepts a directory path OR a named KB from the
+        # persistent store ('scilink kb'); an existing path wins over a name.
+        self.knowledge_dir = None
+        if knowledge_dir:
+            from ...knowledge.kb_store import (
+                resolve_knowledge_source, embedding_compat_warning,
+            )
+            try:
+                self.knowledge_dir, _kb_manifest = resolve_knowledge_source(
+                    str(knowledge_dir)
+                )
+            except FileNotFoundError as e:
+                raise ValueError(str(e)) from e
+            _compat = embedding_compat_warning(_kb_manifest, embedding_model)
+            if _compat:
+                logging.warning(f"⚠️ {_compat}")
+
+        # Detect (but never auto-attach) the launch directory's shared KB —
+        # the stable ./kb_storage that standalone plan sessions build. The
+        # system prompt surfaces it so the meta ASKS the user in chat instead
+        # of a config surface; attach_knowledge_base performs the attachment.
+        self._shared_kb_candidate: Optional[Path] = None
+        if not self.knowledge_dir:
+            _cand = Path.cwd() / "kb_storage"
+            if _cand.is_dir() and any(_cand.iterdir()):
+                self._shared_kb_candidate = _cand.resolve()
 
         self.meta_mode = meta_mode
         self._enable_human_feedback = self._should_enable_human_feedback()
@@ -472,7 +507,7 @@ class MetaOrchestratorAgent:
         # Tools registry.
         self.tools = MetaOrchestratorTools(self)
 
-        system_prompt = get_system_prompt(self.meta_mode)
+        system_prompt = get_system_prompt(self.meta_mode) + self._kb_note()
 
         # Initialize LLM (dual path, copied from AnalysisOrchestratorAgent).
         if base_url:
@@ -523,12 +558,127 @@ class MetaOrchestratorAgent:
         self.meta_mode = mode
         self._enable_human_feedback = self._should_enable_human_feedback()
 
-        new_system_prompt = get_system_prompt(mode)
+        new_system_prompt = get_system_prompt(mode) + self._kb_note()
         self._system_prompt = new_system_prompt
         if self.messages and self.messages[0]["role"] == "system":
             self.messages[0]["content"] = new_system_prompt
 
         logging.info(f"🔄 Meta mode changed: {old_mode.value} → {mode.value}")
+
+    @staticmethod
+    def _kb_source_names(kb_dir: Path) -> list:
+        """Source-document basenames of a KB dir (best-effort, index files
+        excluded)."""
+        try:
+            sources = json.loads(
+                (kb_dir / "default_kb_docs.sources.json").read_text()
+            )
+            names: list = []
+            for entry in sources:
+                if isinstance(entry, dict):
+                    names.extend(entry.get("files") or
+                                 [Path(entry.get("path", "")).name])
+                else:
+                    names.append(Path(str(entry)).name)
+            return sorted({n for n in names
+                           if n and not n.startswith("default_kb")})
+        except Exception:  # noqa: BLE001 - listing is best-effort context
+            return []
+
+    def _kb_note(self) -> str:
+        """System-prompt note listing detached knowledge bases: the launch
+        directory's shared KB (if any) plus the named KBs from the
+        persistent store."""
+        if self.knowledge_dir:
+            return ""
+        lines = []
+        if self._shared_kb_candidate:
+            srcs = self._kb_source_names(self._shared_kb_candidate)[:15]
+            detail = f" Sources: {', '.join(srcs)}." if srcs else ""
+            lines.append(
+                f"- (unnamed, launch directory) {self._shared_kb_candidate} — "
+                f"attach with attach_knowledge_base() [no argument].{detail}"
+            )
+        try:
+            from ...knowledge.kb_store import list_kbs
+            for m in list_kbs():
+                desc = f" — {m['description']}" if m.get("description") else ""
+                srcs = (m.get("sources") or [])[:15]
+                detail = f" Sources: {', '.join(srcs)}." if srcs else ""
+                lines.append(
+                    f"- '{m['name']}'{desc} — attach with "
+                    f"attach_knowledge_base(path='{m['name']}').{detail}"
+                )
+        except Exception:  # noqa: BLE001 - the store listing is best-effort
+            pass
+        if not lines:
+            return ""
+        return (
+            "\n\n## KNOWLEDGE BASES (detached)\n"
+            "These knowledge bases exist but are NOT attached:\n"
+            + "\n".join(lines)
+            + "\nBefore the first planning delegation, ask the user once "
+            "whether to ground planning in one of them and attach it if "
+            "they agree. When no user is available to ask, decide from the "
+            "sources: attach the one clearly relevant to the task (or that "
+            "the task references); leave all detached when none are related "
+            "— irrelevant grounding is worse than none."
+        )
+
+    def attach_knowledge_dir(self, path: Optional[str] = None) -> str:
+        """Attach a stable knowledge/KB directory to the planning child.
+
+        ``path`` may be a directory or a named KB from the persistent store
+        ('scilink kb'); omitted, the launch directory's detected shared-KB
+        candidate is used. If the planning child already exists, its planner
+        is re-bound to the KB in place; otherwise the next delegation picks
+        it up. The choice is checkpointed so a resumed session keeps it.
+
+        Returns:
+            The attached directory path.
+        """
+        from ...knowledge.kb_store import (
+            resolve_knowledge_source, embedding_compat_warning,
+        )
+        manifest = None
+        if path:
+            try:
+                target, manifest = resolve_knowledge_source(str(path))
+            except FileNotFoundError as e:
+                raise ValueError(str(e)) from e
+        else:
+            target = self._shared_kb_candidate
+        if not target:
+            raise ValueError("No knowledge directory given and none detected.")
+        if not target.is_dir():
+            raise ValueError(f"knowledge_dir does not exist: {target}")
+        compat = embedding_compat_warning(manifest, self.embedding_model)
+        if compat:
+            logging.warning(f"⚠️ {compat}")
+
+        self.knowledge_dir = target
+        child = self._children.get("planning")
+        if child is not None:
+            child.knowledge_dir = target
+            child._kb_store_manifest = manifest or None
+            if manifest is not None:
+                # Named store KB: rebind through a session-local copy so the
+                # child's index writes never mutate the shared store (same
+                # copy-on-write the orchestrator constructor applies).
+                import shutil as _shutil
+                cache = child.base_dir / "kb_cache"
+                cache.mkdir(parents=True, exist_ok=True)
+                for f in target.glob("default_kb_*"):
+                    _shutil.copy2(f, cache / f.name)
+                child.planner.rebind_kb(str(cache / "default_kb"))
+            else:
+                child.planner.rebind_kb(str(target / "default_kb"))
+
+        # The detached-KB note no longer applies — refresh the system prompt.
+        self.set_meta_mode(self.meta_mode)
+        self._auto_checkpoint()
+        logging.info(f"📚 Knowledge base attached: {target}")
+        return str(target)
 
     def get_human_feedback_setting(self) -> bool:
         """Returns the current human feedback setting."""
@@ -605,6 +755,19 @@ class MetaOrchestratorAgent:
                 restore_checkpoint=restore,
                 autonomy_level=AutonomyLevel.CO_PILOT,
                 data_dir=None,
+                # Explicit stable KB when the caller opted in (CLI
+                # --knowledge-dir / chat-approved attach_knowledge_base),
+                # else session-scoped. Without
+                # the session-scoped default the child inherits
+                # PlanningAgent's cwd-relative default (./kb_storage),
+                # silently loading whatever stale KB the launch directory
+                # holds — and a non-empty index forces query embedding on
+                # every plan, which hard-fails when the embedding provider's
+                # key is absent. The stable-cwd default stays intentional for
+                # standalone use; meta children isolate per session unless
+                # the user explicitly points them at a KB.
+                knowledge_dir=str(self.knowledge_dir
+                                  or self.planning_dir / "knowledge"),
             )
             # Label its answers as the specialist's — a delegated child's final
             # answer is a deliverable in the meta's verbose stream, not the
@@ -802,6 +965,56 @@ class MetaOrchestratorAgent:
         """Disconnect from all connected MCP servers."""
         for name in list(self._mcp_connections):
             self.disconnect_mcp_server(name)
+
+    def add_documents_to_kb(self, paths: List[str],
+                            name: Optional[str] = None) -> Dict[str, Any]:
+        """Permanently add documents to a named store KB (chat-driven
+        counterpart of 'scilink kb add').
+
+        ``name`` defaults to the currently attached KB when that is a named
+        store KB. New documents are embedded with the KB's own embedding
+        model (the session's key is forwarded only when the models match;
+        otherwise the provider env var must supply it). If the grown KB is
+        attached and the planning child exists, its session cache is
+        refreshed in place so the running session retrieves the new
+        documents immediately.
+
+        Returns:
+            The updated manifest.
+        """
+        from ...knowledge.kb_store import (
+            add_to_kb, kb_store_dir, list_kbs, read_manifest,
+        )
+        if not name:
+            attached_manifest = (read_manifest(self.knowledge_dir)
+                                 if self.knowledge_dir else None)
+            if attached_manifest and (
+                    kb_store_dir() in self.knowledge_dir.parents):
+                name = attached_manifest["name"]
+            else:
+                available = [k["name"] for k in list_kbs()]
+                raise ValueError(
+                    "No named KB is attached — say which KB to add to. "
+                    f"Available: {available or 'none'}."
+                )
+        manifest = read_manifest(
+            kb_store_dir() / name) if name else None
+        key = (self.embedding_api_key
+               if manifest and manifest.get("embedding_model") ==
+               self.embedding_model else None)
+        updated = add_to_kb(name, paths, api_key=key, base_url=self.base_url)
+
+        # Refresh the running session's copy so the addition is usable now.
+        child = self._children.get("planning")
+        if (child is not None and self.knowledge_dir
+                and self.knowledge_dir.name == name):
+            import shutil as _shutil
+            cache = child.base_dir / "kb_cache"
+            cache.mkdir(parents=True, exist_ok=True)
+            for f in self.knowledge_dir.glob("default_kb_*"):
+                _shutil.copy2(f, cache / f.name)
+            child.planner.rebind_kb(str(cache / "default_kb"))
+        return updated
 
     def register_skill(self, skill_path: str) -> str:
         """Register a custom skill (.md) and share it with every specialist.
@@ -1324,6 +1537,13 @@ class MetaOrchestratorAgent:
             self.message_count = state.get("message_count", 0)
             self._delegation_ledger = state.get("delegation_ledger", [])
 
+            # Constructor arg wins; otherwise carry the session's KB choice
+            # forward so a resumed session keeps its grounding.
+            if not self.knowledge_dir and state.get("knowledge_dir"):
+                restored_kd = Path(state["knowledge_dir"])
+                if restored_kd.exists():
+                    self.knowledge_dir = restored_kd
+
             print(f"    ✅ Restored state:")
             print(f"       - Meta mode: {self.meta_mode.value}")
             print(f"       - Delegations: {len(self._delegation_ledger)}")
@@ -1340,6 +1560,7 @@ class MetaOrchestratorAgent:
                 "message_count": self.message_count,
                 "children_instantiated": sorted(self._children.keys()),
                 "delegation_ledger": self._delegation_ledger,
+                "knowledge_dir": str(self.knowledge_dir) if self.knowledge_dir else None,
             }
             with open(self.checkpoint_path, 'w') as f:
                 json.dump(checkpoint_data, f, indent=2, default=str)
@@ -1369,6 +1590,15 @@ class MetaOrchestratorAgent:
             )
         self.last_checkpoint_message_count = self.message_count
         self._save_history()
+        # Saving the session means the TREE: snapshot every instantiated
+        # child too, so a restore recovers their campaign state no matter
+        # how few messages each child has seen.
+        for name, child in self._children.items():
+            try:
+                if hasattr(child, "_auto_checkpoint"):
+                    child._auto_checkpoint()
+            except Exception as e:  # noqa: BLE001 - one child must not block the save
+                logging.warning(f"Child '{name}' checkpoint failed: {e}")
         return str(self.checkpoint_path)
 
     def _trim_history(self, history: List[Dict], max_messages: int = None) -> List[Dict]:
@@ -1554,10 +1784,13 @@ class MetaOrchestratorAgent:
 
             for tool_call in message.tool_calls:
                 func_name = tool_call.function.name
-                try:
-                    args = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError:
-                    args = {}
+                args, arg_error = self._parse_tool_args(
+                    tool_call, getattr(response.choices[0], "finish_reason", None))
+                if arg_error is not None:
+                    print(f"  ⚠️  {func_name}: arguments discarded (see above)")
+                    self.messages.append(
+                        self._tool_message(tool_call.id, arg_error))
+                    continue
 
                 print(f"  🔧 Calling tool: {func_name}")
                 result = self.tools.execute_tool(func_name, **args)
@@ -1566,6 +1799,43 @@ class MetaOrchestratorAgent:
 
         self._last_chat_hit_iter_cap = True
         return "⚠️ Maximum tool iterations reached. Please simplify your request."
+
+    @staticmethod
+    def _parse_tool_args(tool_call, finish_reason=None):
+        """Parse a tool call's JSON arguments, failing loud on bad input.
+
+        Returns (args, None) on success, or (None, error_json) when the
+        arguments are malformed or truncated. Ported from the planning
+        orchestrator (#270), where the same silent ``args = {}`` fallback
+        was found to hide the real cause: the tool then raises about a
+        MISSING argument, so the model "resubmits with the full task" —
+        fixing the wrong thing — and loops. Seen live on the meta four times
+        in a row for one delegate_to_planning call.
+        """
+        try:
+            return json.loads(tool_call.function.arguments), None
+        except json.JSONDecodeError:
+            raw = getattr(tool_call.function, "arguments", "") or ""
+            if finish_reason == "length":
+                cause = ("the arguments JSON was truncated — the response hit "
+                         "the output-token limit")
+            else:
+                cause = ("the arguments string was not valid JSON — typically "
+                         "broken escaping of quotes or newlines inside a large "
+                         "string value")
+            return None, json.dumps({
+                "status": "error",
+                "message": (
+                    f"Tool call discarded: {cause} ({len(raw)} characters "
+                    "received). The tool was NOT executed, and the arguments "
+                    "you sent were never seen — this is NOT a missing-argument "
+                    "error, so re-sending the same call will fail the same "
+                    "way. Send a SHORTER call: for a delegation keep the "
+                    "essential instruction in `task` and move supporting "
+                    "detail into `context`; otherwise split the work across "
+                    "several smaller calls."
+                ),
+            })
 
     def _print_assistant_reasoning(self, content) -> None:
         """Surface the LLM's interim reasoning that accompanies a tool call.
@@ -1668,10 +1938,13 @@ class MetaOrchestratorAgent:
 
             for tool_call in tool_calls:
                 func_name = tool_call.function.name
-                try:
-                    args = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError:
-                    args = {}
+                args, arg_error = self._parse_tool_args(
+                    tool_call, locals().get("finish_reason"))
+                if arg_error is not None:
+                    print(f"  ⚠️  {func_name}: arguments discarded (see above)")
+                    self.messages.append(
+                        self._tool_message(tool_call.id, arg_error))
+                    continue
 
                 print(f"  🔧 Calling tool: {func_name}")
                 result = self.tools.execute_tool(func_name, **args)

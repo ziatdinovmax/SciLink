@@ -4,7 +4,8 @@ import re
 from datetime import datetime
 from typing import Dict, Any, List
 
-from .user_interface import format_caveats
+from .parser_utils import plan_directions, plan_is_portfolio, plan_thesis
+from .user_interface import format_caveats, concept_title, humanize_key
 
 class HTMLReportGenerator:
     def __init__(self, agent_state: Dict[str, Any]):
@@ -203,22 +204,61 @@ class HTMLReportGenerator:
                  # Handle case where steps are just a single string block
                  steps_html = self._markdown_to_html(str(raw_steps))
 
+        # A `concepts` portfolio is the deliverable of an ideation campaign.
+        # The ideation run itself skips this report, but every later refine
+        # regenerates plan.html — without this the HTML would show only the
+        # shared protocol and silently drop the research directions.
+        concepts = exp.get("concepts")
+        concepts_html = ""
+        if isinstance(concepts, list) and concepts:
+            blocks = []
+            for n, c in enumerate(concepts, 1):
+                if not isinstance(c, dict):
+                    blocks.append(f"<li>{html.escape(str(c))}</li>")
+                    continue
+                label = html.escape(str(c.get("id") or n))
+                title = html.escape(concept_title(c, n))
+                tier = (f" <em>(tier {html.escape(str(c['tier']))})</em>"
+                        if c.get("tier") else "")
+                rows = ""
+                for key, val in c.items():
+                    if key in ("id", "title", "tier") or not val:
+                        continue
+                    if isinstance(val, list):
+                        inner = "".join(
+                            f"<li>{self._markdown_to_html(str(v))}</li>"
+                            for v in val)
+                        body = f"<ul>{inner}</ul>"
+                    else:
+                        body = self._markdown_to_html(str(val))
+                    rows += (f"<div><strong>{html.escape(humanize_key(key))}:"
+                             f"</strong> {body}</div>")
+                blocks.append(f"<li><strong>{label}. {title}</strong>{tier}"
+                              f"{rows}</li>")
+            concepts_html = f"""
+            <div style="margin-top: 15px;">
+                <strong>🧠 Research Directions ({len(concepts)}):</strong>
+                <ol>{''.join(blocks)}</ol>
+            </div>
+            """
+        steps_label = "🧭 Shared Protocol" if concepts_html else "🧪 Steps"
+
         return f"""
         <div class="exp-block">
             <h4 style="color: #2563eb; margin-bottom: 5px;">Experiment {index}: {html.escape(exp.get('experiment_name', 'Unnamed'))}</h4>
-            
+
             <div style="margin-bottom: 10px;">
-                <strong>🎯 Hypothesis:</strong> 
+                <strong>🎯 Hypothesis:</strong>
                 <div>{self._markdown_to_html(exp.get('hypothesis', ''))}</div>
             </div>
-            
+
             <div class="justification">
-                <strong>💡 Justification:</strong> 
+                <strong>💡 Justification:</strong>
                 <div>{self._markdown_to_html(exp.get('justification', ''))}</div>
             </div>
-            
+            {concepts_html}
             <div style="margin-top: 15px;">
-                <strong>🧪 Steps:</strong>
+                <strong>{steps_label}:</strong>
                 {steps_html}
             </div>
             {code_html}
@@ -247,15 +287,89 @@ class HTMLReportGenerator:
         </div>
         """
 
+    def _render_portfolio(self, plan: Dict[str, Any]) -> str:
+        """Render a research PORTFOLIO — one card per direction.
+
+        The experiment template renders an ordered protocol, which
+        misrepresents a portfolio badly enough that plan.html was suppressed
+        for ideation entirely. That left the dossier and the white paper as
+        the only readable artifacts and nothing openable mid-run, which is
+        why the reviewer got thousands of words in a terminal instead.
+        """
+        dirs = plan_directions(plan)
+        if not dirs:
+            return ""
+        parts = []
+        thesis = plan_thesis(plan)
+        if thesis:
+            parts.append(
+                '<div class="section"><div class="section-title">'
+                'Organizing thesis</div>'
+                f'<p>{html.escape(str(thesis))}</p></div>'
+            )
+        parts.append('<div class="section"><div class="section-title">'
+                     f'Research directions ({len(dirs)})</div></div>')
+        for n, d in enumerate(dirs, 1):
+            label = html.escape(str(d.get("id") or n))
+            title = html.escape(str(d.get("title") or "Untitled"))
+            tier = d.get("tier")
+            tier_html = (f'<span class="badge plan">{html.escape(str(tier))}</span>'
+                         if tier else "")
+            rows = []
+            for key, heading in (("hypothesis", "Hypothesis"),
+                                 ("rationale", "Rationale"),
+                                 ("novelty", "Novelty")):
+                if d.get(key):
+                    rows.append(
+                        f'<div class="section-title">{heading}</div>'
+                        f'<p>{html.escape(str(d[key]))}</p>')
+            details = d.get("details")
+            if isinstance(details, list) and details:
+                items = "".join(f"<li>{html.escape(str(x))}</li>"
+                                for x in details)
+                rows.append('<div class="section-title">Details</div>'
+                            f'<ul>{items}</ul>')
+            # Author-invented keys carry the objective's own required
+            # elements; dropping them would lose the answer.
+            known = {"id", "title", "tier", "hypothesis", "rationale",
+                     "novelty", "details", "_synthesised"}
+            for k, v in d.items():
+                if k in known or not v:
+                    continue
+                body = ("".join(f"<li>{html.escape(str(x))}</li>" for x in v)
+                        if isinstance(v, list) else
+                        f"<p>{html.escape(str(v))}</p>")
+                body = f"<ul>{body}</ul>" if isinstance(v, list) else body
+                rows.append('<div class="section-title">'
+                            f'{html.escape(k.replace("_", " ").title())}'
+                            f'</div>{body}')
+            parts.append(
+                '<div class="experiment-card">'
+                f'<h3>{label}: {title} {tier_html}</h3>'
+                + "".join(rows) + '</div>'
+            )
+        shared = plan.get("shared_protocol") or []
+        if shared:
+            items = "".join(f"<li>{html.escape(str(x))}</li>" for x in shared)
+            parts.append('<div class="section"><div class="section-title">'
+                         f'Shared protocol</div><ul>{items}</ul></div>')
+        openq = plan.get("open_questions") or []
+        if openq:
+            items = "".join(f"<li>{html.escape(str(x))}</li>" for x in openq)
+            parts.append('<div class="section"><div class="section-title">'
+                         f'Open questions</div><ul>{items}</ul></div>')
+        return "".join(parts)
+
     def generate_single_plan(self, plan: Dict[str, Any], output_path: str,
                              title: str = "Candidate Plan"):
         """Render ONE plan dict (not the session history) to a standalone HTML
         report — used for best-of-N candidate reports, where each candidate
         gets its own persisted page under ``plan_candidates/``."""
-        content_html = "".join(
-            self._render_experiment(exp, x + 1)
-            for x, exp in enumerate(plan.get('proposed_experiments', []))
-        )
+        content_html = (self._render_portfolio(plan)
+                        if plan_is_portfolio(plan) else
+                        "".join(self._render_experiment(exp, x + 1)
+                                for x, exp in enumerate(
+                                    plan.get('proposed_experiments', []))))
         html_content = f"""
         <!DOCTYPE html><html><head><meta charset="UTF-8"><title>{html.escape(title)}</title>{self._get_css()}</head>
         <body><div class="container">
@@ -303,12 +417,17 @@ class HTMLReportGenerator:
             step_num = i + 1 
             is_tea = "technoeconomic_assessment" in plan or plan.get("type") == "technoeconomic_analysis"
             badge_class = "tea" if is_tea else "plan"
-            badge_text = "TECHNO-ECONOMIC ANALYSIS" if is_tea else "EXPERIMENTAL STRATEGY"
+            badge_text = ("TECHNO-ECONOMIC ANALYSIS" if is_tea
+                          else "RESEARCH PORTFOLIO" if plan_is_portfolio(plan)
+                          else "EXPERIMENTAL STRATEGY")
             
             if is_tea:
                 content_html = self._render_tea(plan)
             else:
-                content_html = "".join(self._render_experiment(exp, x+1) for x, exp in enumerate(plan.get('proposed_experiments', [])))
+                content_html = (self._render_portfolio(plan)
+                                if plan_is_portfolio(plan) else
+                                "".join(self._render_experiment(exp, x+1)
+                                        for x, exp in enumerate(plan.get('proposed_experiments', []))))
                 # Advisory critic caveats (same source as the CLI summary / warnings)
                 caveat_lines = format_caveats(plan.get('critic_findings'))
                 if caveat_lines:

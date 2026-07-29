@@ -12,7 +12,8 @@ from ...auth import get_internal_proxy_key
 from ...utils.tool_media import repair_dangling_tool_calls
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
-from .planning_agent import PlanningAgent
+from .planning_agent import (
+    PlanningAgent, compact_planner_state, expand_planner_state)
 from .user_interface import format_caveats
 from .scalarizer_agent import ScalarizerAgent
 from .bo_agent import BOAgent
@@ -232,9 +233,14 @@ for each:
 Several search types can be requested at once (comma-separated) and run in
 parallel, costing roughly the wait of a single search. For IDEATION sessions
 — brainstorming, exploring approaches, "what are interesting directions" —
-pair grounding with cross-domain retrieval and select the ideation profile:
+pair grounding with cross-domain retrieval and author a PORTFOLIO, not an
+experimental plan:
   search_literature(objective="...", search_type="hypothesis_context,cross_domain")
-  generate_initial_plan(..., literature_context=..., selection_profile="ideation")
+  generate_ideation_portfolio(..., literature_context=...)
+generate_initial_plan designs ONE bench experiment; a portfolio forced
+through it comes back with its directions flattened into protocol steps. Use
+it for ideation only when the user has PICKED a direction and wants its
+runnable protocol.
 Literature of any type reduces constraint COVERAGE — plans stay on-topic but
 omit individual requirements. When the objective carries hard equipment or
 process constraints, pass them as additional_context (each is then mapped to a
@@ -643,7 +649,24 @@ class PlanningOrchestratorAgent:
                 raise ValueError(f"data_dir does not exist: {data_dir}")
 
         self.data_dir = Path(data_dir) if data_dir else None
-        self.knowledge_dir = Path(knowledge_dir) if knowledge_dir else None
+        # knowledge_dir accepts a directory path OR a named KB from the
+        # persistent store (scilink kb create/list) — an existing path wins
+        # over a name. A store manifest also gives us the KB's build-time
+        # embedding model, so provider mismatch warns HERE instead of
+        # failing opaquely at query time.
+        self.knowledge_dir = None
+        self._kb_store_manifest = None
+        if knowledge_dir:
+            from ...knowledge.kb_store import (
+                resolve_knowledge_source, embedding_compat_warning,
+            )
+            self.knowledge_dir, self._kb_store_manifest = resolve_knowledge_source(
+                str(knowledge_dir), strict=False
+            )
+            _compat = embedding_compat_warning(self._kb_store_manifest,
+                                               embedding_model)
+            if _compat:
+                logging.warning(f"⚠️ {_compat}")
         self.code_dir = Path(code_dir) if code_dir else None
 
         if self.data_dir:
@@ -722,8 +745,28 @@ class PlanningOrchestratorAgent:
             output_dir=str(self.base_dir),
         )
         if self.knowledge_dir:
-            planner_kwargs["kb_base_path"] = str(self.knowledge_dir / "default_kb")
+            if self._kb_store_manifest is not None:
+                # Named store KB: sessions load it but must never write back
+                # (a session's in-run appends would silently mutate a shared
+                # artifact — mutate the store only via 'scilink kb'). Seed a
+                # session-local copy of the persisted index; loading stays
+                # instant and any session appends stay session-local.
+                import shutil as _shutil
+                cache = self.base_dir / "kb_cache"
+                cache.mkdir(parents=True, exist_ok=True)
+                for f in self.knowledge_dir.glob("default_kb_*"):
+                    if not (cache / f.name).exists():
+                        _shutil.copy2(f, cache / f.name)
+                planner_kwargs["kb_base_path"] = str(cache / "default_kb")
+            else:
+                planner_kwargs["kb_base_path"] = str(self.knowledge_dir / "default_kb")
         self.planner = PlanningAgent(**planner_kwargs)
+        if getattr(self, "_pending_planner_state", None):
+            self.planner.state = self._pending_planner_state
+            n_hist = len(self._pending_planner_state.get("plan_history", []))
+            print(f"    ✅ Planner campaign state restored "
+                  f"({n_hist} plan iteration(s))")
+            self._pending_planner_state = None
 
         # Literature & Molecules agents (orchestrator-level tools)
         self.lit_agent = None
@@ -734,7 +777,7 @@ class PlanningOrchestratorAgent:
             from ..lit_agents.optimize_query import optimize_search_query
             fh_key = futurehouse_api_key or os.getenv("FUTUREHOUSE_API_KEY")
             try:
-                self.lit_agent = LiteratureSearchAgent(fh_key, max_wait_time=3000)
+                self.lit_agent = LiteratureSearchAgent(fh_key, max_wait_time=1500)
                 logging.info("✅ Orchestrator: Literature Search Agent initialized.")
             except Exception as e:
                 logging.warning(f"⚠️ Failed to initialize Literature Agent: {e}")
@@ -1154,7 +1197,17 @@ class PlanningOrchestratorAgent:
         try:
             with open(self.checkpoint_path, 'r') as f:
                 state = json.load(f)
-            
+
+            # Stash the PLANNER's campaign state (current_plan,
+            # plan_history, candidates, literature provenance) — the planner
+            # is constructed AFTER this restore runs, so it is applied right
+            # after construction. The save side always recorded it; without
+            # the reload a restored child answered 'no campaign plan exists'
+            # to every follow-up.
+            _ps = state.get("planner_state") or None
+            self._pending_planner_state = (
+                expand_planner_state(_ps) if _ps else None)
+
             self.active_scalarizer_script = state.get("active_scalarizer_script")
             self.expected_input_columns = state.get("expected_input_columns")
 
@@ -1370,8 +1423,22 @@ class PlanningOrchestratorAgent:
             # _active_output_subdir is scoped to this call; clear it so a
             # later direct chat() on the same instance writes to base_dir.
             self._active_output_subdir = None
+            # A delegation-driven child sees ~1 message per delegation and
+            # never reaches the 10-message auto-checkpoint cadence — so a
+            # meta restore found no checkpoint and rebuilt the child FRESH,
+            # losing the campaign. Checkpoint after every delegation.
+            self._auto_checkpoint()
 
         files_produced = sorted(_snapshot_files() - files_before)
+        # Deterministic, clickable list of what this turn wrote. The model's
+        # prose cites short relative paths ("planning/top3_priority_brief.md")
+        # and the reader is left to `find` the file; this cannot drift from
+        # what was actually produced.
+        try:
+            from .user_interface import display_files_produced
+            display_files_produced(files_produced, self.base_dir)
+        except Exception:  # noqa: BLE001 - reporting must never fail a task
+            pass
 
         # data_points_collected: rows in the BO optimization table, if any.
         data_points = 0
@@ -1471,7 +1538,7 @@ class PlanningOrchestratorAgent:
                 "expected_input_levels": self.expected_input_levels,
                 "fidelity_spec": self.fidelity_spec,
                 "data_points_collected": len(pd.read_csv(self.bo_data_path)) if self.bo_data_path.exists() else 0,
-                "planner_state": self.planner.state,
+                "planner_state": compact_planner_state(self.planner.state),
                 "message_count": self.message_count,
                 "latest_tea_results": self.latest_tea_results,
                 "delegation_counter": self._delegation_counter,

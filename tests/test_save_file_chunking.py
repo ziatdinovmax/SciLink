@@ -130,8 +130,12 @@ def test_bad_args_never_reach_execute_tool(tmp_path):
     args, err = PlanningOrchestratorAgent._parse_tool_args(
         _tool_call('{"filename": "p.md", "content": "trunc'))
     assert args is None and err is not None
-    # The old behavior (args={}) produced this unrecoverable TypeError:
-    old_result = tools.execute_tool("save_file")
-    assert "missing" in json.loads(old_result)["message"]
-    # The new behavior returns the actionable message instead.
+    # Even if bad args DO reach execute_tool (valid-but-incomplete JSON slips
+    # past the parse guard), the schema-required check returns an actionable
+    # error instead of the old unrecoverable TypeError.
+    reached_result = json.loads(tools.execute_tool("save_file"))
+    assert reached_result["status"] == "error"
+    assert "missing" in reached_result["message"].lower()
+    assert "append_file" in reached_result["message"]
+    # The parse-guard path returns the actionable message as before.
     assert "append_file" in json.loads(err)["message"]

@@ -276,6 +276,32 @@ class MetaOrchestratorTools:
             },
         })
 
+    def _vision_model(self):
+        """A CLEAN model instance for one-off vision calls (view_image).
+
+        The meta's chat model carries the orchestrator system prompt and the
+        full tool registry — a describe-this-image call through it gets
+        answered in the meta's persona ('I'll view the image...') instead of
+        with an actual description (seen live on the Bedrock path). Same
+        model/credentials, no system instruction, no tools. Lazily built and
+        cached.
+        """
+        if getattr(self, "_vision_model_cache", None) is None:
+            if self.orch.base_url:
+                from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+                self._vision_model_cache = OpenAIAsGenerativeModel(
+                    model=self.orch.model_name,
+                    api_key=self.orch.api_key,
+                    base_url=self.orch.base_url,
+                )
+            else:
+                from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
+                self._vision_model_cache = LiteLLMGenerativeModel(
+                    model=self.orch.model_name,
+                    api_key=self.orch.api_key,
+                )
+        return self._vision_model_cache
+
     def execute_tool(self, tool_name: str, **kwargs) -> str:
         """Execute a tool by name; always returns a JSON string."""
         if tool_name not in self.functions_map:
@@ -283,8 +309,71 @@ class MetaOrchestratorTools:
                 "status": "error",
                 "message": f"Tool '{tool_name}' not found",
             })
+
+        # A tool call whose arguments hit the output-token cap mid-generation
+        # arrives as VALID but incomplete JSON — later keys simply absent —
+        # and dispatching it raises a bare TypeError about a missing
+        # positional argument. Seen repeatedly on delegate_to_planning, whose
+        # `task` brief runs to thousands of words: the model spends a whole
+        # round trip re-emitting the same oversized call. The planning
+        # orchestrator has guarded this for a while; the meta had not.
+        missing = [p for p in self._required_params(tool_name)
+                   if p not in kwargs]
+        if missing:
+            logging.warning(f"Tool {tool_name}: missing {missing} "
+                            "(likely a truncated tool call)")
+            # Advice has to fit the tool. The delegate_* tools carry a long
+            # free-text brief and can shed weight into `context`; view_document
+            # (paths) and run_fanout (branches) cannot, and telling them to
+            # would be nonsense.
+            import inspect as _inspect
+            try:
+                accepted = set(_inspect.signature(
+                    self.functions_map[tool_name]).parameters)
+            except (TypeError, ValueError):
+                accepted = set()
+            if {"task", "context"} <= accepted:
+                how = ("Re-send it SHORTER: keep the essential instruction in "
+                       "`task` and move supporting detail into `context`, "
+                       "rather than re-sending the same text.")
+            else:
+                how = ("Re-send the call with every required argument. If the "
+                       "payload is large, split the work across several "
+                       "smaller calls rather than repeating this one.")
+            return json.dumps({
+                "status": "error",
+                "tool": tool_name,
+                "message": (
+                    f"Missing required argument(s): {', '.join(missing)}. "
+                    f"The call was most likely truncated by the response "
+                    f"length limit. {how}"
+                ),
+            })
+
         try:
             return self.functions_map[tool_name](**kwargs)
+        except TypeError as e:
+            if "unexpected keyword argument" in str(e):
+                import inspect as _inspect
+                try:
+                    accepted = list(_inspect.signature(
+                        self.functions_map[tool_name]).parameters)
+                except (TypeError, ValueError):
+                    accepted = []
+                logging.warning(f"Tool {tool_name}: {e}")
+                return json.dumps({
+                    "status": "error",
+                    "tool": tool_name,
+                    "message": (f"{e}. Accepted arguments: "
+                                f"{', '.join(accepted) or 'unknown'}. "
+                                "Re-send the call using only those."),
+                })
+            logging.error(f"Tool execution error ({tool_name}): {e}", exc_info=True)
+            return json.dumps({
+                "status": "error",
+                "message": str(e),
+                "tool": tool_name,
+            })
         except Exception as e:
             logging.error(f"Tool execution error ({tool_name}): {e}", exc_info=True)
             return json.dumps({
@@ -292,6 +381,14 @@ class MetaOrchestratorTools:
                 "message": str(e),
                 "tool": tool_name,
             })
+
+    def _required_params(self, tool_name: str) -> list:
+        """Schema-declared required parameter names for a tool."""
+        for schema in getattr(self, "openai_schemas", []) or []:
+            fn = schema.get("function", {})
+            if fn.get("name") == tool_name:
+                return fn.get("parameters", {}).get("required", []) or []
+        return []
 
     def _register_all_tools(self):
         """Register the meta-agent's delegation and introspection tools."""
@@ -749,6 +846,103 @@ class MetaOrchestratorTools:
                 },
             },
             required=[],
+        )
+
+        # -- attach_knowledge_base -------------------------------------------
+        def attach_knowledge_base(path: str = None) -> str:
+            print("  📚 Tool: Attaching knowledge base...")
+            try:
+                attached = self.orch.attach_knowledge_dir(path)
+                from ...knowledge.kb_store import (
+                    read_manifest, embedding_compat_warning,
+                )
+                out = {"status": "success", "knowledge_dir": attached}
+                warn = embedding_compat_warning(
+                    read_manifest(Path(attached)), self.orch.embedding_model
+                )
+                if warn:
+                    out["warning"] = (
+                        f"{warn} Surface this to the user: retrieval from "
+                        "this KB may be degraded or unavailable in this "
+                        "session."
+                    )
+                return json.dumps(out)
+            except Exception as e:
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=attach_knowledge_base,
+            name="attach_knowledge_base",
+            description=(
+                "Ground planning delegations in a stable knowledge base — "
+                "either a NAMED KB from the user's persistent store (listed "
+                "in the system prompt; pass its name as `path`) or a folder "
+                "holding a persisted KB index. With no `path`, attaches the "
+                "launch directory's detached shared KB, if any. Call this "
+                "ONLY after the user has agreed (or explicitly asked) to use "
+                "their knowledge base — except when running autonomously, "
+                "where you decide from the listed sources' relevance to the "
+                "task. Takes effect for all subsequent planning delegations "
+                "and persists across session resume."
+            ),
+            parameters={
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "A named KB from the store (e.g. 'produced-water'), "
+                        "or a knowledge directory path. Omit to attach the "
+                        "launch directory's detached shared KB."
+                    ),
+                },
+            },
+            required=[],
+        )
+
+        # -- add_to_knowledge_base -------------------------------------------
+        def add_to_knowledge_base(paths, name: str = None) -> str:
+            if isinstance(paths, str):
+                paths = [paths]
+            print(f"  📚 Tool: Adding {len(paths)} document(s) to knowledge base...")
+            try:
+                manifest = self.orch.add_documents_to_kb(paths, name=name)
+                return json.dumps({
+                    "status": "success",
+                    "knowledge_base": manifest.get("name"),
+                    "n_vectors": manifest.get("n_vectors"),
+                    "sources": manifest.get("sources", [])[-10:],
+                })
+            except Exception as e:
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=add_to_knowledge_base,
+            name="add_to_knowledge_base",
+            description=(
+                "PERMANENTLY add document files to a named knowledge base in "
+                "the user's persistent store — the KB is a shared artifact "
+                "reused across sessions, so call this ONLY when the user "
+                "explicitly asks to add/save documents to their knowledge "
+                "base (in any autonomy mode; never on your own initiative). "
+                "Embeds only the new documents, using the KB's own embedding "
+                "model. If that KB is attached to this session, the session "
+                "picks up the additions immediately. For using a document in "
+                "just this session's planning, pass it in the delegation "
+                "task instead."
+            ),
+            parameters={
+                "paths": {
+                    "type": ["string", "array"],
+                    "items": {"type": "string"},
+                    "description": "Absolute path(s) of the document file(s) "
+                                   "or folder(s) to add.",
+                },
+                "name": {
+                    "type": "string",
+                    "description": ("Target KB name. Omit to use the "
+                                    "currently attached named KB."),
+                },
+            },
+            required=["paths"],
         )
 
         # -- save_checkpoint -------------------------------------------------
@@ -1238,7 +1432,7 @@ class MetaOrchestratorTools:
                     buf = io.BytesIO()
                     img.save(buf, format="JPEG", quality=90)
                     description = describe_image(
-                        buf.getvalue(), self.orch.model, prompt
+                        buf.getvalue(), self._vision_model(), prompt
                     )
                     results.append({"name": pp.name,
                                     "description": description})

@@ -19,6 +19,7 @@ All LLM traffic is a scripted mock; no network.
 import ast
 import builtins
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -498,3 +499,619 @@ def test_coverage_note_preserves_the_original_context(monkeypatch):
         model=None, generation_config=None,
         additional_context="max 2 mL/well, aqueous only", external_context="lit")
     assert "max 2 mL/well, aqueous only" in seen["additional_context"]
+
+
+def test_candidate_cards_are_visually_separated(capsys):
+    """Each candidate's body runs to several hundred words, so boundaries
+    must be findable at a glance: a banded 'CANDIDATE i of n' rule, the pick
+    starred in that band, and wrapped/indented field bodies. The '── Candidate
+    i: name ──' marker line keeps its exact grammar (UI parser contract)."""
+    long_text = ("word " * 400).strip()
+    cands = [json.loads(plan_json(f"Plan {i}", long_text)) for i in (1, 2, 3)]
+    for c in cands:
+        c["proposed_experiments"][0]["justification"] = long_text
+    judge = json.loads(judge_json(2, 3))
+    display_plan_candidates(cands, judge, selected=2)
+    out = capsys.readouterr().out
+
+    assert out.count("━" * 80) == 6  # a rule above and below each banner
+    for i in (1, 2, 3):
+        assert f"  CANDIDATE {i} of 3" in out
+    assert "CANDIDATE 2 of 3   ★ JUDGE PICK" in out
+    assert "CANDIDATE 1 of 3   ★" not in out
+    # labels sit on their own line; bodies are wrapped and indented under them
+    assert "\n🎯 Hypothesis:\n   word" in out
+    assert "\n💡 Justification:\n   word" in out
+    body_lines = [ln for ln in out.splitlines() if ln.startswith("   word")]
+    assert body_lines and max(len(ln) for ln in body_lines) <= 80
+
+    # pick is still readable from the BLOCK alone (prompt carries no index)
+    parse = _load_ui_parser()
+    cands_p, pick = parse(out, "accept plan candidate")
+    assert pick == 2
+    assert [c["idx"] for c in cands_p] == [1, 2, 3]
+
+
+# ------------------------------------------------- plan summary presentation
+
+def _summary(plan, ideation, capsys):
+    from scilink.agents.planning_agents.user_interface import display_plan_summary
+    display_plan_summary(plan, ideation=ideation)
+    return capsys.readouterr().out
+
+
+def _portfolio_plan():
+    return {"proposed_experiments": [{
+        "experiment_name": "Use-case portfolio",
+        "hypothesis": "PORTFOLIO THESIS: capture structure and function together.",
+        "experimental_steps": [
+            "==================== DOMAIN 1: PRECISION SYNTHESIS ====================",
+            "",
+            "PS-1 (TIER-1) — catch the metastable polymorph before it equilibrates.",
+            "",
+            "PS-2 (TIER-1) — steer the redox state to a target.",
+        ],
+        "required_equipment": ["XRD", "XAS"],
+        "expected_outcome": "SUPPORT if state and function co-emerge.",
+        "justification": "Grounded in the retrieved context.",
+    }]}
+
+
+def test_blank_and_banner_entries_are_not_numbered_steps(capsys):
+    """Blank entries are spacing and '==== ... ====' entries are section
+    dividers — numbering them produced empty '2.'/'4.' rows in live output."""
+    out = _summary(_portfolio_plan(), False, capsys)
+    assert "▸ DOMAIN 1: PRECISION SYNTHESIS" in out
+    assert " 1. PS-1" in out and " 2. PS-2" in out  # numbering skips the gaps
+    assert " 3. " not in out
+    assert not re.search(r"^ \d+\.\s*$", out, re.M)  # no empty numbered rows
+
+
+def test_ideation_view_drops_lab_protocol_vocabulary(capsys):
+    """An ideation portfolio is not a bench protocol: no imposed step
+    numbering (the entries carry their own PS-/BA-/BRIDGE- labels) and no
+    'EXPERIMENT n' ordinal on a single portfolio entry."""
+    out = _summary(_portfolio_plan(), True, capsys)
+    assert "PROPOSED RESEARCH DIRECTIONS" in out
+    assert "💡 RESEARCH DIRECTION: Use-case portfolio" in out
+    assert "RESEARCH DIRECTION 1" not in out  # single entry -> no ordinal
+    assert "--- 🧭 Proposed Program ---" in out
+    assert "--- 🛠️  Key Capabilities ---" in out
+    assert "EXPERIMENT" not in out and "Experimental Steps" not in out
+    assert "  • PS-1" in out and "  • PS-2" in out
+    assert not re.search(r"^ \d+\. PS-", out, re.M)  # author labels, not 1..N
+    assert "▸ DOMAIN 1: PRECISION SYNTHESIS" in out  # dividers still divide
+
+
+def test_lab_view_unchanged_in_shape(capsys):
+    out = _summary(_portfolio_plan(), False, capsys)
+    assert "PROPOSED EXPERIMENTAL PLAN" in out
+    assert "--- 🧪 Experimental Steps ---" in out
+    assert "--- 🛠️  Required Equipment ---" in out
+    assert "RESEARCH DIRECTION" not in out
+
+
+def test_multiple_entries_keep_their_ordinals(capsys):
+    plan = _portfolio_plan()
+    plan["proposed_experiments"].append(
+        dict(plan["proposed_experiments"][0], experiment_name="Second"))
+    out_lab = _summary(plan, False, capsys)
+    assert "🔬 EXPERIMENT 1:" in out_lab and "🔬 EXPERIMENT 2:" in out_lab
+    out_id = _summary(plan, True, capsys)
+    assert "💡 RESEARCH DIRECTION 1:" in out_id
+    assert "💡 RESEARCH DIRECTION 2:" in out_id
+
+
+# ------------------------------------------------- ideation authoring guards
+
+def test_ideation_run_still_resolves_a_fallback_instruction_set(monkeypatch):
+    """The ideation override is CONCATENATED onto the canonical instruction
+    block, so the old identity test (`instructions == HYPOTHESIS_...`) left
+    ideation runs with fallback_instructions=None: an 'Insufficient context'
+    author response then aborted the run instead of regenerating from
+    general knowledge (rag_engine returns the error verbatim when no
+    fallback set is available)."""
+    from scilink.agents.planning_agents import planning_rag as pr
+
+    seen = {}
+    monkeypatch.setattr(pr, "run_rag",
+                        lambda **kw: (seen.update(kw), {"proposed_experiments": []})[1])
+    pr.perform_science_rag(
+        objective="obj",
+        instructions=pr.HYPOTHESIS_GENERATION_INSTRUCTIONS + pr.IDEATION_AUTHOR_OVERRIDE,
+        task_name="Candidate Plan 1", kb_docs=None, model=None,
+        generation_config=None)
+    assert seen["fallback_instructions"] == pr.HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK
+
+    # lab (unconcatenated) and TEA keep resolving as before
+    seen.clear()
+    pr.perform_science_rag(objective="o", instructions=pr.HYPOTHESIS_GENERATION_INSTRUCTIONS,
+                           task_name="t", kb_docs=None, model=None, generation_config=None)
+    assert seen["fallback_instructions"] == pr.HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK
+    seen.clear()
+    pr.perform_science_rag(objective="o", instructions=pr.TEA_INSTRUCTIONS,
+                           task_name="t", kb_docs=None, model=None, generation_config=None)
+    assert seen["fallback_instructions"] == pr.TEA_INSTRUCTIONS_FALLBACK
+
+    # an explicit argument still wins over the prefix inference
+    seen.clear()
+    pr.perform_science_rag(objective="o", instructions=pr.HYPOTHESIS_GENERATION_INSTRUCTIONS,
+                           task_name="t", kb_docs=None, model=None, generation_config=None,
+                           fallback_instructions="CUSTOM")
+    assert seen["fallback_instructions"] == "CUSTOM"
+
+
+def test_ideation_override_bars_invented_optimization_params():
+    """optimization_params is the schema's only optional field and describes
+    knobs of an executable campaign; an ideation portfolio was filling it
+    with defensible-looking ranges for a system nobody had chosen."""
+    from scilink.agents.planning_agents.instruct import (
+        IDEATION_AUTHOR_OVERRIDE, IDEATION_OUTPUT_RULES)
+    assert "optimization_params" in IDEATION_OUTPUT_RULES
+    assert "omit the\nfield entirely" in IDEATION_OUTPUT_RULES
+    # shape rules live OUTSIDE the grounding override, which the fallback
+    # tier drops on purpose
+    assert "optimization_params" not in IDEATION_AUTHOR_OVERRIDE
+    assert "concepts" not in IDEATION_AUTHOR_OVERRIDE
+
+
+def test_lab_and_tea_dispatch_identical_to_pre_fix_oracle(monkeypatch):
+    """No-op proof for the paths that were already correct: for every
+    instruction string the codebase actually passes, the new prefix-based
+    fallback resolution must agree with the OLD identity logic — except for
+    the ideation case, which is exactly the bug (old: None)."""
+    from scilink.agents.planning_agents import planning_rag as pr
+
+    def old_identity_logic(instructions):
+        if instructions == pr.HYPOTHESIS_GENERATION_INSTRUCTIONS:
+            return pr.HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK
+        elif instructions == pr.TEA_INSTRUCTIONS:
+            return pr.TEA_INSTRUCTIONS_FALLBACK
+        return None
+
+    def new_resolution(instructions):
+        seen = {}
+        monkeypatch.setattr(pr, "run_rag",
+                            lambda **kw: (seen.update(kw), {})[1])
+        pr.perform_science_rag(objective="o", instructions=instructions,
+                               task_name="t", kb_docs=None, model=None,
+                               generation_config=None)
+        return seen["fallback_instructions"]
+
+    lab_like = [pr.HYPOTHESIS_GENERATION_INSTRUCTIONS, pr.TEA_INSTRUCTIONS]
+    for instr in lab_like:
+        assert new_resolution(instr) == old_identity_logic(instr), \
+            "lab/TEA dispatch changed — this fix must be a no-op for them"
+
+    ideation = pr.HYPOTHESIS_GENERATION_INSTRUCTIONS + pr.IDEATION_AUTHOR_OVERRIDE
+    assert old_identity_logic(ideation) is None          # the bug
+    assert new_resolution(ideation) is not None          # the fix
+
+
+def test_ideation_prompt_text_never_reaches_a_lab_run(monkeypatch):
+    """The optimization_params ban and the grounding latitude ride
+    IDEATION_AUTHOR_OVERRIDE, which is concatenated only for the ideation
+    profile — a lab author's instruction block must be byte-identical to the
+    canonical constant."""
+    from scilink.agents.planning_agents import planning_rag as pr
+
+    captured = {}
+
+    def fake_rag(**kw):
+        captured[kw["task_name"]] = kw["instructions"]
+        return ({"proposed_experiments": [{"hypothesis": "h"}]},
+                {"retrieved_context": "", "primary_data": ""})
+
+    monkeypatch.setattr(pr, "perform_science_rag", fake_rag)
+    monkeypatch.setattr(pr, "run_rag", lambda **kw: {"error": "stop"})
+
+    pr.generate_plan_candidates(objective="o", kb_docs=None, model=None,
+                                generation_config=None, n_candidates=2,
+                                selection_profile="lab")
+    lab_instr = captured["Candidate Plan 1"]
+    assert lab_instr == pr.HYPOTHESIS_GENERATION_INSTRUCTIONS  # byte-identical
+    assert "IDEATION MODE" not in lab_instr
+    assert "optimization_params describes knobs" not in lab_instr
+
+    captured.clear()
+    pr.generate_plan_candidates(objective="o", kb_docs=None, model=None,
+                                generation_config=None, n_candidates=2,
+                                selection_profile="ideation")
+    id_instr = captured["Candidate Plan 1"]
+    assert id_instr.startswith(pr.HYPOTHESIS_GENERATION_INSTRUCTIONS)
+    assert "IDEATION MODE" in id_instr
+
+
+def test_lab_schema_block_still_offers_optimization_params():
+    """The ban is ideation-only prose; the canonical schema (and its
+    fallback twin) must still describe the field for lab campaigns, which
+    is where run_optimization gets its scientific bounds."""
+    from scilink.agents.planning_agents.instruct import (
+        HYPOTHESIS_GENERATION_INSTRUCTIONS,
+        HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK,
+    )
+    for block in (HYPOTHESIS_GENERATION_INSTRUCTIONS,
+                  HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK):
+        assert "optimization_params" in block
+        assert "min_value" in block and "max_value" in block
+        assert "omit the field" not in block
+
+
+# ------------------------------------------------- concepts portfolio (P1-P3)
+
+CONCEPTS = [
+    {"id": "PS-1", "tier": "1", "title": "Catch the metastable polymorph",
+     "hypothesis": "It nucleates first and relaxes within minutes.",
+     "rationale": "Only visible operando.", "novelty": "Steered, not post-hoc.",
+     "details": ["probes: XRD, PDF", "trigger: quench at max fraction"]},
+    {"id": "BA-1", "tier": "1", "title": "Living biohybrid interphase",
+     "hypothesis": "A charge-transfer interphase co-emerges with product.",
+     "rationale": "Resolves direct-vs-H2.", "novelty": "Dual pumping."},
+    {"id": "BR-1", "title": "Shared belief-state control",
+     "rationale": "One controller spans both domains."},
+]
+
+
+def _concepts_plan(concepts=None, steps=None):
+    exp = {"experiment_name": "Portfolio", "hypothesis": "Thesis.",
+           "expected_outcome": "Support if co-emergence.",
+           "justification": "Grounded.",
+           "experimental_steps": steps if steps is not None else ["S1. Shared prep"]}
+    if concepts is not None:
+        exp["concepts"] = concepts
+    return {"proposed_experiments": [exp]}
+
+
+def test_concepts_render_as_directions_not_steps(capsys):
+    from scilink.agents.planning_agents.user_interface import display_plan_summary
+    display_plan_summary(_concepts_plan(CONCEPTS), ideation=True)
+    out = capsys.readouterr().out
+    assert "--- 🧠 Research Directions (3) ---" in out
+    assert "▸ PS-1: Catch the metastable polymorph  ·  tier 1" in out
+    assert "▸ BR-1: Shared belief-state control" in out       # partial entry ok
+    assert "probes: XRD, PDF" in out                          # details kept
+    # steps demoted to shared protocol, not presented as the whole plan
+    assert "--- 🧭 Shared Protocol ---" in out
+    assert "--- 🧭 Proposed Program ---" not in out
+
+
+def test_plan_without_concepts_renders_exactly_as_before(capsys):
+    from scilink.agents.planning_agents.user_interface import display_plan_summary
+    display_plan_summary(_concepts_plan(), ideation=True)
+    out = capsys.readouterr().out
+    assert "Research Directions" not in out
+    assert "--- 🧭 Proposed Program ---" in out   # unchanged path
+    display_plan_summary(_concepts_plan(), ideation=False)
+    lab = capsys.readouterr().out
+    assert "--- 🧪 Experimental Steps ---" in lab and "Research Directions" not in lab
+
+
+def test_unknown_concept_keys_are_not_silently_dropped(capsys):
+    """Authors add elements the objective asked for; dropping them loses
+    the answer."""
+    from scilink.agents.planning_agents.user_interface import display_plan_summary
+    display_plan_summary(_concepts_plan(
+        [{"title": "T", "operando_necessity": "state vanishes at rest"}]),
+        ideation=True)
+    out = capsys.readouterr().out
+    # rendered for humans ("Operando necessity"), content never dropped
+    assert "Operando necessity" in out and "state vanishes at rest" in out
+
+
+def test_reasoning_passes_see_every_direction():
+    """Conformance/critic summarized a 13-concept portfolio as ONE experiment,
+    so a 'propose 4-6 directions' objective read as unsatisfied — the failure
+    that pushed portfolios into experimental_steps."""
+    from scilink.agents.planning_agents.planning_rag import summarize_experiment
+    s = summarize_experiment(_concepts_plan(CONCEPTS)["proposed_experiments"][0], 1)
+    assert "Research directions in this plan (3 total)" in s
+    for label in ("Catch the metastable polymorph", "Living biohybrid interphase",
+                  "Shared belief-state control"):
+        assert label in s
+    assert "[PS-1 1]" in s
+    # unchanged shape when there is no portfolio
+    plain = summarize_experiment(_concepts_plan()["proposed_experiments"][0], 1)
+    assert "Research directions" not in plain
+    assert plain.startswith("Experiment 1: Portfolio")
+
+
+def test_refinement_prompt_preserves_the_portfolio():
+    """refine_plan_with_feedback is the only plan-mutation path (8 call
+    sites); an unnamed field is what gets dropped on rewrite."""
+    import inspect
+    from scilink.agents.planning_agents import planning_rag as pr
+    src = inspect.getsource(pr.refine_plan_with_feedback)
+    assert '"concepts"' in src
+    assert "Never collapse it into prose" in src
+
+
+def test_ideation_type_stamp_survives_rewrite_passes(tmp_path, no_verify_no_critic):
+    model = ScriptedModel([plan_json("P1", "H1"), plan_json("P2", "H2"),
+                           judge_json(1, 2)])
+    agent = make_agent(tmp_path, model)
+    res = agent.generate_plan("ideate directions on X", enable_human_feedback=False,
+                              n_candidates=2, selection_profile="ideation")
+    assert res["type"] == "ideation"
+    assert agent.state["plan_kind"] == "ideation"
+    assert agent._is_ideation_campaign() is True
+    # a pass that re-emits the plan without `type` gets it back on snapshot
+    stripped = {k: v for k, v in res.items() if k != "type"}
+    assert agent._stamp_campaign(stripped)["type"] == "ideation"
+    # ... and TEA's own kind is never overwritten
+    tea = agent._stamp_campaign({"type": "technoeconomic_analysis"})
+    assert tea["type"] == "technoeconomic_analysis"
+
+
+def test_lab_run_is_not_stamped_ideation(tmp_path, no_verify_no_critic):
+    model = ScriptedModel([plan_json("P1", "H1"), plan_json("P2", "H2"),
+                           judge_json(1, 2)])
+    agent = make_agent(tmp_path, model)
+    res = agent.generate_plan("obj", enable_human_feedback=False,
+                              n_candidates=2, selection_profile="lab")
+    assert "type" not in res
+    assert agent._is_ideation_campaign() is False
+
+
+def test_new_campaign_does_not_inherit_ideation_kind(tmp_path, no_verify_no_critic):
+    model = ScriptedModel([plan_json("I1", "H1"), plan_json("I2", "H2"),
+                           judge_json(1, 2), plan_json("LabPlan", "H3")])
+    agent = make_agent(tmp_path, model)
+    agent.generate_plan("ideate research directions on perovskite stability",
+                        enable_human_feedback=False, n_candidates=2,
+                        selection_profile="ideation")
+    assert agent._is_ideation_campaign() is True
+    lab = agent.generate_plan(
+        "optimize suzuki coupling yield on the flow platform",
+        enable_human_feedback=False, n_candidates=1, selection_profile="lab")
+    assert agent.state["campaign_id"] == 2
+    assert "type" not in lab
+    assert agent._is_ideation_campaign() is False
+
+
+def test_white_paper_leads_with_the_portfolio():
+    """Concepts sit deep in the plan JSON where the 20k truncation can cut
+    them; the paper must be written from all N directions."""
+    agent = PlanningAgent.__new__(PlanningAgent)
+    agent.state = {"objective": "o", "campaign_id": 1,
+                   "current_plan": dict(_concepts_plan(CONCEPTS)["proposed_experiments"][0]
+                                        and _concepts_plan(CONCEPTS), campaign_id=1)}
+    agent.state["plan_history"] = [agent.state["current_plan"]]
+    agent.model = ScriptedModel(["paper"])
+    agent.generation_config = None
+    agent.generate_white_paper()
+    prompt = agent.model.calls[0]
+    assert "RESEARCH DIRECTIONS IN THE SELECTED PLAN (3)" in prompt
+    assert prompt.index("RESEARCH DIRECTIONS") < prompt.index("SELECTED Campaign Plan")
+    for label in ("PS-1", "BA-1", "BR-1"):
+        assert label in prompt
+
+
+def test_dossier_renders_the_flagship_as_shipped_not_as_authored(tmp_path):
+    """Conformance/critic rewrite the selected plan AFTER the candidate set
+    is frozen; rendering the stored copy shipped a dossier describing a plan
+    the user never got (live: dossier carried none of the corrected
+    portfolio's directions while the white paper carried them all)."""
+    from scilink.agents.planning_agents.orchestrator_tools import OrchestratorTools
+
+    def exp(name, concepts=None):
+        e = {"experiment_name": name, "hypothesis": f"H-{name}",
+             "justification": "J"}
+        if concepts:
+            e["concepts"] = concepts
+        return {"proposed_experiments": [e]}
+
+    state = {"objective": "brainstorm",
+             "current_plan": exp("Corrected Portfolio", concepts=CONCEPTS),
+             "plan_candidates": {
+                 "candidates": [exp("Authored A"), exp("Authored B")],
+                 "selected_index": 2,
+                 "judge": {"scores": [], "reasoning": "r"}}}
+    tools = OrchestratorTools.__new__(OrchestratorTools)
+    tools.orch = SimpleNamespace(planner=SimpleNamespace(state=state),
+                                 base_dir=tmp_path, _active_output_subdir=None)
+    tools._output_dir = lambda: tmp_path
+    text = Path(tools._write_ideation_report()).read_text()
+
+    assert "## Candidate 2 — SELECTED (flagship): Corrected Portfolio" in text
+    assert "Shown as shipped" in text
+    assert "### Research directions (3)" in text
+    assert "**PS-1. Catch the metastable polymorph** *(tier 1)*" in text
+    assert "## Candidate 1: Authored A" in text          # runner-up as authored
+    assert text.count("Shown as shipped") == 1
+
+    # unrevised flagship -> no note, no behavior change
+    state["current_plan"] = state["plan_candidates"]["candidates"][1]
+    text2 = Path(tools._write_ideation_report()).read_text()
+    assert "Shown as shipped" not in text2
+
+
+def test_html_report_renders_the_portfolio(tmp_path):
+    """The ideation run itself skips plan.html, but every later refine
+    regenerates it — without concepts rendering, the HTML showed only the
+    shared protocol and silently dropped the research directions."""
+    from scilink.agents.planning_agents.html_generator import HTMLReportGenerator
+
+    plan = _concepts_plan(CONCEPTS)
+    plan["stage"] = "Reasoning Draft"
+    state = {"objective": "o", "plan_history": [plan], "current_plan": plan,
+             "experimental_results": [], "action_history": []}
+    out = tmp_path / "plan.html"
+    HTMLReportGenerator(state).generate(str(out))
+    h = out.read_text()
+
+    assert "Research Directions (3)" in h
+    for cid in ("PS-1", "BA-1", "BR-1"):
+        assert cid in h
+    assert "Catch the metastable polymorph" in h
+    assert "probes: XRD, PDF" in h          # details survive
+    assert "Shared Protocol" in h           # steps demoted, not dropped
+    assert "&lt;" not in "Catch the metastable polymorph"   # sanity
+
+
+def test_html_report_unchanged_without_concepts(tmp_path):
+    from scilink.agents.planning_agents.html_generator import HTMLReportGenerator
+    plan = _concepts_plan()
+    plan["stage"] = "Science Draft"
+    state = {"objective": "o", "plan_history": [plan], "current_plan": plan,
+             "experimental_results": [], "action_history": []}
+    out = tmp_path / "plan.html"
+    HTMLReportGenerator(state).generate(str(out))
+    h = out.read_text()
+    assert "Research Directions" not in h
+    assert "🧪 Steps" in h and "Shared Protocol" not in h
+
+
+def test_html_escapes_hostile_concept_content(tmp_path):
+    """Concept text is model-authored; ids/titles must not inject markup."""
+    from scilink.agents.planning_agents.html_generator import HTMLReportGenerator
+    plan = _concepts_plan([{"id": "<script>x</script>", "title": "A & B <b>",
+                            "tier": "<i>1</i>", "rationale": "r"}])
+    plan["stage"] = "Science Draft"
+    state = {"objective": "o", "plan_history": [plan], "current_plan": plan,
+             "experimental_results": [], "action_history": []}
+    out = tmp_path / "plan.html"
+    HTMLReportGenerator(state).generate(str(out))
+    h = out.read_text()
+    assert "<script>x</script>" not in h
+    assert "&lt;script&gt;" in h
+    assert "A &amp; B" in h
+
+
+def test_output_rules_ride_both_tiers(monkeypatch):
+    """Grounding latitude is tier-dependent (the fallback set already grants
+    it, so the override is dropped there by design) — but the OUTPUT shape
+    rules must survive into the fallback set, or a fallback ideation run
+    goes back to cramming its portfolio into experimental_steps."""
+    from scilink.agents.planning_agents import planning_rag as pr
+
+    seen = {}
+
+    def fake_psr(**kw):
+        seen.update(kw)
+        return ({"proposed_experiments": [{"hypothesis": "h"}]},
+                {"retrieved_context": "", "primary_data": ""})
+
+    monkeypatch.setattr(pr, "perform_science_rag", fake_psr)
+    monkeypatch.setattr(pr, "run_rag", lambda **kw: {"error": "stop"})
+
+    pr.generate_plan_candidates(objective="o", kb_docs=None, model=None,
+                                generation_config=None, n_candidates=2,
+                                selection_profile="ideation")
+    author, fb = seen["instructions"], seen["fallback_instructions"]
+    assert "PORTFOLIO OUTPUT" in author and "GROUNDING LATITUDE" in author
+    assert "PORTFOLIO OUTPUT" in fb            # shape survives the tier swap
+    assert "GROUNDING LATITUDE" not in fb      # latitude deliberately does not
+    assert fb.startswith(pr.HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK)
+
+    # lab is untouched in both tiers
+    seen.clear()
+    pr.generate_plan_candidates(objective="o", kb_docs=None, model=None,
+                                generation_config=None, n_candidates=2,
+                                selection_profile="lab")
+    assert seen["instructions"] == pr.HYPOTHESIS_GENERATION_INSTRUCTIONS
+    assert seen["fallback_instructions"] == pr.HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK
+
+
+# --------------------------------- title resolution for author-chosen keys
+
+OBJECTIVE_SHAPED = [{
+    "id": "PS-1", "regime": "Photosynthetic / photocatalytic",
+    "a_title_and_system": ("TITLE: 'Catch the injection before the pump' — "
+                           "bacteriorhodopsin-on-TiO2 photoelectrode. BIOTIC "
+                           "component: oriented purple-membrane patches."),
+    "b_operando_only_question": "Does the abiotic change LEAD or lag?",
+    "f_ai_closed_loop": "Decision agent picks the next perturbation.",
+}]
+
+
+def test_concept_title_survives_author_chosen_keys():
+    """When the objective mandates its own element list, the model uses THOSE
+    as concept keys and never emits `title` — every card rendered
+    'Untitled' (seen live)."""
+    from scilink.agents.planning_agents.user_interface import (
+        concept_title, humanize_key)
+    assert concept_title(OBJECTIVE_SHAPED[0], 1) == \
+        "Catch the injection before the pump"
+    assert concept_title({"title": "Plain Title"}, 1) == "Plain Title"
+    assert concept_title({"name": "By Name"}, 1) == "By Name"
+    assert concept_title({"id": "X", "tier": "1"}, 3) == "Direction 3"
+    assert concept_title({"id": "X", "rationale": "Because it matters. More."},
+                         2) == "Because it matters"
+    assert humanize_key("a_title_and_system") == "Title and system"
+    assert humanize_key("f_ai_closed_loop") == "Ai closed loop"
+    assert humanize_key("regime") == "Regime"
+
+
+def test_all_three_renderers_show_a_real_title(tmp_path, capsys):
+    from scilink.agents.planning_agents.user_interface import display_plan_summary
+    from scilink.agents.planning_agents.html_generator import HTMLReportGenerator
+    from scilink.agents.planning_agents.orchestrator_tools import OrchestratorTools
+
+    plan = _concepts_plan(OBJECTIVE_SHAPED)
+    plan["stage"] = "Science Draft"
+
+    display_plan_summary(plan, ideation=True)
+    cli = capsys.readouterr().out
+    assert "PS-1: Catch the injection before the pump" in cli
+    assert "Untitled" not in cli
+    assert "Title and system:" in cli and "a_title_and_system" not in cli
+
+    state = {"objective": "o", "plan_history": [plan], "current_plan": plan,
+             "experimental_results": [], "action_history": []}
+    out = tmp_path / "p.html"
+    HTMLReportGenerator(state).generate(str(out))
+    h = out.read_text()
+    assert "Catch the injection before the pump" in h
+    assert "Untitled" not in h
+    assert "Title and system" in h
+
+    st = {"objective": "o", "current_plan": plan,
+          "plan_candidates": {"candidates": [plan], "selected_index": 1,
+                              "judge": {"scores": [], "reasoning": "r"}}}
+    tools = OrchestratorTools.__new__(OrchestratorTools)
+    tools.orch = SimpleNamespace(planner=SimpleNamespace(state=st),
+                                 base_dir=tmp_path, _active_output_subdir=None)
+    tools._output_dir = lambda: tmp_path
+    doss = Path(tools._write_ideation_report()).read_text()
+    assert "Catch the injection before the pump" in doss
+    assert "Untitled" not in doss
+    assert "*Title and system:*" in doss
+
+
+def test_review_offers_a_browser_report_path(tmp_path, capsys):
+    """These blocks run to thousands of words in a terminal; the reviewer
+    gets an HTML path at the top, like the candidate cards already do. The
+    saved plan.html is written by the orchestrator only AFTER the review
+    returns, so the agent renders a preview from live state."""
+    from scilink.agents.planning_agents.user_interface import display_plan_summary
+
+    agent = PlanningAgent.__new__(PlanningAgent)
+    BaseAgent.__init__(agent, str(tmp_path))
+    plan = _concepts_plan(CONCEPTS)
+    plan["stage"] = "Science Draft"
+    agent.state = {"objective": "o", "plan_history": [plan],
+                   "current_plan": plan, "experimental_results": [],
+                   "action_history": []}
+
+    path = agent._review_preview_path()
+    assert path and Path(path).exists()
+    assert Path(path).name == "plan_preview.html"
+    assert "PS-1" in Path(path).read_text()          # renders the portfolio
+    assert "HTML Report updated" not in capsys.readouterr().out  # no dupe line
+
+    display_plan_summary(plan, ideation=True, report_path=path)
+    out = capsys.readouterr().out
+    assert "📄 Full report (open in a browser): " + path in out
+    # ... at the TOP: before any direction content
+    assert out.index("Full report") < out.index("Research Directions")
+
+    # refreshed on each review, and never fatal
+    agent.state["current_plan"] = {"proposed_experiments": [{"experiment_name": "v2"}]}
+    agent.state["plan_history"] = [agent.state["current_plan"]]
+    assert "v2" in Path(agent._review_preview_path()).read_text()
+    agent.state = None                                # broken state
+    assert agent._review_preview_path() is None       # degrades, no raise
+
+    # omitted -> byte-identical to the previous behaviour
+    display_plan_summary(plan, ideation=True)
+    assert "Full report" not in capsys.readouterr().out

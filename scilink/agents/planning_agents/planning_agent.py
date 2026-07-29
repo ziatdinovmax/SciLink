@@ -1,8 +1,9 @@
-import os
 from pathlib import Path
 import copy
+import hashlib
 import json
 import logging
+import re
 import shutil
 import uuid
 from typing import List, Dict, Any, Optional, Union
@@ -11,6 +12,9 @@ from datetime import datetime
 
 from scilink.knowledge import KnowledgeBase
 from .parser_utils import (
+    plan_directions,
+    portfolio_to_experiment_shim,
+    resync_portfolio,
     generate_repo_map,
     write_experiments_to_disk,
     resolve_primary_data_path,
@@ -20,6 +24,9 @@ from .repo_loader import clone_git_repository
 
 from .instruct import (
     HYPOTHESIS_GENERATION_INSTRUCTIONS,
+    HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK,
+    IDEATION_OUTPUT_RULES,
+    WHITE_PAPER_INSTRUCTIONS,
     TEA_INSTRUCTIONS
 )
 
@@ -30,12 +37,9 @@ from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from ._deprecation import normalize_params
 from .base_agent import BaseAgent
 
-import warnings
-
-from ..lit_agents.literature_agent import LiteratureSearchAgent
-from ..lit_agents.optimize_query import optimize_search_query
-
 from .planning_rag import (
+    author_portfolio,
+    portfolio_contract,
     perform_science_rag,
     perform_code_rag,
     refine_plan_with_feedback,
@@ -62,6 +66,171 @@ from .html_generator import HTMLReportGenerator
 
 from .base_agent import BaseAgent
 
+
+# Generic research verbiage that says nothing about WHICH campaign an
+# objective belongs to. Kept small and domain-agnostic: the point is to
+# strip words shared by virtually every objective ("investigate", "novel",
+# "materials"), so the overlap test below compares actual topic vocabulary.
+_CAMPAIGN_STOPWORDS = frozenset("""
+    the and for with from into using via under over between during
+    across within without about this that these those than not non
+    study studies investigate investigation explore exploration
+    research ideate ideation brainstorm brainstorming directions
+    direction propose proposal proposals develop development design
+    optimize optimization improve improvement improving maximize
+    minimize enhance enhancing understand understanding characterize
+    characterization analysis analyze effect effects impact impacts
+    influence driven based related property properties performance
+    condition conditions experimental experiment experiments campaign
+    campaigns plan plans planning strategy strategies approach
+    approaches method methods material materials system systems
+    new novel high low advanced controlled
+    """.split())
+
+
+def objectives_share_campaign(previous: str, new: str,
+                              min_overlap: float = 0.35) -> bool:
+    """Lexical continuity test between two campaign objectives (issue #396).
+
+    Returns True when ``new`` plausibly continues the campaign ``previous``
+    belongs to. Content words (stopwords and generic research verbiage
+    removed, naive plural fold) are compared by overlap over the smaller
+    set: a rewording or narrowing of the same topic keeps most of its
+    domain vocabulary, while an unrelated topic shares at most a stray
+    generic term. Deterministic on purpose — this is the fallback when the
+    caller does not pass ``new_campaign`` explicitly, and it must not cost
+    an LLM call. Ties toward continuity only when either side has no
+    content words at all (an objective with nothing specific in it is not
+    a statement of a new topic).
+
+    The threshold leans DELIBERATELY toward declaring a new campaign,
+    because the two mistakes are not symmetric (review, PR #394): calling
+    two topics one campaign carries the previous corpus forward — the #396
+    leak — while wrongly splitting only loses carry-forward, which the
+    caller can override with ``new_campaign=False``. Measured over real
+    objectives from live sessions, unrelated pairs score <= 0.20 (a
+    perovskite-solar vs solar-wind pair lands exactly there) and genuine
+    continuations >= 0.43, so 0.35 sits mid-gap instead of 0.05 above the
+    dangerous side.
+    """
+    def _depluralize(w: str) -> str:
+        """Drop ONE trailing plural 's'.
+
+        `rstrip("s")` strips every trailing s, which mangles ordinary
+        domain words — stress→stre, mass→ma, gas→ga, analysis→analysi,
+        process→proce — and then fails at the job it was doing: gas→'ga'
+        but gases→'gase', so the two no longer match. Words ending in
+        ss/us/is are not plurals; very short words are left alone.
+        (Still a naive fold, not a stemmer: gas/gases remains unmatched.)
+        """
+        if len(w) > 3 and w.endswith("s") and not w.endswith(("ss", "us", "is")):
+            return w[:-1]
+        return w
+
+    def _tokens(text: str) -> set:
+        words = re.findall(r"[a-z][a-z0-9]{2,}", (text or "").lower())
+        return {_depluralize(w) for w in words
+                if w not in _CAMPAIGN_STOPWORDS}
+    prev_t, new_t = _tokens(previous), _tokens(new)
+    if not prev_t or not new_t:
+        return True
+    overlap = len(prev_t & new_t) / min(len(prev_t), len(new_t))
+    return overlap >= min_overlap
+
+
+_LIT_REF = "__scilink_lit_ref__:"
+_LIT_MIN_CHARS = 4000          # below this, a copy is cheaper than a lookup
+
+
+def compact_planner_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Serialization view of planner state with literature stored ONCE.
+
+    A campaign's corpus is carried on every plan snapshot, so a state file
+    holds the same text N times — live, 1.73 MB of a 1.98 MB state file was
+    five copies of two corpora. Each copy is replaced by a reference into
+    `_literature_store`; `expand_planner_state` restores them verbatim on
+    load, so no consumer ever sees a reference and no context is lost.
+
+    Returns a shallow-copied view: the live state is never mutated.
+    """
+    if not isinstance(state, dict):
+        return state
+    store: Dict[str, str] = {}
+
+    def _ref(text: str) -> str:
+        key = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        store.setdefault(key, text)
+        return _LIT_REF + key
+
+    def _plan(p: Any) -> Any:
+        if not isinstance(p, dict):
+            return p
+        lit = p.get("literature_search")
+        if isinstance(lit, str) and len(lit) >= _LIT_MIN_CHARS:
+            p = dict(p)
+            p["literature_search"] = _ref(lit)
+        return p
+
+    out = dict(state)
+    if state.get("current_plan") is not None:
+        out["current_plan"] = _plan(state.get("current_plan"))
+    if state.get("plan_history"):
+        out["plan_history"] = [_plan(p) for p in state["plan_history"]]
+    pc = state.get("plan_candidates")
+    if isinstance(pc, dict) and pc.get("candidates"):
+        out["plan_candidates"] = dict(pc)
+        out["plan_candidates"]["candidates"] = [
+            _plan(c) for c in pc["candidates"]]
+    if store:
+        out["_literature_store"] = store
+    return out
+
+
+def expand_planner_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Inverse of :func:`compact_planner_state` — restores literature text.
+
+    Tolerates a state that was never compacted (no store, no refs) and an
+    unresolvable reference (left as-is with a warning rather than dropped,
+    so a truncated file degrades visibly instead of silently losing text).
+    """
+    if not isinstance(state, dict):
+        return state
+    store = state.get("_literature_store") or {}
+    if not store and not any(
+        isinstance((p or {}).get("literature_search"), str)
+        and str((p or {}).get("literature_search")).startswith(_LIT_REF)
+        for p in ([state.get("current_plan")]
+                  + list(state.get("plan_history") or []))
+    ):
+        return state
+
+    def _plan(p: Any) -> Any:
+        if not isinstance(p, dict):
+            return p
+        lit = p.get("literature_search")
+        if isinstance(lit, str) and lit.startswith(_LIT_REF):
+            key = lit[len(_LIT_REF):]
+            if key in store:
+                p = dict(p)
+                p["literature_search"] = store[key]
+            else:
+                logging.warning(
+                    "Literature reference %s missing from the state store; "
+                    "leaving the reference in place.", key)
+        return p
+
+    out = dict(state)
+    if state.get("current_plan") is not None:
+        out["current_plan"] = _plan(state.get("current_plan"))
+    if state.get("plan_history"):
+        out["plan_history"] = [_plan(p) for p in state["plan_history"]]
+    pc = state.get("plan_candidates")
+    if isinstance(pc, dict) and pc.get("candidates"):
+        out["plan_candidates"] = dict(pc)
+        out["plan_candidates"]["candidates"] = [
+            _plan(c) for c in pc["candidates"]]
+    out.pop("_literature_store", None)
+    return out
 
 
 class PlanningAgent(BaseAgent):
@@ -90,7 +259,9 @@ class PlanningAgent(BaseAgent):
             When None, uses LiteLLM for multi-provider support.
         embedding_model: Embedding model name.
         embedding_api_key: API key for the embedding LLM provider.
-        futurehouse_api_key: Optional API key for literature search.
+        futurehouse_api_key: UNUSED. Retained for call-site compatibility;
+            the internal literature fallback was removed. Literature flows
+            in via ``external_context`` (orchestrator's search_literature).
         kb_base_path: Path for knowledge base storage.
         code_chunk_size: Chunk size for code files.
         output_dir: Output directory for artifacts.
@@ -168,17 +339,13 @@ class PlanningAgent(BaseAgent):
         self._api_key = api_key
         self.generation_config = None
 
-        # Literature agent (deprecated — prefer orchestrator's search_literature tool)
-        self.lit_agent = None
-        if futurehouse_api_key or os.getenv("FUTUREHOUSE_API_KEY"):
-            try:
-                self.lit_agent = LiteratureSearchAgent(futurehouse_api_key, max_wait_time=3000)
-                logging.info("✅ Literature Search Agent initialized (deprecated fallback).")
-            except Exception as e:
-                logging.warning(f"⚠️ Failed to initialize Literature Agent: {e}")
-        else:
-            logging.info("ℹ️ No FutureHouse API key provided. Literature search will be skipped.")
-                    
+        # No literature agent here: the internal fallback was removed —
+        # literature reaches plan generation only as external_context, via
+        # the orchestrator's search_literature tool (which owns its own
+        # LiteratureSearchAgent). futurehouse_api_key stays accepted for
+        # call-site compatibility but is unused at this level.
+
+
         # --- Dual KnowledgeBase Initialization ---
         base_path = Path(kb_base_path)
         base_path.parent.mkdir(parents=True, exist_ok=True)
@@ -215,6 +382,7 @@ class PlanningAgent(BaseAgent):
         """Agent-specific state fields"""
         return {
             "objective": None,
+            "campaign_id": 1,
             "iteration_index": 0,
             "inputs": {
                 "knowledge_paths": [],
@@ -258,6 +426,348 @@ class PlanningAgent(BaseAgent):
         print(f"     • Actions logged: {len(self.state.get('action_history', []))}")
 
         
+    def starts_new_campaign(self, objective: Optional[str],
+                            new_campaign: Optional[bool] = None) -> bool:
+        """Would generating a plan for ``objective`` start a NEW campaign?
+
+        A session can hold several unrelated brainstorms/campaigns, and
+        every continuity heuristic (literature carry-forward, white-paper
+        corpus selection, refine auto-load) is scoped to ONE campaign
+        (issue #396). An explicit ``new_campaign`` signal wins in both
+        directions; otherwise lexical disjointness between the new
+        objective and the current campaign's objective decides.
+        Non-mutating — ``generate_plan`` applies the transition.
+        """
+        if not self.state or not self.state.get("objective") or not objective:
+            return False
+        if new_campaign is not None:
+            return bool(new_campaign)
+        return not objectives_share_campaign(self.state["objective"], objective)
+
+    def _apply_campaign_transition(self, objective: str) -> None:
+        """Open a new campaign: bump the id and drop the working state the
+        previous campaign would otherwise leak through (current_plan and
+        the best-of-N candidate set). History entries stay archived under
+        their own campaign_id stamps."""
+        prev_cid = int(self.state.get("campaign_id") or 1)
+        self.state["campaign_id"] = prev_cid + 1
+        self.state["current_plan"] = None
+        self.state.pop("plan_candidates", None)
+        # The new campaign decides its own kind — an ideation brainstorm
+        # must not make the next topic's lab plan render as ideation.
+        self.state.pop("plan_kind", None)
+        print(f"  - 🧭 Objective changed materially — starting campaign "
+              f"#{prev_cid + 1}. The previous campaign's plans and "
+              f"literature stay archived and are NOT carried forward.")
+
+    def _save_state(self) -> None:
+        """Persist state with literature stored once (see
+        :func:`compact_planner_state`). Falls back to the plain dump if
+        compaction fails — a state file must always get written."""
+        state_file = self.output_dir / self._get_state_filename()
+        try:
+            payload = compact_planner_state(self.state)
+        except Exception as e:  # noqa: BLE001
+            logging.warning(f"Literature compaction skipped: {e}")
+            payload = self.state
+        try:
+            with open(state_file, 'w') as f:
+                json.dump(payload, f, indent=2)
+        except Exception as e:
+            logging.warning(f"Failed to save {self.agent_type} state: {e}")
+
+    def load_state(self, state_path: str) -> bool:
+        """Restore state, re-inflating any stored literature references."""
+        if not super().load_state(state_path):
+            return False
+        self.state = expand_planner_state(self.state)
+        return True
+
+    def _review_preview_path(self) -> Optional[str]:
+        """Render the plan under review to HTML and return its path.
+
+        The saved `plan.html` is written by the orchestrator only AFTER this
+        call returns, so a reviewer prompted mid-run has nothing to open —
+        yet these summaries run to thousands of words in a terminal. Render
+        a preview from the live state instead, refreshed at every review so
+        it always shows the plan being asked about. Never fatal: a failed
+        preview must not block the review prompt.
+        """
+        try:
+            path = Path(self.output_dir) / "plan_preview.html"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # Swallow the generator's own "HTML Report updated" line: the
+            # review block announces the path itself, one line above.
+            import io as _io
+            import contextlib as _ctx
+            with _ctx.redirect_stdout(_io.StringIO()):
+                HTMLReportGenerator(self.state).generate(str(path))
+            return str(path)
+        except Exception as e:  # noqa: BLE001 - cosmetic aid only
+            logging.debug(f"Review preview unavailable: {e}")
+            return None
+
+    def _is_ideation_campaign(self) -> bool:
+        """Was the current plan authored under the ideation profile?
+
+        Reads the plan's own ``type`` stamp first — a plan dict restored or
+        read in isolation then still knows what it is — and falls back to
+        the best-of-N selection state for plans authored before the stamp
+        existed. Single-plan runs ignore the profile by design, so they
+        report as lab.
+        """
+        cur = (self.state or {}).get("current_plan") or {}
+        if cur.get("type") == "ideation":
+            return True
+        # An explicit lab stamp is the caller saying "this plan is a bench
+        # plan" and outranks the campaign — the case is a campaign that
+        # ideated, then was asked for the runnable protocol of the direction
+        # that won. Other types (TEA) still fall through, as before.
+        if cur.get("type") == "lab":
+            return False
+        if (self.state or {}).get("plan_kind") == "ideation":
+            return True
+        pc = (self.state or {}).get("plan_candidates") or {}
+        return pc.get("profile") == "ideation"
+
+    def _stamp_campaign(self, plan_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Stamp campaign id and plan kind onto a snapshot.
+
+        The kind (`type`) is re-applied here because conformance, critic and
+        refinement passes re-emit the plan JSON and drop fields they were not
+        told to keep — the same way `literature_search` had to be
+        final-stamped. An existing `type` is never overwritten (TEA sets its
+        own).
+        """
+        if isinstance(plan_dict, dict):
+            plan_dict["campaign_id"] = int(self.state.get("campaign_id") or 1)
+            kind = self.state.get("plan_kind")
+            if kind and not plan_dict.get("type"):
+                plan_dict["type"] = kind
+            # Every snapshot that becomes current_plan passes through here,
+            # which makes it the one place a refined portfolio can be kept
+            # self-consistent.
+            resync_portfolio(plan_dict)
+        return plan_dict
+
+    def _finalize_literature(self, plan_dict: Dict[str, Any],
+                             literature: Optional[str]) -> None:
+        """Final-stamp SYSTEM-OWNED literature provenance onto a plan.
+
+        ``literature_search`` must never be model prose — but conformance,
+        critic and feedback-refinement passes RE-EMIT the plan JSON, so a
+        stamp applied before them can be replaced by a model placeholder
+        ('See prior iteration context (unchanged).', seen live). Call this
+        LAST, after every rewrite pass: it stamps the returned plan and the
+        state's current_plan / latest history snapshot (which may be earlier
+        copies).
+        """
+        if not literature:
+            return
+        plan_dict["literature_search"] = literature
+        cur = self.state.get("current_plan")
+        if isinstance(cur, dict):
+            cur["literature_search"] = literature
+        hist = self.state.get("plan_history") or []
+        if hist and isinstance(hist[-1], dict):
+            hist[-1]["literature_search"] = literature
+
+    def generate_white_paper(self, audience_context: Optional[str] = None) -> str:
+        """Write a sponsor-facing white paper from the current campaign plan.
+
+        Distills the selected plan (plus, after a best-of-N run, the
+        alternative candidate strategies and the judge's comparative
+        reasoning, and the critic's caveats) into a technical pre-proposal
+        aimed at sponsors with technical backgrounds — significance and
+        payoff forward, mechanisms rigorous, no bench-level protocol detail.
+
+        Args:
+            audience_context: Optional targeting notes (e.g. "emphasize
+                fundamental-science significance" or "lead with cost and
+                scalability impact").
+
+        Returns:
+            The white paper as markdown.
+
+        Raises:
+            ValueError: when no plan exists yet in this campaign state.
+        """
+        # Campaign scoping (issue #396): a session can hold several
+        # unrelated campaigns; the white paper must be built ONLY from the
+        # current one. Entries without a stamp predate campaign tracking
+        # and are treated as campaign 1.
+        cid = int(self.state.get("campaign_id") or 1)
+
+        def _same_campaign(p: Dict[str, Any]) -> bool:
+            return int(p.get("campaign_id") or 1) == cid
+
+        plan = self.state.get("current_plan") or next(
+            (p for p in reversed(self.state.get("plan_history") or [])
+             if _same_campaign(p)), None
+        )
+        if not plan or not plan.get("proposed_experiments"):
+            raise ValueError(
+                "No campaign plan exists yet — generate a plan first; the "
+                "white paper is distilled from it."
+            )
+
+        parts = [WHITE_PAPER_INSTRUCTIONS,
+                 f"## Research Objective:\n{self.state.get('objective', '')}"]
+        if audience_context:
+            parts.append(f"\n## Sponsor / Audience Targeting Notes:\n"
+                         f"{audience_context}")
+
+        selected = copy.deepcopy(plan)
+        literature = selected.pop("literature_search", None)
+        findings = selected.pop("critic_findings", None)
+        # Literature is CAMPAIGN context, not per-iteration: a restructured
+        # or refined plan may carry none of its own — or worse, a short
+        # model-authored note ('no new search was executed...') that shadows
+        # the real corpus. Take the MOST SUBSTANTIAL literature across the
+        # current plan and the SAME-CAMPAIGN history; length is the tiebreak
+        # because the campaign's actual corpus dwarfs any stub. History from
+        # other campaigns is excluded outright (issue #396) — length must
+        # never arbitrate between two topics' corpora.
+        candidates_lit = [literature] + [
+            prev.get("literature_search")
+            for prev in (self.state.get("plan_history", []) or [])
+            if _same_campaign(prev)
+        ]
+        candidates_lit = [c for c in candidates_lit if c]
+        literature = (max(candidates_lit, key=lambda c: len(str(c)))
+                      if candidates_lit else None)
+        # A portfolio is the deliverable of an ideation run, and it sits deep
+        # in the plan JSON where the 20k truncation can cut it — surface it
+        # first, in full, so the paper is written from all N directions.
+        _portfolio = plan_directions(selected)
+        if _portfolio:
+            parts.append(
+                f"\n## RESEARCH DIRECTIONS IN THE SELECTED PLAN "
+                f"({len(_portfolio)}) — this is the program; give each one "
+                f"its due weight, keep the author's ranking, and cite each "
+                f"by its own id so the paper and the dossier can be read "
+                f"side by side:\n"
+                + json.dumps(_portfolio, indent=2)[:20000])
+        parts.append("\n## SELECTED Campaign Plan:\n"
+                     + json.dumps(selected, indent=2)[:20000])
+
+        cand_state = self.state.get("plan_candidates") or {}
+        candidates = cand_state.get("candidates") or []
+        if len(candidates) > 1:
+            sel_idx = cand_state.get("selected_index", 1)
+            alt_blocks = []
+            judge = cand_state.get("judge") or {}
+            if cand_state.get("human_override"):
+                parts.append(
+                    f"\n## SELECTION PROVENANCE: The PI personally selected "
+                    f"Candidate {sel_idx} as the flagship, OVERRIDING the "
+                    f"judge (which preferred Candidate "
+                    f"{judge.get('selected_candidate', '?')}). Treat the "
+                    f"PI's choice as the primary thrust; the judge's "
+                    f"comparative reasoning below is context, not the "
+                    f"selection rationale."
+                )
+            scores = {s.get("candidate"): s for s in judge.get("scores", [])}
+            for ci, cand in enumerate(candidates, 1):
+                if ci == sel_idx:
+                    continue
+                exp = dict((cand.get("proposed_experiments") or [{}])[0])
+                exp.pop("optimization_params", None)  # protocol detail
+                sc = scores.get(ci, {})
+                alt_blocks.append(
+                    f"### Candidate {ci} "
+                    f"[judge comment: {sc.get('comment', 'n/a')}]\n"
+                    + json.dumps(exp, indent=2)[:6000]
+                )
+            if alt_blocks:
+                parts.append(
+                    "\n## ALTERNATIVE Candidate Strategies (judge-scored "
+                    "runners-up; use mechanistically distinct ones as "
+                    "secondary thrusts, faithfully to their content):\n"
+                    + "\n".join(alt_blocks)
+                    + f"\nJudge's comparative reasoning: "
+                      f"{judge.get('reasoning', 'n/a')}"
+                )
+        if findings:
+            parts.append("\n## Reviewer Caveats (fold into Risks and "
+                         "Mitigation):\n" + json.dumps(findings, indent=2))
+        if literature:
+            lit = str(literature)
+            # Guard: a stored plan may carry file PATH(S) instead of content
+            # (historical sessions where a comma-joined path list slipped
+            # through as raw text) — resolve them to the actual documents so
+            # citation never sees bare filenames.
+            if len(lit) < 4096 and "\n" not in lit.strip():
+                def _is_file(p: Path) -> bool:
+                    try:
+                        return p.is_file()
+                    except OSError:  # e.g. name-too-long for raw prose
+                        return False
+                cand_paths = [Path(t.strip()) for t in lit.split(",")
+                              if t.strip()]
+                if cand_paths and all(_is_file(p) for p in cand_paths):
+                    lit = "\n\n".join(p.read_text() for p in cand_paths)
+            parts.append("\n## Literature Context:\n" + lit[:15000])
+            # Long syntheses put their bibliographies well past any sane
+            # truncation — extract every DOI-bearing line from the FULL
+            # context so the paper can cite with real DOIs, never invented
+            # ones.
+            ref_lines = [ln.strip() for ln in lit.splitlines()
+                         if re.search(r"10\.\d{4,}/", ln)]
+            refs = "\n".join(dict.fromkeys(ref_lines))[:8000]
+            if refs:
+                parts.append("\n## Bibliography extracted from the full "
+                             "literature context (cite from these lines; "
+                             "they carry the DOIs):\n" + refs)
+
+        print("\n--- Generating White Paper ---")
+        response = self.model.generate_content(
+            ["\n".join(parts)], generation_config=self.generation_config
+        )
+        text = response.text if hasattr(response, "text") else str(response)
+        # Strip an accidental fence around the whole document.
+        text = text.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```[a-z]*\n", "", text)
+            text = re.sub(r"\n```$", "", text).strip()
+        return text
+
+    def rebind_kb(self, kb_base_path: str) -> bool:
+        """Re-point both knowledge bases at a new storage path and reload.
+
+        Mirrors the constructor's path derivation so an already-constructed
+        agent can switch to another persisted KB (e.g. the meta attaching a
+        stable knowledge dir after the planning child exists). In-memory KB
+        state is cleared first — a target with no persisted KB yields empty
+        KBs, never a stale carry-over.
+
+        Returns:
+            True if either KB loaded from the new location.
+        """
+        base_path = Path(kb_base_path)
+        base_path.parent.mkdir(parents=True, exist_ok=True)
+
+        self.kb_docs_prefix = base_path.parent / f"{base_path.name}_docs"
+        self.kb_docs_index = str(self.kb_docs_prefix.with_suffix(".faiss"))
+        self.kb_docs_chunks = str(self.kb_docs_prefix.with_suffix(".json"))
+        self.kb_docs_sources_path = str(self.kb_docs_prefix.with_suffix(".sources.json"))
+
+        self.kb_code_prefix = base_path.parent / f"{base_path.name}_code"
+        self.kb_code_index = str(self.kb_code_prefix.with_suffix(".faiss"))
+        self.kb_code_chunks = str(self.kb_code_prefix.with_suffix(".json"))
+        self.kb_code_map_path = str(self.kb_code_prefix.with_suffix(".maps.json"))
+        self.kb_code_sources_path = str(self.kb_code_prefix.with_suffix(".sources.json"))
+
+        for kb in (self.kb_docs, self.kb_code):
+            kb.index = None
+            kb.chunks = []
+            kb.sources = []
+            kb.repo_maps = {}
+
+        print(f"--- Rebinding Knowledge Bases to {base_path.parent} ---")
+        self._load_knowledge_bases()
+        return self._kb_is_built
+
     def _load_knowledge_bases(self):
         """Attempts to load both KBs from disk."""
         print(f"  - Docs KB: Loading from {self.kb_docs_prefix}...")
@@ -421,7 +931,9 @@ class PlanningAgent(BaseAgent):
                     external_context: Optional[str] = None,
                     n_candidates: int = 1,
                     candidate_report_dir: Optional[str] = None,
-                    selection_profile: str = "lab") -> Dict[str, Any]:
+                    selection_profile: str = "lab",
+                    new_campaign: Optional[bool] = None,
+                    kind: str = "experiment") -> Dict[str, Any]:
         """
         Generate experimental plan (science only, no implementation code/protocol).
 
@@ -452,7 +964,8 @@ class PlanningAgent(BaseAgent):
                 If False, appends to the current research session.
             external_context: Pre-fetched external context (e.g. from
                 orchestrator's search_literature/query_molecules tools).
-                When provided, skips internal literature search.
+                The ONLY way literature enters plan generation — there is
+                no internal search.
             n_candidates: Best-of-N width (clamped 1-4). At 1 (default) the
                 single-plan path runs unchanged. Above 1, candidates are
                 generated sequentially — each conditioned to test a DIFFERENT
@@ -478,12 +991,19 @@ class PlanningAgent(BaseAgent):
                 n_candidates >= 2: the single-plan path ignores the profile
                 entirely (documented behavior — ideation is a property of
                 the multi-candidate process).
+            new_campaign: Campaign-boundary signal (issue #396). True forces
+                a new campaign (prior campaign's plans/literature archived,
+                not carried forward); False forces continuation of the
+                current campaign despite a reworded objective; None (default)
+                auto-detects from lexical objective similarity. Ignored on a
+                fresh state.
 
         Returns:
             Dict containing the experimental plan with keys:
                 - proposed_experiments: List of experiment dicts with hypotheses,
                   steps, justifications, and expected outcomes
-                - literature_search: Literature context (if lit_agent available)
+                - literature_search: Literature context (when external
+                  context was supplied)
                 - iteration: Current iteration number
                 - stage: Pipeline stage that produced this plan
                 - error/message: Present only if generation failed
@@ -509,6 +1029,8 @@ class PlanningAgent(BaseAgent):
         else:
             print(f"  - 🔄 Appending to existing research session...")
             if objective:
+                if self.starts_new_campaign(objective, new_campaign):
+                    self._apply_campaign_transition(objective)
                 self.state["objective"] = objective
         
         # Load skill (once, at entry point)
@@ -545,36 +1067,36 @@ class PlanningAgent(BaseAgent):
                 ctx_string += f"## {header}\n{content}\n\n"
             ctx_string = ctx_string.strip() if ctx_string else None
         
-        # External context: prefer caller-provided, fall back to deprecated internal lit search
-        if not external_context and self.lit_agent:
-            warnings.warn(
-                "Internal literature search in PlanningAgent is deprecated. "
-                "Use the orchestrator's search_literature() tool instead.",
-                DeprecationWarning, stacklevel=2
-            )
-            print(f"  - 🌍 Querying literature (deprecated internal path)...")
-            lit_res = self.lit_agent.search_for_hypothesis_context(
-                optimize_search_query(objective=objective, model=self.model)
-            )
-            if lit_res['status'] == 'success':
-                external_context = lit_res['content']
-                print(f"  - ✅ Literature search completed.")
-            else:
-                print(f"  - ⚠️ Literature search {lit_res['status']}: {lit_res.get('message', '')}")
-                external_context = ""
+        # Literature enters ONLY as caller-provided external_context (the
+        # orchestrator's search_literature tool is the sanctioned path).
+        # The old internal fallback searched silently whenever a FutureHouse
+        # key was present and no context was passed — an uninstructable
+        # Edison call that neither the user nor the tool-calling LLM could
+        # veto (seen firing against an explicit "no literature" request
+        # during the #396 live probes). Removed; no replacement.
 
         # Build skill context for plan generation
         skill_planning_context = self._build_skill_context("planning")
 
         # RAG for science plan
-        print(f"\n--- Generating Experimental Strategy ---")
+        # A PORTFOLIO of research directions, or an EXPERIMENT. Ideation asked
+        # for the first and was handed the second for a long time; the plan
+        # tool designs bench experiments, and a portfolio squeezed into that
+        # schema came back with its directions as pseudo-steps.
+        _portfolio_run = (kind == "portfolio")
+        print(f"\n--- Generating {'Research Portfolio' if _portfolio_run else 'Experimental Strategy'} ---")
         n_candidates = max(1, min(int(n_candidates or 1), 4))
         bestofn_candidates = None
         bestofn_judge = None
         bestofn_selected = None
         bestofn_reports = []
         if n_candidates > 1:
+            # One engine, two contracts: a portfolio candidate is a set of
+            # research directions, an experiment candidate a protocol. The
+            # tier pinning, distinctness conditioning and early stop are
+            # shape-agnostic and stay shared.
             candidates, author_context, tier = generate_plan_candidates(
+                contract=(portfolio_contract() if _portfolio_run else None),
                 objective=objective,
                 kb_docs=self.kb_docs,
                 model=self.model,
@@ -588,8 +1110,16 @@ class PlanningAgent(BaseAgent):
                 skill_context=skill_planning_context,
                 selection_profile=selection_profile,
             )
+            # Shim BEFORE judging: the judge, the candidate cards and the
+            # dossier all read `proposed_experiments`, and re-teaching three
+            # consumers the portfolio shape to judge a portfolio is the
+            # migration this transition device exists to avoid.
+            if _portfolio_run:
+                candidates = [portfolio_to_experiment_shim(c)
+                              for c in candidates]
             if len(candidates) > 1:
-                print(f"\n--- Judging {len(candidates)} Candidate Plans ---")
+                print(f"\n--- Judging {len(candidates)} Candidate "
+                      f"{'Portfolios' if _portfolio_run else 'Plans'} ---")
                 bestofn_judge = judge_plan_candidates(
                     objective=objective,
                     candidates=candidates,
@@ -633,24 +1163,71 @@ class PlanningAgent(BaseAgent):
                 "reports": bestofn_reports,
             }
         else:
-            res, author_context = perform_science_rag(
-                objective=objective,
-                instructions=HYPOTHESIS_GENERATION_INSTRUCTIONS,
-                task_name="Experimental Plan",
-                kb_docs=self.kb_docs,
-                model=self.model,
-                generation_config=self.generation_config,
-                primary_data_set=primary_data_set,
-                image_paths=all_image_paths,
-                image_descriptions=image_descriptions,
-                additional_context=ctx_string,
-                external_context=external_context,
-                skill_context=skill_planning_context,
-                return_context=True
-            )
+            # The portfolio OUTPUT contract rides the campaign, not the
+            # best-of-N knob. It used to be injected only when
+            # `selection_profile == "ideation"`, which the tool documents as
+            # best-of-N only — so every single-plan follow-up in an ideation
+            # campaign authored without it. Live: a consolidation delegation
+            # then encoded its portfolio as 56 `experimental_steps` document
+            # sections, while the best-of-N delegations either side of it
+            # emitted clean `concepts` lists. Passed on both tiers, since a
+            # fallback run reverts to cramming otherwise.
+            _ideation_out = (selection_profile == "ideation"
+                             or self._is_ideation_campaign())
+            if _portfolio_run:
+                res, author_context = author_portfolio(
+                    objective=objective,
+                    kb_docs=self.kb_docs,
+                    model=self.model,
+                    generation_config=self.generation_config,
+                    primary_data_set=primary_data_set,
+                    image_paths=all_image_paths,
+                    image_descriptions=image_descriptions,
+                    additional_context=ctx_string,
+                    external_context=external_context,
+                    skill_context=skill_planning_context,
+                )
+            else:
+                res, author_context = perform_science_rag(
+                    objective=objective,
+                    instructions=(HYPOTHESIS_GENERATION_INSTRUCTIONS
+                                  + (IDEATION_OUTPUT_RULES if _ideation_out else "")),
+                    fallback_instructions=(
+                        HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK
+                        + IDEATION_OUTPUT_RULES) if _ideation_out else None,
+                    task_name="Experimental Plan",
+                    kb_docs=self.kb_docs,
+                    model=self.model,
+                    generation_config=self.generation_config,
+                    primary_data_set=primary_data_set,
+                    image_paths=all_image_paths,
+                    image_descriptions=image_descriptions,
+                    additional_context=ctx_string,
+                    external_context=external_context,
+                    skill_context=skill_planning_context,
+                    return_context=True
+                )
 
         if external_context:
             res["literature_search"] = external_context
+
+        # Plan-kind stamp, mirroring TEA's `type="technoeconomic_analysis"`:
+        # a plan dict read on its own (restored checkpoint, a delegation's
+        # plan.json) can then tell what it is without the session state that
+        # produced it. Only a real ideation run is stamped — the profile is
+        # documented as a no-op on the single-plan path.
+        _ideation_run = (selection_profile == "ideation" and n_candidates > 1)
+        if _ideation_run or _portfolio_run:
+            res["type"] = "ideation"
+            self.state["plan_kind"] = "ideation"
+
+        # A portfolio carries BOTH shapes through the transition: `directions`
+        # is the payload, and a one-entry shim keeps the fifty-odd legacy
+        # readers of `proposed_experiments` correct rather than empty-handed —
+        # the validity gates especially, where a missing key reads as a FAILED
+        # plan and aborts the run.
+        if _portfolio_run and isinstance(res, dict) and not res.get("error"):
+            res = portfolio_to_experiment_shim(res)
 
         self._log_action(
             action=("generate_plan_candidates" if n_candidates > 1
@@ -672,7 +1249,7 @@ class PlanningAgent(BaseAgent):
         # Snapshot 1: Science Draft
         res["iteration"] = current_iter
         res["stage"] = "Science Draft"
-        self.state["plan_history"].append(res.copy())
+        self.state["plan_history"].append(self._stamp_campaign(res).copy())
         self.state["current_plan"] = res
         
         def _conform_and_critique(res):
@@ -682,7 +1259,11 @@ class PlanningAgent(BaseAgent):
                 is_relevant, critique = verify_plan_relevance(objective, res, self.model, self.generation_config)
 
                 if not is_relevant:
-                    print(f"\n🔄 Self-correction triggered: {critique}")
+                    # The full critique was just printed by the verifier
+                    # ('Plan Verification Failed: ...') — announce the action
+                    # only, or the same paragraph shows twice back to back.
+                    print("\n🔄 Self-correction triggered — regenerating the "
+                          "plan against the verification failure above.")
                     res = refine_plan_with_feedback(
                         original_result=res,
                         feedback=f"CRITICAL: {critique}",
@@ -694,7 +1275,7 @@ class PlanningAgent(BaseAgent):
 
                     res["iteration"] = current_iter
                     res["stage"] = "Auto-Corrected"
-                    self.state["plan_history"].append(res.copy())
+                    self.state["plan_history"].append(self._stamp_campaign(res).copy())
                     self.state["current_plan"] = res
 
                     self._log_action(
@@ -771,7 +1352,7 @@ class PlanningAgent(BaseAgent):
                     res["literature_search"] = external_context
                 res["iteration"] = current_iter
                 res["stage"] = "Science Draft (human-selected candidate)"
-                self.state["plan_history"].append(res.copy())
+                self.state["plan_history"].append(self._stamp_campaign(res).copy())
                 self.state["current_plan"] = res
                 self._log_action(
                     action="bestofn_human_override",
@@ -787,7 +1368,8 @@ class PlanningAgent(BaseAgent):
         # Human feedback on strategy
         human_feedback = None
         if enable_human_feedback and res.get("proposed_experiments") and not res.get("error"):
-            display_plan_summary(res)
+            display_plan_summary(res, ideation=self._is_ideation_campaign(),
+                                 report_path=self._review_preview_path())
             human_feedback = get_user_feedback()
             
             if human_feedback:
@@ -839,9 +1421,10 @@ class PlanningAgent(BaseAgent):
                         fresh = sorted(fresh, key=lambda f: _order.get(f.get("severity"), 1))
                         res["critic_findings"] = fresh
 
-                    self.state["plan_history"].append(res.copy())
+                    self.state["plan_history"].append(self._stamp_campaign(res).copy())
                     self.state["current_plan"] = res
-                    display_plan_summary(res)
+                    display_plan_summary(res, ideation=self._is_ideation_campaign(),
+                                 report_path=self._review_preview_path())
                     print("✅ Plan updated.")
             else:
                 print("✅ Plan accepted.")
@@ -858,7 +1441,11 @@ class PlanningAgent(BaseAgent):
         )
 
         self.state["status"] = "planned"
-        
+
+        # Final provenance stamp — conformance/critic/feedback passes above
+        # may have re-emitted the plan JSON over the earlier stamp.
+        self._finalize_literature(res, external_context)
+
         return res
     
     def generate_implementation_code(self,
@@ -935,7 +1522,7 @@ class PlanningAgent(BaseAgent):
         # Snapshot: Code Generated
         res["iteration"] = current_iter
         res["stage"] = "Code Generated"
-        self.state["plan_history"].append(res.copy())
+        self.state["plan_history"].append(self._stamp_campaign(res).copy())
         self.state["current_plan"] = res
 
         self._log_action(
@@ -991,7 +1578,7 @@ class PlanningAgent(BaseAgent):
                     
                     res["iteration"] = current_iter
                     res["stage"] = "Code Refined"
-                    self.state["plan_history"].append(res.copy())
+                    self.state["plan_history"].append(self._stamp_campaign(res).copy())
                     self.state["current_plan"] = res
 
                     self._log_action(
@@ -1209,7 +1796,8 @@ class PlanningAgent(BaseAgent):
                     enable_human_feedback: bool = True,
                     state_file_path: Optional[str] = None,
                     use_literature_rag: bool = False,
-                    external_context: Optional[str] = None) -> Dict[str, Any]:
+                    external_context: Optional[str] = None,
+                    literature_text: Optional[str] = None) -> Dict[str, Any]:
         """
         Refines the experimental plan (science strategy only) based on new results.
 
@@ -1222,6 +1810,10 @@ class PlanningAgent(BaseAgent):
             external_context: Pre-fetched external context (e.g. from
                 orchestrator's search_literature/query_molecules tools).
                 Merged with any local KB hits from use_literature_rag.
+            literature_text: The LITERATURE-ONLY portion of the external
+                context, when the caller can separate it. Used to stamp the
+                refined plan's ``literature_search`` provenance; without it,
+                the prior plan's literature carries forward.
 
         Returns:
             Dict with refined plan (proposed_experiments)
@@ -1289,7 +1881,21 @@ Select the most appropriate strategy:
             if self.kb_docs.index and self.kb_docs.index.ntotal > 0:
                 search_query = f"Implications and causes of: {consolidated_feedback[:400]}"
                 print(f"  - 🔍 Searching local KB for context on results...")
-                hits = self.kb_docs.retrieve(search_query, top_k=3)
+                try:
+                    hits = self.kb_docs.retrieve(search_query, top_k=3)
+                except Exception as e:  # noqa: BLE001 - degrade, never kill refinement
+                    try:
+                        hits = self.kb_docs.retrieve_sparse(search_query, top_k=3)
+                        logging.warning(
+                            f"Dense KB retrieval failed ({e}); refining with "
+                            "keyword (BM25) fallback context."
+                        )
+                    except Exception:  # noqa: BLE001
+                        logging.warning(
+                            f"KB retrieval failed ({e}); refining without "
+                            "local KB context."
+                        )
+                        hits = []
                 if hits:
                     context_parts.append("\n---\n".join([c['text'] for c in hits]))
                     print(f"    -> Found {len(hits)} relevant document chunks.")
@@ -1335,10 +1941,26 @@ Select the most appropriate strategy:
             )           
             return new_plan
         
+        # literature_search is SYSTEM-OWNED provenance: the refining LLM
+        # sometimes authors a prose note into that field ('no new search was
+        # executed...'), which then shadows the campaign's real corpus for
+        # every downstream consumer. Stamp it here — the one place the
+        # refined plan enters both current_plan and history — with the
+        # literature actually supplied this round, else carry the prior
+        # plan's literature forward; the model's value survives only if it
+        # is genuinely the most substantial (i.e. it faithfully copied the
+        # corpus).
+        _lit_candidates = [str(new_plan.get("literature_search") or ""),
+                           str(literature_text or ""),
+                           str(current_plan.get("literature_search") or "")]
+        _best_lit = max(_lit_candidates, key=len)
+        if _best_lit:
+            new_plan["literature_search"] = _best_lit
+
         # Snapshot: Reasoning Draft
         new_plan["iteration"] = next_plan_idx
         new_plan["stage"] = "Reasoning Draft"
-        self.state["plan_history"].append(new_plan.copy())
+        self.state["plan_history"].append(self._stamp_campaign(new_plan).copy())
         self.state["current_plan"] = new_plan
 
         # Resolution-check re-critique so caveats describe the revised plan.
@@ -1367,7 +1989,8 @@ Select the most appropriate strategy:
             print("\n" + "="*60)
             print("🧠 AGENT'S PROPOSED REVISION BASED ON RESULTS")
             print("="*60)
-            display_plan_summary(new_plan)
+            display_plan_summary(new_plan, ideation=self._is_ideation_campaign(),
+                                 report_path=self._review_preview_path())
             
             human_feedback = get_user_feedback()
             
@@ -1389,7 +2012,7 @@ Select the most appropriate strategy:
                 # Snapshot: Human Refined
                 new_plan["iteration"] = next_plan_idx
                 new_plan["stage"] = "Human Refined (Science)"
-                self.state["plan_history"].append(new_plan.copy())
+                self.state["plan_history"].append(self._stamp_campaign(new_plan).copy())
                 self.state["current_plan"] = new_plan
                 new_plan = self._recritique_revision(
                     new_plan, prior_plan=prior_plan,
@@ -1410,6 +2033,7 @@ Select the most appropriate strategy:
         )
         
         self.state["status"] = "refined"
+        self._finalize_literature(new_plan, _best_lit)
         return new_plan
     
     def adjust_plan_for_constraints(self,
@@ -1481,7 +2105,7 @@ Select the most appropriate strategy:
         # Keep same iteration — this is an in-place adjustment, not a new cycle
         new_plan["iteration"] = current_plan.get("iteration", 0)
         new_plan["stage"] = "Constraint Adjusted"
-        self.state["plan_history"].append(new_plan.copy())
+        self.state["plan_history"].append(self._stamp_campaign(new_plan).copy())
         self.state["current_plan"] = new_plan
 
         # Resolution-check re-critique: a constraint adjustment often resolves
@@ -1505,7 +2129,8 @@ Select the most appropriate strategy:
             print("\n" + "=" * 60)
             print("🔧 AGENT'S PROPOSED PLAN ADJUSTMENT (Constraint)")
             print("=" * 60)
-            display_plan_summary(new_plan)
+            display_plan_summary(new_plan, ideation=self._is_ideation_campaign(),
+                                 report_path=self._review_preview_path())
 
             human_feedback = get_user_feedback()
 
@@ -1526,7 +2151,7 @@ Select the most appropriate strategy:
                 )
                 new_plan["iteration"] = current_plan.get("iteration", 0)
                 new_plan["stage"] = "Human Refined (Constraint)"
-                self.state["plan_history"].append(new_plan.copy())
+                self.state["plan_history"].append(self._stamp_campaign(new_plan).copy())
                 self.state["current_plan"] = new_plan
                 new_plan = self._recritique_revision(
                     new_plan, prior_plan=prior_plan,
@@ -1603,7 +2228,7 @@ Select the most appropriate strategy:
         # Snapshot: Code Generated
         new_plan["iteration"] = next_plan_idx
         new_plan["stage"] = "Code Generated"
-        self.state["plan_history"].append(new_plan.copy())
+        self.state["plan_history"].append(self._stamp_campaign(new_plan).copy())
         self.state["current_plan"] = new_plan
 
         self._log_action(
@@ -1658,7 +2283,7 @@ Select the most appropriate strategy:
                     # Snapshot: Code Refined
                     new_plan["iteration"] = next_plan_idx
                     new_plan["stage"] = "Code Refined"
-                    self.state["plan_history"].append(new_plan.copy())
+                    self.state["plan_history"].append(self._stamp_campaign(new_plan).copy())
                     self.state["current_plan"] = new_plan
                     
                     print(f"  - 💾 Overwriting files in {temp_dir} with refined code...")
@@ -2046,20 +2671,10 @@ Select the most appropriate strategy:
             )
             return error_result
         
-        # 3. External context: prefer caller-provided, fall back to deprecated internal lit
+        # 3. External context is caller-provided only (orchestrator's
+        # search_literature economic_data type is the sanctioned path; the
+        # silent internal fallback was removed with the one in generate_plan).
         lit_context = external_context or ""
-        if not lit_context and self.lit_agent:
-            warnings.warn(
-                "Internal literature search in PlanningAgent is deprecated. "
-                "Use the orchestrator's search_literature() tool instead.",
-                DeprecationWarning, stacklevel=2
-            )
-            print(f"  - 🌍 Querying literature for TEA context (deprecated internal path)...")
-            lit_res = self.lit_agent.search_for_economic_data(
-                optimize_search_query(objective=objective, model=self.model)
-            )
-            if lit_res['status'] == 'success':
-                lit_context = lit_res['content']
 
         # 4. Perform RAG
         # Build skill context for TEA (overview section if relevant)
@@ -2089,7 +2704,7 @@ Select the most appropriate strategy:
             res["stage"] = "TEA Initial"
             res["iteration"] = 0 # TEA is step 0 (pre-planning)
             # Append copy to history
-            self.state["plan_history"].append(res.copy())
+            self.state["plan_history"].append(self._stamp_campaign(res).copy())
      
         self._log_action(
             action="perform_technoeconomic_analysis",

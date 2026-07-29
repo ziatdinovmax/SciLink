@@ -10,6 +10,7 @@ except Exception:  # Pillow optional — critic degrades to text-only evidence
 
 from scilink.parsers import parse_adaptive_excel
 from scilink.knowledge import run_rag, parse_json_from_response
+from .parser_utils import plan_is_portfolio
 from .instruct import (
     HYPOTHESIS_GENERATION_INSTRUCTIONS,
     TEA_INSTRUCTIONS,
@@ -21,8 +22,49 @@ from .instruct import (
     BESTOFN_SELECTION_PROFILE_LAB,
     BESTOFN_SELECTION_PROFILE_IDEATION,
     IDEATION_AUTHOR_OVERRIDE,
+    IDEATION_OUTPUT_RULES,
+    TECHNICAL_DOCUMENT_INSTRUCTIONS,
+    IDEATION_PORTFOLIO_INSTRUCTIONS,
+    PORTFOLIO_REFINEMENT_RULES,
+    IDEATION_PORTFOLIO_INSTRUCTIONS_FALLBACK,
+    TECHNICAL_DOCUMENT_INSTRUCTIONS_FALLBACK,
+    TECHNICAL_DOCUMENT_REVISION_RULES,
     CONSTRAINT_COVERAGE_NOTE
 )
+
+
+def summarize_experiment(exp: Dict[str, Any], index: int) -> str:
+    """One experiment rendered for the reasoning passes (conformance, critic).
+
+    Enumerates a `concepts` portfolio when the plan carries one. Without
+    this, a plan holding N research directions is summarized by its single
+    experiment entry, so the conformance check cannot see that a
+    "propose 4-6 directions" objective was in fact satisfied — the failure
+    that pushed portfolios into `experimental_steps` in the first place.
+    Concept bodies are clipped: the passes need coverage and identity, not
+    the full text.
+    """
+    lines = [f"Experiment {index}: {exp.get('experiment_name', 'N/A')}",
+             f"  Hypothesis: {exp.get('hypothesis', 'N/A')}",
+             f"  Justification: "
+             f"{exp.get('justification', 'No justification provided.')}"]
+    concepts = exp.get("concepts")
+    if isinstance(concepts, list) and concepts:
+        lines.append(f"  Research directions in this plan "
+                     f"({len(concepts)} total):")
+        for c in concepts:
+            if not isinstance(c, dict):
+                lines.append(f"    - {str(c)[:200]}")
+                continue
+            label = " ".join(str(c.get(k)) for k in ("id", "tier")
+                             if c.get(k))
+            head = f"[{label}] " if label else ""
+            lines.append(f"    - {head}{str(c.get('title', 'Untitled'))[:160]}")
+            for key in ("hypothesis", "novelty"):
+                if c.get(key):
+                    lines.append(f"        {key}: {str(c[key])[:300]}")
+    lines.append("---")
+    return "\n".join(lines)
 
 
 def verify_plan_relevance(objective: str,
@@ -57,18 +99,8 @@ def verify_plan_relevance(objective: str,
             break
 
     # 2. Build Plan Summary for the Verifier
-    plan_summary_lines = []
-    for i, exp in enumerate(experiments):
-        name = exp.get('experiment_name', 'N/A')
-        hyp = exp.get('hypothesis', 'N/A')
-        justification = exp.get('justification', 'No justification provided.')
-
-        plan_summary_lines.append(f"Experiment {i+1}: {name}")
-        plan_summary_lines.append(f"  Hypothesis: {hyp}")
-        plan_summary_lines.append(f"  Justification: {justification}")
-        plan_summary_lines.append("---")
-
-    plan_summary = "\n".join(plan_summary_lines)
+    plan_summary = "\n".join(summarize_experiment(exp, i + 1)
+                             for i, exp in enumerate(experiments))
 
     # 3. Construct Context-Aware Prompt
     if is_fallback:
@@ -181,12 +213,8 @@ def critique_plan(objective: str,
     if not experiments:
         return {"findings": []}
 
-    plan_summary = "\n".join(
-        f"Experiment {i+1}: {exp.get('experiment_name', 'N/A')}\n"
-        f"  Hypothesis: {exp.get('hypothesis', 'N/A')}\n"
-        f"  Justification: {exp.get('justification', 'No justification provided.')}\n---"
-        for i, exp in enumerate(experiments)
-    )
+    plan_summary = "\n".join(summarize_experiment(exp, i + 1)
+                             for i, exp in enumerate(experiments))
 
     # --- Evidence: mirror what the plan author saw so checks are grounded. ---
     evidence_parts = []
@@ -331,7 +359,8 @@ def perform_science_rag(objective: str,
                         external_context: Optional[str] = None,
                         skill_context: Optional[str] = None,
                         return_context: bool = False,
-                        mode_key: Optional[str] = None) -> Any:
+                        mode_key: Optional[str] = None,
+                        fallback_instructions: Optional[str] = None) -> Any:
     """
     Executes the Scientific/TEA RAG loop over the Docs KnowledgeBase.
 
@@ -372,11 +401,16 @@ def perform_science_rag(objective: str,
         additional_context = f"{additional_context}\n{CONSTRAINT_COVERAGE_NOTE}"
 
     # --- Select the fallback instruction set matching the planning task ---
-    fallback_instructions = None
-    if instructions == HYPOTHESIS_GENERATION_INSTRUCTIONS:
-        fallback_instructions = HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK
-    elif instructions == TEA_INSTRUCTIONS:
-        fallback_instructions = TEA_INSTRUCTIONS_FALLBACK
+    # Matched by PREFIX, not identity: callers append overrides to the
+    # canonical block (ideation adds IDEATION_AUTHOR_OVERRIDE), and an
+    # equality test silently left those runs with no fallback set — so an
+    # "Insufficient context" author response aborted the run instead of
+    # regenerating from general knowledge. An explicit argument still wins.
+    if fallback_instructions is None:
+        if instructions.startswith(HYPOTHESIS_GENERATION_INSTRUCTIONS):
+            fallback_instructions = HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK
+        elif instructions.startswith(TEA_INSTRUCTIONS):
+            fallback_instructions = TEA_INSTRUCTIONS_FALLBACK
 
     rag_out = run_rag(
         query=objective,
@@ -414,7 +448,8 @@ def generate_plan_candidates(objective: str,
                              additional_context: Optional[str] = None,
                              external_context: Optional[str] = None,
                              skill_context: Optional[str] = None,
-                             selection_profile: str = "lab"
+                             selection_profile: str = "lab",
+                             contract: Optional[Dict[str, Any]] = None
                              ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], str]:
     """
     Sequential, diversity-conditioned best-of-N candidate generation.
@@ -454,15 +489,35 @@ def generate_plan_candidates(objective: str,
     # rule it supersedes). Lab profile authors exactly as before — the
     # benchmark showed the strict derivability discipline structurally caps
     # rediscovery when the key inspiration is absent from the context.
+    # Grounding latitude is tier-dependent (the fallback set already grants
+    # it); the OUTPUT rules are not — they ride both tiers, else a fallback
+    # ideation run goes back to cramming its portfolio into steps.
+    # A CONTRACT swaps what a candidate IS — a portfolio of research
+    # directions rather than an experiment — while the tier pinning,
+    # distinctness conditioning and early-stop below are shape-agnostic and
+    # stay shared. Absent a contract this is byte-for-byte the experiment
+    # path it has always been.
+    _key = (contract or {}).get("key", "proposed_experiments")
+    _label = (contract or {}).get("label", "Candidate Plan")
+    _summarise = (contract or {}).get("summarise")
+
+    _ideation = selection_profile == "ideation"
     author_instructions = HYPOTHESIS_GENERATION_INSTRUCTIONS
-    if selection_profile == "ideation":
+    fallback_set = HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK
+    if contract:
+        author_instructions = contract["strict"]
+        fallback_set = contract["fallback"]
+    elif _ideation:
         author_instructions = (HYPOTHESIS_GENERATION_INSTRUCTIONS
-                               + IDEATION_AUTHOR_OVERRIDE)
+                               + IDEATION_AUTHOR_OVERRIDE
+                               + IDEATION_OUTPUT_RULES)
+        fallback_set = (HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK
+                        + IDEATION_OUTPUT_RULES)
 
     first, author_context = perform_science_rag(
         objective=objective,
         instructions=author_instructions,
-        task_name="Candidate Plan 1",
+        task_name=f"{_label} 1",
         kb_docs=kb_docs,
         model=model,
         generation_config=generation_config,
@@ -474,21 +529,25 @@ def generate_plan_candidates(objective: str,
         skill_context=skill_context,
         return_context=True,
         mode_key="_rag_mode",
+        # Stated explicitly rather than inferred: the ideation override is
+        # concatenated onto the canonical block above, and the fallback set
+        # carries the OUTPUT rules but not the grounding override (it already
+        # licenses general knowledge — see this function's docstring).
+        fallback_instructions=fallback_set,
     )
     tier = first.pop("_rag_mode", "strict") if isinstance(first, dict) else "strict"
     candidates = [first]
-    if first.get("error") or not first.get("proposed_experiments"):
+    if first.get("error") or not first.get(_key):
         return candidates, author_context, tier
 
     if tier == "fallback":
         print("  - ℹ️  Fallback tier pinned for all candidates in this run.")
 
-    instructions = (author_instructions if tier == "strict"
-                    else HYPOTHESIS_GENERATION_INSTRUCTIONS_FALLBACK)
+    instructions = author_instructions if tier == "strict" else fallback_set
 
     for k in range(2, n_candidates + 1):
         prior = "\n".join(
-            f"{i}. {c['proposed_experiments'][0].get('hypothesis', 'N/A')}"
+            f"{i}. {_summarise(c) if _summarise else (c['proposed_experiments'][0].get('hypothesis', 'N/A'))}"
             for i, c in enumerate(candidates, 1)
         )
         conditioning = HYPOTHESIS_DISTINCTNESS_CONDITIONING.format(
@@ -512,10 +571,10 @@ def generate_plan_candidates(objective: str,
             primary_data_str=author_context.get("primary_data"),
             skill_context=skill_context,
             fallback_instructions=None,
-            task_name=f"Candidate Plan {k}",
+            task_name=f"{_label} {k}",
         )
-        if not isinstance(res, dict) or res.get("error") or not res.get("proposed_experiments"):
-            reason = (res or {}).get("error", "no experiments returned") \
+        if not isinstance(res, dict) or res.get("error") or not res.get(_key):
+            reason = (res or {}).get("error", f"no {_key} returned") \
                 if isinstance(res, dict) else "unparseable response"
             print(f"  - 🛑 Candidate {k} declined ({reason}) — "
                   f"stopping at {len(candidates)} distinct candidate(s).")
@@ -861,7 +920,8 @@ def refine_plan_with_feedback(original_result: Dict[str, Any],
 
     **Constraints:**
     - You MUST return the exact same JSON structure (keys: "proposed_experiments", etc.).
-    - Update "experimental_steps", "hypothesis", or "required_equipment" as requested.
+    - Update "experimental_steps", "hypothesis", "required_equipment", or "concepts" as requested.
+    - If the current plan carries a "concepts" list, it is the portfolio of research directions: KEEP it as a list of concept objects, revising, adding or removing entries as the feedback requires. Never collapse it into prose or into "experimental_steps" rows.
     - Do NOT add explanations outside the JSON.
     - Do NOT carry forward quantitative claims from the original plan that contradict the experimental results.
     - For "source_documents", list ONLY references you actually used from the provided Literature Context. Do NOT invent or carry forward references not present in the context.
@@ -869,6 +929,13 @@ def refine_plan_with_feedback(original_result: Dict[str, Any],
     **Output:**
     A single valid JSON object containing the updated plan.
     """
+
+    # A portfolio refines against judgement, not measurement — see
+    # PORTFOLIO_REFINEMENT_RULES.
+    if plan_is_portfolio(original_result) or any(
+            (e or {}).get("concepts")
+            for e in (original_result.get("proposed_experiments") or [])):
+        refinement_prompt += PORTFOLIO_REFINEMENT_RULES
 
     prompt_parts = [refinement_prompt]
 
@@ -1007,3 +1074,108 @@ def refine_code_with_feedback(result: Dict[str, Any],
     except Exception as e:
         print(f"    - ❌ Error during code refinement: {e}")
         return result
+
+def author_technical_document(request: str,
+                              kb_docs: Any,
+                              model: Any,
+                              generation_config: Any,
+                              *,
+                              external_context: Optional[str] = None,
+                              source_documents: Optional[str] = None,
+                              additional_context: Optional[str] = None,
+                              skill_context: Optional[str] = None,
+                              revise_document: Optional[str] = None,
+                              task_name: str = "Technical Document"
+                              ) -> Dict[str, Any]:
+    """Author a grounded technical document (roadmap, estimate, memo, brief).
+
+    Same retrieval path as plan generation, different contract: the model
+    returns SECTIONS, not an experiment. Sections rather than one markdown
+    blob because these documents run to thousands of words, and a single
+    JSON string that long is the shape that has truncated on us before.
+
+    Returns ``{"sections": [...]}`` or ``{"error": ...}``; the caller
+    assembles the markdown.
+    """
+    parts = []
+    if revise_document:
+        parts.append("## THE CURRENT DOCUMENT (revise THIS, in full):\n"
+                     + revise_document)
+    if source_documents:
+        parts.append("## PRIOR SESSION DOCUMENTS (build on these, do not "
+                     "restate them wholesale):\n" + source_documents)
+    if additional_context:
+        parts.append(additional_context)
+
+    _instr = TECHNICAL_DOCUMENT_INSTRUCTIONS
+    _fallback = TECHNICAL_DOCUMENT_INSTRUCTIONS_FALLBACK
+    if revise_document:
+        _instr += TECHNICAL_DOCUMENT_REVISION_RULES
+        _fallback += TECHNICAL_DOCUMENT_REVISION_RULES
+    result = run_rag(
+        query=request,
+        instructions=_instr,
+        fallback_instructions=_fallback,
+        kb=kb_docs,
+        model=model,
+        generation_config=generation_config,
+        external_context=external_context,
+        additional_context="\n\n".join(parts) if parts else None,
+        skill_context=skill_context,
+        task_name=task_name,
+    )
+    if not isinstance(result, dict):
+        return {"error": f"Document generation returned {type(result).__name__}"}
+    return result
+
+
+def document_to_markdown(title: str, sections: List[Dict[str, Any]]) -> str:
+    """Assemble authored sections into a markdown document."""
+    out = [f"# {title}", ""]
+    for sec in sections or []:
+        if not isinstance(sec, dict):
+            out += [str(sec), ""]
+            continue
+        heading = str(sec.get("heading") or "").strip()
+        body = str(sec.get("body") or "").strip()
+        if heading:
+            out += [f"## {heading}", ""]
+        if body:
+            out += [body, ""]
+    return "\n".join(out).rstrip() + "\n"
+
+
+# The portfolio contract for generate_plan_candidates. The tier pinning,
+# distinctness conditioning and early stop are shape-agnostic and shared; only
+# what a candidate IS changes.
+def portfolio_contract() -> Dict[str, Any]:
+    def _summarise(cand: Dict[str, Any]) -> str:
+        dirs = cand.get("directions") or []
+        titles = "; ".join(str(d.get("title") or d.get("id") or "")
+                           for d in dirs[:6] if isinstance(d, dict))
+        return f"{cand.get('thesis', 'N/A')} — directions: {titles}"
+
+    return {"key": "directions",
+            "label": "Candidate Portfolio",
+            "strict": IDEATION_PORTFOLIO_INSTRUCTIONS,
+            "fallback": IDEATION_PORTFOLIO_INSTRUCTIONS_FALLBACK,
+            "summarise": _summarise}
+
+
+def author_portfolio(objective: str,
+                     kb_docs: Any,
+                     model: Any,
+                     generation_config: Any,
+                     **kw) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Author ONE portfolio (the n_candidates=1 path)."""
+    return perform_science_rag(
+        objective=objective,
+        instructions=IDEATION_PORTFOLIO_INSTRUCTIONS,
+        fallback_instructions=IDEATION_PORTFOLIO_INSTRUCTIONS_FALLBACK,
+        task_name="Research Portfolio",
+        kb_docs=kb_docs,
+        model=model,
+        generation_config=generation_config,
+        return_context=True,
+        **kw,
+    )

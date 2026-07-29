@@ -302,12 +302,117 @@ def _find_new_html_reports() -> list[str]:
     new = []
     for p in Path(session_dir).rglob("*.html"):
         s = str(p)
-        if s not in st.session_state.known_images:  # reuse the same set
-            st.session_state.known_images.add(s)
+        # Identity = path AND mtime. Under the meta each delegation writes
+        # its own directory so a path is unique per turn, but standalone
+        # plan mode rewrites base_dir/plan.html on every refine — a
+        # path-only key marked it "already shown" and the REFINED plan
+        # never reached the chat. Inlined rather than shared: these sweeps
+        # are exec'd standalone by the UI-contract tests.
+        try:
+            key = f"{p}:{p.stat().st_mtime_ns}"
+        except OSError:
+            key = str(p)
+        if key not in st.session_state.known_images:  # reuse the same set
+            st.session_state.known_images.add(key)
             if p.parent.name == "plan_candidates":
+                continue
+            # plan_preview.html is the CLI reviewer's scratch render of the
+            # plan under review — in chat it duplicates the white paper /
+            # brief that follow it, so it is noise here.
+            if p.stem == "plan_preview":
                 continue
             new.append(s)
     return new
+
+
+def _demote_md_headings(text: str) -> str:
+    """Shift markdown headings down two levels (H1 -> H3, capped at H6) for
+    the in-chat preview: st.markdown renders a document H1 at page-title
+    size, which is overwhelming inside a chat bubble. The file on disk keeps
+    its proper heading levels. Fenced code blocks are left untouched."""
+    out, in_fence = [], False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+        if not in_fence:
+            m = re.match(r"^(#{1,6})(\s)", line)
+            if m:
+                line = "#" * min(len(m.group(1)) + 2, 6) + line[len(m.group(1)):]
+        out.append(line)
+    return "\n".join(out)
+
+
+def _find_new_md_documents() -> list[str]:
+    """Return markdown DELIVERABLES in the session dir not yet shown.
+
+    Chosen by the AGENT, not by an allow-list of stems: the filename of the
+    thing a user asked for is invented at request time
+    ("top3_priority_brief.md"), so a stem whitelist silently drops exactly
+    the artifact they are looking for. save_file records a deliverables
+    manifest; anything marked there is embedded. Unmarked markdown is still
+    embedded when it is small enough to read in chat — a forgotten flag must
+    never hide a file — while bulk context (literature dumps) is left to the
+    File Explorer so it cannot bury the deliverables.
+    """
+    session_dir = st.session_state.session_dir
+    if session_dir is None:
+        return []
+
+    MAX_INLINE_BYTES = 60_000
+    BULK_STEMS = ("literature_search", "chat_history", "session_log")
+    try:
+        from scilink.agents.planning_agents.user_interface import (
+            load_deliverables)
+        marked = {e["path"] for e in load_deliverables(session_dir)
+                  if e.get("deliverable")}
+    except Exception:
+        marked = set()
+
+    new = []
+    for p in Path(session_dir).rglob("*.md"):
+        s = str(p)
+        # Identity = path AND mtime. Under the meta each delegation writes
+        # its own directory so a path is unique per turn, but standalone
+        # plan mode rewrites base_dir/plan.html on every refine — a
+        # path-only key marked it "already shown" and the REFINED plan
+        # never reached the chat. Inlined rather than shared: these sweeps
+        # are exec'd standalone by the UI-contract tests.
+        try:
+            key = f"{p}:{p.stat().st_mtime_ns}"
+        except OSError:
+            key = str(p)
+        if key in st.session_state.known_images:  # reuse the same set
+            continue
+        is_marked = str(p.resolve()) in marked
+        if not is_marked:
+            if any(p.stem.startswith(b) for b in BULK_STEMS):
+                continue
+            try:
+                if p.stat().st_size > MAX_INLINE_BYTES:
+                    continue
+            except OSError:
+                continue
+        st.session_state.known_images.add(key)
+        new.append(s)
+    return new
+
+
+def _deliverable_title(md_path, p) -> str:
+    """Heading for an embedded markdown doc: the agent's own label when it
+    gave one, else a readable form of the filename."""
+    try:
+        from scilink.agents.planning_agents.user_interface import (
+            load_deliverables)
+        for e in load_deliverables(st.session_state.session_dir or ""):
+            if e.get("path") == str(Path(md_path).resolve()) and e.get("title"):
+                return e["title"]
+    except Exception:
+        pass
+    if p.stem.startswith("white_paper"):
+        return "White Paper"
+    if p.stem.startswith("ideation_report"):
+        return "Ideation Report"
+    return p.stem.replace("_", " ").title()
 
 
 def _parse_bestofn_review(context: str, prompt: str):
@@ -710,7 +815,13 @@ else:
             render_pre_chat_uploads(_start_task)
     
         _avatars = {"user": AVATAR_USER, "assistant": AVATAR_AGENT}
-        for msg in st.session_state.chat_messages:
+        # Enumerated because widget keys below must be unique per
+        # MESSAGE, not per path: a document revised in place is
+        # re-embedded in a later message under the SAME path, and a
+        # path-only key then collides and crashes the app with
+        # StreamlitDuplicateElementKey (live, after a white paper was
+        # revised via write_technical_document(revise_path=...)).
+        for _mi, msg in enumerate(st.session_state.chat_messages):
             with st.chat_message(msg["role"], avatar=_avatars.get(msg["role"])):
                 # Escape tildes outside LaTeX blocks to prevent Markdown strikethrough
                 _content = _escape_tildes(msg["content"]) if msg["role"] == "assistant" else msg["content"]
@@ -739,7 +850,22 @@ else:
                             data=p.read_bytes(),
                             file_name=p.name,
                             mime="text/html",
-                            key=f"dl_html_{html_path}",
+                            key=f"dl_html_{_mi}_{html_path}",
+                        )
+                for md_path in msg.get("md_reports", []):
+                    p = Path(md_path)
+                    if p.exists():
+                        _doc_title = _deliverable_title(md_path, p)
+                        with st.expander(f"{_doc_title}: {p.name}"):
+                            with st.container(height=600):
+                                st.markdown(_demote_md_headings(
+                                    p.read_text(encoding="utf-8")))
+                        st.download_button(
+                            f"Download {p.name}",
+                            data=p.read_bytes(),
+                            file_name=p.name,
+                            mime="text/markdown",
+                            key=f"dl_md_{_mi}_{md_path}",
                         )
                 if msg.get("verbose"):
                     with st.expander("Verbose output"):
@@ -765,6 +891,7 @@ else:
                 content = re.sub(r"!\[[^\]]*\]\([^)]+\)\n?", "", content).strip()
                 new_images = _find_new_images()
                 new_reports = _find_new_html_reports()
+                new_docs = _find_new_md_documents()
                 # When an HTML report is present it already embeds the
                 # relevant figures — skip showing raw images separately
                 # to avoid duplicate clutter (matches curve fitting UX).
@@ -773,6 +900,7 @@ else:
                     "content": content,
                     "images": [] if new_reports else new_images,
                     "html_reports": new_reports,
+                    "md_reports": new_docs,
                     "verbose": task.verbose_log or "",
                 })
                 st.session_state.chat_task = ChatTask()

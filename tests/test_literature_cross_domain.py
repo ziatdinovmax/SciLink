@@ -18,6 +18,7 @@ No network: the literature agent is a scripted stub.
 
 import json
 import threading
+from pathlib import Path
 import time
 
 import pytest
@@ -102,11 +103,21 @@ def test_cross_domain_prompt_forbids_topical_review():
     q = sent["q"]
     assert "ADJACENT and UNRELATED domains" in q
     assert "TRANSFER" in q
-    assert "NOT provide a topical review" in q
+    assert "NOT be a topical review" in q
     assert "selective lithium recovery from brine" in q
     assert sent["t"] == "CrossDomain"
     # must NOT inherit the grounding template
     assert "comprehensive review of experimental methods" not in q
+
+    # The ban is on the BODY, not on naming the target: an absolute "no
+    # subfield content" rule deadlocks whenever the objective is phrased as
+    # a question about its own field, forcing the model to disobey either
+    # the wrapper or the question. State the function, then leave the field.
+    assert "FUNCTION to be transferred toward" in q
+    assert q.index("FUNCTION to be transferred") < q.index("NOT be a topical")
+    # each analogy must carry its failure mode, not just an appealing story
+    assert "what would break in transfer" in q
+    assert "how it is measured or realized" in q
 
 
 def test_single_type_unchanged(tool):
@@ -187,4 +198,227 @@ def test_tool_description_states_when_to_use_and_when_not(tool):
     # loss was measured for grounding-only retrieval too, and the remedy is
     # constraint->step mapping, not withholding a search type.
     assert "AVOID" not in st
-    assert "parallel" in desc.lower() or "CONCURRENTLY" in desc
+    assert "parallel" in desc.lower() or "concurrent" in desc.lower()
+
+
+# ---------------------------------------------------------------- display
+
+def test_intro_states_question_times_type_multiplication(tool, capsys):
+    """The Q-list shows DISTINCT questions; the header must say each one
+    runs once per search type — '5 questions but 10 searches' read as a
+    mismatch in live sessions — and scale the wait by batch count."""
+    func, *_ = tool
+    func([f"question {i}" for i in range(1, 5)],
+         "hypothesis_context,cross_domain")  # 8 jobs -> batches of 6 + 2
+    out = capsys.readouterr().out
+    assert ("4 questions, each searched 2 ways "
+            "(hypothesis_context, cross_domain) = 8 searches") in out
+    # exact batch sizes, not 'batches of 6' — that read as 6 x 2 = 12
+    assert "run in 2 sequential batches of 6 then 2" in out
+    assert "10-15 minutes per batch" in out
+    assert "expect ~20-30 minutes total" in out
+
+
+def test_intro_single_batch_keeps_flat_eta(tool, capsys):
+    func, *_ = tool
+    func(["q1", "q2"], "hypothesis_context,cross_domain")  # 4 jobs, 1 batch
+    out = capsys.readouterr().out
+    assert "2 questions, each searched 2 ways" in out
+    assert "sequential batches" not in out
+    assert "per batch" not in out
+    assert "typically take 10-15 minutes" in out
+
+
+def test_heartbeat_reports_running_vs_queued(tool, monkeypatch, capsys):
+    """Batches run back-to-back, so not-yet-submitted jobs are QUEUED, not
+    running — the old single 'N still running' line overstated concurrency
+    whenever a call exceeded the 6-wide budget (seen live: '10 of 10 still
+    running' with 6 in flight)."""
+    from scilink.agents.planning_agents import orchestrator_tools as ot
+    func, lit, *_ = tool
+    monkeypatch.setattr(ot, "_LIT_HEARTBEAT_SECONDS", 0.15)
+    lit.delay = 0.9  # batch 1 spans several heartbeat ticks
+    func([f"q{i}" for i in range(1, 5)],
+         "hypothesis_context,cross_domain")  # 8 jobs: 6 running + 2 queued
+    out = capsys.readouterr().out
+    assert "6 running, 2 queued of 8 literature searches" in out
+    assert "~10-15 min per batch" in out
+
+
+def test_search_type_routing_excludes_survey_questions(tool):
+    """cross_domain needs a function to transfer TOWARD. A survey question
+    ("what are the frontiers in X", "what is hard to measure in X") asks for
+    X's own field, which the wrapper forbids in the same breath — the two
+    instructions cannot both be satisfied, so the router must not send one
+    there."""
+    _, _, _, params, _ = tool
+    st = params["search_type"]["description"]
+    assert "FUNCTION or CHALLENGE" in st
+    assert "survey question" in st
+    assert "hypothesis_context" in st.split("survey question")[1]
+
+
+# ------------------------------------------------- per-type objectives
+
+def test_per_type_objectives_send_each_type_its_own_question(tool, tmp_path):
+    """A paired call cross-multiplied ONE text across both types, so the
+    cross_domain leg received a survey question written for grounding —
+    exactly the shape its wrapper tells the model to avoid. Each type can
+    now carry its own objective."""
+    func, lit, *_ = tool
+    out = json.loads(func({
+        "hypothesis_context": ["what are the gaps in biomineralization",
+                               "what is known about amorphous precursors"],
+        "cross_domain": "capture a state that exists only under drive",
+    }))
+    assert out["status"] == "success"
+
+    by_kind = {}
+    for kind, q in lit.calls:
+        by_kind.setdefault(kind, []).append(q)
+    assert sorted(by_kind) == ["cross_domain", "hypothesis_context"]
+    assert len(by_kind["hypothesis_context"]) == 2
+    assert by_kind["cross_domain"] == ["optimized::capture a state that "
+                                       "exists only under drive"]
+    # the grounding questions never reach the transfer leg, and vice versa
+    assert not any("gaps in biomineralization" in q
+                   for q in by_kind["cross_domain"])
+    assert not any("only under drive" in q
+                   for q in by_kind["hypothesis_context"])
+    assert set(out["searches_run"]) and len(lit.calls) == 3
+
+
+def test_shared_objective_still_cross_multiplies(tool):
+    """Back-compat: a string or list keeps the historical behaviour."""
+    func, lit, *_ = tool
+    json.loads(func(["q1", "q2"], "hypothesis_context,cross_domain"))
+    kinds = sorted(k for k, _ in lit.calls)
+    assert kinds == ["cross_domain", "cross_domain",
+                     "hypothesis_context", "hypothesis_context"]
+
+
+def test_per_type_objectives_validate_and_report_honestly(tool, capsys):
+    func, lit, *_ = tool
+    bad = json.loads(func({"nonsense": "q"}))
+    assert bad["status"] == "error" and "nonsense" in bad["message"]
+
+    empty = json.loads(func({"cross_domain": []}))
+    assert empty["status"] == "error"
+
+    capsys.readouterr()
+    json.loads(func({"hypothesis_context": ["a", "b"], "cross_domain": ["c"]}))
+    header = capsys.readouterr().out
+    # no "N questions each searched M ways" — that arithmetic is false here
+    assert "2 for hypothesis_context, 1 for cross_domain = 3 searches" in header
+    assert "each searched" not in header
+    assert "[hypothesis_context]" in header and "[cross_domain]" in header
+
+
+def test_identical_question_for_two_types_is_optimized_once(tool):
+    """Dedup by text: the same question asked of both types costs one query
+    optimization, but still runs once per type."""
+    func, lit, *_ = tool
+    json.loads(func({"hypothesis_context": ["same q"],
+                     "cross_domain": ["same q"]}))
+    assert sorted(k for k, _ in lit.calls) == ["cross_domain",
+                                               "hypothesis_context"]
+    assert {q for _, q in lit.calls} == {"optimized::same q"}
+
+
+# ------------------------------------------------- stuck-search containment
+
+def test_terminal_statuses_are_matched_by_substring():
+    """LIVE BUG: the poll treated only {failed, error} as terminal, so a job
+    Edison reported as cancelled/crashed/timeout read as "still running" and
+    was polled for the whole budget — pinning a 5-search call for 45+ min
+    while four finished results sat unusable behind it."""
+    from scilink.agents.lit_agents.literature_agent import _is_terminal_failure
+
+    for dead in ("failed", "FAILED", "error", "cancelled", "CANCELED",
+                 "crashed", "timeout", "aborted", "killed", "rejected"):
+        assert _is_terminal_failure(dead), dead
+    for alive in ("in progress", "queued", "running", "pending", "success",
+                  "submitted", "starting"):
+        assert not _is_terminal_failure(alive), alive
+
+
+def test_one_wedged_search_cannot_hold_the_whole_call(tool, monkeypatch,
+                                                      tmp_path, capsys):
+    """The finished searches must come back even if a straggler never does."""
+    from scilink.agents.planning_agents import orchestrator_tools as ot
+    func, lit, *_ = tool
+    monkeypatch.setattr(ot, "_LIT_BATCH_DEADLINE", 1)   # 1s instead of 25 min
+
+    started = threading.Event()
+
+    def wedged(q):
+        started.set()
+        time.sleep(30)                                   # never returns in time
+        return {"status": "success", "content": "too late"}
+
+    lit.search_for_cross_domain = wedged
+    t0 = time.time()
+    out = json.loads(func({"hypothesis_context": ["a", "b"],
+                           "cross_domain": ["stuck"]}))
+    elapsed = time.time() - t0
+
+    assert started.is_set()
+    assert elapsed < 15, f"call did not return promptly ({elapsed:.0f}s)"
+    assert out["status"] == "success"                    # partial success
+    assert sorted(out["searches_run"]) == ["q1:hypothesis_context",
+                                           "q2:hypothesis_context"]
+    assert out["failed_searches"] == ["q3:cross_domain"]
+    assert "abandoning it" in capsys.readouterr().out
+    # the two good corpora are on disk, not discarded
+    assert "CONTENT::hypothesis_context" in Path(out["file_path"]).read_text()
+
+
+def test_all_searches_wedged_reports_failure_not_success(tool, monkeypatch):
+    from scilink.agents.planning_agents import orchestrator_tools as ot
+    func, lit, *_ = tool
+    monkeypatch.setattr(ot, "_LIT_BATCH_DEADLINE", 1)
+    lit.search_for_hypothesis_context = lambda q: time.sleep(30)
+    lit.search_for_cross_domain = lambda q: time.sleep(30)
+
+    out = json.loads(func(["x", "y"], "hypothesis_context,cross_domain"))
+    assert out["status"] != "success"
+
+
+def test_heartbeat_clock_restarts_with_each_batch(monkeypatch, capsys):
+    """Live: a 7-search call ran as 6 then 1. The second batch's first
+    minutes were reported against the WHOLE call's clock, so a search that
+    had just started printed '1 still running after 17 min — longer than the
+    usual 10-15' and threatened a give-up time already in the past. Each
+    batch gets its own deadline, so it must get its own clock."""
+    import re
+    from pathlib import Path
+    src = Path("scilink/agents/planning_agents/orchestrator_tools.py").read_text()
+    flat = " ".join(src.split())
+
+    # the clock is shared state, reset per batch — never a call-scoped local
+    assert "_hb_t0" not in src, "a call-scoped clock cannot be reset per batch"
+    assert '"t0": _time.time()' in flat
+    assert '_hb_state["t0"] = _time.time()' in flat
+
+    # ...and the reset happens INSIDE the batch loop, before the work
+    i_loop = flat.index("for start in range(0, len(tasks), MAX_CONCURRENT):")
+    i_reset = flat.index('_hb_state["t0"] = _time.time()')
+    i_submit = flat.index("f = ex.submit(search_methods[t]")
+    assert i_loop < i_reset < i_submit
+
+    # the display reads that clock and names the batch when there are several
+    assert 'mins = int((_time.time() - _t0) / 60)' in flat
+    assert '_of = f" [batch {_bi} of {_bn}]" if _bn > 1 else ""' in flat
+    assert flat.count("{mins} min") >= 3 and "{_of}" in flat
+
+
+def test_batch_count_matches_the_announced_split():
+    """The banner promises 'N sequential batches of 6 then 1'; the heartbeat
+    must count the same batches."""
+    from pathlib import Path
+    src = Path("scilink/agents/planning_agents/orchestrator_tools.py").read_text()
+    assert "_n_batches = -(-len(tasks) // MAX_CONCURRENT)" in src
+    # 7 tasks at 6 wide is 2 batches, not 1
+    MAX = 6
+    for n, expected in ((1, 1), (6, 1), (7, 2), (12, 2), (13, 3)):
+        assert -(-n // MAX) == expected, n
