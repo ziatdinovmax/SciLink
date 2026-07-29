@@ -579,13 +579,15 @@ class SingleObjectiveOptimizer:
         params = params or {}
 
         self.acq_strategy_name = strategy
-        # Expose the pool to skill components: a pool-aware component (e.g.
-        # failure_aware_ei) selects from it; others run their own search.
-        self._candidate_pool = candidates
 
         # --- Skill-contributed acquisition components (bundle .py helpers) ---
         comps = getattr(self, "_acq_components", None)
         if comps and strategy in comps:
+            if candidates is not None:
+                logging.warning(
+                    f"Skill acquisition '{strategy}' does not support a candidate "
+                    "pool; running its own search."
+                )
             self.acq_func = None  # custom acquisitions aren't grid-plotted by default
             return comps[strategy].recommend_fn(self, n_candidates, params)
 
