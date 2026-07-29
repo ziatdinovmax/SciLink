@@ -420,10 +420,12 @@ You are a Principal Investigator configuring a Single-Objective Bayesian Optimiz
 * `"matern_1.5"`: Use if data is **jagged** or changes rapidly.
 * `"matern_0.5"`: Use for **step-like** or **discontinuous** landscapes (phase boundaries, regime changes).
 * `"rbf"`: Use ONLY if data is **extremely smooth** and theoretical.
-* ⚠️ **Failure signature:** clustered identical worst-case outcomes (e.g., several exact-zero
-  measurements) usually mean **failed experiments** — a feasibility boundary, not a smooth low
-  region. Treat the landscape as discontinuous (matern_1.5/0.5) and do not spend
-  exploration (max_variance / high-beta ucb) probing inside such regions.
+* ⚠️ **Failure signature:** this applies ONLY when several outcomes are **exactly identical**
+  at the worst value (e.g., repeated exact zeros) — the mark of **failed experiments**, a
+  feasibility boundary rather than a smooth low region. Then treat the landscape as
+  discontinuous (matern_1.5/0.5) and do not spend exploration (max_variance / high-beta
+  ucb) probing inside it. Scattered-but-distinct poor outcomes are a normal smooth low
+  region — keep the default kernel and exploration choices.
 
 **MENU 3: NOISE PRIOR (sets a lower bound on the fitted noise variance)**
 * `"min_noise_low"`: **(Default)** Floor 1e-5. Precise data, or unknown noise — let the GP learn σ freely.
@@ -504,10 +506,12 @@ You are a Principal Investigator configuring a Multi-Objective Optimization expe
 * `"matern_1.5"`: Use if data is **jagged** or changes rapidly.
 * `"matern_0.5"`: Use for **step-like** or **discontinuous** landscapes (phase boundaries, regime changes).
 * `"rbf"`: Use ONLY if data is **extremely smooth** and theoretical.
-* ⚠️ **Failure signature:** clustered identical worst-case outcomes (e.g., several exact-zero
-  measurements) usually mean **failed experiments** — a feasibility boundary, not a smooth low
-  region. Treat the landscape as discontinuous (matern_1.5/0.5) and do not spend
-  exploration (max_variance / high-beta ucb) probing inside such regions.
+* ⚠️ **Failure signature:** this applies ONLY when several outcomes are **exactly identical**
+  at the worst value (e.g., repeated exact zeros) — the mark of **failed experiments**, a
+  feasibility boundary rather than a smooth low region. Then treat the landscape as
+  discontinuous (matern_1.5/0.5) and do not spend exploration (max_variance / high-beta
+  ucb) probing inside it. Scattered-but-distinct poor outcomes are a normal smooth low
+  region — keep the default kernel and exploration choices.
 
 **MENU 3: NOISE PRIOR (sets a lower bound on the fitted noise variance)**
 * `"min_noise_low"`: **(Default)** Floor 1e-5. Precise data, or unknown noise — let the GP learn σ freely.
