@@ -38,19 +38,10 @@ logger = logging.getLogger(__name__)
 #  BACKEND AVAILABILITY
 # ═══════════════════════════════════════════════════════════════════
 
-def check_backends() -> Dict[str, Dict[str, Any]]:
-    """
-    Check which MLIP backends are installed.
-
-    Returns dict keyed by backend name:
-        { "mace": {"available": bool, "version": str, "pretrained": [...]}, ... }
-    """
-    result: Dict[str, Dict[str, Any]] = {}
-
-    # ── MACE ──────────────────────────────────────────────────────
+def _probe_mace() -> Dict[str, Any]:
     try:
         import mace
-        result["mace"] = {
+        return {
             "available": True,
             "version": getattr(mace, "__version__", "unknown"),
             "lammps_pair_style": "mace",
@@ -80,45 +71,43 @@ def check_backends() -> Dict[str, Dict[str, Any]]:
             ],
         }
     except ImportError:
-        result["mace"] = {
-            "available": False,
-            "version": None,
-            "pretrained": [],
-        }
+        return {"available": False, "version": None, "pretrained": []}
 
-    # ── NequIP ────────────────────────────────────────────────────
+
+def _probe_nequip() -> Dict[str, Any]:
     try:
         import nequip
-        result["nequip"] = {
+        return {
             "available": True,
             "version": getattr(nequip, "__version__", "unknown"),
             "lammps_pair_style": "nequip",
-            "pretrained": [],       # NequIP has no foundation models
+            "pretrained": [],
         }
     except ImportError:
-        result["nequip"] = {"available": False, "version": None, "pretrained": []}
+        return {"available": False, "version": None, "pretrained": []}
 
-    # ── DeePMD ────────────────────────────────────────────────────
+
+def _probe_deepmd() -> Dict[str, Any]:
     try:
         import deepmd
-        result["deepmd"] = {
+        return {
             "available": True,
             "version": getattr(deepmd, "__version__", "unknown"),
             "lammps_pair_style": "deepmd",
-            "pretrained": [],       # DPA-2 may change this
+            "pretrained": [],
         }
     except ImportError:
-        result["deepmd"] = {"available": False, "version": None, "pretrained": []}
+        return {"available": False, "version": None, "pretrained": []}
 
-    # ── CHGNet ────────────────────────────────────────────────────
-    # ASE-only — no LAMMPS pair_style. Pretrained on MPtrj (~1.5M
-    # structures); single universal model, no size variants.
+
+def _probe_chgnet() -> Dict[str, Any]:
+    # ASE-only — no LAMMPS pair_style.
     try:
         import chgnet
-        result["chgnet"] = {
+        return {
             "available": True,
             "version": getattr(chgnet, "__version__", "unknown"),
-            "lammps_pair_style": None,    # no LAMMPS support
+            "lammps_pair_style": None,
             "pretrained": [
                 {
                     "name": "chgnet",
@@ -133,9 +122,79 @@ def check_backends() -> Dict[str, Dict[str, Any]]:
             ],
         }
     except ImportError:
-        result["chgnet"] = {"available": False, "version": None, "pretrained": []}
+        return {"available": False, "version": None, "pretrained": []}
 
-    return result
+
+def _probe_uma() -> Dict[str, Any]:
+    try:
+        import fairchem.core
+        return {
+            "available": True,
+            "version": getattr(fairchem.core, "__version__", "unknown"),
+            "lammps_pair_style": None,
+            "pretrained": [
+                {
+                    "name": "uma-s-1p2",
+                    "domain": "universal",
+                    "description": "UMA small model — fastest, good for screening.",
+                },
+                {
+                    "name": "uma-m-1p1",
+                    "domain": "universal",
+                    "description": "UMA medium model — best accuracy.",
+                },
+            ],
+        }
+    except ImportError:
+        return {"available": False, "version": None, "pretrained": []}
+
+
+def _probe_orb() -> Dict[str, Any]:
+    try:
+        import orb_models
+        return {
+            "available": True,
+            "version": getattr(orb_models, "__version__", "unknown"),
+            "lammps_pair_style": None,
+            "pretrained": [
+                {
+                    "name": "orb-v3-conservative-inf-omat",
+                    "domain": "universal-inorganic",
+                    "description": "Orb v3 conservative model — fast universal MLIP.",
+                },
+            ],
+        }
+    except ImportError:
+        return {"available": False, "version": None, "pretrained": []}
+
+
+_BACKEND_PROBES: Dict[str, Any] = {
+    "mace":    _probe_mace,
+    "nequip":  _probe_nequip,
+    "deepmd":  _probe_deepmd,
+    "chgnet":  _probe_chgnet,
+    "uma":     _probe_uma,
+    "orb":     _probe_orb,
+}
+
+
+def check_backends(
+    backends: Optional[List[str]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Check which MLIP backends are installed.
+
+    Args:
+        backends: Names of backends to probe. When ``None`` (default) all
+            known backends are probed. Pass a single-element list, e.g.
+            ``["mace"]``, to probe only that backend and avoid importing
+            unrelated packages.
+
+    Returns:
+        Dict keyed by backend name:
+        ``{ "mace": {"available": bool, "version": str, "pretrained": [...]}, ... }``
+    """
+    targets = backends if backends is not None else list(_BACKEND_PROBES)
+    return {name: _BACKEND_PROBES[name]() for name in targets if name in _BACKEND_PROBES}
 
 
 # ═══════════════════════════════════════════════════════════════════

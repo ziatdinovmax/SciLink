@@ -44,11 +44,14 @@ DEFAULT_SCALE_DESCRIPTIONS: Dict[str, str] = {
         "structure of solids. ~10-200 atoms typical; up to ~500 with "
         "effort. Engines: VASP, QE, ABINIT, CP2K."
     ),
-    "molecular_dft": (
-        "Gaussian-basis-set DFT for isolated molecules and small "
-        "clusters. Best for: molecular geometry, reaction energetics, "
-        "vibrational analysis, excited states. NOT for periodic "
-        "systems. Engines: PySCF, ORCA, Gaussian, NWChem. (May not be "
+    "molecular_qc": (
+        "Molecular / finite-system electronic structure for isolated "
+        "molecules, ions, and small clusters. Covers DFT and wavefunction "
+        "methods (HF, MP2, CCSD(T), CASSCF) — method and basis are engine "
+        "knobs, not separate scales. Best for: molecular geometry, reaction "
+        "energetics/thermochemistry, implicit solvation, vibrational and "
+        "excited-state analysis, charged ion pairs. NOT for periodic "
+        "systems. Engines: NWChem, PySCF, ORCA, Gaussian. (May not be "
         "installed.)"
     ),
     "molecular_dynamics": (
@@ -91,6 +94,15 @@ def discover_scale_agents() -> Dict[str, Dict[str, Any]]:
         }
     except ImportError as exc:
         _logger.debug("PeriodicDFTAgent not importable: %s", exc)
+
+    try:
+        from .molecular_qc_agent import MolecularQCAgent
+        found[MolecularQCAgent.SKILL_DOMAIN] = {
+            "agent_class": MolecularQCAgent,
+            "supported": MolecularQCAgent.supported_software(),
+        }
+    except ImportError as exc:
+        _logger.debug("MolecularQCAgent not importable: %s", exc)
 
     try:
         from .md_simulation_agent import MDSimulationAgent
