@@ -2,6 +2,7 @@
 
 import base64
 import builtins
+import logging
 import re
 import threading
 from pathlib import Path
@@ -914,6 +915,20 @@ else:
                     "md_reports": new_docs,
                     "verbose": task.verbose_log or "",
                 })
+                # Persist session state now that the turn is complete. The
+                # orchestrators' periodic auto-save (every CHECKPOINT_INTERVAL
+                # messages) left short UI sessions with no checkpoint at all —
+                # unresumable. The CLI saves on quit; the UI has no quit
+                # moment, so save after every finished turn instead.
+                # save_checkpoint (meta) snapshots the children too.
+                _agent = st.session_state.get("agent")
+                try:
+                    if hasattr(_agent, "save_checkpoint"):
+                        _agent.save_checkpoint()
+                    elif hasattr(_agent, "_auto_checkpoint"):
+                        _agent._auto_checkpoint()
+                except Exception as _ckpt_exc:  # noqa: BLE001 - never break the turn
+                    logging.warning(f"Per-turn checkpoint failed: {_ckpt_exc}")
                 st.session_state.chat_task = ChatTask()
                 st.rerun(scope="app")
                 return
