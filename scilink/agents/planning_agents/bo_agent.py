@@ -986,7 +986,8 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                              cat_dims: Optional[List[int]] = None,
                              dkl_config: Optional[Dict[str, int]] = None,
                              fidelity_config: Optional[Dict[str, Any]] = None,
-                             skill: Union[str, List[str], None] = None) -> Dict[str, Any]:
+                             skill: Union[str, List[str], None] = None,
+                             candidate_pool: Union[str, List[List[float]], np.ndarray, None] = None) -> Dict[str, Any]:
         """
         Run one iteration of the Bayesian Optimization loop.
         
@@ -1030,7 +1031,15 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                 Supported for single-objective only; ignored for multi-objective.
             plot_acq: If True, generates and saves a plot of the acquisition function.
                 Supported for single-objective only; ignored for multi-objective.
-            
+            candidate_pool: Optional discrete design library — a CSV path (must
+                contain the input_cols) or an (N, len(input_cols)) array/list of
+                allowed design points (stock solutions, printable settings, a
+                measured materials library). Rows already present in the data
+                are dropped; the recommendation is then selected from the
+                remaining pool instead of a continuous acquisition search.
+                Single-objective only; ignored (with a warning) for
+                multi-objective and for 'mf_kg' / skill acquisitions.
+
         Returns:
             Dict with status, recommendations, strategy, plot paths, budget context,
             and optionally acquisition function plot/data paths (single-objective only)
@@ -1071,6 +1080,7 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             physical_constraints=physical_constraints, strategy_hint=strategy_hint,
             save_acq=save_acq, plot_acq=plot_acq, fixed_noise_std=fixed_noise_std,
             cat_dims=cat_dims, dkl_config=dkl_config, fidelity_config=fidelity_config,
+            candidate_pool=candidate_pool,
             minimize_mask=[], constrained_metadata=None,
             acq_plot_path=None, acq_data_path=None,
         )
@@ -1081,7 +1091,28 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         err = self._stage_configure_strategy(c)
         if err:
             return err
-        self._stage_fit(c)
+        # Surrogate fitting can fail on a poorly-conditioned config choice. A
+        # failure is evidence the strategy LLM never sees unless we loop it
+        # back: re-enter the strategy stage with the failure in context (the
+        # same channel the visual diagnostics use) instead of erroring out.
+        max_fit_attempts = 3
+        for fit_attempt in range(max_fit_attempts):
+            try:
+                self._stage_fit(c)
+                break
+            except Exception as exc:
+                c.fit_failure_note = (
+                    f"model_config {c.valid_config.get('model_config')} failed "
+                    f"surrogate fitting ({type(exc).__name__}: {exc})"
+                )
+                if fit_attempt == max_fit_attempts - 1:
+                    return {"error": f"Surrogate fit failed after "
+                                     f"{max_fit_attempts} strategy attempts: {exc}"}
+                print(f"  - ⚠️ Surrogate fit failed ({type(exc).__name__}); "
+                      "re-configuring strategy with the failure in context...")
+                err = self._stage_configure_strategy(c)
+                if err:
+                    return err
         self._stage_recommend(c)
         self._stage_constrained_batch(c)
         self._stage_diagnostics(c)
@@ -1182,6 +1213,13 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         else:
             trend_context = "No history."
 
+        if getattr(c, "fit_failure_note", None):
+            trend_context += (
+                f"\n\nFAILED ATTEMPT THIS STEP: {c.fit_failure_note}. "
+                "Choose a materially different model_config (noise floor, "
+                "kernel, or surrogate); do not repeat the failed one."
+            )
+
         prompt_parts = self._build_strategy_prompt(
             is_moo=c.is_moo, objective_text=c.objective_text,
             target_directions=c.target_directions, target_cols=c.target_cols,
@@ -1253,16 +1291,60 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             c.valid_config["model_config"]["noise"] = f"fixed_std={c.fixed_noise_std}"
         c.optimizer = optimizer
 
+    def _resolve_candidate_pool(self, c):
+        """Load the candidate pool (CSV path or array), drop rows already in
+        the data, and return an (N, d) array — or None (with a warning) when
+        the pool is unusable so the continuous search still runs."""
+        if c.candidate_pool is None:
+            return None
+        if c.is_moo:
+            logging.warning("candidate_pool is single-objective only; ignoring.")
+            return None
+        try:
+            if isinstance(c.candidate_pool, str):
+                pool_df = pd.read_csv(c.candidate_pool)
+                missing = [col for col in c.input_cols if col not in pool_df.columns]
+                if missing:
+                    logging.warning(
+                        f"candidate_pool file lacks columns {missing}; ignoring.")
+                    return None
+                arr = np.asarray(pool_df[c.input_cols].values, dtype=float)
+            else:
+                arr = np.asarray(c.candidate_pool, dtype=float)
+            if arr.ndim != 2 or arr.shape[1] != len(c.input_cols):
+                logging.warning(
+                    f"candidate_pool shape {arr.shape} does not match "
+                    f"{len(c.input_cols)} input columns; ignoring.")
+                return None
+        except Exception as exc:
+            logging.warning(f"candidate_pool could not be loaded ({exc}); ignoring.")
+            return None
+        measured = np.isclose(arr[:, None, :], c.X[None, :, :],
+                              rtol=0.0, atol=1e-12).all(-1).any(-1)
+        unmeasured = arr[~measured]
+        c.candidate_pool_info = {"provided": int(len(arr)),
+                                 "unmeasured": int(len(unmeasured))}
+        if len(unmeasured) == 0:
+            logging.warning("candidate_pool has no unmeasured points; ignoring.")
+            return None
+        return unmeasured
+
     def _stage_recommend(self, c):
         """Stage 4: unconstrained acquisition recommendation."""
         acq_conf = c.valid_config.get("acquisition_strategy", {})
         strategy_name = acq_conf.get("type", "pareto" if c.is_moo else "log_ei")
 
-        print(f"  - 🚀 Optimizing {strategy_name}...")
+        pool_arr = self._resolve_candidate_pool(c)
+        if pool_arr is not None:
+            print(f"  - 🚀 Optimizing {strategy_name} over "
+                  f"{len(pool_arr)} candidate-pool points...")
+        else:
+            print(f"  - 🚀 Optimizing {strategy_name}...")
         next_x_batch = c.optimizer.recommend(
             n_candidates=c.batch_size,
             strategy=strategy_name,
-            params=acq_conf.get("params", {})
+            params=acq_conf.get("params", {}),
+            candidates=pool_arr,
         )
 
         # Build unconstrained recommendations (used as reference and fallback)
@@ -1476,6 +1558,9 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             result["constrained_planning"] = c.constrained_metadata
         if c.physical_constraints:
             result["constraint_aware"] = True
+
+        if getattr(c, "candidate_pool_info", None):
+            result["candidate_pool"] = c.candidate_pool_info
 
         # Log this action to state
         self._log_action(
