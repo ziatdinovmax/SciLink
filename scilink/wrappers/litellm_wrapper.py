@@ -116,12 +116,13 @@ DEFAULT_MAX_OUTPUT_TOKENS = 32000
 
 
 def _resolve_max_output_tokens(model: str) -> int:
-    """Best-effort max output tokens for a model (Bedrock path only — see #238).
+    """Best-effort max output tokens for a model (bedrock/ and anthropic/ paths).
 
-    litellm fills ``max_tokens`` with the model's registered ceiling for direct
-    Anthropic/OpenAI/Gemini, but the Bedrock converse transform omits ``maxTokens``
-    when unset, so Bedrock falls back to a low server-side default and truncates
-    large generations. Returns litellm's registered ceiling when the model is
+    The Bedrock converse transform omits ``maxTokens`` when unset, so Bedrock
+    falls back to a low server-side default and truncates large generations
+    (#238). Direct Anthropic fills the registered ceiling for mapped models but
+    falls back to a 4096 default for names missing from litellm's registry
+    (custom deployments). Returns litellm's registered ceiling when the model is
     mapped (e.g. Bedrock opus-4-1 -> 32000), else ``DEFAULT_MAX_OUTPUT_TOKENS``. A
     litellm upgrade that maps the model makes this resolve to the true ceiling.
     """
@@ -518,10 +519,12 @@ class LiteLLMGenerativeModel:
                     params[new] = val
 
         # Bedrock omits maxTokens when unset -> a low server-side default truncates
-        # large outputs (#238). Request the model's max on the Bedrock path only;
-        # every other provider already gets a sane ceiling from litellm, so leave
-        # their requests untouched. An explicit max_output_tokens above still wins.
-        if "max_tokens" not in params and str(self.model or "").startswith("bedrock/"):
+        # large outputs (#238). Direct Anthropic has the same trap for model names
+        # missing from litellm's registry (custom deployments): litellm falls back
+        # to a 4096 default and silently caps output. Request the model's max on
+        # both paths; other providers already get a sane ceiling from litellm.
+        # An explicit max_output_tokens above still wins.
+        if "max_tokens" not in params and str(self.model or "").startswith(("bedrock/", "anthropic/")):
             params["max_tokens"] = _resolve_max_output_tokens(self.model)
 
         if tools:
