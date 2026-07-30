@@ -664,9 +664,12 @@ if not st.session_state.agent_initialized:
             resume_session(**_pending_resume)
         else:
             start_session(**_pending)
-        # start_session / resume_session call st.rerun() on success,
-        # so we only reach here if initialization failed.
-        st.stop()
+        # start_session / resume_session call st.rerun() on success, so we
+        # only reach here if initialization failed. The failure message is
+        # stashed in _session_init_error; rerun so the welcome screen can
+        # show it — st.stop() here would freeze on the spinner screen with
+        # the error invisible behind the dimmed sidebar.
+        st.rerun()
 
     # ── Normal welcome screen ────────────────────────────────
     col_l, col_c, col_r = st.columns([1, 2, 1])
@@ -705,6 +708,14 @@ if not st.session_state.agent_initialized:
             f'{_cur_desc}</p>',
             unsafe_allow_html=True,
         )
+
+        # Session start/resume failure from the previous run (stashed by
+        # start_session / resume_session). Below the mode selector because
+        # the mode-selector-anchor CSS pulls that row upward over anything
+        # rendered above it.
+        _init_err = st.session_state.pop("_session_init_error", None)
+        if _init_err:
+            st.error(_init_err)
 
         _is_dark = st.session_state.get("theme_mode", "dark") == "dark"
         _logo = _LOGO_DARK if _is_dark else _LOGO_LIGHT

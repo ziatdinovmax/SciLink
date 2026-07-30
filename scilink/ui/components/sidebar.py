@@ -430,6 +430,11 @@ def render_sidebar() -> None:
                             "restored, but chat history will be loaded."
                         )
 
+                    if not consent:
+                        st.caption(
+                            "☝️ Check the code-execution consent box above "
+                            "to enable resuming."
+                        )
                     if st.button(
                         "Resume Session",
                         disabled=not consent,
@@ -795,7 +800,11 @@ def start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_key
         resolved_key = auth.api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
 
     if not (api_key or base_url or any(os.environ.get(e) for e in spec.cred_env)):
-        st.sidebar.error(spec.cred_error)
+        # Stash rather than render: the caller runs behind the init spinner,
+        # which dims the sidebar — an error drawn there is invisible and the
+        # spinner never clears. app.py reruns and shows this on the welcome
+        # screen instead.
+        st.session_state._session_init_error = spec.cred_error
         return
 
     # Optional MP key: register so the DFT pipeline's auto-discovery picks it up
@@ -835,7 +844,7 @@ def start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_key
                 session_dir, resolved_key, model, base_url, mode, fh_api_key,
             )
     except Exception as exc:
-        st.error(f"Failed to initialize agent: {exc}")
+        st.session_state._session_init_error = f"Failed to initialize agent: {exc}"
         return
 
     st.session_state.agent = agent
@@ -1016,6 +1025,31 @@ def _convert_chat_history_for_display(history: list) -> list:
     return messages
 
 
+def _collect_restored_deliverables(session_path: Path) -> tuple:
+    """Marked deliverables from the session's manifest(s), split for the
+    chat renderer: (md_paths, html_paths).
+
+    Chat-message attachments (md_reports / html_reports) live only in
+    Streamlit state and are lost on restore — the deliverables manifests
+    are the durable record of what the session produced, so a resumed
+    chat re-embeds from them.
+    """
+    from scilink.agents.planning_agents.user_interface import load_deliverables
+
+    md_docs, html_docs = [], []
+    for entry in load_deliverables(session_path):
+        if not entry.get("deliverable"):
+            continue
+        p = Path(entry.get("path", ""))
+        if not p.exists():
+            continue
+        if p.suffix.lower() == ".md":
+            md_docs.append(str(p))
+        elif p.suffix.lower() in (".html", ".htm"):
+            html_docs.append(str(p))
+    return md_docs, html_docs
+
+
 def resume_session(
     session_dir: str,
     model: str,
@@ -1048,7 +1082,9 @@ def resume_session(
         )
 
     if not (api_key or base_url or any(os.environ.get(e) for e in spec.cred_env)):
-        st.sidebar.error(spec.cred_error)
+        # See start_session: rendering here would land behind the dimmed
+        # spinner screen; the welcome screen shows it after the rerun.
+        st.session_state._session_init_error = spec.cred_error
         return
 
     # Optional MP key registration (see start_session for rationale).
@@ -1127,7 +1163,7 @@ def resume_session(
                 futurehouse_api_key=fh_api_key or None,
             )
     except Exception as exc:
-        st.error(f"Failed to restore session: {exc}")
+        st.session_state._session_init_error = f"Failed to restore session: {exc}"
         return
 
     # Load chat history for Streamlit display
@@ -1139,6 +1175,18 @@ def resume_session(
             display_messages = _convert_chat_history_for_display(raw)
         except Exception:
             pass
+
+    # Re-embed the session's deliverables. The per-message attachments the
+    # live chat carries are not persisted, so without this a restored chat
+    # shows the conversation but silently drops every embedded document.
+    md_docs, html_docs = _collect_restored_deliverables(session_path)
+    if md_docs or html_docs:
+        display_messages.append({
+            "role": "assistant",
+            "content": "📎 Deliverables produced in this session:",
+            "md_reports": md_docs,
+            "html_reports": html_docs,
+        })
 
     # Pre-populate known images so they don't re-appear as "new"
     known: set = set()
@@ -1318,7 +1366,9 @@ def _start_simulate_session(
         )
 
     if not (api_key or base_url or any(os.environ.get(e) for e in spec.cred_env)):
-        st.sidebar.error("Provide an API key or set an environment variable.")
+        st.session_state._session_init_error = (
+            "Provide an API key or set an environment variable."
+        )
         return
 
     # Direct providers: export the typed key to the conventional vendor env var
