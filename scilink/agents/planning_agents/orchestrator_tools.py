@@ -2769,7 +2769,9 @@ class OrchestratorTools:
                         except Exception:
                             pass  # If sidecar can't be read, skip validation
 
-                if not self.orch.active_scalarizer_script or force_regenerate:
+                # Pass-through ingests (#366) carry no script to lock.
+                if res.get("source_script") and (
+                        not self.orch.active_scalarizer_script or force_regenerate):
                     self.orch.active_scalarizer_script = res["source_script"]
                     print(f"    ✅ Analysis Logic Locked: {Path(self.orch.active_scalarizer_script).name}")
 
@@ -2807,7 +2809,19 @@ class OrchestratorTools:
                     df_new = pd.DataFrame(metrics)
                     print(f"    📊 Processing {len(df_new)} data points from multi-well experiment")
                 elif isinstance(metrics, dict):
-                    df_new = pd.DataFrame([metrics])
+                    # A multi-row table pass-through (#366) returns columns
+                    # as equal-length lists; expand to one row per
+                    # experiment, broadcasting scalar sidecar conditions.
+                    _lens = {len(v) for v in metrics.values()
+                             if isinstance(v, list)}
+                    if res.get("passthrough") and len(_lens) == 1 and _lens != {1}:
+                        _n = next(iter(_lens))
+                        df_new = pd.DataFrame(
+                            {k: (v if isinstance(v, list) else [v] * _n)
+                             for k, v in metrics.items()})
+                        print(f"    📊 Processing {_n} data points from table pass-through")
+                    else:
+                        df_new = pd.DataFrame([metrics])
                 else:
                     return json.dumps({
                         "status": "error",
@@ -3694,7 +3708,8 @@ class OrchestratorTools:
             experimental_budget: int = None,
             targets: list[str] = None,
             strategy_hint: str = None,
-            skill: str = None
+            skill: str = None,
+            candidate_pool: str = None
         ):
             """
             Runs Bayesian Optimization to suggest next parameters.
@@ -3703,8 +3718,12 @@ class OrchestratorTools:
             """
             print(f"  ⚡ Tool: Running Bayesian Optimization...")
             
-            # --- PRE-FLIGHT CHECKS --- 
-            if not self.orch.active_scalarizer_script:
+            # --- PRE-FLIGHT CHECKS ---
+            # A campaign ingested purely via table pass-through (#366) has
+            # data and schema but never locks a script; only refuse when
+            # nothing has been ingested at all.
+            if (not self.orch.active_scalarizer_script
+                    and not self.orch.bo_data_path.exists()):
                 return json.dumps({
                     "status": "error",
                     "message": "No analysis script locked yet",
@@ -4059,6 +4078,16 @@ class OrchestratorTools:
                     print(f"    📶  Multi-fidelity active: column '{fspec['column']}' "
                           f"(index {fidelity_config['fidelity_col']})")
 
+                # Candidate pool: resolve the CSV path here (fuzzy matching,
+                # clear error to the LLM); column matching / measured-row
+                # exclusion / degradation live in BOAgent._resolve_candidate_pool.
+                resolved_pool = None
+                if candidate_pool:
+                    resolved_pool, pool_err = self._resolve_data_path(candidate_pool)
+                    if pool_err:
+                        return pool_err
+                    print(f"    🎯 Candidate pool: {Path(resolved_pool).name}")
+
                 res = self.orch.bo.run_optimization_loop(
                     data_path=bo_data_path_for_run,
                     objective_text=bo_objective,
@@ -4076,6 +4105,7 @@ class OrchestratorTools:
                     cat_dims=cat_dims if cat_dims else None,
                     skill=skill,
                     fidelity_config=fidelity_config,
+                    candidate_pool=resolved_pool,
                 )
                 
                 if res.get("status") != "success":
@@ -4126,7 +4156,13 @@ class OrchestratorTools:
                     response["trade_offs"] = cp.get("trade_offs", "")
                     if cp.get("validation_errors"):
                         response["constraint_warnings"] = cp["validation_errors"]
-                
+
+                # Candidate-pool provenance: how many library points were
+                # provided / still unmeasured (absent if the pool was
+                # ignored — the BO log warning explains why).
+                if res.get("candidate_pool"):
+                    response["candidate_pool"] = res["candidate_pool"]
+
                 # Include budget context
                 if res.get("budget"):
                     response["budget"] = res["budget"]
@@ -4166,6 +4202,20 @@ class OrchestratorTools:
                     "description": (
                         "Number of parallel experiments (required if parallel_capable=True). "
                         "Infer from experimental plan (e.g., plate format, grid size, equipment capacity)."
+                    )
+                },
+                "candidate_pool": {
+                    "type": "string",
+                    "description": (
+                        "Path to a CSV of the finite candidate library to recommend from "
+                        "(columns must include the input parameter columns; extra columns are "
+                        "ignored). Recommendations are then restricted to unmeasured rows of "
+                        "this library — the right mode when experiments can only be drawn from "
+                        "a fixed set (a compound catalog, pre-made formulations, a measured "
+                        "design library). Pass ONLY when the user or calling system explicitly "
+                        "provided such a candidate file; otherwise omit — recommendations are "
+                        "continuous within the plan- or data-derived bounds. Single-objective "
+                        "campaigns only (ignored with a warning for multi-objective)."
                     )
                 },
                 "physical_constraints": {
