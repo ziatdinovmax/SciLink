@@ -2078,9 +2078,13 @@ class OrchestratorTools:
                     "message": "No campaign plan yet",
                     "hint": "Run generate_initial_plan first."})
             try:
+                # Detail-suffixed stem so an elaborate rerun does not
+                # silently overwrite the simple diagram (or vice versa).
+                _stem = ("campaign_workflow" if detail == "simple"
+                         else f"campaign_workflow_{detail}")
                 res = self._get_diagram_agent().generate_workflow_diagram(
                     plan=plan, out_dir=self._output_dir(), detail=detail,
-                    extra_instructions=focus)
+                    stem=_stem, extra_instructions=focus)
                 if res.get("status") != "success":
                     return json.dumps({"status": "error",
                                        "message": res.get("error")})
