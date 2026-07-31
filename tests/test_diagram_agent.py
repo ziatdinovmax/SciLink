@@ -19,9 +19,9 @@ from scilink.agents.planning_agents.diagram_agent import DiagramAgent
 results = {}
 
 
-def check(name, cond):
+def check(name, cond, detail=""):
     results[name] = bool(cond)
-    print(f"  [{'PASS' if cond else 'FAIL'}] {name}")
+    print(f"  [{'PASS' if cond else 'FAIL'}] {name} {detail}")
 
 
 GOOD = ('```mermaid\nflowchart TD\n  A["Prepare samples"] --> '
@@ -118,6 +118,7 @@ with tempfile.TemporaryDirectory() as t:
     res = DiagramAgent(model=m, output_dir=t).generate_workflow_diagram(PLAN, out_dir=t)
     check("model classDef stripped", "#123456" not in res["code"])
     check("house palette present", "#BBDEFB" in res["code"])
+
 
 print("=" * 50)
 n = sum(results.values())
