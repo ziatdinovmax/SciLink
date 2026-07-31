@@ -1417,10 +1417,20 @@ else:
         else:
             labels = [s[0] for s in sessions]
             paths = [s[1] for s in sessions]
+            # Default to the CURRENT session, not the newest by name: a
+            # stray newer (possibly empty) session directory otherwise
+            # opens the tab on "No files found yet." while the session
+            # being worked on sits unselected below it.
+            current_idx = next(
+                (i for i, p in enumerate(paths)
+                 if p.resolve() == Path(st.session_state.session_dir).resolve()),
+                0,
+            )
             selected_idx = st.selectbox(
                 "Session",
                 range(len(labels)),
                 format_func=lambda i: labels[i],
+                index=current_idx,
                 key="session_selector",
             )
             session_path = paths[selected_idx]

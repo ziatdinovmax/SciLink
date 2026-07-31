@@ -1036,18 +1036,25 @@ def _collect_restored_deliverables(session_path: Path) -> tuple:
     """
     from scilink.agents.planning_agents.user_interface import load_deliverables
 
-    md_docs, html_docs = [], []
+    # Only the most recent deliverable is re-embedded: a session may hold
+    # several revisions under the same title (a revision inherits the
+    # document's name), and embedding all of them repeats near-identical
+    # documents. Manifest entries carry no timestamp, so recency = file
+    # mtime, which also orders correctly across per-child manifests.
+    # Older versions stay reachable in the Files tab.
+    candidates = []
     for entry in load_deliverables(session_path):
         if not entry.get("deliverable"):
             continue
         p = Path(entry.get("path", ""))
-        if not p.exists():
-            continue
-        if p.suffix.lower() == ".md":
-            md_docs.append(str(p))
-        elif p.suffix.lower() in (".html", ".htm"):
-            html_docs.append(str(p))
-    return md_docs, html_docs
+        if p.exists() and p.suffix.lower() in (".md", ".html", ".htm"):
+            candidates.append(p)
+    if not candidates:
+        return [], []
+    latest = max(candidates, key=lambda p: p.stat().st_mtime)
+    if latest.suffix.lower() == ".md":
+        return [str(latest)], []
+    return [], [str(latest)]
 
 
 def resume_session(
@@ -1183,7 +1190,8 @@ def resume_session(
     if md_docs or html_docs:
         display_messages.append({
             "role": "assistant",
-            "content": "📎 Deliverables produced in this session:",
+            "content": ("📎 Latest deliverable from this session "
+                        "(earlier versions are in the Files tab):"),
             "md_reports": md_docs,
             "html_reports": html_docs,
         })
