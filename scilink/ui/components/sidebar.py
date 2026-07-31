@@ -500,6 +500,21 @@ def render_sidebar() -> None:
             elif app_mode == "meta":
                 _render_meta_sidebar_uploads()
 
+            # ── Session name (display-only; dir name stays load-bearing) ──
+            st.divider()
+            from scilink.ui.session_meta import (
+                load_session_name, save_session_name)
+            _sdir = st.session_state.session_dir
+            _current_name = load_session_name(_sdir) or ""
+            _typed = st.text_input(
+                "Session name", value=_current_name,
+                key="session_name_input",
+                help=("Shown in the resume list and File Explorer. "
+                      "Auto-named by the agent after the first turn "
+                      "unless you set one."))
+            if _typed.strip() and _typed.strip() != _current_name:
+                save_session_name(_sdir, _typed, named_by="user")
+
             # ── Agent status (mode-specific) ─────────────────────
             st.divider()
             st.subheader("Agent Status")
@@ -853,6 +868,10 @@ def start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_key
     st.session_state.agent_config = {
         "model": model,
         "mode": mode,
+        # For the auto-title call after the first turn (session_meta):
+        # litellm needs the same credentials the agent got.
+        "api_key": resolved_key,
+        "base_url": base_url or None,
     }
     st.session_state.chat_messages = []
     st.session_state.known_images = set()
@@ -976,12 +995,10 @@ def _discover_resumable_sessions(app_mode: str) -> list:
         if not has_checkpoint and not has_chat:
             continue
 
-        # Build human-readable label from timestamp in dir name
-        parts = s.name.removeprefix(f"{prefix}_")
-        try:
-            label = f"{parts[:4]}-{parts[4:6]}-{parts[6:8]} {parts[9:11]}:{parts[11:13]}:{parts[13:15]}"
-        except (IndexError, ValueError):
-            label = s.name
+        # Human-readable label: stored display name (session_meta.json)
+        # with the timestamp, or the bare timestamp when unnamed.
+        from scilink.ui.session_meta import session_label
+        label = session_label(s, prefix)
 
         summary: dict = {}
         if has_checkpoint:
@@ -1216,7 +1233,9 @@ def resume_session(
     st.session_state.agent = agent
     st.session_state.agent_initialized = True
     st.session_state.session_dir = str(session_path)
-    st.session_state.agent_config = {"model": model, "mode": mode}
+    st.session_state.agent_config = {"model": model, "mode": mode,
+                                     "api_key": resolved_key,
+                                     "base_url": base_url or None}
     st.session_state.chat_messages = display_messages
     st.session_state.known_images = known
     st.rerun()

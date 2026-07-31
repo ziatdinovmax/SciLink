@@ -929,6 +929,27 @@ else:
                         _agent._auto_checkpoint()
                 except Exception as _ckpt_exc:  # noqa: BLE001 - never break the turn
                     logging.warning(f"Per-turn checkpoint failed: {_ckpt_exc}")
+                # Auto-title an unnamed session from its first exchange —
+                # one small LLM call, once per session; a user-set name is
+                # never overwritten and any failure falls back silently to
+                # the timestamp label.
+                try:
+                    from scilink.ui.session_meta import (
+                        load_session_name, save_session_name,
+                        generate_session_title)
+                    _sdir = st.session_state.session_dir
+                    if _sdir and not load_session_name(_sdir):
+                        _cfg = st.session_state.agent_config
+                        _first_user = next(
+                            (m["content"] for m in st.session_state.chat_messages
+                             if m["role"] == "user"), "")
+                        _title = generate_session_title(
+                            _cfg.get("model"), _cfg.get("api_key"),
+                            _cfg.get("base_url"), _first_user, content)
+                        if _title:
+                            save_session_name(_sdir, _title, named_by="agent")
+                except Exception:  # noqa: BLE001 - naming must never break a turn
+                    pass
                 st.session_state.chat_task = ChatTask()
                 st.rerun(scope="app")
                 return
@@ -1387,13 +1408,9 @@ else:
         )
         current = Path(current_session_dir)
         result: list[tuple[str, Path]] = []
+        from scilink.ui.session_meta import session_label
         for s in sessions:
-            # Parse timestamp from directory name like <prefix>_20260223_201729
-            parts = s.name.removeprefix(f"{prefix}_")
-            try:
-                label = f"{parts[:4]}-{parts[4:6]}-{parts[6:8]} {parts[9:11]}:{parts[11:13]}:{parts[13:15]}"
-            except (IndexError, ValueError):
-                label = s.name
+            label = session_label(s, prefix)
             if s.resolve() == current.resolve():
                 label += " (current)"
             result.append((label, s))
