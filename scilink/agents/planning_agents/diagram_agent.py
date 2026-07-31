@@ -35,6 +35,10 @@ Rules:
   node named for what it accomplishes. A single long chain is a
   checklist, not a concept — the campaign below lists individual steps,
   and mapping one step to one node is the mistake to avoid.
+- KEEP THE LONGEST PATH SHORT: no directed run of more than {max_chain}
+  nodes, start to finish. The figure is as wide as that longest path,
+  and a wider one cannot be read on a page. Branch early and merge
+  routine steps.
 - Document figures are landscape-shaped: prefer `flowchart LR`
   (left-to-right) so the figure spans the page width instead of running
   tall and narrow. Use `flowchart TD` only when the horizontal layout
@@ -57,11 +61,16 @@ Campaign (structured):
 # A diagram depicts a CONCEPT. Both levels are bounded: an unrolled
 # 20-step procedure is a checklist rendered as boxes, and it reads worse
 # than the prose it came from.
+# A left-to-right flowchart is as wide as its longest directed path;
+# past ~5 nodes the labels are too small to read once the figure is
+# scaled to a page, whatever the page size.
+_MAX_CHAIN = 5
+
 _DETAIL_RULES = {
-    "simple": ("Compact overview: at most ~8 nodes, stage-level (setup, "
+    "simple": ("Compact overview: at most ~6 nodes, stage-level (setup, "
                "the main loop, decision gates, outcome) — NOT every "
                "individual step."),
-    "elaborate": ("Fuller view, still CONCEPTUAL: at most ~14 nodes. Add "
+    "elaborate": ("Fuller view, still CONCEPTUAL: at most ~10 nodes. Add "
                   "the branch conditions and the decisions that change "
                   "the outcome; group routine consecutive steps into one "
                   "node rather than unrolling a procedure."),
@@ -169,7 +178,8 @@ class DiagramAgent(BaseAgent):
             attempts += 1
             prompt = _GEN_PROMPT.format(
                 detail_rule=_DETAIL_RULES[detail], plan_json=plan_json,
-                extra=extra, feedback=feedback, class_help=CLASS_HELP)
+                extra=extra, feedback=feedback, class_help=CLASS_HELP,
+                max_chain=_MAX_CHAIN)
             try:
                 resp = self.model.generate_content(
                     [prompt], generation_config=self.generation_config)
