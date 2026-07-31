@@ -29,6 +29,11 @@ block) of the experimental campaign below.
 
 Rules:
 - {detail_rule}
+- NO LONG LINEAR SPINE. Never draw more than 3 consecutive nodes
+  without a branch, decision, or loop: collapse such a run into ONE
+  node named for what it accomplishes. A single long chain is a
+  checklist, not a concept — the campaign below lists individual steps,
+  and mapping one step to one node is the mistake to avoid.
 - Document figures are landscape-shaped: prefer `flowchart LR`
   (left-to-right) so the figure spans the page width instead of running
   tall and narrow. Use `flowchart TD` only when the horizontal layout
@@ -45,21 +50,32 @@ Campaign (structured):
 {plan_json}
 {extra}{feedback}"""
 
+# A diagram depicts a CONCEPT. Both levels are bounded: an unrolled
+# 20-step procedure is a checklist rendered as boxes, and it reads worse
+# than the prose it came from.
 _DETAIL_RULES = {
-    "simple": ("Compact overview: at most ~10 nodes, stage-level (setup, "
+    "simple": ("Compact overview: at most ~8 nodes, stage-level (setup, "
                "the main loop, decision gates, outcome) — NOT every "
                "individual step."),
-    "elaborate": ("Detailed view: include the individual experimental "
-                  "steps and branch conditions; still keep labels short."),
+    "elaborate": ("Fuller view, still CONCEPTUAL: at most ~14 nodes. Add "
+                  "the branch conditions and the decisions that change "
+                  "the outcome; group routine consecutive steps into one "
+                  "node rather than unrolling a procedure."),
 }
 
 _QC_PROMPT = """You are reviewing a workflow diagram rendered for a \
 scientific document. Judge it and answer in JSON only:
 {{"approved": true/false, "issues": ["..."]}}
 
+A diagram must convey a CONCEPT at a glance, not reproduce a procedure.
+
 Reject when: text overlaps or is clipped; arrows cross confusingly; the
 diagram contradicts the campaign description below; it is overcrowded
 for a document figure ({detail} level was requested — {detail_rule});
+it reads as an unrolled step-by-step checklist rather than a conceptual
+structure — in particular reject any diagram whose backbone is a single
+long chain of more than 3 consecutive nodes with no branch, decision, or
+loop between them (those runs belong in one node);
 or the shape fights the page — this renders {width}x{height}px and
 document figures should be wider than tall, so reject a strongly
 vertical diagram IF a left-to-right layout would keep the labels

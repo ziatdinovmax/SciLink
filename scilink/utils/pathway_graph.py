@@ -41,6 +41,23 @@ def _states_by_kind(spec: Dict[str, Any]) -> Tuple[List[dict], List[dict]]:
     return transient, endpoints
 
 
+def _weighted(transitions: List[dict]) -> bool:
+    """Do these transitions carry branch probabilities at all?
+
+    Probabilities are OPTIONAL: a plain structural pathway ("A leads to
+    B leads to the product") is a legitimate graph, and demanding
+    normalized branch weights for one would be a tax on the simple case.
+    Rigor scales to the data — where weights exist they are validated
+    and propagated, where they don't the graph is simply drawn.
+    """
+    return any(t.get("p") is not None for t in transitions)
+
+
+def is_weighted(spec: Dict[str, Any]) -> bool:
+    """True when any transition in the spec carries a probability."""
+    return _weighted(spec.get("transitions") or [])
+
+
 def validate_spec(spec: Dict[str, Any], tol: float = 1e-6) -> List[str]:
     """Structural + normalization check. Returns warnings; raises on
     errors that make the graph unusable."""
@@ -62,6 +79,8 @@ def validate_spec(spec: Dict[str, Any], tol: float = 1e-6) -> List[str]:
             continue
         if any(t.get("unresolved") for t in out):
             continue  # normalization is not claimable for a mixture
+        if not _weighted(out):
+            continue  # unweighted branches: nothing to normalize
         total = sum(float(t.get("p", 0.0)) for t in out)
         if abs(total - 1.0) > max(tol, 1e-3):
             raise PathwaySpecError(
@@ -76,8 +95,12 @@ def absorption_distributions(spec: Dict[str, Any]) -> Dict[str, Dict[str, float]
     Endpoints (and an implicit ``unresolved`` outcome, fed by mixture
     states whose branches cannot be resolved) are the absorbing set;
     solves ``B = (I - Q)^-1 R``.
+
+    Empty for an unweighted graph — there is nothing to propagate.
     """
     validate_spec(spec)
+    if not is_weighted(spec):
+        return {}
     transient, endpoints = _states_by_kind(spec)
     t_ids = [s["id"] for s in transient]
     e_ids = [s["id"] for s in endpoints]
@@ -91,8 +114,12 @@ def absorption_distributions(spec: Dict[str, Any]) -> Dict[str, Dict[str, float]
         i = t_idx[s["id"]]
         out = [t for t in (spec.get("transitions") or [])
                if t["from"] == s["id"]]
-        if not out or any(t.get("unresolved") for t in out):
-            R[i, m] = 1.0             # mass stops here, unresolvable
+        # No branches, an unresolvable mixture, or branches nobody
+        # quantified: the outcome distribution is not derivable, so the
+        # mass is reported as unresolved rather than invented.
+        if not out or any(t.get("unresolved") for t in out) \
+                or not _weighted(out):
+            R[i, m] = 1.0
             continue
         for t in out:
             p = float(t.get("p", 0.0))
@@ -146,8 +173,8 @@ def emit_mermaid(spec: Dict[str, Any], style: str = "physics",
             ent = s.get("entropy_bits")
             rows.append(f"H {ent} bits — branches unresolvable"
                         if ent is not None else "branches unresolvable")
-        else:
-            rows.append(_fmt_dist(dists.get(sid, {}), short))
+        elif dists.get(sid):
+            rows.append(_fmt_dist(dists[sid], short))
         if sid in zero_auth:
             rows.append("no steering: stimuli leave distribution unchanged")
         body = "<br/>".join(rows)
@@ -160,16 +187,19 @@ def emit_mermaid(spec: Dict[str, Any], style: str = "physics",
         if t.get("unresolved"):
             lines.append(f'  {t["from"]} -.->|"unresolvable"| {t["to"]}')
             continue
-        p = float(t.get("p", 0.0))
-        sig = t.get("sigma")
-        lab = f"p {p:.2f}".replace("0.", ".")
-        if sig is not None:
-            lab += f" ± {float(sig):.2f}".replace("0.", ".")
-        if style == "full" and t.get("stimulus"):
-            lab += f" — {t['stimulus']}"
-        elif t.get("stimulus"):
-            lab += f" [s{k}]"
-        lines.append(f'  {t["from"]} {arrow}|"{lab}"| {t["to"]}')
+        bits = []
+        if t.get("p") is not None:
+            lab = f"p {float(t['p']):.2f}".replace("0.", ".")
+            if t.get("sigma") is not None:
+                lab += f" ± {float(t['sigma']):.2f}".replace("0.", ".")
+            bits.append(lab)
+        if t.get("stimulus"):
+            bits.append(t["stimulus"] if style == "full" else f"[s{k}]")
+        if bits:
+            lines.append(
+                f'  {t["from"]} {arrow}|"{" — ".join(bits)}"| {t["to"]}')
+        else:
+            lines.append(f'  {t["from"]} {arrow} {t["to"]}')
 
     lines += [
         "  classDef endpoint stroke-width:3px,stroke:#1b5e20,fill:#e8f5e9;",

@@ -118,6 +118,28 @@ try:
 except PathwaySpecError:
     check("unknown state rejected", True)
 
+
+print("7) unweighted graphs: rigor scales to the data")
+plain = {"states": [{"id": "A", "label": "Precursor"},
+                    {"id": "B", "label": "Intermediate"},
+                    {"id": "E", "label": "Product", "kind": "endpoint"}],
+         "transitions": [{"from": "A", "to": "B"},
+                         {"from": "B", "to": "E", "stimulus": "anneal"}]}
+check("plain pathway validates", validate_spec(plain) == [])
+check("no absorption for unweighted", absorption_distributions(plain) == {})
+mm = emit_mermaid(plain)
+check("renders without probabilities", "A --> B" in mm and "p " not in mm)
+check("stimulus still keyed", "[s2]" in mm)
+check("no empty dist rows", "<br/>" not in mm.split("\n")[1])
+mixed = {"states": plain["states"] + [{"id": "C", "label": "Side branch"}],
+         "transitions": [{"from": "A", "to": "B", "p": 0.7},
+                         {"from": "A", "to": "C", "p": 0.3},
+                         {"from": "B", "to": "E", "p": 1.0},
+                         {"from": "C", "to": "E"}]}
+dm2 = absorption_distributions(mixed)
+check("unquantified branch -> unresolved mass",
+      abs(dm2["A"][UNRESOLVED] - 0.3) < 1e-9, f"{dm2['A'][UNRESOLVED]:.2f}")
+
 print("=" * 50)
 n = sum(results.values())
 print(f"PATHWAY GRAPH: {n}/{len(results)} checks passed")
