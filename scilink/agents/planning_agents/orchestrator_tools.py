@@ -788,7 +788,8 @@ class OrchestratorTools:
                 model=self.orch.bo.model, output_dir=str(self.orch.base_dir))
         return self._diagram_agent
 
-    def _maybe_embed_workflow_diagram(self, text: str, out_dir) -> str:
+    def _maybe_embed_workflow_diagram(self, text: str, out_dir,
+                                      stem: str = "campaign_workflow") -> str:
         """Append a compact workflow diagram section to a document when the
         renderer is available and the QC'd diagram succeeds. Any failure
         returns the text unchanged — a document must never be lost to a
@@ -799,9 +800,15 @@ class OrchestratorTools:
                 return text
             plan = (self.orch.planner.state or {}).get("current_plan") or {}
             if not plan:
-                return text
+                # A roadmap or memo is often authored with no campaign
+                # state at all (that is the point of the document tool),
+                # so fall back to diagramming the document's own flow.
+                if len(text or "") < 400:
+                    return text
+                plan = {"objective": "Document workflow",
+                        "scientific_context": text[:4000]}
             res = self._get_diagram_agent().generate_workflow_diagram(
-                plan=plan, out_dir=out_dir, detail="simple")
+                plan=plan, out_dir=out_dir, stem=stem, detail="simple")
             if res.get("status") == "success":
                 rel = Path(res["png_path"]).name
                 print(f"    🗺️  Workflow diagram embedded "
@@ -6629,6 +6636,13 @@ class OrchestratorTools:
                         name += ".md"
                     out = self._output_dir() / name
                 out.parent.mkdir(parents=True, exist_ok=True)
+                # A roadmap or staging memo carries the same campaign flow a
+                # white paper does. Skipped on a revision: the document
+                # already has its figure, and a second pass would append a
+                # duplicate section.
+                if not revise_path:
+                    text = self._maybe_embed_workflow_diagram(
+                        text, out.parent, stem=f"{out.stem}_workflow")
                 out.write_text(text)
 
                 record_deliverable(self.orch.base_dir, out, doc_title,
