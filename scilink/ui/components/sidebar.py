@@ -1201,6 +1201,17 @@ def resume_session(
     for ext in (".png", ".jpg", ".jpeg"):
         for p in session_path.rglob(f"*{ext}"):
             known.add(str(p))
+    # ...and existing reports/documents. The .html/.md sweeps key on
+    # path+mtime in this same set; without pre-marking them, the first
+    # completed turn after a resume treats every report the session ever
+    # produced as "new this turn" and embeds them all in its answer.
+    # (The resume itself already re-embeds the latest deliverable.)
+    for ext in (".html", ".md"):
+        for p in session_path.rglob(f"*{ext}"):
+            try:
+                known.add(f"{p}:{p.stat().st_mtime_ns}")
+            except OSError:
+                known.add(str(p))
 
     st.session_state.agent = agent
     st.session_state.agent_initialized = True
