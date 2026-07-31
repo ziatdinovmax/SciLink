@@ -47,11 +47,14 @@ def _clean_error(output: str) -> str:
 
 
 def render_mermaid(code: str, out_path, timeout: int = 240,
-                   scale: int = 2,
+                   scale: int = 4,
                    background: str = "white") -> Tuple[bool, str]:
     """Render mermaid source to ``out_path`` (suffix selects the format:
     .png / .svg / .pdf). Returns ``(ok, error_message)`` — the error text
     is cleaned for feeding back into a regeneration prompt.
+
+    ``scale`` multiplies the rendered resolution; the default 4 gives
+    roughly print quality (~480 DPI) for a figure spanning a page width.
     """
     cli = find_mermaid_cli()
     if cli is None:

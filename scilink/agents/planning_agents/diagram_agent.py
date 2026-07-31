@@ -192,10 +192,17 @@ class DiagramAgent(BaseAgent):
                  detail: str) -> Dict[str, Any]:
         try:
             img = PIL_Image.open(png_path)
+            width, height = img.width, img.height
+            # High-res renders (print-quality scale) can exceed vision-API
+            # image limits; the gate judges layout, not pixels, so inspect
+            # a bounded copy while reporting the true dimensions.
+            if max(img.size) > 2000:
+                img = img.copy()
+                img.thumbnail((2000, 2000))
             prompt = _QC_PROMPT.format(
                 plan_json=plan_json, detail=detail,
                 detail_rule=_DETAIL_RULES[detail],
-                width=img.width, height=img.height)
+                width=width, height=height)
             resp = self.model.generate_content(
                 [prompt, img], generation_config=self.generation_config)
             verdict, _ = parse_json_from_response(resp)
