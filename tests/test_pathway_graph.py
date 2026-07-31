@@ -94,11 +94,12 @@ check("full inlines stimulus", "fast ramp" in full)
 check("computed distribution in node label", "alpha .54" in phys)
 check("gate styled distinctly", "==>" in phys)
 check("deterministic", emit_mermaid(SPEC) == phys)
-check("endpoints classed", ":::endpoint" in phys)
+check("endpoints classed", ":::outcome" in phys)
+check("house palette applied", "#BBDEFB" in phys and "classDef default" in phys)
 
 mm = emit_mermaid(mix)
 check("mixture node marked",
-      "unresolvable" in mm and ":::mixture" in mm)
+      "unresolvable" in mm and ":::caution" in mm)
 
 print("5) stimulus table")
 tab = stimulus_table(SPEC)

@@ -21,6 +21,7 @@ from PIL import Image as PIL_Image
 from scilink.knowledge import parse_json_from_response
 
 from ...utils.mermaid_render import render_mermaid, mermaid_available  # noqa: F401
+from ...utils.mermaid_theme import CLASS_HELP, apply_theme
 from .base_agent import BaseAgent
 
 _GEN_PROMPT = """You are drawing a workflow diagram for a scientific \
@@ -42,6 +43,9 @@ Rules:
   parentheses or special characters inside labels.
 - Decision points are diamonds (`{{"..."}}`); loops (e.g. an
   optimize-measure-refine cycle) are drawn as cycles, not unrolled.
+- Tag each node with a semantic class — `NodeId["label"]:::decision` —
+  from: {class_help}. Do NOT write classDef, style or linkStyle lines
+  and do NOT choose colors: the palette is applied for you.
 - Stay faithful to the campaign below — do not invent steps that are not
   in it.
 - Output ONLY the fenced mermaid block, no commentary.
@@ -117,11 +121,20 @@ class DiagramAgent(BaseAgent):
 
     @staticmethod
     def _extract_mermaid(text: str) -> Optional[str]:
+        """Mermaid source from a reply, tolerating a missing closing
+        fence — a reply cut off at the token limit still carries a
+        usable (if incomplete) diagram, and letting the renderer judge
+        it feeds the error back through the retry loop instead of
+        silently burning the attempt budget on extraction."""
         import re
-        m = re.search(r"```mermaid\s*(.*?)```", text or "", re.S)
+        text = text or ""
+        m = re.search(r"```mermaid\s*(.*?)```", text, re.S)
         if m:
             return m.group(1).strip()
-        stripped = (text or "").strip()
+        m = re.search(r"```mermaid\s*(.*)", text, re.S)
+        if m:
+            return m.group(1).strip().rstrip("`").strip()
+        stripped = text.strip()
         if stripped.startswith(("flowchart", "graph ")):
             return stripped
         return None
@@ -156,11 +169,21 @@ class DiagramAgent(BaseAgent):
             attempts += 1
             prompt = _GEN_PROMPT.format(
                 detail_rule=_DETAIL_RULES[detail], plan_json=plan_json,
-                extra=extra, feedback=feedback)
+                extra=extra, feedback=feedback, class_help=CLASS_HELP)
             try:
                 resp = self.model.generate_content(
                     [prompt], generation_config=self.generation_config)
-                code = self._extract_mermaid(resp.text)
+                # raw_text, not text: the wrapper's .text runs a JSON
+                # extraction whose "embedded object" pattern slices from
+                # the first '{' to the last '}' when it sees a quote and
+                # a colon — which a Mermaid diamond carrying a `:::class`
+                # tag satisfies, mangling the diagram (same hazard the
+                # codegen path documents for scripts with dict braces).
+                code = self._extract_mermaid(
+                    getattr(resp, "raw_text", None) or resp.text)
+                if code:
+                    # Palette is the package's, structure is the model's.
+                    code = apply_theme(code)
             except Exception as exc:  # noqa: BLE001
                 return {"status": "error", "error": f"LLM call failed: {exc}",
                         "attempts": attempts}

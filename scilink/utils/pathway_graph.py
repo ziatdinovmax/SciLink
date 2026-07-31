@@ -166,7 +166,7 @@ def emit_mermaid(spec: Dict[str, Any], style: str = "physics",
     for s in states:
         sid, label = s["id"], (s.get("label") or s["id"])
         if s.get("kind") == "endpoint":
-            lines.append(f'  {sid}["{label}"]:::endpoint')
+            lines.append(f'  {sid}["{label}"]:::outcome')
             continue
         rows = [label]
         if s.get("kind") == "mixture":
@@ -178,8 +178,8 @@ def emit_mermaid(spec: Dict[str, Any], style: str = "physics",
         if sid in zero_auth:
             rows.append("no steering: stimuli leave distribution unchanged")
         body = "<br/>".join(rows)
-        cls = (":::mixture" if s.get("kind") == "mixture"
-               else ":::zeroauth" if sid in zero_auth else "")
+        cls = (":::caution" if s.get("kind") == "mixture"
+               else ":::inactive" if sid in zero_auth else ":::stage")
         lines.append(f'  {sid}["{body}"]{cls}')
 
     for k, t in enumerate(spec.get("transitions") or [], start=1):
@@ -201,12 +201,8 @@ def emit_mermaid(spec: Dict[str, Any], style: str = "physics",
         else:
             lines.append(f'  {t["from"]} {arrow} {t["to"]}')
 
-    lines += [
-        "  classDef endpoint stroke-width:3px,stroke:#1b5e20,fill:#e8f5e9;",
-        "  classDef mixture stroke-dasharray: 5 5,stroke:#b26a00;",
-        "  classDef zeroauth stroke:#546e7a,fill:#eceff1;",
-    ]
-    return "\n".join(lines)
+    from .mermaid_theme import apply_theme
+    return apply_theme("\n".join(lines))
 
 
 def stimulus_table(spec: Dict[str, Any]) -> str:

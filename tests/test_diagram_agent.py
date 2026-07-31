@@ -101,6 +101,24 @@ with tempfile.TemporaryDirectory() as t:
     check("simple detail rule default",
           "Compact overview" in str(m.calls[0][0]))
 
+
+print("5) truncated reply (no closing fence) is still usable")
+with tempfile.TemporaryDirectory() as t:
+    TRUNC = GOOD.replace("```", "", 1).rsplit("```", 1)[0]  # keep opener only
+    m = SeqModel(["```mermaid\n" + TRUNC.split("\n", 1)[1],
+                  '{"approved": true, "issues": []}'])
+    agent = DiagramAgent(model=m, output_dir=t)
+    res = agent.generate_workflow_diagram(PLAN, out_dir=t)
+    check("recovers from missing closing fence", res["status"] == "success")
+
+print("6) house palette applied, model styling stripped")
+with tempfile.TemporaryDirectory() as t:
+    styled = GOOD.replace("```mermaid\n", "```mermaid\nclassDef foo fill:#123456\n")
+    m = SeqModel([styled, '{"approved": true, "issues": []}'])
+    res = DiagramAgent(model=m, output_dir=t).generate_workflow_diagram(PLAN, out_dir=t)
+    check("model classDef stripped", "#123456" not in res["code"])
+    check("house palette present", "#BBDEFB" in res["code"])
+
 print("=" * 50)
 n = sum(results.values())
 print(f"DIAGRAM AGENT: {n}/{len(results)} checks passed")
