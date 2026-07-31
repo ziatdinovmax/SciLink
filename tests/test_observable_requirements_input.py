@@ -242,5 +242,102 @@ class TestGateDeterministicLayer:
         assert _deterministic_coverage(ctx, "anything") == []
 
 
+class TestObservableDeriver:
+    """Produce side: derive the typed contract from a research goal."""
+
+    def _deriver(self):
+        from scilink.agents.sim_agents.observable_requirements import (
+            ObservableRequirementsDeriver)
+        return ObservableRequirementsDeriver(api_key="test-key")
+
+    def test_parses_valid_requirements(self):
+        d = self._deriver()
+        d._generate_json = lambda p: {"observables": [
+            {"observable": "shear viscosity", "check_kind": "signal_present",
+             "params": {"signal": "stress"}},
+            {"observable": "shear viscosity", "check_kind": "cadence",
+             "params": {"signal": "stress", "max_interval_steps": 1}},
+        ]}
+        reqs = d.derive("compute viscosity", domain="molecular_dynamics")
+        assert [r.check_kind for r in reqs] == ["signal_present", "cadence"]
+        assert reqs[1].params["max_interval_steps"] == 1
+
+    def test_drops_malformed_and_unknown_kinds(self):
+        d = self._deriver()
+        d._generate_json = lambda p: {"observables": [
+            {"observable": "x", "check_kind": "bogus_kind"},   # unknown kind
+            {"check_kind": "signal_present"},                  # no observable
+            "notadict",
+            {"observable": "density", "check_kind": "signal_present"},  # valid
+        ]}
+        reqs = d.derive("goal")
+        assert len(reqs) == 1
+        assert reqs[0].observable == "density" and reqs[0].params == {}
+
+    def test_empty_on_generation_error(self):
+        d = self._deriver()
+
+        def boom(prompt):
+            raise RuntimeError("llm down")
+
+        d._generate_json = boom
+        assert d.derive("goal") == []
+
+    def test_prompt_includes_goal(self):
+        d = self._deriver()
+        captured = {}
+
+        def fake(prompt):
+            captured["p"] = prompt
+            return {"observables": []}
+
+        d._generate_json = fake
+        d.derive("compute the Zn RDF", domain="molecular_dynamics")
+        assert "compute the Zn RDF" in captured["p"]
+
+
+class TestPipelineDerivation:
+    """The pipeline derives observables (opt-in) and threads them into Generate."""
+
+    def test_signature_has_flag(self):
+        assert "derive_observables" in inspect.signature(
+            sp._run_workflow_once).parameters
+
+    def test_derivation_populates_generate(self, tmp_path, monkeypatch):
+        import scilink.agents.sim_agents.observable_requirements as obs_mod
+
+        class FakeDeriver:
+            def __init__(self, **kw):
+                pass
+
+            def derive(self, goal, **kw):
+                return [Requirement("shear viscosity", "signal_present",
+                                    {"signal": "stress"})]
+
+        monkeypatch.setattr(obs_mod, "ObservableRequirementsDeriver", FakeDeriver)
+
+        captured = {}
+
+        def fake_gen(**kw):
+            captured["req"] = kw.get("required_observables")
+            (Path(kw["output_dir"]) / "run.lammps").write_text("echo x\n")
+            return {"status": "success",
+                    "input_files": {"run.lammps": "echo x\n"},
+                    "entry_file": "run.lammps"}
+
+        monkeypatch.setattr(sp, "_generate_inputs", fake_gen)
+
+        structure = tmp_path / "system.data"
+        structure.write_text("dummy")
+        sp.run_complete_workflow(
+            "compute the shear viscosity",
+            scale="molecular_dynamics", software="lammps",
+            structure_file=str(structure), output_dir=str(tmp_path / "out"),
+            api_key="fake-do-not-bill", validate=False,
+            derive_observables=True,
+        )
+        assert captured["req"] and captured["req"][0].observable == "shear viscosity"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

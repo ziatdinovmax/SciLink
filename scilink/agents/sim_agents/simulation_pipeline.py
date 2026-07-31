@@ -308,6 +308,7 @@ def _run_workflow_once(
     reference_check: bool = False,
     auto_fix: bool = True,
     required_observables: Optional[list] = None,
+    derive_observables: bool = False,
 ) -> Dict[str, Any]:
     """Run the full structure → inputs → validation pipeline for any scale.
 
@@ -522,6 +523,24 @@ def _run_workflow_once(
                 "force-field parameterization; the deck may read raw coordinates "
                 "and fail to run."
             )
+
+    # ── Produce the observable-requirements contract when not supplied ──
+    # parameters = f(system, observables): derive the observable set from the
+    # goal (guided by the engine skill) so it is authored upstream and carried
+    # into Generate and the pre-run gate. An explicit required_observables wins;
+    # opt-in via derive_observables so existing runs are unchanged.
+    if derive_observables and required_observables is None:
+        try:
+            from .observable_requirements import ObservableRequirementsDeriver
+            deriver = ObservableRequirementsDeriver(
+                api_key=api_key, base_url=base_url, model_name=model_name)
+            derived = deriver.derive(user_request, skill=software, domain=scale)
+            required_observables = derived or None
+            if derived:
+                logger.info("Derived %d observable requirement(s) from the goal.",
+                            len(derived))
+        except Exception as e:
+            logger.warning("Observable derivation skipped: %s", e)
 
     # ── Step 2: input generation (routed to the scale's foundation agent) ──
     try:
