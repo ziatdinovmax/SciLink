@@ -1062,6 +1062,35 @@ section[data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stExpa
     color: #E0E0E0 !important;
     background-color: #1E1E1E !important;
 }
+/* ...but the rule above only sets the INHERITED color, and inheritance loses
+   to any rule that matches directly. The blanket `.stApp span { #212121 }`
+   below matches every span inside the block, so in light mode un-tokenized
+   text and tokens Prism leaves unpainted (`builtin`, and anything else absent
+   from its palette) came out near-black on #1E1E1E — a contrast ratio of
+   1.04:1. Only syntax-highlighted tokens stayed legible, so `float` and
+   `np.max` were simply missing from a light-mode preview.
+
+   Fixed by SPECIFICITY, not !important: one attribute plus two type selectors
+   (0,1,2) outranks `.stApp span` (0,1,1) and restores the light-on-dark
+   default, while every `.token.x` rule (0,2,0 or more) still wins over it —
+   so Prism's highlighting is untouched and no token type has to be
+   enumerated. An !important here would flatten the palette to one gray. */
+.stCodeBlock code span,
+.stCodeBlock pre span,
+[data-testid="stCode"] code span,
+[data-testid="stCode"] pre span {
+    color: #E0E0E0;
+}
+/* Same story for the block's copy button: its icon inherits the body text
+   color, so in light mode it was #212121 on #1E1E1E — present, clickable,
+   and invisible. */
+.stCodeBlock button[kind="elementToolbar"],
+.stCodeBlock button[kind="elementToolbar"] svg,
+[data-testid="stCode"] button[kind="elementToolbar"],
+[data-testid="stCode"] button[kind="elementToolbar"] svg {
+    color: #E0E0E0;
+    fill: #E0E0E0;
+}
 .stCodeBlock *,
 [data-testid="stCode"] * {
     background-color: #1E1E1E !important;

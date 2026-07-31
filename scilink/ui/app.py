@@ -288,17 +288,131 @@ def _find_code_review_files() -> list[tuple[str, str]]:
 
 
 def _find_new_html_reports() -> list[str]:
-    """Return HTML report paths in the session dir not yet shown."""
+    """Return HTML report paths in the session dir not yet shown.
+
+    Best-of-N candidate reports (``plan_candidates/``) are deliberately
+    excluded from the chat message: they are side artifacts reviewed at the
+    selection prompt and browsable in the File Explorer, and stacking N of
+    them next to the winner's ``plan.html`` buries the actual deliverable.
+    They are still marked known so they never leak into a later message.
+    """
     session_dir = st.session_state.session_dir
     if session_dir is None:
         return []
     new = []
     for p in Path(session_dir).rglob("*.html"):
         s = str(p)
-        if s not in st.session_state.known_images:  # reuse the same set
-            st.session_state.known_images.add(s)
+        # Identity = path AND mtime. Under the meta each delegation writes
+        # its own directory so a path is unique per turn, but standalone
+        # plan mode rewrites base_dir/plan.html on every refine — a
+        # path-only key marked it "already shown" and the REFINED plan
+        # never reached the chat. Inlined rather than shared: these sweeps
+        # are exec'd standalone by the UI-contract tests.
+        try:
+            key = f"{p}:{p.stat().st_mtime_ns}"
+        except OSError:
+            key = str(p)
+        if key not in st.session_state.known_images:  # reuse the same set
+            st.session_state.known_images.add(key)
+            if p.parent.name == "plan_candidates":
+                continue
+            # plan_preview.html is the CLI reviewer's scratch render of the
+            # plan under review — in chat it duplicates the white paper /
+            # brief that follow it, so it is noise here.
+            if p.stem == "plan_preview":
+                continue
             new.append(s)
     return new
+
+
+def _demote_md_headings(text: str) -> str:
+    """Shift markdown headings down two levels (H1 -> H3, capped at H6) for
+    the in-chat preview: st.markdown renders a document H1 at page-title
+    size, which is overwhelming inside a chat bubble. The file on disk keeps
+    its proper heading levels. Fenced code blocks are left untouched."""
+    out, in_fence = [], False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+        if not in_fence:
+            m = re.match(r"^(#{1,6})(\s)", line)
+            if m:
+                line = "#" * min(len(m.group(1)) + 2, 6) + line[len(m.group(1)):]
+        out.append(line)
+    return "\n".join(out)
+
+
+def _find_new_md_documents() -> list[str]:
+    """Return markdown DELIVERABLES in the session dir not yet shown.
+
+    Chosen by the AGENT, not by an allow-list of stems: the filename of the
+    thing a user asked for is invented at request time
+    ("top3_priority_brief.md"), so a stem whitelist silently drops exactly
+    the artifact they are looking for. save_file records a deliverables
+    manifest; anything marked there is embedded. Unmarked markdown is still
+    embedded when it is small enough to read in chat — a forgotten flag must
+    never hide a file — while bulk context (literature dumps) is left to the
+    File Explorer so it cannot bury the deliverables.
+    """
+    session_dir = st.session_state.session_dir
+    if session_dir is None:
+        return []
+
+    MAX_INLINE_BYTES = 60_000
+    BULK_STEMS = ("literature_search", "chat_history", "session_log")
+    try:
+        from scilink.agents.planning_agents.user_interface import (
+            load_deliverables)
+        marked = {e["path"] for e in load_deliverables(session_dir)
+                  if e.get("deliverable")}
+    except Exception:
+        marked = set()
+
+    new = []
+    for p in Path(session_dir).rglob("*.md"):
+        s = str(p)
+        # Identity = path AND mtime. Under the meta each delegation writes
+        # its own directory so a path is unique per turn, but standalone
+        # plan mode rewrites base_dir/plan.html on every refine — a
+        # path-only key marked it "already shown" and the REFINED plan
+        # never reached the chat. Inlined rather than shared: these sweeps
+        # are exec'd standalone by the UI-contract tests.
+        try:
+            key = f"{p}:{p.stat().st_mtime_ns}"
+        except OSError:
+            key = str(p)
+        if key in st.session_state.known_images:  # reuse the same set
+            continue
+        is_marked = str(p.resolve()) in marked
+        if not is_marked:
+            if any(p.stem.startswith(b) for b in BULK_STEMS):
+                continue
+            try:
+                if p.stat().st_size > MAX_INLINE_BYTES:
+                    continue
+            except OSError:
+                continue
+        st.session_state.known_images.add(key)
+        new.append(s)
+    return new
+
+
+def _deliverable_title(md_path, p) -> str:
+    """Heading for an embedded markdown doc: the agent's own label when it
+    gave one, else a readable form of the filename."""
+    try:
+        from scilink.agents.planning_agents.user_interface import (
+            load_deliverables)
+        for e in load_deliverables(st.session_state.session_dir or ""):
+            if e.get("path") == str(Path(md_path).resolve()) and e.get("title"):
+                return e["title"]
+    except Exception:
+        pass
+    if p.stem.startswith("white_paper"):
+        return "White Paper"
+    if p.stem.startswith("ideation_report"):
+        return "Ideation Report"
+    return p.stem.replace("_", " ").title()
 
 
 def _parse_bestofn_review(context: str, prompt: str):
@@ -341,6 +455,48 @@ def _parse_bestofn_review(context: str, prompt: str):
         return None
     if pick is None:
         pm = re.search(r"accept candidate (\d+)", prompt or "")
+        pick = int(pm.group(1)) if pm else min(cands)
+    ordered = [{"idx": i, "label": cands[i]} for i in sorted(cands)]
+    return ordered, pick
+
+
+def _parse_plan_candidate_review(context: str, prompt: str):
+    """Parse the best-of-N PLAN candidate review from captured stdout.
+
+    Sibling of ``_parse_bestofn_review`` for plan mode: gated on its own
+    marker strings ("accept plan candidate" in the prompt, "PLAN CANDIDATES"
+    in the buffer) so neither parser can hijack the other's review, and with
+    its own card grammar — plan candidates carry judge scores, not the
+    ``metric=value`` scalar the analysis regex expects. Returns
+    ``(candidates, judge_pick)`` with ``candidates`` a list of
+    ``{"idx": int, "label": str}``, or ``None`` to fall back to the generic
+    text box (graceful degradation on any parse miss). The full summary cards
+    themselves render via the existing context box; this parser only powers
+    the radio selector. Reply contract matches ``get_candidate_selection``:
+    bare digit to override, "" to accept the judge's pick.
+    """
+    if not prompt or "accept plan candidate" not in prompt:
+        return None
+    if not context or "PLAN CANDIDATES" not in context:
+        return None
+    import re
+    block = context[context.rfind("PLAN CANDIDATES"):]
+    cands: dict[int, str] = {}
+    pick = None
+    for m in re.finditer(r"── Candidate (\d+): (.+?) ──(.*)", block):
+        idx = int(m.group(1))
+        name = m.group(2).strip()
+        # Generous cap: experiment names are the radio's primary signal and
+        # the row has the full content width — clip only pathological ones.
+        if len(name) > 120:
+            name = name[:117] + "…"
+        cands[idx] = f"Candidate {idx} — {name}"
+        if "judge pick" in m.group(3).lower():
+            pick = idx
+    if not cands:
+        return None
+    if pick is None:
+        pm = re.search(r"accept plan candidate (\d+)", prompt)
         pick = int(pm.group(1)) if pm else min(cands)
     ordered = [{"idx": i, "label": cands[i]} for i in sorted(cands)]
     return ordered, pick
@@ -659,7 +815,13 @@ else:
             render_pre_chat_uploads(_start_task)
     
         _avatars = {"user": AVATAR_USER, "assistant": AVATAR_AGENT}
-        for msg in st.session_state.chat_messages:
+        # Enumerated because widget keys below must be unique per
+        # MESSAGE, not per path: a document revised in place is
+        # re-embedded in a later message under the SAME path, and a
+        # path-only key then collides and crashes the app with
+        # StreamlitDuplicateElementKey (live, after a white paper was
+        # revised via write_technical_document(revise_path=...)).
+        for _mi, msg in enumerate(st.session_state.chat_messages):
             with st.chat_message(msg["role"], avatar=_avatars.get(msg["role"])):
                 # Escape tildes outside LaTeX blocks to prevent Markdown strikethrough
                 _content = _escape_tildes(msg["content"]) if msg["role"] == "assistant" else msg["content"]
@@ -688,7 +850,22 @@ else:
                             data=p.read_bytes(),
                             file_name=p.name,
                             mime="text/html",
-                            key=f"dl_html_{html_path}",
+                            key=f"dl_html_{_mi}_{html_path}",
+                        )
+                for md_path in msg.get("md_reports", []):
+                    p = Path(md_path)
+                    if p.exists():
+                        _doc_title = _deliverable_title(md_path, p)
+                        with st.expander(f"{_doc_title}: {p.name}"):
+                            with st.container(height=600):
+                                st.markdown(_demote_md_headings(
+                                    p.read_text(encoding="utf-8")))
+                        st.download_button(
+                            f"Download {p.name}",
+                            data=p.read_bytes(),
+                            file_name=p.name,
+                            mime="text/markdown",
+                            key=f"dl_md_{_mi}_{md_path}",
                         )
                 if msg.get("verbose"):
                     with st.expander("Verbose output"):
@@ -714,6 +891,7 @@ else:
                 content = re.sub(r"!\[[^\]]*\]\([^)]+\)\n?", "", content).strip()
                 new_images = _find_new_images()
                 new_reports = _find_new_html_reports()
+                new_docs = _find_new_md_documents()
                 # When an HTML report is present it already embeds the
                 # relevant figures — skip showing raw images separately
                 # to avoid duplicate clutter (matches curve fitting UX).
@@ -722,6 +900,7 @@ else:
                     "content": content,
                     "images": [] if new_reports else new_images,
                     "html_reports": new_reports,
+                    "md_reports": new_docs,
                     "verbose": task.verbose_log or "",
                 })
                 st.session_state.chat_task = ChatTask()
@@ -831,6 +1010,8 @@ else:
                 # render a radio selector (scales to any N, unlike one button
                 # per candidate). None -> falls through to the generic text box.
                 _bestofn_data = _parse_bestofn_review(req.context or "", _prompt)
+                # Plan-mode best-of-N: same radio UX, its own parser/markers.
+                _plan_cand_data = _parse_plan_candidate_review(req.context or "", _prompt)
                 # (_is_fanout_confirm computed above, before the context render)
                 if "Context" in _prompt or "MISSING METADATA" in _ctx_tail:
                     _input_label = "Describe your data (optional):"
@@ -929,6 +1110,44 @@ else:
                     with col_pick:
                         if st.button(f"Accept judge's pick (Candidate {_pick})",
                                      type="secondary", width="stretch"):
+                            req.response = ""
+                            req.event.set()
+                            st.session_state.pop("_feedback_preview_images", None)
+                            st.session_state.pop("_code_review_files", None)
+                            st.rerun(scope="app")
+                # Plan best-of-N selection: radio over candidate plans. The
+                # summary cards are already visible in the context box above;
+                # full per-candidate HTML reports live in plan_candidates/.
+                # Sends a bare digit (override) or "" (accept judge's pick) —
+                # the get_candidate_selection contract.
+                elif _plan_cand_data:
+                    _pcands, _ppick = _plan_cand_data
+                    _popts = [c["idx"] for c in _pcands]
+                    _plabels = {c["idx"]: c["label"] for c in _pcands}
+                    _pdefault = _popts.index(_ppick) if _ppick in _popts else 0
+                    _pchoice = st.radio(
+                        "Select the plan candidate to proceed with:",
+                        _popts, index=_pdefault,
+                        format_func=lambda i: _plabels.get(i, f"Candidate {i}"),
+                        key="plan_cand_choice",
+                    )
+                    st.markdown(
+                        '<span class="bestofn-actions-anchor"></span>',
+                        unsafe_allow_html=True,
+                    )
+                    col_puse, col_ppick = st.columns(2)
+                    with col_puse:
+                        if st.button("Use selected plan", type="primary",
+                                     width="stretch"):
+                            req.response = str(_pchoice)
+                            req.event.set()
+                            st.session_state.pop("_feedback_preview_images", None)
+                            st.session_state.pop("_code_review_files", None)
+                            st.rerun(scope="app")
+                    with col_ppick:
+                        if st.button(f"Accept judge's pick (Candidate {_ppick})",
+                                     type="secondary", width="stretch",
+                                     key="plan_cand_accept"):
                             req.response = ""
                             req.event.set()
                             st.session_state.pop("_feedback_preview_images", None)

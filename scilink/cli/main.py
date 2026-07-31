@@ -163,6 +163,11 @@ def main():
         sys.argv = [sys.argv[0] + ' memory'] + sys.argv[2:]
         return memory_main()
 
+    elif command == 'kb':
+        from scilink.cli.kb import main as kb_main
+        sys.argv = [sys.argv[0] + ' kb'] + sys.argv[2:]
+        return kb_main()
+
     elif command == 'fetch-xrd-library':
         from scilink.cli.fetch_data import main as fetch_main
         sys.argv = [sys.argv[0] + ' fetch-xrd-library'] + sys.argv[2:]
@@ -224,13 +229,17 @@ Available Commands:
   memory        Manage persistent memory — list, review, promote, or prune
                 graduated and auto-distilled skills
 
+  kb            Manage named, reusable knowledge bases — build once from
+                your documents, ground planning in them from any directory
+                (scilink kb create/add/list/show/import/rebuild/delete)
+
   fetch-xrd-library
                 One-time download of the prebuilt XRD fingerprint reference
                 library (COD-derived) enabling offline powder-pattern
                 identification via search_match_pattern
 
   ui            Launch the Streamlit web interface for interactive
-                analysis (requires: pip install scilink[ui])
+                analysis
 
   serve         Start SciLink as an MCP tool server so external clients
                 (Claude Desktop, Cursor) can use SciLink's tools

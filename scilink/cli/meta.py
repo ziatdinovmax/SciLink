@@ -102,6 +102,13 @@ Environment Variables:
                         help='Session directory for outputs (default: auto-generated)')
     parser.add_argument('--restore', action='store_true',
                         help='Restore from previous checkpoint in session directory')
+    parser.add_argument('--knowledge-dir', type=str, dest='knowledge_dir',
+                        help='Stable knowledge/KB for planning delegations: '
+                             'a directory (e.g. the ./kb_storage a plan '
+                             'session built) OR the name of a knowledge base '
+                             'from the persistent store (scilink kb list). '
+                             'Without it, planning uses a session-scoped KB '
+                             'and the meta offers any detected KBs in chat.')
 
     # Custom skills — shared with every specialist the meta delegates to
     parser.add_argument(
@@ -173,6 +180,9 @@ Environment Variables:
             if not tf.endswith('.py'):
                 parser.error(f"--tools file must be a .py file: {tf}")
 
+    if args.knowledge_dir and not Path(args.knowledge_dir).exists():
+        parser.error(f"--knowledge-dir path does not exist: {args.knowledge_dir}")
+
     config = {
         'model_name': args.model,
         'base_url': args.base_url,
@@ -184,6 +194,7 @@ Environment Variables:
         'initial_message': args.initial_message,
         'session_dir': args.session_dir,
         'restore': args.restore,
+        'knowledge_dir': args.knowledge_dir,
         'skill_files': args.skill_files or [],
         'tool_files': args.tool_files or [],
         'mcp_servers': args.mcp_servers or [],
@@ -329,6 +340,7 @@ a nested child sub-session under this meta session.
                 futurehouse_api_key=futurehouse_api_key,
                 restore_checkpoint=restore,
                 meta_mode=meta_mode,
+                knowledge_dir=self.config.get('knowledge_dir'),
             )
             print("✅ Meta-agent ready!")
         except Exception as e:
@@ -544,8 +556,9 @@ a nested child sub-session under this meta session.
         print("  /skill <path>      Register a custom skill (.md), shared with specialists")
         print("  /tool <path>       Register a custom tool file (.py), shared with specialists")
         print("  /mcp <config>      Connect an MCP server, shared with specialists")
+        print("  /checkpoint        Save session state now (also auto-saved, and saved on exit)")
         print("  /clear             Clear screen")
-        print("  /quit or /exit     Exit")
+        print("  /quit or /exit     Exit (saves a checkpoint)")
         print("\nOr just describe your research goal and let the meta-agent route it!")
         print("=" * 60)
 
@@ -637,6 +650,10 @@ a nested child sub-session under this meta session.
                 self._connect_mcp_servers([parts[1].strip()])
             return True
 
+        if cmd == "/checkpoint":
+            self._save_checkpoint()
+            return True
+
         if cmd == "/clear":
             os.system('cls' if os.name == 'nt' else 'clear')
             print("🧭  Meta-Agent - Session Resumed\n")
@@ -646,6 +663,14 @@ a nested child sub-session under this meta session.
             return "QUIT"
 
         return False
+
+    def _save_checkpoint(self):
+        """Save the meta checkpoint, reporting rather than raising on failure."""
+        try:
+            path = self.agent.save_checkpoint()
+            print(f"\n💾 Checkpoint saved: {path}")
+        except Exception as e:
+            print(f"\n❌ Checkpoint failed: {e}")
 
     def run(self):
         """Main interactive loop."""
@@ -671,7 +696,9 @@ a nested child sub-session under this meta session.
             try:
                 user_input = input("You: ").strip()
             except (EOFError, KeyboardInterrupt):
-                print("\n\n👋 Goodbye!")
+                print()
+                self._save_checkpoint()
+                print("\n👋 Goodbye!")
                 break
 
             if not user_input:
@@ -679,6 +706,7 @@ a nested child sub-session under this meta session.
 
             handled = self.handle_command(user_input)
             if handled == "QUIT":
+                self._save_checkpoint()
                 print("\n👋 Goodbye!")
                 break
             if handled is True:

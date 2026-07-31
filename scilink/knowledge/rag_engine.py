@@ -141,13 +141,34 @@ def retrieve_context(kb: Any, query: str, top_k: int = 10, dedupe: bool = True) 
     """Retrieve the top-k chunks for ``query`` from a ``KnowledgeBase`` and
     format them into a prompt-ready context block.
 
-    The generic RAG retrieval step. Returns an empty string when the KB is
-    empty or unbuilt.
+    The generic RAG retrieval step, with graceful degradation tiers. Returns
+    an empty string when the KB is empty or unbuilt. When dense retrieval
+    fails (e.g. the query embedding call errors because the embedding
+    provider that built the index is unavailable), keyword (BM25) retrieval
+    over the stored chunk text takes over — model-free, so it works for any
+    KB regardless of which embedding model built it. Only when that too
+    yields nothing does generation proceed without retrieved context: a KB
+    is grounding, not a dependency, and retrieval must never kill it.
     """
     if not (kb is not None and kb.index and kb.index.ntotal > 0):
         return ""
 
-    chunks = kb.retrieve(query, top_k=top_k)
+    try:
+        chunks = kb.retrieve(query, top_k=top_k)
+    except Exception as e:  # noqa: BLE001 - any retrieval failure degrades, never kills
+        try:
+            chunks = kb.retrieve_sparse(query, top_k=top_k)
+            logging.warning(
+                f"Dense KB retrieval failed ({e}); using keyword (BM25) "
+                f"fallback — retrieved {len(chunks)} chunks without the "
+                "embedding provider."
+            )
+        except Exception as e2:  # noqa: BLE001
+            logging.warning(
+                f"KB retrieval failed (dense: {e}; sparse: {e2}); "
+                "proceeding without retrieved context."
+            )
+            return ""
     if dedupe:
         chunks = list({c['text']: c for c in chunks}.values())
 
@@ -172,7 +193,8 @@ def run_rag(query: str,
             skill_context: Optional[str] = None,
             fallback_instructions: Optional[str] = None,
             task_name: str = "RAG",
-            return_context: bool = False) -> Any:
+            return_context: bool = False,
+            mode_key: Optional[str] = None) -> Any:
     """Generic RAG generation loop.
 
     Retrieves context for ``query`` from ``kb``, builds a multimodal prompt
@@ -200,6 +222,10 @@ def run_rag(query: str,
             so callers can reuse the exact grounding evidence the generation
             saw (e.g. a downstream critic). Default False preserves the
             original ``result``-only return for all existing callers.
+        mode_key: When set, stamp the returned dict with
+            ``result[mode_key] = "fallback" | "strict"`` so the caller can
+            tell which instruction tier actually produced the plan. Off by
+            default — existing callers' results are untouched.
 
     Returns:
         The parsed JSON dict (or ``{"error": ...}`` on failure). When
@@ -271,6 +297,7 @@ def run_rag(query: str,
             result.get("error") and "Insufficient" in str(result.get("error"))
         )
 
+        used_fallback = False
         if needs_fallback:
             print(f"    - ⚠️ Strict generation failed: {result.get('error')}")
             if not fallback_instructions:
@@ -285,7 +312,10 @@ def run_rag(query: str,
             if error_msg_fb:
                 return _ret({"error": f"Fallback JSON Parsing Error: {error_msg_fb}"})
             print("    - ✅ Fallback generation successful.")
+            used_fallback = True
 
+        if mode_key and isinstance(result, dict):
+            result[mode_key] = "fallback" if used_fallback else "strict"
         return _ret(result)
 
     except Exception as e:

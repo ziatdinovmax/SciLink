@@ -61,12 +61,11 @@ SciLink provides three complementary agent systems that cover the full scientifi
 ```bash
 pip install scilink
 
-# With web UI
-pip install scilink[ui]
-
 # With simulation dependencies (ASE, atomate2, etc.)
 pip install scilink[sim]
 ```
+
+The web UI (`scilink ui`) is included in the default installation.
 
 The analysis agents work without additional dependencies, but installing Meta's [Segment Anything Model](https://github.com/facebookresearch/segment-anything) (SAM) enables more advanced particle and grain segmentation. SAM is not available on PyPI and must be installed from source:
 
@@ -115,8 +114,6 @@ scilink analyze --data ./sample.tif --metadata ./metadata.json
 ```bash
 scilink ui
 ```
-
-Requires `pip install scilink[ui]`.
 
 ### MCP Server
 
@@ -265,6 +262,66 @@ scilink memory promote <domain>/<name>                       # make a provisiona
 > ```
 >
 > Without a mount, SciLink logs a one-time warning that memory won't persist.
+
+### Named Knowledge Bases
+
+Knowledge bases — your papers, datasheets, and prior reports, embedded for
+retrieval-augmented planning — can be promoted to **named, reusable artifacts**
+stored under `~/.scilink/knowledge_bases/` (rides `$SCILINK_HOME`). Build one
+once (this embeds the documents, so it needs the embedding provider's API
+key); every later session reuses the persisted index from **any** directory:
+
+```bash
+scilink kb create produced-water --from ./papers ./composition_data \
+    --description "Produced-water composition and criticality references"
+scilink kb list                          # what exists, built with which embedding model
+scilink kb add produced-water --from ./new_paper.pdf   # embeds only the new documents
+scilink kb import legacy --from ./kb_storage --embedding-model gemini-embedding-001
+scilink kb rebuild produced-water --embedding-model text-embedding-3-small
+```
+
+Use a KB by name wherever a knowledge directory is accepted:
+
+```bash
+scilink plan --knowledge-dir produced-water
+scilink explore --knowledge-dir produced-water
+```
+
+In a meta (explore) session you don't need the flag: detached KBs — the
+launch directory's `kb_storage`, plus every named KB with its description and
+source list — are offered **in chat**. In autopilot the meta asks before the
+first planning delegation; in autonomous mode it attaches the KB whose
+sources are clearly relevant to the task (and leaves all detached otherwise).
+Growing a KB works from chat too — *"add this datasheet to my produced-water
+knowledge base"* embeds just that document (with the KB's own embedding
+model) and the running session picks it up immediately; additions happen
+only on your explicit request, since a named KB is shared across sessions.
+Sessions otherwise treat named KBs as read-only: in-session document use
+stays session-local and never mutates the store.
+
+Each KB's `manifest.json` records the embedding model that built it, so a
+provider mismatch (e.g. a Gemini-built KB in an OpenAI-embedding session)
+warns upfront with a rebuild hint instead of failing opaquely at query time.
+And a KB is never unusable: when its embedding provider is unavailable,
+retrieval falls back to model-free keyword (BM25) search over the stored
+chunks — lower recall than dense retrieval, but real grounding from any KB
+in any session, with zero embedding dependency.
+A KB created with `kb create` keeps copies of its source documents and can be
+re-embedded with `kb rebuild`; an imported one cannot (no sources), so prefer
+`create` when you have the original documents.
+
+**Behavior changes** (vs. releases before the KB store):
+
+- A meta/explore session **no longer silently inherits** whatever `kb_storage/`
+  sits in the launch directory. Grounding is always an explicit choice: the
+  `--knowledge-dir` flag, a chat-time confirmation, or the autonomous
+  relevance decision. Standalone `scilink plan` behavior is unchanged.
+- A planning-tool retrieval failure (e.g. missing embedding key) now
+  degrades through tiers instead of aborting plan generation: dense
+  retrieval → keyword (BM25) retrieval → no retrieved context, each step
+  logged.
+- `--knowledge-dir` accepts a store name as well as a path; an existing
+  directory always wins over a same-named KB.
 
 ---
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scilink"
-version = "0.0.57"
+version = "0.0.58"
 authors = [
   { name="SciLink Team", email="maxim.ziatdinov@gmail.com" },
 ]
@@ -47,6 +47,10 @@ dependencies = [
     "h5py>=3.10",
     "nexusformat>=2.0",
     "pyyaml>=6.0",
+    "streamlit>=1.37.0",
+    # Markdown -> PDF export (with pymupdf above). Arrives transitively via
+    # streamlit -> rich, but this is a direct import, so pin it directly.
+    "markdown-it-py>=2.2.0",
 ]
 
 [project.optional-dependencies]
@@ -57,9 +61,10 @@ sim = [
     "mdanalysis>=2.9.0",
     "paramiko>=3.0.0",
 ]
-ui = [
-    "streamlit>=1.37.0",
-]
+# The web UI ships with the default install now (streamlit is a core
+# dependency). The empty extra is kept so existing `pip install scilink[ui]`
+# instructions keep working.
+ui = []
 structure-matching = [
     # Cap <2026: pymatgen 2026.x makes pymatgen.analysis a namespace package and
     # drops bundled pymatgen.analysis.phase_diagram, which breaks the emmet-core /

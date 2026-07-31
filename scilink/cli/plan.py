@@ -114,7 +114,8 @@ Supported Models:
         '--knowledge-dir',
         type=str,
         dest='knowledge_dir',
-        help='Path to papers/literature or file-based database directory (optional)'
+        help='Papers/literature directory, OR the name of a knowledge '
+             'base from the persistent store (see: scilink kb list)'
     )
     
     parser.add_argument(
@@ -214,9 +215,14 @@ Supported Models:
     if args.data_dir and not Path(args.data_dir).exists():
         parser.error(f"--data-dir path does not exist: {args.data_dir}")
     
-    # Validate optional dirs if provided
-    if args.knowledge_dir and not Path(args.knowledge_dir).exists():
-        parser.error(f"--knowledge-dir path does not exist: {args.knowledge_dir}")
+    # Validate optional dirs if provided (a knowledge dir may also be a
+    # named KB from the persistent store — resolve either, error on typos)
+    if args.knowledge_dir:
+        from scilink.knowledge.kb_store import resolve_knowledge_source
+        try:
+            resolve_knowledge_source(args.knowledge_dir)
+        except FileNotFoundError as e:
+            parser.error(str(e))
     if args.code_dir and not Path(args.code_dir).exists():
         parser.error(f"--code-dir path does not exist: {args.code_dir}")
     

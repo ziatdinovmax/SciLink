@@ -546,13 +546,20 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     feats[f"{base}_not_measurable"] = 1
                     continue
                 stats = m.get("stats")
-                if not isinstance(stats, dict):
+                sc = m.get("scalar")
+                is_scalar = isinstance(sc, (int, float)) and np.isfinite(sc)
+                if not isinstance(stats, dict) and not is_scalar:
                     continue
                 base = str(m.get("name") or "feature").strip().replace(" ", "_")
                 units = str(m.get("units") or "").strip()
                 suffix = ("_" + units.replace(" ", "").replace("/", "per")
                           if units and units.lower() not in ("a.u.", "au", "")
                           else "")
+                if is_scalar:
+                    # Global scalar deliverable (task `scalars` channel) —
+                    # one value, its own column, no min/max/mean.
+                    feats[f"{base}{suffix}"] = float(sc)
+                    continue
                 for k, v in stats.items():
                     if isinstance(v, (int, float)) and np.isfinite(v):
                         feats[f"{base}_{k}{suffix}"] = float(v)
@@ -1058,11 +1065,27 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
             elif is_image:
                 img = load_image(auxiliary_data)
-                result["auxiliary_summary"] = (
-                    f"Image with shape {img.shape} "
-                    f"(dtype: {img.dtype})."
-                )
-                result["auxiliary_array"] = img
+                # The numerical operand carries the RAW values — same rule the
+                # cube branch below states: the uint8 display rendering
+                # quantizes to 256 levels and discards the physical scale
+                # (an STM topography in meters became a constant-zero operand,
+                # silently NaN-ing every correlation computed against it).
+                try:
+                    raw = np.asarray(load_image(auxiliary_data, raw=True))
+                    if np.issubdtype(raw.dtype, np.number):
+                        raw = raw.astype(float, copy=False)
+                    result["auxiliary_array"] = raw
+                    result["auxiliary_summary"] = (
+                        f"Image with shape {raw.shape} (dtype: {raw.dtype}); "
+                        f"raw value range [{float(np.nanmin(raw)):.4g}, "
+                        f"{float(np.nanmax(raw)):.4g}]."
+                    )
+                except Exception:  # noqa: BLE001 - fall back to display array
+                    result["auxiliary_array"] = img
+                    result["auxiliary_summary"] = (
+                        f"Image with shape {img.shape} "
+                        f"(dtype: {img.dtype})."
+                    )
                 if img.ndim == 3:
                     img_gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
                     result["auxiliary_plot_bytes"] = (
@@ -1145,6 +1168,25 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # Load data
             original_hspy_data = self._load_hyperspectral_data(data_path)
 
+            # Fail-fast precondition: the physical axis-2 range is a hard
+            # requirement (interpretation prep and every summary plot call
+            # create_axis, which raises without it — deliberate, fcb77007).
+            # Enforce it here, BEFORE preprocessing and the component test
+            # loop burn minutes of compute on a run that cannot finish.
+            from ...skills.hyperspectral.eels.eels import create_axis
+            try:
+                create_axis(original_hspy_data.shape[-1], system_info, axis_index=2)
+            except ValueError as e:
+                self.logger.error(f"Axis precondition failed: {e}")
+                return None, {
+                    "error": "Missing physical axis range for the spectral axis",
+                    "details": (
+                        f"{e} Supply the physical range of the third (signal/"
+                        f"sweep) axis in the metadata before re-running — no "
+                        f"analysis was performed."
+                    ),
+                }
+
             # Handle structure image
             structure_image_blob = None
             if structure_image_path and os.path.exists(structure_image_path):
@@ -1220,7 +1262,12 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "prior_knowledge": prior_knowledge or [],
                 "literature_context": literature_context,
                 "result_json": None,
-                "error_dict": None,
+                # Carry the iteration pipeline's failure forward so the caller
+                # sees the ORIGINAL error (e.g. the decomposition exception),
+                # not the derivative "No iteration results found for
+                # synthesis" it used to be masked by (#381). The synthesis
+                # controllers all no-op on a pre-set error_dict.
+                "error_dict": iteration_state.get("error_dict"),
                 **skill_state,
                 **auxiliary_state
             }

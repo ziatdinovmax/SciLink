@@ -122,6 +122,44 @@ technique is, how to plan a use of it, how to write the code, how to
 read the output, and how to verify it. New skills should use this
 ordering; legacy `analysis` is accepted by the loader for backcompat.
 
+## Plan mode produces three kinds of thing, not one
+
+`generate_initial_plan` designs **lab experiments**. For a long time it was
+also the only authoring path in plan mode, so two other kinds of request rode
+its schema and were filled by invention:
+
+| the ask | tool | payload |
+|---|---|---|
+| "design an experiment to test X" | `generate_initial_plan` | `proposed_experiments` — hypothesis, steps, equipment |
+| "what directions are worth pursuing" | `generate_ideation_portfolio` | `directions` — id, title, tier, hypothesis, rationale, novelty |
+| "write me a roadmap / estimate / memo" | `write_technical_document` | markdown sections; no campaign state at all |
+
+The rule: **if there is no hypothesis to test and nothing to measure, it is
+not an experimental plan.** A portfolio forced through the experiment schema
+comes back with its directions flattened into `experimental_steps`; a
+document forced through it invents `optimization_params` with ranges and
+citations for a system nobody has chosen yet. Both were observed live.
+
+**One engine, two contracts.** Ideation is not a new agent or a fourth mode.
+`generate_plan(kind="portfolio")` reuses retrieval, best-of-N, the judge, the
+critic, campaign scoping, checkpointing and the deliverables ledger, and
+swaps only what a candidate *is* — `generate_plan_candidates` takes a
+`contract` for that; absent one it is the experiment path unchanged.
+
+**Reading directions.** Never read the payload shape directly. `parser_utils`
+exposes `plan_directions` / `plan_is_portfolio` / `plan_thesis`, resolving
+top-level `directions` → `proposed_experiments[*].concepts` (PR #394) → a
+direction synthesised from the experiment fields (pre-`concepts` plans). That
+fallback ladder is what keeps old checkpoints restorable.
+
+**The transition shim.** A portfolio currently carries BOTH shapes:
+`directions` as the payload plus a one-entry `proposed_experiments` shim, so
+the ~50 legacy readers stay correct instead of seeing a plan with no
+experiments (which their validity gates read as *failed*). Consequence worth
+remembering: every pass that re-emits a plan edits the shim, so
+`resync_portfolio` (called from `_stamp_campaign`) makes the nested copy
+authoritative — otherwise a refined portfolio serves stale directions.
+
 ## Plan-mode capability boundaries
 
 Two settled conventions on where capability lives in plan mode:
@@ -147,6 +185,26 @@ does the hard work with its skill tools, then the scalarizer reduces the
 result (`run_analysis → scalarize`). That cross-mode chain is gated on
 the future `run_task` contract; until it exists, run the analysis
 standalone and feed the resulting scalar in as a data file.
+
+## Knowledge bases are named artifacts; grounding is explicit
+
+RAG knowledge bases live in the persistent store
+(`~/.scilink/knowledge_bases/<name>/`, managed by `scilink kb` /
+`scilink/knowledge/kb_store.py`) with a `manifest.json` recording the
+embedding model that built them — provenance that turns provider
+mismatches into upfront warnings instead of opaque query-time failures.
+Every `knowledge_dir` surface resolves store names as well as paths (an
+existing directory wins over a same-named KB). Two settled rules:
+
+- **No implicit grounding in the meta.** A meta session never silently
+  inherits a launch-directory KB; attachment is an explicit choice —
+  `--knowledge-dir`, a chat-time confirmation (autopilot), or the
+  autonomous relevance decision made from the KB's listed sources.
+  Standalone plan mode keeps its stable-KB conventions.
+- **Retrieval is grounding, not a dependency.** Retrieval degrades
+  through tiers — dense, then model-free keyword (BM25) over the stored
+  chunks, then no-context — each with a warning; it must never abort
+  generation.
 
 ## Why no `BaseChatOrchestrator` refactor
 

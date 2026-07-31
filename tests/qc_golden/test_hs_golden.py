@@ -147,12 +147,21 @@ def test_hs_golden_happy(tmp_path):
 
 
 def test_hs_golden_retry_ladder(tmp_path):
-    # 3 broken attempts (levels 0, 1, 1) then success at level 2 (hot);
-    # pins the annealed retry-feedback prompts and the record levels.
+    # 3 QC-rejected attempts (levels 0, 1, 1) then acceptance at level 2
+    # (hot); pins the annealed retry-feedback prompts (critique + script
+    # anchor at warm, no anchor at hot) and the record levels. QC
+    # rejections, not execution errors, drive the ladder: execution errors
+    # are now repaired by the in-attempt mechanical-correction loop
+    # (curve/image parity) and never advance the annealing level — see
+    # test_hs_golden_exec_repair.
     rules = [
-        Rule("visual_qc", _VISUAL_QC_MARKER, [{"valid": True}], repeat_last=True),
-        Rule("codegen", _CODEGEN_MARKER,
-             [{"code": BROKEN_CODE}] * 3 + [{"code": GOOD_CODE}],
+        Rule("visual_qc", _VISUAL_QC_MARKER,
+             [{"valid": False,
+               "critique": "map is spatially incoherent noise - "
+                           "the estimator is not extracting the feature"}] * 3
+             + [{"valid": True}],
+             repeat_last=True),
+        Rule("codegen", _CODEGEN_MARKER, [{"code": GOOD_CODE}],
              repeat_last=True),
     ]
     target = {"type": "custom_code",
@@ -164,6 +173,29 @@ def test_hs_golden_retry_ladder(tmp_path):
               for it in rec["quality_history"]["verification_iterations"]]
     assert levels == [0, 1, 1, 2]
     check_golden("hs_ladder", payload)
+
+
+def test_hs_golden_exec_repair(tmp_path):
+    # An execution error is repaired by the in-attempt mechanical
+    # correction: one ladder attempt, level 0, exec_corrections recorded —
+    # pins the MECHANICAL CORRECTION prompt (traceback + repair-not-
+    # redesign instruction).
+    rules = [
+        Rule("visual_qc", _VISUAL_QC_MARKER, [{"valid": True}],
+             repeat_last=True),
+        Rule("codegen", _CODEGEN_MARKER,
+             [{"code": BROKEN_CODE}, {"code": GOOD_CODE}],
+             repeat_last=True),
+    ]
+    target = {"type": "custom_code",
+              "description": "map the mean intensity per pixel"}
+    payload = _run(tmp_path, target, rules)
+    rec = payload["records"][0]
+    assert rec["task_success"] is True
+    its = rec["quality_history"]["verification_iterations"]
+    assert [it["annealing_level"] for it in its] == [0]
+    assert its[0]["exec_corrections"] == 1
+    check_golden("hs_exec_repair", payload)
 
 
 def test_hs_golden_salvage_approximate(tmp_path):

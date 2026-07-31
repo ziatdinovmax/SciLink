@@ -70,6 +70,10 @@ HS_HISTORY_KEYMAP: Dict[str, Any] = {
         ("annealing_level", lambda e: e.get("annealing_level", 0)),
         ("issues", _issues),
         ("fix_applied", lambda e: e.get("recommended_action", "")),
+        # In-attempt mechanical repairs of execution errors (curve/image-
+        # parity inner loop) — recorded so the persisted history is honest
+        # about what the attempt cost. 0 for the common clean case.
+        ("exec_corrections", lambda e: e.get("exec_corrections", 0)),
     ],
     "include_alternative_models": False,
     "include_score_explanation": False,

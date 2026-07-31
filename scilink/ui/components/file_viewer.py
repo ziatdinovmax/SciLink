@@ -4,6 +4,40 @@ from pathlib import Path
 
 import streamlit as st
 
+# Rendered markdown is re-parsed on every rerun, so a runaway file (a pasted
+# literature dump) would stall the page. Matches the code-preview clip.
+_MD_MAX_CHARS = 100_000
+
+# Rasterising every page of a long report would stall the pane; the rest is a
+# download away.
+_PDF_MAX_PAGES = 25
+
+# Streamlit paints the SELECTED segment by tinting its text and border with
+# the theme's primaryColor and leaving the fill transparent — and our primary
+# is #6200EE, a deep purple that is barely legible against the dark pane.
+# Give it the filled-pill treatment the app already uses for primary buttons
+# (theme.py: purple fill, white label), which reads the same in both themes.
+# Scoped to this widget's keyed container so no other control is restyled;
+# the inner span carries its own colour, hence the descendant rule.
+_MD_TOGGLE_KEY = "md_view_toggle"
+_MD_TOGGLE_CSS = """<style>
+.st-key-md_view_toggle button[kind="segmented_controlActive"] {
+    background-color: #6200EE !important;
+    border-color: #6200EE !important;
+}
+.st-key-md_view_toggle button[kind="segmented_controlActive"],
+.st-key-md_view_toggle button[kind="segmented_controlActive"] * {
+    color: #FFFFFF !important;
+}
+/* The UNSELECTED segment keeps the dark backgroundColor from config.toml
+   even in light mode, where the label flips dark — #212121 on #252D38, a
+   contrast ratio of about 1.1:1, i.e. invisible. Dropping the fill lets it
+   sit on the pane and inherit a legible label in both themes. */
+.st-key-md_view_toggle button[kind="segmented_control"] {
+    background-color: transparent !important;
+}
+</style>"""
+
 
 def render_file_preview(file_path: Path) -> None:
     """Display an appropriate preview for the given file and a download button."""
@@ -11,14 +45,59 @@ def render_file_preview(file_path: Path) -> None:
 
     st.subheader(file_path.name)
 
-    # Download button
-    with open(file_path, "rb") as fh:
-        st.download_button(
-            "Download",
-            data=fh.read(),
-            file_name=file_path.name,
-            key=f"dl_{file_path}",
-        )
+    # Download button. Markdown gets a PDF twin beside it — a plan or white
+    # paper is written as markdown but forwarded as a PDF. Conversion is
+    # ~15 ms for a typical paper, so it runs eagerly rather than behind a
+    # "prepare" click; if it fails, the markdown download is still there and
+    # the reason is stated rather than swallowed.
+    # The trailing spacer keeps the two buttons beside each other instead of
+    # spread to the edges of a wide preview pane.
+    if suffix == ".md":
+        dl_col, pdf_col, _ = st.columns([1, 1.15, 3])
+    else:
+        dl_col, pdf_col = st.container(), None
+    with dl_col:
+        with open(file_path, "rb") as fh:
+            st.download_button(
+                "Download",
+                data=fh.read(),
+                file_name=file_path.name,
+                key=f"dl_{file_path}",
+            )
+    if pdf_col is not None:
+        with pdf_col:
+            try:
+                from scilink.utils.md_to_pdf import markdown_text_to_pdf
+                import tempfile
+                with tempfile.TemporaryDirectory() as td:
+                    pdf = markdown_text_to_pdf(
+                        file_path.read_text(errors="replace"),
+                        Path(td) / f"{file_path.stem}.pdf",
+                        title=file_path.stem)
+                    data = pdf.read_bytes()
+                st.download_button(
+                    "Download PDF", data=data,
+                    file_name=f"{file_path.stem}.pdf", mime="application/pdf",
+                    key=f"dlpdf_{file_path}",
+                )
+            except Exception as exc:  # noqa: BLE001 - never break the preview
+                st.caption(f"PDF export unavailable: {exc}")
+
+    # PDF — page images, since agents now emit PDFs of their own
+    if suffix == ".pdf":
+        try:
+            import fitz
+            doc = fitz.open(file_path)
+            st.caption(f"{doc.page_count} page"
+                       f"{'s' if doc.page_count != 1 else ''}")
+            for page in doc.pages(0, min(doc.page_count, _PDF_MAX_PAGES)):
+                st.image(page.get_pixmap(dpi=110).tobytes("png"))
+            if doc.page_count > _PDF_MAX_PAGES:
+                st.caption(f"Showing the first {_PDF_MAX_PAGES} pages — "
+                           f"download for the rest.")
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not preview PDF: {exc}")
+        return
 
     # Image
     if suffix in (".png", ".jpg", ".jpeg"):
@@ -104,6 +183,35 @@ def render_file_preview(file_path: Path) -> None:
         )
         return
 
+    # Markdown — rendered, with the source one click away.
+    #
+    # Reports, white papers and plans are the most-clicked files in a session
+    # and they were the ones shown as raw source: headings as literal #, tables
+    # as pipe soup. Unlike the in-chat preview this pane IS the document view,
+    # so headings keep their true levels rather than being demoted.
+    if suffix == ".md":
+        text = file_path.read_text(errors="replace")
+        clipped = text[:_MD_MAX_CHARS]
+        if len(text) > _MD_MAX_CHARS:
+            st.caption(f"Showing the first {_MD_MAX_CHARS:,} of "
+                       f"{len(text):,} characters.")
+            # Clipping mid-fence would render the whole tail as code.
+            if clipped.count("```") % 2:
+                clipped += "\n```"
+        st.markdown(_MD_TOGGLE_CSS, unsafe_allow_html=True)
+        with st.container(key=_MD_TOGGLE_KEY):
+            view = st.segmented_control(
+                "View", ["Rendered", "Source"], default="Rendered",
+                key=f"mdview_{file_path}", label_visibility="collapsed",
+            )
+        # A segmented control can be deselected back to None; that is not a
+        # request for raw source, so anything but an explicit Source renders.
+        if view == "Source":
+            st.code(clipped, language="markdown")
+        else:
+            st.markdown(clipped)
+        return
+
     # Source code
     _code_langs = {
         ".py": "python",
@@ -124,7 +232,7 @@ def render_file_preview(file_path: Path) -> None:
         return
 
     # Plain text fallback
-    if suffix in (".txt", ".md", ".log"):
+    if suffix in (".txt", ".log"):
         st.code(file_path.read_text()[:100000], language="text")
         return
 

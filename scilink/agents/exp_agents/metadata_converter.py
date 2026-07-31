@@ -178,7 +178,7 @@ Fill Conditional Fields based on Type:
 
 If Microscopy: Focus on extracting spatial_info (field of view and units). Omit or use null for spectroscopy/curve fields if not relevant.
 
-If Spectroscopy/Hyperspectral: Focus on extracting energy_range (start, end, units). Omit or use null for microscopy/curve fields if not relevant. If the third (channel) axis of a 3D hyperspectral dataset is NOT energy/wavelength (e.g. it is time, voltage, force, frequency, or another parameter), populate the optional axis_spec object (with axis_0, axis_1, axis_2 entries — each having name, units, kind, and for the signal axis also start/end) instead of energy_range. Use axis_spec.signal_is_nonnegative=false when the signal can be signed (e.g. derivative spectra, difference spectra).
+If Spectroscopy/Hyperspectral: Focus on extracting energy_range (start, end, units). Omit or use null for microscopy/curve fields if not relevant. If the third (channel) axis of a 3D hyperspectral dataset is NOT energy/wavelength (e.g. it is time, voltage, force, frequency, or another parameter), populate the optional axis_spec object (with axis_0, axis_1, axis_2 entries — each having name, units, kind, and for the signal axis also start/end) instead of energy_range. The signal axis's start/end are REQUIRED for datacube analysis, so extract them from whatever evidence states the sweep/scan range — dedicated fields, a comment string, or a filename — rather than omitting them when no field is explicitly named "range". Use axis_spec.signal_is_nonnegative=false when the signal can be signed (e.g. derivative spectra, difference spectra).
 
 If 1D Curve Data (PL, XRD, etc.): Focus on extracting title, data_columns (determining X and Y column names/units), xlabel, and ylabel. energy_range might also apply if the x-axis represents energy. Omit or use null for microscopy fields.
 
@@ -258,9 +258,12 @@ def _describes_spectral_imaging(metadata: dict) -> bool:
     blob = f"{metadata.get('experiment_type') or ''} {technique}".lower()
     if "hyperspectral" in blob or "datacube" in blob:
         return True
-    # "spectral/spectroscopy ... imaging/mapping/spectrum-image/cube"
+    # "spectral/spectroscopy ... imaging/mapping/spectrum-image/cube/grid".
+    # "grid" covers grid spectroscopy (STS/CITS-style spectra on an x-y
+    # grid), which is a datacube even though nothing in its prose says so.
     return ("spectr" in blob
-            and any(w in blob for w in ("imag", "map", "cube", "spectrum image")))
+            and any(w in blob for w in ("imag", "map", "cube", "spectrum image",
+                                        "grid")))
 
 
 def _has_resolvable_energy_axis(metadata: dict) -> bool:
@@ -313,9 +316,10 @@ def check_schema_conformance(metadata: dict) -> tuple[bool, list[str]]:
             issues.append(f"'{key}' should be a dict or null")
 
     # A spectral-imaging / hyperspectral datacube MUST carry a resolvable energy
-    # axis (energy_range.start/end or axis_spec.axis_2.start/end). Without it the
-    # axis silently falls back to channel indices, so the spectral axis is only
-    # in prose — flag it non-conformant so the LLM normalizer re-extracts it.
+    # axis (energy_range.start/end or axis_spec.axis_2.start/end). Without it
+    # the analysis hard-fails when the axis is first built (deliberate — no
+    # silent channel-index fallback), so flag it non-conformant here and let
+    # the LLM normalizer re-extract it while the evidence is still in front of it.
     if _describes_spectral_imaging(metadata) and not _has_resolvable_energy_axis(metadata):
         issues.append(
             "Spectral-imaging/hyperspectral metadata is missing a resolvable "

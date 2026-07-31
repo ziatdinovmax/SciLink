@@ -5,6 +5,8 @@ Supports both Google Gemini (function objects) and OpenAI (JSON schemas).
 
 from datetime import datetime
 import json
+from .planning_rag import (author_technical_document,
+                           document_to_markdown)
 import logging
 import re
 import pandas as pd
@@ -26,6 +28,17 @@ from .instruct import (
 )
 from ..lit_agents.optimize_query import optimize_search_query, is_molecule_design_objective
 from ...skills.loader import list_skills, load_skill
+
+
+# Progress-heartbeat cadence for long-running literature searches (seconds).
+_LIT_HEARTBEAT_SECONDS = 180
+# Wall-clock ceiling for ONE batch of concurrent literature searches. Deep
+# searches are advertised as 10-15 min; past this a straggler is abandoned
+# and whatever finished is returned, rather than holding the call open.
+# Kept ABOVE the agent's own per-task budget (1500s) so a stalled task
+# normally times itself out first and its worker exits cleanly — this
+# deadline is the backstop for when that does not happen.
+_LIT_BATCH_DEADLINE = 1800
 
 
 def _build_planning_skill_description(custom_skills: dict = None) -> str:
@@ -103,6 +116,31 @@ def _build_optimization_skill_description() -> str:
     return " ".join(parts)
 
 
+def resolve_n_candidates(requested, planner_state, new_campaign: bool = False) -> int:
+    """
+    Best-of-N default policy for ``generate_initial_plan`` (issue #377).
+
+    An explicit request always wins (clamped 1-4; pass 1 for a single plan).
+    When the caller omits it, a campaign's FIRST plan defaults to best-of-3 —
+    two rounds of live meta testing showed the opt-in default never fired
+    because upstream routing narrows the objective before delegating, so
+    "raise N when open-ended" prompt guidance never triggered. Any later
+    plan in the campaign defaults to 1: follow-ups iterate on a committed
+    strategy, and the runner-up fallback already covers plan replacement.
+
+    ``new_campaign`` marks a call that will START a new campaign in an
+    existing session (issue #396) — its plan is a campaign-first plan even
+    though ``current_plan`` still holds the previous campaign's plan.
+    """
+    if requested is not None:
+        try:
+            return max(1, min(int(requested), 4))
+        except (TypeError, ValueError):
+            return 1
+    is_first_plan = new_campaign or not (planner_state or {}).get("current_plan")
+    return 3 if is_first_plan else 1
+
+
 class OrchestratorTools:
     """
     Manages tool definitions, schemas, and execution for the OrchestratorAgent.
@@ -114,12 +152,12 @@ class OrchestratorTools:
             orchestrator_instance: Reference to the parent OrchestratorAgent
         """
         self.orch = orchestrator_instance
-        
+
         # Build function map and schemas
         self.functions_map: Dict[str, Callable] = {}
         self.openai_schemas: list = []
         self.gemini_functions: list = []
-        
+
         self._register_all_tools()
 
     def _get_human_feedback_enabled(self) -> bool:
@@ -350,9 +388,441 @@ class OrchestratorTools:
             if paths:
                 return paths
         # Fallback: use orchestrator's configured knowledge directory
-        if self.orch.knowledge_dir and self.orch.knowledge_dir.exists():
-            return [str(self.orch.knowledge_dir)]
+        kd = self.orch.knowledge_dir
+        if kd and kd.exists():
+            # A store KB (marked by its manifest) is PREBUILT: its documents
+            # live under sources/ and are already embedded — handing the KB
+            # root to ingestion would re-embed them and swallow the index
+            # files themselves. Point the source-difference check at the
+            # sources/ dir (or nothing, for index-only imported KBs); plain
+            # knowledge dirs keep the legacy incremental-ingest behavior.
+            if (kd / "manifest.json").is_file():
+                src = kd / "sources"
+                return [str(src)] if src.is_dir() else None
+            return [str(kd)]
         return None
+
+    @staticmethod
+    def _resolve_context_text(value) -> Optional[str]:
+        """Resolve a literature/molecule context argument to TEXT.
+
+        Accepts a file path, a comma-separated string of file paths, a list
+        of file paths, or raw text. File contents are read and concatenated;
+        anything that isn't resolvable as existing files is treated as raw
+        text (the historical behavior). This closes a live failure where a
+        comma-joined pair of paths fell through the single-path check and
+        the PATH STRING itself became the 'literature', leaving downstream
+        consumers (plan grounding, white-paper citations) with filenames
+        instead of content.
+        """
+        if value is None:
+            return None
+        items = value if isinstance(value, list) else [value]
+        pieces = []
+        for item in items:
+            s = str(item).strip()
+            if not s:
+                continue
+            p = Path(s)
+            if p.is_file():
+                pieces.append(p.read_text())
+                continue
+            tokens = [t.strip() for t in s.split(",") if t.strip()]
+            token_paths = [Path(t) for t in tokens]
+            if len(tokens) > 1 and all(tp.is_file() for tp in token_paths):
+                pieces.extend(tp.read_text() for tp in token_paths)
+            else:
+                pieces.append(s)  # raw text
+        return "\n\n".join(pieces) if pieces else None
+
+    def _write_ideation_report(self) -> str:
+        """Render ALL best-of-N candidates into a detailed markdown dossier.
+
+        Deterministic (no LLM): rendered straight from the same campaign
+        state the white paper is generated from, so the two artifacts cannot
+        drift apart. In ideation, runner-up candidates are deliverables, not
+        rejects — the judge's pick designates the flagship, it does not
+        discard the rest.
+
+        The flagship is rendered from ``current_plan``, not from the stored
+        candidate: conformance correction and critic passes rewrite the
+        selected plan *after* the candidate set is frozen, and rendering the
+        stored copy shipped a dossier describing a plan the user never got
+        (live: the dossier carried none of the corrected portfolio's
+        directions while the white paper carried them all). Runner-ups are
+        still rendered as authored — nothing rewrites those.
+        """
+        state = self.orch.planner.state or {}
+        pc = state.get("plan_candidates") or {}
+        candidates = pc.get("candidates") or []
+        if not candidates:
+            raise ValueError("No candidate set in state — nothing to report.")
+        sel = pc.get("selected_index", 1)
+        judge = pc.get("judge") or {}
+        scores = {s.get("candidate"): s for s in judge.get("scores", [])}
+        findings = (state.get("current_plan") or {}).get("critic_findings")
+        override = pc.get("human_override")
+
+        lines = ["# Ideation Report", "",
+                 f"**Objective:** {state.get('objective', '')}", ""]
+        if override:
+            lines += [f"**Selection:** Candidate {sel} chosen by the PI, "
+                      f"overriding the judge's pick of Candidate "
+                      f"{judge.get('selected_candidate', '?')}.", ""]
+        if judge.get("reasoning"):
+            lines += ["## Comparative Assessment (judge)",
+                      judge["reasoning"], ""]
+        current = state.get("current_plan") or {}
+        for ci, cand in enumerate(candidates, 1):
+            exp = (cand.get("proposed_experiments") or [{}])[0]
+            revised = False
+            if ci == sel:
+                flag = (" — SELECTED (flagship, PI override)" if override
+                        else " — SELECTED (flagship)")
+                cur_exp = (current.get("proposed_experiments") or [{}])[0]
+                if cur_exp and cur_exp != exp:
+                    exp = cur_exp          # as-shipped, not as-authored
+                    revised = True
+            else:
+                flag = ""
+            lines += [f"## Candidate {ci}{flag}: "
+                      f"{exp.get('experiment_name', 'Untitled')}", ""]
+            if revised:
+                lines += ["*Shown as shipped: this flagship was revised after "
+                          "selection (conformance / reviewer passes). The "
+                          "judge's scores below refer to the version it "
+                          "compared.*", ""]
+            sc = scores.get(ci)
+            if sc:
+                crit = ", ".join(f"{k}: {v}" for k, v in sc.items()
+                                 if k not in ("candidate", "comment"))
+                lines += [f"*Judge scores — {crit}*",
+                          f"*Judge comment: {sc.get('comment', '')}*", ""]
+            concepts = exp.get("concepts")
+            if isinstance(concepts, list) and concepts:
+                lines.append(f"### Research directions ({len(concepts)})")
+                for n, c in enumerate(concepts, 1):
+                    if not isinstance(c, dict):
+                        lines += [f"**{n}.** {c}", ""]
+                        continue
+                    from .user_interface import concept_title, humanize_key
+                    tier = f" *(tier {c['tier']})*" if c.get("tier") else ""
+                    lines.append(f"**{c.get('id') or n}. "
+                                 f"{concept_title(c, n)}**{tier}")
+                    for key in ("hypothesis", "rationale", "novelty"):
+                        if c.get(key):
+                            lines.append(f"- *{key.capitalize()}:* {c[key]}")
+                    det = c.get("details")
+                    for d in (det if isinstance(det, list) else [det] if det
+                              else []):
+                        lines.append(f"- {d}")
+                    for k, v in c.items():
+                        if k not in ("id", "tier", "title", "hypothesis",
+                                     "rationale", "novelty", "details") and v:
+                            if isinstance(v, list):
+                                v = "; ".join(str(x) for x in v)
+                            lines.append(f"- *{humanize_key(k)}:* {v}")
+                    lines.append("")
+
+            for key, title in (("hypothesis", "Hypothesis"),
+                               ("experimental_steps",
+                                "Shared protocol" if concepts
+                                else "Proposed program"),
+                               ("required_equipment", "Key capabilities"),
+                               ("optimization_params",
+                                "Suggested exploration variables"),
+                               ("expected_outcome", "Expected outcomes"),
+                               ("justification", "Rationale"),
+                               ("source_documents", "Sources")):
+                val = exp.get(key)
+                if not val:
+                    continue
+                lines.append(f"### {title}")
+                if isinstance(val, list):
+                    for item in val:
+                        if isinstance(item, dict):
+                            lines.append("- " + ", ".join(
+                                f"{k}: {v}" for k, v in item.items()))
+                        else:
+                            lines.append(f"- {item}")
+                else:
+                    lines.append(str(val))
+                lines.append("")
+            if ci == sel and findings:
+                lines.append("### Reviewer caveats (on the flagship)")
+                for f in findings:
+                    lines.append(f"- [{f.get('severity', 'note')}] "
+                                 + str(f.get('note') or f.get('finding')
+                                       or f))
+                lines.append("")
+
+        path = self._output_dir() / "ideation_report.md"
+        path.write_text("\n".join(lines))
+        from .user_interface import format_path, record_deliverable
+        record_deliverable(self.orch.base_dir, path,
+                           "Ideation report — all candidate directions",
+                           deliverable=True)
+        print(f"    📄 Ideation report saved: {format_path(path)}")
+        return str(path)
+
+    def _planner_state(self):
+        """Planner session state, or None when the planner has none (yet)."""
+        return getattr(getattr(self.orch, "planner", None), "state", None)
+
+    @property
+    def _pending_lit(self) -> list:
+        """Campaign-literature entries recorded before the planner has any
+        session state (e.g. search_literature before the first plan).
+        Folded into planner state on first access afterwards — see
+        _lit_registry(). Lazily created so partially-constructed tools
+        instances (tests build them via __new__) still work."""
+        if getattr(self, "_prestate_lit", None) is None:
+            self._prestate_lit = []
+        return self._prestate_lit
+
+    def _campaign_id(self) -> int:
+        """Current campaign id from planner state (1 when unset/legacy)."""
+        return int((self._planner_state() or {}).get("campaign_id") or 1)
+
+    def _lit_registry(self) -> list:
+        """The campaign-literature registry: [{'path', 'campaign_id'}, ...].
+
+        Lives in planner state (so it rides session checkpoints and meta
+        restores) once state exists; entries recorded before that are held
+        on the tools instance and folded in on first access afterwards.
+        ``campaign_id`` None marks a pending entry — literature saved
+        before any campaign was active, claimed by the next plan call.
+        """
+        st = self._planner_state()
+        if isinstance(st, dict) and st:
+            reg = st.setdefault("campaign_literature", [])
+            pending = self._pending_lit
+            if pending:
+                known = {(e.get("path"), e.get("campaign_id")) for e in reg}
+                reg.extend(e for e in pending
+                           if (e.get("path"), e.get("campaign_id")) not in known)
+                self._prestate_lit = []
+            return reg
+        return self._pending_lit
+
+    def _emit_plan_report(self, name: str = "plan.html", ideation=None):
+        """Render the campaign's protocol report — unless this is a dossier.
+
+        An ideation campaign gets no plan.html at all: the template renders
+        an ordered experimental-steps protocol, which misrepresents a
+        research portfolio. That suppression used to live on the
+        initial-plan path only, while the four refinement paths kept
+        regenerating the report — so a long ideation session (live: nine
+        delegations of cdoc use-case ideation) accumulated protocol reports
+        for a portfolio it had never planned. One helper, one rule.
+
+        `ideation` may be passed when the caller has already decided; it
+        defaults to asking the campaign. Returns the path, or None when
+        suppressed.
+        """
+        if ideation is None:
+            try:
+                ideation = self.orch.planner._is_ideation_campaign()
+            except Exception:  # noqa: BLE001
+                ideation = False
+        if ideation:
+            # Now that the generator has a portfolio template, an ideation
+            # campaign gets a real browser-readable report — under its own
+            # name, because "plan.html" is what this whole change is getting
+            # ideation out of. Not starred: the deliverables stay the dossier
+            # and the white paper (_record_plan_report is lab-only).
+            name = "portfolio.html" if name == "plan.html" else name
+        from .html_generator import HTMLReportGenerator
+        html_path = self._output_dir() / name
+        HTMLReportGenerator(self.orch.planner.state).generate(str(html_path))
+        self._record_plan_report(html_path)
+        return html_path
+
+    def _record_plan_report(self, html_path) -> None:
+        """Mark a generated plan report as the campaign's deliverable —
+        but only in LAB mode.
+
+        Lab produces no white paper or dossier, so plan.html is what the
+        user asked for. An IDEATION campaign is the opposite: its
+        deliverables are the dossier and the white paper, and plan.html is
+        suppressed at generation precisely because the protocol view
+        misrepresents a portfolio. Refinement regenerates it anyway, so
+        without this check a live ideation session starred three
+        "Experimental plan (report)" files beside its real artifacts.
+        """
+        try:
+            ideation = self.orch.planner._is_ideation_campaign()
+        except Exception:  # noqa: BLE001
+            ideation = False
+        if ideation:
+            return
+        from .user_interface import record_deliverable
+        record_deliverable(self.orch.base_dir, html_path,
+                           "Experimental plan (report)", deliverable=True)
+
+    def _record_literature_file(self, path) -> None:
+        """Register a freshly saved literature file (issue #396).
+
+        Tagged to the current campaign when one is active (a plan exists);
+        otherwise left pending for the next plan call to claim.
+        """
+        st = self._planner_state() or {}
+        cid = (int(st.get("campaign_id") or 1)
+               if st.get("current_plan") else None)
+        self._lit_registry().append(
+            {"path": str(Path(path).resolve()), "campaign_id": cid})
+
+    def _adopt_literature(self, explicit_context=None) -> None:
+        """Claim literature for the CURRENT campaign: pending entries plus
+        any file paths explicitly passed as literature_context. Called
+        after a successful plan/refine so each campaign's corpus is exactly
+        what it searched for or was explicitly given (issue #396)."""
+        cid = self._campaign_id()
+        reg = self._lit_registry()
+        for e in reg:
+            if e.get("campaign_id") is None:
+                e["campaign_id"] = cid
+        for p in self._context_file_paths(explicit_context):
+            if not any(e.get("path") == p and e.get("campaign_id") == cid
+                       for e in reg):
+                reg.append({"path": p, "campaign_id": cid})
+        # Persist immediately. The planner's own state dump is written from
+        # inside generate_plan (after each _log_action), i.e. BEFORE this
+        # runs, so without a re-save the on-disk mirror shows a literature
+        # file still tagged to the previous campaign — a live session's
+        # planning_state.json and checkpoint.json disagreed exactly here.
+        saver = getattr(getattr(self.orch, "planner", None), "_save_state", None)
+        if callable(saver):
+            try:
+                saver()
+            except Exception as e:  # noqa: BLE001 - mirror only
+                logging.debug(f"Planner state re-save after adoption failed: {e}")
+
+    def _prior_campaign_literature(self, explicit_context) -> list:
+        """File paths in ``explicit_context`` that the registry attributes
+        ONLY to previous campaigns — candidate cross-topic contamination
+        when the current call starts a new campaign."""
+        cid = self._campaign_id()
+        owners: Dict[str, set] = {}
+        for e in self._lit_registry():
+            owners.setdefault(str(e.get("path")), set()).add(e.get("campaign_id"))
+        return [p for p in self._context_file_paths(explicit_context)
+                if p in owners and cid not in owners[p]
+                and None not in owners[p]]
+
+    @staticmethod
+    def _context_file_paths(value) -> list:
+        """Existing-file paths named by a literature_context argument —
+        mirrors _resolve_context_text's path resolution (single path,
+        comma-separated paths, or a list; raw text yields nothing)."""
+        if value is None:
+            return []
+        items = value if isinstance(value, list) else [value]
+        out = []
+        for item in items:
+            s = str(item).strip()
+            if not s:
+                continue
+            p = Path(s)
+            if p.is_file():
+                out.append(str(p.resolve()))
+                continue
+            tokens = [t.strip() for t in s.split(",") if t.strip()]
+            token_paths = [Path(t) for t in tokens]
+            if len(tokens) > 1 and all(tp.is_file() for tp in token_paths):
+                out.extend(str(tp.resolve()) for tp in token_paths)
+        return out
+
+    def _latest_literature_file(self) -> Optional[Path]:
+        """Newest literature file belonging to the CURRENT campaign.
+
+        Campaign-scoped via the literature registry (issue #396): a session
+        can hold several unrelated campaigns, and the old session-wide
+        newest-file glob handed one campaign's corpus to another campaign's
+        refine / white paper. Only same-campaign entries are eligible here;
+        a campaign that supplied no literature gets None — an honest miss,
+        never another topic's corpus.
+
+        Legacy fallback: a session restored from before the registry
+        existed has literature files on disk but no entries — for those,
+        and only while no campaign transition has ever happened, fall back
+        to the old session-wide glob (matched by GLOB, not exact name —
+        multi-type searches save under labels like
+        'literature_search_hypothesis_context+cross_domain.md'; recursive
+        from base_dir because under the meta each delegation writes into
+        its own delegations/<NN>_<slug>/).
+        """
+        cid = self._campaign_id()
+        reg = self._lit_registry()
+        files = [Path(e["path"]) for e in reg
+                 if e.get("campaign_id") == cid and e.get("path")]
+        files = [p for p in files if p.is_file()]
+        if files:
+            files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            return files[0]
+        if reg or cid > 1:
+            return None
+        roots = []
+        base = getattr(self.orch, "base_dir", None)
+        if base:
+            roots.append((Path(base), "rglob"))
+        roots.append((self._output_dir(), "glob"))
+        seen: set = set()
+        legacy = []
+        for root, mode in roots:
+            it = (root.rglob("literature_search_*.md") if mode == "rglob"
+                  else root.glob("literature_search_*.md"))
+            for p in it:
+                if str(p) not in seen:
+                    seen.add(str(p))
+                    legacy.append(p)
+        legacy.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return legacy[0] if legacy else None
+
+    def _write_white_paper(self, audience_context: str = None) -> str:
+        """Generate the sponsor-facing white paper from the current plan and
+        save it beside the plan artifacts. Returns the saved path."""
+        # Last-resort literature continuity: if neither the current plan nor
+        # the CURRENT CAMPAIGN's history carries literature, seed the state
+        # from the newest same-campaign saved search so citations survive
+        # plan restructuring. Other campaigns' literature is invisible here
+        # (issue #396): _latest_literature_file is campaign-scoped, and an
+        # earlier campaign's corpus in history must not mask this one's
+        # missing literature.
+        state = self.orch.planner.state or {}
+        cid = self._campaign_id()
+        has_lit = any(p.get("literature_search")
+                      for p in ([state.get("current_plan") or {}]
+                                + list(state.get("plan_history") or []))
+                      if int(p.get("campaign_id") or 1) == cid)
+        if not has_lit:
+            lit_file = self._latest_literature_file()
+            if lit_file is not None and state.get("current_plan"):
+                state["current_plan"]["literature_search"] = \
+                    lit_file.read_text()
+                print(f"    📚 White paper literature restored from "
+                      f"{lit_file.name}")
+        text = self.orch.planner.generate_white_paper(
+            audience_context=audience_context
+        )
+        wp_path = self._output_dir() / "white_paper.md"
+        wp_path.write_text(text)
+        from .user_interface import format_path, record_deliverable
+        record_deliverable(self.orch.base_dir, wp_path,
+                           "White paper", deliverable=True)
+        print(f"    📄 White paper saved: {format_path(wp_path)}")
+        # A PDF twin, because this is the one document that gets forwarded.
+        # Recorded as an ordinary produced file, not a second deliverable —
+        # the markdown stays the single thing the session points at. Failure
+        # here must not lose the white paper that was just written.
+        try:
+            from ...utils.md_to_pdf import markdown_to_pdf
+            pdf_path = markdown_to_pdf(wp_path, title="White paper")
+            record_deliverable(self.orch.base_dir, pdf_path, "White paper PDF")
+            print(f"    📄 PDF version: {format_path(pdf_path)}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"    ⚠️  PDF version unavailable: {exc}")
+        return str(wp_path)
 
     @staticmethod
     def _build_objective_guidance(n_data: int, numeric_cols: list) -> dict:
@@ -404,6 +874,21 @@ class OrchestratorTools:
                 if candidate.exists():
                     print(f"    🔍 Resolved: {path.name} → {candidate.name}")
                     return str(candidate), None
+
+        # Case 2b: a bare name that exists ANYWHERE in this session. Files
+        # written by save_file land in the delegation directory that was
+        # active at the time, so a later turn asking for them by name must
+        # be able to find them without knowing which delegation wrote them.
+        if not path.is_absolute() and len(path.parts) == 1:
+            try:
+                hits = sorted(self.orch.base_dir.rglob(path.name),
+                              key=lambda p: p.stat().st_mtime, reverse=True)
+                hits = [h for h in hits if h.is_file()]
+                if hits:
+                    print(f"    🔍 Resolved in session: {hits[0]}")
+                    return str(hits[0]), None
+            except Exception:  # noqa: BLE001 - fall through to the usual search
+                pass
         
         # Case 3: Try in common data folders (session dirs first, then cwd-relative)
         session = self.orch.base_dir
@@ -483,8 +968,13 @@ class OrchestratorTools:
         During a meta-agent delegation this is a per-delegation sub-directory
         so a reused planning child does not overwrite an earlier delegation's
         artifacts; for direct `scilink plan` use it is the campaign root
-        (``_active_output_subdir`` is None, so behaviour is unchanged)."""
-        return self.orch._active_output_subdir or self.orch.base_dir
+        (``_active_output_subdir`` is None, so behaviour is unchanged).
+
+        Read defensively: file-writing tools now route through here, and a
+        partially-built orchestrator (tests, early construction) has no
+        delegation attribute yet — falling back to the campaign root is
+        always the right answer there."""
+        return getattr(self.orch, "_active_output_subdir", None) or self.orch.base_dir
 
     def _register_all_tools(self):
         """Register all tools with both OpenAI and Gemini formats."""
@@ -526,7 +1016,7 @@ class OrchestratorTools:
         )
         
         # --- LITERATURE SEARCH TOOL ---
-        def search_literature(objective: str, search_type: str = "hypothesis_context"):
+        def search_literature(objective, search_type: str = "hypothesis_context"):
             """
             Searches scientific literature using the FutureHouse Edison API.
             Call this BEFORE generate_initial_plan to enrich the plan with
@@ -538,66 +1028,426 @@ class OrchestratorTools:
                     "message": "Literature search not available (no FutureHouse API key configured)"
                 })
 
-            valid_types = ("hypothesis_context", "economic_data", "fitting_models")
-            if search_type not in valid_types:
+            search_methods = {
+                "hypothesis_context": self.orch.lit_agent.search_for_hypothesis_context,
+                "cross_domain": self.orch.lit_agent.search_for_cross_domain,
+                "economic_data": self.orch.lit_agent.search_for_economic_data,
+                "fitting_models": self.orch.lit_agent.search_for_fitting_models,
+            }
+            # Multiple types — and multiple decomposed objectives — run
+            # CONCURRENTLY: each Edison call is minutes of waiting, so a
+            # serial pair doubles the user's wait for no reason.
+            # PER-TYPE objectives. `objective` may be a mapping
+            # {search_type: question(s)} — because a paired call otherwise
+            # cross-multiplies ONE text across every type, and the two legs
+            # want different text: grounding wants "what are the gaps in X",
+            # transfer wants the FUNCTION to transfer toward. A plain string
+            # or list keeps the historical cross-product.
+            per_type: Dict[str, List[str]] = {}
+            if isinstance(objective, dict):
+                for t, objs in objective.items():
+                    key = str(t).strip()
+                    vals = ([objs] if isinstance(objs, str)
+                            else [str(o) for o in (objs or [])])
+                    vals = [v.strip() for v in vals if v and v.strip()]
+                    if vals:
+                        per_type[key] = vals
+                types = list(per_type)
+            else:
+                types = [t.strip() for t in str(search_type).split(",")
+                         if t.strip()]
+            bad = [t for t in types if t not in search_methods]
+            if bad or not types:
                 return json.dumps({
                     "status": "error",
-                    "message": f"Invalid search_type '{search_type}'. Must be one of: {', '.join(valid_types)}"
+                    "message": (f"Invalid search_type '{bad or search_type}'. "
+                                f"Use one or more (comma-separated, or as the "
+                                f"keys of an objective mapping) of: "
+                                f"{', '.join(search_methods)}")
                 })
 
-            print(f"  ⚡ Tool: Searching literature ({search_type}) for '{objective[:80]}...'")
+            if per_type:
+                # objective index -> text, deduped so an identical question
+                # asked of two types is optimized once.
+                objectives = list(dict.fromkeys(
+                    o for objs in per_type.values() for o in objs))
+                idx = {o: i for i, o in enumerate(objectives)}
+                task_pairs = [(idx[o], t) for t in types for o in per_type[t]]
+            else:
+                objectives = ([objective] if isinstance(objective, str)
+                              else [str(o) for o in (objective or [])])
+                objectives = [o.strip() for o in objectives if o and o.strip()]
+                task_pairs = None
+            if not objectives:
+                return json.dumps({"status": "error",
+                                   "message": "No objective provided."})
+            # Concurrency is bounded by BATCHING inside this single call —
+            # up to MAX_CONCURRENT searches run in parallel, extras spill
+            # into the next back-to-back batch. This fills the parallel
+            # budget before going sequential, and keeps everything in ONE
+            # tool call so the LLM never splits across turns (which would
+            # serialize). MAX_TOTAL is a wall-clock guardrail (each batch is
+            # ~10-15 min), not a concurrency limit.
+            MAX_CONCURRENT = 6
+            MAX_TOTAL = 12
+            n_jobs = (len(task_pairs) if task_pairs is not None
+                      else len(objectives) * len(types))
+            if n_jobs > MAX_TOTAL:
+                return json.dumps({
+                    "status": "error",
+                    "message": (
+                        f"{n_jobs} searches requested, over the "
+                        f"{MAX_TOTAL}-per-"
+                        f"call ceiling (~{-(-n_jobs // MAX_CONCURRENT)} "
+                        f"sequential batches of {MAX_CONCURRENT} = too long). "
+                        f"Prioritize down to <= {MAX_TOTAL} searches in this "
+                        f"one call — do NOT split into separate calls."),
+                })
+
+            label = "+".join(types)
+            n_batches = -(-n_jobs // MAX_CONCURRENT)
+            # The Q-list below shows DISTINCT questions; when several search
+            # types are active each question runs once per type, so say that
+            # multiplication out loud — '5 questions but 10 searches' read
+            # as a mismatch in live sessions.
+            _q = f"{len(objectives)} question{'s' if len(objectives) != 1 else ''}"
+            if per_type:
+                # Each type has its OWN question(s); the multiplication line
+                # would be a lie here.
+                _mapping = (", ".join(
+                    f"{len(per_type[t])} for {t}" for t in types)
+                    + f" = {n_jobs} searches")
+            elif len(types) > 1:
+                _mapping = (f"{_q}, each searched {len(types)} ways "
+                            f"({', '.join(types)}) = {n_jobs} searches")
+            else:
+                _mapping = (f"{_q} x 1 search type ({label}) = {n_jobs} "
+                            f"search{'es' if n_jobs != 1 else ''}")
+            # Spell out the actual batch sizes — 'running 6 at a time in 2
+            # batches' reads as 6 x 2 = 12 when the last batch only carries
+            # the remainder.
+            _batch_sizes = [min(MAX_CONCURRENT, n_jobs - s)
+                            for s in range(0, n_jobs, MAX_CONCURRENT)]
+            _batch_note = (f", run in {n_batches} sequential batches of "
+                           + " then ".join(str(b) for b in _batch_sizes)
+                           if n_batches > 1 else "")
+            print(f"  ⚡ Tool: Searching literature: {_mapping}{_batch_note}")
+            for qi, o in enumerate(objectives, 1):
+                _for = ""
+                if per_type:
+                    _owners = [t for t in types if o in per_type[t]]
+                    _for = f" [{'+'.join(_owners)}]"
+                print(f"     Q{qi}{_for}: '{o[:90]}"
+                      f"{'...' if len(o) > 90 else ''}'")
+            if n_batches > 1:
+                print(f"     ⏱️  Deep literature searches typically take "
+                      f"10-15 minutes per batch — {n_batches} sequential "
+                      f"batches, so expect ~{10 * n_batches}-"
+                      f"{15 * n_batches} minutes total; progress is "
+                      f"reported every few minutes.")
+            else:
+                print("     ⏱️  Deep literature searches typically take 10-15 "
+                      "minutes — the system is working; progress is reported "
+                      "every few minutes.")
+
+            # Heartbeat so a minutes-long silent wait doesn't read as a hang
+            # (Edison jobs produce no output until they complete). Tracks LIVE
+            # completion — '1 of 5 still running', not a static total — via
+            # per-future done-callbacks updating the shared pending set.
+            import threading as _threading
+            import time as _time
+            _hb_stop = _threading.Event()
+            _hb_lock = _threading.Lock()
+            # `t0` is PER BATCH, not per call. Batches run back-to-back and
+            # each gets its own deadline, so a global clock made batch 2's
+            # first minute read as "17 min elapsed — longer than the usual
+            # 10-15" and threatened a give-up time that had already passed.
+            _hb_state = {"pending": None, "running": set(), "total": n_jobs,
+                         "t0": _time.time(), "batch": 0, "n_batches": 1}
+
+            def _hb_mark_running(label):
+                with _hb_lock:
+                    _hb_state["running"].add(label)
+
+            def _hb_mark_done(label):
+                with _hb_lock:
+                    if _hb_state["pending"] is not None:
+                        _hb_state["pending"].discard(label)
+                    _hb_state["running"].discard(label)
+
+            def _heartbeat():
+                # Batches are sequential, so 'remaining' includes jobs that
+                # have not been SUBMITTED yet — report running and queued
+                # separately ('10 still running' overstated concurrency in
+                # live multi-batch sessions).
+                _eta = ("typically 10-15 min total" if n_batches == 1
+                        else "~10-15 min per batch")
+                while not _hb_stop.wait(_LIT_HEARTBEAT_SECONDS):
+                    with _hb_lock:
+                        pending = (set(_hb_state["pending"])
+                                   if _hb_state["pending"] is not None
+                                   else None)
+                        running = len(_hb_state["running"])
+                    remaining = (len(pending) if pending is not None
+                                 else _hb_state["total"])
+                    if remaining == 0:
+                        continue
+                    queued = max(0, remaining - running)
+                    with _hb_lock:
+                        _t0 = _hb_state["t0"]
+                        _bi, _bn = _hb_state["batch"], _hb_state["n_batches"]
+                    mins = int((_time.time() - _t0) / 60)
+                    _of = f" [batch {_bi} of {_bn}]" if _bn > 1 else ""
+                    # Past the advertised window, stop repeating it: saying
+                    # "typically 10-15 min" at minute 45 reads as a hang
+                    # with no end in sight. Say when we will give up.
+                    if mins >= 16:
+                        give_up = _LIT_BATCH_DEADLINE // 60
+                        print(f"  ⏳ {running} still running after {mins} min{_of} "
+                              f"— longer than the usual 10-15; abandoning "
+                              f"stragglers at {give_up} min and returning "
+                              f"whatever finished")
+                        continue
+                    if queued:
+                        print(f"  ⏳ {running} running, {queued} queued of "
+                              f"{_hb_state['total']} literature searches "
+                              f"({mins} min elapsed{_of}; {_eta})")
+                    else:
+                        print(f"  ⏳ {remaining} of {_hb_state['total']} "
+                              f"literature search"
+                              f"{'es' if _hb_state['total'] != 1 else ''} still "
+                              f"running ({mins} min elapsed{_of}; {_eta})")
+
+            _threading.Thread(target=_heartbeat, daemon=True).start()
 
             try:
-                clean_query = optimize_search_query(
-                    objective=objective, model=self.orch.planner.model
-                )
+                clean_queries = [optimize_search_query(
+                    objective=o, model=self.orch.planner.model
+                ) for o in objectives]
 
-                search_methods = {
-                    "hypothesis_context": self.orch.lit_agent.search_for_hypothesis_context,
-                    "economic_data": self.orch.lit_agent.search_for_economic_data,
-                    "fitting_models": self.orch.lit_agent.search_for_fitting_models,
-                }
-                lit_res = search_methods[search_type](clean_query)
+                tasks = (task_pairs if task_pairs is not None
+                         else [(oi, t) for oi in range(len(objectives))
+                               for t in types])
 
-                if lit_res['status'] != 'success':
+                def _task_label(oi, t):
+                    return f"q{oi + 1}:{t}" if len(objectives) > 1 else t
+
+                with _hb_lock:
+                    _hb_state["pending"] = {_task_label(oi, t)
+                                            for oi, t in tasks}
+                results = {}
+                if len(tasks) == 1:
+                    oi, t = tasks[0]
+                    _hb_mark_running(_task_label(oi, t))
+                    results[(oi, t)] = search_methods[t](clean_queries[oi])
+                    _hb_mark_done(_task_label(oi, t))
+                else:
+                    from concurrent.futures import (
+                        ThreadPoolExecutor, TimeoutError as FuturesTimeout)
+                    # Greedy batches of <= MAX_CONCURRENT, back-to-back. A
+                    # 5-search request is ONE parallel batch; an 8-search
+                    # request is 6 concurrent then 2 concurrent — never 2+3
+                    # sub-optimal splits, and never sequential when it fits
+                    # the parallel budget.
+                    _n_batches = -(-len(tasks) // MAX_CONCURRENT)
+                    with _hb_lock:
+                        _hb_state["n_batches"] = _n_batches
+                    for start in range(0, len(tasks), MAX_CONCURRENT):
+                        batch = tasks[start:start + MAX_CONCURRENT]
+                        # Fresh clock: this batch's deadline starts here, so
+                        # the elapsed time reported against it must too.
+                        with _hb_lock:
+                            _hb_state["t0"] = _time.time()
+                            _hb_state["batch"] = start // MAX_CONCURRENT + 1
+                        # NOT a context manager: its __exit__ joins every
+                        # worker, so one wedged remote task would still hold
+                        # the call open after the deadline below fires.
+                        ex = ThreadPoolExecutor(max_workers=len(batch))
+                        try:
+                            futures = {}
+                            for oi, t in batch:
+                                _l = _task_label(oi, t)
+                                _hb_mark_running(_l)
+                                f = ex.submit(search_methods[t],
+                                              clean_queries[oi])
+                                f.add_done_callback(
+                                    lambda _f, _l=_l: _hb_mark_done(_l))
+                                futures[(oi, t)] = f
+                            # Bounded wait. One wedged remote task used to
+                            # pin the whole call (live: 45+ min on a
+                            # 5-search request) while four finished results
+                            # sat unusable behind it. Past the deadline the
+                            # stragglers are abandoned and reported as
+                            # failures — the merge below already handles a
+                            # partial result set.
+                            deadline = _time.time() + _LIT_BATCH_DEADLINE
+                            for k, f in futures.items():
+                                remaining = deadline - _time.time()
+                                try:
+                                    results[k] = f.result(
+                                        timeout=max(0.0, remaining))
+                                except FuturesTimeout:
+                                    label = _task_label(*k)
+                                    _hb_mark_done(label)
+                                    print(f"  ⚠️  {label} exceeded "
+                                          f"{_LIT_BATCH_DEADLINE // 60} min "
+                                          f"— abandoning it and returning "
+                                          f"the searches that finished.")
+                                    results[k] = {
+                                        "status": "timeout",
+                                        "message": (
+                                            f"abandoned after "
+                                            f"{_LIT_BATCH_DEADLINE}s"),
+                                    }
+                                except Exception as e:  # noqa: BLE001
+                                    results[k] = {"status": "error",
+                                                  "message": str(e)}
+                        finally:
+                            # Do not join: an abandoned worker keeps polling
+                            # until the agent's own max_wait_time ends it.
+                            ex.shutdown(wait=False, cancel_futures=True)
+
+                ok = {k: r for k, r in results.items()
+                      if r.get("status") == "success"}
+                if not ok:
+                    first = next(iter(results.values()))
                     return json.dumps({
-                        "status": lit_res['status'],
-                        "message": lit_res.get('message', 'Literature search did not succeed')
+                        "status": first.get("status", "error"),
+                        "message": first.get("message", "Literature search did not succeed")
                     })
 
-                # Save to file (distinct per search_type to avoid overwrites)
-                lit_path = self._output_dir() / f"literature_search_{search_type}.md"
+                # Sections are LABELLED, not concatenated: candidates must be
+                # able to tell established results in this field (usable as
+                # constraints) from cross-domain analogies (usable as
+                # mechanism inspiration, but not established here).
+                SECTION = {
+                    "hypothesis_context": "## ESTABLISHED IN THIS FIELD (known methods, "
+                                          "parameter ranges, failure modes)",
+                    "cross_domain": "## TRANSFERABLE MECHANISMS FROM OTHER DOMAINS "
+                                    "(analogies — NOT established results in this field)",
+                    "economic_data": "## ECONOMIC CONTEXT",
+                    "fitting_models": "## MODELS AND EQUATIONS",
+                }
+                parts = []
+                for oi in range(len(objectives)):
+                    secs = [f"{SECTION.get(t, '## ' + t.upper())}\n{ok[(oi, t)]['content']}"
+                            for t in types if (oi, t) in ok]
+                    if not secs:
+                        continue
+                    if len(objectives) > 1:
+                        # Multi-question runs keep per-question grouping so
+                        # downstream readers see which evidence answers what.
+                        parts.append(f"# Question {oi + 1}: {objectives[oi]}\n\n"
+                                     + "\n\n".join(secs))
+                    else:
+                        parts.extend(secs)
+                content = "\n\n".join(parts)
+
+                lit_path = self._output_dir() / f"literature_search_{label}.md"
                 with open(lit_path, 'w') as f:
-                    f.write(f"# Literature Search Results ({search_type})\n\n")
-                    f.write(lit_res['content'])
+                    f.write(f"# Literature Search Results ({label})\n\n")
+                    f.write(content)
+                self._record_literature_file(lit_path)
 
-                print(f"  ✅ Literature search completed. Saved to {lit_path.name}")
+                failed = [(f"q{oi + 1}:{t}" if len(objectives) > 1 else t)
+                          for oi, t in tasks if (oi, t) not in ok]
+                print(f"  ✅ Literature search completed ({len(ok)}/{len(tasks)}). "
+                      f"Saved to {lit_path.name}")
 
-                return json.dumps({
+                out = {
                     "status": "success",
+                    "searches_run": [
+                        (f"q{oi + 1}:{t}" if len(objectives) > 1 else t)
+                        for oi, t in tasks if (oi, t) in ok
+                    ],
                     "file_path": str(lit_path),
-                    "content_preview": lit_res['content'][:500] + "..." if len(lit_res['content']) > 500 else lit_res['content'],
-                    "hint": "Pass file_path as literature_context to generate_initial_plan()"
-                })
+                    "content_preview": content[:500] + "..." if len(content) > 500 else content,
+                    "hint": "Pass file_path as literature_context to generate_initial_plan()",
+                }
+                if failed:
+                    out["failed_searches"] = failed
+                if ok:
+                    out["caveat"] = ("Literature context of any type was measured to "
+                                     "reduce constraint COVERAGE — plans stay on-topic "
+                                     "but silently omit individual requirements. When "
+                                     "the objective carries hard equipment/process "
+                                     "constraints, pass them as additional_context so "
+                                     "each is mapped to a named step; do not withhold "
+                                     "the literature.")
+                return json.dumps(out)
 
             except Exception as e:
                 logging.error(f"Literature search error: {e}", exc_info=True)
                 return json.dumps({"status": "error", "message": str(e)})
+            finally:
+                _hb_stop.set()
 
         self._register_tool(
             func=search_literature,
             name="search_literature",
             description=(
                 "Searches scientific literature via FutureHouse Edison API. "
+                "A deep search takes ~10-15 minutes — tell the user before "
+                "calling so the wait is expected. "
                 "Call BEFORE generate_initial_plan() to enrich the plan with external context. "
-                "Pass the returned file_path as literature_context to generate_initial_plan()."
+                "Pass the returned file_path as literature_context to generate_initial_plan(). "
+                "DECOMPOSE, don't concatenate: each objective must be ONE "
+                "focused question — a query stuffed with several distinct "
+                "aspects returns a shallow synthesis of all of them. Pass a "
+                "LIST of objectives (and, if useful, multiple search types) "
+                "in a SINGLE call — put ALL the aspects you want covered "
+                "into this one call. The tool runs up to 6 searches "
+                "concurrently and automatically batches any extras into "
+                "back-to-back rounds, merging everything into one labelled "
+                "document. So do NOT make a second search_literature call to "
+                "cover more aspects (a second call is a later turn and runs "
+                "sequentially anyway) — just list them all here. Total "
+                "searches must be <= 12. When pairing grounding with "
+                "cross_domain, give each type its OWN objective via the "
+                "object form (see `objective`) rather than one shared "
+                "question."
             ),
             parameters={
-                "objective": {"type": "string", "description": "Research objective or question to search for"},
+                "objective": {
+                    "type": ["string", "array", "object"],
+                    "items": {"type": "string"},
+                    "description": (
+                        "ONE focused research question, or a LIST of them "
+                        "(run in parallel). Split a broad objective — or "
+                        "one containing too many distinct aspects — into "
+                        "separate entries; each entry should stand alone as "
+                        "a question one review could answer well. "
+                        "PER-TYPE form: pass an OBJECT keyed by search type, "
+                        "e.g. {\"hypothesis_context\": [\"what is known "
+                        "about X\"], \"cross_domain\": [\"capture a state "
+                        "that exists only under drive and relaxes in "
+                        "milliseconds\"]}. Use it whenever you pair the two: "
+                        "grounding wants the question about your field, "
+                        "transfer wants the FUNCTION to transfer toward, and "
+                        "a single shared string cannot be both. With the "
+                        "object form, search_type is taken from its keys."
+                    ),
+                },
                 "search_type": {
                     "type": "string",
-                    "description": "Type of search: 'hypothesis_context' (default, for planning), 'economic_data' (for TEA), or 'fitting_models' (for curve fitting)",
-                    "enum": ["hypothesis_context", "economic_data", "fitting_models"]
+                    "description": (
+                        "One type, or several comma-separated (run in parallel). "
+                        "'hypothesis_context' (default): established methods, "
+                        "parameter ranges and pitfalls in the problem's own field — "
+                        "the grounding a runnable plan needs. "
+                        "'cross_domain': mechanisms from ADJACENT/UNRELATED fields "
+                        "that could transfer — use for IDEATION (pair it with "
+                        "hypothesis_context: 'hypothesis_context,cross_domain'). "
+                        "cross_domain needs a FUNCTION or CHALLENGE to transfer "
+                        "toward, so phrase that objective as the thing to achieve "
+                        "or overcome; a survey question ('what are the frontiers "
+                        "in X', 'what is hard to measure in X') asks for X's own "
+                        "field and belongs to hypothesis_context — sending it to "
+                        "cross_domain asks for a review and forbids it in the "
+                        "same breath. "
+                        "'economic_data' (TEA); 'fitting_models' "
+                        "(curve fitting)."
+                    ),
                 }
             },
             required=["objective"]
@@ -676,7 +1526,12 @@ class OrchestratorTools:
             additional_context: str = None,
             skill: str = None,
             literature_context: str = None,
-            molecule_context: str = None
+            molecule_context: str = None,
+            n_candidates: int = None,
+            selection_profile: str = None,
+            white_paper: bool = None,
+            new_campaign: bool = None,
+            kind: str = "experiment"
         ):
             """
             Generates experimental plan (science strategy only, no code).
@@ -686,6 +1541,37 @@ class OrchestratorTools:
             """
             obj = specific_objective if specific_objective else self.orch.objective
             print(f"  ⚡ Tool: Generating Initial Plan for '{obj}'...")
+
+            # Campaign boundary (issue #396): decided up front so the
+            # best-of-N default and the stale-literature guard below see it.
+            _snc = getattr(self.orch.planner, "starts_new_campaign", None)
+            starts_new = bool(_snc(obj, new_campaign)) if _snc else False
+
+            # Guard: a NEW campaign fed literature that the registry
+            # attributes only to PREVIOUS campaigns is cross-topic
+            # contamination (live-confirmed: a chat-visible file path from
+            # an earlier brainstorm gets re-passed for an unrelated one) —
+            # unless the caller declares BOTH signals explicitly
+            # (new_campaign=true + the file), which marks deliberate reuse.
+            if starts_new and new_campaign is not True:
+                stale = self._prior_campaign_literature(literature_context)
+                if stale:
+                    return json.dumps({
+                        "status": "error",
+                        "message": (
+                            "literature_context points to literature from a "
+                            "PREVIOUS campaign on a different topic: "
+                            + ", ".join(Path(p).name for p in stale)
+                            + ". This objective starts a NEW campaign, and "
+                            "another topic's corpus must not ground it."
+                        ),
+                        "hint": (
+                            "Omit literature_context (or run "
+                            "search_literature for THIS topic first). If "
+                            "reusing that literature is deliberate, pass "
+                            "new_campaign=true together with the file."
+                        ),
+                    })
 
             # Resolve knowledge paths (with fallback to orchestrator dir)
             knowledge_list = self._resolve_knowledge_paths(knowledge_paths)
@@ -769,31 +1655,41 @@ class OrchestratorTools:
             external_context_parts = []
             saved_extras = []
             if literature_context:
-                lp = Path(literature_context)
-                if lp.is_file():
-                    lit_text = lp.read_text()
+                lit_text = self._resolve_context_text(literature_context)
+                if lit_text:
                     external_context_parts.append(lit_text)
-                    saved_extras.append(str(lp))
-                    print(f"    📚 Literature context from: {lp.name}")
-                else:
-                    external_context_parts.append(literature_context)
+                    print(f"    📚 Literature context resolved "
+                          f"({len(lit_text.split())} words)")
             if molecule_context:
-                mp = Path(molecule_context)
-                if mp.is_file():
-                    mol_text = mp.read_text()
+                mol_text = self._resolve_context_text(molecule_context)
+                if mol_text:
                     external_context_parts.append(
                         "## Molecular Design & Synthesis Planning\n" + mol_text
                     )
-                    saved_extras.append(str(mp))
-                    print(f"    🧪 Molecule context from: {mp.name}")
-                else:
-                    external_context_parts.append(
-                        "## Molecular Design & Synthesis Planning\n" + molecule_context
-                    )
+                    print("    🧪 Molecule context resolved")
 
             ext_ctx = "\n\n".join(external_context_parts) if external_context_parts else None
 
+            # DEPRECATED: ideation through the experiment tool. It is what
+            # the portfolio contract replaces, so forward rather than author
+            # a portfolio into the wrong schema one more time. Removed once
+            # no caller passes it.
+            if selection_profile == "ideation" and kind != "portfolio":
+                logging.warning(
+                    "selection_profile='ideation' on generate_initial_plan is "
+                    "deprecated — forwarding to the portfolio contract; call "
+                    "generate_ideation_portfolio directly.")
+                print("    ↪️  ideation profile is deprecated on this tool — "
+                      "authoring a portfolio instead.")
+                kind = "portfolio"
+
             try:
+                n_cand = resolve_n_candidates(
+                    n_candidates, self.orch.planner.state,
+                    new_campaign=starts_new)
+                if n_candidates is None and n_cand > 1:
+                    print(f"    🧭 New campaign — defaulting to best-of-{n_cand} "
+                          "candidate plans (pass n_candidates=1 for a single plan).")
                 plan = self.orch.planner.generate_plan(
                     objective=obj,
                     knowledge_paths=knowledge_list,
@@ -802,8 +1698,30 @@ class OrchestratorTools:
                     enable_human_feedback=self._get_human_feedback_enabled(),
                     reset_state=False,
                     skill=effective_skill,
-                    external_context=ext_ctx
+                    external_context=ext_ctx,
+                    n_candidates=n_cand,
+                    candidate_report_dir=(str(self._output_dir() / "plan_candidates")
+                                          if n_cand > 1 else None),
+                    selection_profile=(selection_profile
+                                       if selection_profile in ("lab", "ideation")
+                                       else "lab"),
+                    new_campaign=new_campaign,
+                    kind=kind,
                 )
+
+                # An explicit lab profile marks THIS plan a bench plan even
+                # inside an ideation campaign: the campaign ideated, the user
+                # picked a direction, and now wants the executable protocol
+                # for it. Without a way to say so the campaign stamp would
+                # hand a runnable protocol a research dossier. Omitting the
+                # profile inherits the campaign; only the explicit word
+                # overrides it. `_stamp_campaign` never overwrites a type
+                # that is already set, so this survives the later passes.
+                if selection_profile == "lab" and isinstance(plan, dict):
+                    plan.setdefault("type", "lab")
+                    _cur = (self.orch.planner.state or {}).get("current_plan")
+                    if isinstance(_cur, dict):
+                        _cur.setdefault("type", "lab")
 
                 # Store skill on orchestrator for downstream tools
                 if effective_skill:
@@ -819,24 +1737,50 @@ class OrchestratorTools:
                                     or "Plan generation failed")
                     })
 
+                # Claim literature for the (possibly new) campaign: pending
+                # searches plus explicitly passed files (issue #396).
+                self._adopt_literature(literature_context)
+
                 # Save
                 output_path = self._output_dir() / "plan.json"
                 with open(output_path, 'w') as f:
                     json.dump(plan, f, indent=2)
 
-                # If literature came from the deprecated internal path, save it
+                # Persist external grounding that arrived without a literature
+                # file (molecule context / raw text stamped into the plan's
+                # literature_search), so the campaign registry can carry it
+                # into later refines. (The internal literature fallback that
+                # originally motivated this save is removed.)
                 if not literature_context and plan.get("literature_search"):
                     lit_path = self._output_dir() / "literature_search.md"
                     with open(lit_path, 'w') as f:
                         f.write("# Literature Search Results\n\n")
                         f.write(plan["literature_search"])
+                    self._record_literature_file(lit_path)
                     saved_extras.append(str(lit_path))
 
-                # Generate HTML
-                from .html_generator import HTMLReportGenerator
-                html_path = self._output_dir() / "plan.html"
-                generator = HTMLReportGenerator(self.orch.planner.state)
-                generator.generate(str(html_path))
+                # Generate HTML — except for ideation runs: the report
+                # template renders the plan as an executable protocol (an
+                # ordered experimental-steps list, pipe-rows merged into
+                # tables) with no ideation vocabulary, which misrepresents a
+                # free-form research dossier; there the white paper is the
+                # human-facing artifact and plan.json keeps the record.
+                # (see the deprecation forward above)
+                # Ask the PLAN what it is, not the best-of-N judge knob.
+                # `selection_profile` weights candidate selection and is a
+                # documented no-op with n_candidates=1 — so a consolidation
+                # call inside an ideation campaign (live: "consolidate the
+                # session's threads into one cross-cutting class") scored as
+                # a lab run and got a protocol report, no dossier, and no
+                # white paper, while the console it printed still used the
+                # ideation vocabulary. The plan's own `type` stamp, inherited
+                # from the campaign, is the honest signal; the profile clause
+                # remains for the first call, which establishes the stamp.
+                _ideation_run = (
+                    plan.get("type") == "ideation"
+                    or (selection_profile == "ideation" and n_cand > 1)
+                )
+                html_path = self._emit_plan_report(ideation=_ideation_run)
 
                 num_experiments = len(plan.get('proposed_experiments', []))
 
@@ -845,14 +1789,60 @@ class OrchestratorTools:
                     "iteration": plan.get('iteration'),
                     "num_experiments": num_experiments,
                     "output_path": str(output_path),
-                    "html_report": str(html_path),
                     "knowledge_used": knowledge_list is not None,
                     "primary_data_used": primary_dataset is not None,
                     "tea_context_included": self.orch.latest_tea_results is not None,
                     "hint": "Use generate_implementation_code() to add executable code"
                 }
+                if html_path is not None:
+                    result["html_report"] = str(html_path)
                 if saved_extras:
                     result["external_results_files"] = saved_extras
+                pc = (self.orch.planner.state or {}).get("plan_candidates")
+                if n_cand > 1 and pc:
+                    result["best_of_n"] = {
+                        "requested": n_cand,
+                        "produced": len(pc.get("candidates", [])),
+                        "selected_candidate": pc.get("selected_index"),
+                        "human_override": pc.get("human_override", False),
+                        "tier": pc.get("tier"),
+                        "judge_reasoning": (pc.get("judge") or {}).get("reasoning", ""),
+                        "candidate_reports": pc.get("reports", []),
+                    }
+
+                # Ideation runs get a detailed all-candidates dossier —
+                # runner-ups are deliverables there, and rendering it
+                # deterministically from the same state the white paper uses
+                # keeps the two consistent by construction.
+                # ...but the DOSSIER is a report over the candidate set, so it
+                # needs one from THIS call. `plan_candidates` survives in state
+                # across delegations, so a single-plan follow-up would render
+                # its own flagship beside an EARLIER question's runner-ups — a
+                # dossier answering a question the user has moved on from.
+                if _ideation_run and n_cand > 1:
+                    try:
+                        result["ideation_report"] = self._write_ideation_report()
+                    except Exception as e:  # noqa: BLE001 - plan result survives
+                        logging.warning(f"Ideation report failed: {e}")
+
+                # Ideation runs additionally produce a sponsor-facing white
+                # paper by default (white_paper=False opts out; =True forces
+                # one for any profile). Non-fatal: the plan already saved.
+                _wp_auto = (white_paper is None and _ideation_run)
+                if white_paper or _wp_auto:
+                    try:
+                        wp_path = self._write_white_paper()
+                        result["white_paper"] = str(wp_path)
+                        result["hint"] = (
+                            "White paper saved alongside the plan — adapt it "
+                            "for a pitch/pre-proposal; regenerate with "
+                            "generate_white_paper(audience_context=...) to "
+                            "target a specific sponsor. "
+                            + result.get("hint", "")
+                        )
+                    except Exception as e:  # noqa: BLE001 - plan result survives
+                        logging.warning(f"White paper generation failed: {e}")
+                        result["white_paper_error"] = str(e)
                 return json.dumps(result)
                 
             except Exception as e:
@@ -867,7 +1857,14 @@ class OrchestratorTools:
             func=generate_initial_plan,
             name="generate_initial_plan",
             description=(
-                "Generates experimental plan (science strategy only, no implementation code). "
+                "Generates an EXPERIMENTAL plan — a testable hypothesis with "
+                "the measurements that would test it (science strategy only, "
+                "no implementation code). "
+                "NOT for a document that merely contains the word plan: a "
+                "build/staging roadmap, a cost or footprint estimate, a "
+                "consolidation memo or a summary is authored with "
+                "write_technical_document. If the request has no hypothesis to "
+                "test and nothing to measure, it is not this tool. "
                 "Automatically includes previous TEA results if available. "
                 "Can use: papers/reports, experimental data, lab constraints."
             ),
@@ -892,10 +1889,141 @@ class OrchestratorTools:
                         getattr(self.orch, "_custom_skills", None)
                     ),
                 },
-                "literature_context": {"type": "string", "description": "File path or text from search_literature() tool. Provides external scientific literature context."},
-                "molecule_context": {"type": "string", "description": "File path or text from query_molecules() tool. Provides molecular design / synthesis context."}
+                "literature_context": {
+                    "type": ["string", "array"],
+                    "items": {"type": "string"},
+                    "description": (
+                        "Literature from search_literature(): a file path, a "
+                        "LIST of file paths (or comma-separated), or raw "
+                        "text. File contents are read and concatenated."
+                    ),
+                },
+                "molecule_context": {"type": "string", "description": "File path or text from query_molecules() tool. Provides molecular design / synthesis context."},
+                "new_campaign": {
+                    "type": "boolean",
+                    "description": (
+                        "Campaign boundary. Set true when this plan starts "
+                        "a NEW research topic unrelated to the current "
+                        "campaign (e.g. a second brainstorm in the same "
+                        "session) — the previous campaign's plans and "
+                        "literature stay archived and are NOT carried into "
+                        "the new topic's plans, white papers, or "
+                        "refinements. Set false to force continuation of "
+                        "the current campaign despite a reworded "
+                        "objective. Omit to auto-detect from objective "
+                        "similarity."
+                    ),
+                },
+                "n_candidates": {
+                    "type": "integer",
+                    "description": (
+                        "Best-of-N width (1-4). OMITTED: a campaign's FIRST "
+                        "plan defaults to best-of-3 (distinct candidate "
+                        "strategies, LLM judge picks, human can override); "
+                        "later plans default to 1. Pass 1 explicitly when "
+                        "the user wants a single plan; pass 2-4 to set the "
+                        "width. A cap, not a quota: generation stops early "
+                        "when the evidence supports no further distinct "
+                        "approach. Keep specific_objective about ONE "
+                        "scientific goal — do NOT ask for multiple "
+                        "plans/strategies in the objective text; this "
+                        "parameter provides the multiplicity."
+                    ),
+                },
+                "selection_profile": {
+                    "type": "string",
+                    "enum": ["lab", "ideation"],
+                    "description": (
+                        "How the best-of-N judge weights its pick. 'lab' "
+                        "(default): feasibility/actionability first — use "
+                        "when the plan will actually be executed on stated "
+                        "equipment. 'ideation': information gain and "
+                        "mechanistic novelty first, feasibility only as a "
+                        "tiebreaker — SWITCH to this when the user is "
+                        "brainstorming, ideating, or asking for the most "
+                        "scientifically interesting direction rather than "
+                        "tomorrow's runnable protocol. Same candidates and "
+                        "scores either way; only the authoring latitude and "
+                        "the pick's weighting change, and the human can "
+                        "still override. NOTE: ideation weighting requires "
+                        "n_candidates >= 2 — with a single plan there is "
+                        "nothing to select — so never pass n_candidates=1 "
+                        "together with ideation. OMIT this parameter inside "
+                        "an established campaign: the plan then inherits "
+                        "that campaign's kind, so a follow-up or "
+                        "consolidation in an ideation campaign still gets "
+                        "the dossier and white paper rather than a bench "
+                        "protocol report. Pass 'lab' EXPLICITLY to force a "
+                        "bench/engineering plan even inside an ideation "
+                        "campaign — the case is the user picking one ideated "
+                        "direction and asking for its runnable bench "
+                        "protocol. Note this tool is for EXPERIMENTAL "
+                        "design and measurements; a roadmap, estimate or "
+                        "summary document is not a plan and belongs in "
+                        "save_file. Ideation plans also produce a "
+                        "sponsor-facing white paper by default (see "
+                        "white_paper)."
+                    ),
+                },
+                "white_paper": {
+                    "type": "boolean",
+                    "description": (
+                        "Also distill the plan into a sponsor-facing "
+                        "technical white paper (pitch / pre-proposal). "
+                        "OMITTED: automatic for ideation-profile runs, off "
+                        "otherwise. Pass false to skip it on an ideation "
+                        "run; pass true to force one for any profile."
+                    ),
+                },
             },
             required=[]
+        )
+
+        # --- WHITE PAPER TOOL ---
+        def generate_white_paper(audience_context: str = None):
+            """Distill the current campaign plan into a sponsor-facing
+            white paper (technical pre-proposal)."""
+            print("  ⚡ Tool: Generating white paper...")
+            try:
+                wp_path = self._write_white_paper(audience_context)
+                text = Path(wp_path).read_text()
+                return json.dumps({
+                    "status": "success",
+                    "white_paper": str(wp_path),
+                    "word_count": len(text.split()),
+                    "preview": text[:600],
+                })
+            except Exception as e:
+                logging.error(f"White paper error: {e}", exc_info=True)
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=generate_white_paper,
+            name="generate_white_paper",
+            description=(
+                "Distill the CURRENT campaign plan into a technical white "
+                "paper aimed at sponsors/program managers with technical "
+                "backgrounds — a pitch / pre-proposal: significance and "
+                "payoff forward, mechanisms rigorous, no bench-level "
+                "protocol detail. After a best-of-N run it weaves distinct "
+                "runner-up strategies in as secondary thrusts and turns the "
+                "reviewer caveats into a risks-and-mitigation section. "
+                "Requires an existing plan (generate_initial_plan first). "
+                "Ideation runs already produce one automatically — call "
+                "this to REGENERATE with sponsor targeting via "
+                "audience_context, or to add one to a lab-profile plan."
+            ),
+            parameters={
+                "audience_context": {
+                    "type": "string",
+                    "description": (
+                        "Optional sponsor targeting, e.g. 'emphasize "
+                        "fundamental-science significance and milestones' "
+                        "or 'lead with cost and scalability impact'."
+                    ),
+                },
+            },
+            required=[],
         )
 
         # 2. GENERATE IMPLEMENTATION CODE
@@ -998,10 +2126,7 @@ class OrchestratorTools:
                     json.dump(updated_plan, f, indent=2)
                 
                 # Regenerate HTML
-                from .html_generator import HTMLReportGenerator
-                html_path = self._output_dir() / "plan.html"
-                generator = HTMLReportGenerator(self.orch.planner.state)
-                generator.generate(str(html_path))
+                html_path = self._emit_plan_report()
                 
                 # Check if any experiments actually got code
                 experiments = updated_plan.get("proposed_experiments", [])
@@ -1016,7 +2141,7 @@ class OrchestratorTools:
                         "message": "Code generation failed — no executable code was produced for any experiment.",
                         "hint": "This may be due to an LLM API timeout or error. Try again.",
                         "output_path": str(output_path),
-                        "html_report": str(html_path)
+                        "html_report": str(html_path) if html_path else None
                     })
 
                 # Save scripts to output folder
@@ -1028,7 +2153,7 @@ class OrchestratorTools:
                     "status": "success",
                     "message": "Implementation code added to plan",
                     "output_path": str(output_path),
-                    "html_report": str(html_path),
+                    "html_report": str(html_path) if html_path else None,
                     "scripts_saved_to": final_out,
                     "code_sources_used": code_list
                 })
@@ -1242,21 +2367,28 @@ class OrchestratorTools:
                 else:
                     payload = [payload] + extras
 
-            # Build external context from literature/molecule files or raw text
-            ext_parts = []
+            # Build external context. Literature is tracked SEPARATELY from
+            # molecule/additional context so provenance stamping downstream
+            # never mistakes a critique or constraint note for literature.
+            lit_text = None
             if literature_context:
-                lp = Path(literature_context)
-                ext_parts.append(lp.read_text() if lp.is_file() else literature_context)
+                lit_text = self._resolve_context_text(literature_context)
                 print(f"    📚 Literature context provided")
             else:
-                # Auto-load hypothesis context from session if available
-                lit_path = self._output_dir() / "literature_search_hypothesis_context.md"
-                if lit_path.is_file():
-                    ext_parts.append(lit_path.read_text())
-                    print(f"    📚 Auto-loaded literature hypothesis context from session")
+                # Auto-load the newest saved literature from the CURRENT
+                # campaign (campaign-scoped registry, issue #396) — matched
+                # by glob-shaped labels (e.g. '...hypothesis_context
+                # +cross_domain.md') via the registry entries. A campaign
+                # that supplied no literature refines without any; another
+                # topic's corpus is never injected.
+                lit_path = self._latest_literature_file()
+                if lit_path is not None:
+                    lit_text = lit_path.read_text()
+                    print(f"    📚 Auto-loaded literature context from "
+                          f"session ({lit_path.name})")
+            ext_parts = [lit_text] if lit_text else []
             if molecule_context:
-                mp = Path(molecule_context)
-                mol_text = mp.read_text() if mp.is_file() else molecule_context
+                mol_text = self._resolve_context_text(molecule_context)
                 ext_parts.append("## Molecular Design & Synthesis Planning\n" + mol_text)
                 print(f"    🧪 Molecule context provided")
             if additional_context:
@@ -1269,7 +2401,8 @@ class OrchestratorTools:
                     results=payload,
                     enable_human_feedback=self._get_human_feedback_enabled(),
                     use_literature_rag=use_literature_rag,
-                    external_context=ext_ctx
+                    external_context=ext_ctx,
+                    literature_text=lit_text
                 )
                 
                 if plan.get("error"):
@@ -1277,24 +2410,30 @@ class OrchestratorTools:
                         "status": "error",
                         "message": plan.get("error")
                     })
-                
+
+                # Explicitly supplied literature files now belong to this
+                # campaign's corpus (issue #396).
+                self._adopt_literature(literature_context)
+
+                # (literature_search provenance is stamped inside
+                # refine_plan itself — the single point where the refined
+                # plan enters current_plan and history — from the
+                # literature_text passed above.)
+
                 # Save
                 output_path = self._output_dir() / "plan.json"
                 with open(output_path, 'w') as f:
                     json.dump(plan, f, indent=2)
 
                 # Generate HTML
-                from .html_generator import HTMLReportGenerator
-                html_path = self._output_dir() / "plan.html"
-                generator = HTMLReportGenerator(self.orch.planner.state)
-                generator.generate(str(html_path))
+                html_path = self._emit_plan_report()
 
                 return json.dumps({
                     "status": "success",
                     "iteration": plan.get('iteration'),
                     "num_experiments": len(plan.get('proposed_experiments', [])),
                     "output_path": str(output_path),
-                    "html_report": str(html_path),
+                    "html_report": str(html_path) if html_path else None,
                     "hint": "Use refine_implementation_code() to update executable code"
                 })
                 
@@ -1366,17 +2505,14 @@ class OrchestratorTools:
                     json.dump(plan, f, indent=2)
 
                 # Generate HTML
-                from .html_generator import HTMLReportGenerator
-                html_path = self._output_dir() / "plan.html"
-                generator = HTMLReportGenerator(self.orch.planner.state)
-                generator.generate(str(html_path))
+                html_path = self._emit_plan_report()
 
                 return json.dumps({
                     "status": "success",
                     "iteration": plan.get('iteration'),
                     "num_experiments": len(plan.get('proposed_experiments', [])),
                     "output_path": str(output_path),
-                    "html_report": str(html_path),
+                    "html_report": str(html_path) if html_path else None,
                     "hint": "Use generate_implementation_code() or refine_implementation_code() to update executable code for the adjusted plan."
                 })
 
@@ -1447,10 +2583,7 @@ class OrchestratorTools:
                     json.dump(updated_plan, f, indent=2)
                 
                 # Regenerate HTML
-                from .html_generator import HTMLReportGenerator
-                html_path = self._output_dir() / "plan_refined.html"
-                generator = HTMLReportGenerator(self.orch.planner.state)
-                generator.generate(str(html_path))
+                html_path = self._emit_plan_report("plan_refined.html")
                 
                 # Save scripts
                 final_out = str(self._output_dir() / "output_scripts")
@@ -1461,7 +2594,7 @@ class OrchestratorTools:
                     "status": "success",
                     "message": "Implementation code updated",
                     "output_path": str(output_path),
-                    "html_report": str(html_path),
+                    "html_report": str(html_path) if html_path else None,
                     "scripts_saved_to": final_out
                 })
                 
@@ -1555,7 +2688,10 @@ class OrchestratorTools:
 
             # Pass schema to experiment context
             current_plan = self.orch.planner.state.get("current_plan", {})
-            exp_context = current_plan.get("proposed_experiments", [{}])[0] if current_plan else {}
+            # `or [{}]` — the dict default only fires on a MISSING key, so a plan
+            # carrying an empty experiments list would IndexError here.
+            _exps = (current_plan or {}).get("proposed_experiments") or [{}]
+            exp_context = _exps[0]
 
             # Inject schema requirements into context (only when generating new script)
             role_hints = None
@@ -1633,7 +2769,9 @@ class OrchestratorTools:
                         except Exception:
                             pass  # If sidecar can't be read, skip validation
 
-                if not self.orch.active_scalarizer_script or force_regenerate:
+                # Pass-through ingests (#366) carry no script to lock.
+                if res.get("source_script") and (
+                        not self.orch.active_scalarizer_script or force_regenerate):
                     self.orch.active_scalarizer_script = res["source_script"]
                     print(f"    ✅ Analysis Logic Locked: {Path(self.orch.active_scalarizer_script).name}")
 
@@ -1671,7 +2809,19 @@ class OrchestratorTools:
                     df_new = pd.DataFrame(metrics)
                     print(f"    📊 Processing {len(df_new)} data points from multi-well experiment")
                 elif isinstance(metrics, dict):
-                    df_new = pd.DataFrame([metrics])
+                    # A multi-row table pass-through (#366) returns columns
+                    # as equal-length lists; expand to one row per
+                    # experiment, broadcasting scalar sidecar conditions.
+                    _lens = {len(v) for v in metrics.values()
+                             if isinstance(v, list)}
+                    if res.get("passthrough") and len(_lens) == 1 and _lens != {1}:
+                        _n = next(iter(_lens))
+                        df_new = pd.DataFrame(
+                            {k: (v if isinstance(v, list) else [v] * _n)
+                             for k, v in metrics.items()})
+                        print(f"    📊 Processing {_n} data points from table pass-through")
+                    else:
+                        df_new = pd.DataFrame([metrics])
                 else:
                     return json.dumps({
                         "status": "error",
@@ -2196,7 +3346,10 @@ class OrchestratorTools:
                 enhanced_objective = f"{enhanced_objective}\n{schema_instruction}".strip()
 
             current_plan = self.orch.planner.state.get("current_plan", {})
-            exp_context = current_plan.get("proposed_experiments", [{}])[0] if current_plan else {}
+            # `or [{}]` — the dict default only fires on a MISSING key, so a plan
+            # carrying an empty experiments list would IndexError here.
+            _exps = (current_plan or {}).get("proposed_experiments") or [{}]
+            exp_context = _exps[0]
 
             if inputs and targets:
                 exp_context = exp_context.copy() if exp_context else {}
@@ -2555,7 +3708,8 @@ class OrchestratorTools:
             experimental_budget: int = None,
             targets: list[str] = None,
             strategy_hint: str = None,
-            skill: str = None
+            skill: str = None,
+            candidate_pool: str = None
         ):
             """
             Runs Bayesian Optimization to suggest next parameters.
@@ -2564,8 +3718,12 @@ class OrchestratorTools:
             """
             print(f"  ⚡ Tool: Running Bayesian Optimization...")
             
-            # --- PRE-FLIGHT CHECKS --- 
-            if not self.orch.active_scalarizer_script:
+            # --- PRE-FLIGHT CHECKS ---
+            # A campaign ingested purely via table pass-through (#366) has
+            # data and schema but never locks a script; only refuse when
+            # nothing has been ingested at all.
+            if (not self.orch.active_scalarizer_script
+                    and not self.orch.bo_data_path.exists()):
                 return json.dumps({
                     "status": "error",
                     "message": "No analysis script locked yet",
@@ -2920,6 +4078,16 @@ class OrchestratorTools:
                     print(f"    📶  Multi-fidelity active: column '{fspec['column']}' "
                           f"(index {fidelity_config['fidelity_col']})")
 
+                # Candidate pool: resolve the CSV path here (fuzzy matching,
+                # clear error to the LLM); column matching / measured-row
+                # exclusion / degradation live in BOAgent._resolve_candidate_pool.
+                resolved_pool = None
+                if candidate_pool:
+                    resolved_pool, pool_err = self._resolve_data_path(candidate_pool)
+                    if pool_err:
+                        return pool_err
+                    print(f"    🎯 Candidate pool: {Path(resolved_pool).name}")
+
                 res = self.orch.bo.run_optimization_loop(
                     data_path=bo_data_path_for_run,
                     objective_text=bo_objective,
@@ -2937,6 +4105,7 @@ class OrchestratorTools:
                     cat_dims=cat_dims if cat_dims else None,
                     skill=skill,
                     fidelity_config=fidelity_config,
+                    candidate_pool=resolved_pool,
                 )
                 
                 if res.get("status") != "success":
@@ -2987,7 +4156,13 @@ class OrchestratorTools:
                     response["trade_offs"] = cp.get("trade_offs", "")
                     if cp.get("validation_errors"):
                         response["constraint_warnings"] = cp["validation_errors"]
-                
+
+                # Candidate-pool provenance: how many library points were
+                # provided / still unmeasured (absent if the pool was
+                # ignored — the BO log warning explains why).
+                if res.get("candidate_pool"):
+                    response["candidate_pool"] = res["candidate_pool"]
+
                 # Include budget context
                 if res.get("budget"):
                     response["budget"] = res["budget"]
@@ -3027,6 +4202,20 @@ class OrchestratorTools:
                     "description": (
                         "Number of parallel experiments (required if parallel_capable=True). "
                         "Infer from experimental plan (e.g., plate format, grid size, equipment capacity)."
+                    )
+                },
+                "candidate_pool": {
+                    "type": "string",
+                    "description": (
+                        "Path to a CSV of the finite candidate library to recommend from "
+                        "(columns must include the input parameter columns; extra columns are "
+                        "ignored). Recommendations are then restricted to unmeasured rows of "
+                        "this library — the right mode when experiments can only be drawn from "
+                        "a fixed set (a compound catalog, pre-made formulations, a measured "
+                        "design library). Pass ONLY when the user or calling system explicitly "
+                        "provided such a candidate file; otherwise omit — recommendations are "
+                        "continuous within the plan- or data-derived bounds. Single-objective "
+                        "campaigns only (ignored with a warning for multi-objective)."
                     )
                 },
                 "physical_constraints": {
@@ -3088,7 +4277,8 @@ class OrchestratorTools:
 
 
         # 9. SAVE FILE
-        def save_file(filename: str, content: str, subfolder: str = ""):
+        def save_file(filename: str, content: str, subfolder: str = "",
+                      deliverable: bool = False, title: str = ""):
             """
             Save text content (code, protocols, notes) to a file in the session
             directory.
@@ -3103,7 +4293,12 @@ class OrchestratorTools:
                     "message": "Invalid filename.",
                 })
 
-            target_dir = self.orch.base_dir
+            # Delegation-scoped, like every other artifact this turn writes
+            # (plan.json, white_paper.md, ...). Rooting at base_dir instead
+            # scattered LLM-saved files OUTSIDE the delegation directory —
+            # live, a white paper landed in planning/<slug>/ as a sibling of
+            # delegations/, duplicating the copy already written inside it.
+            target_dir = self._output_dir()
             if subfolder:
                 safe_sub = Path(subfolder).name
                 target_dir = target_dir / safe_sub
@@ -3112,11 +4307,16 @@ class OrchestratorTools:
 
             try:
                 dest.write_text(content, encoding="utf-8")
-                print(f"    💾 Saved: {dest}")
+                from .user_interface import format_path, record_deliverable
+                record_deliverable(self.orch.base_dir, dest, title,
+                                   deliverable)
+                print(f"    💾 Saved{' (deliverable)' if deliverable else ''}: "
+                      f"{format_path(dest)}")
                 return json.dumps({
                     "status": "success",
                     "path": str(dest),
                     "size_bytes": dest.stat().st_size,
+                    "deliverable": bool(deliverable),
                 })
             except Exception as e:
                 logging.error(f"save_file failed: {e}")
@@ -3129,7 +4329,8 @@ class OrchestratorTools:
             func=save_file,
             name="save_file",
             description=(
-                "Save text content (protocols, notes, small scripts) to a file "
+                "Save text content (notes, small scripts, content you have "
+                "already composed) to a file "
                 "in the session directory. Large content may not survive the "
                 "trip as a single tool-call argument — for anything long "
                 "(roughly >100 lines), save the first chunk with save_file and "
@@ -3156,6 +4357,26 @@ class OrchestratorTools:
                         "e.g. 'protocols' or 'scripts'. Created if it doesn't exist."
                     ),
                 },
+                "deliverable": {
+                    "type": "boolean",
+                    "description": (
+                        "Set TRUE when this file IS the artifact the user "
+                        "asked for (a brief, a report, a protocol they "
+                        "requested) rather than a working note or "
+                        "intermediate. Deliverables are shown to the user "
+                        "directly — starred in the file list and previewed "
+                        "in the chat — so they do not have to hunt through "
+                        "the session folder for them."
+                    ),
+                },
+                "title": {
+                    "type": "string",
+                    "description": (
+                        "Short human label for the file, e.g. 'Top-3 "
+                        "priority brief'. Shown beside it in the file list "
+                        "and as the preview heading."
+                    ),
+                },
             },
             required=["filename", "content"],
         )
@@ -3176,7 +4397,12 @@ class OrchestratorTools:
                     "message": "Invalid filename.",
                 })
 
-            target_dir = self.orch.base_dir
+            # Delegation-scoped, like every other artifact this turn writes
+            # (plan.json, white_paper.md, ...). Rooting at base_dir instead
+            # scattered LLM-saved files OUTSIDE the delegation directory —
+            # live, a white paper landed in planning/<slug>/ as a sibling of
+            # delegations/, duplicating the copy already written inside it.
+            target_dir = self._output_dir()
             if subfolder:
                 safe_sub = Path(subfolder).name
                 target_dir = target_dir / safe_sub
@@ -3477,11 +4703,19 @@ class OrchestratorTools:
         # =====================================================================
         # READ FILE (non-destructive inspection)
         # =====================================================================
-        def read_file(file_path: str, max_lines: int = 200) -> str:
+        def read_file(file_path: str, max_lines: int = 200,
+                      tail: bool = False, search: str = None) -> str:
             """
             Read and return the contents of a file. Use this to inspect
             plans, protocols, configs, logs, or any text/JSON file without
             triggering analysis pipelines.
+
+            Reading from the top was the only mode, and the truncation notice
+            named what was missing without naming a way to get it — so a
+            question about the END of a long document ("does this paper close
+            with a References section?") had no answer at any parameter value.
+            Live, an agent asked it five times and gave up. `tail` and
+            `search` answer those questions in one call.
             """
             print(f"  ⚡ Tool: Reading file '{file_path}'...")
 
@@ -3553,11 +4787,68 @@ class OrchestratorTools:
                 else:
                     with open(path, 'r', encoding='utf-8', errors='replace') as f:
                         lines = f.readlines()
-                    if len(lines) > max_lines:
-                        content = "".join(lines[:max_lines])
-                        content += f"\n... ({len(lines) - max_lines} more lines truncated)"
+                    total = len(lines)
+
+                    if search:
+                        # The real question behind most repeat reads is "is X
+                        # in here, and where" — a search, not a read. Answering
+                        # it directly costs one call and stays cheap however
+                        # long the file is.
+                        try:
+                            rx = re.compile(search, re.I)
+                        except re.error as e:
+                            return json.dumps({
+                                "status": "error",
+                                "message": f"Invalid search pattern: {e}"})
+                        hits = [i for i, ln in enumerate(lines) if rx.search(ln)]
+                        CAP = 40
+                        shown, out = hits[:CAP], []
+                        for i in shown:
+                            lo, hi = max(0, i - 1), min(total, i + 2)
+                            out.append(f"@@ line {i + 1}\n"
+                                       + "".join(lines[lo:hi]).rstrip("\n"))
+                        body = "\n\n".join(out) if out else "(no matches)"
+                        note = (f"{len(hits)} matching line(s) in {total} total"
+                                + (f"; showing the first {CAP}" if len(hits) > CAP
+                                   else ""))
+                        return json.dumps({
+                            "status": "success",
+                            "file_path": str(path),
+                            "mode": "search",
+                            "pattern": search,
+                            "matches": len(hits),
+                            "match_lines": [i + 1 for i in shown],
+                            "total_lines": total,
+                            "content": f"{note}\n\n{body}",
+                        })
+
+                    if total > max_lines:
+                        if tail:
+                            shown = lines[-max_lines:]
+                            first, last = total - max_lines + 1, total
+                            more = (f"... ({first - 1} earlier lines not shown; "
+                                    f"omit tail to read from the top)")
+                            content = more + "\n" + "".join(shown)
+                        else:
+                            shown = lines[:max_lines]
+                            first, last = 1, max_lines
+                            content = "".join(shown) + (
+                                f"\n... ({total - max_lines} more lines not "
+                                f"shown. To see the END of the file call again "
+                                f"with tail=true; to find something specific "
+                                f"use search='<pattern>'; or raise max_lines.)")
                     else:
-                        content = "".join(lines)
+                        first, last, content = 1, total, "".join(lines)
+
+                    return json.dumps({
+                        "status": "success",
+                        "file_path": str(path),
+                        "mode": "tail" if tail else "head",
+                        "total_lines": total,
+                        "shown_lines": f"{first}-{last}",
+                        "truncated": total > max_lines,
+                        "content": content,
+                    })
 
                 return json.dumps({
                     "status": "success",
@@ -3575,9 +4866,13 @@ class OrchestratorTools:
             func=read_file,
             name="read_file",
             description=(
-                "Read and return the contents of a text or JSON file. "
-                "Use this to inspect plans, protocols, scripts, configs, or logs. "
-                "Do NOT use analyze_file for reading — that triggers the scalarizer pipeline."
+                "Read a text or JSON file — plans, protocols, scripts, "
+                "configs, logs, documents. Reads from the TOP by default. "
+                "For a long file do not read it repeatedly hoping to see more: "
+                "use search='<pattern>' to find where something is (and "
+                "whether it is there at all), or tail=true to read the END. "
+                "Do NOT use analyze_file for reading — that triggers the "
+                "scalarizer pipeline."
             ),
             parameters={
                 "file_path": {
@@ -3586,8 +4881,29 @@ class OrchestratorTools:
                 },
                 "max_lines": {
                     "type": "integer",
-                    "description": "Maximum lines to return for large files (default: 200)"
-                }
+                    "description": "Maximum lines to return (default: 200)"
+                },
+                "tail": {
+                    "type": "boolean",
+                    "description": (
+                        "Read the LAST max_lines lines instead of the first. "
+                        "Use to check how a long document ENDS — that it "
+                        "closes with the References section you added, that a "
+                        "log ends in success, that a file was not truncated."
+                    ),
+                },
+                "search": {
+                    "type": "string",
+                    "description": (
+                        "Case-insensitive regex. Returns every matching line "
+                        "with its line number and one line of context either "
+                        "side, plus the total match count — instead of the "
+                        "file body. The right tool for 'is there a References "
+                        "section', 'which lines cite Boettiger', 'did this log "
+                        "raise'. Far cheaper than reading a long file, and it "
+                        "answers presence/absence definitively."
+                    ),
+                },
             },
             required=["file_path"]
         )
@@ -5042,6 +6358,471 @@ class OrchestratorTools:
                 "note": f"Skill '{skill_name}' has been updated in persistent memory."
             })
 
+        def write_technical_document(
+            request: str,
+            filename: str = None,
+            title: str = None,
+            source_files: str = None,
+            use_literature: bool = True,
+            revise_path: str = None,
+        ):
+            """Author a grounded technical document and save it.
+
+            Not a plan: no experiment schema, no campaign state, no plan
+            report. A roadmap or estimate that went through the plan tool
+            came back with a build sequence as its `hypothesis` and invented
+            optimization ranges (live, cdoc facility roadmap).
+            """
+            try:
+                planner = self.orch.planner
+                # REVISION: read the document, rewrite it whole, put it back
+                # where it was. Without this, "revise the paper you wrote"
+                # authored into the CURRENT delegation folder while the
+                # original sat untouched — and the agent then tried to reach
+                # it with `../../`, which save_file's sandbox collapses to a
+                # subfolder name, so it rebuilt the file by hand in chunks
+                # and truncated it doing so (live).
+                from .user_interface import format_path, record_deliverable
+                current = None
+                if revise_path:
+                    rp = Path(revise_path)
+                    if not rp.is_absolute():
+                        rp = self._output_dir() / rp
+                    rp = rp.resolve()
+                    root = Path(self.orch.base_dir).resolve()
+                    if root not in rp.parents:
+                        return json.dumps({
+                            "status": "error",
+                            "message": (f"revise_path must be inside the "
+                                        f"session directory ({root}).")})
+                    if not rp.exists():
+                        return json.dumps({
+                            "status": "error",
+                            "message": f"No such document: {rp}"})
+                    current = rp.read_text(errors="replace")
+                lit = None
+                if use_literature:
+                    lit_file = self._latest_literature_file()
+                    if lit_file is not None:
+                        lit = lit_file.read_text()
+
+                # Prior documents the agent names — this is how a revision or
+                # a merge builds on what the session already wrote instead of
+                # re-deriving it.
+                sources, missing = [], []
+                for raw in (source_files or "").split(","):
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    fp = Path(raw)
+                    if not fp.is_absolute():
+                        fp = self._output_dir() / raw
+                    if fp.exists():
+                        sources.append(f"### {fp.name}\n{fp.read_text()}")
+                    else:
+                        # The agent names its own earlier file; that file
+                        # lives in a SIBLING delegation directory, so search
+                        # the session root by basename before giving up.
+                        hits = sorted(Path(self.orch.base_dir).rglob(fp.name))
+                        if hits:
+                            sources.append(f"### {hits[0].name}\n"
+                                           + hits[0].read_text())
+                        else:
+                            missing.append(raw)
+
+                # A revision inherits the document's OWN name: falling back
+                # to the request titled the deliverable with the instruction
+                # ("Revise this brief with two targeted changes...") and
+                # replaced its real name in the files list. Live.
+                doc_title = title
+                if not doc_title and current:
+                    m = re.search(r"^#\s+(.+)$", current, re.M)
+                    doc_title = (m.group(1).strip() if m
+                                 else rp.stem.replace("_", " "))
+                doc_title = doc_title or (request[:70].strip()
+                                          or "Technical document")
+                result = author_technical_document(
+                    request=request,
+                    kb_docs=planner.kb_docs,
+                    model=planner.model,
+                    generation_config=planner.generation_config,
+                    external_context=lit,
+                    source_documents=("\n\n".join(sources) if sources else None),
+                    skill_context=planner._build_skill_context("planning"),
+                    revise_document=current,
+                    task_name=("Technical Document (revision)" if current
+                               else "Technical Document"),
+                )
+                if result.get("error"):
+                    return json.dumps({"status": "error",
+                                       "message": result["error"]})
+                sections = result.get("sections") or []
+                if not sections:
+                    return json.dumps({
+                        "status": "error",
+                        "message": "The author returned no sections."})
+
+                text = document_to_markdown(doc_title, sections)
+                if revise_path:
+                    out = rp
+                    # Revising in place crosses delegation isolation, which
+                    # exists so a reused child cannot clobber earlier outputs
+                    # by accident. An explicit revision is not that — but the
+                    # audit trail still matters, so the delegation MAKING the
+                    # change keeps the version it replaced. The canonical file
+                    # stays canonical; the evidence lives where the edit
+                    # happened.
+                    bak = None
+                    try:
+                        d = self._output_dir()
+                        d.mkdir(parents=True, exist_ok=True)
+                        # Never clobber an earlier backup: revising the same
+                        # document twice from one delegation would otherwise
+                        # leave only the second-to-last version, and the
+                        # original — the one the user actually approved —
+                        # would be the copy that vanished.
+                        n, bak = 1, d / f"{rp.stem}.before_revision{rp.suffix}"
+                        while bak.exists():
+                            n += 1
+                            bak = d / f"{rp.stem}.before_revision{n}{rp.suffix}"
+                        bak.write_text(current or "")
+                        # Listed (not starred) so the replaced version shows
+                        # up in the files block rather than only on disk.
+                        # Under the meta this is the delegation slug; in a
+                        # standalone session it is just the session dir, and
+                        # "revised by session" says nothing.
+                        who = ("" if d.resolve() == root
+                               else f" (revised by {d.name})")
+                        record_deliverable(
+                            self.orch.base_dir, bak,
+                            f"Pre-revision copy of {rp.name}{who}")
+                    except Exception as e:  # noqa: BLE001 - never block the edit
+                        logging.warning(f"Pre-revision copy failed: {e}")
+                        bak = None
+                    # A revision that came back shorter than the original is
+                    # nearly always the model summarising instead of
+                    # revising. Refuse rather than overwrite the good copy.
+                    if len(text) < 0.5 * len(current or ""):
+                        return json.dumps({
+                            "status": "error",
+                            "message": (
+                                f"Revision aborted: the rewritten document is "
+                                f"{len(text)} chars against the original's "
+                                f"{len(current)}. A revision must return the "
+                                "WHOLE document with untouched sections "
+                                "verbatim. The original is unchanged — retry, "
+                                "reproducing every section."),
+                        })
+                else:
+                    name = filename or "technical_document.md"
+                    if not name.endswith(".md"):
+                        name += ".md"
+                    out = self._output_dir() / name
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(text)
+
+                record_deliverable(self.orch.base_dir, out, doc_title,
+                                   deliverable=True)
+                if revise_path:
+                    # The transcript is the first place anyone looks, so the
+                    # cross-delegation edit is named there, not just on disk.
+                    print(f"    ✏️  Revised IN PLACE: {format_path(out)}")
+                    if bak:
+                        print(f"    ↩️  Previous version kept: "
+                              f"{format_path(bak)}")
+                else:
+                    print(f"    📄 Document saved: {format_path(out)}")
+                res = {"status": "success", "path": str(out),
+                       "revised_in_place": bool(revise_path),
+                       "previous_version": (str(bak) if revise_path and bak
+                                            else None),
+                       "revised_by": (self._output_dir().name if revise_path
+                                      else None),
+                       "title": doc_title,
+                       "sections": [s.get("heading") for s in sections
+                                    if isinstance(s, dict)],
+                       "words": len(text.split()),
+                       "literature_used": bool(lit),
+                       "sources_used": len(sources)}
+                if missing:
+                    res["source_files_not_found"] = missing
+                return json.dumps(res)
+            except Exception as e:
+                logging.error(f"Document authoring error: {e}", exc_info=True)
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=write_technical_document,
+            name="write_technical_document",
+            description=(
+                "Author a grounded technical DOCUMENT and save it as the "
+                "deliverable: a roadmap, staging or build plan, cost or "
+                "footprint estimate, consolidation memo, brief, summary or "
+                "review. USE THIS — not generate_initial_plan — whenever the "
+                "user says 'plan' in the everyday sense of a course of "
+                "action ('plan how we build the facility', 'outline the "
+                "stages', 'estimate the space we need'). "
+                "generate_initial_plan is only for an EXPERIMENT: a testable "
+                "hypothesis with measurements. Grounds the document in the "
+                "campaign's literature and in prior session documents you "
+                "name, so you get retrieval-backed authoring rather than "
+                "writing it unaided into save_file. Use save_file for short "
+                "notes and for content you have already composed. "
+                "NOT for an EXPERIMENTAL PROTOCOL: a procedure with a "
+                "hypothesis and measurements — including 'the runnable bench "
+                "protocol for direction X' — is generate_initial_plan with "
+                "selection_profile='lab', which gives it conformance "
+                "checking, the critic, and refinement against results later. "
+                "A document cannot be refined with results. NOT for editing "
+                "a research portfolio either — 'drop the weakest direction', "
+                "'harden this one', 'consolidate these' all change the "
+                "portfolio itself and belong in refine_portfolio; a document "
+                "about the revised portfolio leaves the portfolio unrevised."
+            ),
+            parameters={
+                "request": {
+                    "type": "string",
+                    "description": (
+                        "What the document must cover, in full — the user's "
+                        "ask plus any structure, constraints, audience or "
+                        "sections it must have. This is the authoring brief."
+                    ),
+                },
+                "filename": {
+                    "type": "string",
+                    "description": (
+                        "File to write, e.g. 'build_roadmap.md'. Defaults to "
+                        "technical_document.md; give it a descriptive name."
+                    ),
+                },
+                "title": {
+                    "type": "string",
+                    "description": (
+                        "Document title, also the label shown beside the "
+                        "file, e.g. 'cdoc staged build roadmap'."
+                    ),
+                },
+                "source_files": {
+                    "type": "string",
+                    "description": (
+                        "Comma-separated files this document should build on "
+                        "— a roadmap you are revising, two documents you are "
+                        "merging. Names of files in the session are resolved "
+                        "for you. Omit for a fresh document."
+                    ),
+                },
+                "use_literature": {
+                    "type": "boolean",
+                    "description": (
+                        "Ground in the campaign's most recent literature "
+                        "search (default true). Set false for a document "
+                        "that is purely internal, e.g. merging two documents "
+                        "you already wrote."
+                    ),
+                },
+                "revise_path": {
+                    "type": "string",
+                    "description": (
+                        "REVISE an existing document IN PLACE: pass its path "
+                        "(any document in this session, including one written "
+                        "by an earlier delegation). The file is read, the "
+                        "whole document is rewritten with your change "
+                        "applied, and it is written back over the SAME path — "
+                        "so use this for 'add references to the paper you "
+                        "wrote', 'tighten section 3', 'split this in two'. "
+                        "Do NOT rebuild an existing document by hand with "
+                        "save_file/append_file chunks: that writes into the "
+                        "current delegation folder instead, and a save_file "
+                        "call truncates what is already there. Omit for a new "
+                        "document; `filename` is ignored when this is set."
+                    ),
+                },
+            },
+            required=["request"]
+        )
+
+        def generate_ideation_portfolio(
+            specific_objective: str,
+            knowledge_paths: str = None,
+            additional_context: str = None,
+            skill: str = None,
+            literature_context: str = None,
+            n_candidates: int = None,
+            white_paper: bool = None,
+            new_campaign: bool = None,
+            selection_profile: str = None,   # accepted, ignored — see below
+        ):
+            """Author a PORTFOLIO of research directions (ideation).
+
+            The ideation twin of generate_initial_plan: same grounding,
+            best-of-N, judge, critic and campaign machinery, different
+            contract — directions, not a bench protocol.
+            """
+            # `selection_profile` is NOT in this tool's schema, but its
+            # description has to name the lab profile to say where a chosen
+            # direction goes next — which puts the parameter in scope, and a
+            # model duly passed it (live). The profile is meaningless here:
+            # a portfolio is ideation by construction. Accept and ignore
+            # rather than spend a round trip on a TypeError.
+            if selection_profile:
+                logging.info("generate_ideation_portfolio ignoring "
+                             "selection_profile=%r (always ideation)",
+                             selection_profile)
+            # Same implementation, different contract — see `kind`.
+            return generate_initial_plan(
+                specific_objective=specific_objective,
+                knowledge_paths=knowledge_paths,
+                additional_context=additional_context,
+                skill=skill,
+                literature_context=literature_context,
+                n_candidates=n_candidates,
+                selection_profile="ideation",
+                white_paper=white_paper,
+                new_campaign=new_campaign,
+                kind="portfolio",
+            )
+
+        self._register_tool(
+            func=generate_ideation_portfolio,
+            name="generate_ideation_portfolio",
+            description=(
+                "Generate a PORTFOLIO of research directions — brainstorming, "
+                "ideation, 'what should we work on', a slate of use cases, a "
+                "hedge against one direction failing, or consolidating earlier "
+                "threads into a standalone class. Each direction carries its "
+                "own hypothesis, rationale and novelty; the portfolio carries "
+                "an organizing thesis. USE THIS INSTEAD OF "
+                "generate_initial_plan whenever the ask is which directions "
+                "are worth pursuing rather than how to run one on the bench — "
+                "generate_initial_plan designs a lab experiment, and a "
+                "portfolio forced into that schema comes back with its "
+                "directions flattened into protocol steps. Produces a "
+                "sponsor-facing white paper by default, and an all-candidates "
+                "dossier when several candidate portfolios were generated. "
+                "Once the user PICKS a direction and wants the runnable "
+                "bench protocol for it, that is generate_initial_plan with "
+                "selection_profile='lab' — an experimental plan, NOT a "
+                "written document."
+            ),
+            parameters={
+                "specific_objective": {
+                    "type": "string",
+                    "description": (
+                        "What to ideate on, in full — the domain, what makes "
+                        "a direction interesting here, any structure the user "
+                        "asked for (how many directions, how to rank or "
+                        "cluster them, elements each must carry)."
+                    ),
+                },
+                "knowledge_paths": {
+                    "type": "string",
+                    "description": "Comma-separated paths to papers/reports/docs folders",
+                },
+                "additional_context": {
+                    "type": "string",
+                    "description": "Constraints, prior findings, or user preferences to honour",
+                },
+                "skill": {
+                    "type": "string",
+                    "description": "Optional planning skill to load for domain guidance",
+                },
+                "literature_context": {
+                    "type": "string",
+                    "description": (
+                        "Path to a literature search file to ground the "
+                        "portfolio in (from search_literature)."
+                    ),
+                },
+                "n_candidates": {
+                    "type": "integer",
+                    "description": (
+                        "How many DISTINCT candidate portfolios to author "
+                        "before the judge picks one. Defaults to best-of-3 on "
+                        "a campaign's first portfolio and 1 for follow-ups. "
+                        "Only a multi-candidate run produces the "
+                        "all-candidates dossier, since that dossier IS the "
+                        "report over the candidate set."
+                    ),
+                },
+                "white_paper": {
+                    "type": "boolean",
+                    "description": (
+                        "Force (true) or suppress (false) the sponsor-facing "
+                        "white paper. Omit for the default, which produces one."
+                    ),
+                },
+                "new_campaign": {
+                    "type": "boolean",
+                    "description": (
+                        "TRUE when this starts a NEW line of work unrelated to "
+                        "the current campaign, so its literature and history "
+                        "do not leak in. Omit to continue the current campaign."
+                    ),
+                },
+            },
+            required=["specific_objective"]
+        )
+
+        def refine_portfolio(request: str, literature_context: str = None,
+                             additional_context: str = None):
+            """Revise a research PORTFOLIO: harden, drop, add, re-rank,
+            consolidate.
+
+            Same refinement engine as refine_plan_with_results — which is
+            reachable but not FINDABLE for this: its name promises results,
+            and dropping a direction has none. Live, "drop the weakest
+            direction" went to write_technical_document instead, which wrote
+            a document ABOUT the revised portfolio and left the portfolio
+            itself untouched.
+            """
+            return refine_plan_with_results(
+                result_data=request,
+                use_literature_rag=False,
+                literature_context=literature_context,
+                additional_context=additional_context,
+            )
+
+        self._register_tool(
+            func=refine_portfolio,
+            name="refine_portfolio",
+            description=(
+                "Revise the current research PORTFOLIO in place. Use for any "
+                "edit to the set of directions, none of which needs "
+                "experimental results: HARDEN one (sharpen its hypothesis, "
+                "name its failure mode), DROP one, ADD one, RE-RANK them, or "
+                "CONSOLIDATE several into a single class. Directions the "
+                "request does not touch are preserved verbatim. This is the "
+                "tool for 'drop the weakest', 'harden class 2', 'consolidate "
+                "these threads into one class' — do NOT write a document "
+                "about the revised portfolio instead, and do not re-author "
+                "the whole portfolio with generate_ideation_portfolio, which "
+                "would lose the directions you are keeping. Use "
+                "refine_plan_with_results instead when actual experimental "
+                "results are what is driving the change."
+            ),
+            parameters={
+                "request": {
+                    "type": "string",
+                    "description": (
+                        "What to change, naming the directions by id where "
+                        "the user did — e.g. 'harden DIR-1: sharpen its "
+                        "hypothesis and name its dominant failure mode; "
+                        "leave the others unchanged' or 'drop DIR-4 and "
+                        "re-rank the rest by feasibility'."
+                    ),
+                },
+                "literature_context": {
+                    "type": "string",
+                    "description": "Optional path to a literature file to ground the revision in.",
+                },
+                "additional_context": {
+                    "type": "string",
+                    "description": "Constraints or preferences to honour in the revision.",
+                },
+            },
+            required=["request"]
+        )
+
         self._register_tool(
             func=update_skill,
             name="update_skill",
@@ -5135,9 +6916,53 @@ class OrchestratorTools:
                 "status": "error",
                 "message": f"Tool '{tool_name}' not found in registry"
             })
-        
+
+        # A tool call whose arguments hit the output-token cap mid-generation
+        # can arrive as VALID but incomplete JSON (later keys dropped), which
+        # slips past the malformed-JSON guard in the chat loop. Check the
+        # schema's required list here so the model gets a clean, actionable
+        # error instead of a TypeError traceback.
+        missing = [p for p in self._required_params(tool_name) if p not in kwargs]
+        if missing:
+            return json.dumps({
+                "status": "error",
+                "tool": tool_name,
+                "message": (
+                    f"Missing required argument(s): {', '.join(missing)}. "
+                    "The tool-call arguments were likely truncated by the "
+                    "response length limit — resend the call with all required "
+                    "arguments, splitting long text across multiple smaller "
+                    "calls (e.g. save_file then append_file chunks)."
+                ),
+            })
+
         try:
             return self.functions_map[tool_name](**kwargs)
+        except TypeError as e:
+            # An unexpected keyword reaches here as a bare TypeError whose
+            # message names the offending argument but not the valid ones,
+            # so the model has to guess its way back. Name them.
+            if "unexpected keyword argument" in str(e):
+                import inspect as _inspect
+                try:
+                    accepted = [n for n in _inspect.signature(
+                        self.functions_map[tool_name]).parameters]
+                except (TypeError, ValueError):
+                    accepted = []
+                logging.warning(f"Tool {tool_name}: {e}")
+                return json.dumps({
+                    "status": "error",
+                    "tool": tool_name,
+                    "message": (f"{e}. Accepted arguments: "
+                                f"{', '.join(accepted) or 'unknown'}. "
+                                "Re-send the call using only those."),
+                })
+            logging.error(f"Tool execution error ({tool_name}): {e}", exc_info=True)
+            return json.dumps({
+                "status": "error",
+                "message": str(e),
+                "tool": tool_name
+            })
         except Exception as e:
             logging.error(f"Tool execution error ({tool_name}): {e}", exc_info=True)
             return json.dumps({
@@ -5145,5 +6970,13 @@ class OrchestratorTools:
                 "message": str(e),
                 "tool": tool_name
             })
+
+    def _required_params(self, tool_name: str) -> list:
+        """Return the schema-declared required parameter names for a tool."""
+        for schema in self.openai_schemas:
+            fn = schema.get("function", {})
+            if fn.get("name") == tool_name:
+                return fn.get("parameters", {}).get("required", []) or []
+        return []
 
 

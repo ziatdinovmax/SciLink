@@ -16,7 +16,7 @@ from botorch.acquisition import LogExpectedImprovement, qLogExpectedImprovement
 from botorch.acquisition.monte_carlo import qUpperConfidenceBound
 from botorch.acquisition.multi_objective import qLogNoisyExpectedHypervolumeImprovement
 from botorch.acquisition.objective import LinearMCObjective
-from botorch.optim import optimize_acqf
+from botorch.optim import optimize_acqf, optimize_acqf_mixed
 from botorch.utils.sampling import draw_sobol_samples
 from botorch.generation import MaxPosteriorSampling
 from botorch.sampling import SobolQMCNormalSampler
@@ -78,7 +78,7 @@ def build_likelihood(noise_key: str) -> GaussianLikelihood:
     config = ALLOWED_NOISE_PRIORS[noise_key]
     noise_constraint = GreaterThan(config["min_noise"])
     likelihood = GaussianLikelihood(noise_constraint=noise_constraint)
-    
+
     # Initialize slightly above min to aid convergence
     likelihood.noise = torch.tensor(config["min_noise"] * 2.0)
     return likelihood
@@ -252,13 +252,12 @@ def build_surrogate(
         key = "single_task"
 
     if key == "single_task":
-        covar = build_covar_module(kernel, input_dim)
-        in_transform = build_input_transform(input_transform, input_dim)
-
         def factory(X, y):
+            # Build modules inside the factory: each model instance (including
+            # fit-rescue rebuilds) gets fresh, state-free modules.
             kwargs = dict(
-                covar_module=covar,
-                input_transform=in_transform,
+                covar_module=build_covar_module(kernel, input_dim),
+                input_transform=build_input_transform(input_transform, input_dim),
                 outcome_transform=Standardize(m=1),
             )
             if fixed_noise_std is not None:
@@ -293,14 +292,12 @@ def build_surrogate(
             logging.warning(
                 "'mixed' surrogate does not support fixed_noise_std; ignoring."
             )
-        cont_normalize = _continuous_normalize(input_dim, cat_dims)
-
         def factory(X, y):
             return MixedSingleTaskGP(
                 X,
                 y,
                 cat_dims=list(cat_dims),
-                input_transform=cont_normalize,
+                input_transform=_continuous_normalize(input_dim, cat_dims),
                 outcome_transform=Standardize(m=1),
             )
 
@@ -330,13 +327,12 @@ def build_surrogate(
                 "'single_task_multi_fidelity' requires skill_config['fidelity_col'] "
                 "(index of the fidelity input column)."
             )
-        in_transform = Normalize(d=input_dim)
 
         def factory(X, y):
             kwargs = dict(
                 data_fidelities=[int(fidelity_col)],
                 outcome_transform=Standardize(m=1),
-                input_transform=in_transform,
+                input_transform=Normalize(d=input_dim),
                 linear_truncated=bool(sc.get("linear_truncated", True)),
             )
             if fixed_noise_std is not None:
@@ -365,11 +361,11 @@ def build_surrogate(
         # surrogate surfaced by a high-dimensionality signal (like `dkl`).
         from botorch.models.fully_bayesian import SaasFullyBayesianSingleTaskGP
         from botorch.fit import fit_fully_bayesian_model_nuts
-        in_transform = Normalize(d=input_dim)
 
         def factory(X, y):
             return SaasFullyBayesianSingleTaskGP(
-                X, y, outcome_transform=Standardize(m=1), input_transform=in_transform,
+                X, y, outcome_transform=Standardize(m=1),
+                input_transform=Normalize(d=input_dim),
             )
 
         return SurrogateSpec(
@@ -392,8 +388,6 @@ def build_surrogate(
     if fixed_noise_std is not None:
         logging.warning("'dkl' surrogate does not support fixed_noise_std; ignoring.")
 
-    in_transform = Normalize(d=input_dim)
-
     def factory(X, y):
         feature_extractor = _DKLFeatureExtractor(input_dim, hidden=hidden, latent=latent)
         feature_extractor = feature_extractor.to(dtype=X.dtype, device=X.device)
@@ -403,7 +397,7 @@ def build_surrogate(
             y,
             feature_extractor=feature_extractor,
             likelihood=likelihood,
-            input_transform=in_transform,
+            input_transform=Normalize(d=input_dim),
             outcome_transform=Standardize(m=1),
         )
 
@@ -501,8 +495,9 @@ class SingleObjectiveOptimizer:
         )
         self.fidelity_config = fidelity_config or {}
         self._acq_components = acquisition_components or {}
+        self._cat_dims = list(cat_dims) if cat_dims else None
         self.model = spec.model_factory(self.X_train, self.y_train)
-        spec.fit_fn(self.model)
+        self._fit_with_rescue(spec)
         # GP-only convenience handle; non-GP surrogates (e.g. a skill-shipped
         # deep ensemble) have no likelihood.
         self.mll = (ExactMarginalLogLikelihood(self.model.likelihood, self.model)
@@ -512,55 +507,114 @@ class SingleObjectiveOptimizer:
         self.acq_func = None
         self.acq_strategy_name = None
 
-    def recommend(self, n_candidates: int = 1, strategy: str = 'log_ei', params: Dict[str, float] = None) -> np.ndarray:
+    def _fit_with_rescue(self, spec, n_rescues: int = 3):
+        """Fit the surrogate; on failure, retry from healed + jittered starts.
+
+        The menu's custom kernels/likelihoods carry no priors, so botorch's
+        internal restarts re-sample nothing — a bad starting point fails every
+        attempt identically. The dominant bad start is a likelihood initialized
+        near its noise floor (near-singular covariance), so each rescue rebuild
+        first lifts the starting noise to a well-conditioned level (the
+        GreaterThan floor itself is untouched — the fit may still descend), then
+        perturbs the raw parameters with escalating scale, which is what prior
+        re-sampling would have done. Successful first fits are byte-identical
+        to the pre-rescue behavior; only the failure path changes.
         """
-        Generates n_candidates. 
+        try:
+            spec.fit_fn(self.model)
+            return
+        except Exception as exc:
+            last_exc = exc
+        for attempt in range(1, n_rescues + 1):
+            try:
+                self.model = spec.model_factory(self.X_train, self.y_train)
+                with torch.no_grad():
+                    submodels = getattr(self.model, "models", [self.model])
+                    for m in submodels:
+                        lik = getattr(m, "likelihood", None)
+                        try:
+                            if lik is not None and lik.noise.item() < 1e-2:
+                                lik.noise = torch.tensor(1e-2)
+                        except Exception:
+                            pass
+                    for p in self.model.parameters():
+                        if p.requires_grad:
+                            p.add_(torch.randn_like(p) * 0.3 * attempt)
+                spec.fit_fn(self.model)
+                logging.warning(
+                    f"Surrogate fit rescued on healed restart {attempt}/{n_rescues}."
+                )
+                return
+            except Exception as exc:
+                last_exc = exc
+        raise last_exc
+
+    def _build_pointwise_acq(self, strategy: str, params: Dict[str, float], n_candidates: int):
+        """Construct the acquisition object for 'ucb' / 'max_variance' / 'log_ei'."""
+        if strategy == 'ucb':
+            return qUpperConfidenceBound(model=self.model, beta=params.get('beta', 2.0))
+        if strategy == 'max_variance':
+            return qUpperConfidenceBound(model=self.model, beta=1000.0)
+        # Default: 'log_ei'
+        best_f = self.y_train.max()
+        if n_candidates > 1:
+            sampler = SobolQMCNormalSampler(sample_shape=torch.Size([512]))
+            return qLogExpectedImprovement(model=self.model, best_f=best_f, sampler=sampler)
+        return LogExpectedImprovement(model=self.model, best_f=best_f)
+
+    def recommend(self, n_candidates: int = 1, strategy: str = 'log_ei',
+                  params: Dict[str, float] = None,
+                  candidates: Optional[np.ndarray] = None) -> np.ndarray:
+        """
+        Generates n_candidates.
         Supports 'thompson' for high-throughput batches, and 'ucb'/'log_ei' for precision.
+
+        ``candidates``: optional (N, input_dim) array of allowed design points (a
+        discrete library — stock solutions, printable settings). When given, the
+        recommendation is selected from these points instead of a continuous
+        acquisition search. Not supported for 'mf_kg' or skill-contributed
+        acquisitions, which fall back to their own search with a warning.
         """
         if self.model is None: raise RuntimeError("Call fit() first.")
         params = params or {}
-        
+
         self.acq_strategy_name = strategy
 
         # --- Skill-contributed acquisition components (bundle .py helpers) ---
         comps = getattr(self, "_acq_components", None)
         if comps and strategy in comps:
+            if candidates is not None:
+                logging.warning(
+                    f"Skill acquisition '{strategy}' does not support a candidate "
+                    "pool; running its own search."
+                )
             self.acq_func = None  # custom acquisitions aren't grid-plotted by default
             return comps[strategy].recommend_fn(self, n_candidates, params)
 
         # --- 0. Cost-aware Multi-Fidelity Knowledge Gradient (baseline) ---
         if strategy == 'mf_kg':
+            if candidates is not None:
+                logging.warning(
+                    "'mf_kg' optimizes the fidelity jointly and does not support "
+                    "a candidate pool; running its continuous search."
+                )
             return self._recommend_mf_kg(n_candidates, params)
+
+        if candidates is not None:
+            return self._recommend_from_candidates(strategy, params, n_candidates, candidates)
 
         # --- 1. Thompson Sampling (High Throughput / Diversity) ---
         if strategy == 'thompson':
             self.acq_func = None  # No persistent acq object for Thompson
             n_pool = min(10000, max(2000, 100 * n_candidates))
             X_cand = draw_sobol_samples(bounds=self.bounds, n=n_pool, q=1).squeeze(1)
-            
+
             thompson_sampler = MaxPosteriorSampling(model=self.model, replacement=False)
             candidates = thompson_sampler(X_cand, num_samples=n_candidates)
             return candidates.detach().cpu().numpy()
 
         # --- 2. Acquisition Functions ---
-        if strategy == 'ucb':
-            beta = params.get('beta', 2.0)
-            acq_func = qUpperConfidenceBound(model=self.model, beta=beta)
-            
-        elif strategy == 'max_variance':
-            acq_func = qUpperConfidenceBound(model=self.model, beta=1000.0)
-            
-        else: # Default: 'log_ei'
-            best_f = self.y_train.max()
-            if n_candidates > 1:
-                sampler = SobolQMCNormalSampler(sample_shape=torch.Size([512]))
-                acq_func = qLogExpectedImprovement(
-                    model=self.model, 
-                    best_f=best_f,
-                    sampler=sampler
-                )
-            else:
-                acq_func = LogExpectedImprovement(model=self.model, best_f=best_f)
+        acq_func = self._build_pointwise_acq(strategy, params, n_candidates)
 
         # Persist the acquisition function
         self.acq_func = acq_func
@@ -568,6 +622,38 @@ class SingleObjectiveOptimizer:
         # --- 3. Optimization (Greedy Batch) ---
         is_large_batch = n_candidates > 10
         use_sequential = n_candidates > 1 and strategy != 'thompson'
+
+        # Categorical dims must be optimized over their observed levels, not a
+        # continuous relaxation — enumerate level combinations for the mixed
+        # optimizer. Past the cap the enumeration is intractable; fall back.
+        cat_dims = getattr(self, "_cat_dims", None)
+        if cat_dims:
+            levels = {
+                int(d): sorted({float(v) for v in
+                                self.X_train[:, int(d)].detach().cpu().numpy()})
+                for d in cat_dims
+            }
+            n_combos = int(np.prod([len(v) for v in levels.values()]))
+            if n_combos <= 512:
+                from itertools import product
+                keys = list(levels)
+                fixed_features_list = [
+                    dict(zip(keys, combo)) for combo in product(*levels.values())
+                ]
+                candidates, _ = optimize_acqf_mixed(
+                    acq_function=acq_func,
+                    bounds=self.bounds,
+                    q=n_candidates,
+                    num_restarts=2 if is_large_batch else 10,
+                    raw_samples=128 if is_large_batch else 512,
+                    fixed_features_list=fixed_features_list,
+                )
+                return candidates.detach().cpu().numpy()
+            logging.warning(
+                f"cat_dims level combinations ({n_combos}) exceed the mixed-"
+                "optimizer cap (512); falling back to continuous relaxation."
+            )
+
         candidates, _ = optimize_acqf(
             acq_function=acq_func,
             bounds=self.bounds,
@@ -577,6 +663,46 @@ class SingleObjectiveOptimizer:
             sequential=use_sequential
         )
         return candidates.detach().cpu().numpy()
+
+    def _recommend_from_candidates(self, strategy: str, params: Dict[str, float],
+                                   n_candidates: int, candidates: np.ndarray) -> np.ndarray:
+        """Select recommendations from a discrete candidate library.
+
+        'thompson' draws without replacement from the posterior over the pool;
+        pointwise strategies ('log_ei' / 'ucb' / 'max_variance') score every
+        candidate and take the top n_candidates (greedy, no fantasization).
+        """
+        cand = np.asarray(candidates, dtype=np.float64)
+        if cand.ndim != 2 or cand.shape[1] != self.input_dim:
+            raise ValueError(
+                f"candidates must have shape (N, {self.input_dim}); got {cand.shape}"
+            )
+        if len(cand) < n_candidates:
+            logging.warning(
+                f"Candidate pool ({len(cand)}) smaller than requested batch "
+                f"({n_candidates}); returning the whole pool."
+            )
+            n_candidates = len(cand)
+        X_cand = torch.tensor(cand, dtype=torch.double, device=self.device)
+
+        if strategy == 'thompson':
+            self.acq_func = None
+            thompson_sampler = MaxPosteriorSampling(model=self.model, replacement=False)
+            picked = thompson_sampler(X_cand, num_samples=n_candidates)
+            return picked.detach().cpu().numpy()
+
+        acq_func = self._build_pointwise_acq(strategy, params, n_candidates)
+        self.acq_func = acq_func
+        scores = np.empty(len(X_cand))
+        chunk = 256
+        with torch.no_grad():
+            for start in range(0, len(X_cand), chunk):
+                end = min(start + chunk, len(X_cand))
+                scores[start:end] = (
+                    acq_func(X_cand[start:end].unsqueeze(1)).detach().cpu().numpy()
+                )
+        top = np.argsort(scores)[::-1][:n_candidates]
+        return cand[top]
 
     def _recommend_mf_kg(self, n_candidates: int, params: Dict[str, float]) -> np.ndarray:
         """Cost-aware multi-fidelity Knowledge Gradient (Tier-2, bo_multi_fidelity
@@ -1349,10 +1475,17 @@ class MultiObjectiveOptimizer:
         self.acq_func = None
         self.acq_strategy_name = None
 
-    def recommend(self, n_candidates: int = 1, strategy: str = 'pareto', params: Dict[str, Any] = None) -> np.ndarray:
+    def recommend(self, n_candidates: int = 1, strategy: str = 'pareto',
+                  params: Dict[str, Any] = None,
+                  candidates: Optional[np.ndarray] = None) -> np.ndarray:
+        if candidates is not None:
+            raise ValueError(
+                "Candidate-pool recommendation is single-objective only; "
+                "multi-objective strategies run a continuous search."
+            )
         if self.model is None: raise RuntimeError("Call fit() first.")
         params = params or {}
-        
+
         self.acq_strategy_name = strategy
 
         if strategy == 'weighted':
