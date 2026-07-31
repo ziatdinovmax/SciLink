@@ -746,9 +746,14 @@ def _run_dry_run_gate(phase, executor, run_critic, ctx, prepare, entry,
             required_observables=getattr(ctx, "required_observables", None),
         )
         run_status = verdict.get("run_status")
-        missing = verdict.get("missing_observables") or []
+        # Deterministic layer: where the engine provides a detection tool, check
+        # exact signal presence + sampling adequacy (tier 2 — which the LLM layer
+        # treats as never-blocking). Block on the UNION: either layer flags.
+        det_blocking = _deterministic_coverage(ctx, real_deck)
+        missing = list(verdict.get("missing_observables") or []) + det_blocking
         history.append({"cycle": cycle, "run_status": run_status,
                         "missing_observables": missing,
+                        "deterministic_blocking": det_blocking,
                         "coverage_vote": verdict.get("coverage_vote")})
         if run_status == "succeeded" and not missing:
             return {"status": "passed", "cycles": cycle + 1, "history": history}
@@ -757,6 +762,41 @@ def _run_dry_run_gate(phase, executor, run_critic, ctx, prepare, entry,
             return {"status": "unfixed", "cycles": cycle + 1, "history": history}
         phase.input_files[entry] = deck_fix
     return {"status": "exhausted", "cycles": max_cycles, "history": history}
+
+
+def _deterministic_coverage(ctx, deck: str) -> List[str]:
+    """Deterministic observable-coverage layer: exact signal presence + cadence.
+
+    Runs the engine-neutral contradiction checkers over the declared observables,
+    delegating engine-specific detection to the active engine's conventional
+    ``detect_signal_logging`` skill tool (resolved from the active skill bundle;
+    absent for an engine that provides none). Returns blocking messages, empty
+    when no observables are declared, no engine detector exists, or all are
+    satisfied. Fail-open: any error yields no block, leaving the LLM coverage
+    layer authoritative.
+    """
+    reqs = getattr(ctx, "required_observables", None)
+    engine = getattr(ctx, "engine", None)
+    if not reqs or not engine:
+        return []
+    try:
+        from .contradictions import check_requirements
+        detector = None
+        try:
+            from ...skills._shared._registry import get_tool_function
+            detector = get_tool_function(
+                "detect_signal_logging", active_skills=[engine])
+        except LookupError:
+            detector = None
+        contradictions = check_requirements(
+            reqs,
+            artifacts={"deck": deck, "signal_detector": detector},
+            active_skills=[engine],
+        )
+        return [c.message for c in contradictions]
+    except Exception as e:
+        logger.warning("Deterministic coverage layer skipped: %s", e)
+        return []
 
 
 def majority_coverage(run_critic, n_votes: int, **assess_kwargs):

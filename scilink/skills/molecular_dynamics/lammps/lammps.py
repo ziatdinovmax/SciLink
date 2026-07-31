@@ -1494,6 +1494,135 @@ def run_with_potential(
 
 # ─── Tool specs (resolved via get_tool_function) ─────────────────────
 
+# --- observable-coverage detection (engine realization of the contradiction
+#     framework's signal_present / cadence check kinds) ------------------------
+
+# Semantic signal name -> LAMMPS thermo keywords that provide it.
+_THERMO_KEYWORDS: Dict[str, set] = {
+    "energy": {"etotal", "pe", "ke", "epair", "emol", "evdwl", "ecoul", "elong"},
+    "temperature": {"temp"},
+    "pressure": {"press", "pxx", "pyy", "pzz", "pxy", "pxz", "pyz"},
+    "stress": {"press", "pxx", "pyy", "pzz", "pxy", "pxz", "pyz"},
+    "volume": {"vol"},
+    "density": {"density", "vol"},
+}
+# Signals recoverable from a saved trajectory (a dump).
+_TRAJECTORY_SIGNALS = {"trajectory", "positions", "coordinates", "traj",
+                       "rdf", "structure", "msd"}
+# LAMMPS default thermo_style ('one') keyword set.
+_THERMO_ONE = {"step", "temp", "epair", "emol", "etotal", "press"}
+
+
+def _thermo_interval(deck: str) -> Optional[int]:
+    hits = re.findall(r'(?mi)^\s*thermo\s+(\d+)\b', deck)
+    return int(hits[-1]) if hits else None
+
+
+def _thermo_keywords(deck: str) -> set:
+    kws: set = set()
+    styles = re.findall(r'(?mi)^\s*thermo_style\s+(.*)$', deck)
+    for line in styles:
+        parts = line.split()
+        if not parts:
+            continue
+        if parts[0].lower() == "custom":
+            kws |= {p.lower() for p in parts[1:]}
+        elif parts[0].lower() in ("one", "multi"):
+            kws |= _THERMO_ONE
+    if not styles:  # no explicit style -> LAMMPS default is 'one'
+        kws |= _THERMO_ONE
+    return kws
+
+
+def _dump_interval(deck: str) -> Optional[int]:
+    ivs = [int(n) for n in
+           re.findall(r'(?mi)^\s*dump\s+\S+\s+\S+\s+\S+\s+(\d+)\b', deck)]
+    return min(ivs) if ivs else None
+
+
+def _ave_output_interval(deck: str) -> Optional[int]:
+    """Smallest output interval (Nfreq) across fix ave/time and ave/correlate —
+    how often accumulated quantities (e.g. stress for Green-Kubo) are written."""
+    freqs = [int(m.group(3)) for m in re.finditer(
+        r'(?mi)^\s*fix\s+\S+\s+\S+\s+ave/(?:time|correlate)\s+(\d+)\s+(\d+)\s+(\d+)\b',
+        deck)]
+    return min(freqs) if freqs else None
+
+
+def _logs_pressure_via_compute(deck: str) -> bool:
+    """A pressure/stress signal accumulated during the run: a pressure or
+    per-atom stress compute whose result is written by an averaging fix."""
+    has_compute = bool(re.search(
+        r'(?mi)^\s*compute\s+\S+\s+\S+\s+(?:pressure|stress/atom|centroid/stress/atom)\b',
+        deck))
+    return has_compute and _ave_output_interval(deck) is not None
+
+
+def detect_signal_logging(deck_text: str, signal: str) -> Dict[str, Any]:
+    """Report whether a LAMMPS deck logs ``signal`` and at what interval.
+
+    Engine realization of the ``signal_present`` / ``cadence`` contradiction
+    checks. Maps a semantic signal name to LAMMPS logging constructs — a saved
+    trajectory (``dump``) for geometry/structure signals, ``thermo`` keywords
+    for thermodynamic ones, and ``fix ave/time`` / ``ave/correlate`` output for
+    quantities accumulated during the run (e.g. stress for Green-Kubo
+    viscosity).
+
+    Args:
+        deck_text: The full LAMMPS input deck.
+        signal: Semantic signal name (e.g. ``"stress"``, ``"trajectory"``,
+            ``"energy"``, ``"temperature"``, ``"density"``).
+
+    Returns:
+        ``{"present": bool, "interval_steps": int | None}``. ``interval_steps``
+        is the coarsest cadence at which the signal is written (``None`` when
+        not logged or when the interval cannot be determined).
+    """
+    signal = str(signal).lower().strip()
+
+    if signal in _TRAJECTORY_SIGNALS:
+        di = _dump_interval(deck_text)
+        return {"present": di is not None, "interval_steps": di}
+
+    thermo_int = _thermo_interval(deck_text)
+    thermo_kws = _thermo_keywords(deck_text)
+    wanted = _THERMO_KEYWORDS.get(signal, {signal})
+
+    intervals: List[int] = []
+    if wanted & thermo_kws and thermo_int is not None:
+        intervals.append(thermo_int)
+    # stress/pressure accumulated during the run via a compute + averaging fix.
+    if signal in ("stress", "pressure") and _logs_pressure_via_compute(deck_text):
+        ai = _ave_output_interval(deck_text)
+        if ai is not None:
+            intervals.append(ai)
+
+    if intervals:
+        return {"present": True, "interval_steps": min(intervals)}
+    return {"present": False, "interval_steps": None}
+
+
+TOOL_SPECS = [
+    ToolSpec(
+        name="detect_signal_logging",
+        description=(
+            "Report whether a LAMMPS deck logs a named signal (trajectory, "
+            "energy, temperature, pressure/stress, volume, density) and at what "
+            "step interval. Engine realization of the signal_present / cadence "
+            "observable-coverage checks."
+        ),
+        parameters={
+            "deck_text": "The full LAMMPS input deck (string).",
+            "signal": (
+                "Semantic signal name to look for, e.g. 'stress', 'trajectory', "
+                "'energy', 'temperature', 'density'."
+            ),
+        },
+        agents=["simulation"],
+    ),
+]
+
+
 TOOL_SPEC = ToolSpec(
     name="default_run_command",
     description=(

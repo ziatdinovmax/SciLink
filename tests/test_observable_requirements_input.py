@@ -138,5 +138,109 @@ class TestGateChecksList:
         assert "authoritative" not in captured["p"]
 
 
+def _fake_detector(deck_text, signal):
+    table = {
+        "stress": {"present": True, "interval_steps": 10},
+        "trajectory": {"present": False, "interval_steps": None},
+    }
+    return table.get(signal, {"present": False, "interval_steps": None})
+
+
+class TestDeterministicCheckers:
+    """Piece 3: engine-neutral signal_present + cadence checkers, delegating
+    detection to a supplied engine tool."""
+
+    def test_signal_present_flags_absent(self):
+        from scilink.agents.sim_agents.contradictions import check_requirements
+        reqs = [Requirement("Zn RDF", "signal_present", {"signal": "trajectory"})]
+        c = check_requirements(reqs, {"deck": "x", "signal_detector": _fake_detector})
+        assert len(c) == 1 and "trajectory" in c[0].message
+
+    def test_signal_present_passes_when_logged(self):
+        from scilink.agents.sim_agents.contradictions import check_requirements
+        reqs = [Requirement("viscosity", "signal_present", {"signal": "stress"})]
+        c = check_requirements(reqs, {"deck": "x", "signal_detector": _fake_detector})
+        assert c == []
+
+    def test_cadence_flags_undersampled(self):
+        from scilink.agents.sim_agents.contradictions import check_requirements
+        reqs = [Requirement("viscosity", "cadence",
+                            {"signal": "stress", "max_interval_steps": 1})]
+        c = check_requirements(reqs, {"deck": "x", "signal_detector": _fake_detector})
+        assert len(c) == 1 and "every 10 steps" in c[0].message
+
+    def test_cadence_passes_when_dense_enough(self):
+        from scilink.agents.sim_agents.contradictions import check_requirements
+        reqs = [Requirement("viscosity", "cadence",
+                            {"signal": "stress", "max_interval_steps": 50})]
+        c = check_requirements(reqs, {"deck": "x", "signal_detector": _fake_detector})
+        assert c == []
+
+    def test_degrades_without_detector(self):
+        from scilink.agents.sim_agents.contradictions import check_requirements
+        reqs = [Requirement("viscosity", "signal_present", {"signal": "stress"})]
+        c = check_requirements(reqs, {"deck": "x"})  # no detector -> defer to LLM
+        assert c == []
+
+
+class TestLammpsDetector:
+    """Piece 3: the LAMMPS engine realization of detect_signal_logging."""
+
+    def _fn(self):
+        from scilink.skills._shared._registry import get_tool_function
+        return get_tool_function("detect_signal_logging", active_skills=["lammps"])
+
+    def test_trajectory_from_dump(self):
+        deck = "units real\ndump 1 all custom 500 t.dump id x y z\n"
+        assert self._fn()(deck_text=deck, signal="trajectory") == {
+            "present": True, "interval_steps": 500}
+
+    def test_thermo_signal_present_and_cadence(self):
+        deck = "thermo 100\nthermo_style custom step temp press density\n"
+        r = self._fn()(deck_text=deck, signal="density")
+        assert r == {"present": True, "interval_steps": 100}
+
+    def test_stress_absent_when_not_logged(self):
+        deck = "thermo 100\nthermo_style custom step temp\n"
+        assert self._fn()(deck_text=deck, signal="stress")["present"] is False
+
+    def test_stress_present_via_compute_and_ave(self):
+        deck = ("thermo 100\nthermo_style custom step temp\n"
+                "compute p all pressure thermo_temp\n"
+                "fix v all ave/correlate 5 100 1000 c_p[1]\n")
+        r = self._fn()(deck_text=deck, signal="stress")
+        assert r["present"] is True and r["interval_steps"] == 1000
+
+
+class TestGateDeterministicLayer:
+    """Piece 3: the gate's deterministic layer resolves the real engine tool and
+    blocks the union with the LLM layer."""
+
+    def _ctx(self, reqs):
+        from scilink.agents.sim_agents.refinement import RefinementContext
+        return RefinementContext(research_goal="compute viscosity",
+                                 engine="lammps", required_observables=reqs)
+
+    def test_blocks_missing_signal(self):
+        from scilink.agents.sim_agents.refinement import _deterministic_coverage
+        ctx = self._ctx([Requirement("shear viscosity", "signal_present",
+                                     {"signal": "stress"})])
+        deck = "thermo 100\nthermo_style custom step temp\n"  # no stress logged
+        blocking = _deterministic_coverage(ctx, deck)
+        assert len(blocking) == 1 and "stress" in blocking[0]
+
+    def test_passes_when_signal_present(self):
+        from scilink.agents.sim_agents.refinement import _deterministic_coverage
+        ctx = self._ctx([Requirement("shear viscosity", "signal_present",
+                                     {"signal": "stress"})])
+        deck = ("thermo 100\nthermo_style custom step temp press\n")  # press logged
+        assert _deterministic_coverage(ctx, deck) == []
+
+    def test_no_observables_no_block(self):
+        from scilink.agents.sim_agents.refinement import _deterministic_coverage
+        ctx = self._ctx(None)
+        assert _deterministic_coverage(ctx, "anything") == []
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

@@ -213,3 +213,74 @@ def _check_selection_realizable(
             },
         },
     )
+
+
+@register_checker("signal_present")
+def _check_signal_present(
+    req: Requirement, artifacts: Dict[str, Any], *, active_skills=None,
+) -> Optional[Contradiction]:
+    """A required raw signal must actually be logged by the deck (tier 1).
+
+    Engine-neutral: whether a signal is written is engine-specific, so detection
+    is delegated to the engine's conventional ``detect_signal_logging`` tool,
+    which the caller resolves and supplies as ``artifacts["signal_detector"]`` (a
+    callable taking ``deck_text`` and ``signal``, returning ``{"present": bool,
+    "interval_steps": int | None}``). The signal token is ``req.params["signal"]``
+    (defaults to the observable name). Returns None — deferring to the LLM
+    coverage layer — when no deck or no detector is available (graceful
+    degradation for an engine that provides no realization of this kind).
+    """
+    signal = req.params.get("signal") or req.observable
+    deck = artifacts.get("deck")
+    detect = artifacts.get("signal_detector")
+    if deck is None or detect is None:
+        return None
+    info = detect(deck_text=deck, signal=signal) or {}
+    if info.get("present"):
+        return None
+    return Contradiction(
+        requirement=req,
+        check_kind="signal_present",
+        message=(
+            f"required signal {signal!r} for observable {req.observable!r} is "
+            f"not logged by the deck"
+        ),
+        resolvable=False,
+    )
+
+
+@register_checker("cadence")
+def _check_cadence(
+    req: Requirement, artifacts: Dict[str, Any], *, active_skills=None,
+) -> Optional[Contradiction]:
+    """A logged signal must be sampled densely enough to extract the property (tier 2).
+
+    Compares the deck's logging interval for the signal (from the same
+    ``detect_signal_logging`` detector in ``artifacts["signal_detector"]``)
+    against ``req.params["max_interval_steps"]``. This is the adequacy check the
+    LLM coverage layer cannot make — it treats sampling frequency as never
+    blocking — so it is the only path to tier-2. Returns None (defers) when the
+    signal is absent (that is ``signal_present``'s concern), when the interval is
+    unknown, or when no detector / threshold is supplied.
+    """
+    max_interval = req.params.get("max_interval_steps")
+    signal = req.params.get("signal") or req.observable
+    deck = artifacts.get("deck")
+    detect = artifacts.get("signal_detector")
+    if deck is None or detect is None or max_interval is None:
+        return None
+    info = detect(deck_text=deck, signal=signal) or {}
+    interval = info.get("interval_steps")
+    if not info.get("present") or interval is None:
+        return None
+    if interval <= max_interval:
+        return None
+    return Contradiction(
+        requirement=req,
+        check_kind="cadence",
+        message=(
+            f"signal {signal!r} for observable {req.observable!r} is logged every "
+            f"{interval} steps but adequate extraction needs <= {max_interval}"
+        ),
+        resolvable=False,
+    )
