@@ -808,6 +808,7 @@ class RunCritic(_CriticBase):
         fixes_mode: str = "auto",
         input_files: Optional[Dict[str, str]] = None,
         check_observables: bool = False,
+        required_observables: Optional[list] = None,
     ) -> Dict[str, Any]:
         """Assess a finished run and return a verdict report.
 
@@ -855,6 +856,13 @@ class RunCritic(_CriticBase):
                 recoverable-in-post-processing or optional ones (reported in
                 ``advisory_observables``, non-blocking). Intended for the
                 pre-run gate; defaults to False.
+            required_observables: Optional list of engine-neutral
+                ``contradictions.Requirement`` objects naming the observables
+                the run must yield. When provided (with ``check_observables``),
+                the coverage check verifies this authoritative list rather than
+                re-deriving the required set from the goal — removing the flaky
+                inference step. When ``None``, the required set is inferred from
+                the goal as before.
 
         Returns:
             A report dict with fields:
@@ -929,10 +937,26 @@ class RunCritic(_CriticBase):
         )
 
         if check_observables:
+            # When the caller declares the required observables, check against
+            # that authoritative list instead of re-deriving it from the goal
+            # (the derive step is the flaky part). Falls back to inference.
+            if required_observables:
+                from .contradictions import format_requirements_for_prompt
+                required_directive = (
+                    "The REQUIRED observables are declared below — treat this "
+                    "list as authoritative and do NOT re-derive it from the "
+                    "goal; check each one against the deck/output:\n"
+                    f"{format_requirements_for_prompt(required_observables)}\n"
+                )
+            else:
+                required_directive = (
+                    "Determine which physical properties the research goal "
+                    "requires. "
+                )
             observable_coverage = (
                 "=== Observable-coverage check (pre-run) ===\n"
-                "Determine which physical properties the research goal requires. "
-                "A gap is BLOCKING only when the raw data needed to compute the "
+                + required_directive
+                + "A gap is BLOCKING only when the raw data needed to compute the "
                 "property is not being written at all and cannot be reconstructed "
                 "after the run. Apply this test:\n"
                 "- A saved trajectory of coordinates/velocities lets you recompute "

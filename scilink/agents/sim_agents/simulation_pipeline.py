@@ -585,6 +585,7 @@ def _run_workflow_once(
         research_goal=user_request, scale=scale, engine=software,
         skill=software, domain=scale, autonomy=autonomy,
         max_cycles=max_run_cycles, coverage_votes=coverage_votes,
+        required_observables=required_observables,
     )
     run_critic = RunCritic(
         api_key=api_key, base_url=base_url, model_name=model_name,

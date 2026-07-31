@@ -98,5 +98,45 @@ class TestReachesPrompt:
         assert "Target observables" not in without
 
 
+class TestGateChecksList:
+    """Piece 2: the pre-run coverage gate checks a passed-in list rather than
+    re-inferring it from the goal."""
+
+    def test_assess_signature_has_param(self):
+        from scilink.agents.sim_agents.critics import RunCritic
+        assert "required_observables" in inspect.signature(
+            RunCritic.assess).parameters
+
+    def test_refinement_context_carries_observables(self):
+        from scilink.agents.sim_agents.refinement import RefinementContext
+        ctx = RefinementContext(research_goal="x", required_observables=REQS)
+        assert ctx.required_observables == REQS
+
+    def test_gate_prompt_uses_authoritative_list(self, tmp_path):
+        from scilink.agents.sim_agents.critics import RunCritic
+        (tmp_path / "log.lammps").write_text("run completed\n")
+        critic = RunCritic(api_key="test-key")
+        captured = {}
+
+        def fake_json(prompt):
+            captured["p"] = prompt
+            return {"status": "success", "run_status": "succeeded",
+                    "verdict": "good"}
+
+        critic._generate_json = fake_json
+
+        critic.assess(str(tmp_path), "compute the mass density",
+                      check_observables=True, required_observables=REQS)
+        assert "authoritative" in captured["p"]
+        assert "shear viscosity [cadence]" in captured["p"]
+        assert "Determine which physical properties" not in captured["p"]
+
+        captured.clear()
+        critic.assess(str(tmp_path), "compute the mass density",
+                      check_observables=True)
+        assert "Determine which physical properties" in captured["p"]
+        assert "authoritative" not in captured["p"]
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

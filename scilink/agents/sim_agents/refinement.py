@@ -303,6 +303,9 @@ class RefinementContext:
         cycle: Refine cycles spent on the current phase (loop-managed).
         coverage_votes: Independent coverage checks to majority-vote in the
             pre-run gate (1 = single check; >1 damps the stochastic decision).
+        required_observables: Optional engine-neutral ``Requirement`` list the
+            run must yield; when set, the coverage gate checks this authoritative
+            list instead of re-deriving the required set from the goal.
         history: Per-cycle records appended by :meth:`record`.
         interact: Optional human-feedback handle; ``None`` for headless runs.
     """
@@ -316,6 +319,7 @@ class RefinementContext:
     max_cycles: int = 3
     cycle: int = 0
     coverage_votes: int = 1
+    required_observables: Optional[List] = None
     history: List[Dict[str, Any]] = field(default_factory=list)
     interact: Optional[InteractFn] = None
 
@@ -739,6 +743,7 @@ def _run_dry_run_gate(phase, executor, run_critic, ctx, prepare, entry,
             output_dir=out_dir, research_goal=ctx.research_goal,
             skill=ctx.skill, domain=ctx.domain,
             input_files={entry: real_deck},
+            required_observables=getattr(ctx, "required_observables", None),
         )
         run_status = verdict.get("run_status")
         missing = verdict.get("missing_observables") or []
