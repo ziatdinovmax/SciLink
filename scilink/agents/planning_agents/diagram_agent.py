@@ -24,11 +24,15 @@ from ...utils.mermaid_render import render_mermaid, mermaid_available  # noqa: F
 from .base_agent import BaseAgent
 
 _GEN_PROMPT = """You are drawing a workflow diagram for a scientific \
-campaign document. Produce ONE Mermaid flowchart (```mermaid fenced block, \
-`flowchart TD`) of the experimental campaign below.
+campaign document. Produce ONE Mermaid flowchart (```mermaid fenced \
+block) of the experimental campaign below.
 
 Rules:
 - {detail_rule}
+- Document figures are landscape-shaped: prefer `flowchart LR`
+  (left-to-right) so the figure spans the page width instead of running
+  tall and narrow. Use `flowchart TD` only when the horizontal layout
+  would cram or wrap the labels (typically many parallel branches).
 - Node labels: short plain phrases in double quotes, no code tokens, no
   parentheses or special characters inside labels.
 - Decision points are diamonds (`{{"..."}}`); loops (e.g. an
@@ -54,8 +58,12 @@ scientific document. Judge it and answer in JSON only:
 {{"approved": true/false, "issues": ["..."]}}
 
 Reject when: text overlaps or is clipped; arrows cross confusingly; the
-diagram contradicts the campaign description below; or it is overcrowded
-for a document figure ({detail} level was requested — {detail_rule})
+diagram contradicts the campaign description below; it is overcrowded
+for a document figure ({detail} level was requested — {detail_rule});
+or the shape fights the page — this renders {width}x{height}px and
+document figures should be wider than tall, so reject a strongly
+vertical diagram IF a left-to-right layout would keep the labels
+readable (readability wins over orientation).
 
 Campaign (structured):
 {plan_json}"""
@@ -186,7 +194,8 @@ class DiagramAgent(BaseAgent):
             img = PIL_Image.open(png_path)
             prompt = _QC_PROMPT.format(
                 plan_json=plan_json, detail=detail,
-                detail_rule=_DETAIL_RULES[detail])
+                detail_rule=_DETAIL_RULES[detail],
+                width=img.width, height=img.height)
             resp = self.model.generate_content(
                 [prompt, img], generation_config=self.generation_config)
             verdict, _ = parse_json_from_response(resp)
