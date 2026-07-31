@@ -133,10 +133,11 @@ prediction credible, not any single match.
 
 ## What we explicitly do NOT claim
 
-- **Not** "SciLink autonomously grounds the fix in literature." Edison is a
-  caveated fallback for systems with no in-house data, flagged as needing
-  verification. `_literature_grounding.py` is demoted from *the reference* to *a
-  hint*, with a longer timeout and a "verify against physics" caveat.
+- **Not** "SciLink autonomously grounds the fix in literature." Edison-based
+  literature grounding stays a *caveated fallback* for systems with no in-house
+  data — a hint that must be verified against physics, never the sole reference
+  for a trend (it returned the wrong trend direction for UC2). It is future work,
+  not part of this capability's core.
 - **Not** full autonomy on the fix. Per the use-case framing (max quality *with
   human feedback*), SciLink catches and recommends; the human approves the
   corrected model; SciLink re-validates. That is the version that works.
