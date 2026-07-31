@@ -61,6 +61,7 @@ def _generate_inputs(
     model_name: str,
     force_field_files: Optional[Dict[str, str]] = None,
     staged: bool = False,
+    required_observables: Optional[list] = None,
 ) -> Dict[str, Any]:
     """Generate inputs for ``scale``, returning a normalized result.
 
@@ -104,6 +105,7 @@ def _generate_inputs(
         )
         result = agent.generate_inputs(
             structure_file=structure_file, request=request, software=software,
+            required_observables=required_observables,
         )
         # PeriodicDFTAgent already returns input_files as {filename: contents}.
         if result.get("status") == "success":
@@ -125,6 +127,7 @@ def _generate_inputs(
         result = gen(
             structure_file=structure_file, research_goal=request, runner=software,
             force_field_files=force_field_files,
+            required_observables=required_observables,
         )
         # Normalize the MD agent's single script_path into the common
         # input_files map so the pipeline stays engine-neutral downstream,
@@ -304,6 +307,7 @@ def _run_workflow_once(
     staged: bool = False,
     reference_check: bool = False,
     auto_fix: bool = True,
+    required_observables: Optional[list] = None,
 ) -> Dict[str, Any]:
     """Run the full structure → inputs → validation pipeline for any scale.
 
@@ -526,7 +530,7 @@ def _run_workflow_once(
             structure_file=structure_path, request=user_request,
             output_dir=output_dir, api_key=api_key, base_url=base_url,
             model_name=model_name, force_field_files=force_field_files,
-            staged=staged,
+            staged=staged, required_observables=required_observables,
         )
     except Exception as e:
         result["final_status"] = "failed_input_generation"

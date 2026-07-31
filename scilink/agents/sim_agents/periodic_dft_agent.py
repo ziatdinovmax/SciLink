@@ -152,7 +152,8 @@ class PeriodicDFTAgent:
     def _build_prompt(self, structure_content: str, request: str,
                       software: str,
                       skill_sections: Optional[dict] = None,
-                      native_structure_file: Optional[str] = None) -> str:
+                      native_structure_file: Optional[str] = None,
+                      required_observables: Optional[list] = None) -> str:
         """
         Build the full prompt, injecting skill content if available.
 
@@ -185,6 +186,17 @@ class PeriodicDFTAgent:
                         f"## {section_name.title()}\n{content}"
                     )
 
+        # Target observables are a first-class co-input: convergence targets,
+        # functional, k-point density, smearing, and output flags are chosen to
+        # yield them, not inferred from the request prose alone.
+        from .contradictions import format_requirements_for_prompt
+        obs_lines = format_requirements_for_prompt(required_observables or [])
+        obs_block = (
+            "**Target observables** — choose settings (functional, k-point "
+            "density, smearing, convergence, output flags) so each of these is "
+            f"obtainable from the calculation:\n{obs_lines}\n\n"
+        ) if obs_lines else ""
+
         base = (
             f"You are an expert in periodic / pseudopotential DFT "
             f"calculations using {software.upper()}.\n\n"
@@ -193,6 +205,7 @@ class PeriodicDFTAgent:
             f"**Structure file content** (use as-is, do not modify):\n"
             f"```\n{structure_content}\n```\n\n"
             f"**User request:**\n{request}\n\n"
+            f"{obs_block}"
             f"**Output format:** Return ONLY a JSON object with this "
             f"structure:\n"
             f"```json\n"
@@ -289,7 +302,8 @@ class PeriodicDFTAgent:
     def generate_inputs(self, structure_file: str,
                         request: str,
                         software: str = "vasp",
-                        skill: Optional[str] = None) -> dict:
+                        skill: Optional[str] = None,
+                        required_observables: Optional[list] = None) -> dict:
         """
         Generate input files for a periodic-DFT calculation.
 
@@ -348,6 +362,7 @@ class PeriodicDFTAgent:
             software=software,
             skill_sections=skill_sections,
             native_structure_file=native_file,
+            required_observables=required_observables,
         )
 
         try:

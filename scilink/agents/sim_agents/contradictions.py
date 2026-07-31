@@ -138,6 +138,27 @@ def check_requirements(
     return out
 
 
+def format_requirements_for_prompt(requirements: List[Requirement]) -> str:
+    """Render a required-observables contract as a prompt block.
+
+    Turns the typed ``Requirement`` list into human-readable lines an agent's
+    Generate stage can reason against when choosing input parameters. Engine-
+    neutral: it states *what* each observable needs (its ``check_kind`` and any
+    params), not how a particular engine realizes it. Returns ``""`` for an
+    empty or missing list so callers can concatenate unconditionally.
+    """
+    if not requirements:
+        return ""
+    lines = []
+    for req in requirements:
+        detail = ""
+        if req.params:
+            detail = " (" + ", ".join(
+                f"{k}={v}" for k, v in req.params.items()) + ")"
+        lines.append(f"- {req.observable} [{req.check_kind}]{detail}")
+    return "\n".join(lines)
+
+
 @register_checker("selection_realizable")
 def _check_selection_realizable(
     req: Requirement, artifacts: Dict[str, Any], *, active_skills=None,
