@@ -136,6 +136,90 @@ def run_reference_check(
             "verdict": verdict}
 
 
+def _observable_name(entry: Dict[str, Any]) -> str:
+    return str(entry.get("observable") or entry.get("component")
+               or entry.get("property") or "observable")
+
+
+def _is_failure(verdict: Dict[str, Any]) -> bool:
+    """A per-observable verdict counts as a validation failure."""
+    return (verdict.get("verdict") in ("poor", "needs_fixes")
+            or verdict.get("consistent") is False)
+
+
+def _default_scope(prediction_target: str, passed: List[str],
+                   failed: List[str]) -> str:
+    """Deterministic confidence statement scoping the prediction to what passed."""
+    passed_str = ", ".join(passed) or "(none)"
+    if not failed:
+        return (f"Prediction of {prediction_target} is backed by validation "
+                f"against: {passed_str}.")
+    return (f"Prediction of {prediction_target} is NOT fully backed: the model "
+            f"failed {', '.join(failed)} (validated only {passed_str}). Scope the "
+            f"{prediction_target} claim down or fix the model before trusting it.")
+
+
+def run_validation_panel(
+    observations: List[Dict[str, Any]],
+    prediction_target: str,
+    system_description: str,
+    *,
+    judge_fn: Callable[[List[Dict[str, Any]], str], Dict[str, Any]],
+    scope_fn: Optional[Callable[[str, List[str], List[str], str], str]] = None,
+) -> Dict[str, Any]:
+    """Validate a set of observables against their references; scope the prediction.
+
+    The post-run generalization of :func:`run_reference_check`: instead of one
+    constituent property, it judges N observables of the *actual* system (each a
+    computed value plus the reference it is judged against — measured data
+    preferred, literature as caveated fallback) and aggregates them into a
+    confidence statement tied to the ``prediction_target`` (the quantity the run
+    predicts, which is NOT itself in ``observations``). A model that reproduces
+    several independent observables earns a credible prediction of a correlated
+    one; a failure scopes the claim down or routes to the fixer.
+
+    Args:
+        observations: ``[{"observable", "value", "units", "reference", ...}, ...]``
+            — one computed value per validation observable, with its reference.
+        prediction_target: The quantity the validated model will predict.
+        system_description: What is being simulated.
+        judge_fn: Judges the observations against their references and returns
+            ``{"per_observable": [{"observable", "verdict", ...}]}`` (a
+            ``per_measurement`` key is also accepted). Injected so the panel stays
+            engine/critic-neutral — wire it to the reference-property critic.
+        scope_fn: Optional richer (e.g. LLM) confidence-statement generator
+            ``(target, passed, failed, system_description) -> str``. Falls back
+            to a deterministic summary.
+
+    Returns:
+        ``{"status", "prediction_target", "per_observable", "passed", "failed",
+        "prediction_warranted", "confidence"}``. ``prediction_warranted`` is True
+        only when no observable failed; ``failed`` is the catch — route those to
+        the reparameterization fixer before trusting the prediction.
+    """
+    report = judge_fn(observations, system_description) or {}
+    per = report.get("per_observable") or report.get("per_measurement") or []
+    passed = [p for p in per if not _is_failure(p)]
+    failed = [p for p in per if _is_failure(p)]
+    passed_names = [_observable_name(p) for p in passed]
+    failed_names = [_observable_name(p) for p in failed]
+    warranted = not failed
+    if scope_fn is not None:
+        confidence = scope_fn(prediction_target, passed_names, failed_names,
+                              system_description)
+    else:
+        confidence = _default_scope(prediction_target, passed_names, failed_names)
+    return {
+        "status": "success",
+        "prediction_target": prediction_target,
+        "per_observable": per,
+        "passed": passed_names,
+        "failed": failed_names,
+        "prediction_warranted": warranted,
+        "confidence": confidence,
+    }
+
+
 def run_reparameterization(
     flagged: List[Dict[str, Any]],
     system_description: str,
