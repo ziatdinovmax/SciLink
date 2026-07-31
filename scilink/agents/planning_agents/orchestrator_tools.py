@@ -779,6 +779,40 @@ class OrchestratorTools:
         legacy.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         return legacy[0] if legacy else None
 
+    def _get_diagram_agent(self):
+        """Lazy DiagramAgent sharing the BO agent's model client (vision-
+        capable; no new credential plumbing)."""
+        if getattr(self, "_diagram_agent", None) is None:
+            from .diagram_agent import DiagramAgent
+            self._diagram_agent = DiagramAgent(
+                model=self.orch.bo.model, output_dir=str(self.orch.base_dir))
+        return self._diagram_agent
+
+    def _maybe_embed_workflow_diagram(self, text: str, out_dir) -> str:
+        """Append a compact workflow diagram section to a document when the
+        renderer is available and the QC'd diagram succeeds. Any failure
+        returns the text unchanged — a document must never be lost to a
+        figure."""
+        try:
+            from ...utils.mermaid_render import mermaid_available
+            if not mermaid_available():
+                return text
+            plan = (self.orch.planner.state or {}).get("current_plan") or {}
+            if not plan:
+                return text
+            res = self._get_diagram_agent().generate_workflow_diagram(
+                plan=plan, out_dir=out_dir, detail="simple")
+            if res.get("status") == "success":
+                rel = Path(res["png_path"]).name
+                print(f"    🗺️  Workflow diagram embedded "
+                      f"({res['attempts']} attempt(s), "
+                      f"{res['qc_rounds']} QC round(s))")
+                return (f"{text}\n\n## Campaign Workflow\n\n"
+                        f"![Campaign workflow diagram]({rel})\n")
+        except Exception as exc:  # noqa: BLE001
+            print(f"    ⚠️  Workflow diagram skipped: {exc}")
+        return text
+
     def _write_white_paper(self, audience_context: str = None) -> str:
         """Generate the sponsor-facing white paper from the current plan and
         save it beside the plan artifacts. Returns the saved path."""
@@ -805,6 +839,7 @@ class OrchestratorTools:
         text = self.orch.planner.generate_white_paper(
             audience_context=audience_context
         )
+        text = self._maybe_embed_workflow_diagram(text, self._output_dir())
         wp_path = self._output_dir() / "white_paper.md"
         wp_path.write_text(text)
         from .user_interface import format_path, record_deliverable
@@ -2020,6 +2055,77 @@ class OrchestratorTools:
                         "Optional sponsor targeting, e.g. 'emphasize "
                         "fundamental-science significance and milestones' "
                         "or 'lead with cost and scalability impact'."
+                    ),
+                },
+            },
+            required=[],
+        )
+
+        # --- WORKFLOW DIAGRAM TOOL ---
+        def generate_workflow_diagram(detail: str = "simple",
+                                      focus: str = None):
+            """QC'd Mermaid workflow diagram of the current campaign plan."""
+            print("  ⚡ Tool: Generating workflow diagram...")
+            from ...utils.mermaid_render import (
+                mermaid_available, INSTALL_HINT)
+            if not mermaid_available():
+                return json.dumps({"status": "error",
+                                   "message": INSTALL_HINT})
+            plan = (self.orch.planner.state or {}).get("current_plan") or {}
+            if not plan:
+                return json.dumps({
+                    "status": "error",
+                    "message": "No campaign plan yet",
+                    "hint": "Run generate_initial_plan first."})
+            try:
+                res = self._get_diagram_agent().generate_workflow_diagram(
+                    plan=plan, out_dir=self._output_dir(), detail=detail,
+                    extra_instructions=focus)
+                if res.get("status") != "success":
+                    return json.dumps({"status": "error",
+                                       "message": res.get("error")})
+                from .user_interface import record_deliverable
+                record_deliverable(self.orch.base_dir, res["png_path"],
+                                   "Campaign workflow diagram")
+                return json.dumps({
+                    "status": "success",
+                    "diagram": res["png_path"],
+                    "mermaid_source": res["mmd_path"],
+                    "render_attempts": res["attempts"],
+                    "visual_qc_rounds": res["qc_rounds"],
+                })
+            except Exception as e:
+                logging.error(f"Workflow diagram error: {e}", exc_info=True)
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=generate_workflow_diagram,
+            name="generate_workflow_diagram",
+            description=(
+                "Draw a workflow diagram (rendered PNG) of the CURRENT "
+                "campaign plan — generated as Mermaid code, retried on "
+                "render errors, and passed through a visual quality gate "
+                "before acceptance. Diagrams are COMPACT stage-level "
+                "overviews by default; white papers already embed one "
+                "automatically. Call this when the user explicitly asks "
+                "for a (new or different) workflow/campaign diagram. "
+                "Requires an existing plan."
+            ),
+            parameters={
+                "detail": {
+                    "type": "string",
+                    "enum": ["simple", "elaborate"],
+                    "description": (
+                        "'simple' (default): compact stage-level overview. "
+                        "'elaborate' ONLY when the user explicitly asks "
+                        "for a detailed/step-by-step diagram."
+                    ),
+                },
+                "focus": {
+                    "type": "string",
+                    "description": (
+                        "Optional emphasis, e.g. 'highlight the "
+                        "optimization loop' or 'show the decision gates'."
                     ),
                 },
             },

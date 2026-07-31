@@ -71,7 +71,10 @@ def markdown_to_pdf(md_path, pdf_path=None, title: str | None = None,
     md_path = Path(md_path)
     out = Path(pdf_path) if pdf_path else md_path.with_suffix(".pdf")
     text = md_path.read_text(errors="replace")
-    return _write_pdf(text, out, title or md_path.stem, css)
+    # base_dir lets relative image references (e.g. an embedded workflow
+    # diagram PNG saved beside the markdown) resolve into the PDF.
+    return _write_pdf(text, out, title or md_path.stem, css,
+                      base_dir=md_path.parent)
 
 
 def markdown_text_to_pdf(text: str, pdf_path, title: str = "",
@@ -80,7 +83,8 @@ def markdown_text_to_pdf(text: str, pdf_path, title: str = "",
     return _write_pdf(text, Path(pdf_path), title, css)
 
 
-def _write_pdf(text: str, out: Path, title: str, css: str | None) -> Path:
+def _write_pdf(text: str, out: Path, title: str, css: str | None,
+               base_dir=None) -> Path:
     try:
         import fitz  # PyMuPDF
     except ImportError as exc:      # pragma: no cover - declared dependency
@@ -95,7 +99,9 @@ def _write_pdf(text: str, out: Path, title: str, css: str | None) -> Path:
 
     import io
 
-    story = fitz.Story(html=html, user_css=css or DEFAULT_CSS)
+    archive = fitz.Archive(str(base_dir)) if base_dir else None
+    story = fitz.Story(html=html, user_css=css or DEFAULT_CSS,
+                       archive=archive)
     try:
         # Gives headings ids, so an in-document [jump](#section) resolves.
         story.add_header_ids()
