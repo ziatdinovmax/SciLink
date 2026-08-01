@@ -95,6 +95,29 @@ class TestRealSkills:
         assert "viscosity_greenkubo" in elig({"thermo_log"})
         assert "viscosity_greenkubo" not in elig({"trajectory"})
 
+    def test_t1_skill_loads_and_gates(self, agent):
+        cat = agent._skill_catalog()
+        t1 = [c for c in cat if c["name"] == "t1_relaxation"]
+        assert t1, "t1_relaxation skill not discovered"
+        meta = t1[0]["meta"]
+        assert meta["computes"] == ["t1_relaxation"]
+        assert meta["requires"] == ["trajectory"]
+        assert t1[0].get("implementation")
+        elig = lambda kinds: {c["name"] for c in agent.eligible_skills(kinds, catalog=cat)}
+        assert "t1_relaxation" in elig({"trajectory"})
+        assert "t1_relaxation" not in elig({"thermo_log"})
+
+    def test_skills_gate_independently(self, agent):
+        cat = agent._skill_catalog()
+        elig = lambda kinds: {c["name"] for c in agent.eligible_skills(kinds, catalog=cat)}
+        targets = {"viscosity_greenkubo", "t1_relaxation"}
+        # a run with both data kinds makes both eligible
+        assert targets.issubset(elig({"trajectory", "thermo_log"}))
+        # a trajectory-only run: T1 eligible, viscosity not
+        assert elig({"trajectory"}) & targets == {"t1_relaxation"}
+        # a thermo-only run: viscosity eligible, T1 not
+        assert elig({"thermo_log"}) & targets == {"viscosity_greenkubo"}
+
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
