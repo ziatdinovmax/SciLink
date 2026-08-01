@@ -39,10 +39,13 @@ Rules:
   nodes, start to finish. The figure is as wide as that longest path,
   and a wider one cannot be read on a page. Branch early and merge
   routine steps.
-- Document figures are landscape-shaped: prefer `flowchart LR`
-  (left-to-right) so the figure spans the page width instead of running
-  tall and narrow. Use `flowchart TD` only when the horizontal layout
-  would cram or wrap the labels (typically many parallel branches).
+- ORIENTATION FOLLOWS SHAPE. If the flow branches — gates with
+  alternative outcomes, loops, parallel paths — use `flowchart LR`, so
+  the figure is landscape and spans the page width. If it is
+  essentially ONE sequence with little branching, use `flowchart TD`:
+  a long chain drawn left-to-right becomes a thin ribbon whose labels
+  are unreadable on a page, while the same chain read downward is a
+  clean vertical list.
 - Node labels: short plain phrases in double quotes, no code tokens, no
   parentheses or special characters inside labels.
 - Decision points are diamonds (`{{"..."}}`); loops (e.g. an
@@ -89,10 +92,12 @@ it reads as an unrolled step-by-step checklist rather than a conceptual
 structure — in particular reject any diagram whose backbone is a single
 long chain of more than 3 consecutive nodes with no branch, decision, or
 loop between them (those runs belong in one node);
-or the shape fights the page — this renders {width}x{height}px and
-document figures should be wider than tall, so reject a strongly
-vertical diagram IF a left-to-right layout would keep the labels
-readable (readability wins over orientation).
+or the shape fights the page — this renders {width}x{height}px. A
+branching flow should be landscape (reject a strongly vertical one when
+left-to-right would still read well), but a mostly-sequential flow
+belongs vertical: reject a thin horizontal ribbon (very wide, very
+short) whose labels no page can show. Readability decides, not
+orientation.
 
 Campaign (structured):
 {plan_json}"""

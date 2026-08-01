@@ -83,9 +83,11 @@ def markdown_text_to_pdf(text: str, pdf_path, title: str = "",
     return _write_pdf(text, Path(pdf_path), title, css)
 
 
-# A figure at least this wide relative to its height cannot be read in a
-# portrait text column, so it earns a landscape page of its own.
+# A figure outside this aspect band cannot be read inside a portrait text
+# column: too wide and it is an inch-tall ribbon, too tall and it runs off
+# the page. Either way it earns a page of its own, oriented to match.
 _WIDE_FIGURE_RATIO = 2.2
+_TALL_FIGURE_RATIO = 0.7
 
 
 def _pull_wide_figures(text: str, base_dir):
@@ -104,7 +106,8 @@ def _pull_wide_figures(text: str, base_dir):
         try:
             from PIL import Image
             with Image.open(p) as im:
-                if im.height and im.width / im.height >= _WIDE_FIGURE_RATIO:
+                ratio = im.width / im.height if im.height else 1.0
+                if not (_TALL_FIGURE_RATIO <= ratio <= _WIDE_FIGURE_RATIO):
                     figures.append((p, alt))
                     return ""      # placed later, on its own page
         except Exception:  # noqa: BLE001 - not an image we can measure
@@ -115,19 +118,25 @@ def _pull_wide_figures(text: str, base_dir):
 
 
 def _append_figure_pages(doc, figures, fitz) -> None:
-    """One landscape page per wide figure, image fitted with a caption."""
+    """One page per outsized figure, oriented to match it, with caption."""
     for path, caption in figures:
-        page = doc.new_page(width=792, height=612)     # letter, landscape
-        frame = fitz.Rect(_MARGIN, _MARGIN,
-                          792 - _MARGIN, 612 - _MARGIN - 24)
+        wide = True
+        try:
+            from PIL import Image
+            with Image.open(path) as im:
+                wide = not im.height or im.width / im.height >= 1.0
+        except Exception:  # noqa: BLE001
+            pass
+        w, h = (792, 612) if wide else (612, 792)
+        page = doc.new_page(width=w, height=h)
+        frame = fitz.Rect(_MARGIN, _MARGIN, w - _MARGIN, h - _MARGIN - 24)
         try:
             page.insert_image(frame, filename=str(path), keep_proportion=True)
         except Exception:  # noqa: BLE001 - a missing figure is not fatal
             continue
         if caption:
             page.insert_textbox(
-                fitz.Rect(_MARGIN, 612 - _MARGIN - 20,
-                          792 - _MARGIN, 612 - _MARGIN),
+                fitz.Rect(_MARGIN, h - _MARGIN - 20, w - _MARGIN, h - _MARGIN),
                 caption, fontsize=9, fontname="helv", align=1)
 
 

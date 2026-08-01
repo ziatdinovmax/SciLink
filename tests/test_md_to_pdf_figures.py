@@ -61,6 +61,22 @@ with tempfile.TemporaryDirectory() as t:
                         if p.rect.width <= p.rect.height)
     check("narrow figure still inline in the text", portrait_imgs >= 1)
 
+
+with tempfile.TemporaryDirectory() as t:
+    d = Path(t)
+    make_png(d / "tall.png", 700, 3000)      # 0.23:1
+    md = d / "tall.md"
+    md.write_text("# Doc\n\nText.\n\n![Tall chain](tall.png)\n")
+    text, figs = _pull_wide_figures(md.read_text(), d)
+    check("tall figure also pulled", len(figs) == 1)
+    doc = fitz.open(markdown_to_pdf(md, title="Doc"))
+    own = [p for p in doc if len(p.get_images()) == 1]
+    check("tall figure gets its own page", len(own) == 1, f"({len(doc)} pages)")
+    if own:
+        r = own[0].rect
+        check("that page is portrait", r.height > r.width,
+              f"({r.width:.0f}x{r.height:.0f})")
+
 with tempfile.TemporaryDirectory() as t:
     d = Path(t)
     md = d / "plain.md"
