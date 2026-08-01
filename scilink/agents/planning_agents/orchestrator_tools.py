@@ -814,6 +814,17 @@ class OrchestratorTools:
                 print(f"    🗺️  Workflow diagram embedded "
                       f"({res['attempts']} attempt(s), "
                       f"{res['qc_rounds']} QC round(s))")
+                # Recorded like the PDF twin — an ordinary produced file,
+                # not a second starred deliverable: the document is what
+                # the session points at. Without this the figure is
+                # invisible to the files listing and to a UI resume,
+                # which re-embeds from these manifests.
+                try:
+                    from .user_interface import record_deliverable
+                    record_deliverable(self.orch.base_dir, res["png_path"],
+                                       "Campaign workflow diagram")
+                except Exception:  # noqa: BLE001
+                    pass
                 return (f"{text}\n\n## Campaign Workflow\n\n"
                         f"![Campaign workflow diagram]({rel})\n")
         except Exception as exc:  # noqa: BLE001
