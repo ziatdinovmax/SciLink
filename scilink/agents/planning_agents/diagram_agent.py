@@ -46,8 +46,12 @@ Rules:
   a long chain drawn left-to-right becomes a thin ribbon whose labels
   are unreadable on a page, while the same chain read downward is a
   clean vertical list.
-- Node labels: short plain phrases in double quotes, no code tokens, no
-  parentheses or special characters inside labels.
+- Node labels: short plain phrases in double quotes. KEEP the science
+  notation — inside the quotes, α→β, TiO₂, 450 °C, Mn(III)/Mn(IV), ±,
+  ≥, [H2O2], 30% w/w all render correctly, so write them rather than
+  flattening them to ASCII. Only a double quote or a backtick may not
+  appear inside a label. No code tokens (function names, CamelCase
+  identifiers) — this is a figure for scientists.
 - Decision points are diamonds (`{{"..."}}`); loops (e.g. an
   optimize-measure-refine cycle) are drawn as cycles, not unrolled.
 - Tag each node with a semantic class — `NodeId["label"]:::decision` —

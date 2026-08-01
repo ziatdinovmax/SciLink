@@ -41,10 +41,14 @@ CLASS_HELP = (
 _STRIP = re.compile(r"^\s*(classDef|style|linkStyle)\s", re.I)
 
 _ARROW = re.compile(r"-{2,}>|={2,}>|-\.-*->|-{3,}|={3,}")
+# The label alternative tries a WHOLE quoted string first. Without that,
+# science inside a label — "Mix KMnO4 (aq)", "[H2O2] = 0.1 M" — looks
+# like a node shape, and the class tag gets spliced into the middle of
+# the sentence (seen live: "Mix KMnO4 (aq):::stage with 30% H2O2").
 _NODE = re.compile(
     r"(?P<id>\b[A-Za-z_]\w*)"
     r"(?P<open>\{\{|\[\[|\(\(|\[|\{|\()"
-    r"(?P<label>[^\]\}\)]*)"
+    r'(?P<label>"[^"]*"|[^"\]\}\)]*)'
     r"(?P<close>\}\}|\]\]|\)\)|\]|\}|\))"
     r"(?P<cls>:::\w+)?")
 
@@ -53,9 +57,14 @@ def _edge_sources(code: str) -> set:
     """Node ids that have at least one outgoing edge."""
     srcs = set()
     for line in (code or "").splitlines():
+        # Strip quoted labels first, then whole bracketed spans: an
+        # unquoted label's words would otherwise read as node ids and the
+        # real source would be lost ("A[Unquoted label] --> B" made
+        # "label" the source, so A looked terminal).
         bare = re.sub(r'"[^"]*"', "", line)
         bare = re.sub(r"\|[^|]*\|", " ", bare)
         bare = re.sub(r":::\w+", " ", bare)
+        bare = re.sub(r"\[[^\]]*\]|\{[^}]*\}|\([^)]*\)", " ", bare)
         bare = re.sub(r"[\[\]{}()]", " ", bare)
         segs = _ARROW.split(bare)
         for seg in segs[:-1]:
