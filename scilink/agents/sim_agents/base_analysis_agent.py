@@ -1,0 +1,357 @@
+"""Sim-side base for simulation-analysis agents.
+
+Simulation analysis is **data → number**: compute a property (viscosity,
+diffusion, an RDF, a band gap) from a finished run's output. Unlike the
+experimental analysis agents — which split by data shape and carry
+shape-specific pipeline stages — simulation analysis is codegen-dominated: the
+reusable engine is a ``generate code → run it sandboxed → verify the number →
+refine on failure`` loop, and the data shape is absorbed inside the generated
+code and its library (MDAnalysis / pymatgen / numpy). This base owns that
+engine; a subclass adds the analysis pipeline (which properties, from which
+inputs, via which technique skill).
+
+Kept in ``sim_agents`` with its own base — it does not subclass the experimental
+``BaseAnalysisAgent`` — so the simulation and experimental modality families stay
+decoupled. Only genuinely shared infrastructure is reused (the LLM wrappers, the
+skill loader, and ``ScriptExecutor``).
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from abc import ABC, abstractmethod
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
+
+from ...auth import get_internal_proxy_key, require_vendor_credentials
+from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
+from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
+from ...executors import ScriptExecutor, check_security_sandbox_indicators
+from ._deprecation import normalize_params
+
+import logging
+
+# Packages a generated analysis script may assume are importable.
+_STANDARD_PACKAGES = (
+    "numpy", "scipy", "pandas", "matplotlib", "json", "math", "os", "sys",
+    "re", "pathlib", "collections", "itertools", "MDAnalysis", "ase",
+)
+
+
+class BaseAnalysisAgent(ABC):
+    """Base for simulation-analysis agents: a verified codegen engine.
+
+    Provides the LLM client, skill loading, and the reusable
+    ``compute_property`` loop (generate → execute sandboxed → verify → refine).
+    A subclass implements :meth:`run_analysis` with the modality's pipeline
+    (identify outputs, select the technique skill by available data, plan the
+    properties to compute, and call :meth:`compute_property` for each).
+
+    Attributes:
+        model: The resolved generative-model client.
+        executor: The sandboxed script executor.
+        output_dir: Directory analysis artifacts are written to.
+        state: Per-run scratch state (skills loaded, intermediate results).
+    """
+
+    def __init__(
+        self,
+        output_dir: str = ".",
+        model_name: str = "claude-opus-4-6",
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        executor_timeout: int = 120,
+        max_refinement_attempts: int = 2,
+        google_api_key: Optional[str] = None,
+        local_model: Optional[str] = None,
+    ):
+        """Construct the agent and its LLM client + sandbox executor.
+
+        Args:
+            output_dir: Where analysis artifacts (scripts, figures) are written.
+            model_name: Model identifier in the resolved provider's form.
+            api_key: LLM key. With ``base_url`` set this is the internal-proxy
+                key (or read from the environment); without it, forwarded to
+                LiteLLM, which falls back to the vendor's env var.
+            base_url: OpenAI-compatible internal-proxy URL; when set, requests
+                route through the proxy client, otherwise through LiteLLM.
+            executor_timeout: Per-script sandbox timeout, in seconds.
+            max_refinement_attempts: How many times a failed script is
+                regenerated from its error before giving up.
+            google_api_key: Deprecated. Use ``api_key``.
+            local_model: Deprecated. Use ``base_url``.
+
+        Raises:
+            ValueError: If ``base_url`` is set and no key can be resolved.
+        """
+        self.logger = logging.getLogger(self.__class__.__name__)
+        self.output_dir = Path(output_dir).resolve()
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.max_refinement_attempts = max_refinement_attempts
+        self.state: Dict[str, Any] = {}
+
+        api_key, base_url = normalize_params(
+            api_key=api_key, google_api_key=google_api_key,
+            base_url=base_url, local_model=local_model,
+            source=self.__class__.__name__,
+        )
+        if base_url:
+            if api_key is None:
+                api_key = get_internal_proxy_key()
+            if not api_key:
+                raise ValueError(
+                    "API key required for internal proxy. Set SCILINK_API_KEY "
+                    "or pass api_key."
+                )
+            self.model = OpenAIAsGenerativeModel(
+                model=model_name, api_key=api_key, base_url=base_url)
+        else:
+            if api_key is None:
+                require_vendor_credentials(model_name)
+            self.model = LiteLLMGenerativeModel(model=model_name, api_key=api_key)
+
+        self.model_name = model_name
+        self.api_key = api_key
+        self.base_url = base_url
+        self.generation_config = None
+
+        self.executor = ScriptExecutor(timeout=executor_timeout)
+        score, _ = check_security_sandbox_indicators()
+        self.in_container = score >= 4
+
+    # ── skills ────────────────────────────────────────────────────────
+
+    def _load_skills_to_state(
+        self, skill: Union[str, List[str], None], domain: str,
+    ) -> Dict[str, Any]:
+        """Load one or more skills and return a state-dict fragment.
+
+        Accepts a single name/path or a list. Returns ``skill_name`` /
+        ``skill_sections`` (the first loaded skill) plus ``skills_loaded`` (all
+        of them). Skills that fail to load are logged and dropped; an empty list
+        is acceptable.
+        """
+        from ...skills.loader import load_skill
+
+        if not skill:
+            inputs: List[str] = []
+        elif isinstance(skill, str):
+            inputs = [skill]
+        else:
+            inputs = list(skill)
+
+        loaded: List[Dict[str, Any]] = []
+        seen: set = set()
+        for s in inputs:
+            try:
+                parsed = load_skill(s, domain=domain)
+            except FileNotFoundError:
+                self.logger.warning("Skill %r not found in %r — skipping", s, domain)
+                continue
+            if parsed["name"] in seen:
+                continue
+            seen.add(parsed["name"])
+            loaded.append(parsed)
+        first = loaded[0] if loaded else None
+        return {
+            "skill_name": first["name"] if first else None,
+            "skill_sections": first,
+            "skills_loaded": loaded,
+        }
+
+    # ── the codegen engine ────────────────────────────────────────────
+
+    def compute_property(
+        self,
+        task: str,
+        data_files: Dict[str, str],
+        *,
+        recipe: str = "",
+        packages: Optional[List[str]] = None,
+        verify: bool = True,
+    ) -> Dict[str, Any]:
+        """Compute one property from ``data_files`` via verified codegen.
+
+        Generates a Python script for ``task`` (guided by ``recipe`` — a skill's
+        implementation section), runs it sandboxed, and — on success — optionally
+        checks the returned value is physically plausible. A failed run is
+        regenerated from its error up to ``max_refinement_attempts`` times.
+
+        Args:
+            task: What to compute (e.g. ``"shear viscosity via Green-Kubo"``).
+            data_files: Mapping of logical name to path the script reads.
+            recipe: Optional technique recipe (a skill's implementation section)
+                the generated code should follow.
+            packages: Packages the script may import (defaults to the standard set).
+            verify: When True, run the LLM plausibility gate on the result.
+
+        Returns:
+            ``{"status", "value"?, "units"?, "verification"?, "code_path",
+            "attempts"}``. ``status`` is ``"success"`` when the script ran and
+            returned a value, else ``"error"`` with a ``message``.
+        """
+        pkgs = packages or list(_STANDARD_PACKAGES)
+        # Inject the inputs the generated body references as globals, so it needs
+        # no hardcoded paths and stays engine-neutral.
+        preamble = (
+            f"DATA_FILES = {json.dumps(data_files)}\n"
+            f"OUTPUT_DIR = {json.dumps(str(self.output_dir))}\n\n"
+        )
+        code = self._generate_code(task, data_files, recipe, pkgs)
+        error_info: Dict[str, Any] = {}
+        for attempt in range(self.max_refinement_attempts + 1):
+            if attempt > 0:
+                code = self._refine_code(code, error_info, task, recipe, pkgs)
+            result = self._execute_script(preamble + code, task)
+            if result.get("status") != "error":
+                out = {k: v for k, v in result.items() if k != "status"}
+                out["status"] = "success"
+                out["attempts"] = attempt + 1
+                if verify and result.get("value") is not None:
+                    out["verification"] = self._verify_result(task, result)
+                return out
+            error_info = result
+        return {"status": "error", "message": error_info.get("message", "unknown"),
+                "attempts": self.max_refinement_attempts + 1}
+
+    def _generate_code(self, task: str, data_files: Dict[str, str],
+                       recipe: str, packages: List[str]) -> str:
+        """Generate a self-contained analysis script for ``task``."""
+        files_desc = "\n".join(f"  - {name}: {path}"
+                               for name, path in data_files.items())
+        prompt = (
+            "You are a scientific data-analysis engineer. Write a complete, "
+            "self-contained Python script that computes the requested property "
+            "from the provided data files and prints the result as a single "
+            "JSON object on the LAST line of stdout.\n\n"
+            f"TASK: {task}\n\n"
+            f"DATA FILES (globals `DATA_FILES` maps name -> path):\n{files_desc}\n\n"
+            + (f"TECHNIQUE RECIPE (follow this):\n{recipe}\n\n" if recipe else "")
+            + "REQUIREMENTS:\n"
+            f"- Import only from: {', '.join(packages)}.\n"
+            "- Two globals are provided: `DATA_FILES` (dict name->path) and "
+            "`OUTPUT_DIR` (str). Read inputs from DATA_FILES; write any figures "
+            "into OUTPUT_DIR.\n"
+            "- Compute the property and print EXACTLY ONE JSON object as the last "
+            'stdout line: {"status": "success", "value": <number>, "units": '
+            '<str>, ...} — or {"status": "error", "message": <str>} if it cannot '
+            "be computed.\n"
+            "- Handle missing/short data gracefully; never hang or prompt.\n\n"
+            "Return ONLY the Python code, no markdown."
+        )
+        return self._clean_code(self._llm(prompt))
+
+    def _refine_code(self, code: str, error_info: Dict[str, Any], task: str,
+                     recipe: str, packages: List[str]) -> str:
+        """Regenerate a failed script from its error."""
+        err = error_info.get("concise_error") or error_info.get("message", "")
+        prompt = (
+            "The following analysis script failed. Fix it and return the full "
+            "corrected script (same contract: use globals DATA_FILES / OUTPUT_DIR, "
+            "print one JSON object on the last stdout line).\n\n"
+            f"TASK: {task}\n\n"
+            + (f"RECIPE:\n{recipe}\n\n" if recipe else "")
+            + f"ERROR:\n{err}\n\nSCRIPT:\n{code}\n\n"
+            f"Import only from: {', '.join(packages)}. Return ONLY the code."
+        )
+        return self._clean_code(self._llm(prompt))
+
+    def _execute_script(self, code: str, name: str) -> Dict[str, Any]:
+        """Run a script sandboxed with DATA_FILES/OUTPUT_DIR injected; parse JSON.
+
+        The script's globals are prepended, so the generated body reads its
+        inputs and writes figures without hardcoded paths. On success the last
+        JSON object on stdout is returned (merged into the result); on failure a
+        concise error plus the traceback tail is returned for refinement.
+        """
+        slug = re.sub(r"[^0-9a-zA-Z]+", "_", name).strip("_") or "analysis"
+        exec_result = self.executor.execute_script(
+            script_content=code, working_dir=str(self.output_dir))
+        if exec_result.get("status") == "success":
+            (self.output_dir / f"{slug}.py").write_text(code)
+            parsed = self._extract_json(exec_result.get("stdout", ""))
+            if parsed is not None:
+                return {"status": "success", "code_path":
+                        str(self.output_dir / f"{slug}.py"), **parsed}
+            return {"status": "success", "code_path":
+                    str(self.output_dir / f"{slug}.py"),
+                    "message": "ran but produced no JSON",
+                    "raw_output": exec_result.get("stdout", "")[:2000]}
+        raw = exec_result.get("message", "") or exec_result.get("stderr", "")
+        tb = raw[raw.find("Traceback"):] if "Traceback" in raw else raw
+        concise = ""
+        for line in reversed(tb.strip().split("\n")):
+            line = line.strip()
+            if line and not line.startswith(("File", "Traceback")):
+                concise = line
+                break
+        return {"status": "error", "message": tb[-2000:] or "no error output",
+                "concise_error": concise}
+
+    @staticmethod
+    def _extract_json(stdout: str) -> Optional[Dict[str, Any]]:
+        """Return the last JSON object printed on stdout, or None."""
+        for line in reversed(stdout.strip().split("\n")):
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    return json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+        match = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", stdout, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except json.JSONDecodeError:
+                pass
+        return None
+
+    def _verify_result(self, task: str, result: Dict[str, Any]) -> Dict[str, Any]:
+        """LLM plausibility gate on a computed value (the exp-agent-style check).
+
+        Returns ``{"plausible": bool, "reasoning": str}``. Errs toward accepting
+        when unsure — it flags clearly-wrong magnitudes, it is not a second
+        physics reviewer. A failure to parse is treated as non-blocking.
+        """
+        prompt = (
+            "A simulation-analysis script computed a property. Judge only whether "
+            "the numeric value is physically plausible in magnitude and sign for "
+            "the stated task — not whether the method is optimal. Respond with "
+            'JSON: {"plausible": true|false, "reasoning": "<one sentence>"}.\n\n'
+            f"TASK: {task}\n"
+            f"VALUE: {result.get('value')} {result.get('units', '')}\n"
+        )
+        parsed = self._extract_json(self._llm(prompt))
+        if not parsed or "plausible" not in parsed:
+            return {"plausible": True, "reasoning": "verification unavailable"}
+        return {"plausible": bool(parsed["plausible"]),
+                "reasoning": parsed.get("reasoning", "")}
+
+    def _llm(self, prompt: str) -> str:
+        """Send a prompt to the model and return the raw text."""
+        response = self.model.generate_content(
+            prompt, generation_config=self.generation_config)
+        return getattr(response, "text", str(response))
+
+    @staticmethod
+    def _clean_code(text: str) -> str:
+        """Strip markdown fences from an LLM code response."""
+        text = text.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```[a-zA-Z]*\n", "", text)
+            text = re.sub(r"\n```$", "", text)
+        return text.strip()
+
+    # ── contract ──────────────────────────────────────────────────────
+
+    @abstractmethod
+    def run_analysis(self, research_goal: str, **kwargs) -> Dict[str, Any]:
+        """Compute the properties a research goal calls for from run output.
+
+        Implemented by the concrete agent: identify the available outputs, select
+        the technique skill by what data is present, plan the properties, and
+        call :meth:`compute_property` for each. Returns
+        ``{"status", "results", "output_directory", ...}``.
+        """
+        raise NotImplementedError
