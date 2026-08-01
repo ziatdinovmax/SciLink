@@ -1343,7 +1343,20 @@ class OrchestratorTools:
                         parts.extend(secs)
                 content = "\n\n".join(parts)
 
+                # The name is keyed only by search TYPE, so a second search
+                # of the same type in one output directory used to truncate
+                # the first — silently, since the registry then held two
+                # entries pointing at one surviving file. Under the meta
+                # each delegation has its own directory, so this bites the
+                # standalone campaign root hardest. Suffix only on
+                # collision: the first (overwhelmingly common) write keeps
+                # the historical name exactly.
                 lit_path = self._output_dir() / f"literature_search_{label}.md"
+                _n = 1
+                while lit_path.exists():
+                    _n += 1
+                    lit_path = (self._output_dir()
+                                / f"literature_search_{label}_{_n}.md")
                 with open(lit_path, 'w') as f:
                     f.write(f"# Literature Search Results ({label})\n\n")
                     f.write(content)
