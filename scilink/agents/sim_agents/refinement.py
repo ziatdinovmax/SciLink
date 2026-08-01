@@ -721,6 +721,7 @@ def _run_dry_run_gate(phase, executor, run_critic, ctx, prepare, entry,
                       max_cycles) -> Dict[str, Any]:
     dry_dir = os.path.join(phase.run_dir, "_dryrun")
     history: List[Dict[str, Any]] = []
+    prev_det: List[str] = []          # deterministic findings carried to next cycle
     for cycle in range(max_cycles):
         real_deck = phase.input_files[entry]
         twin = prepare(real_deck)
@@ -744,12 +745,14 @@ def _run_dry_run_gate(phase, executor, run_critic, ctx, prepare, entry,
             skill=ctx.skill, domain=ctx.domain,
             input_files={entry: real_deck},
             required_observables=getattr(ctx, "required_observables", None),
+            deterministic_findings=prev_det,
         )
         run_status = verdict.get("run_status")
         # Deterministic layer: where the engine provides a detection tool, check
         # exact signal presence + sampling adequacy (tier 2 — which the LLM layer
         # treats as never-blocking). Block on the UNION: either layer flags.
         det_blocking = _deterministic_coverage(ctx, real_deck)
+        prev_det = det_blocking          # next cycle's LLM fixer sees these
         missing = list(verdict.get("missing_observables") or []) + det_blocking
         history.append({"cycle": cycle, "run_status": run_status,
                         "missing_observables": missing,

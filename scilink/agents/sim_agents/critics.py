@@ -809,6 +809,7 @@ class RunCritic(_CriticBase):
         input_files: Optional[Dict[str, str]] = None,
         check_observables: bool = False,
         required_observables: Optional[list] = None,
+        deterministic_findings: Optional[list] = None,
     ) -> Dict[str, Any]:
         """Assess a finished run and return a verdict report.
 
@@ -986,6 +987,18 @@ class RunCritic(_CriticBase):
             )
         else:
             observable_coverage = ""
+
+        # Deterministic findings from a prior gate cycle: a checker already
+        # proved these observables under-provided, so the fixer must treat each
+        # as blocking and emit a corrected deck — otherwise a deterministic-only
+        # flag blocks the status but never reaches suggested_fixes.
+        if check_observables and deterministic_findings:
+            observable_coverage += (
+                "\n\nDETERMINISTICALLY-DETECTED GAPS (already proven by a "
+                "deterministic check — treat each as BLOCKING and return a "
+                "corrected deck that fixes it):\n- "
+                + "\n- ".join(str(f) for f in deterministic_findings)
+            )
 
         prompt = self.BASELINE_PROMPT_TEMPLATE.format(
             skill_context=skill_context or "(no engine skill loaded)",

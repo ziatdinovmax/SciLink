@@ -61,6 +61,17 @@ def test_scope_fn_injection_overrides_default():
     assert r["confidence"] == "CUSTOM T1 ['density'] []"
 
 
+def test_unrated_is_not_counted_as_passed():
+    # A judge entry with no verdict/consistent is unrated — it must not land in
+    # `passed` or be cited as validation, and it blocks warranting.
+    def judge(o, s):
+        return {"per_observable": [{"observable": "density"}]}
+    r = run_validation_panel([{"observable": "density"}], "T1", "x", judge_fn=judge)
+    assert r["passed"] == [] and r["unrated"] == ["density"]
+    assert r["prediction_warranted"] is False
+    assert "could not rate density" in r["confidence"]
+
+
 def test_per_measurement_key_is_accepted():
     def judge(o, s):
         return {"per_measurement": [{"component": "water", "verdict": "good"}]}

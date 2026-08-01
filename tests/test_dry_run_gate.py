@@ -56,7 +56,7 @@ class StubCritic:
 
     def assess(self, output_dir, research_goal, skill=None, domain=None,
                fixes_mode="auto", input_files=None, check_observables=False,
-               required_observables=None):
+               required_observables=None, deterministic_findings=None):
         self.seen_input_files = input_files
         self.seen_check_observables = check_observables
         deck_path = os.path.join(output_dir, "run.lammps")

@@ -57,7 +57,7 @@ class ScriptedCritic:
 
     def assess(self, output_dir, research_goal, skill=None, domain=None,
                fixes_mode="auto", input_files=None, check_observables=False,
-               required_observables=None):
+               required_observables=None, deterministic_findings=None):
         self.calls += 1
         # Repeat the last verdict if the loop asks for more than scripted.
         idx = min(self.calls - 1, len(self._verdicts) - 1)

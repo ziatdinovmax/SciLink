@@ -224,6 +224,13 @@ def _load_components_manifest(structure_path: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+# The live measurement + FF-search seams below are not yet implemented (they
+# return None). Until they are, the reference check can only fail open, so the
+# pipeline short-circuits it rather than spend per-component packing on a no-op.
+# Flip to True when both seams are wired.
+_LIVE_MEASUREMENT_IMPLEMENTED = False
+
+
 def _measure_property_via_short_run(psystem, property, working_dir, engine,
                                     executor, run_command):
     """Measure a pure component's reference ``property`` with a short run.
@@ -502,7 +509,16 @@ def _run_workflow_once(
                 # properties now, before spending production compute. A 'poor'
                 # verdict means the model is untrustworthy, so stop here rather
                 # than run (and later discard) an expensive campaign.
-                if reference_check:
+                if reference_check and not _LIVE_MEASUREMENT_IMPLEMENTED:
+                    # Seam not wired: the check would only fail open, so skip it
+                    # before spending per-component packing/parameterization.
+                    logger.info("Reference-property check skipped: live "
+                                "measurement seam not implemented yet.")
+                    result["reference_validation"] = {
+                        "status": "skipped",
+                        "reason": "live measurement seam not implemented"}
+                    result["steps_completed"].append("reference_validation")
+                elif reference_check:
                     ref = _reference_check(
                         manifest["components"], user_request, psystem, ff_agent,
                         api_key=api_key, base_url=base_url, model_name=model_name,

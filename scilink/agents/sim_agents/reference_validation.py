@@ -116,12 +116,24 @@ def run_reference_check(
     untrustworthy and production should not proceed unfixed.
     """
     selection = select_fn(components, system_description)
-    by_component = {s.get("component"): s
-                    for s in selection.get("selections", [])}
+
+    def _norm(s) -> str:
+        return str(s or "").strip().casefold()
+
+    # Index selections by BOTH a normalized name and the SMILES, so a cosmetic
+    # mismatch ("EIS" vs "EIS (ethyl isopropyl sulfone)") does not silently drop
+    # a component to unmeasured (which would fail the gate open).
+    by_name: Dict[str, Any] = {}
+    by_smiles: Dict[str, Any] = {}
+    for s in selection.get("selections", []):
+        if s.get("component"):
+            by_name[_norm(s.get("component"))] = s
+        if s.get("smiles"):
+            by_smiles[_norm(s.get("smiles"))] = s
 
     def _measure_selected(component: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        key = component.get("name") or component.get("smiles")
-        chosen = by_component.get(key) or {}
+        chosen = (by_name.get(_norm(component.get("name")))
+                  or by_smiles.get(_norm(component.get("smiles"))) or {})
         if not chosen.get("measurable"):
             return {"error": chosen.get("rationale",
                                         "no reference property selected")}
@@ -147,15 +159,29 @@ def _is_failure(verdict: Dict[str, Any]) -> bool:
             or verdict.get("consistent") is False)
 
 
+def _is_rated(verdict: Dict[str, Any]) -> bool:
+    """The judge actually rated this observable (has a verdict/consistent field).
+
+    An unrated entry is neither pass nor fail — it is missing evidence, and must
+    not be cited as validation.
+    """
+    return verdict.get("verdict") is not None or verdict.get("consistent") is not None
+
+
 def _default_scope(prediction_target: str, passed: List[str],
-                   failed: List[str]) -> str:
+                   failed: List[str], unrated: List[str]) -> str:
     """Deterministic confidence statement scoping the prediction to what passed."""
     passed_str = ", ".join(passed) or "(none)"
-    if not failed:
+    if not failed and not unrated:
         return (f"Prediction of {prediction_target} is backed by validation "
                 f"against: {passed_str}.")
+    problems = []
+    if failed:
+        problems.append(f"failed {', '.join(failed)}")
+    if unrated:
+        problems.append(f"could not rate {', '.join(unrated)}")
     return (f"Prediction of {prediction_target} is NOT fully backed: the model "
-            f"failed {', '.join(failed)} (validated only {passed_str}). Scope the "
+            f"{'; '.join(problems)} (validated only {passed_str}). Scope the "
             f"{prediction_target} claim down or fix the model before trusting it.")
 
 
@@ -199,22 +225,28 @@ def run_validation_panel(
     """
     report = judge_fn(observations, system_description) or {}
     per = report.get("per_observable") or report.get("per_measurement") or []
-    passed = [p for p in per if not _is_failure(p)]
     failed = [p for p in per if _is_failure(p)]
+    passed = [p for p in per if _is_rated(p) and not _is_failure(p)]
+    unrated = [p for p in per if not _is_rated(p) and not _is_failure(p)]
     passed_names = [_observable_name(p) for p in passed]
     failed_names = [_observable_name(p) for p in failed]
-    warranted = not failed
+    unrated_names = [_observable_name(p) for p in unrated]
+    # Warranted only when everything was rated AND nothing failed — an unrated
+    # observable is missing evidence, not a pass.
+    warranted = not failed and not unrated
     if scope_fn is not None:
         confidence = scope_fn(prediction_target, passed_names, failed_names,
                               system_description)
     else:
-        confidence = _default_scope(prediction_target, passed_names, failed_names)
+        confidence = _default_scope(prediction_target, passed_names,
+                                    failed_names, unrated_names)
     return {
         "status": "success",
         "prediction_target": prediction_target,
         "per_observable": per,
         "passed": passed_names,
         "failed": failed_names,
+        "unrated": unrated_names,
         "prediction_warranted": warranted,
         "confidence": confidence,
     }

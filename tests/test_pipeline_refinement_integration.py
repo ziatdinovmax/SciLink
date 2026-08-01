@@ -74,6 +74,7 @@ class TestWorkflowComposition:
     def test_reference_check_catch_only_blocks_production(self, tmp_path,
                                                           monkeypatch):
         structure = self._setup_md_with_manifest(tmp_path, monkeypatch)
+        monkeypatch.setattr(sp, "_LIVE_MEASUREMENT_IMPLEMENTED", True)
         monkeypatch.setattr(sp, "_reference_check", lambda *a, **k: {
             "selections": [], "measurements": [],
             "verdict": {"verdict": "poor", "failure_class": "force_field"}})
@@ -92,6 +93,7 @@ class TestWorkflowComposition:
 
     def test_auto_fix_reparameterizes_and_proceeds(self, tmp_path, monkeypatch):
         structure = self._setup_md_with_manifest(tmp_path, monkeypatch)
+        monkeypatch.setattr(sp, "_LIVE_MEASUREMENT_IMPLEMENTED", True)
         monkeypatch.setattr(sp, "_reference_check", lambda *a, **k: {
             "selections": [], "measurements": [],
             "verdict": {"verdict": "poor", "failure_class": "force_field",
@@ -119,6 +121,7 @@ class TestWorkflowComposition:
 
     def test_auto_fix_escalation_still_blocks(self, tmp_path, monkeypatch):
         structure = self._setup_md_with_manifest(tmp_path, monkeypatch)
+        monkeypatch.setattr(sp, "_LIVE_MEASUREMENT_IMPLEMENTED", True)
         monkeypatch.setattr(sp, "_reference_check", lambda *a, **k: {
             "selections": [], "measurements": [],
             "verdict": {"verdict": "poor", "failure_class": "force_field",
@@ -140,6 +143,7 @@ class TestWorkflowComposition:
     def test_reference_check_good_proceeds_to_production(self, tmp_path,
                                                          monkeypatch):
         structure = self._setup_md_with_manifest(tmp_path, monkeypatch)
+        monkeypatch.setattr(sp, "_LIVE_MEASUREMENT_IMPLEMENTED", True)
         monkeypatch.setattr(sp, "_reference_check", lambda *a, **k: {
             "selections": [], "measurements": [],
             "verdict": {"verdict": "good", "failure_class": None}})
@@ -169,7 +173,7 @@ class TestWorkflowComposition:
 
             def assess(self, output_dir, research_goal, skill=None, domain=None,
                        fixes_mode="auto", input_files=None, check_observables=False,
-                       required_observables=None):
+                       required_observables=None, deterministic_findings=None):
                 FakeRunCritic.calls += 1
                 if FakeRunCritic.calls == 1:
                     return {"status": "success", "run_status": "failed",

@@ -1534,28 +1534,46 @@ def _thermo_keywords(deck: str) -> set:
     return kws
 
 
+def _has_dump(deck: str) -> bool:
+    """Any dump command — presence of a saved trajectory, interval or not."""
+    return bool(re.search(r'(?mi)^\s*dump\s+\S+\s+\S+\s+\S+\s+\S+', deck))
+
+
 def _dump_interval(deck: str) -> Optional[int]:
+    """Coarsest dump interval, or None when only variable (``${...}``) intervals
+    are used (present but unparseable)."""
     ivs = [int(n) for n in
            re.findall(r'(?mi)^\s*dump\s+\S+\s+\S+\s+\S+\s+(\d+)\b', deck)]
     return min(ivs) if ivs else None
 
 
 def _ave_output_interval(deck: str) -> Optional[int]:
-    """Smallest output interval (Nfreq) across fix ave/time and ave/correlate —
-    how often accumulated quantities (e.g. stress for Green-Kubo) are written."""
-    freqs = [int(m.group(3)) for m in re.finditer(
-        r'(?mi)^\s*fix\s+\S+\s+\S+\s+ave/(?:time|correlate)\s+(\d+)\s+(\d+)\s+(\d+)\b',
-        deck)]
-    return min(freqs) if freqs else None
+    """Smallest sampling cadence across averaging fixes, or None if unparseable.
+
+    For ``ave/time`` the raw write interval is Nfreq (group 3). For
+    ``ave/correlate`` the governing cadence is **Nevery** (group 1) — the fix
+    samples the quantity internally at that rate, which is what sets Green-Kubo
+    adequacy — not the (typically large) correlation-output interval Nfreq.
+    """
+    intervals = []
+    for m in re.finditer(
+            r'(?mi)^\s*fix\s+\S+\s+\S+\s+ave/(time|correlate)\s+(\d+)\s+(\d+)\s+(\d+)\b',
+            deck):
+        kind, nevery, _nrepeat, nfreq = (m.group(1).lower(), int(m.group(2)),
+                                         int(m.group(3)), int(m.group(4)))
+        intervals.append(nevery if kind == "correlate" else nfreq)
+    return min(intervals) if intervals else None
 
 
-def _logs_pressure_via_compute(deck: str) -> bool:
-    """A pressure/stress signal accumulated during the run: a pressure or
-    per-atom stress compute whose result is written by an averaging fix."""
+def _has_pressure_ave(deck: str) -> bool:
+    """Pressure/stress accumulated during the run: a pressure or per-atom stress
+    compute together with an averaging fix that writes it (interval or not)."""
     has_compute = bool(re.search(
         r'(?mi)^\s*compute\s+\S+\s+\S+\s+(?:pressure|stress/atom|centroid/stress/atom)\b',
         deck))
-    return has_compute and _ave_output_interval(deck) is not None
+    has_ave = bool(re.search(
+        r'(?mi)^\s*fix\s+\S+\s+\S+\s+ave/(?:time|correlate)\b', deck))
+    return has_compute and has_ave
 
 
 def detect_signal_logging(deck_text: str, signal: str) -> Dict[str, Any]:
@@ -1580,25 +1598,35 @@ def detect_signal_logging(deck_text: str, signal: str) -> Dict[str, Any]:
     """
     signal = str(signal).lower().strip()
 
+    # Presence is decided by the logging COMMAND existing, independent of whether
+    # its interval is a literal integer — decks commonly use variables
+    # (`thermo ${freq}`, `dump 1 all custom ${n} ...`), which log the signal but
+    # have an unparseable cadence. interval_steps is then None (cadence defers).
     if signal in _TRAJECTORY_SIGNALS:
-        di = _dump_interval(deck_text)
-        return {"present": di is not None, "interval_steps": di}
+        if not _has_dump(deck_text):
+            return {"present": False, "interval_steps": None}
+        return {"present": True, "interval_steps": _dump_interval(deck_text)}
 
-    thermo_int = _thermo_interval(deck_text)
     thermo_kws = _thermo_keywords(deck_text)
     wanted = _THERMO_KEYWORDS.get(signal, {signal})
 
+    present = False
     intervals: List[int] = []
-    if wanted & thermo_kws and thermo_int is not None:
-        intervals.append(thermo_int)
+    if wanted & thermo_kws:
+        present = True
+        ti = _thermo_interval(deck_text)
+        if ti is not None:
+            intervals.append(ti)
     # stress/pressure accumulated during the run via a compute + averaging fix.
-    if signal in ("stress", "pressure") and _logs_pressure_via_compute(deck_text):
+    if signal in ("stress", "pressure") and _has_pressure_ave(deck_text):
+        present = True
         ai = _ave_output_interval(deck_text)
         if ai is not None:
             intervals.append(ai)
 
-    if intervals:
-        return {"present": True, "interval_steps": min(intervals)}
+    if present:
+        return {"present": True,
+                "interval_steps": min(intervals) if intervals else None}
     return {"present": False, "interval_steps": None}
 
 

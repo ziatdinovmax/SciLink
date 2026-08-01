@@ -209,7 +209,19 @@ class TestLammpsDetector:
                 "compute p all pressure thermo_temp\n"
                 "fix v all ave/correlate 5 100 1000 c_p[1]\n")
         r = self._fn()(deck_text=deck, signal="stress")
-        assert r["present"] is True and r["interval_steps"] == 1000
+        # ave/correlate cadence is Nevery (5), not the correlation-output Nfreq.
+        assert r["present"] is True and r["interval_steps"] == 5
+
+    def test_variable_thermo_interval_still_present(self):
+        # A signal logged with a variable interval is present; cadence unknown.
+        deck = "thermo ${freq}\nthermo_style custom step temp press\n"
+        r = self._fn()(deck_text=deck, signal="pressure")
+        assert r["present"] is True and r["interval_steps"] is None
+
+    def test_variable_dump_interval_still_present(self):
+        deck = "dump 1 all custom ${dn} traj.dump id x y z\n"
+        r = self._fn()(deck_text=deck, signal="trajectory")
+        assert r["present"] is True and r["interval_steps"] is None
 
 
 class TestGateDeterministicLayer:
