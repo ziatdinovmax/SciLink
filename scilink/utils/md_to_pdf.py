@@ -71,7 +71,10 @@ def markdown_to_pdf(md_path, pdf_path=None, title: str | None = None,
     md_path = Path(md_path)
     out = Path(pdf_path) if pdf_path else md_path.with_suffix(".pdf")
     text = md_path.read_text(errors="replace")
-    return _write_pdf(text, out, title or md_path.stem, css)
+    # base_dir lets relative image references (e.g. an embedded workflow
+    # diagram PNG saved beside the markdown) resolve into the PDF.
+    return _write_pdf(text, out, title or md_path.stem, css,
+                      base_dir=md_path.parent)
 
 
 def markdown_text_to_pdf(text: str, pdf_path, title: str = "",
@@ -80,12 +83,74 @@ def markdown_text_to_pdf(text: str, pdf_path, title: str = "",
     return _write_pdf(text, Path(pdf_path), title, css)
 
 
-def _write_pdf(text: str, out: Path, title: str, css: str | None) -> Path:
+# A figure outside this aspect band cannot be read inside a portrait text
+# column: too wide and it is an inch-tall ribbon, too tall and it runs off
+# the page. Either way it earns a page of its own, oriented to match.
+_WIDE_FIGURE_RATIO = 2.2
+_TALL_FIGURE_RATIO = 0.7
+
+
+def _pull_wide_figures(text: str, base_dir):
+    """Strip wide markdown images out of ``text``; return the remaining
+    text and ``[(path, caption)]`` for placement on their own pages."""
+    import re
+    figures = []
+    if not base_dir:
+        return text, figures
+
+    def take(m):
+        alt, src = m.group(1), m.group(2).strip()
+        p = Path(src)
+        if not p.is_absolute():
+            p = Path(base_dir) / src
+        try:
+            from PIL import Image
+            with Image.open(p) as im:
+                ratio = im.width / im.height if im.height else 1.0
+                if not (_TALL_FIGURE_RATIO <= ratio <= _WIDE_FIGURE_RATIO):
+                    figures.append((p, alt))
+                    return ""      # placed later, on its own page
+        except Exception:  # noqa: BLE001 - not an image we can measure
+            pass
+        return m.group(0)
+
+    return re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", take, text), figures
+
+
+def _append_figure_pages(doc, figures, fitz) -> None:
+    """One page per outsized figure, oriented to match it, with caption."""
+    for path, caption in figures:
+        wide = True
+        try:
+            from PIL import Image
+            with Image.open(path) as im:
+                wide = not im.height or im.width / im.height >= 1.0
+        except Exception:  # noqa: BLE001
+            pass
+        w, h = (792, 612) if wide else (612, 792)
+        page = doc.new_page(width=w, height=h)
+        frame = fitz.Rect(_MARGIN, _MARGIN, w - _MARGIN, h - _MARGIN - 24)
+        try:
+            page.insert_image(frame, filename=str(path), keep_proportion=True)
+        except Exception:  # noqa: BLE001 - a missing figure is not fatal
+            continue
+        if caption:
+            page.insert_textbox(
+                fitz.Rect(_MARGIN, h - _MARGIN - 20, w - _MARGIN, h - _MARGIN),
+                caption, fontsize=9, fontname="helv", align=1)
+
+
+def _write_pdf(text: str, out: Path, title: str, css: str | None,
+               base_dir=None) -> Path:
     try:
         import fitz  # PyMuPDF
     except ImportError as exc:      # pragma: no cover - declared dependency
         raise PdfConversionError(
             "PDF export needs PyMuPDF: pip install pymupdf") from exc
+    # A wide schematic squeezed into the text column is an inch tall and
+    # unreadable. Pull those figures out of the flow and give each its own
+    # landscape page after the text, where the full page width is theirs.
+    text, wide_figures = _pull_wide_figures(text, base_dir)
     try:
         html = _render_html(text, title)
     except ImportError as exc:
@@ -95,7 +160,9 @@ def _write_pdf(text: str, out: Path, title: str, css: str | None) -> Path:
 
     import io
 
-    story = fitz.Story(html=html, user_css=css or DEFAULT_CSS)
+    archive = fitz.Archive(str(base_dir)) if base_dir else None
+    story = fitz.Story(html=html, user_css=css or DEFAULT_CSS,
+                       archive=archive)
     try:
         # Gives headings ids, so an in-document [jump](#section) resolves.
         story.add_header_ids()
@@ -125,11 +192,16 @@ def _write_pdf(text: str, out: Path, title: str, css: str | None) -> Path:
     writer.close()
 
     try:
-        fitz.Story.add_pdf_links(buf, positions).save(str(out))
+        doc = fitz.Story.add_pdf_links(buf, positions)
     except Exception:  # noqa: BLE001
         # add_pdf_links refuses e.g. an anchor with no target. Clickable links
         # are worth having, but never at the cost of the document itself.
-        out.write_bytes(buf.getvalue())
+        doc = fitz.open("pdf", buf.getvalue())
+    try:
+        _append_figure_pages(doc, wide_figures, fitz)
+    except Exception:  # noqa: BLE001 - never lose the document over a figure
+        pass
+    doc.save(str(out))
 
     if not out.exists() or out.stat().st_size == 0:
         raise PdfConversionError(f"PDF conversion produced nothing: {out}")

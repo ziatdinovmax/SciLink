@@ -1,0 +1,272 @@
+"""Workflow-diagram generation with the same discipline as code generation.
+
+Mermaid source is code, so it gets the codegen treatment: the LLM writes
+it grounded in the STRUCTURED plan (not free-form prose, so it cannot
+invent steps), the renderer is the compile check (render errors feed a
+retry), and the rendered image passes a visual quality gate (a vision
+call judging legibility and faithfulness) before the diagram is accepted.
+
+Diagrams default to a compact stage-level overview — white papers and
+roadmaps stay simple unless the user explicitly asks for an elaborate
+diagram (``detail="elaborate"``).
+"""
+
+import json
+import logging
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+from PIL import Image as PIL_Image
+
+from scilink.knowledge import parse_json_from_response
+
+from ...utils.mermaid_render import render_mermaid, mermaid_available  # noqa: F401
+from ...utils.mermaid_theme import CLASS_HELP, apply_theme
+from .base_agent import BaseAgent
+
+_GEN_PROMPT = """You are drawing a workflow diagram for a scientific \
+campaign document. Produce ONE Mermaid flowchart (```mermaid fenced \
+block) of the experimental campaign below.
+
+Rules:
+- {detail_rule}
+- NO LONG LINEAR SPINE. Never draw more than 3 consecutive nodes
+  without a branch, decision, or loop: collapse such a run into ONE
+  node named for what it accomplishes. A single long chain is a
+  checklist, not a concept — the campaign below lists individual steps,
+  and mapping one step to one node is the mistake to avoid.
+- KEEP THE LONGEST PATH SHORT: no directed run of more than {max_chain}
+  nodes, start to finish. The figure is as wide as that longest path,
+  and a wider one cannot be read on a page. Branch early and merge
+  routine steps.
+- ORIENTATION FOLLOWS SHAPE. If the flow branches — gates with
+  alternative outcomes, loops, parallel paths — use `flowchart LR`, so
+  the figure is landscape and spans the page width. If it is
+  essentially ONE sequence with little branching, use `flowchart TD`:
+  a long chain drawn left-to-right becomes a thin ribbon whose labels
+  are unreadable on a page, while the same chain read downward is a
+  clean vertical list.
+- Node labels: short plain phrases in double quotes. KEEP the science
+  notation — inside the quotes, α→β, TiO₂, 450 °C, Mn(III)/Mn(IV), ±,
+  ≥, [H2O2], 30% w/w all render correctly, so write them rather than
+  flattening them to ASCII. Only a double quote or a backtick may not
+  appear inside a label. No code tokens (function names, CamelCase
+  identifiers) — this is a figure for scientists.
+- Decision points are diamonds (`{{"..."}}`); loops (e.g. an
+  optimize-measure-refine cycle) are drawn as cycles, not unrolled.
+- Tag each node with a semantic class — `NodeId["label"]:::decision` —
+  from: {class_help}. Do NOT write classDef, style or linkStyle lines
+  and do NOT choose colors: the palette is applied for you.
+- Stay faithful to the campaign below — do not invent steps that are not
+  in it.
+- Output ONLY the fenced mermaid block, no commentary.
+
+Campaign (structured):
+{plan_json}
+{extra}{feedback}"""
+
+# A diagram depicts a CONCEPT. Both levels are bounded: an unrolled
+# 20-step procedure is a checklist rendered as boxes, and it reads worse
+# than the prose it came from.
+# A left-to-right flowchart is as wide as its longest directed path;
+# past ~5 nodes the labels are too small to read once the figure is
+# scaled to a page, whatever the page size.
+_MAX_CHAIN = 5
+
+_DETAIL_RULES = {
+    "simple": ("Compact overview: at most ~6 nodes, stage-level (setup, "
+               "the main loop, decision gates, outcome) — NOT every "
+               "individual step."),
+    "elaborate": ("Fuller view, still CONCEPTUAL: at most ~10 nodes. Add "
+                  "the branch conditions and the decisions that change "
+                  "the outcome; group routine consecutive steps into one "
+                  "node rather than unrolling a procedure."),
+}
+
+_QC_PROMPT = """You are reviewing a workflow diagram rendered for a \
+scientific document. Judge it and answer in JSON only:
+{{"approved": true/false, "issues": ["..."]}}
+
+A diagram must convey a CONCEPT at a glance, not reproduce a procedure.
+
+Reject when: text overlaps or is clipped; arrows cross confusingly; the
+diagram contradicts the campaign description below; it is overcrowded
+for a document figure ({detail} level was requested — {detail_rule});
+it reads as an unrolled step-by-step checklist rather than a conceptual
+structure — in particular reject any diagram whose backbone is a single
+long chain of more than 3 consecutive nodes with no branch, decision, or
+loop between them (those runs belong in one node);
+or the shape fights the page — this renders {width}x{height}px. A
+branching flow should be landscape (reject a strongly vertical one when
+left-to-right would still read well), but a mostly-sequential flow
+belongs vertical: reject a thin horizontal ribbon (very wide, very
+short) whose labels no page can show. Readability decides, not
+orientation.
+
+Campaign (structured):
+{plan_json}"""
+
+
+class DiagramAgent(BaseAgent):
+    """Generate → render → visually verify Mermaid workflow diagrams."""
+
+    def __init__(self, model=None, output_dir: str = "."):
+        """``model`` is an already-constructed generative-model wrapper
+        (e.g. the planning orchestrator passes its BO agent's) — reusing
+        it means no new credential plumbing. For standalone use, build
+        one via ``BOAgent(...).model`` or the wrappers directly."""
+        super().__init__(output_dir)
+        self.agent_type = "diagram"
+        self.model = model
+        self.generation_config = None
+
+    # ── prompt assembly ─────────────────────────────────────────────
+
+    @staticmethod
+    def _plan_json(plan: Dict[str, Any]) -> str:
+        """The diagram-relevant slice of the plan, compact."""
+        keep: Dict[str, Any] = {}
+        for exp in (plan.get("proposed_experiments") or [])[:3]:
+            keep.setdefault("experiments", []).append({
+                k: exp.get(k) for k in
+                ("experiment_name", "hypothesis", "experimental_steps",
+                 "expected_outcomes") if exp.get(k)})
+        for k in ("objective", "scientific_context", "directions"):
+            if plan.get(k):
+                keep[k] = plan[k]
+        txt = json.dumps(keep, indent=0, default=str)
+        return txt[:6000]
+
+    @staticmethod
+    def _extract_mermaid(text: str) -> Optional[str]:
+        """Mermaid source from a reply, tolerating a missing closing
+        fence — a reply cut off at the token limit still carries a
+        usable (if incomplete) diagram, and letting the renderer judge
+        it feeds the error back through the retry loop instead of
+        silently burning the attempt budget on extraction."""
+        import re
+        text = text or ""
+        m = re.search(r"```mermaid\s*(.*?)```", text, re.S)
+        if m:
+            return m.group(1).strip()
+        m = re.search(r"```mermaid\s*(.*)", text, re.S)
+        if m:
+            return m.group(1).strip().rstrip("`").strip()
+        stripped = text.strip()
+        if stripped.startswith(("flowchart", "graph ")):
+            return stripped
+        return None
+
+    # ── main entry ──────────────────────────────────────────────────
+
+    def generate_workflow_diagram(
+            self, plan: Dict[str, Any], out_dir=None,
+            stem: str = "campaign_workflow", detail: str = "simple",
+            extra_instructions: Optional[str] = None,
+            max_render_attempts: int = 3,
+            max_qc_rounds: int = 2) -> Dict[str, Any]:
+        """Returns ``{status, png_path, mmd_path, code, attempts,
+        qc_rounds, inspection, error}``. ``status != "success"`` never
+        raises — callers ship the document without a diagram."""
+        if self.model is None:
+            return {"status": "error", "error": "no model client"}
+        detail = detail if detail in _DETAIL_RULES else "simple"
+        out_dir = Path(out_dir) if out_dir else self.output_dir
+        png_path = out_dir / f"{stem}.png"
+        mmd_path = out_dir / f"{stem}.mmd"
+        plan_json = self._plan_json(plan or {})
+        extra = (f"\nAdditional instructions: {extra_instructions}\n"
+                 if extra_instructions else "")
+
+        feedback = ""
+        code = None
+        attempts = 0
+        qc_rounds = 0
+        inspection: Dict[str, Any] = {}
+        while attempts < max_render_attempts:
+            attempts += 1
+            prompt = _GEN_PROMPT.format(
+                detail_rule=_DETAIL_RULES[detail], plan_json=plan_json,
+                extra=extra, feedback=feedback, class_help=CLASS_HELP,
+                max_chain=_MAX_CHAIN)
+            try:
+                resp = self.model.generate_content(
+                    [prompt], generation_config=self.generation_config)
+                # raw_text, not text: the wrapper's .text runs a JSON
+                # extraction whose "embedded object" pattern slices from
+                # the first '{' to the last '}' when it sees a quote and
+                # a colon — which a Mermaid diamond carrying a `:::class`
+                # tag satisfies, mangling the diagram (same hazard the
+                # codegen path documents for scripts with dict braces).
+                code = self._extract_mermaid(
+                    getattr(resp, "raw_text", None) or resp.text)
+                if code:
+                    # Palette is the package's, structure is the model's.
+                    code = apply_theme(code)
+            except Exception as exc:  # noqa: BLE001
+                return {"status": "error", "error": f"LLM call failed: {exc}",
+                        "attempts": attempts}
+            if not code:
+                feedback = ("\nYour previous reply contained no mermaid "
+                            "block. Output only the fenced block.")
+                continue
+
+            ok, err = render_mermaid(code, png_path)
+            if not ok:
+                print(f"    🔁 Diagram render error (attempt {attempts}): "
+                      f"{err.splitlines()[-1] if err else 'unknown'}")
+                feedback = (f"\nYour previous diagram failed to render. "
+                            f"Renderer error:\n{err}\nFix the syntax and "
+                            f"output the corrected fenced block.")
+                continue
+
+            # Visual quality gate — same shape as the BO agent's plot
+            # inspection. A QC failure regenerates with the issues named;
+            # an unavailable QC call accepts the render (gate, not wall).
+            inspection = self._inspect(png_path, plan_json, detail)
+            if inspection.get("approved", True):
+                break
+            qc_rounds += 1
+            if qc_rounds > max_qc_rounds:
+                inspection["note"] = "accepted after exhausting QC rounds"
+                break
+            issues = "; ".join(inspection.get("issues") or [])[:600]
+            print(f"    👀 Diagram QC requests changes: {issues}")
+            feedback = (f"\nYour previous diagram rendered but failed "
+                        f"visual review: {issues}\nRedraw it fixing these "
+                        f"issues. Output only the fenced block.")
+        else:
+            return {"status": "error",
+                    "error": "no valid render within attempt budget",
+                    "attempts": attempts}
+
+        mmd_path.write_text(code)
+        return {"status": "success", "png_path": str(png_path),
+                "mmd_path": str(mmd_path), "code": code,
+                "attempts": attempts, "qc_rounds": qc_rounds,
+                "inspection": inspection}
+
+    def _inspect(self, png_path: Path, plan_json: str,
+                 detail: str) -> Dict[str, Any]:
+        try:
+            img = PIL_Image.open(png_path)
+            width, height = img.width, img.height
+            # High-res renders (print-quality scale) can exceed vision-API
+            # image limits; the gate judges layout, not pixels, so inspect
+            # a bounded copy while reporting the true dimensions.
+            if max(img.size) > 2000:
+                img = img.copy()
+                img.thumbnail((2000, 2000))
+            prompt = _QC_PROMPT.format(
+                plan_json=plan_json, detail=detail,
+                detail_rule=_DETAIL_RULES[detail],
+                width=width, height=height)
+            resp = self.model.generate_content(
+                [prompt, img], generation_config=self.generation_config)
+            verdict, _ = parse_json_from_response(resp)
+            if isinstance(verdict, dict) and "approved" in verdict:
+                return verdict
+            return {"approved": True, "note": "unparseable QC reply"}
+        except Exception as exc:  # noqa: BLE001
+            logging.warning(f"Diagram visual QC skipped: {exc}")
+            return {"approved": True, "note": f"qc skipped: {exc}"}
