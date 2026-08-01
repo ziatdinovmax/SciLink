@@ -79,5 +79,22 @@ class TestPipeline:
         assert r["status"] == "error" and r["results"] == {}
 
 
+class TestRealSkills:
+    """The on-disk simulation_analysis skills load and gate through the real loader."""
+
+    def test_viscosity_skill_loads_and_gates(self, agent):
+        cat = agent._skill_catalog()
+        visc = [c for c in cat if c["name"] == "viscosity_greenkubo"]
+        assert visc, "viscosity_greenkubo skill not discovered"
+        meta = visc[0]["meta"]
+        assert meta["computes"] == ["shear_viscosity"]
+        assert meta["requires"] == ["thermo_log"]
+        assert visc[0].get("implementation")           # recipe present
+        # availability gate: eligible only when its required data is on disk
+        elig = lambda kinds: {c["name"] for c in agent.eligible_skills(kinds, catalog=cat)}
+        assert "viscosity_greenkubo" in elig({"thermo_log"})
+        assert "viscosity_greenkubo" not in elig({"trajectory"})
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
