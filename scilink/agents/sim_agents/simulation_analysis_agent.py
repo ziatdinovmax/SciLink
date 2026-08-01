@@ -18,16 +18,6 @@ from typing import Any, Dict, List, Optional
 
 from .base_analysis_agent import BaseAnalysisAgent
 
-# Data-format -> the run-output patterns that realize it. The one place output
-# formats are named; kept a small, extensible table (a data-format concern, like
-# MDAnalysis/ASE format detection) rather than engine control-flow. Longer term
-# each engine skill can declare its own output patterns and this folds away.
-_DATA_FORMATS: Dict[str, tuple] = {
-    "trajectory": ("lammpstrj", "dcd", "xtc", "trr", "traj", "nc"),
-    "thermo_log": ("log.lammps", "thermo.log"),
-    "dft_output": ("vasprun.xml", "outcar"),
-}
-
 
 class SimulationAnalysisAgent(BaseAnalysisAgent):
     """Compute the properties a research goal calls for from a run's output.
@@ -40,12 +30,45 @@ class SimulationAnalysisAgent(BaseAnalysisAgent):
 
     DOMAIN = "simulation_analysis"
 
+    def _output_format_map(self) -> Dict[str, set]:
+        """Build ``{data_kind: {patterns}}`` from engine skills' ``outputs:``.
+
+        Engine specifics stay out of this agent: each engine skill declares, in
+        frontmatter, which output-file patterns realize which data kind (the
+        ``vasp`` skill maps ``vasprun.xml`` -> ``dft_output``, ``lammps`` maps
+        ``log.lammps`` -> ``thermo_log``, and so on). This aggregates those
+        declarations across every skill, so adding an engine is a skill-only
+        change — no filename ever appears here. Cached per instance.
+        """
+        if getattr(self, "_fmt_map_cache", None) is not None:
+            return self._fmt_map_cache
+        from ...skills.loader import list_all_skills, load_skill
+
+        fmt: Dict[str, set] = defaultdict(set)
+        for domain, names in list_all_skills().items():
+            for name in names:
+                try:
+                    meta = load_skill(name, domain=domain).get("meta") or {}
+                except Exception:
+                    continue
+                outputs = meta.get("outputs")
+                if not isinstance(outputs, dict):
+                    continue
+                for kind, pats in outputs.items():
+                    if isinstance(pats, str):
+                        pats = [pats]
+                    fmt[kind].update(str(p).lower() for p in pats)
+        self._fmt_map_cache = dict(fmt)
+        return self._fmt_map_cache
+
     def classify_outputs(self, run_dir: str) -> Dict[str, List[str]]:
         """Map the present data kinds to the files that realize them.
 
         Returns ``{data_kind: [paths]}`` for every recognized output in
-        ``run_dir`` (recursively). Unrecognized files are ignored.
+        ``run_dir`` (recursively), using the engine-declared output patterns
+        (:meth:`_output_format_map`). Unrecognized files are ignored.
         """
+        fmt = self._output_format_map()
         present: Dict[str, List[str]] = defaultdict(list)
         root = Path(run_dir)
         if not root.exists():
@@ -55,7 +78,7 @@ class SimulationAnalysisAgent(BaseAnalysisAgent):
                 continue
             name = p.name.lower()
             ext = p.suffix.lower().lstrip(".")
-            for kind, pats in _DATA_FORMATS.items():
+            for kind, pats in fmt.items():
                 if any(name == pat or name.endswith(pat) or ext == pat
                        for pat in pats):
                     present[kind].append(str(p))

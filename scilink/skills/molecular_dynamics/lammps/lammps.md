@@ -1,5 +1,8 @@
 ---
 description: LAMMPS classical molecular dynamics — input scripts for materials, biomolecular, and reactive systems with pair styles spanning EAM, Tersoff, ReaxFF, OPLS-AA, AMBER, and MLIP backends.
+outputs:
+  trajectory: [lammpstrj, dcd, xtc, trr, nc]
+  thermo_log: [log.lammps, thermo.log]
 detect:
   binaries: [lmp, lmp_mpi, lmp_serial, lmp_kokkos_cuda_mpi, lammps]
   env_vars: [LAMMPS_HOME, LAMMPS_DIR]

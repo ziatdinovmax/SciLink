@@ -36,6 +36,14 @@ class TestClassify:
     def test_empty_dir(self, agent, tmp_path):
         assert agent.classify_outputs(str(tmp_path)) == {}
 
+    def test_format_map_is_engine_declared(self, agent):
+        # Patterns come from engine skills' `outputs:` frontmatter — the agent
+        # itself names no filenames, so adding an engine is a skill-only change.
+        fmt = agent._output_format_map()
+        assert "vasprun.xml" in fmt.get("dft_output", set())      # from vasp skill
+        assert "log.lammps" in fmt.get("thermo_log", set())       # from lammps skill
+        assert "lammpstrj" in fmt.get("trajectory", set())        # from lammps skill
+
 
 class TestAvailabilityGate:
     def test_gates_by_required_data(self, agent):
