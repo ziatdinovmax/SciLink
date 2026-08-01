@@ -230,9 +230,10 @@ class BaseAnalysisAgent(ABC):
             + (f"TECHNIQUE RECIPE (follow this):\n{recipe}\n\n" if recipe else "")
             + "REQUIREMENTS:\n"
             f"- Import only from: {', '.join(packages)}.\n"
-            "- Two globals are provided: `DATA_FILES` (dict name->path) and "
-            "`OUTPUT_DIR` (str). Read inputs from DATA_FILES; write any figures "
-            "into OUTPUT_DIR.\n"
+            "- `DATA_FILES` (dict name->path) and `OUTPUT_DIR` (str) are ALREADY "
+            "defined as globals at runtime — reference them directly; do NOT "
+            "import, redefine, guard, or reassign them. Read inputs from "
+            "DATA_FILES; write any figures into OUTPUT_DIR.\n"
             "- Compute the property and print EXACTLY ONE JSON object as the last "
             'stdout line: {"status": "success", "value": <number>, "units": '
             '<str>, ...} — or {"status": "error", "message": <str>} if it cannot '
@@ -261,10 +262,17 @@ class BaseAnalysisAgent(ABC):
         """Run a script sandboxed with DATA_FILES/OUTPUT_DIR injected; parse JSON.
 
         The script's globals are prepended, so the generated body reads its
-        inputs and writes figures without hardcoded paths. On success the last
-        JSON object on stdout is returned (merged into the result); on failure a
-        concise error plus the traceback tail is returned for refinement.
+        inputs and writes figures without hardcoded paths. Syntactically-invalid
+        code is caught by a compile check before any sandbox run, so the refine
+        loop gets a precise error cheaply. On success the last JSON object on
+        stdout is returned (merged into the result); on failure a concise error
+        plus the traceback tail is returned for refinement.
         """
+        try:
+            compile(code, "<generated>", "exec")
+        except SyntaxError as e:
+            msg = f"SyntaxError: {e.msg} (line {e.lineno})"
+            return {"status": "error", "message": msg, "concise_error": msg}
         slug = re.sub(r"[^0-9a-zA-Z]+", "_", name).strip("_") or "analysis"
         exec_result = self.executor.execute_script(
             script_content=code, working_dir=str(self.output_dir))
@@ -329,10 +337,18 @@ class BaseAnalysisAgent(ABC):
                 "reasoning": parsed.get("reasoning", "")}
 
     def _llm(self, prompt: str) -> str:
-        """Send a prompt to the model and return the raw text."""
+        """Send a prompt to the model and return the UNCLEANED text.
+
+        Uses ``raw_text`` in preference to ``.text``: the wrapper's ``.text``
+        runs an embedded-JSON extraction that greedily slices a ``{...}`` out of
+        the response, which mangles generated code (a script's result dict looks
+        like JSON). JSON callers here re-extract via :meth:`_extract_json`, so raw
+        text is correct for both code and JSON responses.
+        """
         response = self.model.generate_content(
             prompt, generation_config=self.generation_config)
-        return getattr(response, "text", str(response))
+        return (getattr(response, "raw_text", None)
+                or getattr(response, "text", None) or str(response))
 
     @staticmethod
     def _clean_code(text: str) -> str:

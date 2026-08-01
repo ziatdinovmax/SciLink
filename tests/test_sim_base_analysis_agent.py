@@ -47,6 +47,11 @@ class TestExecution:
         r = agent._execute_script("raise RuntimeError('boom')", "t")
         assert r["status"] == "error" and "boom" in r["concise_error"]
 
+    def test_execute_script_catches_syntax_error_before_run(self, agent):
+        # A syntax error is caught by the compile check, not a sandbox run.
+        r = agent._execute_script('print(json.dumps({"a": 1}))extra)', "t")
+        assert r["status"] == "error" and "SyntaxError" in r["concise_error"]
+
     def test_execute_script_reads_injected_globals(self, agent, tmp_path):
         # compute_property injects DATA_FILES/OUTPUT_DIR; a script can read them.
         data = tmp_path / "d.txt"
