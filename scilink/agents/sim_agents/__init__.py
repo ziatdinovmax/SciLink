@@ -11,6 +11,8 @@ from .lammps_updater import LAMMPSUpdater
 from .force_field_agent import ForceFieldAgent
 from .lammps_analysis import LAMMPSAnalysisAgent
 from .lammps_analysis_updater import LAMMPSAnalysisUpdater
+from .base_analysis_agent import BaseAnalysisAgent
+from .simulation_analysis_agent import SimulationAnalysisAgent
 from .lammps_orchestrator import LAMMPSOrchestrator
 from .structure_pipeline import StructurePipeline
 from .simulation_pipeline import run_complete_workflow

@@ -204,11 +204,14 @@ class BaseAnalysisAgent(ABC):
             if attempt > 0:
                 code = self._refine_code(code, error_info, task, recipe, pkgs)
             result = self._execute_script(preamble + code, task)
-            if result.get("status") != "error":
-                out = {k: v for k, v in result.items() if k != "status"}
-                out["status"] = "success"
+            if result.get("ok"):
+                # The script ran and produced its answer (success OR an honest
+                # error). Return it as-is — do not retry, and never overwrite an
+                # honest error with success.
+                out = {k: v for k, v in result.items() if k != "ok"}
                 out["attempts"] = attempt + 1
-                if verify and result.get("value") is not None:
+                if (verify and out.get("status") == "success"
+                        and result.get("value") is not None):
                     out["verification"] = self._verify_result(task, result)
                 return out
             error_info = result
@@ -272,7 +275,8 @@ class BaseAnalysisAgent(ABC):
             compile(code, "<generated>", "exec")
         except SyntaxError as e:
             msg = f"SyntaxError: {e.msg} (line {e.lineno})"
-            return {"status": "error", "message": msg, "concise_error": msg}
+            return {"ok": False, "status": "error", "message": msg,
+                    "concise_error": msg}
         slug = re.sub(r"[^0-9a-zA-Z]+", "_", name).strip("_") or "analysis"
         exec_result = self.executor.execute_script(
             script_content=code, working_dir=str(self.output_dir))
@@ -280,12 +284,20 @@ class BaseAnalysisAgent(ABC):
             (self.output_dir / f"{slug}.py").write_text(code)
             parsed = self._extract_json(exec_result.get("stdout", ""))
             if parsed is not None:
-                return {"status": "success", "code_path":
+                # The script RAN and returned its JSON answer — whether it reports
+                # success or an honest "cannot compute" error. ok=True means don't
+                # retry: retrying an honest error only invites a fabricated value,
+                # the one failure mode a validation-feeding agent must not have.
+                # The script's own status is preserved (not forced to success).
+                parsed.setdefault("status", "success")
+                return {"ok": True, "code_path":
                         str(self.output_dir / f"{slug}.py"), **parsed}
-            return {"status": "success", "code_path":
-                    str(self.output_dir / f"{slug}.py"),
-                    "message": "ran but produced no JSON",
+            # Ran but violated the contract (no JSON on stdout) — retryable.
+            return {"ok": False, "status": "error",
+                    "message": "ran but produced no JSON on the last stdout line",
+                    "concise_error": "no JSON output",
                     "raw_output": exec_result.get("stdout", "")[:2000]}
+        # The script crashed — retryable.
         raw = exec_result.get("message", "") or exec_result.get("stderr", "")
         tb = raw[raw.find("Traceback"):] if "Traceback" in raw else raw
         concise = ""
@@ -294,8 +306,8 @@ class BaseAnalysisAgent(ABC):
             if line and not line.startswith(("File", "Traceback")):
                 concise = line
                 break
-        return {"status": "error", "message": tb[-2000:] or "no error output",
-                "concise_error": concise}
+        return {"ok": False, "status": "error",
+                "message": tb[-2000:] or "no error output", "concise_error": concise}
 
     @staticmethod
     def _extract_json(stdout: str) -> Optional[Dict[str, Any]]:
@@ -307,12 +319,13 @@ class BaseAnalysisAgent(ABC):
                     return json.loads(line)
                 except json.JSONDecodeError:
                     continue
-        match = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", stdout, re.DOTALL)
-        if match:
+        # Fallback: the LAST balanced object anywhere (matches the docstring).
+        matches = re.findall(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", stdout, re.DOTALL)
+        for candidate in reversed(matches):
             try:
-                return json.loads(match.group(0))
+                return json.loads(candidate)
             except json.JSONDecodeError:
-                pass
+                continue
         return None
 
     def _verify_result(self, task: str, result: Dict[str, Any]) -> Dict[str, Any]:
@@ -322,13 +335,22 @@ class BaseAnalysisAgent(ABC):
         when unsure — it flags clearly-wrong magnitudes, it is not a second
         physics reviewer. A failure to parse is treated as non-blocking.
         """
+        details = {
+            k: v for k, v in result.items()
+            if k not in ("code_path", "ok", "status", "attempts",
+                         "verification", "raw_output")
+            and isinstance(v, (int, float, str, bool))
+        }
         prompt = (
-            "A simulation-analysis script computed a property. Judge only whether "
-            "the numeric value is physically plausible in magnitude and sign for "
-            "the stated task — not whether the method is optimal. Respond with "
-            'JSON: {"plausible": true|false, "reasoning": "<one sentence>"}.\n\n'
+            "A simulation-analysis script computed a property. Judge whether the "
+            "result is physically plausible AND adequately converged — take the "
+            "reported diagnostic/convergence fields into account: a "
+            "`plateau_reached` / `linear_regime` / `converged`-style flag that is "
+            "false means the value is NOT trustworthy and must NOT be judged "
+            "plausible on magnitude alone. Respond with JSON: "
+            '{"plausible": true|false, "reasoning": "<one sentence>"}.\n\n'
             f"TASK: {task}\n"
-            f"VALUE: {result.get('value')} {result.get('units', '')}\n"
+            f"RESULT FIELDS: {json.dumps(details, default=str)}\n"
         )
         parsed = self._extract_json(self._llm(prompt))
         if not parsed or "plausible" not in parsed:
