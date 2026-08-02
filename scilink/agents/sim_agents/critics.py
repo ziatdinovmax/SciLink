@@ -713,23 +713,34 @@ and a successful run (give a verdict and sanity-check the physics).
 Return a JSON object with these fields:
   status              "success" | "error"
   run_status          "succeeded" | "failed" | "incomplete"
-  failure_class       "deck" | "structure" | null
-                      Set ONLY when run_status is "failed" — the ROOT cause.
-                      "structure" — the failure is caused by the initial atomic
-                      configuration itself (a broken / overlapping pack), so NO
-                      change to the run inputs can fix it and it must be
-                      regenerated; a tell is a non-finite or absurd energy /
-                      pressure at the very first step that persists even though
-                      the deck already minimizes. "deck" — anything a corrected
-                      input file fixes (a setting, a style, an unstable timestep,
-                      an atom leaving the grid mid-run). When "structure", set
-                      suggested_fixes to null: the structure must be regenerated,
-                      not patched.
+  failure_class       "deck" | "structure" | "force_field" | null
+                      The ROOT cause. Set when a run FAILED, or when a run
+                      CONVERGED but the result is physically unsound (verdict
+                      "poor"). null when the result is acceptable.
+                      "structure" — caused by the initial atomic configuration
+                      itself (a broken / overlapping pack), so NO change to the
+                      run inputs can fix it and it must be regenerated; a tell is
+                      a non-finite or absurd energy / pressure at the very first
+                      step that persists even though the deck already minimizes.
+                      "deck" — anything a corrected input file fixes (a setting,
+                      a style, an unstable timestep, an atom leaving the grid
+                      mid-run). "force_field" — the run completed but a computed
+                      property contradicts the known physical behaviour of the
+                      system or its components, and the cause is the model's
+                      parameters, not the run settings, so no input-deck change
+                      can fix it. When "structure" OR "force_field", set
+                      suggested_fixes to null: the structure must be regenerated
+                      / the force field re-parameterized, not patched by the deck.
   verdict             "good" | "warning" | "poor" | "needs_fixes"
                       good        — converged, physically sensible
                       warning     — converged but with concerns
                       poor        — converged but result is suspect or wrong
                       needs_fixes — did not converge or failed to run
+                      Judge "poor" by reasoning about whether the computed
+                      properties and their trends are consistent with the known
+                      physical behaviour of this system and its components: a run
+                      that completes cleanly but contradicts well-established
+                      behaviour is "poor", not "good".
   reasoning           prose summary (3-6 sentences)
   suggested_fixes     {{ "filename": "complete_corrected_file", ... }} | null
                       Provide a non-null dict only when the verdict is
@@ -797,6 +808,8 @@ class RunCritic(_CriticBase):
         fixes_mode: str = "auto",
         input_files: Optional[Dict[str, str]] = None,
         check_observables: bool = False,
+        required_observables: Optional[list] = None,
+        deterministic_findings: Optional[list] = None,
     ) -> Dict[str, Any]:
         """Assess a finished run and return a verdict report.
 
@@ -844,6 +857,13 @@ class RunCritic(_CriticBase):
                 recoverable-in-post-processing or optional ones (reported in
                 ``advisory_observables``, non-blocking). Intended for the
                 pre-run gate; defaults to False.
+            required_observables: Optional list of engine-neutral
+                ``contradictions.Requirement`` objects naming the observables
+                the run must yield. When provided (with ``check_observables``),
+                the coverage check verifies this authoritative list rather than
+                re-deriving the required set from the goal — removing the flaky
+                inference step. When ``None``, the required set is inferred from
+                the goal as before.
 
         Returns:
             A report dict with fields:
@@ -918,10 +938,26 @@ class RunCritic(_CriticBase):
         )
 
         if check_observables:
+            # When the caller declares the required observables, check against
+            # that authoritative list instead of re-deriving it from the goal
+            # (the derive step is the flaky part). Falls back to inference.
+            if required_observables:
+                from .contradictions import format_requirements_for_prompt
+                required_directive = (
+                    "The REQUIRED observables are declared below — treat this "
+                    "list as authoritative and do NOT re-derive it from the "
+                    "goal; check each one against the deck/output:\n"
+                    f"{format_requirements_for_prompt(required_observables)}\n"
+                )
+            else:
+                required_directive = (
+                    "Determine which physical properties the research goal "
+                    "requires. "
+                )
             observable_coverage = (
                 "=== Observable-coverage check (pre-run) ===\n"
-                "Determine which physical properties the research goal requires. "
-                "A gap is BLOCKING only when the raw data needed to compute the "
+                + required_directive
+                + "A gap is BLOCKING only when the raw data needed to compute the "
                 "property is not being written at all and cannot be reconstructed "
                 "after the run. Apply this test:\n"
                 "- A saved trajectory of coordinates/velocities lets you recompute "
@@ -952,6 +988,18 @@ class RunCritic(_CriticBase):
         else:
             observable_coverage = ""
 
+        # Deterministic findings from a prior gate cycle: a checker already
+        # proved these observables under-provided, so the fixer must treat each
+        # as blocking and emit a corrected deck — otherwise a deterministic-only
+        # flag blocks the status but never reaches suggested_fixes.
+        if check_observables and deterministic_findings:
+            observable_coverage += (
+                "\n\nDETERMINISTICALLY-DETECTED GAPS (already proven by a "
+                "deterministic check — treat each as BLOCKING and return a "
+                "corrected deck that fixes it):\n- "
+                + "\n- ".join(str(f) for f in deterministic_findings)
+            )
+
         prompt = self.BASELINE_PROMPT_TEMPLATE.format(
             skill_context=skill_context or "(no engine skill loaded)",
             output_dir=str(out_path),
@@ -967,4 +1015,503 @@ class RunCritic(_CriticBase):
             report["suggested_fixes"] = None
         else:
             _drop_vacuous_fix(report)
+        return report
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# ReferencePropertyCritic
+# ──────────────────────────────────────────────────────────────────────────
+
+_REFERENCE_CRITIC_PROMPT = """\
+You are validating a simulation's model BEFORE an expensive production run.
+Below are reference properties measured for each pure component of the system,
+computed with the SAME force field the production run will use. Independently of
+any target result, judge each measured value against the KNOWN physical
+behaviour of that component.
+
+{skill_context}
+
+=== System ===
+{system_description}
+
+=== Measured reference properties (this force field) ===
+{measurements_block}
+
+For EACH measured value, decide whether it is consistent with the
+well-established behaviour of that substance. Reason from what is known about the
+component; a stored reference value, when provided, is an anchor, not the only
+basis. A value that clearly contradicts known behaviour means the underlying
+model is miscalibrated, and any prediction built on it is untrustworthy — no
+change to the run settings can fix that. If a value is only mildly off, or you
+are unsure, treat it as consistent: this gate must not veto a sound model over a
+surprising-but-plausible number. But judge whether the VALUE is correct, not
+whether its error is surprising: a value that is clearly wrong is inconsistent
+even when the error is a well-known or expected limitation of this class of model
+— "expected" is not "acceptable", because the prediction built on it is still
+untrustworthy. The benefit of the doubt is only for values genuinely close to
+correct, or surprising but real — never for a large, confirmed error.
+
+Return a JSON object:
+  status           "success"
+  per_measurement  list of {{ "component": ..., "property": ...,
+                   "consistent": true|false, "reasoning": "<one sentence>" }} —
+                   one entry per MEASURED value shown above (a component checked
+                   on two properties gets two entries)
+  verdict          "good" — every measured value is physically consistent
+                   "poor" — at least one clearly contradicts known behaviour
+  failure_class    when verdict is "poor", the miscalibrated model — name what
+                   the system actually uses: "force_field" (classical MD),
+                   "functional" (DFT), or "potential" (machine-learning
+                   interatomic potential). null when verdict is "good".
+  reasoning        short prose summary (which value, and why)
+"""
+
+
+class ReferencePropertyCritic(_CriticBase):
+    """Reasons over pre-run reference-property measurements to decide whether
+    the force field is trustworthy before the production run.
+
+    Given each pure component's measured reference property (from the
+    engine-neutral :func:`reference_validation.validate_component_properties`
+    stage), it judges each value against the known behaviour of that substance
+    and, when one clearly contradicts it, returns a ``poor`` verdict naming the
+    miscalibrated model in the system's own terms — ``failure_class`` is
+    ``"force_field"`` for classical MD, ``"functional"`` for DFT, or
+    ``"potential"`` for a machine-learning interatomic potential. The MD value
+    matches the post-run :class:`RunCritic`, so both feed one reparameterization
+    fixer.
+
+    Reasoning-first: the judgement rests on the model's knowledge of the
+    components (a skill's ``validation`` section can supply known values as an
+    anchor, but is not required), and it is deliberately conservative — a mildly
+    off or merely surprising value is treated as consistent, so a sound model is
+    never vetoed over an unexpected result.
+    """
+
+    SKILL_SECTION = "validation"
+    BASELINE_PROMPT_TEMPLATE = _REFERENCE_CRITIC_PROMPT
+
+    def assess(
+        self,
+        measurements: List[Dict[str, Any]],
+        system_description: str = "",
+        skill: Optional[str] = None,
+        domain: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Judge measured reference properties; flag the force field if a value
+        contradicts known behaviour.
+
+        Args:
+            measurements: The ``measurements`` list from
+                ``validate_component_properties`` — entries with
+                ``status="measured"`` carry ``value`` / ``units``; unmeasured
+                ones are shown for context but not judged.
+            system_description: What is being simulated (context for the judge).
+            skill, domain: Optional skill bundle whose ``validation`` section
+                supplies known reference behaviour as an anchor.
+
+        Returns:
+            ``{"status", "verdict", "failure_class", "per_measurement",
+            "reasoning"}``. ``per_measurement`` has one entry per measured value
+            (``{"component", "property", "consistent", "reasoning"}``);
+            ``failure_class`` names the miscalibrated model in the system's own
+            terms (``"force_field"`` / ``"functional"`` / ``"potential"``).
+            Fails open to a non-blocking ``good`` verdict (no LLM call) when no
+            component was measured.
+        """
+        if skill and not domain:
+            raise ValueError(
+                "domain is required when skill is provided (e.g. 'lammps' with "
+                "'molecular_dynamics')."
+            )
+        measured = [m for m in (measurements or [])
+                    if m.get("status") == "measured"]
+        if not measured:
+            return {
+                "status": "success",
+                "verdict": "good",
+                "failure_class": None,
+                "per_measurement": [],
+                "reasoning": "No reference properties were measured; nothing to "
+                             "validate.",
+            }
+
+        lines = []
+        for m in measurements:
+            if m.get("status") == "measured":
+                prop = f" — {m['property']}" if m.get("property") else ""
+                unit = f" {m['units']}" if m.get("units") else ""
+                smi = f" [{m['smiles']}]" if m.get("smiles") else ""
+                lines.append(f"- {m['component']}{prop}{smi}: {m['value']}{unit}")
+            else:
+                lines.append(f"- {m.get('component')}: not measured "
+                             f"({m.get('error', 'unknown')})")
+        measurements_block = "\n".join(lines)
+
+        skill_context = self._load_skill_section(skill, domain or "")
+        prompt = self.BASELINE_PROMPT_TEMPLATE.format(
+            skill_context=skill_context or "(no engine skill loaded)",
+            system_description=system_description or "(not provided)",
+            measurements_block=measurements_block,
+        )
+        report = self._generate_json(prompt)
+        report.setdefault("status", "success")
+        report.setdefault("verdict", "good")
+        report.setdefault("failure_class", None)
+        report.setdefault("per_measurement", [])
+        return report
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# ReferencePropertySelector
+# ──────────────────────────────────────────────────────────────────────────
+
+_REFERENCE_SELECTOR_PROMPT = """\
+You are validating a simulation's force field BEFORE an expensive production
+run. For EACH component of the system below, choose the SINGLE reference
+property that best validates the force field for that component.
+
+{skill_context}
+
+=== System ===
+{system_description}
+
+=== Components ===
+{components_block}
+
+A good reference property is one that (a) has an independently KNOWN correct
+value for that substance — from experiment or well-established data — so a
+measured value can be judged, and (b) can be measured by a short standalone
+simulation of the pure component. Choose the property that most sharply exposes
+a miscalibration for THIS kind of substance. As a guide, not a rule: a molecular
+liquid is usually best checked by its mass density; a crystalline solid by a
+lattice constant; a small rigid molecule by a characteristic bond length or
+angle. If a component has no independently-known reference property worth
+checking, mark it not measurable and say why.
+
+Return a JSON object:
+  status       "success"
+  selections   list of {{ "component": ..., "property": "<name>",
+               "measurable": true|false, "rationale": "<one sentence>" }} — one
+               entry per component; "property" may be null when "measurable" is
+               false
+"""
+
+
+class ReferencePropertySelector(_CriticBase):
+    """Chooses which reference property to validate for each component.
+
+    Picks the property whose correct value is independently known and that a
+    short pure-component simulation can measure — density for a molecular
+    liquid, a lattice constant for a crystal, a characteristic bond length for a
+    small molecule, and so on. This is what keeps the validation general: the
+    downstream measurement and the judging critic never hardcode a property;
+    this step decides, per component, what is worth checking.
+    """
+
+    SKILL_SECTION = "validation"
+    BASELINE_PROMPT_TEMPLATE = _REFERENCE_SELECTOR_PROMPT
+
+    def select(
+        self,
+        components: List[Dict[str, Any]],
+        system_description: str = "",
+        skill: Optional[str] = None,
+        domain: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Choose a reference property per component.
+
+        Args:
+            components: ``[{"name", "smiles", "role"?}, ...]``. ``role`` is
+                optional free text (e.g. "solvent", "cation").
+            system_description: What is being simulated (context for the choice).
+            skill, domain: Optional skill bundle whose ``validation`` section
+                supplies domain guidance on what to check.
+
+        Returns:
+            ``{"status", "selections": [{"component", "property", "measurable",
+            "rationale"}, ...]}``. Empty selections (no LLM call) when no
+            components are supplied.
+        """
+        if skill and not domain:
+            raise ValueError(
+                "domain is required when skill is provided (e.g. 'lammps' with "
+                "'molecular_dynamics')."
+            )
+        if not components:
+            return {"status": "success", "selections": []}
+
+        lines = []
+        for c in components:
+            smi = f" [{c['smiles']}]" if c.get("smiles") else ""
+            role = f" — {c['role']}" if c.get("role") else ""
+            lines.append(f"- {c.get('name') or c.get('smiles')}{smi}{role}")
+        components_block = "\n".join(lines)
+
+        skill_context = self._load_skill_section(skill, domain or "")
+        prompt = self.BASELINE_PROMPT_TEMPLATE.format(
+            skill_context=skill_context or "(no engine skill loaded)",
+            system_description=system_description or "(not provided)",
+            components_block=components_block,
+        )
+        report = self._generate_json(prompt)
+        report.setdefault("status", "success")
+        report.setdefault("selections", [])
+        return report
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# ReparameterizationAdvisor
+# ──────────────────────────────────────────────────────────────────────────
+
+_REPARAM_ADVISOR_PROMPT = """\
+A pre-run validation flagged the force field: one or more pure-component
+reference properties contradict known behaviour, so the model is untrustworthy
+for production. Recommend a concrete corrective action so it can be fixed and
+re-validated before the run — no production compute is spent until it passes.
+
+{skill_context}
+
+=== System ===
+{system_description}
+
+=== Current force-field backend ===
+{backend}
+
+=== Flagged reference properties ===
+{flagged_block}
+
+Reason about the LIKELY cause of each flagged value — partial charges, van der
+Waals / Lennard-Jones terms, bonded/torsion terms, or a chemistry the base force
+field does not really cover — and recommend ONE concrete corrective action:
+- "add_force_field": supplement or replace the offending component's parameters
+  with a validated set (e.g. a literature model for that chemistry), applied
+  through the backend's extra-force-field channel.
+- "adjust_parameters": change specific named terms — for a targeted issue.
+- "switch_backend": use a backend that covers this chemistry better.
+- "escalate": no confident automatic fix to attempt — hand to the human.
+
+The system finds and applies the fix ITSELF: it searches the literature for
+candidate parameters and re-runs this same pure-component check to validate them
+automatically, so a wrong candidate is caught and discarded, not trusted. So do
+NOT punt the SEARCH to a human — recommend "add_force_field" whenever a validated
+set plausibly exists in the literature. A human APPROVES the corrected model
+before production; a human is not needed to find the parameters. Reserve
+"escalate" for when no automatic fix is worth attempting at all.
+
+Return a JSON object:
+  status              "success"
+  diagnosis           which component/property, and the likely force-field cause
+  recommended_action  one of "add_force_field" | "adjust_parameters" |
+                      "switch_backend" | "escalate"
+  detail              concrete specifics (what to search for / change / switch to)
+  requires_human      true|false — whether a human must APPROVE the corrected
+                      model before production (finding the parameters is
+                      automatic; use "escalate" when there is no automatic fix
+                      to attempt at all)
+  rationale           short prose
+"""
+
+
+class ReparameterizationAdvisor(_CriticBase):
+    """Recommends how to fix a force field that the pre-run check flagged.
+
+    Given the flagged pure-component reference properties (the inconsistent
+    entries from :class:`ReferencePropertyCritic`), it reasons about the likely
+    parameter-level cause and proposes a concrete corrective action —
+    supplementing the component's parameters, adjusting named terms, switching
+    backend, or escalating to a human when there is no confident automatic fix.
+    It advises; it does not apply the fix, and (matching the human-in-the-loop
+    use-case contract) flags when a human must supply or approve it.
+    """
+
+    SKILL_SECTION = "validation"
+    BASELINE_PROMPT_TEMPLATE = _REPARAM_ADVISOR_PROMPT
+
+    def advise(
+        self,
+        flagged: List[Dict[str, Any]],
+        system_description: str = "",
+        backend: str = "",
+        skill: Optional[str] = None,
+        domain: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Recommend a corrective action for the flagged reference properties.
+
+        Args:
+            flagged: The inconsistent measurements — each
+                ``{"component", "property", "reasoning", ...}`` (the ``poor``
+                entries the critic returned).
+            system_description: What is being simulated.
+            backend: The force-field backend in use (e.g. ``"openff"``).
+            skill, domain: Optional skill bundle whose ``validation`` section
+                supplies domain guidance on likely causes and fixes.
+
+        Returns:
+            ``{"status", "diagnosis", "recommended_action", "detail",
+            "requires_human", "rationale"}``. When ``flagged`` is empty, returns
+            a no-op ``escalate`` with no LLM call.
+        """
+        if skill and not domain:
+            raise ValueError(
+                "domain is required when skill is provided (e.g. 'lammps' with "
+                "'molecular_dynamics')."
+            )
+        if not flagged:
+            return {
+                "status": "success",
+                "diagnosis": "No flagged properties supplied.",
+                "recommended_action": "escalate",
+                "detail": "Nothing to fix.",
+                "requires_human": True,
+                "rationale": "Advisor called with no flagged measurements.",
+            }
+
+        lines = []
+        for m in flagged:
+            prop = f" — {m['property']}" if m.get("property") else ""
+            why = f": {m['reasoning']}" if m.get("reasoning") else ""
+            lines.append(f"- {m.get('component')}{prop}{why}")
+        flagged_block = "\n".join(lines)
+
+        skill_context = self._load_skill_section(skill, domain or "")
+        prompt = self.BASELINE_PROMPT_TEMPLATE.format(
+            skill_context=skill_context or "(no engine skill loaded)",
+            system_description=system_description or "(not provided)",
+            backend=backend or "(not specified)",
+            flagged_block=flagged_block,
+        )
+        report = self._generate_json(prompt)
+        report.setdefault("status", "success")
+        report.setdefault("recommended_action", "escalate")
+        report.setdefault("requires_human", True)
+        return report
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# TrendCritic
+# ──────────────────────────────────────────────────────────────────────────
+
+_TREND_CRITIC_PROMPT = """\
+You are validating a simulation by checking whether a computed TREND across a
+swept parameter is physically sensible — the check that catches a model error no
+single run can show. Judge the DIRECTION and shape of the trend against known
+behaviour, not the absolute value of any single point.
+
+{skill_context}
+
+=== System ===
+{system_description}
+
+=== Swept parameter ===
+{parameter}
+
+=== Observed trend ({quantity}) ===
+{trend_block}
+
+=== Known reference behaviour (literature / constituent properties) ===
+{reference_context}
+
+Reason about which way {quantity} SHOULD move as the parameter increases, using
+the known behaviour of the components — a value provided above is a sourced
+anchor, not a guess. Then compare to the observed trend. A trend whose DIRECTION
+contradicts well-established behaviour means the model is miscalibrated: a strong,
+unambiguous signal even when individual values look plausible. A merely
+surprising-but-real trend (a genuine anomaly) is NOT a failure — flag only a
+clear contradiction.
+
+Return a JSON object:
+  status              "success"
+  expected_direction  "increasing" | "decreasing" | "non-monotonic" | "unclear"
+  observed_direction  "increasing" | "decreasing" | "non-monotonic" | "flat"
+  consistent          true|false — does the observed trend match expectation
+  verdict             "good" (consistent) | "poor" (clear contradiction)
+  failure_class       when "poor", the miscalibrated model in the system's own
+                      terms ("force_field" | "functional" | "potential"), else null
+  reasoning           short prose (which way it should go, which way it went, why)
+"""
+
+
+class TrendCritic(_CriticBase):
+    """Judges whether a property-vs-parameter trend is physically sensible.
+
+    The reliable catch for a swept series (e.g. a composition series): a single
+    run's value can look plausible while the TREND across the sweep is
+    physically backwards. Grounded in the sourced constituent properties (a
+    denser-than-water cosolvent should raise mixture density, so a falling trend
+    is wrong), it flags a direction that contradicts known behaviour and names
+    the miscalibrated model — the same cause vocabulary the other critics use.
+    Conservative on genuine anomalies: only a clear contradiction is flagged.
+    """
+
+    SKILL_SECTION = "validation"
+    BASELINE_PROMPT_TEMPLATE = _TREND_CRITIC_PROMPT
+
+    def assess(
+        self,
+        series: List[Dict[str, Any]],
+        quantity: str = "the property",
+        parameter: str = "the swept parameter",
+        system_description: str = "",
+        reference_context: str = "",
+        units: str = "",
+        skill: Optional[str] = None,
+        domain: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Assess a swept trend and return a verdict.
+
+        Args:
+            series: The trend as ordered points, each ``{"point": <parameter
+                value or label>, "value": <measured value>}``.
+            quantity: What is plotted on the trend (e.g. ``"mass density"``).
+            parameter: What is swept (e.g. ``"ethyl-isopropyl-sulfone mole
+                fraction"``).
+            system_description: What is being simulated.
+            reference_context: Known reference behaviour to reason against — the
+                literature-sourced constituent properties that fix the expected
+                direction (e.g. "pure EIS density 1.13 g/cm^3 > water 1.00").
+            units: Units of the trend values (appended to each point).
+            skill, domain: Optional skill bundle for domain guidance.
+
+        Returns:
+            ``{"status", "expected_direction", "observed_direction",
+            "consistent", "verdict", "failure_class", "reasoning"}``. A series
+            with fewer than two points has no trend to judge and returns a
+            non-blocking ``good`` with no LLM call.
+        """
+        if skill and not domain:
+            raise ValueError(
+                "domain is required when skill is provided (e.g. 'lammps' with "
+                "'molecular_dynamics')."
+            )
+        points = [p for p in (series or []) if p.get("value") is not None]
+        if len(points) < 2:
+            return {
+                "status": "success",
+                "expected_direction": "unclear",
+                "observed_direction": "flat",
+                "consistent": True,
+                "verdict": "good",
+                "failure_class": None,
+                "reasoning": "Fewer than two points — no trend to assess.",
+            }
+
+        unit = f" {units}" if units else ""
+        trend_block = "\n".join(
+            f"- {p.get('point')}: {p['value']}{unit}" for p in points)
+
+        skill_context = self._load_skill_section(skill, domain or "")
+        prompt = self.BASELINE_PROMPT_TEMPLATE.format(
+            skill_context=skill_context or "(no engine skill loaded)",
+            system_description=system_description or "(not provided)",
+            parameter=parameter,
+            quantity=quantity,
+            trend_block=trend_block,
+            reference_context=reference_context or "(none provided)",
+        )
+        report = self._generate_json(prompt)
+        report.setdefault("status", "success")
+        report.setdefault("verdict", "good")
+        report.setdefault("failure_class", None)
+        report.setdefault("consistent", report.get("verdict") != "poor")
         return report

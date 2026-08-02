@@ -63,6 +63,7 @@ def _generate_inputs(
     model_name: str,
     force_field_files: Optional[Dict[str, str]] = None,
     staged: bool = False,
+    required_observables: Optional[list] = None,
 ) -> Dict[str, Any]:
     """Generate inputs for ``scale``, returning a normalized result.
 
@@ -106,6 +107,7 @@ def _generate_inputs(
         )
         result = agent.generate_inputs(
             structure_file=structure_file, request=request, software=software,
+            required_observables=required_observables,
         )
         # PeriodicDFTAgent already returns input_files as {filename: contents}.
         if result.get("status") == "success":
@@ -141,6 +143,7 @@ def _generate_inputs(
         result = gen(
             structure_file=structure_file, research_goal=request, runner=software,
             force_field_files=force_field_files,
+            required_observables=required_observables,
         )
         # Normalize the MD agent's single script_path into the common
         # input_files map so the pipeline stays engine-neutral downstream,
@@ -221,6 +224,121 @@ def _load_components_manifest(structure_path: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+# The live measurement + FF-search seams below are not yet implemented (they
+# return None). Until they are, the reference check can only fail open, so the
+# pipeline short-circuits it rather than spend per-component packing on a no-op.
+# Flip to True when both seams are wired.
+_LIVE_MEASUREMENT_IMPLEMENTED = False
+
+
+def _measure_property_via_short_run(psystem, property, working_dir, engine,
+                                    executor, run_command):
+    """Measure a pure component's reference ``property`` with a short run.
+
+    Returns ``{"value": float, "units": str}`` or None. Property-general: the
+    property is a goal, not a hardcoded routine — a density is a short NPT, a
+    lattice constant is a relaxation, etc.
+
+    LIVE-ENV SEAM (not yet implemented): write engine inputs via
+    ``write_md_inputs``, generate a short run to measure ``property`` through the
+    normal input-generation path (so it works for any property/engine — no
+    per-property code), run it through ``executor`` with ``run_command``, and
+    read the value from the run snapshot. Until implemented it returns None, so
+    the measurement is recorded as unmeasured and the gate fails open.
+    """
+    _ = (psystem, property, working_dir, engine, executor, run_command)
+    return None
+
+
+def _reference_check(components, system_description, psystem, ff_agent, *,
+                     api_key, base_url, model_name, executor, run_command,
+                     engine, working_dir, ff_kwargs=None):
+    """Run the pre-run reference-property validation; return its result dict.
+
+    Builds the selector + critic and a density measurer bound to the SAME
+    force-field backend the production run uses (through ``ff_agent``), then runs
+    the composed :func:`reference_validation.run_reference_check`. Module-level so
+    tests and callers can substitute it. ``ff_kwargs`` are extra parameterization
+    arguments (e.g. ``extra_force_fields``) applied to the pure-component
+    parameterization too — so re-checking a candidate fix actually measures it.
+    """
+    from .critics import ReferencePropertyCritic, ReferencePropertySelector
+    from .reference_measurement import measure_pure_component_property
+    from .reference_validation import run_reference_check
+
+    selector = ReferencePropertySelector(api_key=api_key, base_url=base_url,
+                                         model_name=model_name)
+    critic = ReferencePropertyCritic(api_key=api_key, base_url=base_url,
+                                     model_name=model_name)
+
+    def _measure(component, prop):
+        name = component.get("name") or component.get("smiles") or "component"
+        slug = "".join(c if c.isalnum() else "_" for c in str(name))
+        wd = os.path.join(working_dir, "reference_check", slug)
+        return measure_pure_component_property(
+            component, prop or "density", wd,
+            parameterize_fn=lambda comps, coords, w: ff_agent.parameterize(
+                components=comps, coordinates_file=coords, working_dir=w,
+                **(ff_kwargs or {})),
+            run_measure_fn=lambda ps, p, w: _measure_property_via_short_run(
+                ps, p, w, engine, executor, run_command),
+        )
+
+    return run_reference_check(
+        components, system_description,
+        select_fn=lambda comps, sd: selector.select(comps, system_description=sd),
+        measure_fn=_measure,
+        judge_fn=lambda meas, sd: critic.assess(meas, system_description=sd),
+    )
+
+
+def _search_force_field_parameters(recommendation, tried):
+    """Find a candidate force-field correction for a flagged component.
+
+    LIVE-ENV SEAM (not yet implemented): search the literature (SciLink's
+    literature agents) for validated parameters for the offending chemistry and
+    return them as parameterization kwargs (e.g.
+    ``{"extra_force_fields": [<path>]}``), skipping anything in ``tried``. Until
+    implemented it returns None, so the fixer loop reports ``no_candidate`` and
+    escalates to the human rather than inventing parameters.
+    """
+    _ = (recommendation, tried)
+    return None
+
+
+def _reparameterize(flagged, system_description, backend, components,
+                    coordinates_file, ff_agent, engine, working_dir, *,
+                    api_key, base_url, model_name, executor, run_command,
+                    confirm_fn=None):
+    """Drive the autonomous fix: advise -> search -> apply candidate + re-check.
+
+    SciLink sources the fix and the pure-component re-check validates it; the
+    human only approves (``confirm_fn``). Module-level so tests can substitute
+    it. Returns :func:`reference_validation.run_reparameterization`'s dict.
+    """
+    from .critics import ReparameterizationAdvisor
+    from .reference_validation import run_reparameterization
+
+    advisor = ReparameterizationAdvisor(api_key=api_key, base_url=base_url,
+                                        model_name=model_name)
+
+    def _apply_and_recheck(candidate):
+        return _reference_check(
+            components, system_description, None, ff_agent,
+            api_key=api_key, base_url=base_url, model_name=model_name,
+            executor=executor, run_command=run_command, engine=engine,
+            working_dir=working_dir, ff_kwargs=(candidate or {}))
+
+    return run_reparameterization(
+        flagged, system_description, backend,
+        advise_fn=lambda fl, sd, bk: advisor.advise(
+            fl, system_description=sd, backend=bk),
+        search_fn=_search_force_field_parameters,
+        apply_and_recheck_fn=_apply_and_recheck,
+        confirm_fn=confirm_fn or (lambda candidate: True),
+    )
+
+
 def _run_workflow_once(
     user_request: str,
     *,
@@ -245,6 +363,10 @@ def _run_workflow_once(
     structure_file: Optional[str] = None,
     force_field_files: Optional[Dict[str, str]] = None,
     staged: bool = False,
+    reference_check: bool = False,
+    auto_fix: bool = True,
+    required_observables: Optional[list] = None,
+    derive_observables: bool = False,
 ) -> Dict[str, Any]:
     """Run the full structure → inputs → validation pipeline for any scale.
 
@@ -363,6 +485,10 @@ def _run_workflow_once(
                     working_dir=output_dir, api_key=api_key,
                     base_url=base_url, model_name=model_name,
                 )
+                # Keep the packed coordinates — write_md_inputs overwrites
+                # structure_path with the engine data file, but a fix has to
+                # re-parameterize the mixture from the original coordinates.
+                orig_coordinates = structure_path
                 psystem = ff_agent.parameterize(
                     components=manifest["components"],
                     coordinates_file=structure_path,
@@ -377,6 +503,82 @@ def _run_workflow_once(
                     "total_charge": psystem.total_charge,
                 }
                 result["steps_completed"].append("force_field")
+
+                # Pre-run reference-property validation — the pre-PRODUCTION
+                # catch. Validate the force field against known constituent
+                # properties now, before spending production compute. A 'poor'
+                # verdict means the model is untrustworthy, so stop here rather
+                # than run (and later discard) an expensive campaign.
+                if reference_check and not _LIVE_MEASUREMENT_IMPLEMENTED:
+                    # Seam not wired: the check would only fail open, so skip it
+                    # before spending per-component packing/parameterization.
+                    logger.info("Reference-property check skipped: live "
+                                "measurement seam not implemented yet.")
+                    result["reference_validation"] = {
+                        "status": "skipped",
+                        "reason": "live measurement seam not implemented"}
+                    result["steps_completed"].append("reference_validation")
+                elif reference_check:
+                    ref = _reference_check(
+                        manifest["components"], user_request, psystem, ff_agent,
+                        api_key=api_key, base_url=base_url, model_name=model_name,
+                        executor=executor, run_command=run_command,
+                        engine=software, working_dir=output_dir,
+                    )
+                    result["reference_validation"] = ref
+                    result["steps_completed"].append("reference_validation")
+                    verdict = (ref.get("verdict") or {})
+                    if verdict.get("verdict") == "poor":
+                        cause = (verdict.get("failure_class")
+                                 or "force_field").replace("_", " ")
+                        flagged = [m for m in verdict.get("per_measurement", [])
+                                   if m.get("consistent") is False]
+
+                        # Catch -> FIX: SciLink sources a correction and the
+                        # pure-component re-check validates it; the human only
+                        # approves. On success, re-parameterize the mixture with
+                        # the corrected model and proceed to production.
+                        fix = None
+                        if auto_fix:
+                            fix = _reparameterize(
+                                flagged, user_request, psystem.backend,
+                                manifest["components"], orig_coordinates,
+                                ff_agent, software, output_dir,
+                                api_key=api_key, base_url=base_url,
+                                model_name=model_name, executor=executor,
+                                run_command=run_command,
+                            )
+                            result["reparameterization"] = fix
+                            result["steps_completed"].append("reparameterization")
+
+                        if fix and fix.get("status") == "fixed":
+                            psystem = ff_agent.parameterize(
+                                components=manifest["components"],
+                                coordinates_file=orig_coordinates,
+                                working_dir=output_dir,
+                                **(fix.get("candidate") or {}),
+                            )
+                            written = write_md_inputs(psystem, software, output_dir)
+                            structure_path = written["structure_file"]
+                            force_field_files = written["force_field_files"] or None
+                            result["force_field"]["reparameterized"] = True
+                            result.setdefault("warnings", []).append(
+                                "Pre-run validation flagged the force field; it was "
+                                "reparameterized and re-validated. Production uses "
+                                "the corrected model."
+                            )
+                            # fall through to production with the corrected FF
+                        else:
+                            result["force_field_flagged"] = True
+                            result.setdefault("warnings", []).append(
+                                f"Pre-run reference-property validation flagged the "
+                                f"{cause}: a pure-component property contradicts "
+                                "known behaviour, and no validated fix was applied. "
+                                "Production was NOT run — the model needs "
+                                "reparameterization first."
+                            )
+                            result["final_status"] = "reference_validation_failed"
+                            return result
             except Exception as e:
                 result["final_status"] = "failed_force_field"
                 result["force_field"] = {"status": "error", "message": str(e)}
@@ -389,6 +591,24 @@ def _run_workflow_once(
                 "and fail to run."
             )
 
+    # ── Produce the observable-requirements contract when not supplied ──
+    # parameters = f(system, observables): derive the observable set from the
+    # goal (guided by the engine skill) so it is authored upstream and carried
+    # into Generate and the pre-run gate. An explicit required_observables wins;
+    # opt-in via derive_observables so existing runs are unchanged.
+    if derive_observables and required_observables is None:
+        try:
+            from .observable_requirements import ObservableRequirementsDeriver
+            deriver = ObservableRequirementsDeriver(
+                api_key=api_key, base_url=base_url, model_name=model_name)
+            derived = deriver.derive(user_request, skill=software, domain=scale)
+            required_observables = derived or None
+            if derived:
+                logger.info("Derived %d observable requirement(s) from the goal.",
+                            len(derived))
+        except Exception as e:
+            logger.warning("Observable derivation skipped: %s", e)
+
     # ── Step 2: input generation (routed to the scale's foundation agent) ──
     try:
         gen_result = _generate_inputs(
@@ -396,7 +616,7 @@ def _run_workflow_once(
             structure_file=structure_path, request=user_request,
             output_dir=output_dir, api_key=api_key, base_url=base_url,
             model_name=model_name, force_field_files=force_field_files,
-            staged=staged,
+            staged=staged, required_observables=required_observables,
         )
     except Exception as e:
         result["final_status"] = "failed_input_generation"
@@ -451,6 +671,7 @@ def _run_workflow_once(
         research_goal=user_request, scale=scale, engine=software,
         skill=software, domain=scale, autonomy=autonomy,
         max_cycles=max_run_cycles, coverage_votes=coverage_votes,
+        required_observables=required_observables,
     )
     run_critic = RunCritic(
         api_key=api_key, base_url=base_url, model_name=model_name,
@@ -461,6 +682,21 @@ def _run_workflow_once(
     )
     result["refinement"] = refinement
     result["steps_completed"].append("refinement")
+    # Detection is wired; the automated reparameterization fix is not. When the
+    # critic attributes a converged-but-wrong result to the force field, surface
+    # it plainly so the result is not read as trustworthy.
+    if refinement.get("failure_class") == "force_field":
+        result["force_field_flagged"] = True
+        result.setdefault("warnings", []).append(
+            "A computed property contradicts the known physical behaviour of the "
+            "system — the force field appears miscalibrated. No input-deck change "
+            "can fix this; the force field needs reparameterization (not yet "
+            "automated). Treat this result as unreliable."
+        )
+        logger.warning(
+            "Run flagged force-field-limited (failure_class='force_field'); "
+            "reparameterization needed — not yet automated."
+        )
     result["final_status"] = (
         "success" if refinement.get("status") == "success"
         else f"refinement_{refinement.get('status', 'failed')}"

@@ -41,6 +41,127 @@ class TestWorkflowComposition:
             }
         monkeypatch.setattr(sp, "_generate_inputs", fake_generate_inputs)
 
+    def _setup_md_with_manifest(self, tmp_path, monkeypatch):
+        """Structure + components.json + faked FF parameterization, so the
+        reference-check gate is reachable without real OpenFF."""
+        import json
+        self._stub_generation(monkeypatch)
+        structure = tmp_path / "system.data"
+        structure.write_text("dummy")
+        (tmp_path / "components.json").write_text(json.dumps(
+            {"components": [{"name": "water", "smiles": "O", "count": 100},
+                            {"name": "EIS", "smiles": "CCS(=O)(=O)C(C)C",
+                             "count": 10}]}))
+
+        class FakePSystem:
+            backend, n_atoms, total_charge = "openff", 330, 0.0
+
+        class FakeFFAgent:
+            def __init__(self, **kw):
+                pass
+
+            def parameterize(self, **kw):
+                return FakePSystem()
+
+        import scilink.agents.sim_agents._engine_inputs as ei
+        import scilink.agents.sim_agents.force_field_agent as ffa
+        monkeypatch.setattr(ffa, "ForceFieldAgent", FakeFFAgent)
+        monkeypatch.setattr(ei, "write_md_inputs",
+                            lambda ps, sw, wd: {"structure_file": str(structure),
+                                                "force_field_files": {}})
+        return structure
+
+    def test_reference_check_catch_only_blocks_production(self, tmp_path,
+                                                          monkeypatch):
+        structure = self._setup_md_with_manifest(tmp_path, monkeypatch)
+        monkeypatch.setattr(sp, "_LIVE_MEASUREMENT_IMPLEMENTED", True)
+        monkeypatch.setattr(sp, "_reference_check", lambda *a, **k: {
+            "selections": [], "measurements": [],
+            "verdict": {"verdict": "poor", "failure_class": "force_field"}})
+        result = sp.run_complete_workflow(
+            "aqueous sulfone electrolyte density",
+            scale="molecular_dynamics", software="lammps",
+            structure_file=str(structure), output_dir=str(tmp_path / "out"),
+            api_key="fake-do-not-bill", validate=False,
+            executor=LocalExecutor(timeout=30), run_command="true",
+            reference_check=True, auto_fix=False)
+        # Catch-only (no fix attempt): gate ran, campaign did NOT.
+        assert result["final_status"] == "reference_validation_failed"
+        assert result.get("force_field_flagged") is True
+        assert "reference_validation" in result["steps_completed"]
+        assert "refinement" not in result["steps_completed"]
+
+    def test_auto_fix_reparameterizes_and_proceeds(self, tmp_path, monkeypatch):
+        structure = self._setup_md_with_manifest(tmp_path, monkeypatch)
+        monkeypatch.setattr(sp, "_LIVE_MEASUREMENT_IMPLEMENTED", True)
+        monkeypatch.setattr(sp, "_reference_check", lambda *a, **k: {
+            "selections": [], "measurements": [],
+            "verdict": {"verdict": "poor", "failure_class": "force_field",
+                        "per_measurement": [
+                            {"component": "EIS", "property": "density",
+                             "consistent": False, "reasoning": "under-dense"}]}})
+        monkeypatch.setattr(sp, "_reparameterize", lambda *a, **k: {
+            "status": "fixed",
+            "candidate": {"extra_force_fields": ["sulfone.offxml"]}})
+        import scilink.agents.sim_agents.refinement as rf
+        monkeypatch.setattr(rf, "run_campaign", lambda *a, **k: {
+            "status": "success", "phases": [], "stages": [], "history": []})
+        result = sp.run_complete_workflow(
+            "aqueous sulfone electrolyte density",
+            scale="molecular_dynamics", software="lammps",
+            structure_file=str(structure), output_dir=str(tmp_path / "out_fix"),
+            api_key="fake-do-not-bill", validate=False,
+            executor=LocalExecutor(timeout=30), run_command="true",
+            reference_check=True)
+        # Flagged -> fixed -> reparameterized -> production ran with the fix.
+        assert "reparameterization" in result["steps_completed"]
+        assert result["force_field"].get("reparameterized") is True
+        assert "refinement" in result["steps_completed"]
+        assert result.get("force_field_flagged") is not True
+
+    def test_auto_fix_escalation_still_blocks(self, tmp_path, monkeypatch):
+        structure = self._setup_md_with_manifest(tmp_path, monkeypatch)
+        monkeypatch.setattr(sp, "_LIVE_MEASUREMENT_IMPLEMENTED", True)
+        monkeypatch.setattr(sp, "_reference_check", lambda *a, **k: {
+            "selections": [], "measurements": [],
+            "verdict": {"verdict": "poor", "failure_class": "force_field",
+                        "per_measurement": []}})
+        monkeypatch.setattr(sp, "_reparameterize",
+                            lambda *a, **k: {"status": "escalated"})
+        result = sp.run_complete_workflow(
+            "aqueous sulfone electrolyte density",
+            scale="molecular_dynamics", software="lammps",
+            structure_file=str(structure), output_dir=str(tmp_path / "out_esc"),
+            api_key="fake-do-not-bill", validate=False,
+            executor=LocalExecutor(timeout=30), run_command="true",
+            reference_check=True)
+        # No validated fix -> still stops before production.
+        assert result["final_status"] == "reference_validation_failed"
+        assert "reparameterization" in result["steps_completed"]
+        assert "refinement" not in result["steps_completed"]
+
+    def test_reference_check_good_proceeds_to_production(self, tmp_path,
+                                                         monkeypatch):
+        structure = self._setup_md_with_manifest(tmp_path, monkeypatch)
+        monkeypatch.setattr(sp, "_LIVE_MEASUREMENT_IMPLEMENTED", True)
+        monkeypatch.setattr(sp, "_reference_check", lambda *a, **k: {
+            "selections": [], "measurements": [],
+            "verdict": {"verdict": "good", "failure_class": None}})
+        import scilink.agents.sim_agents.refinement as rf
+        monkeypatch.setattr(rf, "run_campaign", lambda *a, **k: {
+            "status": "success", "phases": [], "stages": [], "history": []})
+        result = sp.run_complete_workflow(
+            "aqueous electrolyte density",
+            scale="molecular_dynamics", software="lammps",
+            structure_file=str(structure), output_dir=str(tmp_path / "out2"),
+            api_key="fake-do-not-bill", validate=False,
+            executor=LocalExecutor(timeout=30), run_command="true",
+            reference_check=True)
+        # Good verdict: gate ran and passed; production proceeded.
+        assert result.get("force_field_flagged") is not True
+        assert "reference_validation" in result["steps_completed"]
+        assert "refinement" in result["steps_completed"]
+
     def test_executor_path_fail_fix_succeed(self, tmp_path, monkeypatch):
         self._stub_generation(monkeypatch)
 
@@ -51,7 +172,8 @@ class TestWorkflowComposition:
                 pass
 
             def assess(self, output_dir, research_goal, skill=None, domain=None,
-                       fixes_mode="auto", input_files=None, check_observables=False):
+                       fixes_mode="auto", input_files=None, check_observables=False,
+                       required_observables=None, deterministic_findings=None):
                 FakeRunCritic.calls += 1
                 if FakeRunCritic.calls == 1:
                     return {"status": "success", "run_status": "failed",
@@ -125,6 +247,35 @@ class TestWorkflowComposition:
         )
         assert result["final_status"] == "success"
         assert result["refinement"]["status"] == "skipped"
+
+    def test_force_field_result_is_surfaced(self, tmp_path, monkeypatch):
+        self._stub_generation(monkeypatch)
+        # Stub the campaign to return a converged, force-field-flagged result
+        # (the detector's output), bypassing the loop/dry-run internals.
+        import scilink.agents.sim_agents.refinement as rf
+        monkeypatch.setattr(rf, "run_campaign", lambda *a, **k: {
+            "status": "success", "failure_class": "force_field",
+            "phases": [], "stages": [], "history": [],
+        })
+        structure = tmp_path / "POSCAR"
+        structure.write_text("dummy")
+        result = sp.run_complete_workflow(
+            "compute mixture density",
+            scale="molecular_dynamics", software="lammps",
+            structure_file=str(structure),
+            output_dir=str(tmp_path / "out_ff"),
+            api_key="fake-do-not-bill",
+            validate=False,
+            executor=LocalExecutor(timeout=30),
+            run_command="true",
+        )
+        # The force-field cause is surfaced plainly; the run still completes
+        # (detection only — the automated fix is not wired yet).
+        assert result["refinement"]["failure_class"] == "force_field"
+        assert result.get("force_field_flagged") is True
+        assert any("reparameteriz" in w.lower()
+                   for w in result.get("warnings", []))
+        assert result["final_status"] == "success"
 
 
 class TestGeneratedRemoteScript:

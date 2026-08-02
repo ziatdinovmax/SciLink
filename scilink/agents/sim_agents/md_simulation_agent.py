@@ -206,6 +206,7 @@ class MDSimulationAgent(SimulationAgent):
         system_info: Dict[str, Any],
         temperature: float = 300.0,
         pressure: float = 1.0,
+        required_observables: Optional[List] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         self.logger.info(f"Planning: {research_goal}")
@@ -215,6 +216,20 @@ class MDSimulationAgent(SimulationAgent):
             for e, c in system_info.get("element_counts", {}).items()
         )
         planning = self._get_skill_context(section="planning")
+
+        # Target observables are a first-class co-input: the run's length and
+        # what it logs/dumps (and how often) are chosen to satisfy them, not
+        # guessed from the goal prose alone.
+        from .contradictions import format_requirements_for_prompt
+        obs_lines = format_requirements_for_prompt(required_observables or [])
+        obs_section = (
+            "TARGET OBSERVABLES — the run MUST be configured so each is\n"
+            "recoverable from its output. Choose the ensemble, production_time,\n"
+            "and especially what to log/dump and how often so every observable\n"
+            "below is computable, and reflect them in required_outputs. Do not\n"
+            "under-sample a requested observable.\n"
+            f"{obs_lines}\n\n"
+        ) if obs_lines else ""
 
         prompt = (
             "Recommend MD simulation parameters for this research goal.\n\n"
@@ -228,6 +243,7 @@ class MDSimulationAgent(SimulationAgent):
             f"- Metal: {'Yes' if system_info.get('has_metal') else 'No'}\n"
             f"- Has bonds: {'Yes' if system_info.get('has_bonds') else 'No'}\n"
             f"- Has vacuum: {'Yes' if system_info.get('has_vacuum') else 'No'}\n\n"
+            f"{obs_section}"
             f"{planning}\n\n"
             "Use the tables above to select the correct unit system, timestep, and\n"
             "damping constants for this system type.\n\n"
@@ -292,6 +308,7 @@ class MDSimulationAgent(SimulationAgent):
         potential: Optional[DeployedPotential] = None,
         runner: str = "lammps",
         task: str = "md",
+        required_observables: Optional[List] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         # Multi-agent collaboration path: a potential-producing agent
@@ -331,6 +348,7 @@ class MDSimulationAgent(SimulationAgent):
             system_info=system_info,
             temperature=temperature,
             pressure=pressure,
+            required_observables=required_observables,
             **kwargs,
         )
         self._last_plan = plan
@@ -341,6 +359,7 @@ class MDSimulationAgent(SimulationAgent):
             system_description,
             system_info,
             plan,
+            required_observables=required_observables,
         )
 
         # Deck-gen boundary: the analysis's declared species-resolved selections
@@ -504,7 +523,8 @@ class MDSimulationAgent(SimulationAgent):
         }
 
     def _generate_md_input(
-        self, structure_file, goal, desc, info, plan, resolved_selections=None
+        self, structure_file, goal, desc, info, plan, resolved_selections=None,
+        required_observables=None,
     ) -> str:
         data_filename = os.path.basename(structure_file)
 
@@ -557,6 +577,16 @@ class MDSimulationAgent(SimulationAgent):
         ):
             multi_block = self._build_multi_sim_block(plan)
 
+        # Declared target observables → the deck must emit the computes / dumps /
+        # thermo cadence that make each one recoverable.
+        from .contradictions import format_requirements_for_prompt
+        obs_lines = format_requirements_for_prompt(required_observables or [])
+        obs_block_deck = (
+            "## Target observables (the deck MUST make each computable — write "
+            "the matching computes/dumps and thermo/dump cadence)\n"
+            f"{obs_lines}\n\n"
+        ) if obs_lines else ""
+
         if has_skill:
             prompt = (
                 "You are an expert molecular dynamics simulation engineer.\n"
@@ -582,6 +612,7 @@ class MDSimulationAgent(SimulationAgent):
                 f"- Production: {plan.get('production_time')} ns ({prod_steps} steps)\n"
                 f"- Outputs: {plan.get('required_outputs', [])}\n"
                 f"{multi_block}\n\n"
+                f"{obs_block_deck}"
                 "## Implementation Templates\n"
                 f"{implementation}\n\n"
                 "## Parameter Guidelines\n"

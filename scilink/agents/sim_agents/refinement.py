@@ -303,6 +303,9 @@ class RefinementContext:
         cycle: Refine cycles spent on the current phase (loop-managed).
         coverage_votes: Independent coverage checks to majority-vote in the
             pre-run gate (1 = single check; >1 damps the stochastic decision).
+        required_observables: Optional engine-neutral ``Requirement`` list the
+            run must yield; when set, the coverage gate checks this authoritative
+            list instead of re-deriving the required set from the goal.
         history: Per-cycle records appended by :meth:`record`.
         interact: Optional human-feedback handle; ``None`` for headless runs.
     """
@@ -316,6 +319,7 @@ class RefinementContext:
     max_cycles: int = 3
     cycle: int = 0
     coverage_votes: int = 1
+    required_observables: Optional[List] = None
     history: List[Dict[str, Any]] = field(default_factory=list)
     interact: Optional[InteractFn] = None
 
@@ -717,6 +721,7 @@ def _run_dry_run_gate(phase, executor, run_critic, ctx, prepare, entry,
                       max_cycles) -> Dict[str, Any]:
     dry_dir = os.path.join(phase.run_dir, "_dryrun")
     history: List[Dict[str, Any]] = []
+    prev_det: List[str] = []          # deterministic findings carried to next cycle
     for cycle in range(max_cycles):
         real_deck = phase.input_files[entry]
         twin = prepare(real_deck)
@@ -739,11 +744,19 @@ def _run_dry_run_gate(phase, executor, run_critic, ctx, prepare, entry,
             output_dir=out_dir, research_goal=ctx.research_goal,
             skill=ctx.skill, domain=ctx.domain,
             input_files={entry: real_deck},
+            required_observables=getattr(ctx, "required_observables", None),
+            deterministic_findings=prev_det,
         )
         run_status = verdict.get("run_status")
-        missing = verdict.get("missing_observables") or []
+        # Deterministic layer: where the engine provides a detection tool, check
+        # exact signal presence + sampling adequacy (tier 2 — which the LLM layer
+        # treats as never-blocking). Block on the UNION: either layer flags.
+        det_blocking = _deterministic_coverage(ctx, real_deck)
+        prev_det = det_blocking          # next cycle's LLM fixer sees these
+        missing = list(verdict.get("missing_observables") or []) + det_blocking
         history.append({"cycle": cycle, "run_status": run_status,
                         "missing_observables": missing,
+                        "deterministic_blocking": det_blocking,
                         "coverage_vote": verdict.get("coverage_vote")})
         if run_status == "succeeded" and not missing:
             return {"status": "passed", "cycles": cycle + 1, "history": history}
@@ -752,6 +765,41 @@ def _run_dry_run_gate(phase, executor, run_critic, ctx, prepare, entry,
             return {"status": "unfixed", "cycles": cycle + 1, "history": history}
         phase.input_files[entry] = deck_fix
     return {"status": "exhausted", "cycles": max_cycles, "history": history}
+
+
+def _deterministic_coverage(ctx, deck: str) -> List[str]:
+    """Deterministic observable-coverage layer: exact signal presence + cadence.
+
+    Runs the engine-neutral contradiction checkers over the declared observables,
+    delegating engine-specific detection to the active engine's conventional
+    ``detect_signal_logging`` skill tool (resolved from the active skill bundle;
+    absent for an engine that provides none). Returns blocking messages, empty
+    when no observables are declared, no engine detector exists, or all are
+    satisfied. Fail-open: any error yields no block, leaving the LLM coverage
+    layer authoritative.
+    """
+    reqs = getattr(ctx, "required_observables", None)
+    engine = getattr(ctx, "engine", None)
+    if not reqs or not engine:
+        return []
+    try:
+        from .contradictions import check_requirements
+        detector = None
+        try:
+            from ...skills._shared._registry import get_tool_function
+            detector = get_tool_function(
+                "detect_signal_logging", active_skills=[engine])
+        except LookupError:
+            detector = None
+        contradictions = check_requirements(
+            reqs,
+            artifacts={"deck": deck, "signal_detector": detector},
+            active_skills=[engine],
+        )
+        return [c.message for c in contradictions]
+    except Exception as e:
+        logger.warning("Deterministic coverage layer skipped: %s", e)
+        return []
 
 
 def majority_coverage(run_critic, n_votes: int, **assess_kwargs):
@@ -940,6 +988,11 @@ def run_campaign(
         p.get("failure_class") == "structure" for p in flat
     ):
         result["failure_class"] = "structure"
+    # A force-field cause can arise on a run that CONVERGED (verdict "poor",
+    # not a crash), so surface it regardless of overall status. Like structure,
+    # the deck loop cannot fix it — it needs reparameterization upstream.
+    elif any(p.get("failure_class") == "force_field" for p in flat):
+        result["failure_class"] = "force_field"
     if dry_run_record is not None:
         result["dry_run"] = dry_run_record
     return result
