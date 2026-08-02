@@ -189,6 +189,21 @@ class TestParseDataFileBiomolecular:
         assert info["has_pair_coeffs"] is True
 
 
+class TestParseDataFileElectrolyte:
+    """Aqueous electrolyte: bonded, carbon-bearing, N-free — must NOT be
+    swept up as biomolecular the way a bare bonded-carbon rule would."""
+
+    def test_system_category(self, data_dir):
+        info = lammps_tools.parse_data_file(str(data_dir / "electrolyte.data"))
+        assert info["system_category"] == "electrolyte"
+
+    def test_flags(self, data_dir):
+        info = lammps_tools.parse_data_file(str(data_dir / "electrolyte.data"))
+        assert info["has_water"] is True
+        assert info["has_ions"] is True
+        assert info["has_organic"] is True
+
+
 class TestParseDataFileSlab:
     """Cu slab with vacuum gap."""
 

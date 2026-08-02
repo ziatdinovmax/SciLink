@@ -493,18 +493,33 @@ def parse_data_file(data_file: str) -> Dict[str, Any]:
     info["has_metal"] = bool(elems & _METALS) and not info["has_bonds"]
     info["has_semiconductor"] = bool(elems & _SEMICONDUCTORS) and not info["has_bonds"]
 
-    # Category (ordered by specificity)
-    if info["has_bonds"] and ("C" in ec or "N" in ec):
-        info["system_category"] = "biomolecular"
-    elif info["has_bonds"] and info["has_water"] and not info["has_organic"]:
-        info["system_category"] = "liquid"
-    elif not info["has_bonds"] and elems <= _METALS:
+    # Category (bonded molecular systems first, then non-bonded solids).
+    # "biomolecular" requires nitrogen, not just any bonded carbon: proteins and
+    # nucleic acids carry N in their amide/amine/base backbones, whereas most
+    # organic electrolyte and solvent species (triflate, sulfone, carbonates,
+    # glymes) are carbon-bearing but N-free. Keying on N (rather than "C or N")
+    # stops those liquids from being swept up as biomolecular, while a solvated
+    # small molecule with N is rare enough to accept the occasional miss.
+    if info["has_bonds"]:
+        if "N" in ec and "C" in ec:
+            info["system_category"] = "biomolecular"
+        elif info["has_water"] and info["has_ions"]:
+            info["system_category"] = "electrolyte"
+        elif info["has_water"] and info["has_organic"]:
+            info["system_category"] = "solution"
+        elif info["has_water"]:
+            info["system_category"] = "liquid"
+        elif info["has_organic"]:
+            info["system_category"] = "molecular_liquid"
+        else:
+            info["system_category"] = "unknown"
+    elif elems <= _METALS:
         info["system_category"] = "metal"
-    elif not info["has_bonds"] and elems & _SEMICONDUCTORS and "O" not in ec:
+    elif elems & _SEMICONDUCTORS and "O" not in ec:
         info["system_category"] = "semiconductor"
-    elif not info["has_bonds"] and "O" in ec and elems & _METALS:
+    elif "O" in ec and elems & _METALS:
         info["system_category"] = "oxide"
-    elif not info["has_bonds"] and info["has_ions"]:
+    elif info["has_ions"]:
         info["system_category"] = "ionic"
     else:
         info["system_category"] = "unknown"

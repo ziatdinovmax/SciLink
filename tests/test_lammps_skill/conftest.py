@@ -245,6 +245,53 @@ Bonds
 9 2 6 10
 """
 
+# Toy aqueous electrolyte: water + NaCl + a small organic co-solvent. Bonded,
+# carbon-bearing, but N-free — a "biomolecular"-by-any-bonded-carbon rule would
+# mislabel it; it should classify as "electrolyte".
+ELECTROLYTE_DATA = """\
+LAMMPS data file for a toy aqueous electrolyte (water + NaCl + organic)
+
+11 atoms
+6 bonds
+5 atom types
+2 bond types
+
+0.0 20.0 xlo xhi
+0.0 20.0 ylo yhi
+0.0 20.0 zlo zhi
+
+Masses
+
+1 15.999 # O
+2  1.008 # H
+3 22.990 # Na
+4 35.453 # Cl
+5 12.011 # C
+
+Atoms # full
+
+1  1 1 -0.8 5.0 5.0 5.0
+2  1 2  0.4 5.8 5.0 5.0
+3  1 2  0.4 5.0 5.8 5.0
+4  2 1 -0.8 9.0 5.0 5.0
+5  2 2  0.4 9.8 5.0 5.0
+6  2 2  0.4 9.0 5.8 5.0
+7  3 3  1.0 3.0 3.0 3.0
+8  4 4 -1.0 7.0 3.0 3.0
+9  5 5 -0.2 12.0 5.0 5.0
+10 5 5 -0.2 13.5 5.0 5.0
+11 5 2  0.1 12.0 6.0 5.0
+
+Bonds
+
+1 1 1 2
+2 1 1 3
+3 1 4 5
+4 1 4 6
+5 2 9 10
+6 2 9 11
+"""
+
 
 # ─── Script Fixtures ─────────────────────────────────────────────────
 
@@ -575,6 +622,7 @@ def fixtures_dir(tmp_path):
         "cu_slab.data": CU_SLAB_DATA,
         "mgo.data": MGO_DATA,
         "protein.data": BIOMOLECULAR_DATA,
+        "electrolyte.data": ELECTROLYTE_DATA,
     }
     for name, content in data_files.items():
         (data_dir / name).write_text(content)
