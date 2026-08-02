@@ -259,3 +259,11 @@ log.lammps
 *_series_*/
 simulation_workflow_output/
 composition_series_output/
+
+# --- added after the #405 accidental-commit cleanup ---
+.claude/
+validation/results/
+packmol_test_output/
+*.model
+claude_resume
+lammps_make_notes
