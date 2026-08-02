@@ -1130,7 +1130,25 @@ def author_technical_document(request: str,
 
 
 def document_to_markdown(title: str, sections: List[Dict[str, Any]]) -> str:
-    """Assemble authored sections into a markdown document."""
+    """Assemble authored sections into a markdown document.
+
+    The title is owned HERE, not by the author. On a revision the model is
+    shown a document that already opens with its title and told to return
+    everything verbatim, so it faithfully returns the title as a section —
+    and prepending it again added one copy per revision (live: six stacked
+    titles, readable as the title's own edit history). A leading section that
+    merely repeats the title is therefore dropped.
+    """
+    def _is_title_echo(sec) -> bool:
+        if not isinstance(sec, dict) or (sec.get("body") or "").strip():
+            return False
+        h = str(sec.get("heading") or "").strip().lstrip("#").strip()
+        return h.casefold() == str(title).strip().casefold()
+
+    sections = list(sections or [])
+    while sections and _is_title_echo(sections[0]):
+        sections.pop(0)
+
     out = [f"# {title}", ""]
     for sec in sections or []:
         if not isinstance(sec, dict):
