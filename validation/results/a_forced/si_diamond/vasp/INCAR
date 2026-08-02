@@ -1,0 +1,25 @@
+# Bulk silicon relaxation (diamond-cubic structure)
+# Full cell + ionic relaxation for semiconductor
+
+GGA = PE
+PREC = Accurate
+ENCUT = 400
+EDIFF = 1E-6
+ISMEAR = 0
+SIGMA = 0.05
+LREAL = .FALSE.
+ALGO = Normal
+
+# Relaxation settings
+IBRION = 2
+ISIF = 3
+NSW = 200
+EDIFFG = -0.01
+
+# Output options
+LORBIT = 11
+LCHARG = .FALSE.
+LWAVE = .FALSE.
+
+# Parallelization
+NCORE = 4

@@ -1,0 +1,106 @@
+# Dockerfile for SciLink with MD Analysis capabilities
+FROM python:3.12-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    gcc \
+    g++ \
+    gfortran \
+    libopenblas-dev \
+    liblapack-dev \
+    libgomp1 \
+    git \
+    libgl1 \
+    libglib2.0-0 \
+    libxext6 \
+    libxrender1 \
+    libgomp1 \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update && apt-get install -y \
+    libcurl4 \
+    libpng16-16 \
+    libfftw3-double3 \
+    libfftw3-single3 \
+    libopenmpi40 \
+    libopenmpi-dev \
+    libx11-6 \
+    libxext6 \
+    libxi6 \
+    libxrender1 \
+    libxrandr2 \
+    libxinerama1 \
+    libxcursor1 \
+    libxft2 \
+    libxxf86vm1 \
+    libgl1 \
+    libglu1-mesa \
+    libnetcdf-dev \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY vmd-1.9.3.bin.LINUXAMD64.text.tar.gz ./
+RUN tar -xzf vmd-1.9.3.bin.LINUXAMD64.text.tar.gz \
+    && cd vmd-1.9.3 \
+    && ./configure \
+    && cd src \
+    && make install \
+    && rm -rf /tmp/vmd* \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Upgrade pip
+RUN pip install --no-cache-dir --upgrade pip
+
+# Install core scientific stack
+RUN pip install --no-cache-dir \
+    numpy==1.26.4 \
+    scipy==1.11.4 \
+    matplotlib==3.8.2 \
+    pandas==2.1.4 \
+    seaborn==0.13.0
+
+# Install MD analysis packages
+RUN pip install --no-cache-dir \
+    MDAnalysis==2.7.0 \
+    nglview \
+    plotly \
+    statsmodels \
+    scikit-learn
+
+# Install LLM packages
+RUN pip install --no-cache-dir \
+    google-generativeai \
+    openai \
+    litellm
+
+# Install ASE for structure handling
+RUN pip install --no-cache-dir ase
+
+# Install additional useful packages
+RUN pip install --no-cache-dir \
+    tqdm \
+    pyyaml \
+    requests
+
+# Install other SciLink-specific dependencies
+RUN pip install --no-cache-dir \
+    atomai>=0.8.1 \
+    gdown>=5.2.0 \
+    atomate2>=0.0.21 \
+    edison-client>=0.7.6
+
+# Set environment variables
+ENV RUNNING_IN_CONTAINER=true \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    MPLBACKEND=Agg \
+    OMP_NUM_THREADS=1
+
+WORKDIR /app
+
+CMD ["/bin/bash"]

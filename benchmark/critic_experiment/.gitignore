@@ -1,0 +1,11 @@
+# Run artifacts — regenerable, large, manifests are the durable record
+outputs/
+
+# Per-run cache (analyzer, bootstrap, etc.)
+.cache/
+*.pyc
+__pycache__/
+
+# OS / editor
+.DS_Store
+*.swp

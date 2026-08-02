@@ -1,0 +1,28 @@
+System = Bulk Cu relaxation
+
+# Functional
+GGA = PE
+
+# Precision and convergence
+ENCUT = 450
+PREC = Accurate
+EDIFF = 1E-6
+EDIFFG = -0.01
+
+# Electronic relaxation
+ALGO = Normal
+ISMEAR = 1
+SIGMA = 0.1
+
+# Ionic relaxation
+IBRION = 2
+NSW = 200
+ISIF = 3
+
+# Output
+LORBIT = 11
+LCHARG = .FALSE.
+LWAVE = .FALSE.
+
+# Parallelization
+NCORE = 4

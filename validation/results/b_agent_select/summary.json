@@ -1,0 +1,86 @@
+{
+  "mode": "b_agent_select",
+  "collected_at": "2026-05-15T09:23:21.797723",
+  "engines": [
+    "vasp",
+    "mlip"
+  ],
+  "rows": [
+    {
+      "system": "si_diamond",
+      "crystal": "silicon, diamond cubic (Fd-3m)",
+      "exp_a": 5.431,
+      "engines": {
+        "vasp": {
+          "a": 5.4701,
+          "dev_pct": 0.72,
+          "in_band": true,
+          "selected_backend": null
+        },
+        "mlip": {
+          "a": 5.4553,
+          "dev_pct": 0.45,
+          "in_band": true,
+          "selected_backend": "mace"
+        }
+      }
+    },
+    {
+      "system": "cu_fcc",
+      "crystal": "copper, face-centered cubic (Fm-3m)",
+      "exp_a": 3.615,
+      "engines": {
+        "vasp": {
+          "a": 3.6282,
+          "dev_pct": 0.37,
+          "in_band": true,
+          "selected_backend": null
+        },
+        "mlip": {
+          "a": 3.6239,
+          "dev_pct": 0.25,
+          "in_band": true,
+          "selected_backend": "mace"
+        }
+      }
+    },
+    {
+      "system": "mgo_rocksalt",
+      "crystal": "magnesium oxide, rock-salt (Fm-3m)",
+      "exp_a": 4.212,
+      "engines": {
+        "vasp": {
+          "a": null,
+          "dev_pct": null,
+          "in_band": null,
+          "selected_backend": null
+        },
+        "mlip": {
+          "a": 4.2541,
+          "dev_pct": 1.0,
+          "in_band": true,
+          "selected_backend": "mace"
+        }
+      }
+    },
+    {
+      "system": "c_diamond",
+      "crystal": "diamond carbon (Fd-3m)",
+      "exp_a": 3.567,
+      "engines": {
+        "vasp": {
+          "a": 3.5738,
+          "dev_pct": 0.19,
+          "in_band": true,
+          "selected_backend": null
+        },
+        "mlip": {
+          "a": 3.5703,
+          "dev_pct": 0.09,
+          "in_band": true,
+          "selected_backend": "mace"
+        }
+      }
+    }
+  ]
+}

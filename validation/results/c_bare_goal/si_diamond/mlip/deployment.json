@@ -1,0 +1,22 @@
+{
+  "backend": "mace",
+  "model_name": "mace-mp-0",
+  "model_file": "/qfs/people/alle927/SciLink/SciLink/validation/results/c_bare_goal/si_diamond/mlip/mace-mp-0.model",
+  "elements": [
+    "Si"
+  ],
+  "selection": {
+    "backend": "mace",
+    "model_name": "mace-mp-0",
+    "justification": "Silicon is an inorganic semiconductor that is extremely well-represented in the Materials Project dataset. MACE-MP-0 is trained on ~150k inorganic materials including many silicon-containing structures (elemental Si, silicates, silicon oxides, etc.). The diamond-cubic structure of silicon is a fundamental crystal structure that will be in the training set. This model provides state-of-the-art accuracy for geometry optimization of inorganic crystals and will reliably predict the lattice constant to within ~1% of DFT/experimental values. It supports stress tensor prediction which is essential for cell relaxation.",
+    "cautions": "None significant for this use case. Silicon in diamond-cubic structure is a textbook example well within the model's domain. The mace-mp-0b variant could also work if faster inference is needed, though for a single bulk relaxation the speed difference is negligible and the higher accuracy of mace-mp-0 is preferred."
+  },
+  "run_path": "/qfs/people/alle927/SciLink/SciLink/validation/results/c_bare_goal/si_diamond/mlip/run_relax.py",
+  "runner": "ase",
+  "task": "relax",
+  "potential_backend": "mace",
+  "potential_model": "mace-mp-0",
+  "structure_file": "/qfs/people/alle927/SciLink/SciLink/validation/results/c_bare_goal/si_diamond/mlip/system.data",
+  "research_goal": "Relax bulk silicon in the diamond-cubic structure to its equilibrium geometry \u2014 optimize both the cell and the ionic positions \u2014 and report the optimized cubic lattice constant.",
+  "notes": "MACE mace-mp-0 (medium, inorganic). LAMMPS-capable via pair_style mliap unified."
+}

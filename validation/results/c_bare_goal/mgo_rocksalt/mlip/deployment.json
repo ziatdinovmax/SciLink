@@ -1,0 +1,23 @@
+{
+  "backend": "mace",
+  "model_name": "mace-mp-0",
+  "model_file": "/qfs/people/alle927/SciLink/SciLink/validation/results/c_bare_goal/mgo_rocksalt/mlip/mace-mp-0.model",
+  "elements": [
+    "Mg",
+    "O"
+  ],
+  "selection": {
+    "backend": "mace",
+    "model_name": "mace-mp-0",
+    "justification": "MgO is a prototypical inorganic ionic oxide with rock-salt structure, precisely the type of system the mace-mp-0 model was designed for. Trained on the MPtrj dataset covering ~150k inorganic materials including many metal oxides, this model should accurately capture the ionic bonding, lattice energetics, and structural properties of MgO. The task requires accurate forces and stresses for cell optimization, which mace-mp-0 provides with high fidelity. MgO is likely well-represented in the Materials Project training data as a common binary oxide.",
+    "cautions": "None expected for this system. MgO is a simple, well-studied binary oxide that should be well within the model's training distribution. The rock-salt structure is one of the most common crystal structures in the MPtrj dataset. If extremely high precision is required (e.g., lattice constant within 0.01 \u00c5 of experiment), verify against DFT or experimental reference values, though mace-mp-0 typically achieves excellent accuracy for such systems."
+  },
+  "run_path": "/qfs/people/alle927/SciLink/SciLink/validation/results/c_bare_goal/mgo_rocksalt/mlip/run_relax.py",
+  "runner": "ase",
+  "task": "relax",
+  "potential_backend": "mace",
+  "potential_model": "mace-mp-0",
+  "structure_file": "/qfs/people/alle927/SciLink/SciLink/validation/results/c_bare_goal/mgo_rocksalt/mlip/system.data",
+  "research_goal": "Relax bulk magnesium oxide in the rock-salt structure to its equilibrium geometry \u2014 optimize both the cell and the ionic positions \u2014 and report the optimized cubic lattice constant.",
+  "notes": "MACE mace-mp-0 (medium, inorganic). LAMMPS-capable via pair_style mliap unified."
+}

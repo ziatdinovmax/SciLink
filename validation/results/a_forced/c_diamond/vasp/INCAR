@@ -1,0 +1,25 @@
+# Bulk diamond (C) - full relaxation (cell + ions)
+# ISIF = 3: relax ions, cell shape, and volume
+
+GGA = PE
+PREC = Accurate
+ENCUT = 520
+EDIFF = 1E-6
+ISMEAR = 0
+SIGMA = 0.05
+LREAL = .FALSE.
+ALGO = Normal
+
+# Relaxation
+IBRION = 2
+ISIF = 3
+NSW = 100
+EDIFFG = -0.01
+
+# Output
+LORBIT = 11
+LCHARG = .FALSE.
+LWAVE = .FALSE.
+
+# Parallelization
+NCORE = 4

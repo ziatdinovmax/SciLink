@@ -1,0 +1,22 @@
+{
+  "backend": "mace",
+  "model_name": "mace-mp-0",
+  "model_file": "/qfs/people/alle927/SciLink/SciLink/validation/results/b_agent_select/cu_fcc/mlip/mace-mp-0.model",
+  "elements": [
+    "Cu"
+  ],
+  "selection": {
+    "backend": "mace",
+    "model_name": "mace-mp-0",
+    "justification": "MACE-MP-0 is the best choice for this task. It is a universal potential trained on the Materials Project trajectory dataset (~150k inorganic materials), which includes extensive coverage of elemental metals and FCC structures. Copper is a common element in the MPtrj training set, so the model will have seen many Cu configurations during training. This model is specifically noted as 'good for metals, oxides, ceramics' and will provide high accuracy for bulk FCC Cu relaxation. For geometric optimization tasks like lattice constant prediction, the highest-accuracy variant (mace-mp-0) is preferred over the medium-accuracy mace-mp-0b.",
+    "cautions": "While MACE-MP-0 should provide excellent accuracy for bulk Cu, always validate the predicted lattice constant against experimental values (3.615 \u00c5 for Cu) or high-quality DFT benchmarks. The model predicts energies, forces, and stresses needed for full cell relaxation. For production molecular dynamics or very large-scale sampling, consider mace-mp-0b if inference speed becomes a bottleneck, though for a single geometry optimization this is not a concern."
+  },
+  "run_path": "/qfs/people/alle927/SciLink/SciLink/validation/results/b_agent_select/cu_fcc/mlip/run_relax.py",
+  "runner": "ase",
+  "task": "relax",
+  "potential_backend": "mace",
+  "potential_model": "mace-mp-0",
+  "structure_file": "/qfs/people/alle927/SciLink/SciLink/validation/results/b_agent_select/cu_fcc/mlip/system.data",
+  "research_goal": "Relax bulk FCC copper to its equilibrium geometry (full cell + ionic relaxation) and report the optimized lattice constant. This is a metal; use appropriate smearing and a dense k-point mesh.",
+  "notes": "MACE mace-mp-0 (medium, inorganic). LAMMPS-capable via pair_style mliap unified."
+}

@@ -1,0 +1,16 @@
+# Bulk diamond relaxation - cell and ionic optimization
+GGA = PE
+ENCUT = 450
+PREC = Accurate
+EDIFF = 1E-6
+ISMEAR = 0
+SIGMA = 0.05
+ALGO = Normal
+IBRION = 2
+ISIF = 3
+NSW = 200
+EDIFFG = -0.01
+LORBIT = 11
+LWAVE = .FALSE.
+LCHARG = .FALSE.
+NCORE = 4

@@ -1,0 +1,22 @@
+{
+  "backend": "mace",
+  "model_name": "mace",
+  "model_file": "/qfs/people/alle927/SciLink/SciLink/validation/results/a_forced/mgo_rocksalt/mace/mace.model",
+  "elements": [
+    "Mg",
+    "O"
+  ],
+  "selection": {
+    "backend": "mace",
+    "model_name": "mace",
+    "justification": "caller-forced via backend='mace'"
+  },
+  "run_path": "/qfs/people/alle927/SciLink/SciLink/validation/results/a_forced/mgo_rocksalt/mace/run_relax.py",
+  "runner": "ase",
+  "task": "relax",
+  "potential_backend": "mace",
+  "potential_model": "mace",
+  "structure_file": "/qfs/people/alle927/SciLink/SciLink/validation/results/a_forced/mgo_rocksalt/mace/system.data",
+  "research_goal": "Relax bulk magnesium oxide in the rock-salt structure to its equilibrium geometry (full cell + ionic relaxation) and report the optimized lattice constant. This is a wide-gap ionic insulator.",
+  "notes": "MACE mace (medium, inorganic). LAMMPS-capable via pair_style mliap unified."
+}

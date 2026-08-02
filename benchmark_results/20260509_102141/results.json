@@ -1,0 +1,164 @@
+{
+  "started_at": "2026-05-09T10:21:41.016718",
+  "phases_run": [
+    "1"
+  ],
+  "phase_1": [
+    {
+      "label": "Missing GGA tag (POTCAR not found)",
+      "status": "pass",
+      "expected_diagnosis_substr": "Missing GGA tag",
+      "actual_diagnoses": [
+        "Missing GGA tag \u2014 ASE searching wrong pseudopotential directory"
+      ],
+      "expected_fix_keys": [
+        "GGA"
+      ],
+      "actual_fix_keys": [
+        "GGA"
+      ],
+      "remaining_errors": []
+    },
+    {
+      "label": "ZBRENT bracketing failure",
+      "status": "pass",
+      "expected_diagnosis_substr": "Ionic step",
+      "actual_diagnoses": [
+        "Ionic step too large, reducing POTIM and switching to RMM-DIIS",
+        "Ionic step bracketing failed \u2014 restarting from CONTCAR with reduced step size"
+      ],
+      "expected_fix_keys": [
+        "IBRION",
+        "POTIM"
+      ],
+      "actual_fix_keys": [
+        "IBRION",
+        "POTIM"
+      ],
+      "remaining_errors": [
+        "fatal error in bracketing",
+        "error in bracketing"
+      ]
+    },
+    {
+      "label": "Sub-Space-Matrix not hermitian",
+      "status": "pass",
+      "expected_diagnosis_substr": "Electronic minimization instability",
+      "actual_diagnoses": [
+        "Electronic minimization instability, switching to Normal algorithm"
+      ],
+      "expected_fix_keys": [
+        "ALGO"
+      ],
+      "actual_fix_keys": [
+        "ALGO"
+      ],
+      "remaining_errors": []
+    },
+    {
+      "label": "BRMIX charge mixing failure",
+      "status": "pass",
+      "expected_diagnosis_substr": "Charge density mixing",
+      "actual_diagnoses": [
+        "Charge density mixing failure \u2014 reducing mixing parameters and increasing NELM"
+      ],
+      "expected_fix_keys": [
+        "AMIX",
+        "AMIX_MAG",
+        "BMIX",
+        "BMIX_MAG",
+        "NELM"
+      ],
+      "actual_fix_keys": [
+        "AMIX",
+        "AMIX_MAG",
+        "BMIX",
+        "BMIX_MAG",
+        "NELM"
+      ],
+      "remaining_errors": []
+    },
+    {
+      "label": "RSPHER projection overlap",
+      "status": "pass",
+      "expected_diagnosis_substr": "Real-space projection",
+      "actual_diagnoses": [
+        "Real-space projection sphere overlap"
+      ],
+      "expected_fix_keys": [
+        "LREAL"
+      ],
+      "actual_fix_keys": [
+        "LREAL"
+      ],
+      "remaining_errors": [
+        "RSPHER: internal error in RSHPER"
+      ]
+    },
+    {
+      "label": "EDDDAV did not converge",
+      "status": "pass",
+      "expected_diagnosis_substr": "Electronic minimization not converging",
+      "actual_diagnoses": [
+        "Electronic minimization not converging"
+      ],
+      "expected_fix_keys": [
+        "ALGO",
+        "NELM"
+      ],
+      "actual_fix_keys": [
+        "ALGO",
+        "NELM"
+      ],
+      "remaining_errors": [
+        "EDDDAV: Call to ZHEGV failed. Returncode = 6"
+      ]
+    },
+    {
+      "label": "Highest band is occupied (NBANDS too small)",
+      "status": "pass",
+      "expected_diagnosis_substr": "Not enough empty bands",
+      "actual_diagnoses": [
+        "Not enough empty bands"
+      ],
+      "expected_fix_keys": [
+        "NBANDS"
+      ],
+      "actual_fix_keys": [
+        "NBANDS"
+      ],
+      "remaining_errors": [
+        "highest band is occupied at some k-points"
+      ]
+    },
+    {
+      "label": "Electronic SCF reached NELM",
+      "status": "pass",
+      "expected_diagnosis_substr": "Electronic SCF did not converge",
+      "actual_diagnoses": [
+        "Electronic SCF did not converge within NELM steps \u2014 increasing NELM and switching algorithm"
+      ],
+      "expected_fix_keys": [
+        "ALGO",
+        "NELM"
+      ],
+      "actual_fix_keys": [
+        "ALGO",
+        "NELM"
+      ],
+      "remaining_errors": []
+    },
+    {
+      "label": "Clean log (no errors) \u2014 should produce no fixes",
+      "status": "pass",
+      "expected_diagnosis_substr": null,
+      "actual_diagnoses": [],
+      "expected_fix_keys": [],
+      "actual_fix_keys": [],
+      "remaining_errors": [
+        "1 F= -.10000000E+02 E0= -.10000000E+02 d E =-.000000E+00",
+        " writing wavefunctions"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+# MgO bulk relaxation (rock-salt structure)
+# Wide-gap ionic insulator - full cell + ionic optimization
+
+GGA = PE
+PREC = Accurate
+ENCUT = 520
+EDIFF = 1E-6
+
+# Smearing for insulator relaxation
+ISMEAR = 0
+SIGMA = 0.05
+
+# Relaxation settings
+IBRION = 2
+ISIF = 3
+NSW = 200
+EDIFFG = -0.01
+
+# Algorithm
+ALGO = Normal
+LREAL = .FALSE.
+
+# Output
+LORBIT = 11
+LCHARG = .TRUE.
+LWAVE = .FALSE.
+
+# Parallelization
+NCORE = 4
+KPAR = 2

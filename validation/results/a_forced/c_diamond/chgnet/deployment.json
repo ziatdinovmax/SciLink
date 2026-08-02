@@ -1,0 +1,21 @@
+{
+  "backend": "chgnet",
+  "model_name": "chgnet",
+  "model_file": "",
+  "elements": [
+    "C"
+  ],
+  "selection": {
+    "backend": "chgnet",
+    "model_name": "chgnet",
+    "justification": "caller-forced via backend='chgnet'"
+  },
+  "run_path": "/qfs/people/alle927/SciLink/SciLink/validation/results/a_forced/c_diamond/chgnet/run_relax.py",
+  "runner": "ase",
+  "task": "relax",
+  "potential_backend": "chgnet",
+  "potential_model": "chgnet",
+  "structure_file": "/qfs/people/alle927/SciLink/SciLink/validation/results/a_forced/c_diamond/chgnet/system.data",
+  "research_goal": "Relax bulk diamond (cubic carbon) to its equilibrium geometry (full cell + ionic relaxation) and report the optimized lattice constant. Carbon is a light element \u2014 ensure the plane-wave cutoff is high enough.",
+  "notes": "CHGNet universal MPtrj-pretrained model. ASE-only \u2014 no LAMMPS pair_style; the MD agent must use the ASE runner."
+}

@@ -1,0 +1,120 @@
+{
+  "mode": "b_agent_select",
+  "goal_level": "guided",
+  "generated_at": "2026-05-14T19:54:14.216069",
+  "panel": {
+    "si_diamond": {
+      "exp_lattice_constant": 5.431,
+      "engines": {
+        "vasp": {
+          "status": "generated",
+          "kind": "vasp",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/b_agent_select/si_diamond/vasp",
+          "input_files": [
+            "INCAR",
+            "KPOINTS"
+          ],
+          "notes": "Semiconductor bulk relaxation with ISIF=3 for full cell optimization. ISMEAR=0 (Gaussian) with small SIGMA=0.05 eV is appropriate for semiconductor relaxations. 8x8x8 Gamma-centered k-point mesh provides ~0.025 \u00c5\u207b\u00b9 spacing (conventional cell). ENCUT=450 eV is well-converged for Si (ENMAX~250 eV). After relaxation completes, extract the optimized lattice constant from CONTCAR. The equilibrium lattice constant should be around 5.46-5.48 \u00c5 with PBE (experimental value is 5.431 \u00c5). For production-quality convergence testing, verify with denser k-meshes (10x10x10 or 12x12x12) and check that energy changes are <1 meV/atom.",
+          "run_cmd": "sbatch submit.sbatch"
+        },
+        "mlip": {
+          "status": "generated",
+          "kind": "mlip",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/b_agent_select/si_diamond/mlip",
+          "run_script": "run_relax.py",
+          "backend": "mace",
+          "agent_selected": true,
+          "model_name": "mace-mp-0",
+          "run_cmd": "python run_relax.py",
+          "ran": true,
+          "returncode": 0
+        }
+      }
+    },
+    "cu_fcc": {
+      "exp_lattice_constant": 3.615,
+      "engines": {
+        "vasp": {
+          "status": "generated",
+          "kind": "vasp",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/b_agent_select/cu_fcc/vasp",
+          "input_files": [
+            "INCAR",
+            "KPOINTS"
+          ],
+          "notes": "This is a bulk FCC Cu metal relaxation with full cell optimization (ISIF=3). Used ISMEAR=1 (Methfessel-Paxton) with SIGMA=0.1 eV appropriate for metals in both static and relaxation calculations. The 12\u00d712\u00d712 k-point mesh provides ~0.028 \u00c5\u207b\u00b9 spacing, which should converge energies to ~1 meV/atom. After the calculation completes, check: (1) The entropy term T*S in OUTCAR should be <1 meV/atom to confirm adequate smearing convergence; (2) Extract the optimized lattice constant from the final cell vectors in CONTCAR; (3) The experimental Cu lattice constant is 3.615 \u00c5 - PBE typically underestimates by ~1-2%. If higher accuracy is needed, consider testing k-point convergence with 14\u00d714\u00d714 or 16\u00d716\u00d716 meshes.",
+          "run_cmd": "sbatch submit.sbatch"
+        },
+        "mlip": {
+          "status": "generated",
+          "kind": "mlip",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/b_agent_select/cu_fcc/mlip",
+          "run_script": "run_relax.py",
+          "backend": "mace",
+          "agent_selected": true,
+          "model_name": "mace-mp-0",
+          "run_cmd": "python run_relax.py",
+          "ran": true,
+          "returncode": 0
+        }
+      }
+    },
+    "mgo_rocksalt": {
+      "exp_lattice_constant": 4.212,
+      "engines": {
+        "vasp": {
+          "status": "generated",
+          "kind": "vasp",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/b_agent_select/mgo_rocksalt/vasp",
+          "input_files": [
+            "INCAR",
+            "KPOINTS"
+          ],
+          "notes": "MgO is a wide-gap insulator, so ISMEAR=0 (Gaussian smearing) with small SIGMA=0.05 is appropriate for the relaxation. ISIF=3 enables full cell relaxation (cell shape + volume + ions). ENCUT=520 eV is set above the typical O POTCAR ENMAX (~400 eV) by >1.3x for good convergence. 8x8x8 Gamma-centered k-mesh provides good convergence for this simple cubic rock-salt structure. After the calculation completes, the optimized lattice constant will be found in the final lattice vectors in CONTCAR. For MgO, the experimental lattice constant is ~4.21 \u00c5, and PBE typically overestimates by ~1-2%. If more accurate energies are needed after relaxation, run a single-point calculation (NSW=0) with ISMEAR=-5 (tetrahedron method) using the relaxed CONTCAR geometry.",
+          "run_cmd": "sbatch submit.sbatch"
+        },
+        "mlip": {
+          "status": "generated",
+          "kind": "mlip",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/b_agent_select/mgo_rocksalt/mlip",
+          "run_script": "run_relax.py",
+          "backend": "mace",
+          "agent_selected": true,
+          "model_name": "mace-mp-0",
+          "run_cmd": "python run_relax.py",
+          "ran": true,
+          "returncode": 0
+        }
+      }
+    },
+    "c_diamond": {
+      "exp_lattice_constant": 3.567,
+      "engines": {
+        "vasp": {
+          "status": "generated",
+          "kind": "vasp",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/b_agent_select/c_diamond/vasp",
+          "input_files": [
+            "INCAR",
+            "KPOINTS",
+            "POTCAR"
+          ],
+          "notes": "Diamond (C) is a wide-gap semiconductor, so ISMEAR=0 (Gaussian smearing) is appropriate. ENCUT=520 eV is chosen well above the recommended minimum for carbon (approximately 400 eV for light elements) to ensure accurate forces and stress tensor during full cell relaxation. ISIF=3 allows optimization of both cell shape/volume and ionic positions. EDIFFG=-0.005 eV/\u00c5 gives tight force convergence for accurate lattice constant determination. The 11\u00d711\u00d711 Gamma-centered k-point mesh provides good convergence for the small cubic cell (approximately 0.025 \u00c5\u207b\u00b9 spacing). After the calculation completes, the optimized lattice constant can be extracted from the final lattice vectors in CONTCAR. You will need to generate the POTCAR file by concatenating the C POTCAR from your potpaw_PBE directory.",
+          "run_cmd": "sbatch submit.sbatch"
+        },
+        "mlip": {
+          "status": "generated",
+          "kind": "mlip",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/b_agent_select/c_diamond/mlip",
+          "run_script": "run_relax.py",
+          "backend": "mace",
+          "agent_selected": true,
+          "model_name": "mace-mp-0",
+          "run_cmd": "python run_relax.py",
+          "ran": true,
+          "returncode": 0
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "workflow_status": "success",
+  "user_request": "Bulk silicon in the diamond structure, 2-atom primitive cell. Compute the ground-state SCF energy with PBE.",
+  "output_directory": "/Users/sarah.allec/Library/CloudStorage/OneDrive-PNNL/Documents/Github_Repos/SciLink_fork/SciLink/examples/benchmark_suite_20260509_135123/si_bulk",
+  "final_files": {
+    "structure": "POSCAR",
+    "incar": "INCAR",
+    "kpoints": "KPOINTS"
+  },
+  "ready_for_vasp": true,
+  "literature_validated": false
+}

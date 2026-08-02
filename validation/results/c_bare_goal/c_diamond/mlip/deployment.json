@@ -1,0 +1,22 @@
+{
+  "backend": "mace",
+  "model_name": "mace-mp-0",
+  "model_file": "/qfs/people/alle927/SciLink/SciLink/validation/results/c_bare_goal/c_diamond/mlip/mace-mp-0.model",
+  "elements": [
+    "C"
+  ],
+  "selection": {
+    "backend": "mace",
+    "model_name": "mace-mp-0",
+    "justification": "Diamond (cubic carbon) is an inorganic crystalline material that falls squarely within the domain of mace-mp-0, which was trained on the MPtrj dataset covering ~150k inorganic materials including various carbon allotropes. Diamond is a well-studied structure likely represented in the Materials Project database. This model provides high accuracy for geometry optimization and lattice constant prediction of inorganic crystals. The task requires accurate forces and stresses for cell relaxation, which mace-mp-0 is specifically designed to provide.",
+    "cautions": "Diamond has a very simple structure and is a common benchmark material, so mace-mp-0 should perform excellently. However, if ultra-high precision is needed (e.g., lattice constant accurate to <0.001 \u00c5), comparison with DFT reference values is recommended. The mace-off23 model should be avoided despite containing carbon, as it is trained on organic molecules and peptides, not crystalline carbon allotropes."
+  },
+  "run_path": "/qfs/people/alle927/SciLink/SciLink/validation/results/c_bare_goal/c_diamond/mlip/run_relax.py",
+  "runner": "ase",
+  "task": "relax",
+  "potential_backend": "mace",
+  "potential_model": "mace-mp-0",
+  "structure_file": "/qfs/people/alle927/SciLink/SciLink/validation/results/c_bare_goal/c_diamond/mlip/system.data",
+  "research_goal": "Relax bulk diamond (cubic carbon) to its equilibrium geometry \u2014 optimize both the cell and the ionic positions \u2014 and report the optimized cubic lattice constant.",
+  "notes": "MACE mace-mp-0 (medium, inorganic). LAMMPS-capable via pair_style mliap unified."
+}

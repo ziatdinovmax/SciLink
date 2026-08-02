@@ -1,0 +1,17 @@
+{
+    "material_type": "Polymer blend thin film",
+    "microscopy_type": "Optical microscope",
+    "technique": "Polarized light microscopy",
+    "series": {
+        "variable": "annealing_temperature",
+        "values": [100, 150, 200, 250, 300],
+        "unit": "C"
+    },
+    "experimental_details": {
+        "spatial_info": {
+            "field_of_view_x": 50.0,
+            "field_of_view_y": 50.0,
+            "field_of_view_units": "um"
+        }
+    }
+}

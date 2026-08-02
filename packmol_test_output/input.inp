@@ -1,0 +1,13 @@
+tolerance 2.0
+filetype xyz
+output nacl_water_40x40x40_0_15M.xyz
+
+structure components/nacl.xyz
+  number 6
+  inside cube 0. 0. 0. 40.
+end structure
+
+structure components/water.xyz
+  number 2000
+  inside cube 0. 0. 0. 40.
+end structure

@@ -1,0 +1,23 @@
+{
+  "backend": "mace",
+  "model_name": "mace-mp-0",
+  "model_file": "/qfs/people/alle927/SciLink/SciLink/validation/results/b_agent_select/mgo_rocksalt/mlip/mace-mp-0.model",
+  "elements": [
+    "Mg",
+    "O"
+  ],
+  "selection": {
+    "backend": "mace",
+    "model_name": "mace-mp-0",
+    "justification": "MgO is a canonical ionic oxide widely represented in the Materials Project training data. MACE-MP-0 was explicitly trained on ~150k inorganic materials including oxides and alkaline earth compounds, making it ideal for this system. The rock-salt structure of MgO is one of the most common crystal structures in the MPtrj dataset. This is a straightforward bulk relaxation task for which the universal inorganic potential should provide high accuracy comparable to DFT.",
+    "cautions": "MgO is a wide-gap insulator (~7.8 eV). While MACE-MP-0 handles charge transfer and ionic bonding well, verify that the predicted lattice constant is within ~1% of experimental values (4.21 \u00c5). If very high precision is required for specific defect or surface calculations, consider validating against DFT for your specific use case. The model should excel at bulk properties but may require fine-tuning for exotic defects or extreme conditions."
+  },
+  "run_path": "/qfs/people/alle927/SciLink/SciLink/validation/results/b_agent_select/mgo_rocksalt/mlip/run_relax.py",
+  "runner": "ase",
+  "task": "relax",
+  "potential_backend": "mace",
+  "potential_model": "mace-mp-0",
+  "structure_file": "/qfs/people/alle927/SciLink/SciLink/validation/results/b_agent_select/mgo_rocksalt/mlip/system.data",
+  "research_goal": "Relax bulk magnesium oxide in the rock-salt structure to its equilibrium geometry (full cell + ionic relaxation) and report the optimized lattice constant. This is a wide-gap ionic insulator.",
+  "notes": "MACE mace-mp-0 (medium, inorganic). LAMMPS-capable via pair_style mliap unified."
+}

@@ -1,0 +1,76 @@
+<svg viewBox="0 0 300 200" xmlns="http://www.w3.org/2000/svg">
+  <!-- Define gradients for each research component -->
+  <defs>
+    <!-- Experiment gradient (orange/red tones) -->
+    <linearGradient id="experimentGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f97316;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#dc2626;stop-opacity:1" />
+    </linearGradient>
+    
+    <!-- Theory gradient (blue tones) -->
+    <linearGradient id="theoryGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#3b82f6;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#1d4ed8;stop-opacity:1" />
+    </linearGradient>
+    
+    <!-- Literature gradient (green tones) -->
+    <linearGradient id="literatureGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#10b981;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#059669;stop-opacity:1" />
+    </linearGradient>
+    
+    <!-- Central text gradient -->
+    <linearGradient id="textGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#3b82f6;stop-opacity:1" />
+      <stop offset="50%" style="stop-color:#f97316;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#10b981;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  
+  <!-- Connections from center to nodes -->
+  <line x1="150" y1="110" x2="150" y2="60" stroke="#e2e8f0" stroke-width="1.5" stroke-dasharray="3,3" opacity="0.6"/>
+  <line x1="150" y1="110" x2="100" y2="142" stroke="#e2e8f0" stroke-width="1.5" stroke-dasharray="3,3" opacity="0.6"/>
+  <line x1="150" y1="110" x2="200" y2="142" stroke="#e2e8f0" stroke-width="1.5" stroke-dasharray="3,3" opacity="0.6"/>
+  
+  <!-- Theory node (top) -->
+  <circle cx="150" cy="35" r="22" fill="url(#theoryGradient)"/>
+  <circle cx="150" cy="35" r="16" fill="white" opacity="0.2"/>
+  <text x="150" y="40" text-anchor="middle" font-family="Arial" font-size="18" fill="white" font-weight="bold">θ</text>
+  
+  <!-- Experiment node (bottom left) -->
+  <circle cx="85" cy="165" r="22" fill="url(#experimentGradient)"/>
+  <circle cx="85" cy="165" r="16" fill="white" opacity="0.2"/>
+  <path d="M 80 160 L 80 165 L 78 170 L 92 170 L 90 165 L 90 160 Z" fill="white" stroke="none"/>
+  <circle cx="85" cy="168" r="2" fill="white"/>
+  
+  <!-- Literature node (bottom right) -->
+  <circle cx="215" cy="165" r="22" fill="url(#literatureGradient)"/>
+  <circle cx="215" cy="165" r="16" fill="white" opacity="0.2"/>
+  <rect x="208" y="160" width="14" height="10" fill="white" rx="1"/>
+  <line x1="215" y1="160" x2="215" y2="170" stroke="#059669" stroke-width="1"/>
+  
+  <!-- Central hub circle -->
+  <circle cx="150" cy="110" r="35" fill="white" stroke="#e2e8f0" stroke-width="2" opacity="0.95"/>
+  
+  <!-- SciLink text in center with creative styling -->
+  <text x="150" y="105" text-anchor="middle" font-family="Arial, sans-serif" font-size="20" font-weight="700" fill="#1e293b">Sci</text>
+  <text x="150" y="122" text-anchor="middle" font-family="Arial, sans-serif" font-size="20" font-weight="700" fill="url(#textGradient)">Link</text>
+  
+  <!-- Curved connections between outer nodes -->
+  <path d="M 105 155 Q 150 175 195 155" stroke="#e2e8f0" stroke-width="1" stroke-linecap="round" fill="none" opacity="0.4"/>
+  <path d="M 95 145 Q 80 95 130 45" stroke="#e2e8f0" stroke-width="1" stroke-linecap="round" fill="none" opacity="0.4"/>
+  <path d="M 170 45 Q 220 95 205 145" stroke="#e2e8f0" stroke-width="1" stroke-linecap="round" fill="none" opacity="0.4"/>
+  
+  <!-- Small orbital dots for visual interest -->
+  <circle cx="150" cy="75" r="2" fill="#3b82f6" opacity="0.6">
+    <animateTransform attributeName="transform" type="rotate" from="0 150 110" to="360 150 110" dur="20s" repeatCount="indefinite"/>
+  </circle>
+  
+  <circle cx="123" cy="133" r="2" fill="#f97316" opacity="0.6">
+    <animateTransform attributeName="transform" type="rotate" from="0 150 110" to="-360 150 110" dur="15s" repeatCount="indefinite"/>
+  </circle>
+  
+  <circle cx="177" cy="133" r="2" fill="#10b981" opacity="0.6">
+    <animateTransform attributeName="transform" type="rotate" from="0 150 110" to="360 150 110" dur="25s" repeatCount="indefinite"/>
+  </circle>
+</svg>

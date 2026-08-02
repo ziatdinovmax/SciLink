@@ -1,0 +1,12 @@
+{
+    "material_type": "Polycrystalline stainless steel 304",
+    "microscopy_type": "Optical microscope",
+    "technique": "Etched cross-section, bright field",
+    "experimental_details": {
+        "spatial_info": {
+            "field_of_view_x": 100.0,
+            "field_of_view_y": 100.0,
+            "field_of_view_units": "um"
+        }
+    }
+}

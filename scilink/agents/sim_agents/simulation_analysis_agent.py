@@ -78,9 +78,11 @@ class SimulationAnalysisAgent(BaseAnalysisAgent):
                 continue
             name = p.name.lower()
             ext = p.suffix.lower().lstrip(".")
+            # Match a full filename (e.g. `log.lammps`) or the exact extension
+            # (e.g. `lammpstrj`) — NOT a bare `endswith`, which mis-classifies
+            # `mesh.inc` as a trajectory because it ends with `nc`.
             for kind, pats in fmt.items():
-                if any(name == pat or name.endswith(pat) or ext == pat
-                       for pat in pats):
+                if any(name == pat or ext == pat for pat in pats):
                     present[kind].append(str(p))
                     break
         return dict(present)
@@ -171,9 +173,19 @@ class SimulationAnalysisAgent(BaseAnalysisAgent):
         eligible = self.eligible_skills(by_kind.keys())
         selected = self._select_properties(research_goal, eligible)
 
-        # All classified files are offered to each analysis; the generated code
-        # reads whichever it needs.
-        data_files = {Path(p).name: p for paths in by_kind.values() for p in paths}
+        # Offer every classified file to each analysis, keyed by its path RELATIVE
+        # to run_dir — so fan-out members (member_0/log.lammps, member_1/…) keep
+        # distinct keys instead of colliding on basename and silently dropping all
+        # but one. The generated code reads whichever it needs from DATA_FILES.
+        root = Path(run_dir)
+        data_files: Dict[str, str] = {}
+        for paths in by_kind.values():
+            for p in paths:
+                try:
+                    key = str(Path(p).relative_to(root))
+                except ValueError:
+                    key = Path(p).name
+                data_files[key] = p
         results: Dict[str, Any] = {}
         for skill in selected:
             meta = skill.get("meta") or {}

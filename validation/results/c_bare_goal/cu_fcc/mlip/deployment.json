@@ -1,0 +1,22 @@
+{
+  "backend": "mace",
+  "model_name": "mace-mp-0",
+  "model_file": "/qfs/people/alle927/SciLink/SciLink/validation/results/c_bare_goal/cu_fcc/mlip/mace-mp-0.model",
+  "elements": [
+    "Cu"
+  ],
+  "selection": {
+    "backend": "mace",
+    "model_name": "mace-mp-0",
+    "justification": "MACE-MP-0 is the best choice for this task. It is a universal inorganic potential trained on the Materials Project trajectory dataset (~150k inorganic materials), which explicitly includes excellent coverage of metals like copper. For a simple bulk FCC copper relaxation task, this foundation model will provide high-accuracy forces and stresses needed to optimize both lattice parameters and ionic positions. The model has been extensively validated on metallic systems and should predict the Cu lattice constant to within ~1% of DFT reference values.",
+    "cautions": "None significant for this application. MACE-MP-0 is well-suited for elemental metals and bulk crystal optimization. The task is well within the model's training distribution (FCC Cu is a standard test case in materials databases). If sub-meV/atom accuracy is critical, consider comparing results with DFT, but for standard geometry optimization this model should be more than adequate."
+  },
+  "run_path": "/qfs/people/alle927/SciLink/SciLink/validation/results/c_bare_goal/cu_fcc/mlip/run_relax.py",
+  "runner": "ase",
+  "task": "relax",
+  "potential_backend": "mace",
+  "potential_model": "mace-mp-0",
+  "structure_file": "/qfs/people/alle927/SciLink/SciLink/validation/results/c_bare_goal/cu_fcc/mlip/system.data",
+  "research_goal": "Relax bulk FCC copper to its equilibrium geometry \u2014 optimize both the cell and the ionic positions \u2014 and report the optimized cubic lattice constant.",
+  "notes": "MACE mace-mp-0 (medium, inorganic). LAMMPS-capable via pair_style mliap unified."
+}

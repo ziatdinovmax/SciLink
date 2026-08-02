@@ -1,0 +1,17 @@
+# Bulk MgO relaxation - cell and ionic optimization
+GGA = PE
+PREC = Accurate
+ENCUT = 520
+EDIFF = 1E-6
+ISMEAR = 0
+SIGMA = 0.05
+LREAL = .FALSE.
+ALGO = Normal
+IBRION = 2
+ISIF = 3
+NSW = 200
+EDIFFG = -0.01
+LORBIT = 11
+LCHARG = .TRUE.
+LWAVE = .FALSE.
+NCORE = 4

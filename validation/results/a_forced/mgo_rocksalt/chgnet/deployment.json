@@ -1,0 +1,22 @@
+{
+  "backend": "chgnet",
+  "model_name": "chgnet",
+  "model_file": "",
+  "elements": [
+    "Mg",
+    "O"
+  ],
+  "selection": {
+    "backend": "chgnet",
+    "model_name": "chgnet",
+    "justification": "caller-forced via backend='chgnet'"
+  },
+  "run_path": "/qfs/people/alle927/SciLink/SciLink/validation/results/a_forced/mgo_rocksalt/chgnet/run_relax.py",
+  "runner": "ase",
+  "task": "relax",
+  "potential_backend": "chgnet",
+  "potential_model": "chgnet",
+  "structure_file": "/qfs/people/alle927/SciLink/SciLink/validation/results/a_forced/mgo_rocksalt/chgnet/system.data",
+  "research_goal": "Relax bulk magnesium oxide in the rock-salt structure to its equilibrium geometry (full cell + ionic relaxation) and report the optimized lattice constant. This is a wide-gap ionic insulator.",
+  "notes": "CHGNet universal MPtrj-pretrained model. ASE-only \u2014 no LAMMPS pair_style; the MD agent must use the ASE runner."
+}

@@ -1,0 +1,21 @@
+{
+  "backend": "mace",
+  "model_name": "mace",
+  "model_file": "/qfs/people/alle927/SciLink/SciLink/validation/results/a_forced/c_diamond/mace/mace.model",
+  "elements": [
+    "C"
+  ],
+  "selection": {
+    "backend": "mace",
+    "model_name": "mace",
+    "justification": "caller-forced via backend='mace'"
+  },
+  "run_path": "/qfs/people/alle927/SciLink/SciLink/validation/results/a_forced/c_diamond/mace/run_relax.py",
+  "runner": "ase",
+  "task": "relax",
+  "potential_backend": "mace",
+  "potential_model": "mace",
+  "structure_file": "/qfs/people/alle927/SciLink/SciLink/validation/results/a_forced/c_diamond/mace/system.data",
+  "research_goal": "Relax bulk diamond (cubic carbon) to its equilibrium geometry (full cell + ionic relaxation) and report the optimized lattice constant. Carbon is a light element \u2014 ensure the plane-wave cutoff is high enough.",
+  "notes": "MACE mace (medium, inorganic). LAMMPS-capable via pair_style mliap unified."
+}

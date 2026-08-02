@@ -1,0 +1,32 @@
+# Full cell + ionic relaxation for bulk diamond (cubic carbon)
+# ISIF = 3 allows full relaxation of lattice vectors and ionic positions
+
+GGA = PE
+IVASP = 0
+
+# Electronic minimization
+ENCUT = 520
+PREC = Accurate
+EDIFF = 1E-7
+ALGO = Normal
+NELM = 100
+
+# Smearing (semiconductor)
+ISMEAR = 0
+SIGMA = 0.05
+
+# Ionic relaxation
+IBRION = 2
+ISIF = 3
+NSW = 100
+EDIFFG = -0.005
+POTIM = 0.5
+
+# Performance
+LREAL = .FALSE.
+NCORE = 4
+
+# Output
+LORBIT = 11
+LCHARG = .FALSE.
+LWAVE = .FALSE.

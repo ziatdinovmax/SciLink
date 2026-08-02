@@ -1,0 +1,24 @@
+{
+  "experiment_type": "Spectroscopy",
+  "experiment": {
+    "technique": "Raman Spectroscopy",
+    "instrument": "Simulated Spectrometer V1",
+    "details": "532nm excitation laser, room temperature"
+  },
+  "sample": {
+    "material": "Silicon-doped Test Sample",
+    "description": "Synthetic simulation for agent validation."
+  },
+  "data_columns": [
+    {
+      "name": "Raman Shift",
+      "units": "cm^-1"
+    },
+    {
+      "name": "Intensity",
+      "units": "counts"
+    }
+  ],
+  "xlabel": "Wavenumber (cm^-1)",
+  "ylabel": "Intensity (a.u.)"
+}

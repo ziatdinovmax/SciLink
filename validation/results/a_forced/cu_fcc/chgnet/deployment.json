@@ -1,0 +1,21 @@
+{
+  "backend": "chgnet",
+  "model_name": "chgnet",
+  "model_file": "",
+  "elements": [
+    "Cu"
+  ],
+  "selection": {
+    "backend": "chgnet",
+    "model_name": "chgnet",
+    "justification": "caller-forced via backend='chgnet'"
+  },
+  "run_path": "/qfs/people/alle927/SciLink/SciLink/validation/results/a_forced/cu_fcc/chgnet/run_relax.py",
+  "runner": "ase",
+  "task": "relax",
+  "potential_backend": "chgnet",
+  "potential_model": "chgnet",
+  "structure_file": "/qfs/people/alle927/SciLink/SciLink/validation/results/a_forced/cu_fcc/chgnet/system.data",
+  "research_goal": "Relax bulk FCC copper to its equilibrium geometry (full cell + ionic relaxation) and report the optimized lattice constant. This is a metal; use appropriate smearing and a dense k-point mesh.",
+  "notes": "CHGNet universal MPtrj-pretrained model. ASE-only \u2014 no LAMMPS pair_style; the MD agent must use the ASE runner."
+}

@@ -1,0 +1,11 @@
+{
+    "material_type": "Yttrium barium copper oxide",
+    "microscopy_type": "HAADF-TEM",
+    "experimental_details": {
+        "spatial_info":{
+            "field_of_view_x": 18.0,
+            "field_of_view_y": 18.0,
+            "field_of_view_units": "nm"
+        }
+    }
+}

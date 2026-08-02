@@ -1,0 +1,167 @@
+{
+  "mode": "a_forced",
+  "goal_level": "guided",
+  "generated_at": "2026-05-14T19:51:48.817519",
+  "panel": {
+    "si_diamond": {
+      "exp_lattice_constant": 5.431,
+      "engines": {
+        "vasp": {
+          "status": "generated",
+          "kind": "vasp",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/a_forced/si_diamond/vasp",
+          "input_files": [
+            "INCAR",
+            "KPOINTS"
+          ],
+          "notes": "This calculation performs full cell and ionic relaxation (ISIF=3) of bulk silicon. Key settings: (1) ISMEAR=0 (Gaussian) with SIGMA=0.05 eV is appropriate for semiconductor relaxations. (2) 8x8x8 Gamma-centered k-point mesh provides good convergence for Si (equivalent to ~0.025 \u00c5\u207b\u00b9 density). (3) ENCUT=400 eV is sufficient for Si (default ENMAX ~250 eV, 400 eV gives 1.6x factor). (4) LREAL=.FALSE. for small unit cell (8 atoms) ensures accuracy. (5) EDIFFG=-0.01 gives converged forces. After completion, check CONTCAR for the relaxed structure and OUTCAR for the optimized lattice constant. The experimental lattice constant for Si is ~5.43 \u00c5; PBE typically overestimates by ~1-2%. For production work, consider testing k-point convergence (e.g., 10x10x10) and tighter EDIFFG (-0.005) if sub-meV/atom accuracy is needed.",
+          "run_cmd": "sbatch submit.sbatch"
+        },
+        "mace": {
+          "status": "generated",
+          "kind": "mlip",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/a_forced/si_diamond/mace",
+          "run_script": "run_relax.py",
+          "backend": "mace",
+          "agent_selected": false,
+          "model_name": "mace",
+          "run_cmd": "python run_relax.py",
+          "ran": true,
+          "returncode": 0
+        },
+        "chgnet": {
+          "status": "generated",
+          "kind": "mlip",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/a_forced/si_diamond/chgnet",
+          "run_script": "run_relax.py",
+          "backend": "chgnet",
+          "agent_selected": false,
+          "model_name": "chgnet",
+          "run_cmd": "python run_relax.py",
+          "ran": true,
+          "returncode": 0
+        }
+      }
+    },
+    "cu_fcc": {
+      "exp_lattice_constant": 3.615,
+      "engines": {
+        "vasp": {
+          "status": "generated",
+          "kind": "vasp",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/a_forced/cu_fcc/vasp",
+          "input_files": [
+            "INCAR",
+            "KPOINTS"
+          ],
+          "notes": "This calculation performs full cell + ionic relaxation of bulk FCC Cu. ISIF=3 allows both lattice parameters and atomic positions to relax. ISMEAR=1 (Methfessel-Paxton) with SIGMA=0.1 is appropriate for this metallic system for both static and relaxation calculations. The 12\u00d712\u00d712 Gamma-centered k-point mesh provides good convergence for Cu (approximately 0.024 \u00c5\u207b\u00b9 spacing). After convergence, check the final lattice constant in the CONTCAR file or in the last 'volume of cell' entry in the OUTCAR. The experimental lattice constant for Cu is 3.615 \u00c5; PBE typically gives slightly larger values (~3.63-3.64 \u00c5). Verify that the entropy term T*S in OUTCAR is less than 1 meV/atom to confirm the smearing width is appropriate.",
+          "run_cmd": "sbatch submit.sbatch"
+        },
+        "mace": {
+          "status": "generated",
+          "kind": "mlip",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/a_forced/cu_fcc/mace",
+          "run_script": "run_relax.py",
+          "backend": "mace",
+          "agent_selected": false,
+          "model_name": "mace",
+          "run_cmd": "python run_relax.py",
+          "ran": true,
+          "returncode": 0
+        },
+        "chgnet": {
+          "status": "generated",
+          "kind": "mlip",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/a_forced/cu_fcc/chgnet",
+          "run_script": "run_relax.py",
+          "backend": "chgnet",
+          "agent_selected": false,
+          "model_name": "chgnet",
+          "run_cmd": "python run_relax.py",
+          "ran": true,
+          "returncode": 0
+        }
+      }
+    },
+    "mgo_rocksalt": {
+      "exp_lattice_constant": 4.212,
+      "engines": {
+        "vasp": {
+          "status": "generated",
+          "kind": "vasp",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/a_forced/mgo_rocksalt/vasp",
+          "input_files": [
+            "INCAR",
+            "KPOINTS"
+          ],
+          "notes": "MgO is a wide-gap ionic insulator, so ISMEAR=0 (Gaussian smearing) is used for the relaxation with small SIGMA=0.05 eV. ISIF=3 enables full cell shape and volume relaxation to find the equilibrium lattice constant. ENCUT=520 eV is chosen to be well above the O POTCAR ENMAX (~400 eV). An 8\u00d78\u00d78 Gamma-centered k-point mesh provides good convergence for this cubic system (~0.025 \u00c5\u207b\u00b9 spacing). After the calculation completes, the optimized lattice constant can be read from the final geometry in CONTCAR. Experimental lattice constant for MgO is ~4.21 \u00c5; PBE typically overestimates by 1-2%. For a final accurate total energy after relaxation, consider running a static calculation with ISMEAR=-5 (tetrahedron method) using the optimized geometry.",
+          "run_cmd": "sbatch submit.sbatch"
+        },
+        "mace": {
+          "status": "generated",
+          "kind": "mlip",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/a_forced/mgo_rocksalt/mace",
+          "run_script": "run_relax.py",
+          "backend": "mace",
+          "agent_selected": false,
+          "model_name": "mace",
+          "run_cmd": "python run_relax.py",
+          "ran": true,
+          "returncode": 0
+        },
+        "chgnet": {
+          "status": "generated",
+          "kind": "mlip",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/a_forced/mgo_rocksalt/chgnet",
+          "run_script": "run_relax.py",
+          "backend": "chgnet",
+          "agent_selected": false,
+          "model_name": "chgnet",
+          "run_cmd": "python run_relax.py",
+          "ran": true,
+          "returncode": 0
+        }
+      }
+    },
+    "c_diamond": {
+      "exp_lattice_constant": 3.567,
+      "engines": {
+        "vasp": {
+          "status": "generated",
+          "kind": "vasp",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/a_forced/c_diamond/vasp",
+          "input_files": [
+            "INCAR",
+            "KPOINTS"
+          ],
+          "notes": "Carbon is a wide-gap semiconductor, so ISMEAR=0 (Gaussian smearing) with SIGMA=0.05 is appropriate for relaxation. ENCUT=520 eV ensures high accuracy for light elements like C (diamond calculations often use 500-600 eV). ISIF=3 enables full cell optimization including lattice vectors and volume. The 11\u00d711\u00d711 Gamma-centered k-point mesh provides good convergence for the small cubic cell (~0.03 \u00c5\u207b\u00b9 spacing). IBRION=2 uses conjugate-gradient for efficient relaxation. After the calculation completes, the optimized lattice constant can be extracted from the final CONTCAR file or from the last printed lattice vectors in the OUTCAR.",
+          "run_cmd": "sbatch submit.sbatch"
+        },
+        "mace": {
+          "status": "generated",
+          "kind": "mlip",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/a_forced/c_diamond/mace",
+          "run_script": "run_relax.py",
+          "backend": "mace",
+          "agent_selected": false,
+          "model_name": "mace",
+          "run_cmd": "python run_relax.py",
+          "ran": true,
+          "returncode": 0
+        },
+        "chgnet": {
+          "status": "generated",
+          "kind": "mlip",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/a_forced/c_diamond/chgnet",
+          "run_script": "run_relax.py",
+          "backend": "chgnet",
+          "agent_selected": false,
+          "model_name": "chgnet",
+          "run_cmd": "python run_relax.py",
+          "ran": true,
+          "returncode": 0
+        }
+      }
+    }
+  }
+}

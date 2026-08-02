@@ -1,0 +1,22 @@
+{
+  "backend": "mace",
+  "model_name": "mace-mp-0",
+  "model_file": "/qfs/people/alle927/SciLink/SciLink/validation/results/b_agent_select/si_diamond/mlip/mace-mp-0.model",
+  "elements": [
+    "Si"
+  ],
+  "selection": {
+    "backend": "mace",
+    "model_name": "mace-mp-0",
+    "justification": "Silicon is a semiconductor element well-represented in inorganic materials databases. MACE-MP-0 was trained on the Materials Project trajectory dataset (~150k inorganic materials) which extensively covers silicon structures including the diamond-cubic phase. This model provides state-of-the-art accuracy for predicting lattice constants and energies of crystalline solids, making it ideal for bulk relaxation tasks. Silicon is one of the most common elements in the MPtrj training set, so excellent coverage is expected.",
+    "cautions": "For highly accurate lattice constant predictions (within 0.01 \u00c5 of DFT), verify the result against experimental values (5.431 \u00c5 for Si diamond-cubic). MACE-MP-0 typically achieves <1% error on well-sampled systems. Ensure adequate k-point sampling (e.g., 8\u00d78\u00d78 or denser \u0393-centered grid) for the semiconductor band structure, though the MLIP itself does not have explicit k-point dependence\u2014this matters for any subsequent electronic structure analysis. Use appropriate smearing (e.g., Gaussian with small width ~0.01 eV) if performing DFT verification, but for pure MLIP relaxation this is not relevant."
+  },
+  "run_path": "/qfs/people/alle927/SciLink/SciLink/validation/results/b_agent_select/si_diamond/mlip/run_relax.py",
+  "runner": "ase",
+  "task": "relax",
+  "potential_backend": "mace",
+  "potential_model": "mace-mp-0",
+  "structure_file": "/qfs/people/alle927/SciLink/SciLink/validation/results/b_agent_select/si_diamond/mlip/system.data",
+  "research_goal": "Relax bulk silicon in the diamond-cubic structure to its equilibrium geometry (full cell + ionic relaxation) and report the optimized lattice constant. This is a semiconductor; choose smearing and k-point density accordingly.",
+  "notes": "MACE mace-mp-0 (medium, inorganic). LAMMPS-capable via pair_style mliap unified."
+}

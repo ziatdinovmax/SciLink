@@ -1,0 +1,119 @@
+{
+  "mode": "c_bare_goal",
+  "goal_level": "bare",
+  "generated_at": "2026-05-14T19:56:41.230145",
+  "panel": {
+    "si_diamond": {
+      "exp_lattice_constant": 5.431,
+      "engines": {
+        "vasp": {
+          "status": "generated",
+          "kind": "vasp",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/c_bare_goal/si_diamond/vasp",
+          "input_files": [
+            "INCAR",
+            "KPOINTS"
+          ],
+          "notes": "This calculation will fully relax bulk silicon (cell shape, volume, and ionic positions) using ISIF=3. Silicon is a semiconductor with a bandgap, so ISMEAR=0 (Gaussian smearing) with SIGMA=0.05 eV is appropriate for the relaxation. The structure provided is the conventional cubic cell of diamond-structure Si with 8 atoms. An 8\u00d78\u00d78 Gamma-centered k-point mesh provides good convergence for Si (approximately 0.025 \u00c5\u207b\u00b9 spacing). ENCUT=450 eV is more than sufficient for Si (default ENMAX ~250 eV). After the calculation completes, the optimized cubic lattice constant can be read from the final lattice vectors in the CONTCAR file - all three diagonal elements should be equal (within numerical noise) for the cubic structure. The experimental lattice constant for Si is ~5.43 \u00c5; PBE typically overestimates it by ~1-2%. For production-quality results, you may want to increase the k-point mesh to 10\u00d710\u00d710 or 12\u00d712\u00d712 and verify convergence with respect to ENCUT (test 500-520 eV).",
+          "run_cmd": "sbatch submit.sbatch"
+        },
+        "mlip": {
+          "status": "generated",
+          "kind": "mlip",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/c_bare_goal/si_diamond/mlip",
+          "run_script": "run_relax.py",
+          "backend": "mace",
+          "agent_selected": true,
+          "model_name": "mace-mp-0",
+          "run_cmd": "python run_relax.py",
+          "ran": true,
+          "returncode": 0
+        }
+      }
+    },
+    "cu_fcc": {
+      "exp_lattice_constant": 3.615,
+      "engines": {
+        "vasp": {
+          "status": "generated",
+          "kind": "vasp",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/c_bare_goal/cu_fcc/vasp",
+          "input_files": [
+            "INCAR",
+            "KPOINTS"
+          ],
+          "notes": "This setup will fully relax both the cell shape/volume and ionic positions of bulk FCC Cu (ISIF=3). Cu is metallic so ISMEAR=1 (Methfessel-Paxton) with SIGMA=0.1 is used. The k-point mesh of 12\u00d712\u00d712 provides good convergence for the FCC structure (approximately 0.025 \u00c5\u207b\u00b9 spacing). After completion, the optimized lattice constant can be read from the final lattice vectors in CONTCAR - for a cubic system, it will be the a-axis length. The experimental lattice constant of Cu is ~3.615 \u00c5; PBE typically slightly overestimates this by ~1-2%. Cu is not magnetic in its ground state so ISPIN=2 is not needed.",
+          "run_cmd": "sbatch submit.sbatch"
+        },
+        "mlip": {
+          "status": "generated",
+          "kind": "mlip",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/c_bare_goal/cu_fcc/mlip",
+          "run_script": "run_relax.py",
+          "backend": "mace",
+          "agent_selected": true,
+          "model_name": "mace-mp-0",
+          "run_cmd": "python run_relax.py",
+          "ran": true,
+          "returncode": 0
+        }
+      }
+    },
+    "mgo_rocksalt": {
+      "exp_lattice_constant": 4.212,
+      "engines": {
+        "vasp": {
+          "status": "generated",
+          "kind": "vasp",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/c_bare_goal/mgo_rocksalt/vasp",
+          "input_files": [
+            "INCAR",
+            "KPOINTS"
+          ],
+          "notes": "This calculation will fully relax both the cell shape/volume (ISIF=3) and ionic positions of rock-salt MgO. The system is an insulator, so ISMEAR=0 (Gaussian) with SIGMA=0.05 is used for the relaxation. ENCUT=520 eV provides good convergence for both Mg and O. The 8x8x8 Gamma-centered k-point mesh should give energy convergence better than 1 meV/atom. The optimized lattice constant can be extracted from the final CONTCAR file (diagonal elements of the lattice vectors should be equal for cubic symmetry). Experimental lattice constant is ~4.21 \u00c5; PBE typically overestimates by ~1-2%. After relaxation completes, check that forces are below 0.01 eV/\u00c5 and that the structure maintains cubic symmetry.",
+          "run_cmd": "sbatch submit.sbatch"
+        },
+        "mlip": {
+          "status": "generated",
+          "kind": "mlip",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/c_bare_goal/mgo_rocksalt/mlip",
+          "run_script": "run_relax.py",
+          "backend": "mace",
+          "agent_selected": true,
+          "model_name": "mace-mp-0",
+          "run_cmd": "python run_relax.py",
+          "ran": true,
+          "returncode": 0
+        }
+      }
+    },
+    "c_diamond": {
+      "exp_lattice_constant": 3.567,
+      "engines": {
+        "vasp": {
+          "status": "generated",
+          "kind": "vasp",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/c_bare_goal/c_diamond/vasp",
+          "input_files": [
+            "INCAR",
+            "KPOINTS"
+          ],
+          "notes": "This calculation will fully relax bulk diamond (both cell shape/volume and ionic positions). ISIF=3 allows full cell optimization. ISMEAR=0 (Gaussian smearing) is used because diamond is an insulator with a large band gap. The 8x8x8 Gamma-centered k-point mesh provides good convergence for the cubic cell (reciprocal spacing ~0.036 1/\u00c5). After completion, check the CONTCAR file for the optimized structure - the lattice constant will be the first lattice vector length. The experimental lattice constant for diamond is ~3.567 \u00c5, so expect a value close to this (PBE typically overestimates by ~1-2%). The symmetry will preserve the cubic structure, so all three lattice vectors should remain equal. Verify convergence by checking that forces (EDIFFG=-0.01) and stress tensor are small in the final ionic step.",
+          "run_cmd": "sbatch submit.sbatch"
+        },
+        "mlip": {
+          "status": "generated",
+          "kind": "mlip",
+          "dir": "/qfs/people/alle927/SciLink/SciLink/validation/results/c_bare_goal/c_diamond/mlip",
+          "run_script": "run_relax.py",
+          "backend": "mace",
+          "agent_selected": true,
+          "model_name": "mace-mp-0",
+          "run_cmd": "python run_relax.py",
+          "ran": true,
+          "returncode": 0
+        }
+      }
+    }
+  }
+}

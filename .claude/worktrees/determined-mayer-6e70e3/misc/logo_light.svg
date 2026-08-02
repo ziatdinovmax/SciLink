@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 850" width="800" height="850">
+  <defs>
+    <!-- Richer gradients for better contrast on white -->
+    <radialGradient id="blueGrad" cx="35%" cy="30%" r="65%">
+      <stop offset="0%" stop-color="#5A9CF0"/>
+      <stop offset="50%" stop-color="#3B7DD8"/>
+      <stop offset="100%" stop-color="#2458B5"/>
+    </radialGradient>
+    <radialGradient id="orangeGrad" cx="35%" cy="30%" r="65%">
+      <stop offset="0%" stop-color="#F58B6A"/>
+      <stop offset="50%" stop-color="#E5623D"/>
+      <stop offset="100%" stop-color="#C94825"/>
+    </radialGradient>
+    <radialGradient id="greenGrad" cx="35%" cy="30%" r="65%">
+      <stop offset="0%" stop-color="#4AD492"/>
+      <stop offset="50%" stop-color="#2AAF6E"/>
+      <stop offset="100%" stop-color="#1D8F55"/>
+    </radialGradient>
+    <radialGradient id="centerGrad" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="70%" stop-color="#F5F6F8"/>
+      <stop offset="100%" stop-color="#E4E7EC"/>
+    </radialGradient>
+    
+    <!-- Subtle shadow filters for white background -->
+    <filter id="blueShadow" x="-50%" y="-50%" width="200%" height="200%">
+      <feDropShadow dx="0" dy="3" stdDeviation="8" flood-color="#2458B5" flood-opacity="0.3"/>
+    </filter>
+    <filter id="orangeShadow" x="-50%" y="-50%" width="200%" height="200%">
+      <feDropShadow dx="0" dy="3" stdDeviation="8" flood-color="#C94825" flood-opacity="0.3"/>
+    </filter>
+    <filter id="greenShadow" x="-50%" y="-50%" width="200%" height="200%">
+      <feDropShadow dx="0" dy="3" stdDeviation="8" flood-color="#1D8F55" flood-opacity="0.3"/>
+    </filter>
+    <filter id="centerShadow" x="-50%" y="-50%" width="200%" height="200%">
+      <feDropShadow dx="0" dy="5" stdDeviation="15" flood-color="#8090A5" flood-opacity="0.25"/>
+    </filter>
+  </defs>
+  
+  <!-- White background -->
+  <rect width="800" height="850" fill="#FFFFFF"/>
+  
+  <!-- Dashed triangular connector path -->
+  <path d="M 400 180 
+           C 550 180, 680 400, 616.5 555
+           C 580 640, 500 690, 400 690
+           C 300 690, 220 640, 183.5 555
+           C 120 400, 250 180, 400 180"
+        fill="none" 
+        stroke="#A0AABB" 
+        stroke-width="2.5" 
+        stroke-dasharray="14,10"
+        opacity="0.6"/>
+  
+  <!-- Connection lines from center circle edge to outer circles -->
+  <line x1="400" y1="315" x2="400" y2="248" stroke="#9AA5B5" stroke-width="2.5"/>
+  <line x1="300.4" y1="487.5" x2="242.4" y2="521" stroke="#9AA5B5" stroke-width="2.5"/>
+  <line x1="499.6" y1="487.5" x2="557.6" y2="521" stroke="#9AA5B5" stroke-width="2.5"/>
+  
+  <!-- Center circle with shadow and border -->
+  <circle cx="400" cy="430" r="115" fill="url(#centerGrad)" filter="url(#centerShadow)" stroke="#D0D5DD" stroke-width="2"/>
+  
+  <!-- Small colored dots exactly at the stems (on center circle edge) -->
+  <circle cx="400" cy="315" r="6" fill="#3B7DD8"/>
+  <circle cx="300.4" cy="487.5" r="6" fill="#E5623D"/>
+  <circle cx="499.6" cy="487.5" r="6" fill="#2AAF6E"/>
+  
+  <!-- SciLink text -->
+  <text x="400" y="418" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif" font-size="64" font-weight="700" fill="#1E3A5F">Sci</text>
+  
+  <text x="400" y="478" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif" font-size="64" font-weight="700">
+    <tspan fill="#2458B5">L</tspan><tspan fill="#C94825">i</tspan><tspan fill="#B8920E">n</tspan><tspan fill="#1D8F55">k</tspan>
+  </text>
+  
+  <!-- Blue circle (top) - Theta -->
+  <circle cx="400" cy="180" r="68" fill="url(#blueGrad)" filter="url(#blueShadow)"/>
+  <!-- Theta symbol -->
+  <ellipse cx="400" cy="180" rx="20" ry="32" fill="none" stroke="white" stroke-width="5.5" stroke-linecap="round"/>
+  <line x1="380" y1="180" x2="420" y2="180" stroke="white" stroke-width="5.5" stroke-linecap="round"/>
+  
+  <!-- Orange circle (bottom-left) - Wave -->
+  <circle cx="183.5" cy="555" r="68" fill="url(#orangeGrad)" filter="url(#orangeShadow)"/>
+  <!-- Wave icon -->
+  <path d="M 140 567 
+           Q 152 530, 164 560 
+           Q 176 590, 188 545
+           Q 200 500, 212 545
+           Q 221 575, 227 557" 
+        fill="none" stroke="white" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+  
+  <!-- Green circle (bottom-right) - Document -->
+  <circle cx="616.5" cy="555" r="68" fill="url(#greenGrad)" filter="url(#greenShadow)"/>
+  <!-- Document/text icon -->
+  <rect x="584" y="522" width="65" height="66" rx="10" fill="white"/>
+  <line x1="597" y1="544" x2="636" y2="544" stroke="#1D8F55" stroke-width="5.5" stroke-linecap="round"/>
+  <line x1="597" y1="564" x2="628" y2="564" stroke="#1D8F55" stroke-width="5.5" stroke-linecap="round"/>
+</svg>

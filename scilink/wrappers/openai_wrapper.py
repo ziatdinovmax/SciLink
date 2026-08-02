@@ -89,14 +89,20 @@ class OpenAIAsGenerativeModel:
         # Build Gemini-like response
         finish_map = {"stop": 1, "length": 0, "tool_calls": 2, "content_filter": 3}
         candidates = []
+        raw_texts = []
         for ch in resp.choices:
-            text = (ch.message.content or "")
-            text = self._fix_json_format(text)
+            raw = (ch.message.content or "")
+            raw_texts.append(raw)
+            text = self._fix_json_format(raw)
             fr = finish_map.get(ch.finish_reason, -1)
             candidates.append(SimpleNamespace(content=text, finish_reason=fr))
 
         first_text = candidates[0].content if candidates else ""
-        final_response = SimpleNamespace(text=first_text, candidates=candidates)
+        # raw_text is the model's UNCLEANED output — codegen must parse it, since
+        # _fix_json_format is JSON-oriented and can mangle a generated script.
+        first_raw = raw_texts[0] if raw_texts else first_text
+        final_response = SimpleNamespace(
+            text=first_text, raw_text=first_raw, candidates=candidates)
         return final_response
 
     # ---------------------- helpers ----------------------

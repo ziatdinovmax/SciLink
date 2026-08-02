@@ -1,0 +1,13 @@
+
+/people/alle927/lammps-mace-src/lib/kokkos/core/src/Kokkos_MathematicalFunctions.hpp(447): warning #20013-D: calling a constexpr __host__ function("signbit") from a __host__ __device__ function("signbit") is not allowed. The experimental flag '--expt-relaxed-constexpr' can be used to allow this.
+  inline bool signbit(double x) { using std::signbit; return signbit(x); } inline bool signbit(long double x) { using std::signbit; return signbit(x); } template <class T> 
+                                                             ^
+
+/people/alle927/lammps-mace-src/lib/kokkos/core/src/Kokkos_MathematicalFunctions.hpp(447): warning #20015-D: calling a constexpr __host__ function from a __host__ __device__ function is not allowed. The experimental flag '--expt-relaxed-constexpr' can be used to allow this.
+  inline bool signbit(double x) { using std::signbit; return signbit(x); } inline bool signbit(long double x) { using std::signbit; return signbit(x); } template <class T> 
+                                                      ^
+
+[ 92%] Building CXX object CMakeFiles/lammps.dir/people/alle927/lammps-mace-src/src/KOKKOS/fix_nve_limit_kokkos.cpp.o
+nvcc_wrapper - *warning* you have set multiple optimization flags (-O*), only the last is used because nvcc can only accept a single optimization setting.
+[ 92%] Building CXX object CMakeFiles/lammps.dir/people/alle927/lammps-mace-src/src/KOKKOS/fix_nve_sphere_kokkos.cpp.o
+nvcc_wrapper - *warning* you have set multiple optimization flags (-O*), only the last is used because nvcc can only accept a single optimization setting.

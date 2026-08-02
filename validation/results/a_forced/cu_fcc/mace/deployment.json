@@ -1,0 +1,21 @@
+{
+  "backend": "mace",
+  "model_name": "mace",
+  "model_file": "/qfs/people/alle927/SciLink/SciLink/validation/results/a_forced/cu_fcc/mace/mace.model",
+  "elements": [
+    "Cu"
+  ],
+  "selection": {
+    "backend": "mace",
+    "model_name": "mace",
+    "justification": "caller-forced via backend='mace'"
+  },
+  "run_path": "/qfs/people/alle927/SciLink/SciLink/validation/results/a_forced/cu_fcc/mace/run_relax.py",
+  "runner": "ase",
+  "task": "relax",
+  "potential_backend": "mace",
+  "potential_model": "mace",
+  "structure_file": "/qfs/people/alle927/SciLink/SciLink/validation/results/a_forced/cu_fcc/mace/system.data",
+  "research_goal": "Relax bulk FCC copper to its equilibrium geometry (full cell + ionic relaxation) and report the optimized lattice constant. This is a metal; use appropriate smearing and a dense k-point mesh.",
+  "notes": "MACE mace (medium, inorganic). LAMMPS-capable via pair_style mliap unified."
+}

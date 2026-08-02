@@ -1,0 +1,22 @@
+{
+  "backend": "mace",
+  "model_name": "mace-mp-0",
+  "model_file": "/qfs/people/alle927/SciLink/SciLink/validation/results/b_agent_select/c_diamond/mlip/mace-mp-0.model",
+  "elements": [
+    "C"
+  ],
+  "selection": {
+    "backend": "mace",
+    "model_name": "mace-mp-0",
+    "justification": "Diamond (cubic carbon) is an inorganic crystalline material that falls squarely within the domain of mace-mp-0, which was trained on the Materials Project trajectory dataset covering ~150k inorganic materials. The MPtrj dataset includes various carbon allotropes and structures, making this model well-suited for predicting the structural properties of diamond. MACE-MP-0 provides high accuracy for lattice parameters and energetics of inorganic solids, and it natively supports stress tensor calculations needed for full cell relaxation. The model has been extensively validated on carbon systems including diamond.",
+    "cautions": "While mace-mp-0 should perform well for diamond, be aware that: (1) Carbon is a light element with high phonon frequencies, so ensure your relaxation convergence criteria are tight enough (forces < 0.01 eV/\u00c5 recommended). (2) Diamond has a very high bulk modulus, so stress convergence may require careful settings. (3) If the predicted lattice constant deviates significantly from the experimental value (~3.567 \u00c5), consider that the model inherits systematic errors from the PBE functional used in the MPtrj training data (PBE typically underestimates lattice constants by ~1-2% for diamond). (4) The 'mace-mp-0b' variant would be faster but less accurate if speed becomes a concern for larger cells."
+  },
+  "run_path": "/qfs/people/alle927/SciLink/SciLink/validation/results/b_agent_select/c_diamond/mlip/run_relax.py",
+  "runner": "ase",
+  "task": "relax",
+  "potential_backend": "mace",
+  "potential_model": "mace-mp-0",
+  "structure_file": "/qfs/people/alle927/SciLink/SciLink/validation/results/b_agent_select/c_diamond/mlip/system.data",
+  "research_goal": "Relax bulk diamond (cubic carbon) to its equilibrium geometry (full cell + ionic relaxation) and report the optimized lattice constant. Carbon is a light element \u2014 ensure the plane-wave cutoff is high enough.",
+  "notes": "MACE mace-mp-0 (medium, inorganic). LAMMPS-capable via pair_style mliap unified."
+}
