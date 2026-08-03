@@ -62,5 +62,18 @@ app = open("/Users/maxim.ziatdinov/Code/SciLink/scilink/ui/app.py").read()
 check("_cfg.get(\"api_key\")" not in app, "call site no longer reads credentials from agent_config")
 check("getattr(st.session_state.agent, \"model\", None)" in app, "call site passes the agent's model")
 
+# ── title shaping ───────────────────────────────────────────────────────────
+print("\n=== titles are cut on a word boundary, not mid-word ===")
+long = FakeModel(text="Operando XRD polymorph identification from amorphous precursor phases")
+t = generate_session_title(long, "x")
+print(f"     {t!r}  (len={len(t)})")
+check(len(t) <= 60, "respects the 60-char label cap")
+check(not t.endswith("precurs"), "does not cut mid-word (live proxy produced exactly this)")
+check(t == "Operando XRD polymorph identification from amorphous", "cuts at the last whole word")
+check(generate_session_title(FakeModel(text="  Ragged\n\n  spacing   here "), "x")
+      == "Ragged spacing here", "collapses ragged whitespace")
+check(generate_session_title(FakeModel(text="A"*80), "x") == "A"*60,
+      "unbroken 80-char string still yields 60 chars, not empty")
+
 print("\n" + ("ALL PASSED" if not fails else f"{len(fails)} FAILURE(S): {fails}"))
 sys.exit(1 if fails else 0)

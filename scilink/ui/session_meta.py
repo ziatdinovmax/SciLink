@@ -94,6 +94,11 @@ def generate_session_title(model, first_user_msg: str,
         resp = model.generate_content(
             [prompt], generation_config=SimpleNamespace(max_output_tokens=24))
         title = re.sub(r'["\'\n\r.]+', " ", getattr(resp, "text", "") or "")
-        return title.strip()[:60] or None
+        title = " ".join(title.split()).strip()
+        if len(title) > 60:
+            # Cut on a word boundary — a sidebar label ending mid-word
+            # ("...from amorphous precurs") reads as a broken title.
+            title = title[:60].rsplit(" ", 1)[0].rstrip(" ,;:-") or title[:60]
+        return title or None
     except Exception:
         return None
