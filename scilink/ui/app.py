@@ -939,13 +939,12 @@ else:
                         generate_session_title)
                     _sdir = st.session_state.session_dir
                     if _sdir and not load_session_name(_sdir):
-                        _cfg = st.session_state.agent_config
                         _first_user = next(
                             (m["content"] for m in st.session_state.chat_messages
                              if m["role"] == "user"), "")
                         _title = generate_session_title(
-                            _cfg.get("model"), _cfg.get("api_key"),
-                            _cfg.get("base_url"), _first_user, content)
+                            getattr(st.session_state.agent, "model", None),
+                            _first_user, content)
                         if _title:
                             save_session_name(_sdir, _title, named_by="agent")
                 except Exception:  # noqa: BLE001 - naming must never break a turn

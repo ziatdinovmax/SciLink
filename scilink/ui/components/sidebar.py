@@ -868,10 +868,6 @@ def start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_key
     st.session_state.agent_config = {
         "model": model,
         "mode": mode,
-        # For the auto-title call after the first turn (session_meta):
-        # litellm needs the same credentials the agent got.
-        "api_key": resolved_key,
-        "base_url": base_url or None,
     }
     st.session_state.chat_messages = []
     st.session_state.known_images = set()
@@ -1233,9 +1229,7 @@ def resume_session(
     st.session_state.agent = agent
     st.session_state.agent_initialized = True
     st.session_state.session_dir = str(session_path)
-    st.session_state.agent_config = {"model": model, "mode": mode,
-                                     "api_key": resolved_key,
-                                     "base_url": base_url or None}
+    st.session_state.agent_config = {"model": model, "mode": mode}
     st.session_state.chat_messages = display_messages
     st.session_state.known_images = known
     st.rerun()

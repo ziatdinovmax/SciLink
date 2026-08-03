@@ -10,6 +10,7 @@ user-set name always wins and is never overwritten by the agent.
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 _META_FILE = "session_meta.json"
@@ -67,15 +68,22 @@ def session_label(session_dir, prefix: str) -> str:
     return f"{name} — {ts}" if name else ts
 
 
-def generate_session_title(model: str, api_key, base_url,
-                           first_user_msg: str,
+def generate_session_title(model, first_user_msg: str,
                            first_reply: str = "") -> Optional[str]:
     """One small LLM call -> a concise session title, or None on any
-    failure (callers fall back to the timestamp label silently)."""
+    failure (callers fall back to the timestamp label silently).
+
+    Takes the agent's already-constructed model object — the one whose
+    transport is set up for wherever this deployment actually talks.
+    Calling litellm directly instead would re-derive the credentials and
+    get the internal proxy wrong: with a base_url set and a project-suffixed
+    model, litellm reads a claude-* name as the Anthropic provider and never
+    speaks the proxy's schema, so titling silently no-ops on the deployment
+    most sessions run on.
+    """
     if not (model and first_user_msg):
         return None
     try:
-        import litellm
         prompt = (
             "Name this scientific-assistant session in 3-6 plain words "
             "(no quotes, no trailing period). Base it on the topic, not "
@@ -83,15 +91,9 @@ def generate_session_title(model: str, api_key, base_url,
             f"First request: {first_user_msg[:600]}\n"
             f"Start of reply: {first_reply[:300]}"
         )
-        kwargs = {"model": model,
-                  "messages": [{"role": "user", "content": prompt}],
-                  "max_tokens": 24}
-        if api_key:
-            kwargs["api_key"] = api_key
-        if base_url:
-            kwargs["base_url"] = base_url
-        title = litellm.completion(**kwargs).choices[0].message.content
-        title = re.sub(r'["\'\n\r.]+', " ", title or "").strip()
-        return title[:60] or None
+        resp = model.generate_content(
+            [prompt], generation_config=SimpleNamespace(max_output_tokens=24))
+        title = re.sub(r'["\'\n\r.]+', " ", getattr(resp, "text", "") or "")
+        return title.strip()[:60] or None
     except Exception:
         return None
