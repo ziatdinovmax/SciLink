@@ -47,7 +47,15 @@ dependencies = [
     "h5py>=3.10",
     "nexusformat>=2.0",
     "pyyaml>=6.0",
-    "streamlit>=1.37.0",
+    # 1.52.0 is the floor for st.html(unsafe_allow_javascript=True), which the
+    # theme injects on every rerun — an older Streamlit takes the app down on
+    # the first inject_theme() call.
+    "streamlit>=1.52.0",
+    # litellm's Bedrock path needs boto3 (credential/region resolution) and
+    # botocore (SigV4 signing); litellm itself declares neither outside its
+    # [proxy] extra. Bedrock is a first-class provider in scilink/providers.py
+    # and selectable from the UI, so this belongs in the base install.
+    "boto3>=1.34.0",
     # Markdown -> PDF export (with pymupdf above). Arrives transitively via
     # streamlit -> rich, but this is a direct import, so pin it directly.
     "markdown-it-py>=2.2.0",
