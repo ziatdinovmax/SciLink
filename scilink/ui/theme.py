@@ -1,6 +1,44 @@
 """Material Design theme — dark and light variants."""
 
+import sys
+
 import streamlit as st
+
+_JS_DEGRADED_NOTICE_SHOWN = False
+
+
+def _inject_js(html: str) -> None:
+    """Inject a ``<script>`` block, degrading instead of crashing.
+
+    ``st.html``'s ``unsafe_allow_javascript`` kwarg landed in Streamlit
+    1.52.0; older versions raise ``TypeError`` for it. Everything injected
+    through here is cosmetic (widget restyling, emoji collisions), while
+    ``inject_theme()`` runs before anything else on every rerun — so a
+    failure here must cost the effect, not the app.
+    """
+    global _JS_DEGRADED_NOTICE_SHOWN
+    try:
+        st.html(html, unsafe_allow_javascript=True)
+        return
+    except TypeError:
+        pass
+    except Exception:
+        return
+
+    if not _JS_DEGRADED_NOTICE_SHOWN:
+        _JS_DEGRADED_NOTICE_SHOWN = True
+        print(
+            f"SciLink: Streamlit {st.__version__} rejected the "
+            "unsafe_allow_javascript argument; cosmetic theme effects are "
+            "disabled. Fix: pip install -U 'streamlit>=1.52'",
+            file=sys.stderr,
+        )
+    # Pre-1.52 st.html strips <script>, so the effect is lost but the DOM
+    # slot the theme relies on for stable layout is still emitted.
+    try:
+        st.html(html)
+    except Exception:
+        pass
 
 _MATERIAL_CSS_DARK = """
 <style>
@@ -1459,7 +1497,7 @@ def inject_theme() -> None:
     css = _MATERIAL_CSS_DARK if theme_mode == "dark" else _MATERIAL_CSS_LIGHT
     st.markdown(css, unsafe_allow_html=True)
 
-    # Force-restyle widgets via JS injected through st.html(unsafe_allow_javascript=True)
+    # Force-restyle widgets via JS injected through _inject_js -> st.html
     # (st.markdown strips <script> tags). st.html runs inline in the main
     # document — not an iframe — so window.parent resolves to the app window
     # and window.parent.document is the app document itself.
@@ -1494,11 +1532,11 @@ def inject_theme() -> None:
         .observe(doc.body, {childList:true, subtree:true, attributes:true});
 })();
 </script>"""
-        st.html(_LIGHT_WIDGET_JS, unsafe_allow_javascript=True)
+        _inject_js(_LIGHT_WIDGET_JS)
     else:
         # Keep DOM slot count stable; also undo any inline styles
         # left by the light-mode observer on the stop button.
-        st.html("""<script>
+        _inject_js("""<script>
 (function(){
     var doc = window.parent.document;
     function cleanup(){
@@ -1514,7 +1552,7 @@ def inject_theme() -> None:
     new MutationObserver(cleanup)
         .observe(doc.body, {childList:true, subtree:true});
 })();
-</script>""", unsafe_allow_javascript=True)
+</script>""")
 
     vibe = st.session_state.get("vibe_theme", "Professional")
 
@@ -1541,7 +1579,6 @@ def inject_theme() -> None:
         unsafe_allow_html=True,
     )
     # Slot 2: collision JS (always present, no-op script when inactive)
-    st.html(
-        _COLLISION_JS if use_collision_js else "<script>/* noop */</script>",
-        unsafe_allow_javascript=True,
+    _inject_js(
+        _COLLISION_JS if use_collision_js else "<script>/* noop */</script>"
     )
