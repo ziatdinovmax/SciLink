@@ -759,7 +759,10 @@ def _append_fit_domain_guidance(prompt: list, state: dict) -> None:
         "\n## Fit-domain & background guidance\n"
         f"User processing note: {instruction}\n"
         "Express any region-of-interest as the FIT DOMAIN and any "
-        "background/baseline as a FIT PARAMETER — not as preprocessing."
+        "background/baseline as a FIT PARAMETER — not as preprocessing.\n"
+        "This note is a USER request: a region restriction it implies is "
+        "user-authorized — it satisfies any 'unless the user asked' condition "
+        "in domain skill rules and must not be reverted or second-guessed."
     )
 
 
@@ -2070,6 +2073,12 @@ class CurveFittingPlanningController:
         # ambiguous. Mirrors the planning prompt and ImageAnalysis._validate_plan.
         _append_objective_context(prompt_parts, state)
         _append_skill_context(prompt_parts, state, "planning")
+        # The validator must see a user processing note (e.g. a crop /
+        # region-of-interest request): without it, a skill's mandatory
+        # "fit the full measured range" rule reads a user-restricted fit
+        # domain as a violation and reverts it. Mirrors the planning-prompt
+        # injection; no-op when no custom_processing_instruction is set.
+        _append_fit_domain_guidance(prompt_parts, state)
 
         # For a series, show the multi-spectrum scout overlay (the single
         # first-spectrum plot is uninformative — and can render blank — for a
