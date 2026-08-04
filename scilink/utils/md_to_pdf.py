@@ -118,16 +118,35 @@ def _pull_wide_figures(text: str, base_dir):
 
 
 def _append_figure_pages(doc, figures, fitz) -> None:
-    """One page per outsized figure, oriented to match it, with caption."""
+    """One page per outsized figure, oriented to match it, with caption.
+
+    The page is SIZED TO THE FIGURE along its short axis: an extreme
+    ribbon (a left-to-right workflow diagram can be 5:1) fitted onto a
+    fixed letter page is width-bound and floats in a sea of vertical
+    whitespace. The long axis keeps the letter dimension so the figure
+    gets the full width (or height); the short axis shrinks to the scaled
+    figure plus margins and the caption strip, floored so a page never
+    degenerates into a sliver.
+    """
+    _MIN_SHORT = 216       # 3" — keep even the thinnest ribbon page page-like
     for path, caption in figures:
-        wide = True
+        wide, aspect = True, 1.0
         try:
             from PIL import Image
             with Image.open(path) as im:
-                wide = not im.height or im.width / im.height >= 1.0
+                if im.height and im.width:
+                    aspect = im.width / im.height
+                wide = aspect >= 1.0
         except Exception:  # noqa: BLE001
             pass
-        w, h = (792, 612) if wide else (612, 792)
+        if wide:
+            w = 792
+            img_h = (w - 2 * _MARGIN) / aspect
+            h = min(612.0, max(_MIN_SHORT, img_h + 2 * _MARGIN + 24))
+        else:
+            h = 792
+            img_w = (h - 2 * _MARGIN - 24) * aspect
+            w = min(612.0, max(_MIN_SHORT, img_w + 2 * _MARGIN))
         page = doc.new_page(width=w, height=h)
         frame = fitz.Rect(_MARGIN, _MARGIN, w - _MARGIN, h - _MARGIN - 24)
         try:
