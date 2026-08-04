@@ -109,12 +109,22 @@ def _pull_wide_figures(text: str, base_dir):
                 ratio = im.width / im.height if im.height else 1.0
                 if not (_TALL_FIGURE_RATIO <= ratio <= _WIDE_FIGURE_RATIO):
                     figures.append((p, alt))
-                    return ""      # placed later, on its own page
+                    return "\x00FIG\x00"   # placed later, on its own page
         except Exception:  # noqa: BLE001 - not an image we can measure
             pass
         return m.group(0)
 
-    return re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", take, text), figures
+    text = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", take, text)
+    # A section whose ONLY content was a pulled figure would keep an
+    # orphaned heading over dead space on the text page (live: a document
+    # ending with '## Campaign Workflow' and nothing under it). Take the
+    # heading with the figure — its page already carries the caption. A
+    # figure pulled from MID-section leaves its surrounding prose (and
+    # heading) untouched.
+    text = re.sub(
+        r"(?m)^#{1,6}[^\n]*\n\s*\x00FIG\x00\s*(?=^#{1,6}\s|\Z)", "", text)
+    text = text.replace("\x00FIG\x00", "")
+    return text, figures
 
 
 def _append_figure_pages(doc, figures, fitz) -> None:

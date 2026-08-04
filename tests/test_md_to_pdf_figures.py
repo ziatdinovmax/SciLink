@@ -85,6 +85,41 @@ with tempfile.TemporaryDirectory() as t:
     check("no spurious pages without figures",
           all(p.rect.width <= p.rect.height for p in doc))
 
+# ── the figure page fits its figure; a figure-only heading moves with it ──
+
+with tempfile.TemporaryDirectory() as t:
+    d = Path(t)
+    make_png(d / "ribbon.png", 3100, 590)    # ~5.3:1, the live shape
+    md = d / "wp.md"
+    md.write_text("# Paper\n\nBody text.\n\n## References\n\nSome ref.\n\n"
+                  "## Campaign Workflow\n\n![Campaign workflow](ribbon.png)\n")
+
+    text, figs = _pull_wide_figures(md.read_text(), d)
+    check("figure-only heading pulled with its figure",
+          "Campaign Workflow" not in text)
+    check("other headings untouched", "## References" in text)
+    check("no sentinel leaks into the text", "\x00" not in text)
+
+    doc = fitz.open(markdown_to_pdf(md, title="wp"))
+    fig_pages = [p for p in doc if p.get_images()]
+    check("ribbon still gets its page", len(fig_pages) == 1)
+    if fig_pages:
+        r = fig_pages[0].rect
+        check("page is sized to the ribbon, not full letter",
+              r.width == 792 and r.height < 400,
+              f"({r.width:.0f}x{r.height:.0f})")
+
+with tempfile.TemporaryDirectory() as t:
+    d = Path(t)
+    make_png(d / "ribbon.png", 3000, 500)
+    md = d / "mid.md"
+    md.write_text("# Doc\n\n## Methods\n\nBefore the figure.\n\n"
+                  "![Flow](ribbon.png)\n\nAfter the figure.\n")
+    text, _ = _pull_wide_figures(md.read_text(), d)
+    check("mid-section pull keeps the heading", "## Methods" in text)
+    check("mid-section pull keeps surrounding prose",
+          "Before the figure." in text and "After the figure." in text)
+
 print("=" * 50)
 n = sum(results.values())
 print(f"PDF FIGURE PAGES: {n}/{len(results)} checks passed")
