@@ -1328,4 +1328,8 @@ come through verbatim: same sections, same order, same wording. The result
 replaces the original file in place, so anything you omit is deleted.
 If the document carries references, keep them and keep their numbering
 consistent with any citations you add.
+
+Do NOT return the document's TITLE as a section. The title is written for
+you when the sections are assembled; returning it as well stacks a second
+copy on top of the document, and one more with every later revision.
 """

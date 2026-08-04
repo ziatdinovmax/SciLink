@@ -807,6 +807,13 @@ class SimulationOrchestratorAgent:
             system_msg = self.messages[0]
             recent_msgs = self._trim_history(self.messages[1:], max_messages=self.MAX_HISTORY_MESSAGES)
             self.messages = [system_msg] + recent_msgs
+            # AFTER the trim, not before: the trim is what slices a
+            # tool_use away from its tool_result, so repairing first
+            # cleans a history that was already valid and leaves the
+            # fresh damage unrepaired (live: Bedrock rejected
+            # 'Expected toolResult blocks at messages.10' — index 10
+            # being exactly the splice boundary).
+            self.messages = repair_dangling_tool_calls(self.messages)
 
         iteration = 0
         while iteration < self.max_iterations:
@@ -890,6 +897,13 @@ class SimulationOrchestratorAgent:
             system_msg = self.messages[0]
             recent_msgs = self._trim_history(self.messages[1:], max_messages=self.MAX_HISTORY_MESSAGES)
             self.messages = [system_msg] + recent_msgs
+            # AFTER the trim, not before: the trim is what slices a
+            # tool_use away from its tool_result, so repairing first
+            # cleans a history that was already valid and leaves the
+            # fresh damage unrepaired (live: Bedrock rejected
+            # 'Expected toolResult blocks at messages.10' — index 10
+            # being exactly the splice boundary).
+            self.messages = repair_dangling_tool_calls(self.messages)
 
         iteration = 0
         while iteration < self.max_iterations:
