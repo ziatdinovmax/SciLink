@@ -472,6 +472,9 @@ class MetaOrchestratorAgent:
         # fusion-entry appends across fan-out worker threads.
         self._complementarity_cache: Dict[frozenset, Dict[str, Any]] = {}
         self._fanout_lock = threading.Lock()
+        # Serializes checkpoint writes: _close_delegation checkpoints on every
+        # completion, and fan-out workers close their entries concurrently.
+        self._checkpoint_lock = threading.Lock()
         # Auto-generated specialist capability inventory — built once on the
         # first chat turn (children must exist to read their tool registries).
         self._capabilities_block: Optional[str] = None
@@ -1373,6 +1376,11 @@ class MetaOrchestratorAgent:
             "error": result.get("error"),
             "completed_at": datetime.now().isoformat(),
         })
+        # A completed delegation is the ledger state worth preserving — the
+        # every-N-messages auto-save left short sessions (fewer than
+        # CHECKPOINT_INTERVAL turns) with no checkpoint at all, making them
+        # unresumable with their delegation history.
+        self._auto_checkpoint()
 
     def _summarize_delegation_result(self, mode, result, index) -> str:
         """Build the JSON string a delegate_to_* tool returns to the meta LLM."""
@@ -1552,18 +1560,26 @@ class MetaOrchestratorAgent:
             logging.warning(f"Failed to restore checkpoint: {e}")
 
     def _auto_checkpoint(self):
-        """Internal auto-checkpoint without LLM interaction."""
+        """Internal auto-checkpoint without LLM interaction.
+
+        Atomic (temp file + replace) and serialized: concurrent fan-out
+        workers checkpoint via _close_delegation, and a torn write would
+        corrupt the one file a resume depends on.
+        """
         try:
-            checkpoint_data = {
-                "timestamp": datetime.now().isoformat(),
-                "meta_mode": self.meta_mode.value,
-                "message_count": self.message_count,
-                "children_instantiated": sorted(self._children.keys()),
-                "delegation_ledger": self._delegation_ledger,
-                "knowledge_dir": str(self.knowledge_dir) if self.knowledge_dir else None,
-            }
-            with open(self.checkpoint_path, 'w') as f:
-                json.dump(checkpoint_data, f, indent=2, default=str)
+            with self._checkpoint_lock:
+                checkpoint_data = {
+                    "timestamp": datetime.now().isoformat(),
+                    "meta_mode": self.meta_mode.value,
+                    "message_count": self.message_count,
+                    "children_instantiated": sorted(self._children.keys()),
+                    "delegation_ledger": self._delegation_ledger,
+                    "knowledge_dir": str(self.knowledge_dir) if self.knowledge_dir else None,
+                }
+                tmp_path = self.checkpoint_path.with_suffix(".json.tmp")
+                with open(tmp_path, 'w') as f:
+                    json.dump(checkpoint_data, f, indent=2, default=str)
+                os.replace(tmp_path, self.checkpoint_path)
             print(f"    ✅ Auto-checkpoint saved")
             return True
         except Exception as e:

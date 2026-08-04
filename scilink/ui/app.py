@@ -2,6 +2,7 @@
 
 import base64
 import builtins
+import logging
 import re
 import threading
 from pathlib import Path
@@ -664,9 +665,12 @@ if not st.session_state.agent_initialized:
             resume_session(**_pending_resume)
         else:
             start_session(**_pending)
-        # start_session / resume_session call st.rerun() on success,
-        # so we only reach here if initialization failed.
-        st.stop()
+        # start_session / resume_session call st.rerun() on success, so we
+        # only reach here if initialization failed. The failure message is
+        # stashed in _session_init_error; rerun so the welcome screen can
+        # show it — st.stop() here would freeze on the spinner screen with
+        # the error invisible behind the dimmed sidebar.
+        st.rerun()
 
     # ── Normal welcome screen ────────────────────────────────
     col_l, col_c, col_r = st.columns([1, 2, 1])
@@ -705,6 +709,14 @@ if not st.session_state.agent_initialized:
             f'{_cur_desc}</p>',
             unsafe_allow_html=True,
         )
+
+        # Session start/resume failure from the previous run (stashed by
+        # start_session / resume_session). Below the mode selector because
+        # the mode-selector-anchor CSS pulls that row upward over anything
+        # rendered above it.
+        _init_err = st.session_state.pop("_session_init_error", None)
+        if _init_err:
+            st.error(_init_err)
 
         _is_dark = st.session_state.get("theme_mode", "dark") == "dark"
         _logo = _LOGO_DARK if _is_dark else _LOGO_LIGHT
@@ -903,6 +915,40 @@ else:
                     "md_reports": new_docs,
                     "verbose": task.verbose_log or "",
                 })
+                # Persist session state now that the turn is complete. The
+                # orchestrators' periodic auto-save (every CHECKPOINT_INTERVAL
+                # messages) left short UI sessions with no checkpoint at all —
+                # unresumable. The CLI saves on quit; the UI has no quit
+                # moment, so save after every finished turn instead.
+                # save_checkpoint (meta) snapshots the children too.
+                _agent = st.session_state.get("agent")
+                try:
+                    if hasattr(_agent, "save_checkpoint"):
+                        _agent.save_checkpoint()
+                    elif hasattr(_agent, "_auto_checkpoint"):
+                        _agent._auto_checkpoint()
+                except Exception as _ckpt_exc:  # noqa: BLE001 - never break the turn
+                    logging.warning(f"Per-turn checkpoint failed: {_ckpt_exc}")
+                # Auto-title an unnamed session from its first exchange —
+                # one small LLM call, once per session; a user-set name is
+                # never overwritten and any failure falls back silently to
+                # the timestamp label.
+                try:
+                    from scilink.ui.session_meta import (
+                        load_session_name, save_session_name,
+                        generate_session_title)
+                    _sdir = st.session_state.session_dir
+                    if _sdir and not load_session_name(_sdir):
+                        _first_user = next(
+                            (m["content"] for m in st.session_state.chat_messages
+                             if m["role"] == "user"), "")
+                        _title = generate_session_title(
+                            getattr(st.session_state.agent, "model", None),
+                            _first_user, content)
+                        if _title:
+                            save_session_name(_sdir, _title, named_by="agent")
+                except Exception:  # noqa: BLE001 - naming must never break a turn
+                    pass
                 st.session_state.chat_task = ChatTask()
                 st.rerun(scope="app")
                 return
@@ -1361,13 +1407,9 @@ else:
         )
         current = Path(current_session_dir)
         result: list[tuple[str, Path]] = []
+        from scilink.ui.session_meta import session_label
         for s in sessions:
-            # Parse timestamp from directory name like <prefix>_20260223_201729
-            parts = s.name.removeprefix(f"{prefix}_")
-            try:
-                label = f"{parts[:4]}-{parts[4:6]}-{parts[6:8]} {parts[9:11]}:{parts[11:13]}:{parts[13:15]}"
-            except (IndexError, ValueError):
-                label = s.name
+            label = session_label(s, prefix)
             if s.resolve() == current.resolve():
                 label += " (current)"
             result.append((label, s))
@@ -1391,10 +1433,20 @@ else:
         else:
             labels = [s[0] for s in sessions]
             paths = [s[1] for s in sessions]
+            # Default to the CURRENT session, not the newest by name: a
+            # stray newer (possibly empty) session directory otherwise
+            # opens the tab on "No files found yet." while the session
+            # being worked on sits unselected below it.
+            current_idx = next(
+                (i for i, p in enumerate(paths)
+                 if p.resolve() == Path(st.session_state.session_dir).resolve()),
+                0,
+            )
             selected_idx = st.selectbox(
                 "Session",
                 range(len(labels)),
                 format_func=lambda i: labels[i],
+                index=current_idx,
                 key="session_selector",
             )
             session_path = paths[selected_idx]

@@ -850,6 +850,30 @@ div:has(> [data-testid="stMarkdown"] .theme-toggle-anchor) + div button:hover {
     color: #212121 !important;
     box-shadow: none !important;
 }
+/* Main-area secondary buttons (e.g. the Files tab's Refresh) — the sidebar
+   and mode-selector rules miss them, so they fall through to the
+   launch-time dark native theme: a dark box under a forced-dark label.
+   The mode-selector's outlined-purple rule is more specific and keeps
+   winning where it applies. */
+section[data-testid="stMain"] .stButton > button[kind="secondary"],
+section[data-testid="stMain"] button[data-testid="stBaseButton-secondary"] {
+    background-color: #EEEEEE !important;
+    color: #212121 !important;
+    border: 1px solid #E0E0E0 !important;
+}
+section[data-testid="stMain"] .stButton > button[kind="secondary"] *,
+section[data-testid="stMain"] button[data-testid="stBaseButton-secondary"] * {
+    color: #212121 !important;
+}
+section[data-testid="stMain"] .stButton > button[kind="secondary"]:hover,
+section[data-testid="stMain"] button[data-testid="stBaseButton-secondary"]:hover {
+    background-color: #E3F2FD !important;
+    border-color: #5B8DEF !important;
+    box-shadow: none !important;
+}
+/* Streamlit ≥1.49 drops the `kind` DOM attribute (it became a styled-prop
+   filtered before the DOM), so the [kind=…] halves above are for older
+   versions; the stBaseButton testid halves are what actually match. */
 /* The popover panel is portaled to the document root (not inside the expander),
    so style it globally for light mode. baseweb gives the body (and a nested
    content wrapper) a dark inline background, so whiten the body AND its block

@@ -4844,8 +4844,23 @@ class OrchestratorTools:
         # =====================================================================
         # READ FILE (non-destructive inspection)
         # =====================================================================
+        # A literature report is read for its whole content, never its head:
+        # its questions sit in sequence, so a head-only read hides every
+        # question but the first. Live, an agent read one seven times, decided
+        # the file "repeats" Q1, and wrote the note without Q2-Q4 — 70% of the
+        # retrieval unused, recorded as [TBD] as though the literature were
+        # thin. These files get the whole body up to a cap.
+        # Cap sized against the real corpus: session lit reports run 89k-262k
+        # chars (median 169k), so a smaller cap would exclude precisely the
+        # multi-question reports that most need a whole read. Past the cap the
+        # read truncates but emits the section outline, so the agent can
+        # offset= to each question instead of being stuck at the head.
+        _FULL_READ_STEMS = ("literature_search",)
+        _FULL_READ_MAX_CHARS = 250_000
+
         def read_file(file_path: str, max_lines: int = 200,
-                      tail: bool = False, search: str = None) -> str:
+                      tail: bool = False, search: str = None,
+                      offset: int = None) -> str:
             """
             Read and return the contents of a file. Use this to inspect
             plans, protocols, configs, logs, or any text/JSON file without
@@ -4963,23 +4978,51 @@ class OrchestratorTools:
                             "content": f"{note}\n\n{body}",
                         })
 
-                    if total > max_lines:
-                        if tail:
-                            shown = lines[-max_lines:]
-                            first, last = total - max_lines + 1, total
-                            more = (f"... ({first - 1} earlier lines not shown; "
-                                    f"omit tail to read from the top)")
-                            content = more + "\n" + "".join(shown)
-                        else:
-                            shown = lines[:max_lines]
-                            first, last = 1, max_lines
-                            content = "".join(shown) + (
-                                f"\n... ({total - max_lines} more lines not "
-                                f"shown. To see the END of the file call again "
-                                f"with tail=true; to find something specific "
-                                f"use search='<pattern>'; or raise max_lines.)")
-                    else:
+                    # A truncated read must say what it is missing and where,
+                    # or the agent cannot tell a short file from a short read.
+                    def _outline():
+                        heads = [(i + 1, ln.strip()) for i, ln in
+                                 enumerate(lines) if ln.startswith('#')]
+                        if len(heads) < 2:
+                            return ""
+                        return "\nSections: " + " · ".join(
+                            f"{h.lstrip('# ')[:44]} @ line {n}"
+                            for n, h in heads[:12]) + (
+                            " …" if len(heads) > 12 else "")
+
+                    # Files read for their whole content, not their head.
+                    whole = (any(s in path.name.lower()
+                                 for s in _FULL_READ_STEMS)
+                             and offset is None and not tail
+                             and len("".join(lines)) <= _FULL_READ_MAX_CHARS)
+
+                    truncated = True
+                    if whole or total <= max_lines:
                         first, last, content = 1, total, "".join(lines)
+                        truncated = False
+                    elif offset is not None:
+                        start = max(0, offset - 1)
+                        shown = lines[start:start + max_lines]
+                        first, last = start + 1, min(total, start + max_lines)
+                        content = "".join(shown) + (
+                            f"\n... (showing lines {first}-{last} of {total}."
+                            f"{_outline()})")
+                    elif tail:
+                        shown = lines[-max_lines:]
+                        first, last = total - max_lines + 1, total
+                        more = (f"... ({first - 1} earlier lines not shown; "
+                                f"omit tail to read from the top)")
+                        content = more + "\n" + "".join(shown)
+                    else:
+                        shown = lines[:max_lines]
+                        first, last = 1, max_lines
+                        content = "".join(shown) + (
+                            f"\n... ({total - max_lines} more lines not "
+                            f"shown — this is a TRUNCATED READ, not the whole "
+                            f"file. Jump to any part with offset=<line>; read "
+                            f"the END with tail=true; find something with "
+                            f"search='<pattern>'; or raise max_lines."
+                            f"{_outline()})")
 
                     return json.dumps({
                         "status": "success",
@@ -4987,7 +5030,7 @@ class OrchestratorTools:
                         "mode": "tail" if tail else "head",
                         "total_lines": total,
                         "shown_lines": f"{first}-{last}",
-                        "truncated": total > max_lines,
+                        "truncated": truncated,
                         "content": content,
                     })
 
@@ -5008,11 +5051,14 @@ class OrchestratorTools:
             name="read_file",
             description=(
                 "Read a text or JSON file — plans, protocols, scripts, "
-                "configs, logs, documents. Reads from the TOP by default. "
-                "For a long file do not read it repeatedly hoping to see more: "
-                "use search='<pattern>' to find where something is (and "
-                "whether it is there at all), or tail=true to read the END. "
-                "Do NOT use analyze_file for reading — that triggers the "
+                "configs, logs, documents. Reads from the TOP by default; "
+                "literature-search reports are returned WHOLE. "
+                "For a long file do not read it repeatedly hoping to see more — "
+                "you will get the same lines back. A truncated read lists the "
+                "section headings and their line numbers: use offset=<line> to "
+                "jump to one, search='<pattern>' to find where something is "
+                "(and whether it is there at all), or tail=true to read the "
+                "END. Do NOT use analyze_file for reading — that triggers the "
                 "scalarizer pipeline."
             ),
             parameters={
@@ -5043,6 +5089,18 @@ class OrchestratorTools:
                         "section', 'which lines cite Boettiger', 'did this log "
                         "raise'. Far cheaper than reading a long file, and it "
                         "answers presence/absence definitively."
+                    ),
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": (
+                        "1-based line to start reading from — the way to read "
+                        "the MIDDLE of a file. A truncated read lists the "
+                        "section headings with their line numbers; pass one "
+                        "here to jump straight there (e.g. offset=198 to read "
+                        "a section beginning at line 198). Do NOT re-read from "
+                        "the top hoping to see more — you will get the same "
+                        "lines back."
                     ),
                 },
             },

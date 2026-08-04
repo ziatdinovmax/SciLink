@@ -430,6 +430,11 @@ def render_sidebar() -> None:
                             "restored, but chat history will be loaded."
                         )
 
+                    if not consent:
+                        st.caption(
+                            "☝️ Check the code-execution consent box above "
+                            "to enable resuming."
+                        )
                     if st.button(
                         "Resume Session",
                         disabled=not consent,
@@ -494,6 +499,21 @@ def render_sidebar() -> None:
                 _render_planning_sidebar_uploads()
             elif app_mode == "meta":
                 _render_meta_sidebar_uploads()
+
+            # ── Session name (display-only; dir name stays load-bearing) ──
+            st.divider()
+            from scilink.ui.session_meta import (
+                load_session_name, save_session_name)
+            _sdir = st.session_state.session_dir
+            _current_name = load_session_name(_sdir) or ""
+            _typed = st.text_input(
+                "Session name", value=_current_name,
+                key="session_name_input",
+                help=("Shown in the resume list and File Explorer. "
+                      "Auto-named by the agent after the first turn "
+                      "unless you set one."))
+            if _typed.strip() and _typed.strip() != _current_name:
+                save_session_name(_sdir, _typed, named_by="user")
 
             # ── Agent status (mode-specific) ─────────────────────
             st.divider()
@@ -795,7 +815,11 @@ def start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_key
         resolved_key = auth.api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
 
     if not (api_key or base_url or any(os.environ.get(e) for e in spec.cred_env)):
-        st.sidebar.error(spec.cred_error)
+        # Stash rather than render: the caller runs behind the init spinner,
+        # which dims the sidebar — an error drawn there is invisible and the
+        # spinner never clears. app.py reruns and shows this on the welcome
+        # screen instead.
+        st.session_state._session_init_error = spec.cred_error
         return
 
     # Optional MP key: register so the DFT pipeline's auto-discovery picks it up
@@ -835,7 +859,7 @@ def start_session(model: str, api_key: str, base_url: str, mode: str, fh_api_key
                 session_dir, resolved_key, model, base_url, mode, fh_api_key,
             )
     except Exception as exc:
-        st.error(f"Failed to initialize agent: {exc}")
+        st.session_state._session_init_error = f"Failed to initialize agent: {exc}"
         return
 
     st.session_state.agent = agent
@@ -967,12 +991,10 @@ def _discover_resumable_sessions(app_mode: str) -> list:
         if not has_checkpoint and not has_chat:
             continue
 
-        # Build human-readable label from timestamp in dir name
-        parts = s.name.removeprefix(f"{prefix}_")
-        try:
-            label = f"{parts[:4]}-{parts[4:6]}-{parts[6:8]} {parts[9:11]}:{parts[11:13]}:{parts[13:15]}"
-        except (IndexError, ValueError):
-            label = s.name
+        # Human-readable label: stored display name (session_meta.json)
+        # with the timestamp, or the bare timestamp when unnamed.
+        from scilink.ui.session_meta import session_label
+        label = session_label(s, prefix)
 
         summary: dict = {}
         if has_checkpoint:
@@ -1016,6 +1038,38 @@ def _convert_chat_history_for_display(history: list) -> list:
     return messages
 
 
+def _collect_restored_deliverables(session_path: Path) -> tuple:
+    """Marked deliverables from the session's manifest(s), split for the
+    chat renderer: (md_paths, html_paths).
+
+    Chat-message attachments (md_reports / html_reports) live only in
+    Streamlit state and are lost on restore — the deliverables manifests
+    are the durable record of what the session produced, so a resumed
+    chat re-embeds from them.
+    """
+    from scilink.agents.planning_agents.user_interface import load_deliverables
+
+    # Only the most recent deliverable is re-embedded: a session may hold
+    # several revisions under the same title (a revision inherits the
+    # document's name), and embedding all of them repeats near-identical
+    # documents. Manifest entries carry no timestamp, so recency = file
+    # mtime, which also orders correctly across per-child manifests.
+    # Older versions stay reachable in the Files tab.
+    candidates = []
+    for entry in load_deliverables(session_path):
+        if not entry.get("deliverable"):
+            continue
+        p = Path(entry.get("path", ""))
+        if p.exists() and p.suffix.lower() in (".md", ".html", ".htm"):
+            candidates.append(p)
+    if not candidates:
+        return [], []
+    latest = max(candidates, key=lambda p: p.stat().st_mtime)
+    if latest.suffix.lower() == ".md":
+        return [str(latest)], []
+    return [], [str(latest)]
+
+
 def resume_session(
     session_dir: str,
     model: str,
@@ -1048,7 +1102,9 @@ def resume_session(
         )
 
     if not (api_key or base_url or any(os.environ.get(e) for e in spec.cred_env)):
-        st.sidebar.error(spec.cred_error)
+        # See start_session: rendering here would land behind the dimmed
+        # spinner screen; the welcome screen shows it after the rerun.
+        st.session_state._session_init_error = spec.cred_error
         return
 
     # Optional MP key registration (see start_session for rationale).
@@ -1127,7 +1183,7 @@ def resume_session(
                 futurehouse_api_key=fh_api_key or None,
             )
     except Exception as exc:
-        st.error(f"Failed to restore session: {exc}")
+        st.session_state._session_init_error = f"Failed to restore session: {exc}"
         return
 
     # Load chat history for Streamlit display
@@ -1140,11 +1196,35 @@ def resume_session(
         except Exception:
             pass
 
+    # Re-embed the session's deliverables. The per-message attachments the
+    # live chat carries are not persisted, so without this a restored chat
+    # shows the conversation but silently drops every embedded document.
+    md_docs, html_docs = _collect_restored_deliverables(session_path)
+    if md_docs or html_docs:
+        display_messages.append({
+            "role": "assistant",
+            "content": ("📎 Latest deliverable from this session "
+                        "(earlier versions are in the Files tab):"),
+            "md_reports": md_docs,
+            "html_reports": html_docs,
+        })
+
     # Pre-populate known images so they don't re-appear as "new"
     known: set = set()
     for ext in (".png", ".jpg", ".jpeg"):
         for p in session_path.rglob(f"*{ext}"):
             known.add(str(p))
+    # ...and existing reports/documents. The .html/.md sweeps key on
+    # path+mtime in this same set; without pre-marking them, the first
+    # completed turn after a resume treats every report the session ever
+    # produced as "new this turn" and embeds them all in its answer.
+    # (The resume itself already re-embeds the latest deliverable.)
+    for ext in (".html", ".md"):
+        for p in session_path.rglob(f"*{ext}"):
+            try:
+                known.add(f"{p}:{p.stat().st_mtime_ns}")
+            except OSError:
+                known.add(str(p))
 
     st.session_state.agent = agent
     st.session_state.agent_initialized = True
@@ -1318,7 +1398,9 @@ def _start_simulate_session(
         )
 
     if not (api_key or base_url or any(os.environ.get(e) for e in spec.cred_env)):
-        st.sidebar.error("Provide an API key or set an environment variable.")
+        st.session_state._session_init_error = (
+            "Provide an API key or set an environment variable."
+        )
         return
 
     # Direct providers: export the typed key to the conventional vendor env var
