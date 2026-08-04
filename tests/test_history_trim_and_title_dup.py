@@ -22,11 +22,13 @@ from scilink.utils.tool_media import repair_dangling_tool_calls
 
 PLANNING = Path("scilink/agents/planning_agents/planning_orchestrator.py")
 META = Path("scilink/agents/meta_agent/meta_orchestrator.py")
+ANALYSIS = Path("scilink/agents/exp_agents/analysis_orchestrator.py")
+SIMULATION = Path("scilink/agents/sim_agents/simulation_orchestrator.py")
 
 
 # ── 1 · repair must run AFTER the trim ───────────────────────────────
 
-@pytest.mark.parametrize("src", [PLANNING, META])
+@pytest.mark.parametrize("src", [PLANNING, META, ANALYSIS, SIMULATION])
 def test_repair_follows_every_trim(src):
     """Repairing before the trim fixes a history that was already fine."""
     text = src.read_text()
@@ -39,7 +41,7 @@ def test_repair_follows_every_trim(src):
             f"{src.name}: a trim at offset {pos} is not followed by a repair")
 
 
-@pytest.mark.parametrize("src", [PLANNING, META])
+@pytest.mark.parametrize("src", [PLANNING, META, ANALYSIS, SIMULATION])
 def test_the_reason_is_recorded_at_the_call_site(src):
     assert "AFTER the trim, not before" in src.read_text()
 
