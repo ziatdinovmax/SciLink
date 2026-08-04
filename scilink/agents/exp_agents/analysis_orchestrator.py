@@ -630,6 +630,11 @@ class AnalysisOrchestratorAgent:
         
         # Session state
         self.current_metadata: Optional[Dict[str, Any]] = None
+        # Dataset that current_metadata belongs to. None = unbound (freshly
+        # loaded, not yet consumed by run_analysis). Binds on first use; a
+        # run_analysis on a *different* dataset must re-resolve rather than
+        # silently reuse another dataset's metadata (issue #411).
+        self.current_metadata_owner: Optional[str] = None
         self.current_data_path: Optional[str] = None
         self.current_data_type: Optional[str] = None
         self.selected_agent_id: Optional[int] = None
@@ -1284,6 +1289,13 @@ class AnalysisOrchestratorAgent:
                 state = json.load(f)
             
             self.current_metadata = state.get("current_metadata")
+            # Older checkpoints predate ownership: backfill from the last data
+            # path so restored metadata stays bound to the dataset it served,
+            # instead of silently binding to whatever runs next.
+            self.current_metadata_owner = state.get("current_metadata_owner") or (
+                state.get("current_data_path")
+                if state.get("current_metadata") is not None else None
+            )
             self.current_data_path = state.get("current_data_path")
             self.current_data_type = state.get("current_data_type")
             self.selected_agent_id = state.get("selected_agent_id")
@@ -1552,6 +1564,7 @@ class AnalysisOrchestratorAgent:
             checkpoint_data = {
                 "timestamp": datetime.now().isoformat(),
                 "current_metadata": self.current_metadata,
+                "current_metadata_owner": self.current_metadata_owner,
                 "current_data_path": self.current_data_path,
                 "current_data_type": self.current_data_type,
                 "selected_agent_id": self.selected_agent_id,
