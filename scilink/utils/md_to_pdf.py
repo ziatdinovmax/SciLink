@@ -23,12 +23,13 @@ _MARGIN = 54          # points (0.75")
 # progress. Far above any real plan: a 105 KB white paper is ~24 pages.
 _MAX_PAGES = 500
 
-# Print styling, not screen styling: dark text on white, with the app's
-# purple for headings so the PDF is recognisably SciLink's.
+# Print styling, not screen styling: dark text on white. Section headings
+# in a dark print red — legible on paper and distinct from body text and
+# links.
 DEFAULT_CSS = """
 body { font-family: sans-serif; font-size: 10pt; color: #1a1a1a; }
 h1 { font-size: 19pt; color: #1a1a2e; margin-bottom: 2pt; }
-h2 { font-size: 14pt; color: #6200EE; margin-top: 14pt; }
+h2 { font-size: 14pt; color: #B00020; margin-top: 14pt; }
 h3 { font-size: 11.5pt; color: #333333; margin-top: 10pt; }
 h4, h5, h6 { font-size: 10.5pt; color: #333333; }
 p { line-height: 1.35; }
