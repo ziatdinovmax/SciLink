@@ -321,6 +321,16 @@ Structure:
 
 Length: roughly 800-1400 words. Write in confident, direct prose — no
 filler, no unexplained acronyms on first use, no marketing superlatives.
+
+**Sentence and vocabulary discipline:**
+- One idea per sentence. When a sentence stacks several clauses behind
+  dashes or semicolons, split it into two or three plain sentences instead.
+- No stock rhetorical phrases: never "load-bearing", and never the
+  "not merely X, but Y" construction. State the point directly.
+- Write in the audience's own vocabulary. For natural scientists
+  (physicists, chemists, materials scientists, biologists), express methods
+  in the science's terms and avoid software-engineering jargon unless the
+  subject itself is software.
 """
 
 
@@ -1197,6 +1207,14 @@ Rules:
   decided, what is open, and what each choice costs.
 - This is not an experimental plan: no hypothesis/steps/equipment schema
   unless the request explicitly asks for a protocol section.
+- Sentence discipline: one idea per sentence — when a sentence stacks
+  several clauses behind dashes or semicolons, split it into plain
+  sentences instead. Avoid stock rhetorical phrases: never "load-bearing",
+  and never the "not merely X, but Y" construction.
+- Write in the audience's own vocabulary: for natural scientists
+  (physicists, chemists, materials scientists, biologists), express methods
+  in the science's terms and avoid software-engineering jargon unless the
+  subject itself is software.
 - Return ONLY the JSON object.
 """
 
