@@ -339,6 +339,66 @@ class TestValidateScriptErrors:
         r = lammps_tools.validate_script("/no/such/file.lammps")
         assert r["valid"] is False
 
+    def test_sequential_npt_unfix_nvt_ok(self, script_dir):
+        # Issue #409: a legitimate NPT equilibration -> unfix -> NVT production
+        # deck was flagged as nvt+npt overlap because unfix was ignored.
+        deck = script_dir / "ok_seq_npt_unfix_nvt.lammps"
+        deck.write_text("""\
+units metal
+atom_style atomic
+boundary p p p
+read_data cu_bulk.data
+pair_style eam/alloy
+pair_coeff * * Cu_mishin1.eam.alloy Cu
+fix NPT all npt temp 300.0 300.0 0.1 iso 0.0 0.0 1.0
+run 1000
+unfix NPT
+fix NVT all nvt temp 300.0 300.0 0.1
+timestep 0.001
+run 10000
+""")
+        r = lammps_tools.validate_script(str(deck))
+        assert not any("nvt" in e.lower() and "npt" in e.lower() for e in r["errors"])
+
+    def test_template_mention_in_comment_ok(self, script_dir):
+        # Issue #409: a comment that merely mentions ${scale} was flagged as
+        # an unresolved template even though `variable scale` is defined.
+        deck = script_dir / "ok_template_in_comment.lammps"
+        deck.write_text("""\
+units metal
+atom_style atomic
+boundary p p p
+read_data cu_bulk.data
+pair_style eam/alloy
+pair_coeff * * Cu_mishin1.eam.alloy Cu
+# Green-Kubo viscosity: ${scale} is set below
+variable scale equal 5.0
+fix 1 all nvt temp 300.0 300.0 0.1
+timestep 0.001
+run 10000
+""")
+        r = lammps_tools.validate_script(str(deck))
+        assert not any("unresolved" in e.lower() or "template" in e.lower() for e in r["errors"])
+
+    def test_template_with_defined_variable_ok(self, script_dir):
+        # A ${name} whose `variable name` is defined in the deck is valid
+        # LAMMPS syntax, not an unresolved SciLink template.
+        deck = script_dir / "ok_defined_variable.lammps"
+        deck.write_text("""\
+units metal
+atom_style atomic
+boundary p p p
+read_data cu_bulk.data
+pair_style eam/alloy
+pair_coeff * * Cu_mishin1.eam.alloy Cu
+variable temperature equal 300.0
+fix 1 all nvt temp ${temperature} ${temperature} 0.1
+timestep 0.001
+run 10000
+""")
+        r = lammps_tools.validate_script(str(deck))
+        assert not any("unresolved" in e.lower() or "template" in e.lower() for e in r["errors"])
+
 
 # =====================================================================
 # validate_script — warnings (non-fatal)

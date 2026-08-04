@@ -868,9 +868,11 @@ def validate_script(
     commands_seen: set = set()
     command_order: List[str] = []
 
-    # Track thermostat/barostat per group
-    npt_groups: set = set()
-    nvt_groups: set = set()
+    # Track the fix lifecycle: fix_id -> (group, style). `unfix` removes an
+    # entry, so only fixes active when the script ends participate in the
+    # nvt/npt overlap check below.
+    active_fixes: Dict[str, Tuple[str, str]] = {}
+    defined_vars: set = set()
 
     for line in lines:
         stripped = line.strip()
@@ -898,15 +900,22 @@ def validate_script(
             result["has_minimize"] = True
         elif keyword == "run":
             result["has_run"] = True
+        elif keyword == "variable" and len(parts) >= 2:
+            defined_vars.add(parts[1].lower())
         elif keyword == "fix" and len(parts) >= 4:
             group = parts[2]
             style = parts[3].lower()
             if "shake" in style or "rattle" in style:
                 result["has_shake"] = True
-            if style in ("npt", "nph"):
-                npt_groups.add(group)
-            elif style == "nvt":
-                nvt_groups.add(group)
+            active_fixes[parts[1]] = (group, style)
+        elif keyword == "unfix" and len(parts) >= 2:
+            active_fixes.pop(parts[1], None)
+
+    # Only fixes still active at the end of the script count for the overlap
+    # check. A sequential deck (NPT equilibration, unfix, NVT production) is
+    # legitimate and must not be flagged.
+    npt_groups = {g for g, s in active_fixes.values() if s in ("npt", "nph")}
+    nvt_groups = {g for g, s in active_fixes.values() if s == "nvt"}
 
     errors = result["errors"]
     warnings = result["warnings"]
@@ -1108,7 +1117,17 @@ def validate_script(
                 pass
 
     # ── Unresolved templates ──
-    templates = re.findall(r'\$\{[a-z_]+\}|\{[a-z_]+\}', content, re.IGNORECASE)
+    # Scan only executable lines: a comment that merely *mentions* ${var}
+    # must not be flagged. And a ${name}/{name} whose `name` has a matching
+    # `variable name` definition earlier in the deck is valid LAMMPS syntax,
+    # not an unresolved SciLink template.
+    code_lines = [ln for ln in lines if ln.strip() and not ln.strip().startswith("#")]
+    code_text = "\n".join(code_lines)
+    templates = [
+        m.group(0)
+        for m in re.finditer(r"\$\{([a-z_]+)\}|\{([a-z_]+)\}", code_text, re.IGNORECASE)
+        if (m.group(1) or m.group(2)).lower() not in defined_vars
+    ]
     if templates:
         errors.append(f"Unresolved template variables: {sorted(set(templates))}")
 
