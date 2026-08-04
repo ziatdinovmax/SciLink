@@ -2693,7 +2693,12 @@ If you identify problems, return:
     "fitting_strategy": "revised strategy if needed",
     "series_analysis_plan": null
 }}}}
-Include series_analysis_plan only if this is a series with regimes that need revision.
+If your correction changes the technique or the physical model, the existing series
+regimes are invalid — return a re-derived series_analysis_plan rather than carrying
+them over; leave it null only when the regimes remain valid under your correction
+(or this is not a series). A re-derived plan uses exactly these regime fields:
+{{"regimes": [{{"name": str, "spectrum_indices": [int], "physical_model": str,
+"fitting_strategy": str, "parameters_to_extract": [str]}}]}}
 Only flag genuine problems — do not redesign a reasonable plan.
 
 An explicit requirement in the stated objective (e.g. a region to exclude, a parameter

@@ -15,6 +15,7 @@ LLM reasoning.  If extraction fails, the user is prompted and shown the
 sidecar contents to help them specify the variable manually.
 """
 
+import fnmatch
 import glob
 import hashlib
 import json
@@ -275,6 +276,59 @@ def _resolve_glob_files(pattern: str) -> tuple[list[Path], list[Path]]:
         if sidecar.is_file():
             all_files.append(sidecar)
     return data_files, all_files
+
+
+def _dataset_key(data_path: str) -> str:
+    """Canonical form of a dataset reference for ownership comparison.
+
+    Globs keep their pattern (resolved to an absolute base) so two different
+    patterns over the same folder stay distinct datasets; real paths resolve
+    to their absolute form.
+    """
+    if _is_glob(data_path):
+        p = Path(data_path)
+        try:
+            return str(p.parent.resolve() / p.name)
+        except OSError:
+            return data_path
+    try:
+        return str(Path(data_path).resolve())
+    except OSError:
+        return data_path
+
+
+def _same_dataset(owner: str, requested: str) -> bool:
+    """Does metadata bound to *owner* also cover *requested*?
+
+    True when they are the same path, when *requested* drills into the
+    owner directory (a member file, or a glob selecting files within it),
+    or when *requested* is a file the owner glob matches. A broader or
+    sibling dataset is NOT covered — reuse must be re-resolved.
+    """
+    owner_key = _dataset_key(owner)
+    req_key = _dataset_key(requested)
+    if owner_key == req_key:
+        return True
+
+    owner_is_glob = _is_glob(owner)
+    req_is_glob = _is_glob(requested)
+
+    if not owner_is_glob:
+        owner_p = Path(owner_key)
+        if owner_p.is_dir():
+            # Member file/dir of the owner folder, or a glob over it.
+            probe = Path(req_key).parent if req_is_glob else Path(req_key)
+            try:
+                probe.relative_to(owner_p)
+                return True
+            except ValueError:
+                return False
+        return False
+
+    # Owner is a glob: a single file it matches belongs to its dataset.
+    if not req_is_glob:
+        return fnmatch.fnmatch(req_key, owner_key)
+    return False
 
 
 def _detect_sidecar_jsons(
@@ -754,6 +808,9 @@ class AnalysisOrchestratorTools:
             old_instruction = self.orch.current_metadata.get(_CPI)
 
         self.orch.current_metadata = new_metadata
+        # A fresh document is unbound: it binds to the first dataset
+        # run_analysis consumes it for (issue #411).
+        self.orch.current_metadata_owner = None
 
         if not old_instruction:
             return None  # Nothing to preserve
@@ -2263,7 +2320,17 @@ class AnalysisOrchestratorTools:
                     "message": "No agent selected. Use select_agent first."
                 })
             
-            if self.orch.current_metadata is None:
+            # Dataset-aware metadata resolution (issue #411). The loaded
+            # document may serve this run only if it is unbound (freshly
+            # loaded) or bound to this same dataset; metadata bound to a
+            # *different* dataset is stale and must be re-resolved — never
+            # silently reused across techniques.
+            _stale_owner = None
+            if self.orch.current_metadata is not None:
+                _owner = getattr(self.orch, "current_metadata_owner", None)
+                if _owner and not _same_dataset(_owner, data_path):
+                    _stale_owner = _owner
+            if self.orch.current_metadata is None or _stale_owner:
                 # When a data directory contains sidecar JSONs, allow
                 # run_analysis to proceed so the sidecar extraction code
                 # below can populate metadata automatically.
@@ -2282,14 +2349,20 @@ class AnalysisOrchestratorTools:
                     _smap, _ = _detect_sidecar_jsons(_data, _all)
                     has_sidecars = bool(_smap)
                 if has_sidecars:
+                    if _stale_owner:
+                        print(f"  📎 Metadata loaded for '{_stale_owner}' does not "
+                              f"cover this dataset; using its sidecar JSONs instead")
                     self.orch.current_metadata = {}
+                    self.orch.current_metadata_owner = None
                 else:
                     # Single-file backstop: if a stem-matched sidecar JSON sits
                     # next to the data file (foo.npy -> foo.json), auto-load it
-                    # instead of erroring. This ONLY runs when no metadata was
-                    # loaded (so it can never override an explicit load); it
-                    # converts a hard error into a usable run and makes metadata
-                    # forwarding deterministic for the meta fan-out path.
+                    # instead of erroring. It never overrides an explicit load
+                    # *for this dataset* (that case is not re-resolved at all);
+                    # it converts a hard error into a usable run and makes
+                    # metadata forwarding deterministic for the meta fan-out
+                    # path.
+                    _resolved_from_sidecar = False
                     if data_p.is_file():
                         sidecar = data_p.with_suffix(".json")
                         if sidecar.exists():
@@ -2298,14 +2371,35 @@ class AnalysisOrchestratorTools:
                                     _md = json.load(_fh)
                                 if isinstance(_md, dict) and _md:
                                     self.orch.current_metadata = _md
+                                    self.orch.current_metadata_owner = None
+                                    _resolved_from_sidecar = True
                                     print(f"  📎 Auto-loaded sidecar metadata: {sidecar.name}")
                             except Exception:  # noqa: BLE001 - bad sidecar -> fall through to error
                                 pass
-                    if self.orch.current_metadata is None:
-                        return json.dumps({
-                            "status": "error",
-                            "message": "No metadata available. Use load_metadata or convert_metadata first."
-                        })
+                    if not _resolved_from_sidecar:
+                        if _stale_owner:
+                            # Refuse rather than reuse: a plausible fit against
+                            # another dataset's schema is worse than a stopped
+                            # run. Recovery is one tool call.
+                            return json.dumps({
+                                "status": "error",
+                                "message": (
+                                    f"The loaded metadata belongs to a different "
+                                    f"dataset ('{_stale_owner}') and no sidecar "
+                                    f"metadata was found for '{data_path}'. Use "
+                                    f"load_metadata or convert_metadata for this "
+                                    f"dataset before analyzing it."
+                                )
+                            })
+                        if self.orch.current_metadata is None:
+                            return json.dumps({
+                                "status": "error",
+                                "message": "No metadata available. Use load_metadata or convert_metadata first."
+                            })
+            # Bind unbound metadata to the dataset now consuming it.
+            if (self.orch.current_metadata is not None
+                    and not getattr(self.orch, "current_metadata_owner", None)):
+                self.orch.current_metadata_owner = _dataset_key(data_path)
             
             try:
                 # === Handle directory / glob input - filter out metadata files ===
@@ -3361,6 +3455,7 @@ class AnalysisOrchestratorTools:
                 checkpoint_data = {
                     "timestamp": datetime.now().isoformat(),
                     "current_metadata": self.orch.current_metadata,
+                    "current_metadata_owner": self.orch.current_metadata_owner,
                     "current_data_path": self.orch.current_data_path,
                     "current_data_type": self.orch.current_data_type,
                     "selected_agent_id": self.orch.selected_agent_id,
