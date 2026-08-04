@@ -734,26 +734,33 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
         system_info: Dict[str, Any] | str | None = None,
         novelty_context: str | None = None,
         novelty_assessment: Dict[str, Any] | None = None,
+        measurement_history: List[Any] | None = None,
         **kwargs
     ) -> Dict[str, Any]:
         """
         Generate measurement recommendations based on analysis.
-        
+
         This is an optional post-processing step that builds on analyze() results.
         If no analysis_result is provided, runs analyze() first.
-        
+
         Args:
             analysis_result: Output from analyze(). If None, runs analyze() first.
             data: Input data (required if analysis_result is None)
             system_info: Metadata (passed to analyze() if running it)
             novelty_context: Optional context from literature review
+            measurement_history: Optional list describing measurements already
+                performed this session (e.g. energy windows / conditions).
+                Recommendations exclude covered ground unless re-measuring
+                under different conditions is explicitly justified.
             **kwargs: Additional arguments passed to analyze() if needed
-        
+
         Returns:
             dict containing:
                 - "status": "success" | "error"
                 - "analysis_integration": str (how analysis informed recommendations)
-                - "measurement_recommendations": list[dict]
+                - "measurement_recommendations": list[dict]; each item may carry
+                  a machine-readable "target" ({"setting", "expected_signature"}
+                  or null) alongside the free-text fields
         """
         # If no analysis provided, run it first
         if analysis_result is None:
@@ -780,7 +787,8 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
                 }
         
         # Generate recommendations from analysis
-        return self._generate_recommendations(analysis_result, system_info, novelty_context, novelty_assessment)
+        return self._generate_recommendations(analysis_result, system_info, novelty_context, novelty_assessment,
+                                              measurement_history=measurement_history)
 
     # =========================================================================
     # BACKWARD COMPATIBLE ALIASES
@@ -865,6 +873,7 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
         system_info: Dict[str, Any] | str | None = None,
         novelty_context: str | None = None,
         novelty_assessment: Dict[str, Any] | None = None,
+        measurement_history: List[Any] | None = None,
     ) -> Dict[str, Any]:
         """Internal method to generate recommendations from analysis results."""
         system_info = self._handle_system_info(system_info)
@@ -898,7 +907,7 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
                 for img_data in stored_images[:5]:
                     if isinstance(img_data, dict) and 'label' in img_data and 'data' in img_data:
                         prompt_parts.append(f"\n**{img_data['label']}:**")
-                        prompt_parts.append({"mime_type": "image/jpeg", "data": img_data['data']})
+                        prompt_parts.append({"mime_type": self._image_mime_type(img_data['data']), "data": img_data['data']})
             
             if novelty_context:
                 prompt_parts.append(f"\n\n## Novelty Context\n{novelty_context}")
@@ -909,7 +918,16 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
             
             if system_info:
                 prompt_parts.append(f"\n\n## System Information\n{json.dumps(system_info, indent=2)}")
-            
+
+            if measurement_history:
+                prompt_parts.append(
+                    "\n\n## Measurements Already Performed This Session\n"
+                    f"{json.dumps(measurement_history, indent=2, default=str)}\n"
+                    "Do not recommend re-acquiring these; recommend a covered "
+                    "setting again only if different acquisition conditions are "
+                    "scientifically justified, and state what must change."
+                )
+
             prompt_parts.append("\n\nProvide measurement recommendations in JSON format.")
             
             self.logger.info("📋 Generating measurement recommendations...")
@@ -1281,6 +1299,30 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
         """Retrieve stored analysis images."""
         return self._stored_analysis_images.copy()
 
+    @staticmethod
+    def _image_mime_type(data) -> str:
+        """Best-effort media type from magic bytes; stored figures are PNGs
+        more often than JPEGs, and strict providers (Bedrock) reject a
+        declared type that doesn't match the payload. Handles raw bytes and
+        base64 strings; defaults to JPEG when unrecognized."""
+        if isinstance(data, (bytes, bytearray)):
+            head = bytes(data[:8])
+            if head.startswith(b"\x89PNG"):
+                return "image/png"
+            if head.startswith(b"GIF8"):
+                return "image/gif"
+            if head.startswith(b"RIFF"):
+                return "image/webp"
+        else:
+            s = str(data)
+            if s.startswith("iVBOR"):       # base64 of \x89PNG
+                return "image/png"
+            if s.startswith("R0lGO"):       # base64 of GIF8
+                return "image/gif"
+            if s.startswith("UklGR"):       # base64 of RIFF (webp)
+                return "image/webp"
+        return "image/jpeg"
+
     def _clear_stored_images(self) -> None:
         """Clear stored images to free memory."""
         self._stored_analysis_images = []
@@ -1327,6 +1369,9 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
             if isinstance(rec, dict) and all(k in rec for k in required_keys):
                 priority = rec.get("priority")
                 if isinstance(priority, int) and 1 <= priority <= 5:
+                    # normalize the optional machine-readable target: dict or None
+                    if not isinstance(rec.get("target"), dict):
+                        rec["target"] = None
                     valid_recommendations.append(rec)
         
         return sorted(valid_recommendations, key=lambda x: x.get("priority", 5))
@@ -1541,7 +1586,7 @@ Maintain the same JSON output format with "detailed_analysis" and "scientific_cl
                 for img_data in stored_images:
                     if isinstance(img_data, dict) and 'label' in img_data and 'data' in img_data:
                         prompt_parts.append(f"\n{img_data['label']}:")
-                        prompt_parts.append({"mime_type": "image/jpeg", "data": img_data['data']})
+                        prompt_parts.append({"mime_type": self._image_mime_type(img_data['data']), "data": img_data['data']})
             
             if system_info:
                 prompt_parts.append(self._build_system_info_prompt_section(system_info))
