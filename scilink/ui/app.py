@@ -870,8 +870,16 @@ else:
                         _doc_title = _deliverable_title(md_path, p)
                         with st.expander(f"{_doc_title}: {p.name}"):
                             with st.container(height=600):
+                                # Figures saved beside the document (relative
+                                # refs, e.g. an embedded workflow diagram)
+                                # cannot be fetched by Streamlit's markdown
+                                # renderer — inline them as data URIs.
+                                from scilink.ui.md_images import (
+                                    inline_local_images)
                                 st.markdown(_demote_md_headings(
-                                    p.read_text(encoding="utf-8")))
+                                    inline_local_images(
+                                        p.read_text(encoding="utf-8"),
+                                        p.parent)))
                         st.download_button(
                             f"Download {p.name}",
                             data=p.read_bytes(),

@@ -67,14 +67,24 @@ def render_file_preview(file_path: Path) -> None:
     if pdf_col is not None:
         with pdf_col:
             try:
-                from scilink.utils.md_to_pdf import markdown_text_to_pdf
-                import tempfile
-                with tempfile.TemporaryDirectory() as td:
-                    pdf = markdown_text_to_pdf(
-                        file_path.read_text(errors="replace"),
-                        Path(td) / f"{file_path.stem}.pdf",
-                        title=file_path.stem)
-                    data = pdf.read_bytes()
+                from scilink.ui.md_images import pdf_twin
+                twin = pdf_twin(file_path)
+                if twin is not None:
+                    # The authoring-time twin was converted in the document's
+                    # own directory, so its relative figures resolved.
+                    data = twin.read_bytes()
+                else:
+                    # Regenerate from the FILE (not in-memory text): the
+                    # file-based converter passes base_dir, so relative
+                    # figures beside the markdown reach the PDF.
+                    from scilink.utils.md_to_pdf import markdown_to_pdf
+                    import tempfile
+                    with tempfile.TemporaryDirectory() as td:
+                        pdf = markdown_to_pdf(
+                            file_path,
+                            Path(td) / f"{file_path.stem}.pdf",
+                            title=file_path.stem)
+                        data = pdf.read_bytes()
                 st.download_button(
                     "Download PDF", data=data,
                     file_name=f"{file_path.stem}.pdf", mime="application/pdf",
@@ -209,7 +219,10 @@ def render_file_preview(file_path: Path) -> None:
         if view == "Source":
             st.code(clipped, language="markdown")
         else:
-            st.markdown(clipped)
+            # Figures saved beside the document (relative refs) cannot be
+            # fetched by Streamlit's markdown renderer — inline them.
+            from scilink.ui.md_images import inline_local_images
+            st.markdown(inline_local_images(clipped, file_path.parent))
         return
 
     # Source code

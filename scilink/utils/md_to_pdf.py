@@ -23,12 +23,13 @@ _MARGIN = 54          # points (0.75")
 # progress. Far above any real plan: a 105 KB white paper is ~24 pages.
 _MAX_PAGES = 500
 
-# Print styling, not screen styling: dark text on white, with the app's
-# purple for headings so the PDF is recognisably SciLink's.
+# Print styling, not screen styling: dark text on white. Section headings
+# in a dark print red — legible on paper and distinct from body text and
+# links.
 DEFAULT_CSS = """
 body { font-family: sans-serif; font-size: 10pt; color: #1a1a1a; }
 h1 { font-size: 19pt; color: #1a1a2e; margin-bottom: 2pt; }
-h2 { font-size: 14pt; color: #6200EE; margin-top: 14pt; }
+h2 { font-size: 14pt; color: #B00020; margin-top: 14pt; }
 h3 { font-size: 11.5pt; color: #333333; margin-top: 10pt; }
 h4, h5, h6 { font-size: 10.5pt; color: #333333; }
 p { line-height: 1.35; }
@@ -109,25 +110,54 @@ def _pull_wide_figures(text: str, base_dir):
                 ratio = im.width / im.height if im.height else 1.0
                 if not (_TALL_FIGURE_RATIO <= ratio <= _WIDE_FIGURE_RATIO):
                     figures.append((p, alt))
-                    return ""      # placed later, on its own page
+                    return "\x00FIG\x00"   # placed later, on its own page
         except Exception:  # noqa: BLE001 - not an image we can measure
             pass
         return m.group(0)
 
-    return re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", take, text), figures
+    text = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", take, text)
+    # A section whose ONLY content was a pulled figure would keep an
+    # orphaned heading over dead space on the text page (live: a document
+    # ending with '## Campaign Workflow' and nothing under it). Take the
+    # heading with the figure — its page already carries the caption. A
+    # figure pulled from MID-section leaves its surrounding prose (and
+    # heading) untouched.
+    text = re.sub(
+        r"(?m)^#{1,6}[^\n]*\n\s*\x00FIG\x00\s*(?=^#{1,6}\s|\Z)", "", text)
+    text = text.replace("\x00FIG\x00", "")
+    return text, figures
 
 
 def _append_figure_pages(doc, figures, fitz) -> None:
-    """One page per outsized figure, oriented to match it, with caption."""
+    """One page per outsized figure, oriented to match it, with caption.
+
+    The page is SIZED TO THE FIGURE along its short axis: an extreme
+    ribbon (a left-to-right workflow diagram can be 5:1) fitted onto a
+    fixed letter page is width-bound and floats in a sea of vertical
+    whitespace. The long axis keeps the letter dimension so the figure
+    gets the full width (or height); the short axis shrinks to the scaled
+    figure plus margins and the caption strip, floored so a page never
+    degenerates into a sliver.
+    """
+    _MIN_SHORT = 216       # 3" — keep even the thinnest ribbon page page-like
     for path, caption in figures:
-        wide = True
+        wide, aspect = True, 1.0
         try:
             from PIL import Image
             with Image.open(path) as im:
-                wide = not im.height or im.width / im.height >= 1.0
+                if im.height and im.width:
+                    aspect = im.width / im.height
+                wide = aspect >= 1.0
         except Exception:  # noqa: BLE001
             pass
-        w, h = (792, 612) if wide else (612, 792)
+        if wide:
+            w = 792
+            img_h = (w - 2 * _MARGIN) / aspect
+            h = min(612.0, max(_MIN_SHORT, img_h + 2 * _MARGIN + 24))
+        else:
+            h = 792
+            img_w = (h - 2 * _MARGIN - 24) * aspect
+            w = min(612.0, max(_MIN_SHORT, img_w + 2 * _MARGIN))
         page = doc.new_page(width=w, height=h)
         frame = fitz.Rect(_MARGIN, _MARGIN, w - _MARGIN, h - _MARGIN - 24)
         try:

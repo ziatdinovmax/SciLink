@@ -141,9 +141,12 @@ def test_non_markdown_gets_no_pdf_button(rec, tmp_path):
 
 
 def test_a_failing_conversion_never_breaks_the_preview(monkeypatch, tmp_path):
-    """The markdown download and the rendered document must still be there."""
+    """The markdown download and the rendered document must still be there.
+
+    No PDF twin exists beside the file, so the button path regenerates via
+    the file-based converter — which is made to fail here."""
     import scilink.utils.md_to_pdf as m
-    monkeypatch.setattr(m, "markdown_text_to_pdf", lambda *a, **k: 1 / 0)
+    monkeypatch.setattr(m, "markdown_to_pdf", lambda *a, **k: 1 / 0)
     r = _Recorder()
     monkeypatch.setattr(file_viewer, "st", r)
     file_viewer.render_file_preview(_md(tmp_path, "# Title\n"))
