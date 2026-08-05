@@ -20,6 +20,7 @@ from enum import Enum
 
 from ...auth import get_internal_proxy_key
 from ...utils.tool_media import (repair_dangling_tool_calls,
+                                 close_interrupted_turn,
                                  build_tool_message, provider_supports_tool_image,
                                  sanitize_history_images)
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
@@ -1606,6 +1607,11 @@ class AnalysisOrchestratorAgent:
         # Repair any tool_use left unanswered by a mid-run user Stop
         # (or a trim slicing a pair apart) before extending history.
         self.messages = repair_dangling_tool_calls(self.messages)
+        # A stopped turn ends on a tool result; close it with a stub
+        # assistant note so the new user message does not create
+        # consecutive user-role blocks (Bedrock alternation; silences
+        # litellm's 'trying to merge' warning).
+        self.messages = close_interrupted_turn(self.messages)
         self.messages.append({"role": "user", "content": user_input})
         
         if len(self.messages) > 120:
@@ -1757,6 +1763,11 @@ class AnalysisOrchestratorAgent:
         # Repair any tool_use left unanswered by a mid-run user Stop
         # (or a trim slicing a pair apart) before extending history.
         self.messages = repair_dangling_tool_calls(self.messages)
+        # A stopped turn ends on a tool result; close it with a stub
+        # assistant note so the new user message does not create
+        # consecutive user-role blocks (Bedrock alternation; silences
+        # litellm's 'trying to merge' warning).
+        self.messages = close_interrupted_turn(self.messages)
         self.messages.append({"role": "user", "content": user_input})
         
         if len(self.messages) > 120:

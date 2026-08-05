@@ -209,3 +209,23 @@ def sanitize_history_images(messages: list) -> list:
         else:
             out.append(m)
     return out
+
+
+def close_interrupted_turn(messages: list) -> list:
+    """Restore user/assistant alternation after an interrupted turn.
+
+    A mid-run Stop ends a turn on a tool result with no assistant reply.
+    The next user message would then directly follow a tool block — on
+    Bedrock's converse API both are user-role blocks, and litellm papers
+    over the pair with a noisy "Potential consecutive user/tool blocks.
+    Trying to merge." warning on every subsequent call in the session.
+    Closing the turn with a one-line assistant note keeps alternation
+    intact instead. A normally completed turn (assistant last) — and
+    anything else — passes through unchanged.
+    """
+    if messages and messages[-1].get("role") == "tool":
+        messages.append({
+            "role": "assistant",
+            "content": "[Turn interrupted before a reply was produced.]",
+        })
+    return messages
