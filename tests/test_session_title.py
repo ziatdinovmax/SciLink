@@ -95,5 +95,11 @@ t = generate_session_title(ramble, "x")
 print(f"     {t!r}")
 check(len(t.split()) <= 8, "one-line ramble capped at 8 words")
 
+print("\n=== sidebar name box uses a per-session widget key ===")
+check('key=f"session_name_input:{_sdir}"' in sb,
+      "per-session key (fixed key hid the agent title behind stale "
+      "first-render state and bled a typed name into the next session)")
+check('key="session_name_input"' not in sb, "no fixed widget key remains")
+
 print("\n" + ("ALL PASSED" if not fails else f"{len(fails)} FAILURE(S): {fails}"))
 sys.exit(1 if fails else 0)

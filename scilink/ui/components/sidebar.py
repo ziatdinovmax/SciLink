@@ -506,9 +506,15 @@ def render_sidebar() -> None:
                 load_session_name, save_session_name)
             _sdir = st.session_state.session_dir
             _current_name = load_session_name(_sdir) or ""
+            # Per-session widget key: with a fixed key, Streamlit keeps the
+            # box's first-render state (empty) and ignores value= forever —
+            # the agent's auto-title never appeared here — and the state
+            # survives switching sessions, writing session A's typed name
+            # into session B's meta as named_by="user", which then blocks
+            # B's auto-titling permanently.
             _typed = st.text_input(
                 "Session name", value=_current_name,
-                key="session_name_input",
+                key=f"session_name_input:{_sdir}",
                 help=("Shown in the resume list and File Explorer. "
                       "Auto-named by the agent after the first turn "
                       "unless you set one."))
