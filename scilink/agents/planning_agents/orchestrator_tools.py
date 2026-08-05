@@ -1026,6 +1026,29 @@ class OrchestratorTools:
             print(f"    ⚠️  Workflow diagram skipped: {exc}")
         return text
 
+    def _refresh_pdf_twin(self, md_path: Path) -> bool:
+        """Re-export a markdown document's PDF twin, if one exists.
+
+        Deterministic markdown_to_pdf re-export — no LLM, no content
+        change — so an in-place edit or revision never leaves a stale
+        PDF beside a fresh .md (live: a diagram swap updated the white
+        paper's markdown while its forwarded PDF kept the old image).
+        Returns True when a twin was refreshed; failure must never
+        block the edit that triggered it.
+        """
+        pdf = md_path.with_suffix(".pdf")
+        if md_path.suffix.lower() != ".md" or not pdf.exists():
+            return False
+        try:
+            from ...utils.md_to_pdf import markdown_to_pdf
+            markdown_to_pdf(md_path)
+            from .user_interface import format_path
+            print(f"    📄 PDF twin refreshed: {format_path(pdf)}")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            print(f"    ⚠️  PDF twin not refreshed: {exc}")
+            return False
+
     def _write_white_paper(self, audience_context: str = None) -> str:
         """Generate the sponsor-facing white paper from the current plan and
         save it beside the plan artifacts. Returns the saved path."""
@@ -4761,11 +4784,17 @@ class OrchestratorTools:
                                    deliverable)
                 print(f"    💾 Saved{' (deliverable)' if deliverable else ''}: "
                       f"{format_path(dest)}")
+                # Same invariant as edit_file and the revision branch: a
+                # markdown write never leaves a stale PDF twin beside it
+                # (live, an agent rewrote a document via save_file and its
+                # forwarded PDF kept serving the old content).
+                pdf_refreshed = self._refresh_pdf_twin(dest)
                 return json.dumps({
                     "status": "success",
                     "path": str(dest),
                     "size_bytes": dest.stat().st_size,
                     "deliverable": bool(deliverable),
+                    "pdf_refreshed": pdf_refreshed,
                 })
             except Exception as e:
                 logging.error(f"save_file failed: {e}")
@@ -4779,8 +4808,13 @@ class OrchestratorTools:
             name="save_file",
             description=(
                 "Save text content (notes, small scripts, content you have "
-                "already composed) to a file "
-                "in the session directory. Large content may not survive the "
+                "already composed) to a NEW file "
+                "in the session directory. To change an EXISTING document, "
+                "do not rewrite it with save_file — use edit_file for a "
+                "snippet swap or write_technical_document with revise_path "
+                "for a content revision; those paths keep a pre-change "
+                "backup and guard against accidental truncation. "
+                "Large content may not survive the "
                 "trip as a single tool-call argument — for anything long "
                 "(roughly >100 lines), save the first chunk with save_file and "
                 "the rest with append_file. For executable analysis/"
@@ -4902,6 +4936,154 @@ class OrchestratorTools:
                 },
             },
             required=["filename", "content"],
+        )
+
+        # 9c. EDIT FILE — surgical in-place replacement
+        def edit_file(path: str, old_text: str, new_text: str,
+                      replace_all: bool = False):
+            """
+            Mechanical in-place edit of an existing session document:
+            replace one exact text snippet. Small edits only — content
+            revisions go through write_technical_document(revise_path=...).
+            """
+            print(f"  ⚡ Tool: Editing file '{path}'...")
+            editable = {".md", ".html", ".mmd", ".txt", ".json", ".py",
+                        ".csv", ".yaml", ".yml"}
+            try:
+                from .user_interface import format_path, record_deliverable
+                rp = Path(path)
+                if not rp.is_absolute():
+                    rp = self._output_dir() / rp
+                rp = rp.resolve()
+                root = Path(self.orch.base_dir).resolve()
+                if root not in rp.parents:
+                    return json.dumps({
+                        "status": "error",
+                        "message": (f"path must be inside the session "
+                                    f"directory ({root}).")})
+                if not rp.exists():
+                    return json.dumps({
+                        "status": "error",
+                        "message": f"No such file: {rp}"})
+                if rp.suffix.lower() not in editable:
+                    return json.dumps({
+                        "status": "error",
+                        "message": (f"'{rp.suffix}' is not an editable text "
+                                    f"format ({', '.join(sorted(editable))}).")})
+                if not old_text:
+                    return json.dumps({
+                        "status": "error",
+                        "message": "old_text must be a non-empty snippet."})
+                if old_text == new_text:
+                    return json.dumps({
+                        "status": "error",
+                        "message": "old_text and new_text are identical."})
+                # Surgical means SMALL. The cap is what stops this tool
+                # from becoming a piecewise document rewriter that dodges
+                # write_technical_document's whole-document length guard
+                # (models summarise when they mean to revise).
+                if max(len(old_text), len(new_text or "")) > 2000:
+                    return json.dumps({
+                        "status": "error",
+                        "message": (
+                            "Edit too large for edit_file — for content "
+                            "revisions use write_technical_document with "
+                            "revise_path, which rewrites the whole document "
+                            "under its length guard.")})
+                current = rp.read_text(errors="replace")
+                n = current.count(old_text)
+                if n == 0:
+                    return json.dumps({
+                        "status": "error",
+                        "message": (
+                            "old_text not found — read_file the document and "
+                            "copy the snippet verbatim, whitespace included.")})
+                if n > 1 and not replace_all:
+                    return json.dumps({
+                        "status": "error",
+                        "message": (
+                            f"old_text matches {n} places — extend the "
+                            "snippet until it is unique, or pass "
+                            "replace_all=true to change every occurrence.")})
+                # Audit trail, like a revision's .before_revision copy: the
+                # delegation MAKING the edit keeps the version it replaced.
+                bak = None
+                try:
+                    d = self._output_dir()
+                    d.mkdir(parents=True, exist_ok=True)
+                    i, bak = 1, d / f"{rp.stem}.before_edit{rp.suffix}"
+                    while bak.exists():
+                        i += 1
+                        bak = d / f"{rp.stem}.before_edit{i}{rp.suffix}"
+                    bak.write_text(current)
+                    who = ("" if d.resolve() == root
+                           else f" (edited by {d.name})")
+                    record_deliverable(self.orch.base_dir, bak,
+                                       f"Pre-edit copy of {rp.name}{who}")
+                except Exception as e:  # noqa: BLE001 - never block the edit
+                    logging.warning(f"Pre-edit copy failed: {e}")
+                    bak = None
+                rp.write_text(current.replace(old_text, new_text)
+                              if replace_all else
+                              current.replace(old_text, new_text, 1))
+                print(f"    ✏️  Edited in place: {format_path(rp)}")
+                pdf_refreshed = self._refresh_pdf_twin(rp)
+                return json.dumps({
+                    "status": "success",
+                    "path": str(rp),
+                    "replacements": n if replace_all else 1,
+                    "previous_version": str(bak) if bak else None,
+                    "pdf_refreshed": pdf_refreshed,
+                })
+            except Exception as e:
+                logging.error(f"edit_file failed: {e}", exc_info=True)
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=edit_file,
+            name="edit_file",
+            description=(
+                "Surgically edit an existing session document IN PLACE by "
+                "replacing one exact text snippet — an image reference, a "
+                "path, a caption, a typo, a parameter value. Mechanical "
+                "edits only: copy old_text VERBATIM from the file (read_file "
+                "first), and both snippets are capped at 2000 characters. "
+                "For actual content revisions (rewriting prose, "
+                "restructuring sections) use write_technical_document with "
+                "revise_path instead. If the document has a PDF twin beside "
+                "it, the PDF is re-exported automatically so it never goes "
+                "stale."
+            ),
+            parameters={
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Path of the file to edit — absolute, or relative "
+                        "to the current output directory. Must be inside "
+                        "the session directory."
+                    ),
+                },
+                "old_text": {
+                    "type": "string",
+                    "description": (
+                        "The exact snippet to replace, copied VERBATIM from "
+                        "the file including whitespace. Must match exactly "
+                        "one place unless replace_all is true."
+                    ),
+                },
+                "new_text": {
+                    "type": "string",
+                    "description": "The replacement text.",
+                },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": (
+                        "Replace every occurrence instead of requiring the "
+                        "snippet to be unique. Default false."
+                    ),
+                },
+            },
+            required=["path", "old_text", "new_text"],
         )
 
         # 10. SAVE CHECKPOINT
@@ -7034,6 +7216,12 @@ class OrchestratorTools:
                     text = self._maybe_embed_workflow_diagram(
                         text, out.parent, stem=f"{out.stem}_workflow")
                 out.write_text(text)
+                # A revised document's exported PDF twin (the white paper's
+                # forwarded copy) must not keep serving the pre-revision
+                # content; re-export is deterministic, so it does not touch
+                # the content freeze a revision may be operating under.
+                pdf_refreshed = self._refresh_pdf_twin(out) if revise_path \
+                    else False
 
                 record_deliverable(self.orch.base_dir, out, doc_title,
                                    deliverable=True)
@@ -7052,6 +7240,7 @@ class OrchestratorTools:
                                             else None),
                        "revised_by": (self._output_dir().name if revise_path
                                       else None),
+                       "pdf_refreshed": pdf_refreshed,
                        "title": doc_title,
                        "sections": [s.get("heading") for s in sections
                                     if isinstance(s, dict)],
