@@ -1029,25 +1029,21 @@ class OrchestratorTools:
     def _refresh_pdf_twin(self, md_path: Path) -> bool:
         """Re-export a markdown document's PDF twin, if one exists.
 
-        Deterministic markdown_to_pdf re-export — no LLM, no content
-        change — so an in-place edit or revision never leaves a stale
-        PDF beside a fresh .md (live: a diagram swap updated the white
-        paper's markdown while its forwarded PDF kept the old image).
-        Returns True when a twin was refreshed; failure must never
-        block the edit that triggered it.
+        Shared core in utils/file_edit (live: a diagram swap updated the
+        white paper's markdown while its forwarded PDF kept the old
+        image). Returns True when a twin was refreshed; failure must
+        never block the edit that triggered it — this wrapper only owns
+        the transcript prints.
         """
-        pdf = md_path.with_suffix(".pdf")
-        if md_path.suffix.lower() != ".md" or not pdf.exists():
-            return False
-        try:
-            from ...utils.md_to_pdf import markdown_to_pdf
-            markdown_to_pdf(md_path)
+        from ...utils.file_edit import refresh_pdf_twin
+        refreshed, err = refresh_pdf_twin(md_path)
+        if refreshed:
             from .user_interface import format_path
-            print(f"    📄 PDF twin refreshed: {format_path(pdf)}")
-            return True
-        except Exception as exc:  # noqa: BLE001
-            print(f"    ⚠️  PDF twin not refreshed: {exc}")
-            return False
+            print(f"    📄 PDF twin refreshed: "
+                  f"{format_path(md_path.with_suffix('.pdf'))}")
+        elif err:
+            print(f"    ⚠️  PDF twin not refreshed: {err}")
+        return refreshed
 
     def _write_white_paper(self, audience_context: str = None) -> str:
         """Generate the sponsor-facing white paper from the current plan and
@@ -4947,98 +4943,44 @@ class OrchestratorTools:
             revisions go through write_technical_document(revise_path=...).
             """
             print(f"  ⚡ Tool: Editing file '{path}'...")
-            editable = {".md", ".html", ".mmd", ".txt", ".json", ".py",
-                        ".csv", ".yaml", ".yml"}
             try:
+                from ...utils.file_edit import apply_surgical_edit
                 from .user_interface import format_path, record_deliverable
                 rp = Path(path)
                 if not rp.is_absolute():
                     rp = self._output_dir() / rp
                 rp = rp.resolve()
                 root = Path(self.orch.base_dir).resolve()
-                if root not in rp.parents:
-                    return json.dumps({
-                        "status": "error",
-                        "message": (f"path must be inside the session "
-                                    f"directory ({root}).")})
-                if not rp.exists():
-                    return json.dumps({
-                        "status": "error",
-                        "message": f"No such file: {rp}"})
-                if rp.suffix.lower() not in editable:
-                    return json.dumps({
-                        "status": "error",
-                        "message": (f"'{rp.suffix}' is not an editable text "
-                                    f"format ({', '.join(sorted(editable))}).")})
-                if not old_text:
-                    return json.dumps({
-                        "status": "error",
-                        "message": "old_text must be a non-empty snippet."})
-                if old_text == new_text:
-                    return json.dumps({
-                        "status": "error",
-                        "message": "old_text and new_text are identical."})
-                # Surgical means SMALL. The cap is what stops this tool
-                # from becoming a piecewise document rewriter that dodges
-                # write_technical_document's whole-document length guard
-                # (models summarise when they mean to revise).
-                if max(len(old_text), len(new_text or "")) > 2000:
-                    return json.dumps({
-                        "status": "error",
-                        "message": (
-                            "Edit too large for edit_file. For a content "
-                            "revision use write_technical_document with "
-                            "revise_path (whole-document rewrite under its "
-                            "length guard). For a VERBATIM insertion, split "
-                            "the text at a unique boundary into consecutive "
-                            "smaller edit_file calls — do not rewrite the "
-                            "whole file with save_file, which keeps no "
-                            "backup and has no truncation guard.")})
-                current = rp.read_text(errors="replace")
-                n = current.count(old_text)
-                if n == 0:
-                    return json.dumps({
-                        "status": "error",
-                        "message": (
-                            "old_text not found — read_file the document and "
-                            "copy the snippet verbatim, whitespace included.")})
-                if n > 1 and not replace_all:
-                    return json.dumps({
-                        "status": "error",
-                        "message": (
-                            f"old_text matches {n} places — extend the "
-                            "snippet until it is unique, or pass "
-                            "replace_all=true to change every occurrence.")})
+                d = self._output_dir()
+                # Guards + backup live in the shared core; this wrapper owns
+                # path resolution, the planning-specific routing hint below,
+                # deliverable recording, and the PDF-twin invariant.
+                out = apply_surgical_edit(
+                    rp, old_text, new_text,
+                    root=root, backup_dir=d, replace_all=replace_all,
+                    too_large_message=(
+                        "Edit too large for edit_file. For a content "
+                        "revision use write_technical_document with "
+                        "revise_path (whole-document rewrite under its "
+                        "length guard). For a VERBATIM insertion, split "
+                        "the text at a unique boundary into consecutive "
+                        "smaller edit_file calls — do not rewrite the "
+                        "whole file with save_file, which keeps no "
+                        "backup and has no truncation guard."),
+                )
+                if out["status"] != "success":
+                    return json.dumps(out)
                 # Audit trail, like a revision's .before_revision copy: the
                 # delegation MAKING the edit keeps the version it replaced.
-                bak = None
-                try:
-                    d = self._output_dir()
-                    d.mkdir(parents=True, exist_ok=True)
-                    i, bak = 1, d / f"{rp.stem}.before_edit{rp.suffix}"
-                    while bak.exists():
-                        i += 1
-                        bak = d / f"{rp.stem}.before_edit{i}{rp.suffix}"
-                    bak.write_text(current)
+                if out.get("previous_version"):
                     who = ("" if d.resolve() == root
                            else f" (edited by {d.name})")
-                    record_deliverable(self.orch.base_dir, bak,
+                    record_deliverable(self.orch.base_dir,
+                                       Path(out["previous_version"]),
                                        f"Pre-edit copy of {rp.name}{who}")
-                except Exception as e:  # noqa: BLE001 - never block the edit
-                    logging.warning(f"Pre-edit copy failed: {e}")
-                    bak = None
-                rp.write_text(current.replace(old_text, new_text)
-                              if replace_all else
-                              current.replace(old_text, new_text, 1))
                 print(f"    ✏️  Edited in place: {format_path(rp)}")
-                pdf_refreshed = self._refresh_pdf_twin(rp)
-                return json.dumps({
-                    "status": "success",
-                    "path": str(rp),
-                    "replacements": n if replace_all else 1,
-                    "previous_version": str(bak) if bak else None,
-                    "pdf_refreshed": pdf_refreshed,
-                })
+                out["pdf_refreshed"] = self._refresh_pdf_twin(rp)
+                return json.dumps(out)
             except Exception as e:
                 logging.error(f"edit_file failed: {e}", exc_info=True)
                 return json.dumps({"status": "error", "message": str(e)})
