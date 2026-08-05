@@ -33,7 +33,27 @@ pipeline; this skill orchestrates it.
 
 ## Planning
 
-Prerequisites and choices before running:
+**Install UQ-MLIP.** This skill depends on the `uq_mlip` package (the PNNL
+[UQ-MLIP](https://github.com/pnnl/UQ-MLIP) repo). Install it with the extra that
+matches the MLIP backend you will use — the extractor for a backend is only
+importable once that backend's dependency stack is present:
+
+```bash
+pip install -e ".[chgnet]"   # CHGNet extraction (shares an env with either below)
+pip install -e ".[mace]"     # MACE extraction
+pip install -e ".[uma]"      # UMA extraction
+```
+
+Run from a clone of the UQ-MLIP repo (requires Python 3.11–3.13). The base
+package pulls in `ase`, `numpy`, `pandas`, and `xgboost`; the extra adds the
+selected potential. **MACE and UMA depend on incompatible `e3nn` versions** — if
+you need both, use separate environments; CHGNet has no `e3nn` dependency and
+can share an env with either. On macOS, XGBoost also needs the OpenMP runtime
+(`brew install libomp`); for UMA where `~/.cache` is not writable, set
+`FAIRCHEM_CACHE_DIR`. Verify the install with `python -c "import uq_mlip"` before
+running the recipe.
+
+Other prerequisites and choices before running:
 
 - **Backend must match the potential that generated the trajectory.** UQ is
   read off the MLIP's own embeddings, so extracting with a *different* backend
