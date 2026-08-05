@@ -159,6 +159,44 @@ def test_second_edit_never_clobbers_the_first_backup(tmp_path):
     assert (deleg / "doc.before_edit2.md").read_text() == "v2\n"
 
 
+# --------------------------------------------------------- rename_file
+
+
+def test_rename_is_byte_exact_and_stays_in_place(tmp_path):
+    """The live failure this replaces: no rename tool, so the agent
+    reconstructed a 30 KB document via save_file + append_file chunks,
+    dropping content and nesting it in a phantom directory."""
+    tools, cap, deleg = make_tools(tmp_path)
+    d08 = tmp_path / "delegations" / "08_brainstorm"
+    d08.mkdir(parents=True)
+    doc = d08 / "technical_document.md"
+    doc.write_text("# Companion\n\nfull body, every byte kept\n")
+
+    out = json.loads(cap["rename_file"](
+        str(doc), "spm_companion.md", deliverable=True, title="Companion"))
+    assert out["status"] == "success"
+    dest = Path(out["path"])
+    assert dest == d08 / "spm_companion.md"       # same folder, new identity
+    assert dest.read_text() == "# Companion\n\nfull body, every byte kept\n"
+    assert not doc.exists()
+
+    # directories in new_name are stripped, not nested (the phantom-folder
+    # failure came from a path passed as a name)
+    src2 = deleg / "notes.md"
+    src2.write_text("n\n")
+    out2 = json.loads(cap["rename_file"](str(src2), "sub/dir/final.md"))
+    assert Path(out2["path"]) == deleg / "final.md"
+
+
+def test_rename_refuses_to_clobber(tmp_path):
+    tools, cap, deleg = make_tools(tmp_path)
+    (deleg / "a.md").write_text("a\n")
+    (deleg / "b.md").write_text("b\n")
+    out = json.loads(cap["rename_file"](str(deleg / "a.md"), "b.md"))
+    assert out["status"] == "error"
+    assert (deleg / "b.md").read_text() == "b\n"
+
+
 # ----------------------------------------------------- PDF twin refresh
 
 

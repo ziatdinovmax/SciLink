@@ -4807,9 +4807,10 @@ class OrchestratorTools:
                 "already composed) to a NEW file "
                 "in the session directory. To change an EXISTING document, "
                 "do not rewrite it with save_file — use edit_file for a "
-                "snippet swap or write_technical_document with revise_path "
-                "for a content revision; those paths keep a pre-change "
-                "backup and guard against accidental truncation. "
+                "snippet swap, rename_file to change its filename, or "
+                "write_technical_document with revise_path "
+                "for a content revision; those paths keep the content "
+                "byte-safe and guard against accidental truncation. "
                 "Large content may not survive the "
                 "trip as a single tool-call argument — for anything long "
                 "(roughly >100 lines), save the first chunk with save_file and "
@@ -5030,6 +5031,105 @@ class OrchestratorTools:
                 },
             },
             required=["path", "old_text", "new_text"],
+        )
+
+        # 9d. RENAME FILE — byte-exact, never through the LLM
+        def rename_file(path: str, new_name: str, copy: bool = False,
+                        deliverable: bool = False, title: str = ""):
+            """
+            Rename (or copy) an existing session file byte-exactly, in its
+            own directory. Exists because the alternative was observed
+            live: with no rename tool, the agent reconstructed a 30 KB
+            document via save_file + append_file chunks, dropping content
+            and leaving divergent duplicates.
+            """
+            print(f"  ⚡ Tool: Renaming file '{path}' → '{new_name}'...")
+            try:
+                from ...utils.file_edit import rename_or_copy_file
+                from .user_interface import format_path, record_deliverable
+                rp = Path(path)
+                if not rp.is_absolute():
+                    rp = self._output_dir() / rp
+                rp = rp.resolve()
+                # A bare target name keeps the file where it lives — the
+                # rename changes identity, not location (moving between
+                # delegation folders is how phantom nested copies happen).
+                safe_name = Path(new_name).name
+                if not safe_name:
+                    return json.dumps({"status": "error",
+                                       "message": "Invalid new_name."})
+                out = rename_or_copy_file(
+                    rp, rp.parent / safe_name,
+                    root=Path(self.orch.base_dir).resolve(), copy=copy)
+                if out["status"] != "success":
+                    return json.dumps(out)
+                verb = "Copied" if copy else "Renamed"
+                print(f"    📛 {verb}: {format_path(Path(out['path']))}")
+                if out["pdf_twin_followed"]:
+                    print("    📄 PDF twin followed the "
+                          f"{'copy' if copy else 'rename'}")
+                record_deliverable(
+                    self.orch.base_dir, Path(out["path"]),
+                    title or f"{verb} from {rp.name}", deliverable)
+                return json.dumps(out)
+            except Exception as e:
+                logging.error(f"rename_file failed: {e}", exc_info=True)
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=rename_file,
+            name="rename_file",
+            description=(
+                "Rename (or copy) an existing session file BYTE-EXACTLY "
+                "under a new filename in its own directory — the content "
+                "never passes through the model. Use this to land a "
+                "document under its intended filename. Never reconstruct "
+                "a file with save_file/append_file just to rename it: "
+                "that loses content and leaves divergent duplicates. A "
+                "markdown document's PDF twin follows the rename "
+                "automatically."
+            ),
+            parameters={
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "File to rename — absolute, or relative to the "
+                        "current output directory. Must be inside the "
+                        "session directory."
+                    ),
+                },
+                "new_name": {
+                    "type": "string",
+                    "description": (
+                        "New filename (bare name, no directories). The "
+                        "file stays in its own folder."
+                    ),
+                },
+                "copy": {
+                    "type": "boolean",
+                    "description": (
+                        "Keep the original and create a copy under the "
+                        "new name instead of renaming. Default false — "
+                        "prefer a true rename; duplicates diverge."
+                    ),
+                },
+                "deliverable": {
+                    "type": "boolean",
+                    "description": (
+                        "Set TRUE when the renamed file IS the artifact "
+                        "the user asked for, so it is starred in the "
+                        "files list."
+                    ),
+                },
+                "title": {
+                    "type": "string",
+                    "description": (
+                        "Short human label for the file in the files "
+                        "list (e.g. its document title)."
+                    ),
+                },
+            },
+            required=["path", "new_name"],
         )
 
         # 10. SAVE CHECKPOINT

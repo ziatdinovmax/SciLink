@@ -125,6 +125,68 @@ def apply_surgical_edit(
     }
 
 
+def rename_or_copy_file(
+    src: Path,
+    dest: Path,
+    *,
+    root: Path,
+    copy: bool = False,
+    root_label: str = "session directory",
+) -> Dict[str, Any]:
+    """Byte-exact rename (or copy) of a session file — content never
+    passes through a model.
+
+    Exists because the alternative was observed live: with no rename
+    tool, an agent reconstructed a 30 KB document through save_file +
+    append_file chunks to change its filename, dropping content on the
+    way and leaving divergent duplicates. Both paths must be resolved
+    (absolute) and inside `root`; `dest` must not exist (never clobber).
+
+    A markdown file's PDF twin follows the move/copy automatically (when
+    one exists and the destination twin is free), preserving the
+    twins-never-go-stale invariant across renames.
+    """
+    import shutil
+
+    src, dest, root = Path(src), Path(dest), Path(root).resolve()
+    for label, p in (("path", src), ("new path", dest)):
+        if root not in p.parents:
+            return {"status": "error",
+                    "message": (f"{label} must be inside the {root_label} "
+                                f"({root}).")}
+    if not src.is_file():
+        return {"status": "error", "message": f"No such file: {src}"}
+    if src == dest:
+        return {"status": "error",
+                "message": "path and new path are identical."}
+    if dest.exists():
+        return {"status": "error",
+                "message": (f"Destination already exists: {dest} — "
+                            "refusing to overwrite it.")}
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    op = shutil.copy2 if copy else shutil.move
+    op(str(src), str(dest))
+
+    twin_followed = False
+    src_pdf, dest_pdf = src.with_suffix(".pdf"), dest.with_suffix(".pdf")
+    if (src.suffix.lower() == ".md" and src_pdf.exists()
+            and not dest_pdf.exists()):
+        try:
+            op(str(src_pdf), str(dest_pdf))
+            twin_followed = True
+        except Exception as e:  # noqa: BLE001 - never undo the main move
+            logging.warning(f"PDF twin did not follow the rename: {e}")
+
+    return {
+        "status": "success",
+        "path": str(dest),
+        "previous_path": str(src),
+        "copied": bool(copy),
+        "pdf_twin_followed": twin_followed,
+    }
+
+
 def refresh_pdf_twin(md_path: Path) -> Tuple[bool, Optional[str]]:
     """Re-export a markdown document's PDF twin, if one exists.
 

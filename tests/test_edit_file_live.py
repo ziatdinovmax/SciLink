@@ -38,6 +38,12 @@ agent routes edits correctly:
                           not claim success.
   8. html_edit         — a mechanical swap inside portfolio.html (no
                           PDF twin involved).
+  9. rename            — the past-session failure replayed: land a
+                          document under its intended filename. Must be
+                          a byte-exact rename_file (twin follows), NOT a
+                          save_file/append_file reconstruction (which
+                          dropped content and nested a phantom folder,
+                          live).
 
 Run:
     AWS_BEARER_TOKEN_BEDROCK=... AWS_REGION_NAME=us-east-1 \
@@ -405,10 +411,52 @@ def part8_html_edit():
                                          "CDOC Portfolio v2"))
 
 
+def part9_rename():
+    print("\n=== 9. intended-filename rename: byte-exact, no rebuild ===")
+    run = BASE / "p9"
+    orch = _seed_session(run, {})
+    base = Path(orch.base_dir)
+    d08 = base / "delegations" / "08_brainstorm_alternative"
+    d09 = base / "delegations" / "09_revise_and_rename"
+    d08.mkdir(parents=True)
+    d09.mkdir(parents=True)
+    doc = d08 / "technical_document.md"
+    doc.write_text(REPORT)
+    _write_png(d08 / "old_diagram.png", "gray")
+    _write_png(d08 / "campaign_workflow.png", "navy")
+    from scilink.utils.md_to_pdf import markdown_to_pdf
+    markdown_to_pdf(doc)
+    orch._active_output_subdir = d09
+
+    buf = Tee()
+    with contextlib.redirect_stdout(buf):
+        orch.chat(
+            "The engineering companion currently lives at "
+            "technical_document.md — land it under its intended filename "
+            "spm_cdoc_platform_engineering_companion.md. The content is "
+            "final; do not change a single byte of it.")
+    log = buf.getvalue()
+
+    dest = d08 / "spm_cdoc_platform_engineering_companion.md"
+    check("p9 rename_file used", "Tool: Renaming file" in log)
+    check("p9 no chunked reconstruction",
+          "Tool: Saving file" not in log
+          and "Tool: Appending to file" not in log)
+    check("p9 byte-identical at the new name",
+          dest.exists() and dest.read_text() == REPORT)
+    check("p9 old name gone (no divergent duplicate)", not doc.exists())
+    check("p9 stayed in its own folder (no phantom nesting)",
+          not any(base.rglob("*/09_revise_and_rename/*technical*"))
+          and not (d09 / dest.name).exists())
+    check("p9 PDF twin followed", dest.with_suffix(".pdf").exists()
+          and not doc.with_suffix(".pdf").exists())
+
+
 PARTS = {"1": part1_mechanical_swap, "2": part2_content_revision,
          "3": part3_replace_all, "4": part4_delegation_layout,
          "5": part5_disambiguation, "6": part6_cap_fallback,
-         "7": part7_sandbox_honesty, "8": part8_html_edit}
+         "7": part7_sandbox_honesty, "8": part8_html_edit,
+         "9": part9_rename}
 
 if __name__ == "__main__":
     want = sys.argv[1:] or sorted(PARTS)
