@@ -168,7 +168,7 @@ against the SAME evidence (provided below), so differences between them
 reflect strategy, not information. Judge them comparatively.
 
 Score EACH candidate 1-5 on:
-- "groundedness": every load-bearing claim is traceable to the provided evidence.
+- "groundedness": every substantive claim is traceable to the provided evidence.
 - "testability": the hypothesis is falsifiable by the stated expected_outcome.
 - "actionability": steps are executable without placeholders; optimization
   parameters are well-bounded.

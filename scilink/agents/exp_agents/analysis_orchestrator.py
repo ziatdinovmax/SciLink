@@ -19,6 +19,7 @@ from datetime import datetime
 from enum import Enum
 
 from ...auth import get_internal_proxy_key
+from ...utils.prose_style import PROSE_STYLE_RULE
 from ...utils.tool_media import (repair_dangling_tool_calls,
                                  build_tool_message, provider_supports_tool_image,
                                  sanitize_history_images)
@@ -492,7 +493,7 @@ def get_system_prompt(
             "When running analysis on data that matches a custom skill's domain, "
             "pass the skill name via the `skill` parameter in `run_analysis`.\n"
         )
-    return directives[analysis_mode] + body
+    return directives[analysis_mode] + body + "\n\n" + PROSE_STYLE_RULE
 
 
 class AnalysisOrchestratorAgent:

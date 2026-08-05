@@ -3131,7 +3131,7 @@ Update an existing skill with new knowledge while preserving what is already cor
    `user_correction` (`user_feedback`) → planning constraints/preferences and validation \
    acceptance criteria (treat human corrections as high-priority ground truth).
 4. Be ADDITIVE: the existing skill already routes real analyses, and every existing rule, \
-   constraint, and section is load-bearing — removing or weakening one regresses working \
+   constraint, and section is in active use — removing or weakening one regresses working \
    behavior. Remove or weaken existing guidance ONLY when the new knowledge explicitly \
    contradicts it.
 5. When there is a conflict, prefer the newer knowledge but note the discrepancy briefly.

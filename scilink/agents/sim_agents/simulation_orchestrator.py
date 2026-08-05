@@ -29,6 +29,7 @@ from ...auth import (
     APIKeyNotFoundError, get_api_key, get_internal_proxy_key, infer_provider,
     require_vendor_credentials,
 )
+from ...utils.prose_style import PROSE_STYLE_RULE
 from ...utils.tool_media import repair_dangling_tool_calls
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
@@ -229,7 +230,7 @@ def get_system_prompt(
             f"  {names}\n"
             "Pass the skill name to the relevant tool when applicable.\n"
         )
-    return directives[simulation_mode] + body
+    return directives[simulation_mode] + body + "\n\n" + PROSE_STYLE_RULE
 
 
 class SimulationOrchestratorAgent:

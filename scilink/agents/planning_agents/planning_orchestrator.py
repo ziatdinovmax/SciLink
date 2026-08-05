@@ -9,6 +9,7 @@ from datetime import datetime
 from enum import Enum
 
 from ...auth import get_internal_proxy_key
+from ...utils.prose_style import PROSE_STYLE_RULE
 from ...utils.tool_media import repair_dangling_tool_calls
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
@@ -552,7 +553,7 @@ def get_system_prompt(
             lines.append(f"- **{t['name']}**: {t.get('description', '')}")
         prompt += "\n".join(lines)
 
-    return prompt
+    return prompt + "\n\n" + PROSE_STYLE_RULE
 
 
 
