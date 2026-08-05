@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from ..loader import graduated_skills_dir
+from ._store_io import atomic_write_text, file_lock
 
 
 def safe_path_component(value: str, *, fallback: str = "unknown") -> str:
@@ -331,62 +332,70 @@ def graduate_to_skill_file(
 
     knowledge_text = _format_knowledge(knowledge_entry)
 
-    is_update = skill_path.exists()
-    if is_update:
-        existing_data = _read_skill_as_dict(skill_path, domain=domain)
-        prompt = update_template.format(
-            skill_name=skill_name,
-            existing_skill=json.dumps(existing_data, indent=2),
-            new_knowledge=knowledge_text,
-        )
-    else:
-        prompt = fresh_template.format(
-            skill_name=skill_name,
-            domain=domain,
-            knowledge_text=knowledge_text,
-        )
+    # The read-modify-write (read existing, LLM merge, write) must be one
+    # critical section: two sessions graduating into the same skill would
+    # otherwise both merge from the old content and the loser's work is
+    # silently discarded. Locking the skill file serializes same-skill
+    # graduations; graduation is rare, so this is fine.
+    # ponytail: per-skill lock, split read/write locks if same-skill
+    # throughput ever matters.
+    with file_lock(skill_path):
+        is_update = skill_path.exists()
+        if is_update:
+            existing_data = _read_skill_as_dict(skill_path, domain=domain)
+            prompt = update_template.format(
+                skill_name=skill_name,
+                existing_skill=json.dumps(existing_data, indent=2),
+                new_knowledge=knowledge_text,
+            )
+        else:
+            prompt = fresh_template.format(
+                skill_name=skill_name,
+                domain=domain,
+                knowledge_text=knowledge_text,
+            )
 
-    raw = llm_call(prompt)
-    try:
-        parsed = parse_json_response(raw)
-    except ValueError:
-        # The model answered in prose (or the JSON was truncated off the
-        # end). One corrective retry with the contract restated up front.
-        retry_prompt = (
-            "Respond with ONLY a single JSON object — no prose before or "
-            "after it.\n\n" + prompt
-        )
-        parsed = parse_json_response(llm_call(retry_prompt))
-    if extra_meta:
-        for key in _EXTRA_META_KEYS:
-            if key in extra_meta and extra_meta[key] is not None:
-                parsed[key] = extra_meta[key]
-    if append_sections:
-        for key, text in append_sections.items():
-            text = (text or "").strip()
-            if not text:
-                continue
-            existing = (str(parsed.get(key) or "")).strip()
-            parsed[key] = f"{existing}\n\n{text}".strip() if existing else text
-    skill_content = format_skill_as_markdown(parsed)
+        raw = llm_call(prompt)
+        try:
+            parsed = parse_json_response(raw)
+        except ValueError:
+            # The model answered in prose (or the JSON was truncated off the
+            # end). One corrective retry with the contract restated up front.
+            retry_prompt = (
+                "Respond with ONLY a single JSON object — no prose before or "
+                "after it.\n\n" + prompt
+            )
+            parsed = parse_json_response(llm_call(retry_prompt))
+        if extra_meta:
+            for key in _EXTRA_META_KEYS:
+                if key in extra_meta and extra_meta[key] is not None:
+                    parsed[key] = extra_meta[key]
+        if append_sections:
+            for key, text in append_sections.items():
+                text = (text or "").strip()
+                if not text:
+                    continue
+                existing = (str(parsed.get(key) or "")).strip()
+                parsed[key] = f"{existing}\n\n{text}".strip() if existing else text
+        skill_content = format_skill_as_markdown(parsed)
 
-    # Build-only mode: return the proposed content WITHOUT writing it, so a
-    # caller can show it for review (used by the upgrade propose/apply flow).
-    if not write:
-        return {
-            "status": "success",
-            "method": "updated" if is_update else "created",
-            "skill_name": skill_name,
-            "domain": domain,
-            "skill_path": str(skill_path),
-            "content": skill_content,
-            "word_count": len(skill_content.split()),
-        }
+        # Build-only mode: return the proposed content WITHOUT writing it, so a
+        # caller can show it for review (used by the upgrade propose/apply flow).
+        if not write:
+            return {
+                "status": "success",
+                "method": "updated" if is_update else "created",
+                "skill_name": skill_name,
+                "domain": domain,
+                "skill_path": str(skill_path),
+                "content": skill_content,
+                "word_count": len(skill_content.split()),
+            }
 
-    # Loader-style bundles include __init__.py; harmless for path-loaded
-    # skills, but keeps the layout consistent with built-ins.
-    (skill_dir / "__init__.py").touch()
-    skill_path.write_text(skill_content)
+        # Loader-style bundles include __init__.py; harmless for path-loaded
+        # skills, but keeps the layout consistent with built-ins.
+        (skill_dir / "__init__.py").touch()
+        atomic_write_text(skill_path, skill_content)
 
     word_count = len(skill_content.split())
     warning = None

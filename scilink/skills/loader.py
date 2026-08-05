@@ -30,6 +30,8 @@ from typing import Dict, List
 
 import yaml
 
+from ._shared._store_io import atomic_write_text
+
 _SKILLS_DIR = Path(__file__).parent
 
 _KNOWN_SECTIONS = {"overview", "planning", "analysis", "interpretation", "validation", "implementation"}
@@ -138,7 +140,7 @@ def set_memory_enabled(enabled: bool) -> Path:
     cfg = _read_config()
     cfg["memory_enabled"] = bool(enabled)
     p = _config_path()
-    p.write_text(json.dumps(cfg, indent=2))
+    atomic_write_text(p, json.dumps(cfg, indent=2))
     return p
 
 

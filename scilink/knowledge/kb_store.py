@@ -37,6 +37,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from ..skills._shared._store_io import atomic_write_text, file_lock
 from ..skills.loader import scilink_home
 
 _logger = logging.getLogger(__name__)
@@ -221,8 +222,20 @@ def _write_manifest(kb_dir: Path, **fields) -> Dict[str, Any]:
     manifest = read_manifest(kb_dir) or {}
     manifest.update(fields)
     manifest["updated_at"] = datetime.now().isoformat(timespec="seconds")
-    (kb_dir / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2))
+    atomic_write_text(kb_dir / MANIFEST_NAME, json.dumps(manifest, indent=2))
     return manifest
+
+
+def _publish_locked(staging: Path, final: Path) -> None:
+    """``_swap_into_place`` under a per-name lock.
+
+    Two sessions rebuilding the same-named KB share the ``.staging_<name>``
+    and ``.bak`` paths; without serialization the last publisher wins and can
+    swap in the other session's half-built staging dir. The lock file sits
+    next to ``final`` so it is per-KB-name.
+    """
+    with file_lock(final.with_name(final.name + ".publish.lock")):
+        _publish_locked(staging, final)
 
 
 def _source_names(kb_dir: Path) -> List[str]:
@@ -339,7 +352,7 @@ def create_kb(name: str,
             n_vectors=n_vectors,
             sources=_source_names(staging),
         )
-        _swap_into_place(staging, final)
+        _publish_locked(staging, final)
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise
@@ -411,7 +424,7 @@ def import_kb(name: str,
             n_vectors=n_vectors,
             sources=source_names,
         )
-        _swap_into_place(staging, final)
+        _publish_locked(staging, final)
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise
@@ -494,7 +507,7 @@ def add_to_kb(name: str,
             n_vectors=(manifest.get("n_vectors") or 0) + n_added,
             sources=_source_names(staging),
         )
-        _swap_into_place(staging, final)
+        _publish_locked(staging, final)
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise
@@ -586,7 +599,7 @@ def rebuild_kb(name: str,
                "n_chunks": n_chunks,
                "n_vectors": n_vectors},
         )
-        _swap_into_place(staging, final)
+        _publish_locked(staging, final)
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise
