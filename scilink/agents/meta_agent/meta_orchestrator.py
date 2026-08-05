@@ -24,6 +24,7 @@ from datetime import datetime
 from enum import Enum
 
 from ...auth import get_internal_proxy_key
+from ...utils.prose_style import PROSE_STYLE_RULE
 from ...utils.tool_media import (repair_dangling_tool_calls,
                                  close_interrupted_turn,
                                  build_tool_message, provider_supports_tool_image,
@@ -320,7 +321,7 @@ def get_system_prompt(meta_mode: MetaMode) -> str:
         MetaMode.AUTOPILOT: _AUTOPILOT_DIRECTIVE,
         MetaMode.AUTONOMOUS: _AUTONOMOUS_DIRECTIVE,
     }
-    return directives[meta_mode] + _SYSTEM_PROMPT_BODY
+    return directives[meta_mode] + _SYSTEM_PROMPT_BODY + "\n\n" + PROSE_STYLE_RULE
 
 
 def _tool_lines(schemas) -> str:
