@@ -316,16 +316,101 @@ def part6_chat_selection():
           TOPUP_MARK in lit)
 
 
+REAL_Q1 = ("What annealing parameters control the anatase-to-rutile "
+           "transformation in TiO2 thin films?")
+REAL_Q2 = ("How does pulsed or flash annealing differ from furnace "
+           "annealing for oxide thin-film crystallization?")
+REAL_Q3 = ("What in-situ probes can track polymorph selection during "
+           "rapid thermal annealing of oxide films?")
+
+
+def part7_real_search_end_to_end():
+    """REAL Edison searches (needs FUTUREHOUSE_API_KEY; ~20-30 min):
+    write site → headings/registry → index → auto-union refine, all on
+    genuine third-party literature content."""
+    print("\n=== 7. real Edison searches: write → index → union ===")
+    from scilink.agents.planning_agents.orchestrator_tools import (
+        _LIT_QUESTION_RE, OrchestratorTools as OT)
+    run = BASE / "p7"
+    orch = _seed_session(run, [])
+    fns = orch.tools.functions_map
+
+    out1 = json.loads(fns["search_literature"](
+        objective=[REAL_Q1, REAL_Q2], search_type="hypothesis_context"))
+    check("p7 search 1 (2 questions) succeeded",
+          out1.get("status") == "success")
+    if out1.get("status") != "success":
+        return
+    f1 = Path(out1["file_path"])
+    text1 = f1.read_text()
+    heads = _LIT_QUESTION_RE.findall(text1)
+    check("p7 real 2-question file carries both headings",
+          [h[1] for h in heads] == [REAL_Q1, REAL_Q2])
+    secs = OT._split_literature_sections(text1)
+    check("p7 splitter round-trips real content",
+          "".join(c for _q, c in secs) == text1)
+    reg = orch.planner.state["campaign_literature"]
+    e1 = [e for e in reg if e["path"] == str(f1.resolve())]
+    check("p7 registry stamped label+questions",
+          bool(e1) and e1[0].get("label") == "hypothesis_context"
+          and e1[0].get("questions") == [REAL_Q1, REAL_Q2])
+    ref2 = OT._resolve_context_text(f"{f1}#q2")
+    check("p7 #q2 ref resolves on real file",
+          bool(ref2) and ref2.startswith("# Question 2:")
+          and REAL_Q1 not in ref2)
+
+    out2 = json.loads(fns["search_literature"](
+        objective=REAL_Q3, search_type="hypothesis_context"))
+    check("p7 search 2 (1 question) succeeded",
+          out2.get("status") == "success")
+    if out2.get("status") != "success":
+        return
+    f2 = Path(out2["file_path"])
+    text2 = f2.read_text()
+    check("p7 second file collision-suffixed, first intact",
+          f2 != f1 and f1.read_text() == text1)
+    check("p7 single-question real file is headingless",
+          not _LIT_QUESTION_RE.search(text2))
+
+    idx = json.loads(fns["list_literature_searches"]())
+    check("p7 index lists both real files", idx.get("count") == 2)
+    fe2 = [fe for fe in idx["files"] if fe["path"] == str(f2)]
+    check("p7 headingless real file indexed with #q1 ref and question",
+          bool(fe2) and fe2[0]["sections"]
+          and fe2[0]["sections"][0]["section_ref"] == f"{f2}#q1"
+          and fe2[0]["sections"][0]["question"] == REAL_Q3
+          and fe2[0]["sections"][0]["answer_preview"])
+
+    # mid-section snippets from each real corpus must survive the union
+    body1 = secs[1][1]
+    snip1 = body1[len(body1) // 2: len(body1) // 2 + 40]
+    snip2 = text2[len(text2) // 2: len(text2) // 2 + 40]
+    buf = Tee()
+    with contextlib.redirect_stdout(buf):
+        out3 = json.loads(fns["refine_plan_with_results"](RESULTS_TXT))
+    log = buf.getvalue()
+    check("p7 refine succeeded on real union",
+          out3.get("status") == "success")
+    check("p7 auto-union of 2 real files logged", "2 file(s)" in log)
+    lit = (orch.planner.state.get("current_plan") or {}).get(
+        "literature_search", "")
+    check("p7 both real corpora reach the refined plan",
+          snip1 in lit and snip2 in lit)
+
+
 PARTS = {1: part1_single_file_refine, 2: part2_two_file_refine,
          3: part3_white_paper_multi, 4: part4_budget_drop_refine,
-         5: part5_chat_auto_default, 6: part6_chat_selection}
+         5: part5_chat_auto_default, 6: part6_chat_selection,
+         7: part7_real_search_end_to_end}
 
 
 if __name__ == "__main__":
     if not os.environ.get("AWS_BEARER_TOKEN_BEDROCK"):
         sys.exit("AWS_BEARER_TOKEN_BEDROCK not set")
     os.environ.setdefault("AWS_REGION_NAME", "us-east-1")
-    wanted = [int(a) for a in sys.argv[1:]] or sorted(PARTS)
+    default = (sorted(PARTS) if os.environ.get("FUTUREHOUSE_API_KEY")
+               else [n for n in sorted(PARTS) if n != 7])
+    wanted = [int(a) for a in sys.argv[1:]] or default
     if BASE.exists() and set(wanted) == set(PARTS):
         shutil.rmtree(BASE)
     BASE.mkdir(parents=True, exist_ok=True)
