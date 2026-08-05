@@ -29,7 +29,8 @@ from ...auth import (
     APIKeyNotFoundError, get_api_key, get_internal_proxy_key, infer_provider,
     require_vendor_credentials,
 )
-from ...utils.tool_media import repair_dangling_tool_calls
+from ...utils.tool_media import (repair_dangling_tool_calls,
+                                 close_interrupted_turn)
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .simulation_orchestrator_tools import SimulationOrchestratorTools
@@ -800,6 +801,11 @@ class SimulationOrchestratorAgent:
         # Repair any tool_use left unanswered by a mid-run user Stop
         # (or a trim slicing a pair apart) before extending history.
         self.messages = repair_dangling_tool_calls(self.messages)
+        # A stopped turn ends on a tool result; close it with a stub
+        # assistant note so the new user message does not create
+        # consecutive user-role blocks (Bedrock alternation; silences
+        # litellm's 'trying to merge' warning).
+        self.messages = close_interrupted_turn(self.messages)
         self.messages.append({"role": "user", "content": user_input})
 
         if len(self.messages) > 120:
@@ -890,6 +896,11 @@ class SimulationOrchestratorAgent:
         # Repair any tool_use left unanswered by a mid-run user Stop
         # (or a trim slicing a pair apart) before extending history.
         self.messages = repair_dangling_tool_calls(self.messages)
+        # A stopped turn ends on a tool result; close it with a stub
+        # assistant note so the new user message does not create
+        # consecutive user-role blocks (Bedrock alternation; silences
+        # litellm's 'trying to merge' warning).
+        self.messages = close_interrupted_turn(self.messages)
         self.messages.append({"role": "user", "content": user_input})
 
         if len(self.messages) > 120:
