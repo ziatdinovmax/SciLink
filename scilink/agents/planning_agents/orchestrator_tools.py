@@ -448,11 +448,18 @@ class OrchestratorTools:
         if not base.is_file():
             return None
         n = int(m.group("n"))
-        for _q, chunk in OrchestratorTools._split_literature_sections(
-                base.read_text()):
+        text = base.read_text()
+        sections = OrchestratorTools._split_literature_sections(text)
+        for _q, chunk in sections:
             hm = _LIT_QUESTION_RE.match(chunk)
             if hm and int(hm.group(1)) == n:
                 return chunk
+        if n == 1 and len(sections) == 1:
+            # A single-question corpus is written WITHOUT question
+            # headings; its whole body is section 1 (live: the model
+            # selected '<file>#q1' for exactly such a file, and a strict
+            # resolver skipped the campaign's most relevant corpus).
+            return text
         return ""
 
     @staticmethod
@@ -1739,9 +1746,9 @@ class OrchestratorTools:
                     text = p.read_text()
                     entry = meta.get(str(p.resolve()), {})
                     reg_qs = entry.get("questions") or []
+                    chunks = self._split_literature_sections(text)
                     sections = []
-                    for question, chunk in self._split_literature_sections(
-                            text):
+                    for question, chunk in chunks:
                         m = _LIT_QUESTION_RE.match(chunk)
                         body = (chunk[m.end():] if m else chunk).strip()
                         if (question is None and len(body) < 200
@@ -1756,8 +1763,13 @@ class OrchestratorTools:
                         item = {"question": question,
                                 "chars": len(chunk),
                                 "answer_preview": body[:300]}
+                        # Headingless single-question files are addressable
+                        # as their one-and-only section, '#q1' — keep the
+                        # selection syntax uniform across file shapes.
                         if m:
                             item["section_ref"] = f"{p}#q{m.group(1)}"
+                        elif len(chunks) == 1:
+                            item["section_ref"] = f"{p}#q1"
                         sections.append(item)
                     out_files.append({
                         "path": str(p),

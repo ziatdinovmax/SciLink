@@ -237,6 +237,15 @@ def test_section_ref_mixes_with_paths_comma_separated(tmp_path):
     assert paths == [str(fa.resolve()), str(fb.resolve())]  # ref → base file
 
 
+def test_headingless_file_q1_resolves_to_whole_body(tmp_path):
+    # live: the model selected '<file>#q1' for a single-question corpus
+    # written without question headings — that must mean "its only
+    # section", not an empty skip
+    f = _lit_file(tmp_path, "literature_search_b.md", TOPUP, T0)
+    assert OrchestratorTools._resolve_context_text(f"{f}#q1") == TOPUP
+    assert OrchestratorTools._resolve_context_text(f"{f}#q2") is None
+
+
 def test_missing_section_ref_never_becomes_raw_text(tmp_path, capsys):
     f = _lit_file(tmp_path, "literature_search_a.md", FOUNDATION, T0)
     text = OrchestratorTools._resolve_context_text(f"{f}#q9")
@@ -313,9 +322,10 @@ def test_list_literature_searches_index(tmp_path):
                   "Capture a state that exists only under drive?"]
     assert all(s["answer_preview"] for s in first["sections"])
     assert first["sections"][1]["section_ref"] == f"{old}#q2"
-    # single-question file: no heading in the file, question from registry
+    # single-question file: no heading in the file, question from registry,
+    # and its whole body addressable as '#q1' (uniform selection syntax)
     assert second["sections"][0]["question"] == "Which annealing schedule?"
-    assert "section_ref" not in second["sections"][0]
+    assert second["sections"][0]["section_ref"] == f"{new}#q1"
     assert "auto-load" in out["hint"].lower() or "Omit" in out["hint"]
 
 
