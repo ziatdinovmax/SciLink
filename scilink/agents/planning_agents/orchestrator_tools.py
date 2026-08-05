@@ -4986,10 +4986,14 @@ class OrchestratorTools:
                     return json.dumps({
                         "status": "error",
                         "message": (
-                            "Edit too large for edit_file — for content "
-                            "revisions use write_technical_document with "
-                            "revise_path, which rewrites the whole document "
-                            "under its length guard.")})
+                            "Edit too large for edit_file. For a content "
+                            "revision use write_technical_document with "
+                            "revise_path (whole-document rewrite under its "
+                            "length guard). For a VERBATIM insertion, split "
+                            "the text at a unique boundary into consecutive "
+                            "smaller edit_file calls — do not rewrite the "
+                            "whole file with save_file, which keeps no "
+                            "backup and has no truncation guard.")})
                 current = rp.read_text(errors="replace")
                 n = current.count(old_text)
                 if n == 0:
