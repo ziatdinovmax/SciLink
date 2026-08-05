@@ -70,10 +70,30 @@ print(f"     {t!r}  (len={len(t)})")
 check(len(t) <= 60, "respects the 60-char label cap")
 check(not t.endswith("precurs"), "does not cut mid-word (live proxy produced exactly this)")
 check(t == "Operando XRD polymorph identification from amorphous", "cuts at the last whole word")
-check(generate_session_title(FakeModel(text="  Ragged\n\n  spacing   here "), "x")
+check(generate_session_title(FakeModel(text="  Ragged \t spacing   here "), "x")
       == "Ragged spacing here", "collapses ragged whitespace")
 check(generate_session_title(FakeModel(text="A"*80), "x") == "A"*60,
       "unbroken 80-char string still yields 60 chars, not empty")
+
+print("\n=== only the FIRST line is the title (live: runoff glued on) ===")
+runoff = FakeModel(text="Smart interventions along synthesis pathways\n\n"
+                        "I have your uploaded PDF and")
+t = generate_session_title(runoff, "x")
+print(f"     {t!r}")
+check(t == "Smart interventions along synthesis pathways",
+      "continuation after the title line is dropped (live session name "
+      "carried it: '...pathways I have your')")
+check(generate_session_title(
+          FakeModel(text="Title: Flash anneal polymorph control"), "x")
+      == "Flash anneal polymorph control", "leading 'Title:' prefix stripped")
+check(generate_session_title(
+          FakeModel(text="\n\n  Operando XRD mapping\nmore chatter"), "x")
+      == "Operando XRD mapping", "leading blank lines skipped, tail dropped")
+ramble = FakeModel(text="This session is broadly about controlling oxide "
+                        "polymorph selection using pulsed annealing schedules")
+t = generate_session_title(ramble, "x")
+print(f"     {t!r}")
+check(len(t.split()) <= 8, "one-line ramble capped at 8 words")
 
 print("\n" + ("ALL PASSED" if not fails else f"{len(fails)} FAILURE(S): {fails}"))
 sys.exit(1 if fails else 0)
