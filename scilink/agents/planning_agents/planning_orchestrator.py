@@ -249,6 +249,9 @@ process constraints, pass them as additional_context (each is then mapped to a
 named step) rather than withholding the literature.
 
 For refinement, reuse existing literature or run a new search as needed.
+Omitting literature_context auto-loads ALL of the campaign's saved literature;
+when several searches have accumulated and only part is relevant, consult
+`list_literature_searches` and pass a selection instead.
 
 **MOLECULAR DESIGN WORKFLOW:**
 When the objective involves molecular design, molecular synthesis planning, or molecular discovery,
