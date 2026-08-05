@@ -8,6 +8,7 @@ import json
 from .planning_rag import (author_technical_document,
                            document_to_markdown)
 import logging
+import os
 import re
 import pandas as pd
 from pathlib import Path
@@ -39,6 +40,36 @@ _LIT_HEARTBEAT_SECONDS = 180
 # normally times itself out first and its worker exits cleanly — this
 # deadline is the backstop for when that does not happen.
 _LIT_BATCH_DEADLINE = 1800
+
+# Character budget for AUTO-LOADED multi-file literature context (issue
+# #425). A campaign accumulates literature across searches; unioning
+# without a cap turns the old silent-omission bug into a silent-truncation
+# bug (a refine prompt was measured at ~83k tokens with literature already
+# 85% of it). Applies ONLY when several files are unioned — a campaign's
+# single literature file is always loaded whole, and explicitly passed
+# literature_context is never capped. Over-budget WHOLE sections are
+# dropped (never mid-file truncation: a half-severed review paragraph
+# reads as complete) and the omission is logged.
+_LIT_AUTOLOAD_MAX_CHARS = int(os.environ.get(
+    "SCILINK_LIT_AUTOLOAD_MAX_CHARS", 400_000))
+
+# The question-heading template is the structural contract between the
+# literature write site and every reader that splits a saved corpus into
+# per-question sections (auto-load budgeting, the list_literature_searches
+# index, #q<N> section selection). Third-party search backends supply only
+# the prose INSIDE a section; these boundaries are SciLink-authored, so
+# writer and splitter must share one definition.
+_LIT_QUESTION_RE = re.compile(r"^# Question (\d+): (.*)$", re.MULTILINE)
+
+# '<path>#qN' — one question section of a saved literature file, the
+# selection unit surfaced by list_literature_searches (issue #425).
+_LIT_SECTION_REF_RE = re.compile(r"^(?P<base>.+?)#q(?P<n>\d+)$")
+
+
+def _format_lit_question_heading(n: int, objective: str) -> str:
+    """The one authoring point for '# Question N: <objective>' headings —
+    must stay in lockstep with _LIT_QUESTION_RE."""
+    return f"# Question {n}: {objective}"
 
 
 def _build_planning_skill_description(custom_skills: dict = None) -> str:
@@ -403,13 +434,36 @@ class OrchestratorTools:
         return None
 
     @staticmethod
+    def _resolve_section_ref(s: str) -> Optional[str]:
+        """Resolve a '<path>#qN' section reference (issue #425) to that
+        question section's text. Returns None when ``s`` is not a section
+        reference over an existing file; returns '' (resolved but empty)
+        when the file exists but holds no question N, so the caller can
+        warn instead of letting the ref string masquerade as raw text.
+        """
+        m = _LIT_SECTION_REF_RE.match(s)
+        if not m:
+            return None
+        base = Path(m.group("base"))
+        if not base.is_file():
+            return None
+        n = int(m.group("n"))
+        for _q, chunk in OrchestratorTools._split_literature_sections(
+                base.read_text()):
+            hm = _LIT_QUESTION_RE.match(chunk)
+            if hm and int(hm.group(1)) == n:
+                return chunk
+        return ""
+
+    @staticmethod
     def _resolve_context_text(value) -> Optional[str]:
         """Resolve a literature/molecule context argument to TEXT.
 
-        Accepts a file path, a comma-separated string of file paths, a list
-        of file paths, or raw text. File contents are read and concatenated;
-        anything that isn't resolvable as existing files is treated as raw
-        text (the historical behavior). This closes a live failure where a
+        Accepts a file path, a '<path>#qN' section reference, a
+        comma-separated string of these, a list of them, or raw text.
+        File/section contents are read and concatenated; anything that
+        isn't resolvable as existing files is treated as raw text (the
+        historical behavior). This closes a live failure where a
         comma-joined pair of paths fell through the single-path check and
         the PATH STRING itself became the 'literature', leaving downstream
         consumers (plan grounding, white-paper citations) with filenames
@@ -417,22 +471,36 @@ class OrchestratorTools:
         """
         if value is None:
             return None
+
+        def _read_one(s: str) -> Optional[str]:
+            """Text for one file path or section ref; None if neither."""
+            sec = OrchestratorTools._resolve_section_ref(s)
+            if sec is not None:
+                if not sec:
+                    print(f"    ⚠️  Section reference '{s}' names a "
+                          f"question that file does not contain — skipped")
+                return sec
+            p = Path(s)
+            return p.read_text() if p.is_file() else None
+
         items = value if isinstance(value, list) else [value]
         pieces = []
         for item in items:
             s = str(item).strip()
             if not s:
                 continue
-            p = Path(s)
-            if p.is_file():
-                pieces.append(p.read_text())
+            one = _read_one(s)
+            if one is not None:
+                if one:
+                    pieces.append(one)
                 continue
             tokens = [t.strip() for t in s.split(",") if t.strip()]
-            token_paths = [Path(t) for t in tokens]
-            if len(tokens) > 1 and all(tp.is_file() for tp in token_paths):
-                pieces.extend(tp.read_text() for tp in token_paths)
-            else:
-                pieces.append(s)  # raw text
+            if len(tokens) > 1:
+                texts = [_read_one(t) for t in tokens]
+                if all(t is not None for t in texts):
+                    pieces.extend(t for t in texts if t)
+                    continue
+            pieces.append(s)  # raw text
         return "\n\n".join(pieces) if pieces else None
 
     def _write_ideation_report(self) -> str:
@@ -660,17 +728,29 @@ class OrchestratorTools:
         record_deliverable(self.orch.base_dir, html_path,
                            "Experimental plan (report)", deliverable=True)
 
-    def _record_literature_file(self, path) -> None:
+    def _record_literature_file(self, path, label: str = None,
+                                questions: list = None) -> None:
         """Register a freshly saved literature file (issue #396).
 
         Tagged to the current campaign when one is active (a plan exists);
         otherwise left pending for the next plan call to claim.
+
+        ``label`` (search-type coverage, e.g. 'hypothesis_context
+        +cross_domain') and ``questions`` (the objectives the file
+        answers) record CONTENT coverage on the registry entry (issue
+        #425) so selection and indexing need not be made on filesystem
+        accident (mtime) or re-parsing — older entries simply lack the
+        fields and readers fall back to parsing the file.
         """
         st = self._planner_state() or {}
         cid = (int(st.get("campaign_id") or 1)
                if st.get("current_plan") else None)
-        self._lit_registry().append(
-            {"path": str(Path(path).resolve()), "campaign_id": cid})
+        entry = {"path": str(Path(path).resolve()), "campaign_id": cid}
+        if label:
+            entry["label"] = label
+        if questions:
+            entry["questions"] = [str(q) for q in questions]
+        self._lit_registry().append(entry)
 
     def _adopt_literature(self, explicit_context=None) -> None:
         """Claim literature for the CURRENT campaign: pending entries plus
@@ -714,34 +794,49 @@ class OrchestratorTools:
     def _context_file_paths(value) -> list:
         """Existing-file paths named by a literature_context argument —
         mirrors _resolve_context_text's path resolution (single path,
+        '<path>#qN' section refs resolving to their base file,
         comma-separated paths, or a list; raw text yields nothing)."""
         if value is None:
             return []
+
+        def _one_path(s: str) -> Optional[str]:
+            m = _LIT_SECTION_REF_RE.match(s)
+            if m and Path(m.group("base")).is_file():
+                return str(Path(m.group("base")).resolve())
+            p = Path(s)
+            return str(p.resolve()) if p.is_file() else None
+
         items = value if isinstance(value, list) else [value]
         out = []
         for item in items:
             s = str(item).strip()
             if not s:
                 continue
-            p = Path(s)
-            if p.is_file():
-                out.append(str(p.resolve()))
+            one = _one_path(s)
+            if one is not None:
+                out.append(one)
                 continue
             tokens = [t.strip() for t in s.split(",") if t.strip()]
-            token_paths = [Path(t) for t in tokens]
-            if len(tokens) > 1 and all(tp.is_file() for tp in token_paths):
-                out.extend(str(tp.resolve()) for tp in token_paths)
+            if len(tokens) > 1:
+                token_paths = [_one_path(t) for t in tokens]
+                if all(tp is not None for tp in token_paths):
+                    out.extend(token_paths)
         return out
 
-    def _latest_literature_file(self) -> Optional[Path]:
-        """Newest literature file belonging to the CURRENT campaign.
+    def _campaign_literature_files(self) -> List[Path]:
+        """ALL literature files belonging to the CURRENT campaign, oldest
+        first (issue #425).
 
         Campaign-scoped via the literature registry (issue #396): a session
         can hold several unrelated campaigns, and the old session-wide
         newest-file glob handed one campaign's corpus to another campaign's
         refine / white paper. Only same-campaign entries are eligible here;
-        a campaign that supplied no literature gets None — an honest miss,
-        never another topic's corpus.
+        a campaign that supplied no literature gets an empty list — an
+        honest miss, never another topic's corpus.
+
+        Oldest-first because literature accumulates as a broad foundational
+        search followed by narrow top-ups: foundation leads, top-ups
+        append — the right reading order and the right truncation order.
 
         Legacy fallback: a session restored from before the registry
         existed has literature files on disk but no entries — for those,
@@ -754,20 +849,25 @@ class OrchestratorTools:
         """
         cid = self._campaign_id()
         reg = self._lit_registry()
-        files = [Path(e["path"]) for e in reg
-                 if e.get("campaign_id") == cid and e.get("path")]
-        files = [p for p in files if p.is_file()]
+        seen: set = set()
+        files = []
+        for e in reg:
+            if e.get("campaign_id") != cid or not e.get("path"):
+                continue
+            p = Path(e["path"])
+            if str(p) not in seen and p.is_file():
+                seen.add(str(p))
+                files.append(p)
         if files:
-            files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-            return files[0]
+            files.sort(key=lambda p: p.stat().st_mtime)
+            return files
         if reg or cid > 1:
-            return None
+            return []
         roots = []
         base = getattr(self.orch, "base_dir", None)
         if base:
             roots.append((Path(base), "rglob"))
         roots.append((self._output_dir(), "glob"))
-        seen: set = set()
         legacy = []
         for root, mode in roots:
             it = (root.rglob("literature_search_*.md") if mode == "rglob"
@@ -776,8 +876,96 @@ class OrchestratorTools:
                 if str(p) not in seen:
                     seen.add(str(p))
                     legacy.append(p)
-        legacy.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        return legacy[0] if legacy else None
+        legacy.sort(key=lambda p: p.stat().st_mtime)
+        return legacy
+
+    def _latest_literature_file(self) -> Optional[Path]:
+        """Newest literature file of the CURRENT campaign (compat wrapper
+        over _campaign_literature_files, which is oldest-first)."""
+        files = self._campaign_literature_files()
+        return files[-1] if files else None
+
+    @staticmethod
+    def _split_literature_sections(text: str) -> list:
+        """Split a saved literature corpus into [(question, chunk), ...].
+
+        Boundaries are the SciLink-authored '# Question N: <objective>'
+        headings (_LIT_QUESTION_RE) — third-party search content only ever
+        appears INSIDE a section, so a format change upstream cannot move
+        them. A chunk includes its heading. Content before the first
+        heading (the file title, or the entire body of a single-question
+        file, which is written without question headings) is one chunk
+        with question=None. Rejoining all chunks reproduces the input
+        byte-for-byte.
+        """
+        matches = list(_LIT_QUESTION_RE.finditer(text))
+        if not matches:
+            return [(None, text)]
+        sections = []
+        if matches[0].start() > 0:
+            sections.append((None, text[:matches[0].start()]))
+        for i, m in enumerate(matches):
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            sections.append((m.group(2).strip(), text[m.start():end]))
+        return sections
+
+    def _load_campaign_literature(self) -> Optional[Dict[str, Any]]:
+        """Auto-load the CURRENT campaign's literature corpus (issue #425).
+
+        Returns {'text', 'files', 'n_files', 'dropped'} or None when the
+        campaign has no literature. Selection policy:
+
+        - ONE file: loaded whole, verbatim, uncapped — there is no choice
+          to make, and the single-search case is self-limiting. This path
+          is byte-identical to the historical newest-file behavior.
+        - SEVERAL files: oldest-first union. Verbatim-duplicate sections
+          (identical content — e.g. a re-recorded file or a search re-run
+          that returned the same text) are dropped first-occurrence-wins;
+          different prose about the same question is NEVER fused. Then a
+          character budget (_LIT_AUTOLOAD_MAX_CHARS) drops whole
+          over-budget sections (oldest-first fill, never mid-section
+          truncation), and every drop is reported — no silent caps.
+        """
+        files = self._campaign_literature_files()
+        if not files:
+            return None
+        if len(files) == 1:
+            text = files[0].read_text()
+            return {"text": text, "files": [files[0].name],
+                    "n_files": 1, "dropped": []}
+        chunks = []  # (file_name, question, chunk_text)
+        seen_content: set = set()
+        dup_dropped = []
+        for p in files:
+            for question, chunk in self._split_literature_sections(
+                    p.read_text()):
+                key = chunk.strip()
+                if key in seen_content:
+                    dup_dropped.append((p.name, question))
+                    continue
+                seen_content.add(key)
+                chunks.append((p.name, question, chunk))
+        kept, dropped, total = [], [], 0
+        for name, question, chunk in chunks:
+            if kept and total + len(chunk) > _LIT_AUTOLOAD_MAX_CHARS:
+                dropped.append((name, question))
+                continue
+            kept.append(chunk)
+            total += len(chunk)
+        if dup_dropped:
+            print(f"    📚 Literature union: skipped "
+                  f"{len(dup_dropped)} duplicate section(s) repeated "
+                  f"verbatim across files")
+        if dropped:
+            what = "; ".join(
+                f"{name}: {q or 'untitled section'}" for name, q in dropped)
+            print(f"    ⚠️  Literature budget "
+                  f"({_LIT_AUTOLOAD_MAX_CHARS:,} chars): dropped "
+                  f"{len(dropped)} whole section(s) — {what}")
+        return {"text": "\n\n".join(c.strip("\n") for c in kept),
+                "files": [p.name for p in files],
+                "n_files": len(files),
+                "dropped": dropped}
 
     def _get_diagram_agent(self):
         """Lazy DiagramAgent sharing the BO agent's model client (vision-
@@ -848,12 +1036,11 @@ class OrchestratorTools:
                                 + list(state.get("plan_history") or []))
                       if int(p.get("campaign_id") or 1) == cid)
         if not has_lit:
-            lit_file = self._latest_literature_file()
-            if lit_file is not None and state.get("current_plan"):
-                state["current_plan"]["literature_search"] = \
-                    lit_file.read_text()
+            lit = self._load_campaign_literature()
+            if lit is not None and state.get("current_plan"):
+                state["current_plan"]["literature_search"] = lit["text"]
                 print(f"    📚 White paper literature restored from "
-                      f"{lit_file.name}")
+                      f"{', '.join(lit['files'])}")
         text = self.orch.planner.generate_white_paper(
             audience_context=audience_context
         )
@@ -1390,8 +1577,10 @@ class OrchestratorTools:
                     if len(objectives) > 1:
                         # Multi-question runs keep per-question grouping so
                         # downstream readers see which evidence answers what.
-                        parts.append(f"# Question {oi + 1}: {objectives[oi]}\n\n"
-                                     + "\n\n".join(secs))
+                        parts.append(
+                            _format_lit_question_heading(oi + 1,
+                                                         objectives[oi])
+                            + "\n\n" + "\n\n".join(secs))
                     else:
                         parts.extend(secs)
                 content = "\n\n".join(parts)
@@ -1413,7 +1602,11 @@ class OrchestratorTools:
                 with open(lit_path, 'w') as f:
                     f.write(f"# Literature Search Results ({label})\n\n")
                     f.write(content)
-                self._record_literature_file(lit_path)
+                self._record_literature_file(
+                    lit_path, label=label,
+                    questions=[objectives[oi]
+                               for oi in range(len(objectives))
+                               if any((oi, t) in ok for t in types)])
 
                 failed = [(f"q{oi + 1}:{t}" if len(objectives) > 1 else t)
                           for oi, t in tasks if (oi, t) not in ok]
@@ -1517,6 +1710,97 @@ class OrchestratorTools:
                 }
             },
             required=["objective"]
+        )
+
+        # --- LITERATURE INDEX TOOL (issue #425) ---
+        def list_literature_searches():
+            """
+            Index of the CURRENT campaign's saved literature searches:
+            every file, the question each section answers, and the
+            beginning of each answer — the information needed to DECIDE
+            what a refine / plan call should read, without loading
+            hundreds of KB to find out.
+            """
+            print("  ⚡ Tool: Listing campaign literature searches...")
+            try:
+                files = self._campaign_literature_files()
+                if not files:
+                    return json.dumps({
+                        "status": "success", "count": 0, "files": [],
+                        "message": ("No literature saved for the current "
+                                    "campaign. Use search_literature() to "
+                                    "gather some.")})
+                meta = {}
+                for e in self._lit_registry():
+                    if e.get("path"):
+                        meta[str(Path(e["path"]).resolve())] = e
+                out_files = []
+                for p in files:
+                    text = p.read_text()
+                    entry = meta.get(str(p.resolve()), {})
+                    reg_qs = entry.get("questions") or []
+                    sections = []
+                    for question, chunk in self._split_literature_sections(
+                            text):
+                        m = _LIT_QUESTION_RE.match(chunk)
+                        body = (chunk[m.end():] if m else chunk).strip()
+                        if (question is None and len(body) < 200
+                                and body.startswith(
+                                    "# Literature Search Results")):
+                            continue  # bare title chunk, not content
+                        if question is None and len(reg_qs) == 1:
+                            # Single-question files are written without a
+                            # question heading; the registry knows the
+                            # objective.
+                            question = reg_qs[0]
+                        item = {"question": question,
+                                "chars": len(chunk),
+                                "answer_preview": body[:300]}
+                        if m:
+                            item["section_ref"] = f"{p}#q{m.group(1)}"
+                        sections.append(item)
+                    out_files.append({
+                        "path": str(p),
+                        "label": entry.get("label"),
+                        "chars": len(text),
+                        "modified": datetime.fromtimestamp(
+                            p.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+                        "sections": sections,
+                    })
+                return json.dumps({
+                    "status": "success",
+                    "count": len(out_files),
+                    "files": out_files,
+                    "hint": (
+                        "Decide from the questions/previews what the next "
+                        "plan or refine call should read, then pass that "
+                        "selection as literature_context — whole files by "
+                        "path, or individual sections by their "
+                        "section_ref ('<path>#qN'), comma-separated. "
+                        "Omit literature_context to auto-load ALL of the "
+                        "above (oldest-first union, deduped, capped at "
+                        f"{_LIT_AUTOLOAD_MAX_CHARS:,} chars).")})
+            except Exception as e:
+                logging.error(f"Literature listing error: {e}", exc_info=True)
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=list_literature_searches,
+            name="list_literature_searches",
+            description=(
+                "Lists the current campaign's saved literature searches as "
+                "an index: each file's questions and the beginning of each "
+                "answer, with per-section sizes. Costs almost nothing — "
+                "it reads no corpus into context. Call it before "
+                "refine_plan_with_results() or write_technical_document() "
+                "when the campaign may hold MORE THAN ONE literature file, "
+                "and pass the relevant selection (file paths, or "
+                "'<path>#qN' section refs) as literature_context. If you "
+                "pass nothing, ALL campaign literature is auto-loaded — "
+                "safe, but larger than a considered selection."
+            ),
+            parameters={},
+            required=[]
         )
 
         # --- MOLECULES QUERY TOOL ---
@@ -2516,17 +2800,19 @@ class OrchestratorTools:
                 lit_text = self._resolve_context_text(literature_context)
                 print(f"    📚 Literature context provided")
             else:
-                # Auto-load the newest saved literature from the CURRENT
-                # campaign (campaign-scoped registry, issue #396) — matched
-                # by glob-shaped labels (e.g. '...hypothesis_context
-                # +cross_domain.md') via the registry entries. A campaign
+                # Auto-load ALL saved literature from the CURRENT campaign
+                # (campaign-scoped registry, issue #396; plural union,
+                # issue #425 — the newest-file singular load silently
+                # dropped 77% of a live session's corpus). A campaign
                 # that supplied no literature refines without any; another
                 # topic's corpus is never injected.
-                lit_path = self._latest_literature_file()
-                if lit_path is not None:
-                    lit_text = lit_path.read_text()
+                lit = self._load_campaign_literature()
+                if lit is not None:
+                    lit_text = lit["text"]
                     print(f"    📚 Auto-loaded literature context from "
-                          f"session ({lit_path.name})")
+                          f"session ({lit['n_files']} file(s), "
+                          f"{len(lit_text):,} chars: "
+                          f"{', '.join(lit['files'])})")
             ext_parts = [lit_text] if lit_text else []
             if molecule_context:
                 mol_text = self._resolve_context_text(molecule_context)
@@ -2605,7 +2891,17 @@ class OrchestratorTools:
                 },
                 "literature_context": {
                     "type": "string",
-                    "description": "File path or text from search_literature() tool. Provides external scientific literature context for refinement."
+                    "description": (
+                        "External scientific literature for refinement: "
+                        "file path(s) or '<path>#qN' section refs "
+                        "(comma-separated; see list_literature_searches), "
+                        "or raw text. OMITTED: all of the current "
+                        "campaign's saved literature is auto-loaded — the "
+                        "right default. When the campaign holds several "
+                        "literature files and the refinement is narrow, "
+                        "consider selecting via list_literature_searches "
+                        "first."
+                    )
                 },
                 "molecule_context": {
                     "type": "string",
@@ -6601,9 +6897,9 @@ class OrchestratorTools:
                     current = rp.read_text(errors="replace")
                 lit = None
                 if use_literature:
-                    lit_file = self._latest_literature_file()
-                    if lit_file is not None:
-                        lit = lit_file.read_text()
+                    _lit = self._load_campaign_literature()
+                    if _lit is not None:
+                        lit = _lit["text"]
 
                 # Prior documents the agent names — this is how a revision or
                 # a merge builds on what the session already wrote instead of
