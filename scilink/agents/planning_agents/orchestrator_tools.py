@@ -1256,7 +1256,7 @@ class OrchestratorTools:
                  artifact_names = [f"analysis_artifacts/{f.name}" for f in artifacts_dir.iterdir() if f.is_file()]
             
             all_files = files + artifact_names
-            
+
             # Include data point count for optimization readiness
             data_count = 0
             if self.orch.bo_data_path.exists():
@@ -1265,19 +1265,71 @@ class OrchestratorTools:
                     data_count = len(df)
                 except Exception:
                     pass
-            
-            return json.dumps({
+
+            # Under a meta session every artifact lives in
+            # delegations/<slug>/, which the flat listing cannot see — live,
+            # an agent probed six guessed paths for a companion whose real
+            # filename it could not know (folders are named by task slug,
+            # files by the authoring turn) and only found it by reading
+            # deliverables.json as a last resort. Surface both halves of the
+            # answer here: the registry (title -> path, the semantic index)
+            # and a one-level listing of each delegation folder.
+            deliverables_index = []
+            try:
+                from .user_interface import load_deliverables
+                for e in load_deliverables(self.orch.base_dir):
+                    p = e.get("path")
+                    if not p or not Path(p).exists():
+                        continue
+                    deliverables_index.append({
+                        "title": e.get("title") or Path(p).name,
+                        "path": p,
+                        "deliverable": bool(e.get("deliverable")),
+                    })
+            except Exception:  # noqa: BLE001 - listing must never fail
+                pass
+
+            delegation_folders = {}
+            try:
+                droot = self.orch.base_dir / "delegations"
+                if droot.is_dir():
+                    for d in sorted(droot.iterdir()):
+                        if d.is_dir():
+                            delegation_folders[d.name] = sorted(
+                                f.name + ("/" if f.is_dir() else "")
+                                for f in d.iterdir())
+            except Exception:  # noqa: BLE001
+                pass
+
+            payload = {
                 "status": "success",
                 "files": all_files,
                 "data_points_collected": data_count,
                 "optimization_ready": data_count >= 3,
                 "active_analysis_script": Path(self.orch.active_scalarizer_script).name if self.orch.active_scalarizer_script else None
-            })
-        
+            }
+            if deliverables_index:
+                payload["deliverables_index"] = deliverables_index
+                payload["hint"] = ("deliverables_index maps document titles "
+                                   "to their real paths — use it instead of "
+                                   "guessing filenames.")
+            if delegation_folders:
+                payload["delegation_folders"] = delegation_folders
+            return json.dumps(payload)
+
         self._register_tool(
             func=list_workspace_files,
             name="list_workspace_files",
-            description="Lists files in the session directory (checkpoints, analysis artifacts, etc.). User data files may exist outside the session folder.",
+            description=(
+                "Lists files in the session directory (checkpoints, analysis "
+                "artifacts, etc.), plus — when present — a deliverables index "
+                "(document title -> real path) and the contents of each "
+                "delegations/ folder. To find a document produced earlier, "
+                "use this index rather than guessing paths: delegation "
+                "folders are named by task slug and filenames rarely match "
+                "a document's topic. User data files may exist outside the "
+                "session folder."
+            ),
             parameters={}
         )
         
