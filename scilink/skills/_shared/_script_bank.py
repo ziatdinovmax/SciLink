@@ -45,6 +45,7 @@ import numpy as np
 
 from ..loader import scilink_home, memory_enabled, _TRUTHY, _FALSY
 from ._graduation import safe_path_component, warn_if_ephemeral_store
+from ._store_io import atomic_write_text, file_lock
 
 
 def bank_dir() -> Path:
@@ -102,6 +103,18 @@ def add_record(domain: str, record: Dict[str, Any], *, root: Optional[Path] = No
         return {"id": None, "action": "skipped_no_script"}
     h = script_hash(script)
 
+    # The dedup + stat-update path is a read-modify-write on a shared record
+    # file. Two sessions banking the same script concurrently would both miss
+    # the not-yet-written duplicate and either lose an n_successes increment
+    # or create two records with the same script_hash. Serialize per domain.
+    # ponytail: per-domain lock, per-record locks if banking throughput matters.
+    with file_lock(_domain_dir(domain, root=root)):
+        return _add_record_locked(domain, record, h, root=root)
+
+
+def _add_record_locked(
+    domain: str, record: Dict[str, Any], h: str, *, root: Optional[Path] = None
+) -> Dict[str, Any]:
     existing = _find_by_hash(domain, h, root=root)
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     session = (record.get("provenance") or {}).get("session")
@@ -127,7 +140,7 @@ def add_record(domain: str, record: Dict[str, Any], *, root: Optional[Path] = No
             ):
                 rec["outcome"]["best_metric"] = metric
         rec["updated_at"] = now
-        path.write_text(json.dumps(rec, indent=2, default=str))
+        atomic_write_text(path, json.dumps(rec, indent=2, default=str))
         return {"id": rec["id"], "action": "updated"}
 
     warn_if_ephemeral_store()
@@ -143,7 +156,7 @@ def add_record(domain: str, record: Dict[str, Any], *, root: Optional[Path] = No
         "stats": {"n_successes": 1, "n_retrievals": 0},
         **record,
     }
-    (d / f"{rid}.json").write_text(json.dumps(payload, indent=2, default=str))
+    atomic_write_text(d / f"{rid}.json", json.dumps(payload, indent=2, default=str))
     return {"id": rid, "action": "created"}
 
 
