@@ -147,16 +147,49 @@ def test_degenerate_inputs_are_refused(tmp_path):
         cap["edit_file"](str(deleg / "nope.md"), "a", "b"))["status"] == "error"
 
 
-def test_second_edit_never_clobbers_the_first_backup(tmp_path):
+def test_edit_chain_keeps_only_the_chain_origin_backup(tmp_path):
+    """One backup per file per delegation: the state before the FIRST
+    edit. Live, an 18-edit chain filed 18 near-identical backups, each
+    recorded and re-embedded by the UI."""
     tools, cap, deleg = make_tools(tmp_path)
     doc = deleg / "doc.md"
     doc.write_text("v1\n")
-    json.loads(cap["edit_file"](str(doc), "v1", "v2"))
-    json.loads(cap["edit_file"](str(doc), "v2", "v3"))
+    out1 = json.loads(cap["edit_file"](str(doc), "v1", "v2"))
+    out2 = json.loads(cap["edit_file"](str(doc), "v2", "v3"))
     baks = sorted(p.name for p in deleg.glob("doc.before_edit*"))
-    assert baks == ["doc.before_edit.md", "doc.before_edit2.md"]
+    assert baks == ["doc.before_edit.md"]
     assert (deleg / "doc.before_edit.md").read_text() == "v1\n"
-    assert (deleg / "doc.before_edit2.md").read_text() == "v2\n"
+    assert out1["backup_created"] is True
+    assert out2["backup_created"] is False
+    assert out2["previous_version"] == out1["previous_version"]
+
+
+def test_batched_edits_apply_atomically_in_one_call(tmp_path):
+    tools, cap, deleg = make_tools(tmp_path)
+    doc = deleg / "doc.md"
+    doc.write_text("alpha one. beta two. gamma three.\n")
+
+    out = json.loads(cap["edit_file"](str(doc), edits=[
+        {"old_text": "alpha one", "new_text": "alpha 1"},
+        {"old_text": "beta two", "new_text": "beta 2"},
+        {"old_text": "gamma three", "new_text": "gamma 3"},
+    ]))
+    assert out["status"] == "success" and out["n_edits"] == 3
+    assert doc.read_text() == "alpha 1. beta 2. gamma 3.\n"
+    assert len(list(deleg.glob("doc.before_edit*"))) == 1
+
+    # a failing edit in the middle aborts the WHOLE batch
+    before = doc.read_text()
+    out = json.loads(cap["edit_file"](str(doc), edits=[
+        {"old_text": "alpha 1", "new_text": "alpha I"},
+        {"old_text": "NOT PRESENT", "new_text": "x"},
+    ]))
+    assert out["status"] == "error" and out["failed_edit"] == 2
+    assert doc.read_text() == before
+
+    # neither form provided -> clear error
+    out = json.loads(cap["edit_file"](str(doc)))
+    assert out["status"] == "error" and "edits list" in out["message"]
 
 
 # --------------------------------------------------------- rename_file

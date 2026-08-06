@@ -4987,18 +4987,27 @@ class OrchestratorTools:
             required=["filename", "content"],
         )
 
-        # 9c. EDIT FILE — surgical in-place replacement
-        def edit_file(path: str, old_text: str, new_text: str,
-                      replace_all: bool = False):
+        # 9c. EDIT FILE — surgical in-place replacement (single or batched)
+        def edit_file(path: str, old_text: str = None, new_text: str = None,
+                      replace_all: bool = False, edits: list = None):
             """
             Mechanical in-place edit of an existing session document:
-            replace one exact text snippet. Small edits only — content
-            revisions go through write_technical_document(revise_path=...).
+            replace exact text snippets — one old/new pair, or a batched
+            `edits` list applied atomically in one call. Content revisions
+            go through write_technical_document(revise_path=...).
             """
             print(f"  ⚡ Tool: Editing file '{path}'...")
             try:
-                from ...utils.file_edit import apply_surgical_edit
+                from ...utils.file_edit import apply_surgical_edits
                 from .user_interface import format_path, record_deliverable
+                if not edits:
+                    if old_text is None or new_text is None:
+                        return json.dumps({
+                            "status": "error",
+                            "message": ("Provide either old_text+new_text "
+                                        "or a non-empty edits list.")})
+                    edits = [{"old_text": old_text, "new_text": new_text,
+                              "replace_all": replace_all}]
                 rp = Path(path)
                 if not rp.is_absolute():
                     rp = self._output_dir() / rp
@@ -5008,9 +5017,9 @@ class OrchestratorTools:
                 # Guards + backup live in the shared core; this wrapper owns
                 # path resolution, the planning-specific routing hint below,
                 # deliverable recording, and the PDF-twin invariant.
-                out = apply_surgical_edit(
-                    rp, old_text, new_text,
-                    root=root, backup_dir=d, replace_all=replace_all,
+                out = apply_surgical_edits(
+                    rp, edits,
+                    root=root, backup_dir=d,
                     too_large_message=(
                         "Edit too large for edit_file. For a content "
                         "revision use write_technical_document with "
@@ -5023,15 +5032,19 @@ class OrchestratorTools:
                 )
                 if out["status"] != "success":
                     return json.dumps(out)
-                # Audit trail, like a revision's .before_revision copy: the
-                # delegation MAKING the edit keeps the version it replaced.
-                if out.get("previous_version"):
+                # Audit trail: ONE chain-origin backup per file per
+                # delegation, recorded once (live: an 18-edit chain filed
+                # 18 near-identical backups, each re-embedded by the UI).
+                if out.get("backup_created") and out.get("previous_version"):
                     who = ("" if d.resolve() == root
                            else f" (edited by {d.name})")
                     record_deliverable(self.orch.base_dir,
                                        Path(out["previous_version"]),
                                        f"Pre-edit copy of {rp.name}{who}")
-                print(f"    ✏️  Edited in place: {format_path(rp)}")
+                n = out.get("n_edits", 1)
+                print(f"    ✏️  Edited in place"
+                      f"{f' ({n} edits)' if n > 1 else ''}: "
+                      f"{format_path(rp)}")
                 out["pdf_refreshed"] = self._refresh_pdf_twin(rp)
                 return json.dumps(out)
             except Exception as e:
@@ -5043,14 +5056,19 @@ class OrchestratorTools:
             name="edit_file",
             description=(
                 "Surgically edit an existing session document IN PLACE by "
-                "replacing one exact text snippet — an image reference, a "
+                "replacing exact text snippets — an image reference, a "
                 "path, a caption, a typo, a parameter value. Mechanical "
                 "edits only: copy old_text VERBATIM from the file (read_file "
-                "first), and both snippets are capped at 2000 characters. "
-                "For actual content revisions (rewriting prose, "
-                "restructuring sections) use write_technical_document with "
-                "revise_path instead. If the document has a PDF twin beside "
-                "it, the PDF is re-exported automatically so it never goes "
+                "first), and each snippet is capped at 2000 characters. "
+                "Several changes to ONE file go in a single call as the "
+                "`edits` list (applied atomically, in order) — never as a "
+                "chain of one-edit calls, which burns the turn's tool "
+                "budget. A document-wide STYLE pass (readability, tone, "
+                "consistency) is a content revision even though each "
+                "change looks mechanical — use write_technical_document "
+                "with revise_path for that, as for any prose rewrite or "
+                "restructuring. If the document has a PDF twin beside it, "
+                "the PDF is re-exported automatically so it never goes "
                 "stale."
             ),
             parameters={
@@ -5065,24 +5083,46 @@ class OrchestratorTools:
                 "old_text": {
                     "type": "string",
                     "description": (
-                        "The exact snippet to replace, copied VERBATIM from "
-                        "the file including whitespace. Must match exactly "
-                        "one place unless replace_all is true."
+                        "Single-edit form: the exact snippet to replace, "
+                        "copied VERBATIM from the file including "
+                        "whitespace. Must match exactly one place unless "
+                        "replace_all is true. Omit when passing `edits`."
                     ),
                 },
                 "new_text": {
                     "type": "string",
-                    "description": "The replacement text.",
+                    "description": ("Single-edit form: the replacement "
+                                    "text. Omit when passing `edits`."),
                 },
                 "replace_all": {
                     "type": "boolean",
                     "description": (
-                        "Replace every occurrence instead of requiring the "
-                        "snippet to be unique. Default false."
+                        "Single-edit form: replace every occurrence "
+                        "instead of requiring the snippet to be unique. "
+                        "Default false."
+                    ),
+                },
+                "edits": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_text": {"type": "string"},
+                            "new_text": {"type": "string"},
+                            "replace_all": {"type": "boolean"},
+                        },
+                        "required": ["old_text", "new_text"],
+                    },
+                    "description": (
+                        "Batched form: ALL the changes for this file in "
+                        "one call. Applied in order, each against the "
+                        "already-edited text; all-or-nothing — if one "
+                        "edit fails to match, nothing is applied and the "
+                        "error names which edit failed."
                     ),
                 },
             },
-            required=["path", "old_text", "new_text"],
+            required=["path"],
         )
 
         # 9d. RENAME FILE — byte-exact, never through the LLM

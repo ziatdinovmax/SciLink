@@ -51,7 +51,8 @@ def test_cap_uses_the_callers_routing_hint(tmp_path):
     f.write_text("short\n")
     out = edit(f, "short", "y" * 2001, root=tmp_path,
                too_large_message="USE-MODE-SPECIFIC-TOOL")
-    assert out == {"status": "error", "message": "USE-MODE-SPECIFIC-TOOL"}
+    assert out["status"] == "error"
+    assert out["message"] == "USE-MODE-SPECIFIC-TOOL"   # verbatim, no prefix
     assert f.read_text() == "short\n"
 
 
@@ -67,13 +68,47 @@ def test_suffix_policy_is_configurable_for_extensionless_vasp(tmp_path):
     assert incar.read_text() == "ENCUT = 520\n"
 
 
-def test_backup_counter_never_clobbers(tmp_path):
+def test_chain_origin_backup_only(tmp_path):
     f = tmp_path / "doc.md"
     f.write_text("v1\n")
-    edit(f, "v1", "v2", root=tmp_path)
-    edit(f, "v2", "v3", root=tmp_path)
+    o1 = edit(f, "v1", "v2", root=tmp_path)
+    o2 = edit(f, "v2", "v3", root=tmp_path)
     baks = sorted(p.name for p in (tmp_path / "backups").iterdir())
-    assert baks == ["doc.before_edit.md", "doc.before_edit2.md"]
+    assert baks == ["doc.before_edit.md"]
+    assert (tmp_path / "backups" / "doc.before_edit.md").read_text() == "v1\n"
+    assert o1["backup_created"] is True and o2["backup_created"] is False
+
+
+def test_snippet_batch_is_sequential_and_atomic(tmp_path):
+    from scilink.utils.file_edit import apply_snippet_edits
+
+    # sequential: edit 2 matches text PRODUCED by edit 1
+    out = apply_snippet_edits("a b c", [
+        {"old_text": "a b", "new_text": "X Y"},
+        {"old_text": "Y c", "new_text": "Y Z"},
+    ])
+    assert out["status"] == "success"
+    assert out["text"] == "X Y Z" and out["n_edits"] == 2
+
+    # atomic: failure names the edit, nothing "applied"
+    out = apply_snippet_edits("a b c", [
+        {"old_text": "a", "new_text": "A"},
+        {"old_text": "missing", "new_text": "x"},
+    ])
+    assert out["status"] == "error" and out["failed_edit"] == 2
+    assert "IN ORDER" in out["message"]
+
+    # per-edit guards carry the edit label
+    out = apply_snippet_edits("a a", [{"old_text": "a", "new_text": "b"}])
+    assert out["status"] == "error" and "2 places" in out["message"]
+    out = apply_snippet_edits("a", [{"old_text": "a", "new_text": "b" * 2001}])
+    assert out["status"] == "error" and out["failed_edit"] == 1
+    assert apply_snippet_edits("a", [])["status"] == "error"
+
+    # replace_all inside a batch
+    out = apply_snippet_edits("x x x", [
+        {"old_text": "x", "new_text": "y", "replace_all": True}])
+    assert out["status"] == "success" and out["replacements"] == 3
 
 
 def test_rename_moves_bytes_and_pdf_twin(tmp_path):

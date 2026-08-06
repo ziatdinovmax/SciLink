@@ -44,6 +44,13 @@ agent routes edits correctly:
                           save_file/append_file reconstruction (which
                           dropped content and nested a phantom folder,
                           live).
+ 10. readability_pass  — the 18-call edit-chain failure replayed: a
+                          document-wide sentence-splitting pass must go
+                          through ONE revision or few batched edit
+                          calls — not an unbatched per-sentence chain
+                          that burns the tool-iteration budget and
+                          piles up backups (live: 18 calls, 18 backups,
+                          turn aborted at the iteration cap).
 
 Run:
     AWS_BEARER_TOKEN_BEDROCK=... AWS_REGION_NAME=us-east-1 \
@@ -452,11 +459,78 @@ def part9_rename():
           and not doc.with_suffix(".pdf").exists())
 
 
+SUMMARY = """# Three-Track Summary
+
+## Track 1 — MZI
+
+The MZI-QPI channel resolves refractive-index transients at 2 ms cadence
+across the full field while the co-registered thermal probe tracks the
+exotherm and the flow controller holds residence time constant, which
+together let the campaign separate nucleation onset from growth kinetics
+without pausing the run. The cell is reset by rinse-in-place between
+runs, the MARKER-BUDGET-46K line covers optics, and the same fixture
+carries both the seed and seedless arms so cross-arm drift stays below
+the noise floor of the phase readout.
+
+## Track 2 — SPM
+
+The AFM and c-KPFM channels map topography and surface potential on the
+same tip pass while confocal Raman adds a phase-identity readout through
+the top window, and the pulse generator applies the E/B/T perturbation
+suite without breaking meniscus contact, so a single mounted sample
+yields the whole per-mode cadence table. MARKER-SPM-CELL names the
+liquid cell geometry.
+
+## Track 3 — SAXS/WAXS
+
+Lab-source SAXS resolves the 2-50 nm structure factor while WAXS indexes
+the crystalline fraction on the same exposure, and the Mo/Cu switchable
+anode trades flux against q-range so the MARKER-CAPILLARY flow cell can
+follow both the induction period and the ripening tail in one unattended
+sequence spanning several hours.
+"""
+
+
+def part10_readability_pass():
+    print("\n=== 10. document-wide readability pass: no edit chain ===")
+    run = BASE / "p10"
+    orch = _seed_session(run, {"three_track_summary.md": SUMMARY},
+                         with_pdf=("three_track_summary.md",))
+    base = Path(orch.base_dir)
+
+    buf = Tee()
+    with contextlib.redirect_stdout(buf):
+        orch.chat(
+            "Do a readability pass on three_track_summary.md in place: "
+            "split the long multi-clause sentences into shorter ones. "
+            "Keep every fact, figure, and heading — sentence structure "
+            "only.")
+    log = buf.getvalue()
+
+    check("p10 no iteration-cap abort",
+          "Maximum tool iterations" not in log)
+    n_edit_calls = log.count("Tool: Editing file")
+    used_revision = "Revised IN PLACE" in log
+    check("p10 one revision or few BATCHED edit calls (was: 18)",
+          used_revision or (1 <= n_edit_calls <= 3))
+    baks = list(base.glob("three_track_summary.before_edit*")) \
+        + list(base.glob("three_track_summary.before_revision*"))
+    check("p10 at most one backup (was: 18)", len(baks) <= 1)
+    text = (base / "three_track_summary.md").read_text()
+    check("p10 facts and headings survived",
+          all(m in text for m in ("MARKER-BUDGET-46K", "MARKER-SPM-CELL",
+                                  "MARKER-CAPILLARY", "## Track 3")))
+    check("p10 sentences actually split",
+          text.count(". ") + text.count(".\n") >
+          SUMMARY.count(". ") + SUMMARY.count(".\n"))
+    check("p10 PDF twin refreshed", "PDF twin refreshed" in log)
+
+
 PARTS = {"1": part1_mechanical_swap, "2": part2_content_revision,
          "3": part3_replace_all, "4": part4_delegation_layout,
          "5": part5_disambiguation, "6": part6_cap_fallback,
          "7": part7_sandbox_honesty, "8": part8_html_edit,
-         "9": part9_rename}
+         "9": part9_rename, "10": part10_readability_pass}
 
 if __name__ == "__main__":
     want = sys.argv[1:] or sorted(PARTS)

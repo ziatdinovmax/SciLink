@@ -37,6 +37,76 @@ DEFAULT_TOO_LARGE_MESSAGE = (
 )
 
 
+def apply_snippet_edits(
+    text: str,
+    edits: list,
+    *,
+    max_len: int = DEFAULT_MAX_SNIPPET_LEN,
+    too_large_message: str = DEFAULT_TOO_LARGE_MESSAGE,
+) -> Dict[str, Any]:
+    """Atomically apply a SEQUENCE of exact-snippet replacements to text.
+
+    Each edit is ``{old_text, new_text, replace_all?}`` with the single-edit
+    semantics (non-empty, non-identical, per-snippet cap, exactly one match
+    unless replace_all). Edits apply IN ORDER, each against the text as
+    already edited by its predecessors. All-or-nothing: the first failing
+    edit aborts the whole list — the returned error names it (1-based
+    ``failed_edit``) and nothing is considered applied. On success returns
+    ``{"status": "success", "text", "replacements", "n_edits"}``.
+
+    This is the batching primitive: a document-wide set of small changes is
+    ONE call carrying the whole list, not one tool call per sentence (live:
+    an 18-call edit chain burned the delegation's tool-iteration budget and
+    left an 18-deep backup pile).
+    """
+    if not edits:
+        return {"status": "error", "message": "edits must be a non-empty list."}
+    cur, total = text, 0
+    # Single-edit calls keep the original (live-tested) message wording;
+    # the "edit i/N" label and batch caveats appear only in true batches.
+    batch = len(edits) > 1
+    for i, e in enumerate(edits):
+        label = f"edit {i + 1}/{len(edits)}: " if batch else ""
+        if not isinstance(e, dict):
+            return {"status": "error", "failed_edit": i + 1,
+                    "message": f"{label}each edit must be an object "
+                               "with old_text and new_text."}
+        old = e.get("old_text") or ""
+        new = e.get("new_text") or ""
+        ra = bool(e.get("replace_all"))
+        if not old:
+            return {"status": "error", "failed_edit": i + 1,
+                    "message": f"{label}old_text must be a non-empty snippet."}
+        if old == new:
+            return {"status": "error", "failed_edit": i + 1,
+                    "message": f"{label}old_text and new_text are identical."}
+        if max(len(old), len(new)) > max_len:
+            return {"status": "error", "failed_edit": i + 1,
+                    "message": f"{label}{too_large_message}"}
+        n = cur.count(old)
+        if n == 0:
+            batch_note = (" Note edits apply IN ORDER: a later edit must "
+                          "match the text as already changed by earlier "
+                          "edits. Nothing was applied.") if batch else ""
+            return {"status": "error", "failed_edit": i + 1,
+                    "message": (
+                        f"{label}old_text not found — read_file the "
+                        "document and copy the snippet verbatim, "
+                        f"whitespace included.{batch_note}")}
+        if n > 1 and not ra:
+            batch_note = (" Nothing was applied." if batch else "")
+            return {"status": "error", "failed_edit": i + 1,
+                    "message": (
+                        f"{label}old_text matches {n} places — extend the "
+                        "snippet until it is unique, or pass "
+                        f"replace_all=true to change every occurrence."
+                        f"{batch_note}")}
+        cur = cur.replace(old, new) if ra else cur.replace(old, new, 1)
+        total += n if ra else 1
+    return {"status": "success", "text": cur,
+            "replacements": total, "n_edits": len(edits)}
+
+
 def apply_surgical_edit(
     path: Path,
     old_text: str,
@@ -45,28 +115,52 @@ def apply_surgical_edit(
     root: Path,
     backup_dir: Path,
     replace_all: bool = False,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Single-edit convenience wrapper over :func:`apply_surgical_edits`."""
+    return apply_surgical_edits(
+        path,
+        [{"old_text": old_text, "new_text": new_text,
+          "replace_all": replace_all}],
+        root=root, backup_dir=backup_dir, **kwargs)
+
+
+def apply_surgical_edits(
+    path: Path,
+    edits: list,
+    *,
+    root: Path,
+    backup_dir: Path,
     max_len: int = DEFAULT_MAX_SNIPPET_LEN,
     allowed_suffixes: Set[str] = DEFAULT_EDITABLE_SUFFIXES,
     too_large_message: str = DEFAULT_TOO_LARGE_MESSAGE,
     root_label: str = "session directory",
 ) -> Dict[str, Any]:
-    """Replace one exact snippet in `path`, guarded and backed up.
+    """Apply an atomic batch of exact-snippet edits to `path`, guarded and
+    backed up.
 
     `path` must already be resolved (absolute); relative-name resolution
     against a delegation/output directory is the caller's job. Returns a
     dict with ``status: "success"`` (plus ``path``, ``replacements``,
-    ``previous_version``) or ``status: "error"`` (plus ``message``). Never
-    raises for expected failures; unexpected ones propagate to the caller's
-    error handling.
+    ``n_edits``, ``previous_version``, ``backup_created``) or
+    ``status: "error"`` (plus ``message``, and ``failed_edit`` when a
+    specific edit failed). Never raises for expected failures.
 
-    Guards, in order: sandbox (inside `root`), existence, suffix allowlist,
-    non-empty and non-identical snippets, size cap (`too_large_message` is
-    the mode's routing hint — it should name that mode's alternative tool),
-    exactly-one occurrence unless `replace_all`.
+    Path guards: sandbox (inside `root`), existence, suffix allowlist.
+    Per-edit guards live in :func:`apply_snippet_edits` (all-or-nothing);
+    `too_large_message` is the mode's routing hint — it should name that
+    mode's alternative tool.
 
-    The pre-edit copy lands in `backup_dir` as
-    ``<stem>.before_edit[N]<suffix>`` — counter-suffixed, never clobbering
-    an earlier backup. Backup failure is logged and never blocks the edit.
+    Backup: ONE per file per `backup_dir` — ``<stem>.before_edit<suffix>``
+    holds the state before this backup dir's FIRST edit of the file, and
+    later edits (or batches) from the same dir do not add more. The chain
+    origin is the meaningful audit artifact; per-edit intermediates were
+    noise at scale (live: an 18-edit chain recorded 18 near-identical
+    backups, each re-embedded by the UI). ``previous_version`` always names
+    the chain-origin copy; ``backup_created`` says whether THIS call wrote
+    it. Caveat: the name is keyed by filename, so two same-named files
+    edited from one backup_dir share a slot — first wins. Backup failure is
+    logged and never blocks the edit.
     """
     rp = Path(path)
     root = Path(root).resolve()
@@ -80,48 +174,34 @@ def apply_surgical_edit(
         return {"status": "error",
                 "message": (f"'{rp.suffix}' is not an editable text "
                             f"format ({shown}).")}
-    if not old_text:
-        return {"status": "error",
-                "message": "old_text must be a non-empty snippet."}
-    if old_text == new_text:
-        return {"status": "error",
-                "message": "old_text and new_text are identical."}
-    if max(len(old_text), len(new_text or "")) > max_len:
-        return {"status": "error", "message": too_large_message}
 
     current = rp.read_text(errors="replace")
-    n = current.count(old_text)
-    if n == 0:
-        return {"status": "error",
-                "message": ("old_text not found — read_file the document and "
-                            "copy the snippet verbatim, whitespace included.")}
-    if n > 1 and not replace_all:
-        return {"status": "error",
-                "message": (f"old_text matches {n} places — extend the "
-                            "snippet until it is unique, or pass "
-                            "replace_all=true to change every occurrence.")}
+    res = apply_snippet_edits(current, edits, max_len=max_len,
+                              too_large_message=too_large_message)
+    if res["status"] != "success":
+        return res
 
     bak: Optional[Path] = None
+    created = False
     try:
         backup_dir = Path(backup_dir)
         backup_dir.mkdir(parents=True, exist_ok=True)
-        i, bak = 1, backup_dir / f"{rp.stem}.before_edit{rp.suffix}"
-        while bak.exists():
-            i += 1
-            bak = backup_dir / f"{rp.stem}.before_edit{i}{rp.suffix}"
-        bak.write_text(current)
+        bak = backup_dir / f"{rp.stem}.before_edit{rp.suffix}"
+        if not bak.exists():
+            bak.write_text(current)
+            created = True
     except Exception as e:  # noqa: BLE001 - never block the edit
         logging.warning(f"Pre-edit copy failed: {e}")
         bak = None
 
-    rp.write_text(current.replace(old_text, new_text)
-                  if replace_all else
-                  current.replace(old_text, new_text, 1))
+    rp.write_text(res["text"])
     return {
         "status": "success",
         "path": str(rp),
-        "replacements": n if replace_all else 1,
+        "replacements": res["replacements"],
+        "n_edits": res["n_edits"],
         "previous_version": str(bak) if bak else None,
+        "backup_created": created,
     }
 
 
