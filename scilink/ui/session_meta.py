@@ -93,8 +93,21 @@ def generate_session_title(model, first_user_msg: str,
         )
         resp = model.generate_content(
             [prompt], generation_config=SimpleNamespace(max_output_tokens=24))
-        title = re.sub(r'["\'\n\r.]+', " ", getattr(resp, "text", "") or "")
+        raw = getattr(resp, "text", "") or ""
+        # Only the FIRST non-empty line is the title. Models keep talking
+        # past the title often enough that folding newlines into spaces
+        # shipped the runoff as part of the name — a sidebar label read
+        # "Smart interventions along synthesis pathways I have your"
+        # (live), the tail being conversational continuation cut
+        # mid-sentence by the token cap.
+        raw = next((ln for ln in raw.splitlines() if ln.strip()), "")
+        raw = re.sub(r"^\s*title\s*[:\-]\s*", "", raw, flags=re.IGNORECASE)
+        title = re.sub(r'["\'\n\r.]+', " ", raw)
         title = " ".join(title.split()).strip()
+        # Backstop the 3-6-word instruction against one-line rambles.
+        words = title.split()
+        if len(words) > 8:
+            title = " ".join(words[:8])
         if len(title) > 60:
             # Cut on a word boundary — a sidebar label ending mid-word
             # ("...from amorphous precurs") reads as a broken title.
