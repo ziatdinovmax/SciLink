@@ -301,6 +301,12 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # with a fixed model / feature-table schema (#172).
         prior_analysis_paths: Optional[List[str]] = None,
         reuse_locked_script: bool = False,
+        # Surgical single-knob follow-up on the locked-reuse path: exact
+        # old/new snippet pairs applied to the prior script BEFORE the
+        # verbatim run, so the rerun is byte-identical except the knob
+        # (requires prior_analysis_paths + reuse_locked_script). Validated
+        # up front; the sandbox run remains the verification.
+        script_edits: Optional[List[Dict[str, Any]]] = None,
         literature_file: Optional[str] = None,
         # Quality control overrides (optional)
         r2_threshold: Optional[float] = None,
@@ -500,6 +506,37 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "can be cold-started."
                 )
             realtime_cold_start = True
+
+        # Surgical script edits — validated HERE, before any pipeline work:
+        # the edits must apply cleanly to the prior run's saved script or the
+        # run refuses with the per-edit report. Never a partial application,
+        # never a silent unedited run, zero LLM cost on refusal.
+        if script_edits:
+            def _edits_error(err: str, details: str, **extra):
+                return {"status": "error",
+                        "error": {"error": err, "details": details, **extra},
+                        "output_directory": str(self.output_dir)}
+            if not (prior_analysis_paths and reuse_locked_script):
+                return _edits_error(
+                    "script_edits requires locked reuse",
+                    "Pass prior_analysis_paths=[<prior run dir>] and "
+                    "reuse_locked_script=True — script_edits surgically "
+                    "modifies that prior script before the verbatim run.")
+            from .controllers.curve_fitting_controllers import (
+                _first_prior_curve_fit_script)
+            from scilink.utils.file_edit import apply_snippet_edits
+            _prior_script, _ = _first_prior_curve_fit_script(
+                {"prior_analysis_paths": prior_analysis_paths})
+            if not _prior_script:
+                return _edits_error(
+                    "no reusable prior script",
+                    "None of prior_analysis_paths carries a saved fitting "
+                    "script (series_fit_results.json + scripts/*.py).")
+            _res = apply_snippet_edits(_prior_script, script_edits)
+            if _res["status"] != "success":
+                return _edits_error(
+                    "script_edits do not apply", _res["message"],
+                    failed_edit=_res.get("failed_edit"))
 
         # Resolve task_mode — caller sets this explicitly (standalone user or
         # orchestrator). Defaults to "fitting" when unset.
@@ -819,6 +856,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # Opt-in: force verbatim reuse of the prior locked script (#172).
             # Default False — prior runs are agent-judged reference material.
             "reuse_locked_script": bool(reuse_locked_script),
+            # Surgical follow-up edits applied to the reused script (already
+            # validated above; the series controller applies them).
+            "script_edits": script_edits or [],
             # Verbatim cold start (#346 step 4): the audition winner, threaded
             # into the series controller's reuse path (None when not used).
             "_cold_start_reuse": ({

@@ -2241,6 +2241,7 @@ class AnalysisOrchestratorTools:
             task_mode: str = None,
             prior_analysis_paths: List[str] = None,
             reuse_locked_script: bool = False,
+            script_edits: List[dict] = None,
             profile: str = None,
             literature_file: str = None,
             r2_threshold: float = None,
@@ -2826,6 +2827,13 @@ class AnalysisOrchestratorTools:
                     analyze_kwargs["prior_analysis_paths"] = prior_analysis_paths
                 if reuse_locked_script:
                     analyze_kwargs["reuse_locked_script"] = True
+                if script_edits:
+                    # Surgical follow-up: only forward to agents whose
+                    # analyze() accepts it (currently curve fitting).
+                    import inspect as _inspect
+                    if "script_edits" in _inspect.signature(
+                            agent.analyze).parameters:
+                        analyze_kwargs["script_edits"] = script_edits
                 if profile:
                     # Operating profile (#346): forward only to agents whose
                     # analyze() accepts it (all three do; introspection keeps
@@ -3222,6 +3230,39 @@ class AnalysisOrchestratorTools:
                         "verification or deeper-analysis follow-ups, or for a "
                         "different kind of measurement — leave it false so the "
                         "agent decides how to use the prior run as reference."
+                    )
+                },
+                "script_edits": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_text": {"type": "string"},
+                            "new_text": {"type": "string"},
+                            "replace_all": {"type": "boolean"},
+                        },
+                        "required": ["old_text", "new_text"],
+                    },
+                    "description": (
+                        "Surgical single-knob follow-up (curve fitting; "
+                        "requires `prior_analysis_paths` + "
+                        "`reuse_locked_script=true`): exact old/new snippet "
+                        "pairs applied to the prior run's saved script BEFORE "
+                        "it re-executes, so the rerun differs from the prior "
+                        "run in EXACTLY the requested change — a controlled "
+                        "one-variable-at-a-time comparison. Use when the user "
+                        "asks to redo an accepted analysis with one parameter "
+                        "changed (a threshold, a bound, a window) — NOT for a "
+                        "different model or a re-derivation, where the agent "
+                        "should plan freely. Copy old_text VERBATIM from the "
+                        "prior run's saved script (scripts/*.py in its output "
+                        "dir); each edit must match exactly once. All edits "
+                        "apply atomically or the run refuses with a per-edit "
+                        "report before any execution. The result records "
+                        "`script_edits_applied` and the usual "
+                        "`reuse_validity` R² verdict (signal, not gate — the "
+                        "knob change is intentional; judge the outcome "
+                        "yourself)."
                     )
                 },
                 "profile": {
