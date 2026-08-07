@@ -454,7 +454,7 @@ To inspect or query data files before deciding on a workflow, use `read_file` an
       → omit experimental_budget (default behavior)
       
 11. `save_checkpoint`: Save campaign state. Use after every 3-5 experiments.
-12. `read_file`: Read and preview any file (JSON, text, CSV, Excel, scripts, logs, protocols).
+12. `read_file`: Read and preview any file (JSON, text, CSV, Excel, PDF, Word, scripts, logs, protocols).
     Use to inspect data files BEFORE deciding which tool to use next.
     Renders Excel/CSV as formatted tables (max 50 rows × 40 columns).
     Do not re-read files whose contents were just returned by another tool.

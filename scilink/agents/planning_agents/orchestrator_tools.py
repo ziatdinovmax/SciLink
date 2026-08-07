@@ -5518,10 +5518,13 @@ class OrchestratorTools:
             try:
                 ext = path.suffix.lower()
 
-                # Size guard — skip for Excel/CSV since we cap at 50 rows × 40 cols
+                # Size guard — skip for Excel/CSV since we cap at 50 rows × 40 cols.
+                # Documents get more headroom: extraction is page-based and a
+                # figure-heavy PDF is megabytes of images, not of text.
                 if ext not in ('.xlsx', '.xls', '.csv'):
                     size_mb = path.stat().st_size / (1024 * 1024)
-                    if size_mb > 5:
+                    cap_mb = 25 if ext in ('.pdf', '.docx') else 5
+                    if size_mb > cap_mb:
                         return json.dumps({
                             "status": "error",
                             "message": f"File too large ({size_mb:.1f} MB)."
@@ -5569,8 +5572,35 @@ class OrchestratorTools:
                     trunc = f" (showing {', '.join(trunc_parts)})" if trunc_parts else ""
                     content = f"Shape: {total_rows} rows × {total_cols} columns{trunc}\n\n{preview_text}"
                 else:
-                    with open(path, 'r', encoding='utf-8', errors='replace') as f:
-                        lines = f.readlines()
+                    doc_meta = {}
+                    if ext in ('.pdf', '.docx'):
+                        # #397 phase 0: opened as text, a PDF returns its
+                        # compressed byte streams — live, a delegation handed
+                        # a proposal PDF could not ground on it (one run
+                        # proceeded from the caller's paraphrase; another
+                        # refused an adversarial review outright). Extraction
+                        # is ALREADY shared infrastructure; route through it.
+                        from ...parsers.extract import extract_text
+                        info = extract_text(
+                            str(path),
+                            ocr_model=getattr(self.orch.planner, "model",
+                                              None))
+                        raw = info.get("text") or ""
+                        if not raw.strip():
+                            return json.dumps({
+                                "status": "error",
+                                "message": (
+                                    f"No extractable text in {path.name} "
+                                    "(empty or image-only document).")})
+                        lines = raw.splitlines(keepends=True)
+                        doc_meta = {k: info[k] for k in
+                                    ("n_pages", "n_ocr_pages", "n_paragraphs")
+                                    if info.get(k) is not None}
+                        doc_meta["extracted"] = ext.lstrip(".")
+                    else:
+                        with open(path, 'r', encoding='utf-8',
+                                  errors='replace') as f:
+                            lines = f.readlines()
                     total = len(lines)
 
                     if search:
@@ -5604,6 +5634,7 @@ class OrchestratorTools:
                             "match_lines": [i + 1 for i in shown],
                             "total_lines": total,
                             "content": f"{note}\n\n{body}",
+                            **doc_meta,
                         })
 
                     # A truncated read must say what it is missing and where,
@@ -5660,6 +5691,7 @@ class OrchestratorTools:
                         "shown_lines": f"{first}-{last}",
                         "truncated": truncated,
                         "content": content,
+                        **doc_meta,
                     })
 
                 return json.dumps({
@@ -5679,7 +5711,10 @@ class OrchestratorTools:
             name="read_file",
             description=(
                 "Read a text or JSON file — plans, protocols, scripts, "
-                "configs, logs, documents. Reads from the TOP by default; "
+                "configs, logs, documents. PDF and Word documents are "
+                "extracted to text automatically (tables preserved, scanned "
+                "pages OCR'd), so uploaded papers and proposals read like "
+                "any text file. Reads from the TOP by default; "
                 "literature-search reports are returned WHOLE. "
                 "For a long file do not read it repeatedly hoping to see more — "
                 "you will get the same lines back. A truncated read lists the "

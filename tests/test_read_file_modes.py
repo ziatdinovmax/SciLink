@@ -130,3 +130,63 @@ def test_the_schema_tells_the_model_not_to_re_read(read):
     desc = src[i:i + 2600]
     assert "do not read it repeatedly" in desc
     assert "tail=true" in desc and "search=" in desc
+
+
+# ── #397 phase 0: documents route through the shared extractor ─────────────
+
+def _tool(tmp_path):
+    t = OrchestratorTools.__new__(OrchestratorTools)
+    t.functions_map, t.openai_schemas = {}, []
+    t.orch = SimpleNamespace(base_dir=tmp_path, _active_output_subdir=None,
+                             planner=SimpleNamespace())
+    t._resolve_data_path = lambda p: (str(p), None)
+    t._register_tool = lambda func, name, **kw: t.functions_map.setdefault(name, func)
+    OrchestratorTools._register_all_tools(t)
+    return t.functions_map["read_file"]
+
+
+def _make_pdf(tmp_path):
+    pytest.importorskip("fitz")
+    pytest.importorskip("markdown_it")
+    from scilink.utils.md_to_pdf import markdown_to_pdf
+    md = tmp_path / "proposal.md"
+    md.write_text("# Funded Proposal\n\n"
+                  + "".join(f"Aim {i}: paragraph of prose about MARKER-{i}. "
+                            for i in range(1, 30))
+                  + "\n\n## References\n\n[1] MARKER-REF Boettiger 2013\n")
+    return markdown_to_pdf(md, tmp_path / "proposal.pdf")
+
+
+def test_pdf_returns_prose_not_bytes(tmp_path):
+    """#397's observed failure: read_file opened a PDF as text and returned
+    '%PDF-1.7...' compressed streams; the delegation grounded on a
+    paraphrase (one run) or refused an adversarial review (another)."""
+    pdf = _make_pdf(tmp_path)
+    out = json.loads(_tool(tmp_path)(file_path=str(pdf)))
+    assert out["status"] == "success"
+    assert "%PDF" not in out["content"]
+    assert "MARKER-1" in out["content"]
+    assert out["extracted"] == "pdf" and out["n_pages"] >= 1
+
+
+def test_pdf_windowing_works(tmp_path):
+    """Extraction feeds the SAME windowing as text files — search and tail
+    answer questions about a PDF in one call."""
+    pdf = _make_pdf(tmp_path)
+    read = _tool(tmp_path)
+    out = json.loads(read(file_path=str(pdf), search="MARKER-REF"))
+    assert out["mode"] == "search" and out["matches"] == 1
+    assert "Boettiger" in out["content"]
+    out = json.loads(read(file_path=str(pdf), tail=True, max_lines=5))
+    assert "References" in out["content"] or "MARKER-REF" in out["content"]
+
+
+def test_textless_pdf_is_a_clean_error(tmp_path):
+    fitz = pytest.importorskip("fitz")
+    doc = fitz.open()
+    doc.new_page()
+    p = tmp_path / "blank.pdf"
+    doc.save(str(p))
+    out = json.loads(_tool(tmp_path)(file_path=str(p)))
+    assert out["status"] == "error"
+    assert "No extractable text" in out["message"]
