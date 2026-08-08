@@ -245,6 +245,12 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # feature-table schema. Default False: prior runs are agent-judged
         # reference material (reuse / adapt / rewrite is the agent's call).
         reuse_locked_script: bool = False,
+        # Surgical single-knob follow-up on the locked-reuse path: exact
+        # old/new snippet pairs applied to the prior script BEFORE the
+        # verbatim run, so the rerun is byte-identical except the knob
+        # (requires prior_analysis_paths + reuse_locked_script). Validated
+        # up front; the sandbox run remains the verification.
+        script_edits: Optional[List[Dict[str, Any]]] = None,
         literature_file: Optional[str] = None,
         # Quality control overrides
         outlier_sigma: Optional[float] = None,
@@ -343,6 +349,38 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         except (TypeError, ValueError):
             n_candidates = 1
         candidate_escalation = bool(candidate_escalation) and n_candidates > 1
+
+        # Surgical script edits — validated HERE, before any pipeline work:
+        # the edits must apply cleanly to the prior run's saved script or
+        # the run refuses with the per-edit report. Never a partial
+        # application, never a silent unedited run, zero LLM cost on
+        # refusal. Mirrors the curve twin.
+        if script_edits:
+            def _edits_error(err: str, details: str, **extra):
+                return {"status": "error",
+                        "error": {"error": err, "details": details, **extra},
+                        "output_directory": str(self.output_dir)}
+            if not (prior_analysis_paths and reuse_locked_script):
+                return _edits_error(
+                    "script_edits requires locked reuse",
+                    "Pass prior_analysis_paths=[<prior run dir>] and "
+                    "reuse_locked_script=True — script_edits surgically "
+                    "modifies that prior script before the verbatim run.")
+            from .controllers.image_analysis_controllers import (
+                _first_prior_image_script)
+            from scilink.utils.file_edit import apply_snippet_edits
+            _prior_script, _ = _first_prior_image_script(
+                {"prior_analysis_paths": prior_analysis_paths})
+            if not _prior_script:
+                return _edits_error(
+                    "no reusable prior script",
+                    "None of prior_analysis_paths carries a saved analysis "
+                    "script (scripts/*.py in a prior image run).")
+            _res = apply_snippet_edits(_prior_script, script_edits)
+            if _res["status"] != "success":
+                return _edits_error(
+                    "script_edits do not apply", _res["message"],
+                    failed_edit=_res.get("failed_edit"))
 
         # Parse input
         data_path, data_paths, data_array, error = self._parse_data_input(data)
@@ -511,6 +549,9 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # Opt-in verbatim reuse of the prior locked script (#172); default
             # False — prior runs are agent-judged reference material.
             "reuse_locked_script": bool(reuse_locked_script),
+            # Surgical follow-up edits applied to the reused script (already
+            # validated at entry; the series controller applies them).
+            "script_edits": script_edits or [],
             # Best-of-N: independent parallel anchor attempts; LLM judge
             # selects the winner (1 = no fan-out). Escalation runs attempt 0
             # alone and fans out only when it is weak.

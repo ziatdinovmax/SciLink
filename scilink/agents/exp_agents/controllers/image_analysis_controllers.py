@@ -3501,6 +3501,9 @@ Return JSON with:
             )
             if verdict == "poor":
                 reuse_result["quality_warning"] = message
+            # Surgical follow-up provenance (shared with the curve twin).
+            from .._qc_engine import attach_script_edit_provenance
+            attach_script_edit_provenance(ctx, reuse_result)
             return reuse_result
         self.logger.warning(
             f"   ⚠️  Prior analysis script could not execute on this "
@@ -5431,9 +5434,22 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
         # rewrite. Verbatim reuse cannot verify or deepen a prior result.
         if state.get("reuse_locked_script"):
             reuse_script, reuse_source = _first_prior_image_script(state)
+            from .._qc_engine import apply_reuse_script_edits
+            reuse_script, reuse_source = apply_reuse_script_edits(
+                state, reuse_script, reuse_source, self.logger)
         else:
             reuse_script, reuse_source = None, None
         if reuse_script and regime_configs:
+            # With script_edits present this must be a loud refusal, not a
+            # silent fallback to free re-derivation (mirrors the curve
+            # twin's regime guard).
+            if state.get("script_edits"):
+                raise RuntimeError(
+                    "script_edits cannot be applied: the series plan split "
+                    "this run into multiple regimes, which disables locked-"
+                    "script reuse. Either re-run without script_edits "
+                    "(per-regime pipelines will be re-derived), or analyze "
+                    "the images individually as single-regime follow-ups.")
             self.logger.info(
                 "   ♻️  Prior image-analysis run supplied, but this run is "
                 "multi-regime — locked-script reuse skipped."
