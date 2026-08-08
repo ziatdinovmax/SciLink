@@ -6,11 +6,20 @@ embeddings, or retrieval. The heavyweight ingestion/retrieval path lives in
 ``scilink.knowledge``.
 """
 
+import os
 from pathlib import Path
 from typing import Any, Dict, Union
 
 from .pdf_parser import _extract_pdf_blocks, _assemble_flat_text
 from .ocr import DEFAULT_OCR_DPI, MAX_OCR_PAGES
+
+# Small LRU over full extractions of the expensive formats —
+# see the cache comment in extract_text. 8 documents is ample
+# for any session's working set; texts are ~100 KB each.
+from collections import OrderedDict
+_EXTRACT_CACHE: "OrderedDict[tuple, dict]" = OrderedDict()
+_EXTRACT_CACHE_MAX = 8
+
 
 
 def extract_text(path: Union[str, Path], max_pages: int = None,
@@ -49,6 +58,29 @@ def extract_text(path: Union[str, Path], max_pages: int = None,
     path = Path(path)
     ext = path.suffix.lower()
     info: Dict[str, Any] = {}
+
+    # Extraction cache for the expensive formats. Windowed readers
+    # (planning read_file, meta view_document, analysis read_document)
+    # legitimately call several times per document — without this, every
+    # window re-parsed the whole PDF and re-ran vision-OCR on the same
+    # scanned pages (a 200-DPI vision-LLM call per window, observed
+    # live). Keyed on (path, mtime, size) plus every parameter that
+    # changes the output; a rewritten file misses and re-extracts.
+    # $SCILINK_EXTRACT_CACHE=0 disables.
+    cache_key = None
+    if ext in (".pdf", ".docx") and os.environ.get(
+            "SCILINK_EXTRACT_CACHE", "").strip().lower() not in (
+            "0", "false", "off", "no"):
+        try:
+            st = path.stat()
+            cache_key = (str(path.resolve()), st.st_mtime_ns, st.st_size,
+                         max_pages, bool(ocr_model), ocr_dpi, max_ocr_pages)
+            hit = _EXTRACT_CACHE.get(cache_key)
+            if hit is not None:
+                _EXTRACT_CACHE.move_to_end(cache_key)
+                return dict(hit)
+        except OSError:
+            cache_key = None
 
     if ext == ".pdf":
         page_texts, table_chunks, n_pages, ocr_pages = _extract_pdf_blocks(
@@ -100,4 +132,9 @@ def extract_text(path: Union[str, Path], max_pages: int = None,
     text = text.strip()
     info["text"] = text
     info["n_chars"] = len(text)
+    if cache_key is not None:
+        _EXTRACT_CACHE[cache_key] = dict(info)
+        _EXTRACT_CACHE.move_to_end(cache_key)
+        while len(_EXTRACT_CACHE) > _EXTRACT_CACHE_MAX:
+            _EXTRACT_CACHE.popitem(last=False)
     return info
