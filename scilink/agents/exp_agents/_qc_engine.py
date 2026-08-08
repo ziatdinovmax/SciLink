@@ -169,6 +169,43 @@ def bump_bank_adapt_success(host, res, *, domain: str) -> None:
                 "recorded (edit-adapted script survived QC).")
     except Exception:  # noqa: BLE001 - bookkeeping must never fail a run
         pass
+def apply_reuse_script_edits(state: dict, reuse_script, reuse_source,
+                             logger=None):
+    """Apply the caller's surgical ``script_edits`` to a reused script.
+
+    Shared across the #172 reuse twins (curve fitting, image analysis):
+    the prior script runs byte-identical EXCEPT the requested edits, so
+    consecutive runs stay comparable one variable at a time. Edits were
+    validated at ``analyze()`` entry against this same prior script, so a
+    failure here means the prior run changed on disk mid-run — refuse
+    loudly rather than silently run the UNEDITED script the caller asked
+    to change.
+    """
+    edits = state.get("script_edits") or []
+    if not (reuse_script and edits):
+        return reuse_script, reuse_source
+    from scilink.utils.file_edit import apply_snippet_edits
+    res = apply_snippet_edits(reuse_script, edits)
+    if res["status"] != "success":
+        raise RuntimeError(
+            f"script_edits no longer apply to the prior script "
+            f"({res['message']}) — the prior run changed on disk after "
+            "validation. Nothing was run.")
+    if logger:
+        logger.info(f"   ✏️  Applied {res['n_edits']} surgical edit(s) to "
+                    f"the reused script (execution will verify)")
+    return res["text"], f"{reuse_source} + {res['n_edits']} edit(s)"
+
+
+def attach_script_edit_provenance(ctx, reuse_result: dict) -> None:
+    """Record the exact old/new pairs on a reuse result, so the delta
+    between consecutive runs is auditable from saved artifacts alone."""
+    if ctx.state.get("script_edits"):
+        reuse_result["script_edits_applied"] = list(
+            ctx.state["script_edits"])
+        rv = reuse_result.get("reuse_validity")
+        if isinstance(rv, dict):
+            rv["script_edits"] = len(ctx.state["script_edits"])
 
 
 @dataclass(frozen=True)
