@@ -38,6 +38,137 @@ from pathlib import Path
 from typing import Any, Optional
 
 
+# Bank minimal-edit adaptation (Phase B), shared across the codegen
+# twins. Fires only on matches clearing the retrieval floor (0.45, hard
+# filtered on fingerprint kind + axis/pixel metadata) — calibrated live
+# on the curve corpus: the canonical adapt case scores 0.495-0.522
+# across runs, so stricter thresholds never fired. One attempt, capped
+# by the fall-through ladder. $SCILINK_BANK_EDIT_ADAPT_SCORE raises it;
+# $SCILINK_BANK_EDIT_ADAPT=0 disables the mode.
+BANK_EDIT_ADAPT_MIN_SCORE = 0.45
+
+
+def try_bank_edit_adapt(host, ctx, *, domain: str, script_kind: str,
+                        output_contract: str, config_key: str,
+                        data_context: str, run_fn):
+    """Adapt a strongly matching banked script via an LLM edit LIST,
+    applied mechanically — instead of whole-script re-emission.
+
+    Full-regeneration "adapt" erodes exactly the provenance that made
+    the script worth banking; a minimal-edit adaptation keeps the proven
+    logic byte-recognizable and (on clean acceptance) accumulates
+    cross-session success evidence on the SAME bank record. The result
+    enters the UNCHANGED verification loop — execution and the quality
+    gate stay the arbiters. Every fall-through is logged with its reason
+    (no silent fallbacks); returning None resumes the exemplar-
+    generation path exactly.
+
+    `host` supplies model / generation_config / logger; `run_fn(script)`
+    executes the adapted script through the modality's single-item
+    runner and returns its result dict.
+    """
+    import json as _json
+    import os as _os
+
+    state = ctx.state
+    exemplar = state.get("_bank_exemplar")
+    if not exemplar:
+        return None
+    if (_os.environ.get("SCILINK_BANK_EDIT_ADAPT", "").strip().lower()
+            in ("0", "false", "off", "no")):
+        return None
+    try:
+        min_score = float(_os.environ.get(
+            "SCILINK_BANK_EDIT_ADAPT_SCORE", BANK_EDIT_ADAPT_MIN_SCORE))
+    except ValueError:
+        min_score = BANK_EDIT_ADAPT_MIN_SCORE
+    score = float(exemplar.get("score") or 0)
+    if score < min_score:
+        host.logger.info(
+            f"   🏦 Edit-adapt skipped: match score {score} < "
+            f"{min_score} — exemplar-guided generation instead.")
+        return None
+    rec = exemplar.get("record") or {}
+    banked = (rec.get("working_script") or "").strip()
+    if not banked:
+        return None
+    try:
+        from .instruct import BANK_EDIT_ADAPT_INSTRUCTIONS
+        from scilink.skills._shared._graduation import parse_json_response
+        from scilink.utils.file_edit import apply_snippet_edits
+        prompt = BANK_EDIT_ADAPT_INSTRUCTIONS.format(
+            script_kind=script_kind,
+            banked_script=banked,
+            locked_config=_json.dumps(state.get(config_key) or {},
+                                      indent=2, default=str),
+            data_context=data_context,
+            output_contract=output_contract,
+        )
+        raw = host.model.generate_content(
+            prompt, generation_config=host.generation_config)
+        raw = raw.text if hasattr(raw, "text") else str(raw)
+        try:
+            parsed = parse_json_response(raw)
+        except ValueError:
+            retry = ("Respond with ONLY a single JSON object — no prose "
+                     "before or after it.\n\n" + prompt)
+            raw = host.model.generate_content(
+                retry, generation_config=host.generation_config)
+            raw = raw.text if hasattr(raw, "text") else str(raw)
+            parsed = parse_json_response(raw)
+        edits = parsed.get("edits")
+        if not isinstance(edits, list):
+            raise ValueError("no edits list in the adaptation reply")
+        if edits:
+            res = apply_snippet_edits(banked, edits)
+            if res["status"] != "success":
+                raise ValueError(f"edits do not apply: {res['message']}")
+            adapted_script, n_edits = res["text"], res["n_edits"]
+        else:
+            adapted_script, n_edits = banked, 0
+        host.logger.info(
+            f"   🏦 ✏️  Bank edit-adapt: record {rec.get('id')} "
+            f"(score {score}), {n_edits} edit(s) — "
+            f"{str(parsed.get('rationale'))[:120]}")
+        result = run_fn(adapted_script)
+        if not result.get("success"):
+            host.logger.info(
+                "   🏦 ↩️  Edit-adapted script did not execute cleanly — "
+                "falling back to exemplar-guided generation.")
+            return None
+        ctx.initial_label = (f"bank edit-adapt of {rec.get('id')} "
+                             f"({n_edits} edit(s))")
+        result["bank_edit_adapt"] = {
+            "id": rec.get("id"), "score": score, "n_edits": n_edits,
+            "edits": list(edits), "rationale": parsed.get("rationale"),
+        }
+        return result
+    except Exception as e:  # noqa: BLE001 - never worse than today
+        host.logger.info(
+            f"   🏦 ↩️  Edit-adapt fell through ({e}) — falling back to "
+            "exemplar-guided generation.")
+        return None
+
+
+def bump_bank_adapt_success(host, res, *, domain: str) -> None:
+    """CLEAN acceptance of an edit-adapted script accumulates proven-N
+    evidence on the SAME bank record. A verification-loop refit replaces
+    the result and drops the provenance, so a rejected adaptation never
+    bumps — and a kept-but-flagged poor fit (quality_warning) must not
+    either (live: an NMR adaptation executed fine at R²=0.42 and would
+    have counted as "proven"). Proven-N feeds the graduation signal;
+    only unflagged survivals are evidence."""
+    try:
+        bea = res.get("bank_edit_adapt") if isinstance(res, dict) else None
+        if (bea and bea.get("id") and res.get("success")
+                and not res.get("quality_warning")):
+            from scilink.skills._shared import _script_bank
+            _script_bank.record_success(domain, bea["id"])
+            host.logger.info(
+                f"   🏦 📈 Bank record {bea['id']}: cross-session success "
+                "recorded (edit-adapted script survived QC).")
+    except Exception:  # noqa: BLE001 - bookkeeping must never fail a run
+        pass
 def apply_reuse_script_edits(state: dict, reuse_script, reuse_source,
                              logger=None):
     """Apply the caller's surgical ``script_edits`` to a reused script.

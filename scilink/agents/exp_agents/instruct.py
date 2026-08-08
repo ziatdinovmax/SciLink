@@ -3146,7 +3146,7 @@ DELETE that section.
 
 Output ONLY the JSON object. Do not wrap in code blocks. Do not include any prose outside the JSON."""
 
-BANK_EDIT_ADAPT_INSTRUCTIONS = """You are an expert scientific data analyst. A PROVEN fitting script \
+BANK_EDIT_ADAPT_INSTRUCTIONS = """You are an expert scientific data analyst. A PROVEN {script_kind} script \
 from the script bank closely matches the current dataset. Adapt it with the SMALLEST possible set of \
 exact text edits — do NOT rewrite it. The proven structure is the value: a minimal-edit adaptation \
 keeps the script byte-recognizable, so its cross-session success record keeps accumulating.
@@ -3165,10 +3165,9 @@ keeps the script byte-recognizable, so its cross-session success record keeps ac
 **Rules:**
 1. Each edit is an exact-verbatim substring of the proven script (old_text), replaced by new_text. \
 old_text must appear EXACTLY ONCE in the script. Keep each edit small (a value, a line, a few lines).
-2. Re-derive dataset-specific values for THIS data: peak positions/counts, ranges, initial guesses, \
-thresholds, axis windows. Keep the vetted algorithm, model family, and overall structure.
-3. NEVER touch the output contract: the FIT_RESULTS_JSON print, the success marker, the \
-visualization saving, or the results schema.
+2. Re-derive dataset-specific values for THIS data: positions/counts, ranges, initial guesses, \
+thresholds, windows, scale factors. Keep the vetted algorithm, model family, and overall structure.
+3. NEVER touch the output contract: {output_contract}.
 4. If the script fits this dataset as-is, return an empty edits list.
 
 Return ONLY a JSON object: {{"edits": [{{"old_text": "...", "new_text": "..."}}, ...], \

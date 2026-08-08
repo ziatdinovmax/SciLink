@@ -3410,7 +3410,9 @@ Return JSON with:
             is_regime_anchor=is_regime_anchor,
             reuse_script=reuse_script, reuse_source=reuse_source,
         )
-        return engine.run_item(ctx)
+        res = engine.run_item(ctx)
+        self._bump_bank_adapt_success(res)
+        return res
 
     # --- CodegenQCEngine hooks (bodies moved verbatim from the old driver) ---
 
@@ -3519,10 +3521,44 @@ Return JSON with:
         self.logger.info(f"   Attempt 1: {initial_pipeline[:80]}...")
 
         self._offer_bank_exemplar(ctx)
+        # Minimal-edit adaptation of a strongly matching banked script
+        # (Phase B, shared with the curve twin): one cheap attempt in
+        # FRONT of exemplar generation — any failure falls through.
+        adapted = self._try_bank_edit_adapt(ctx)
+        if adapted is not None:
+            return adapted
         return self._process_single_image(
             state=ctx.state, image_data=ctx.data, data_path=ctx.data_path,
             image_name=ctx.item_name, image_idx=ctx.item_idx, base_script=None,
         )
+
+    def _try_bank_edit_adapt(self, ctx: QCItemContext):
+        """Image wrapper over the shared minimal-edit adapt attempt
+        (implementation, threshold and calibration history live in
+        _qc_engine.try_bank_edit_adapt — shared with the curve twin so
+        the two cannot drift)."""
+        from .._qc_engine import try_bank_edit_adapt
+        return try_bank_edit_adapt(
+            self, ctx,
+            domain="image_analysis",
+            script_kind="image-analysis",
+            output_contract=(
+                "the IMAGE_ANALYSIS_RESULTS_JSON print, the success "
+                "marker, the visualization saving, and the results "
+                "schema"),
+            config_key="locked_analysis_config",
+            data_context=(
+                f"system_info: {str(ctx.state.get('system_info'))[:800]}\n"
+                f"image shape: {getattr(ctx.data, 'shape', None)}"),
+            run_fn=lambda script: self._process_single_image(
+                state=ctx.state, image_data=ctx.data,
+                data_path=ctx.data_path, image_name=ctx.item_name,
+                image_idx=ctx.item_idx, base_script=script),
+        )
+
+    def _bump_bank_adapt_success(self, res) -> None:
+        from .._qc_engine import bump_bank_adapt_success
+        bump_bank_adapt_success(self, res, domain="image_analysis")
 
     def _offer_bank_exemplar(self, ctx: QCItemContext) -> None:
         """Adapt-mode script-bank retrieval (#346 step 2) — image mirror of

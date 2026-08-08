@@ -46,7 +46,9 @@ def make_self(model_replies, fit_result=None):
         model=FakeModel(model_replies),
         generation_config=None,
         _fit_single_spectrum=_fit_single_spectrum,
-        _BANK_EDIT_ADAPT_MIN_SCORE=C._BANK_EDIT_ADAPT_MIN_SCORE,
+        _process_single_image=lambda **kw: (
+            captured.update(kw) or (fit_result if fit_result is not None
+                                    else {"success": True})),
     )
     return s, captured
 
@@ -148,7 +150,57 @@ def test_success_bump_only_with_surviving_provenance(monkeypatch):
 def test_template_contract():
     from scilink.agents.exp_agents.instruct import BANK_EDIT_ADAPT_INSTRUCTIONS
     filled = BANK_EDIT_ADAPT_INSTRUCTIONS.format(
-        banked_script="s", locked_config="{}", data_context="d")
+        script_kind="curve-fitting", banked_script="s", locked_config="{}",
+        data_context="d", output_contract="the FIT_RESULTS_JSON print")
     assert '"edits"' in filled and "ONLY a JSON object" in filled
     assert "EXACTLY ONCE" in filled
-    assert "output contract" in filled     # FIT_RESULTS_JSON stays untouched
+    assert "FIT_RESULTS_JSON" in filled    # contract text is caller-supplied
+
+
+# ------------------------------------------- image twin (shared core)
+
+
+def make_image_ctx(score=0.8):
+    ctx = make_ctx(score=score)
+    ctx.state["locked_analysis_config"] = {"processing_pipeline": "blobs"}
+    ctx.data = SimpleNamespace(shape=(64, 64))
+    return ctx
+
+
+def test_image_wrapper_shares_the_core():
+    from scilink.agents.exp_agents.controllers.image_analysis_controllers \
+        import UnifiedImageProcessingController as IC
+    fake, captured = make_self([GOOD_REPLY])
+    ctx = make_image_ctx()
+    res = IC._try_bank_edit_adapt(fake, ctx)
+    assert res is not None and res["bank_edit_adapt"]["id"] == "rec_001"
+    assert "CENTER_GUESS = 7.2" in captured["base_script"]
+    assert captured["image_name"] == "s"       # image runner was used
+    assert "edit-adapt of rec_001" in ctx.initial_label
+
+
+def test_image_bump_uses_image_domain(monkeypatch):
+    from scilink.agents.exp_agents.controllers.image_analysis_controllers \
+        import UnifiedImageProcessingController as IC
+    from scilink.skills._shared import _script_bank
+    bumped = []
+    monkeypatch.setattr(_script_bank, "record_success",
+                        lambda d, rid, session=None: bumped.append((d, rid)))
+    fake, _ = make_self([])
+    IC._bump_bank_adapt_success(fake, {
+        "success": True, "bank_edit_adapt": {"id": "rec_009"}})
+    assert bumped == [("image_analysis", "rec_009")]
+
+
+def test_single_shared_implementation():
+    from pathlib import Path
+    curve = Path("scilink/agents/exp_agents/controllers/"
+                 "curve_fitting_controllers.py").read_text()
+    image = Path("scilink/agents/exp_agents/controllers/"
+                 "image_analysis_controllers.py").read_text()
+    engine = Path("scilink/agents/exp_agents/_qc_engine.py").read_text()
+    assert engine.count("def try_bank_edit_adapt") == 1
+    for src in (curve, image):
+        assert "from .._qc_engine import try_bank_edit_adapt" in src
+        assert "def try_bank_edit_adapt" not in src.replace(
+            "from .._qc_engine import try_bank_edit_adapt", "")
