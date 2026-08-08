@@ -4603,136 +4603,33 @@ Return JSON with:
             spectrum_name=ctx.item_name, spectrum_idx=ctx.item_idx, base_script=None
         )
 
-    # Calibrated live: the canonical adapt case (same-family single peak,
-    # position shifted 1.5 units) scores 0.495-0.522 across runs — the
-    # jitter comes from the banked script itself being nondeterministic
-    # codegen — so 0.60 never fired and 0.50 was a coin flip. Any match
-    # that cleared the retrieval floor (0.45, with hard filters on
-    # fingerprint kind and axis units) is worth ONE edit-adapt attempt:
-    # the fall-through ladder caps the cost at exactly that attempt.
-    # Raise via $SCILINK_BANK_EDIT_ADAPT_SCORE if live evidence shows
-    # wrong-script anchoring; $SCILINK_BANK_EDIT_ADAPT=0 disables.
-    _BANK_EDIT_ADAPT_MIN_SCORE = 0.45
-
     def _try_bank_edit_adapt(self, ctx: QCItemContext) -> Optional[dict]:
-        """Adapt a strongly matching banked script via an LLM edit LIST,
-        applied mechanically — instead of whole-script re-emission.
-
-        Full-regeneration "adapt" erodes exactly the provenance that made
-        the script worth banking; a minimal-edit adaptation keeps the
-        proven logic byte-recognizable and (on gate pass) accumulates
-        cross-session success evidence on the SAME bank record. The
-        result enters the UNCHANGED verification loop — execution and
-        the quality gate stay the arbiters. Every fall-through is logged
-        with its reason (no silent fallbacks); returning None resumes
-        today's exemplar-generation path exactly.
-        """
-        state = ctx.state
-        exemplar = state.get("_bank_exemplar")
-        if not exemplar:
-            return None
-        import os as _os
-        if (_os.environ.get("SCILINK_BANK_EDIT_ADAPT", "").strip().lower()
-                in ("0", "false", "off", "no")):
-            return None
-        try:
-            min_score = float(_os.environ.get(
-                "SCILINK_BANK_EDIT_ADAPT_SCORE",
-                self._BANK_EDIT_ADAPT_MIN_SCORE))
-        except ValueError:
-            min_score = self._BANK_EDIT_ADAPT_MIN_SCORE
-        score = float(exemplar.get("score") or 0)
-        if score < min_score:
-            self.logger.info(
-                f"   🏦 Edit-adapt skipped: match score {score} < "
-                f"{min_score} — exemplar-guided generation instead.")
-            return None
-        rec = exemplar.get("record") or {}
-        banked = (rec.get("working_script") or "").strip()
-        if not banked:
-            return None
-        try:
-            from ..instruct import BANK_EDIT_ADAPT_INSTRUCTIONS
-            from scilink.skills._shared._graduation import parse_json_response
-            from scilink.utils.file_edit import apply_snippet_edits
-            prompt = BANK_EDIT_ADAPT_INSTRUCTIONS.format(
-                banked_script=banked,
-                locked_config=json.dumps(
-                    state.get("locked_fitting_config") or {}, indent=2,
-                    default=str),
-                data_context=(
-                    f"system_info: {str(state.get('system_info'))[:800]}\n"
-                    f"data statistics: "
-                    f"{str(state.get('data_statistics'))[:800]}"),
-            )
-            raw = self.model.generate_content(
-                prompt, generation_config=self.generation_config)
-            raw = raw.text if hasattr(raw, "text") else str(raw)
-            try:
-                parsed = parse_json_response(raw)
-            except ValueError:
-                retry = ("Respond with ONLY a single JSON object — no "
-                         "prose before or after it.\n\n" + prompt)
-                raw = self.model.generate_content(
-                    retry, generation_config=self.generation_config)
-                raw = raw.text if hasattr(raw, "text") else str(raw)
-                parsed = parse_json_response(raw)
-            edits = parsed.get("edits")
-            if not isinstance(edits, list):
-                raise ValueError("no edits list in the adaptation reply")
-            if edits:
-                res = apply_snippet_edits(banked, edits)
-                if res["status"] != "success":
-                    raise ValueError(f"edits do not apply: {res['message']}")
-                adapted_script, n_edits = res["text"], res["n_edits"]
-            else:
-                adapted_script, n_edits = banked, 0
-            self.logger.info(
-                f"   🏦 ✏️  Bank edit-adapt: record {rec.get('id')} "
-                f"(score {score}), {n_edits} edit(s) — "
-                f"{str(parsed.get('rationale'))[:120]}")
-            result = self._fit_single_spectrum(
-                state=state, curve_data=ctx.data, data_path=ctx.data_path,
-                spectrum_name=ctx.item_name, spectrum_idx=ctx.item_idx,
-                base_script=adapted_script)
-            if not result.get("success"):
-                self.logger.info(
-                    "   🏦 ↩️  Edit-adapted script did not execute cleanly "
-                    "— falling back to exemplar-guided generation.")
-                return None
-            ctx.initial_label = (f"bank edit-adapt of {rec.get('id')} "
-                                 f"({n_edits} edit(s))")
-            result["bank_edit_adapt"] = {
-                "id": rec.get("id"), "score": score, "n_edits": n_edits,
-                "edits": list(edits), "rationale": parsed.get("rationale"),
-            }
-            return result
-        except Exception as e:  # noqa: BLE001 - never worse than today
-            self.logger.info(
-                f"   🏦 ↩️  Edit-adapt fell through ({e}) — falling back "
-                "to exemplar-guided generation.")
-            return None
+        """Curve wrapper over the shared minimal-edit adapt attempt
+        (implementation, threshold and calibration history live in
+        _qc_engine.try_bank_edit_adapt — shared with the image twin so
+        the two cannot drift)."""
+        from .._qc_engine import try_bank_edit_adapt
+        return try_bank_edit_adapt(
+            self, ctx,
+            domain="curve_fitting",
+            script_kind="curve-fitting",
+            output_contract=(
+                "the FIT_RESULTS_JSON print, the success marker, the "
+                "visualization saving, and the results schema"),
+            config_key="locked_fitting_config",
+            data_context=(
+                f"system_info: {str(ctx.state.get('system_info'))[:800]}\n"
+                f"data statistics: "
+                f"{str(ctx.state.get('data_statistics'))[:800]}"),
+            run_fn=lambda script: self._fit_single_spectrum(
+                state=ctx.state, curve_data=ctx.data,
+                data_path=ctx.data_path, spectrum_name=ctx.item_name,
+                spectrum_idx=ctx.item_idx, base_script=script),
+        )
 
     def _bump_bank_adapt_success(self, res) -> None:
-        """CLEAN acceptance of an edit-adapted script accumulates proven-N
-        evidence on the SAME bank record. A verification-loop refit
-        replaces the result and drops the provenance, so a rejected
-        adaptation never bumps — and a kept-but-flagged poor fit
-        (quality_warning) must not either: live, an NMR adaptation
-        executed fine at R²=0.42 and would have counted as "proven".
-        Proven-N feeds the graduation signal; only unflagged survivals
-        are evidence."""
-        try:
-            bea = res.get("bank_edit_adapt") if isinstance(res, dict) else None
-            if (bea and bea.get("id") and res.get("success")
-                    and not res.get("quality_warning")):
-                from scilink.skills._shared import _script_bank
-                _script_bank.record_success("curve_fitting", bea["id"])
-                self.logger.info(
-                    f"   🏦 📈 Bank record {bea['id']}: cross-session "
-                    "success recorded (edit-adapted script survived QC).")
-        except Exception:  # noqa: BLE001 - bookkeeping must never fail a fit
-            pass
+        from .._qc_engine import bump_bank_adapt_success
+        bump_bank_adapt_success(self, res, domain="curve_fitting")
 
     def _offer_bank_exemplar(self, ctx: QCItemContext) -> None:
         """Adapt-mode script-bank retrieval (#346 step 2).

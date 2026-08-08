@@ -164,7 +164,92 @@ def part2_fallthrough():
     check("p2 no adapt provenance", '"bank_edit_adapt":' not in blob)
 
 
-PARTS = {"1": part1_adapt, "2": part2_fallthrough}
+def part3_image_adapt():
+    print("\n=== 3. image twin: adapt + bump through the shared core ===")
+    from scilink.agents.exp_agents.image_analysis_agent import (
+        ImageAnalysisAgent)
+
+    run = BASE / "p3"
+    if run.exists():
+        shutil.rmtree(run)
+    run.mkdir(parents=True)
+
+    def make_image(path, seed):
+        rng = np.random.default_rng(seed)
+        yy, xx = np.mgrid[0:128, 0:128]
+        img = rng.normal(0.1, 0.02, (128, 128))
+        for cx, cy in [(30, 40), (80, 90), (100, 30)]:
+            img += 0.8 * np.exp(-(((xx - cx - rng.integers(-4, 5)) ** 2
+                                   + (yy - cy - rng.integers(-4, 5)) ** 2)
+                                  / (2 * 6.0 ** 2)))
+        np.save(path, img.astype(np.float32))
+
+    make_image(run / "img_a.npy", 1)
+    make_image(run / "img_b.npy", 2)
+    si = {"technique": "AFM height image",
+          "description": "nanoparticles on a flat substrate",
+          "pixel_size_nm": 2.0}
+
+    def img_agent(out):
+        return ImageAnalysisAgent(api_key=None, model_name=MODEL,
+                                  output_dir=str(out),
+                                  enable_human_feedback=False,
+                                  max_verification_iterations=1)
+
+    res_a = img_agent(run / "run_a").analyze(str(run / "img_a.npy"),
+                                             system_info=si)
+    check("p3 run A succeeded", res_a.get("status") == "success")
+    from scilink.skills._shared import _script_bank
+    recs = _script_bank.list_records("image_analysis")
+    if not recs:
+        # The organic write gate requires QC APPROVAL, stochastic at
+        # max_verification_iterations=1. The gate is pre-existing #346
+        # behavior with its own tests; THIS scenario tests adaptation —
+        # seed the bank deterministically from run A's saved script.
+        scripts = sorted((run / "run_a" / "scripts").glob("*.py"))
+        img_a = np.load(run / "img_a.npy")
+        _script_bank.add_record("image_analysis", {
+            "technique_signals": {"analysis_type":
+                                  "particle blob detection (seeded)"},
+            "measurement_context": _script_bank.measurement_context(si),
+            "data_fingerprint": _script_bank.image_fingerprint(
+                img_a, pixel_size_nm=2.0),
+            "outcome": {"metric": {"name": "score", "value": 0.9}},
+            "working_script": scripts[0].read_text(),
+        })
+        recs = _script_bank.list_records("image_analysis")
+        print("     (bank seeded from run A's script — organic gate "
+              "did not approve at smoke settings)")
+    check("p3 bank holds a record", len(recs) >= 1)
+    if not recs:
+        return
+
+    buf = Tee()
+    with capture_all(buf):
+        res_b = img_agent(run / "run_b").analyze(str(run / "img_b.npy"),
+                                                 system_info=si)
+    log = buf.getvalue()
+    check("p3 run B succeeded", res_b.get("status") == "success")
+    check("p3 edit-adapt fired", "Bank edit-adapt: record" in log)
+    # Image analyze() flattens its return; provenance lives in the saved
+    # artifacts (same read the corpus matrix uses).
+    blob = "".join(p.read_text() for p in (run / "run_b").rglob("*.json"))
+    check("p3 provenance present", '"bank_edit_adapt"' in blob)
+    after = {r["id"]: (r.get("stats") or {}).get("n_successes", 1)
+             for r in _script_bank.list_records("image_analysis")}
+    bumped = any(n >= 2 for n in after.values())
+    # Clean-acceptance rule: an adaptation kept WITH a quality_warning
+    # must not bump (observed live both ways: clean run bumped; a
+    # score-0.54 flagged run was correctly withheld).
+    flagged = '"quality_warning": "' in blob
+    if flagged:
+        check("p3 bump correctly WITHHELD (adaptation kept but flagged)",
+              not bumped)
+    else:
+        check("p3 proven-N bumped on a clean adaptation", bumped)
+
+
+PARTS = {"1": part1_adapt, "2": part2_fallthrough, "3": part3_image_adapt}
 
 if __name__ == "__main__":
     assert os.environ.get("SCILINK_HOME"), \
