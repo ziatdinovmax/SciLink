@@ -541,11 +541,70 @@ def part9_multiregime():
               and "Applied 1 surgical edit" in log)
 
 
+def part11_image_wiring():
+    """Image twin: byte-exact except the edit, provenance recorded —
+    mirrors part 1 through the image agent's #172 reuse path."""
+    print("\n=== 11. image agent: byte-exact except the edit ===")
+    from scilink.agents.exp_agents.image_analysis_agent import (
+        ImageAnalysisAgent)
+
+    run = BASE / "p11"
+    if run.exists():
+        shutil.rmtree(run)
+    run.mkdir(parents=True)
+
+    def make_image(path, seed):
+        rng = np.random.default_rng(seed)
+        yy, xx = np.mgrid[0:128, 0:128]
+        img = rng.normal(0.1, 0.02, (128, 128))
+        for cx, cy in [(30, 40), (80, 90), (100, 30)]:
+            img += 0.8 * np.exp(-(((xx - cx - rng.integers(-3, 4)) ** 2
+                                   + (yy - cy - rng.integers(-3, 4)) ** 2)
+                                  / (2 * 6.0 ** 2)))
+        np.save(path, img.astype(np.float32))
+
+    make_image(run / "img_a.npy", 1)
+    make_image(run / "img_b.npy", 2)
+    si = {"technique": "AFM height image",
+          "description": "nanoparticles on a flat substrate",
+          "pixel_size_nm": 2.0}
+
+    anchor = ImageAnalysisAgent(
+        api_key=None, model_name=MODEL, output_dir=str(run / "anchor"),
+        enable_human_feedback=False, max_verification_iterations=1)
+    res_a = anchor.analyze(str(run / "img_a.npy"), system_info=si)
+    check("p11 anchor succeeded", res_a.get("status") == "success")
+    _, script_a = _saved_script(run / "anchor")
+    assert "import numpy as np" in script_a
+
+    rerun = ImageAnalysisAgent(
+        api_key=None, model_name=MODEL, output_dir=str(run / "rerun"),
+        enable_human_feedback=False, max_verification_iterations=1)
+    buf = Tee()
+    with capture_all(buf):
+        res_b = rerun.analyze(
+            str(run / "img_b.npy"), system_info=si,
+            prior_analysis_paths=[str(run / "anchor")],
+            reuse_locked_script=True, script_edits=[MARK_EDIT])
+    log = buf.getvalue()
+
+    check("p11 rerun succeeded", res_b.get("status") == "success")
+    check("p11 edit applied (log)", "Applied 1 surgical edit" in log)
+    _, script_b = _saved_script(run / "rerun")
+    check("p11 mark present in executed script",
+          "SURGICAL-EDIT-MARK" in script_b)
+    check("p11 byte-identical except the edit",
+          script_b.replace("  # SURGICAL-EDIT-MARK", "") == script_a)
+    blob = "".join(p.read_text() for p in (run / "rerun").glob("*.json"))
+    check("p11 provenance in saved artifacts",
+          "script_edits_applied" in blob and "+ 1 edit(s)" in blob)
+
+
 PARTS = {"1": part1_wiring, "2": part2_routing,
          "3": part3_meta_cross_delegation, "4": part4_meta_same_delegation,
          "5": part5_chaining, "6": part6_realtime,
          "7": part7_fanout_variants, "8": part8_refusals,
-         "9": part9_multiregime}
+         "9": part9_multiregime, "11": part11_image_wiring}
 
 if __name__ == "__main__":
     for k in (sys.argv[1:] or sorted(PARTS)):

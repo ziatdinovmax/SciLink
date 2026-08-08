@@ -130,6 +130,72 @@ def test_multi_regime_refuses_rather_than_dropping_edits():
 # ---------------------------------------------- orchestrator surface
 
 
+# ---------------------------------------------- image twin
+
+
+def make_prior_image_run(tmp_path):
+    run = tmp_path / "prior_image_run"
+    (run / "scripts").mkdir(parents=True)
+    (run / "scripts" / "analysis_script.py").write_text(SCRIPT)
+    (run / "analysis_results.json").write_text(json.dumps({
+        "status": "success", "analysis_approach": "blob detection"}))
+    return run
+
+
+@pytest.fixture
+def image_agent(tmp_path, monkeypatch):
+    monkeypatch.setenv("UNSAFE_EXECUTION_OK", "true")
+    from scilink.agents.exp_agents.image_analysis_agent import (
+        ImageAnalysisAgent)
+    return ImageAnalysisAgent(
+        api_key="offline-dummy", model_name="claude-opus-5",
+        output_dir=str(tmp_path / "img_out"), enable_human_feedback=False)
+
+
+IMG = np.random.default_rng(0).random((64, 64))
+
+
+def test_image_entry_validation_mirrors_curve(image_agent, tmp_path):
+    run = make_prior_image_run(tmp_path)
+    out = image_agent.analyze(
+        IMG, system_info="test image",
+        prior_analysis_paths=[str(run)],
+        script_edits=[{"old_text": "a", "new_text": "b"}])
+    assert out["status"] == "error"
+    assert "reuse_locked_script" in out["error"]["details"]
+
+    out = image_agent.analyze(
+        IMG, system_info="test image",
+        prior_analysis_paths=[str(run)], reuse_locked_script=True,
+        script_edits=[{"old_text": "NOT THERE", "new_text": "x"}])
+    assert out["status"] == "error"
+    assert out["error"]["error"] == "script_edits do not apply"
+
+    empty = tmp_path / "empty_img_run"
+    empty.mkdir()
+    out = image_agent.analyze(
+        IMG, system_info="test image",
+        prior_analysis_paths=[str(empty)], reuse_locked_script=True,
+        script_edits=[{"old_text": "a", "new_text": "b"}])
+    assert out["status"] == "error"
+    assert "prior script" in out["error"]["error"]
+
+
+def test_image_regime_guard_and_shared_helper():
+    src = Path("scilink/agents/exp_agents/controllers/"
+               "image_analysis_controllers.py").read_text()
+    i = src.index("multi-regime — locked-script reuse skipped")
+    guard = src[i - 1500:i]
+    assert 'state.get("script_edits")' in guard
+    assert "raise RuntimeError" in guard
+    # both twins consume the ONE shared implementation
+    assert "apply_reuse_script_edits" in src
+    curve = Path("scilink/agents/exp_agents/controllers/"
+                 "curve_fitting_controllers.py").read_text()
+    assert "from .._qc_engine import" in curve
+    assert curve.count("def apply_reuse_script_edits") == 0
+
+
 def test_unsupported_agent_refuses_script_edits():
     """Image/HS runs must REFUSE script_edits, not silently drop them —
     the forwarding gate alone completed the run with the caller's
@@ -147,7 +213,7 @@ def test_orchestrator_forwards_and_documents_script_edits():
                ).read_text()
     assert '"script_edits"' in src
     i = src.index('"script_edits": {')
-    desc = src[i:i + 1800]
+    desc = src[i:i + 2400]
     assert "reuse_locked_script" in desc          # names its preconditions
     assert "VERBATIM" in desc                     # copy-from-saved-script rule
     assert "signal, not gate" in desc             # execute-don't-gate semantics

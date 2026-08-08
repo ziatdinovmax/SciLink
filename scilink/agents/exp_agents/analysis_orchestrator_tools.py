@@ -2841,11 +2841,11 @@ class AnalysisOrchestratorTools:
                             "status": "error",
                             "message": (
                                 f"script_edits is not supported by "
-                                f"{type(agent).__name__} — it is a "
-                                "curve-fitting capability (surgical edits "
-                                "to a prior fitting script). Re-run "
-                                "without script_edits, or route 1D curve "
-                                "data to the curve-fitting agent.")})
+                                f"{type(agent).__name__} — it applies "
+                                "surgical edits to a prior run's saved "
+                                "script, currently supported for curve "
+                                "fitting and image analysis. Re-run "
+                                "without script_edits.")})
                 if profile:
                     # Operating profile (#346): forward only to agents whose
                     # analyze() accepts it (all three do; introspection keeps
@@ -3256,8 +3256,8 @@ class AnalysisOrchestratorTools:
                         "required": ["old_text", "new_text"],
                     },
                     "description": (
-                        "Surgical single-knob follow-up (curve fitting; "
-                        "requires `prior_analysis_paths` + "
+                        "Surgical single-knob follow-up (curve fitting and "
+                        "image analysis; requires `prior_analysis_paths` + "
                         "`reuse_locked_script=true`): exact old/new snippet "
                         "pairs applied to the prior run's saved script BEFORE "
                         "it re-executes, so the rerun differs from the prior "

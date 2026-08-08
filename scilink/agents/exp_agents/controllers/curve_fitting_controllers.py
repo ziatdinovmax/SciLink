@@ -1069,31 +1069,10 @@ def _first_prior_curve_fit_script(state: dict):
     return None, None
 
 
-def _apply_reuse_script_edits(state: dict, reuse_script, reuse_source,
-                              logger=None):
-    """Apply the caller's surgical ``script_edits`` to the reused script.
-
-    Single-knob follow-ups on the #172 locked-reuse path: the prior script
-    runs byte-identical EXCEPT the requested edits, so consecutive runs stay
-    comparable one variable at a time. Edits were validated at ``analyze()``
-    entry against this same prior script, so a failure here means the prior
-    run changed on disk mid-run — refuse loudly rather than silently run
-    the UNEDITED script the caller asked to change.
-    """
-    edits = state.get("script_edits") or []
-    if not (reuse_script and edits):
-        return reuse_script, reuse_source
-    from scilink.utils.file_edit import apply_snippet_edits
-    res = apply_snippet_edits(reuse_script, edits)
-    if res["status"] != "success":
-        raise RuntimeError(
-            f"script_edits no longer apply to the prior script "
-            f"({res['message']}) — the prior run changed on disk after "
-            "validation. Nothing was run.")
-    if logger:
-        logger.info(f"   ✏️  Applied {res['n_edits']} surgical edit(s) to "
-                    f"the reused script (execution will verify)")
-    return res["text"], f"{reuse_source} + {res['n_edits']} edit(s)"
+# Shared with the image twin — the implementation lives with the QC
+# engine; this alias keeps the established local name.
+from .._qc_engine import (  # noqa: E402
+    apply_reuse_script_edits as _apply_reuse_script_edits)
 
 
 def _append_objective_context(prompt: list, state: dict) -> None:
@@ -4550,14 +4529,9 @@ Return JSON with:
                 "verdict": verdict,
                 "message": message,
             }
-            # Surgical follow-up provenance: the exact old/new pairs applied
-            # to the prior script, so the delta between consecutive runs is
-            # auditable from the saved results alone.
-            if ctx.state.get("script_edits"):
-                reuse_result["script_edits_applied"] = list(
-                    ctx.state["script_edits"])
-                reuse_result["reuse_validity"]["script_edits"] = len(
-                    ctx.state["script_edits"])
+            # Surgical follow-up provenance (shared with the image twin).
+            from .._qc_engine import attach_script_edit_provenance
+            attach_script_edit_provenance(ctx, reuse_result)
             if verdict == "poor":
                 reuse_result["quality_warning"] = message
             # Realtime drift channel (#346 step 3): the gate metric measures
