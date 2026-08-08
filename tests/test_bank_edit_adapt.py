@@ -9,6 +9,7 @@ failure falls through (with its reason logged) to today's exemplar path.
 """
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -192,15 +193,114 @@ def test_image_bump_uses_image_domain(monkeypatch):
     assert bumped == [("image_analysis", "rec_009")]
 
 
+# --------------------------------------- hyperspectral twin (H1)
+
+
+def make_hs_ctx(score=0.8, with_exemplar=True):
+    return SimpleNamespace(
+        state={},
+        item_name="Ni K-edge jump map",
+        required_outputs=["edge_jump_map"],
+        session={"processing_note": "binned 2x",
+                 "optimal_data": SimpleNamespace(shape=(32, 32, 200))},
+        attempt_entries=[], retries=0,
+        bank_exemplar=({"score": score,
+                        "record": {"id": "hs_rec_1",
+                                   "working_script": BANKED}}
+                       if with_exemplar else None),
+        initial_label=None, current_result=None, last_code=None,
+        supplied_script=None)
+
+
+def hs_fake(model_replies, task_success=True):
+    from scilink.agents.exp_agents.controllers.hyperspectral_controllers \
+        import RunDynamicAnalysisController as HC
+    captured = {}
+
+    def _run_attempt(ctx):
+        captured["supplied"] = ctx.supplied_script
+        ctx.attempt_entries.append({"passed_fraction": 1.0})
+        ctx.retries += 1
+        return {"task_success": task_success}
+
+    s = SimpleNamespace(
+        logger=SimpleNamespace(info=lambda *a, **k: None,
+                               warning=lambda *a, **k: None,
+                               error=lambda *a, **k: None),
+        model=FakeModel(model_replies), generation_config=None,
+        _run_attempt=_run_attempt)
+    return HC, s, captured
+
+
+def test_hs_adapt_executes_edited_script_and_keeps_provenance():
+    HC, fake, captured = hs_fake([GOOD_REPLY])
+    ctx = make_hs_ctx()
+    res = HC._try_bank_edit_adapt(fake, ctx)
+    assert res is not None and res["success"] is True
+    assert "CENTER_GUESS = 7.2" in captured["supplied"]
+    assert res["_from_bank_adapt"] is True
+    assert ctx.bank_edit_adapt["id"] == "hs_rec_1"
+    assert "_bank_exemplar" not in ctx.state       # cleaned up
+    assert len(ctx.attempt_entries) == 1           # counts as attempt 1
+
+
+def test_hs_task_failure_is_budget_neutral():
+    """A task-failed adaptation must roll back its attempt entry and
+    retry tick — the escalation ladder starts fresh."""
+    HC, fake, captured = hs_fake([GOOD_REPLY], task_success=False)
+    ctx = make_hs_ctx()
+    res = HC._try_bank_edit_adapt(fake, ctx)
+    assert res is None
+    assert ctx.attempt_entries == [] and ctx.retries == 0
+    assert "_bank_exemplar" not in ctx.state
+
+
+def test_hs_no_exemplar_no_llm_call():
+    HC, fake, _ = hs_fake([GOOD_REPLY])
+    assert HC._try_bank_edit_adapt(fake, make_hs_ctx(
+        with_exemplar=False)) is None
+    assert fake.model.calls == 0
+
+
+def test_hs_record_provenance_gated_on_adapted_acceptance():
+    from scilink.agents.exp_agents.controllers.hyperspectral_controllers \
+        import RunDynamicAnalysisController as HC
+    fake = SimpleNamespace(
+        logger=SimpleNamespace(warning=lambda *a, **k: None),
+        SUCCESS_THRESHOLD=0.6)
+    ctx = make_hs_ctx()
+    ctx.attempt_entries = [{"passed_fraction": 1.0}]
+    ctx.best_attempt = {"valid_count": 1}
+    ctx.last_code = "code"
+    ctx.bank_edit_adapt = {"id": "hs_rec_1", "n_edits": 1}
+
+    ctx.current_result = {"_from_bank_adapt": True}
+    rec = HC._build_target_record(fake, ctx, task_success=True)
+    assert rec["bank_edit_adapt"]["id"] == "hs_rec_1"
+
+    ctx.current_result = {}                        # ladder refit replaced it
+    rec = HC._build_target_record(fake, ctx, task_success=True)
+    assert "bank_edit_adapt" not in rec
+
+
+def test_hs_supplied_script_mode_in_run_attempt_source():
+    src = Path("scilink/agents/exp_agents/controllers/"
+               "hyperspectral_controllers.py").read_text()
+    i = src.index('getattr(ctx, "supplied_script", None)')
+    assert "Executing supplied" in src[i:i + 600]
+
+
 def test_single_shared_implementation():
     from pathlib import Path
     curve = Path("scilink/agents/exp_agents/controllers/"
                  "curve_fitting_controllers.py").read_text()
     image = Path("scilink/agents/exp_agents/controllers/"
                  "image_analysis_controllers.py").read_text()
+    hs = Path("scilink/agents/exp_agents/controllers/"
+              "hyperspectral_controllers.py").read_text()
     engine = Path("scilink/agents/exp_agents/_qc_engine.py").read_text()
     assert engine.count("def try_bank_edit_adapt") == 1
-    for src in (curve, image):
+    for src in (curve, image, hs):
         assert "from .._qc_engine import try_bank_edit_adapt" in src
         assert "def try_bank_edit_adapt" not in src.replace(
             "from .._qc_engine import try_bank_edit_adapt", "")

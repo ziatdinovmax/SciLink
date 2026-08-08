@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 import numpy as np
 import json
 import os
@@ -2963,6 +2964,9 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                             base_prompt + "\n\n"
                             + _script_bank.render_exemplar_block(match)
                         )
+                        # Per-target stash for the minimal-edit adapt
+                        # attempt (Phase B) — ctx is fresh per target.
+                        ctx.bank_exemplar = match
                         _script_bank.mark_retrieved(
                             "hyperspectral", match["record"]["id"])
                         self.logger.info(
@@ -3003,8 +3007,34 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             record = out.get("record")
             if record is not None:
                 state.setdefault("dynamic_analysis_records", []).append(record)
+                # Clean acceptance of an edit-adapted script accumulates
+                # proven-N on the SAME bank record (provenance only exists
+                # on task_success records — see _build_target_record).
+                if record.get("bank_edit_adapt"):
+                    from .._qc_engine import bump_bank_adapt_success
+                    bump_bank_adapt_success(
+                        self, {"success": True,
+                               "bank_edit_adapt": record["bank_edit_adapt"]},
+                        domain="hyperspectral")
 
         # --- FINAL AGGREGATION ---
+        # Persist the per-target records (script, verdict, quality history,
+        # bank-adapt provenance) — they previously lived only in the run's
+        # in-memory state, so the artifacts could not answer "which banked
+        # script was adapted, and did it survive". Additive and
+        # failure-isolated; T=2 staging keeps reading the in-memory list.
+        try:
+            recs = state.get("dynamic_analysis_records") or []
+            if recs:
+                _rec_path = Path(output_dir) / "dynamic_analysis_records.json"
+                _rec_path.write_text(json.dumps(recs, indent=1, default=str))
+                self.logger.info(
+                    f"   📄 {len(recs)} per-target record(s) persisted: "
+                    f"{_rec_path.name}")
+        except Exception as _persist_err:  # noqa: BLE001
+            self.logger.warning(
+                f"per-target record persistence skipped: {_persist_err}")
+
         _null_meta = [m for m in all_valid_meta
                       if isinstance(m, dict) and m.get("determination")]
         if not all_valid_maps and _null_meta:
@@ -3048,7 +3078,79 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
         return None  # no locked-script reuse path for dynamic analysis
 
     def qc_run_initial(self, ctx: QCItemContext) -> dict:
+        # Minimal-edit adaptation of a strongly matching banked script
+        # (Phase B, shared with the curve/image twins): one attempt in
+        # FRONT of exemplar generation; any failure falls through with
+        # the ladder budget restored.
+        adapted = self._try_bank_edit_adapt(ctx)
+        if adapted is not None:
+            return adapted
         return self._run_attempt(ctx)
+
+    def _try_bank_edit_adapt(self, ctx: QCItemContext):
+        """HS wrapper over the shared minimal-edit adapt attempt.
+
+        Per-target: the exemplar match is stashed on ctx by the prompt
+        builder. HS has no locked config (dynamic analysis), so the
+        "plan" shown to the adapter is the target + required outputs +
+        processing note. A task-failed adaptation is BUDGET-NEUTRAL:
+        its attempt entry and retry tick are rolled back so the
+        escalation ladder starts fresh, exactly as if the attempt had
+        never run — the mode can only add, never subtract.
+        """
+        match = getattr(ctx, "bank_exemplar", None)
+        if not match:
+            return None
+        from .._qc_engine import try_bank_edit_adapt
+        state = ctx.state
+        state["_hs_adapt_plan"] = {
+            "analysis_target": ctx.item_name,
+            "required_outputs": ctx.required_outputs,
+            "processing_note": ctx.session.get("processing_note"),
+        }
+        state["_bank_exemplar"] = match
+
+        def run_fn(script):
+            n_entries = len(ctx.attempt_entries)
+            retries0 = ctx.retries
+            ctx.supplied_script = script
+            try:
+                out = self._run_attempt(ctx)
+            finally:
+                ctx.supplied_script = None
+            if not out.get("task_success"):
+                # roll back the probe: ladder budget untouched
+                del ctx.attempt_entries[n_entries:]
+                ctx.retries = retries0
+                return {"success": False}
+            out["_from_bank_adapt"] = True
+            return {**out, "success": True}
+
+        try:
+            res = try_bank_edit_adapt(
+                self, ctx,
+                domain="hyperspectral",
+                script_kind="hyperspectral-analysis",
+                output_contract=(
+                    "the analyze_feature(...) function name and signature, "
+                    "the returned result dictionary schema, and the "
+                    "required outputs"),
+                config_key="_hs_adapt_plan",
+                data_context=(
+                    f"analysis target: {ctx.item_name}\n"
+                    f"cube shape: "
+                    f"{getattr(ctx.session.get('optimal_data'), 'shape', None)}\n"
+                    f"processing note: "
+                    f"{str(ctx.session.get('processing_note'))[:400]}"),
+                run_fn=run_fn,
+            )
+        finally:
+            state.pop("_bank_exemplar", None)
+            state.pop("_hs_adapt_plan", None)
+        if res is not None:
+            ctx.bank_edit_adapt = res.get("bank_edit_adapt")
+            res["success"] = True   # engine-level success, HS convention
+        return res
 
     def qc_record_initial(self, ctx: QCItemContext, result: dict) -> None:
         ctx.best_result = result
@@ -3271,6 +3373,14 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 "task_success": bool(task_success),
                 "salvaged": (not task_success) and ctx.best_attempt["valid_count"] > 0,
                 "script": ctx.last_code or None,
+                # Adapt provenance survives ONLY when the accepted result
+                # IS the adapted attempt (a ladder refit replaces it and
+                # the provenance rightly drops with it).
+                **({"bank_edit_adapt": getattr(ctx, "bank_edit_adapt", None)}
+                   if (task_success
+                       and getattr(ctx, "bank_edit_adapt", None)
+                       and (ctx.current_result or {}).get("_from_bank_adapt"))
+                   else {}),
                 "quality_history": _hist,
             }
         except Exception as _rec_err:  # noqa: BLE001 - record is additive
@@ -3328,20 +3438,30 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             # method. QC rejections remain ladder currency as before.
             code_str, result_dict, _mech_tb = "", None, ""
             for _exec_try in range(self.MAX_EXEC_ATTEMPTS):
-                if _exec_try == 0:
-                    self.logger.info(f"    (Attempt {retries+1}) Asking LLM to write code...")
-                    _gen_prompt = ctx.current_prompt
-                else:
-                    exec_corrections = _exec_try
+                if _exec_try == 0 and getattr(ctx, "supplied_script", None):
+                    # Given-script execution mode (bank edit-adapt): run the
+                    # supplied script instead of generating. Mechanical
+                    # corrections below still repair it on execution errors,
+                    # same as any generated script.
                     self.logger.info(
-                        f"    🔧 Mechanical correction {_exec_try}/"
-                        f"{self.MAX_EXEC_ATTEMPTS - 1}: repairing the "
-                        f"execution error (ladder budget untouched)...")
-                    _gen_prompt = ctx.current_prompt + _exec_correction_feedback(
-                        code_str, _mech_tb)
-                response = self.model.generate_content(_gen_prompt, generation_config=self.generation_config)
-                result_json, _ = parse_codegen_response(response, field="code", logger=self.logger)
-                code_str = (result_json or {}).get("code", "")
+                        f"    (Attempt {retries+1}) Executing supplied "
+                        f"script (bank edit-adapt)...")
+                    code_str, response = ctx.supplied_script, "(supplied)"
+                else:
+                    if _exec_try == 0:
+                        self.logger.info(f"    (Attempt {retries+1}) Asking LLM to write code...")
+                        _gen_prompt = ctx.current_prompt
+                    else:
+                        exec_corrections = _exec_try
+                        self.logger.info(
+                            f"    🔧 Mechanical correction {_exec_try}/"
+                            f"{self.MAX_EXEC_ATTEMPTS - 1}: repairing the "
+                            f"execution error (ladder budget untouched)...")
+                        _gen_prompt = ctx.current_prompt + _exec_correction_feedback(
+                            code_str, _mech_tb)
+                    response = self.model.generate_content(_gen_prompt, generation_config=self.generation_config)
+                    result_json, _ = parse_codegen_response(response, field="code", logger=self.logger)
+                    code_str = (result_json or {}).get("code", "")
                 ctx.last_code = code_str
 
                 # Fresh sandbox per try so a failed exec's half-defined state
