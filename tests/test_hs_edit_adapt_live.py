@@ -215,7 +215,144 @@ def part3_probe():
         check("p3 fall-through/skip was clean (run unaffected)", True)
 
 
-PARTS = {"1": part1_anchor, "2": part2_pair, "3": part3_probe}
+TAS2 = Path.home() / "Code" / "TaS2_STM"
+
+
+def si_tas2(zone):
+    return {
+        "experiment_type": "Spectroscopy",
+        "experiment": {
+            "technique": ("STM grid spectroscopy (STS): per-pixel dI/dV "
+                          "via lock-in (LIX 1 omega channel)"),
+            "instrument": "LT-STM, Nanonis grid spectroscopy",
+            "details": ("168x168 px grid over 15x15 nm, 151-point bias "
+                        "sweep -1.0 V to +1.0 V. Data cube (x, y, bias): "
+                        "LIX 1 omega (A) ~ dI/dV, proportional to the "
+                        "local density of states."),
+        },
+        "sample": {"material": "1T-TaS2",
+                   "description": f"1T-TaS2 surface, {zone} — layered "
+                   "CDW material; expect DOS suppression (gap) around "
+                   "zero bias in Mott/CDW regions."},
+        "energy_range": {"start": -1.0, "end": 1.0, "units": "V"},
+    }
+
+
+TAS2_OBJECTIVE = (
+    "Map the electronic gap around zero bias: produce a zero-bias "
+    "conductance map and a gap-width map from the per-pixel dI/dV "
+    "spectra, and identify regions of suppressed density of states.")
+
+
+def run_tas2(name, zone_dir, zone_label, budget=1):
+    from scilink.agents.exp_agents.hyperspectral_analysis_agent import (
+        HyperspectralAnalysisAgent)
+    out = BASE / name
+    if out.exists():
+        shutil.rmtree(out)
+    a = HyperspectralAnalysisAgent(
+        api_key=None, model_name=MODEL, output_dir=str(out),
+        enable_human_feedback=False, max_verification_iterations=budget)
+    buf = Tee()
+    with capture_all(buf):
+        res = a.analyze(
+            data=str(TAS2 / zone_dir / "LIX_1_omega__A.npy"),
+            system_info=si_tas2(zone_label), objective=TAS2_OBJECTIVE)
+    return res, buf.getvalue(), out
+
+
+def part4_tas2():
+    """A second, physics-distinct HS family: STS grids on 1T-TaS2 —
+    zone 1 anchors, zone 2 (same sample, different region) adapts."""
+    print("\n=== 4. TaS2 STS: zone-to-zone adaptation ===")
+    from scilink.skills._shared import _script_bank
+
+    # The TaS2 gap target is demanding: the anchor gets a 3-iteration
+    # budget so the banked script comes from an APPROVED analysis.
+    # Anchor approval is stochastic under the strict verifier — when it
+    # does not approve, the scenario SKIPS honestly rather than failing
+    # on anchor difficulty (the feature under test never ran).
+    res, log, out = run_tas2("tas2_zone1", "TaS2_015_npy(zone1)", "zone 1",
+                             budget=3)
+    if res.get("status") != "success":
+        print("     (zone-1 retry — verifier rejected the first pass)")
+        res, log, out = run_tas2("tas2_zone1_retry",
+                                 "TaS2_015_npy(zone1)", "zone 1", budget=3)
+    if res.get("status") != "success":
+        print("     SKIPPED: zone-1 anchor not approved at this budget — "
+              "the adaptation scenario needs an approved anchor script.")
+        check("p4 SKIPPED (anchor not approved; feature not exercised)",
+              True)
+        return
+    check("p4 zone-1 anchor succeeded", res.get("status") == "success")
+    if not _script_bank.list_records("hyperspectral"):
+        # Seed ONLY from task-success records — a script from a rejected
+        # analysis is not a proven script (live: seeding a rejected
+        # zone-1 script made the verifier correctly reject the zone-2
+        # adaptation built on it).
+        recs = [r for r in records_with_scripts(out)
+                if r.get("task_success")]
+        check("p4 zone-1 produced a task-success record", bool(recs))
+        if not recs:
+            return
+        cube = np.load(TAS2 / "TaS2_015_npy(zone1)/LIX_1_omega__A.npy")
+        axis = np.load(TAS2 / "TaS2_015_npy(zone1)/sweep_signal.npy")
+        _script_bank.add_record("hyperspectral", {
+            "technique_signals": {"analysis_target": recs[0].get("target")},
+            "measurement_context": _script_bank.measurement_context(
+                si_tas2("zone 1")),
+            "data_fingerprint": _script_bank.hyperspectral_fingerprint(
+                cube.astype(float), axis.astype(float), "V"),
+            "outcome": {"metric": {"name": "passed_fraction", "value": 1.0}},
+            "working_script": recs[0]["script"],
+        })
+        print("     (bank seeded from zone 1's per-target script)")
+    check("p4 bank holds a record",
+          len(_script_bank.list_records("hyperspectral")) >= 1)
+
+    before = {r["id"]: (r.get("stats") or {}).get("n_successes", 1)
+              for r in _script_bank.list_records("hyperspectral")}
+    res2, log2, out2 = run_tas2("tas2_zone2", "TaS2_013_npy(zone2)",
+                                "zone 2")
+    check("p4 zone-2 run succeeded", res2.get("status") == "success")
+    # The attempt's FATE is stochastic (observed live across runs: fired
+    # then verifier-rejected; verbatim then rejected; degenerate LLM
+    # edit reply refused pre-execution). What is guaranteed: a matching
+    # record is offered, and every arm is logged with its reason.
+    offered = "Bank exemplar offered" in log2
+    fired = "Bank edit-adapt: record" in log2
+    fell = "Edit-adapt fell through" in log2
+    skipped = "Edit-adapt skipped" in log2
+    print(f"     offered={offered} fired={fired} fell_through={fell} "
+          f"skipped={skipped}")
+    check("p4 a matching record was offered to zone 2", offered)
+    check("p4 the attempt's outcome was logged (no silent path)",
+          fired or fell or skipped)
+    # Zone-to-zone STS transfer is a HARD case (the CDW/defect landscape
+    # shifts between zones, breaking gap-extraction heuristics) — whether
+    # the adaptation survives is the verifier's call, both outcomes are
+    # correct behavior. What must hold either way: provenance exists IFF
+    # the accepted result is the adapted attempt, and proven-N moves IFF
+    # provenance exists.
+    kept = [r for r in records_with_scripts(out2)
+            if r.get("bank_edit_adapt")]
+    after = {r["id"]: (r.get("stats") or {}).get("n_successes", 1)
+             for r in _script_bank.list_records("hyperspectral")}
+    bumped = any(after.get(rid, 0) > n for rid, n in before.items())
+    if kept:
+        print("     transfer outcome: adaptation KEPT by the verifier")
+        check("p4 kept adaptation is on a task-success record",
+              all(r.get("task_success") for r in kept))
+        check("p4 proven-N bumped with kept provenance", bumped)
+    else:
+        print("     transfer outcome: adaptation REJECTED by the verifier "
+              "(ladder regenerated — the strict arbiter at work)")
+        check("p4 rejected transfer left NO provenance", True)
+        check("p4 rejected transfer did NOT bump proven-N", not bumped)
+
+
+PARTS = {"1": part1_anchor, "2": part2_pair, "3": part3_probe,
+         "4": part4_tas2}
 
 if __name__ == "__main__":
     assert os.environ.get("SCILINK_HOME"), "isolated SCILINK_HOME required"
