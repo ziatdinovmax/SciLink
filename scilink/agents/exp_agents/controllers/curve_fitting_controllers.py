@@ -1069,6 +1069,12 @@ def _first_prior_curve_fit_script(state: dict):
     return None, None
 
 
+# Shared with the image twin — the implementation lives with the QC
+# engine; this alias keeps the established local name.
+from .._qc_engine import (  # noqa: E402
+    apply_reuse_script_edits as _apply_reuse_script_edits)
+
+
 def _append_objective_context(prompt: list, state: dict) -> None:
     """Append high-level scientific objective to an LLM prompt.
 
@@ -4525,6 +4531,9 @@ Return JSON with:
                 "verdict": verdict,
                 "message": message,
             }
+            # Surgical follow-up provenance (shared with the image twin).
+            from .._qc_engine import attach_script_edit_provenance
+            attach_script_edit_provenance(ctx, reuse_result)
             if verdict == "poor":
                 reuse_result["quality_warning"] = message
             # Realtime drift channel (#346 step 3): the gate metric measures
@@ -6257,6 +6266,8 @@ Return JSON with:
         # reproduces it).
         if state.get("reuse_locked_script"):
             reuse_script, reuse_source = _first_prior_curve_fit_script(state)
+            reuse_script, reuse_source = _apply_reuse_script_edits(
+                state, reuse_script, reuse_source, self.logger)
         else:
             reuse_script, reuse_source = None, None
         # Verbatim cold start (#346 step 4): a realtime run with no explicit
@@ -6269,6 +6280,17 @@ Return JSON with:
             reuse_script = cs.get("script")
             reuse_source = f"script_bank:{cs.get('id')}"
         if reuse_script and regime_configs:
+            # script_edits made it past entry validation, but the series
+            # plan split this run into regimes, which disables reuse — the
+            # caller's explicitly requested edits would be silently dropped
+            # and the run would re-derive freely. Refuse loudly instead.
+            if state.get("script_edits"):
+                raise RuntimeError(
+                    "script_edits cannot be applied: the series plan split "
+                    "this run into multiple regimes, which disables locked-"
+                    "script reuse. Either re-run without script_edits "
+                    "(per-regime models will be re-derived), or fit the "
+                    "points individually as single-regime follow-ups.")
             self.logger.info(
                 "   ♻️  Locked-script reuse requested, but this run is "
                 "multi-regime — reuse skipped."
