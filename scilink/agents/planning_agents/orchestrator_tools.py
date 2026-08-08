@@ -2303,7 +2303,13 @@ class OrchestratorTools:
             ),
             parameters={
                 "specific_objective": {"type": "string", "description": "Research objective"},
-                "knowledge_paths": {"type": "string", "description": "Comma-separated paths to papers/reports/docs folders"},
+                "knowledge_paths": {"type": "string", "description": (
+                    "Comma-separated paths to papers/reports/docs folders — "
+                    "for document CORPORA too large to read directly "
+                    "(triggers a full embedding knowledge-base build for "
+                    "retrieval). A handful of documents you have ALREADY "
+                    "read this session belongs in additional_context, not "
+                    "here.")},
                 "primary_data_set": {
                     "type": "string",
                     "description": (
@@ -2565,8 +2571,7 @@ class OrchestratorTools:
             
             print(f"  ⚡ Tool: Generating implementation code for existing plan...")
 
-            kb_available = (self.orch.planner.kb_code.index and 
-                            self.orch.planner.kb_code.index.ntotal > 0)
+            kb_available = bool(self.orch.planner.kb_code.chunks)
 
             if not kb_available and not code_paths:
                 return json.dumps({
@@ -2613,7 +2618,9 @@ class OrchestratorTools:
                 
                 print(f"    💻 Code sources: {code_list}")
             elif kb_available:
-                print(f"    💻 Using existing Code KB ({self.orch.planner.kb_code.index.ntotal} vectors)")
+                print(f"    💻 Using existing Code KB "
+                      f"({self.orch.planner.kb_code.index.ntotal if self.orch.planner.kb_code.index else 0} vectors, "
+                      f"{len(self.orch.planner.kb_code.chunks)} chunks)")
             
             try:
                 updated_plan = self.orch.planner.generate_implementation_code(
@@ -7592,7 +7599,12 @@ class OrchestratorTools:
                 },
                 "knowledge_paths": {
                     "type": "string",
-                    "description": "Comma-separated paths to papers/reports/docs folders",
+                    "description": (
+                        "Comma-separated paths to papers/reports/docs "
+                        "folders — for document CORPORA too large to read "
+                        "directly (triggers a full embedding KB build). "
+                        "Documents already read this session belong in "
+                        "additional_context, not here."),
                 },
                 "additional_context": {
                     "type": "string",
