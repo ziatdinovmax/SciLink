@@ -279,7 +279,7 @@ def _build_index_into(target: Path, embedding_model: str,
         str(prefix.with_suffix(".json")),
         sources_path=str(prefix.with_suffix(".sources.json")),
     )
-    return len(chunks), int(kb.index.ntotal)
+    return len(chunks), int(kb.index.ntotal) if kb.index else 0
 
 
 def create_kb(name: str,
@@ -532,7 +532,7 @@ def _append_index_into(target: Path, new_doc_paths: List[str],
                    str(prefix.with_suffix(".json")),
                    sources_path=str(prefix.with_suffix(".sources.json"))):
         raise ValueError(f"Could not load the existing index from {target}.")
-    before = int(kb.index.ntotal)
+    before = int(kb.index.ntotal) if kb.index else 0
     # Record the additions under the FINAL sources path so the orchestrator's
     # source-difference check keeps recognising everything as embedded.
     kb.sources.append({
@@ -545,7 +545,7 @@ def _append_index_into(target: Path, new_doc_paths: List[str],
         str(prefix.with_suffix(".json")),
         sources_path=str(prefix.with_suffix(".sources.json")),
     )
-    return len(chunks), int(kb.index.ntotal) - before
+    return len(chunks), (int(kb.index.ntotal) if kb.index else 0) - before
 
 
 def rebuild_kb(name: str,

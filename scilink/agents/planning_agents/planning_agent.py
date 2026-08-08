@@ -1494,7 +1494,7 @@ class PlanningAgent(BaseAgent):
             return error_result
         
         # Check if code KB has content
-        if not (self.kb_code.index and self.kb_code.index.ntotal > 0):
+        if not self.kb_code.chunks:   # keyword-only KBs count as content
             print("  - ⚠️  Code KB is empty, skipping code generation")
             self._log_action(
                 action="generate_implementation_code",
@@ -1878,7 +1878,7 @@ Select the most appropriate strategy:
 
         # Local KB RAG (optional, additive)
         if use_literature_rag:
-            if self.kb_docs.index and self.kb_docs.index.ntotal > 0:
+            if self.kb_docs.chunks:   # keyword-only KBs count as content
                 search_query = f"Implications and causes of: {consolidated_feedback[:400]}"
                 print(f"  - 🔍 Searching local KB for context on results...")
                 try:
@@ -2180,7 +2180,7 @@ Select the most appropriate strategy:
             Updated plan dict with implementation_code added/updated
         """
         
-        if not self.kb_code.index or self.kb_code.index.ntotal == 0:
+        if not self.kb_code.chunks:   # keyword-only KBs count as content
             print("  - ℹ️  No Code KB available, skipping implementation update")
             self._log_action(
                 action="refine_implementation_code",

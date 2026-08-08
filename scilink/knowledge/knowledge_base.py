@@ -128,8 +128,24 @@ class KnowledgeBase:
                         print(f"    - ❌ Rate limit hit on final attempt. Build failed.")
                         raise e 
                 except Exception as e:
+                    # Build-time leg of the degradation ladder ("retrieval
+                    # is grounding, not a dependency"): an unavailable
+                    # embedding provider (e.g. a Bedrock-only session with
+                    # the default Gemini embedder) must not abort
+                    # generation. Fall back to a KEYWORD-ONLY KB: chunks
+                    # are kept, the dense index is dropped entirely (a
+                    # partial index would silently search a stale subset),
+                    # and the query path's existing BM25 tier takes over.
                     print(f"    - ❌ Error embedding batch {i//batch_size + 1}: {e}")
-                    raise e
+                    print(
+                        "  - ⚠️  Embeddings unavailable — building a "
+                        "KEYWORD-ONLY knowledge base (BM25 retrieval tier). "
+                        "Dense retrieval is disabled for this KB; to enable "
+                        "it, configure the embedding provider "
+                        f"('{self.embedding_model_name}') and rebuild.")
+                    self.index = None
+                    self._bm25_state = None
+                    return
 
         embeddings_np = np.array(all_embeddings, dtype=np.float32)
         dimension = embeddings_np.shape[1]
@@ -176,12 +192,20 @@ class KnowledgeBase:
         chunks_file = Path(chunks_path)
         sources_file = Path(sources_path)
 
-        if not index_file.exists() or not chunks_file.exists() or not sources_file.exists() :
-            print("  - ⚠️  Cannot load: Index or chunks or sources file missing.")
+        if not chunks_file.exists() or not sources_file.exists():
+            print("  - ⚠️  Cannot load: chunks or sources file missing.")
             return False
-            
+
         try:
-            self.index = faiss.read_index(index_path)
+            if index_file.exists():
+                self.index = faiss.read_index(index_path)
+            else:
+                # A keyword-only KB (built while embeddings were
+                # unavailable) has chunks but no dense index — load it in
+                # that mode rather than refusing.
+                self.index = None
+                print("  - ⚠️  No dense index on disk — loading as a "
+                      "KEYWORD-ONLY knowledge base (BM25 retrieval tier).")
             with open(chunks_file, 'r', encoding='utf-8') as f:
                 self.chunks = json.load(f)
             
@@ -197,7 +221,8 @@ class KnowledgeBase:
                 except Exception as e:
                     print(f"    - ⚠️ Error loading repo maps file: {e}")
             
-            print(f"  - ✅ Successfully loaded {len(self.chunks)} chunks and index with {self.index.ntotal} vectors from {len(self.sources)} sources.")
+            n_vec = self.index.ntotal if self.index is not None else 0
+            print(f"  - ✅ Successfully loaded {len(self.chunks)} chunks and index with {n_vec} vectors from {len(self.sources)} sources.")
             return True
         except Exception as e:
             print(f"  - ❌ Error loading knowledge base: {e}")
@@ -210,6 +235,13 @@ class KnowledgeBase:
         Retrieves the most relevant document chunks for a given query.
         """
         if not self.index:
+            if self.chunks:
+                # Keyword-only KB: the dense tier does not exist, so ANY
+                # caller of retrieve() degrades to BM25 here instead of
+                # each call site re-implementing the ladder.
+                print("  - ℹ️  No dense index (keyword-only KB) — "
+                      "retrieving via BM25.")
+                return self.retrieve_sparse(query, top_k=top_k)
             print("⚠️  Cannot retrieve: Knowledge base has not been built.")
             return []
             
