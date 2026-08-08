@@ -6166,6 +6166,17 @@ Return JSON with:
             reuse_script = cs.get("script")
             reuse_source = f"script_bank:{cs.get('id')}"
         if reuse_script and regime_configs:
+            # script_edits made it past entry validation, but the series
+            # plan split this run into regimes, which disables reuse — the
+            # caller's explicitly requested edits would be silently dropped
+            # and the run would re-derive freely. Refuse loudly instead.
+            if state.get("script_edits"):
+                raise RuntimeError(
+                    "script_edits cannot be applied: the series plan split "
+                    "this run into multiple regimes, which disables locked-"
+                    "script reuse. Either re-run without script_edits "
+                    "(per-regime models will be re-derived), or fit the "
+                    "points individually as single-regime follow-ups.")
             self.logger.info(
                 "   ♻️  Locked-script reuse requested, but this run is "
                 "multi-regime — reuse skipped."

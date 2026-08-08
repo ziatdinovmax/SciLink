@@ -114,6 +114,19 @@ def test_non_matching_edits_refused_before_any_work(agent, tmp_path):
     assert out["error"]["failed_edit"] == 2
 
 
+def test_multi_regime_refuses_rather_than_dropping_edits():
+    """Regime split disables reuse; with script_edits present that must be
+    a loud refusal, not a silent fallback to free re-derivation (the run
+    would quietly ignore the caller's explicitly requested change)."""
+    src = Path("scilink/agents/exp_agents/controllers/"
+               "curve_fitting_controllers.py").read_text()
+    i = src.index("multi-regime — reuse skipped")
+    guard = src[i - 1200:i]
+    assert 'state.get("script_edits")' in guard
+    assert "raise RuntimeError" in guard
+    assert "script_edits cannot be applied" in guard
+
+
 # ---------------------------------------------- orchestrator surface
 
 
