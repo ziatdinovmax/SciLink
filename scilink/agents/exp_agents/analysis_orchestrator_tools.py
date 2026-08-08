@@ -2828,12 +2828,24 @@ class AnalysisOrchestratorTools:
                 if reuse_locked_script:
                     analyze_kwargs["reuse_locked_script"] = True
                 if script_edits:
-                    # Surgical follow-up: only forward to agents whose
-                    # analyze() accepts it (currently curve fitting).
+                    # Surgical follow-up: only curve fitting supports it.
+                    # An unsupported agent must REFUSE, not silently drop
+                    # the caller's explicitly requested change (same
+                    # principle as the multi-regime guard).
                     import inspect as _inspect
                     if "script_edits" in _inspect.signature(
                             agent.analyze).parameters:
                         analyze_kwargs["script_edits"] = script_edits
+                    else:
+                        return json.dumps({
+                            "status": "error",
+                            "message": (
+                                f"script_edits is not supported by "
+                                f"{type(agent).__name__} — it is a "
+                                "curve-fitting capability (surgical edits "
+                                "to a prior fitting script). Re-run "
+                                "without script_edits, or route 1D curve "
+                                "data to the curve-fitting agent.")})
                 if profile:
                     # Operating profile (#346): forward only to agents whose
                     # analyze() accepts it (all three do; introspection keeps

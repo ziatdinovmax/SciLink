@@ -130,6 +130,18 @@ def test_multi_regime_refuses_rather_than_dropping_edits():
 # ---------------------------------------------- orchestrator surface
 
 
+def test_unsupported_agent_refuses_script_edits():
+    """Image/HS runs must REFUSE script_edits, not silently drop them —
+    the forwarding gate alone completed the run with the caller's
+    explicitly requested change ignored."""
+    src = Path("scilink/agents/exp_agents/analysis_orchestrator_tools.py"
+               ).read_text()
+    i = src.index('analyze_kwargs["script_edits"]')
+    guard = src[i:i + 800]
+    assert "is not supported by" in guard
+    assert '"status": "error"' in guard
+
+
 def test_orchestrator_forwards_and_documents_script_edits():
     src = Path("scilink/agents/exp_agents/analysis_orchestrator_tools.py"
                ).read_text()
