@@ -830,6 +830,42 @@ class OrchestratorTools:
                     out.extend(token_paths)
         return out
 
+    def _outgoing_campaign_literature(self, explicit_context) -> list:
+        """Files in ``explicit_context`` that belong to the campaign this
+        call is LEAVING — [{'file', 'covers'}, ...], covers being the
+        questions the registry recorded for it (issue #425); empty when
+        nothing was passed or nothing is attributable.
+
+        Distinct from _prior_campaign_literature, which reports corpora
+        from campaigns strictly OLDER than the current one and is a hard
+        refusal. The outgoing campaign's own corpus can never appear there
+        — the transition has not been applied when the guard runs, so that
+        literature still reads as current — which is exactly the case a
+        new campaign is most likely to be handed, since its path is the
+        one sitting in the agent's recent context.
+
+        Reported rather than refused. The transition is decided by lexical
+        overlap against the previous objective, a heuristic that has been
+        observed comparing against a placeholder objective, and a hard gate
+        built on it would block legitimate work and push callers to pass
+        new_campaign=true reflexively — which disables the guard that does
+        catch older corpora. The agent has the topic in hand; it only
+        lacked the fact that the campaign moved.
+        """
+        cid = self._campaign_id()
+        owners: Dict[str, set] = {}
+        meta: Dict[str, dict] = {}
+        for e in self._lit_registry():
+            p = str(e.get("path"))
+            owners.setdefault(p, set()).add(e.get("campaign_id"))
+            meta.setdefault(p, e)
+        out = []
+        for p in self._context_file_paths(explicit_context):
+            if p in owners and cid in owners[p] and None not in owners[p]:
+                out.append({"file": Path(p).name,
+                            "covers": (meta[p].get("questions") or [])})
+        return out
+
     def _campaign_literature_files(self) -> List[Path]:
         """ALL literature files belonging to the CURRENT campaign, oldest
         first (issue #425).
@@ -2056,6 +2092,17 @@ class OrchestratorTools:
                         ),
                     })
 
+            # Literature the OUTGOING campaign owns, captured here because
+            # _campaign_id() still reads the pre-transition value; once
+            # generate_plan applies the bump and _adopt_literature re-claims
+            # these files under the new id, the fact is unrecoverable.
+            # Reported on the result so the campaign boundary reaches the
+            # decision that grounds what comes next (see the helper).
+            carried_literature = (
+                self._outgoing_campaign_literature(literature_context)
+                if starts_new else [])
+            outgoing_campaign_id = self._campaign_id()
+
             # Resolve knowledge paths (with fallback to orchestrator dir)
             knowledge_list = self._resolve_knowledge_paths(knowledge_paths)
             if knowledge_list:
@@ -2277,6 +2324,26 @@ class OrchestratorTools:
                     "tea_context_included": self.orch.latest_tea_results is not None,
                     "hint": "Use generate_implementation_code() to add executable code"
                 }
+                if carried_literature:
+                    _now = self._campaign_id()
+                    result["campaign_transition"] = {
+                        "previous_campaign": outgoing_campaign_id,
+                        "new_campaign": _now,
+                        "literature_carried_over": carried_literature,
+                        "note": (
+                            f"This objective opened campaign {_now}. The "
+                            f"literature above was gathered for campaign "
+                            f"{outgoing_campaign_id} and is now also "
+                            f"registered to this one, so later refine and "
+                            f"document calls will auto-load it. If it does "
+                            f"not cover this topic, run search_literature "
+                            f"for THIS objective before grounding further "
+                            f"work on it."
+                        ),
+                    }
+                    print(f"    🧭 Literature carried over from campaign "
+                          f"{outgoing_campaign_id}: "
+                          + ", ".join(c["file"] for c in carried_literature))
                 if html_path is not None:
                     result["html_report"] = str(html_path)
                 if saved_extras:
