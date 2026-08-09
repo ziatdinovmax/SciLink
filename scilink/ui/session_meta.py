@@ -101,7 +101,17 @@ def generate_session_title(model, first_user_msg: str,
         # (live), the tail being conversational continuation cut
         # mid-sentence by the token cap.
         raw = next((ln for ln in raw.splitlines() if ln.strip()), "")
-        raw = re.sub(r"^\s*title\s*[:\-]\s*", "", raw, flags=re.IGNORECASE)
+        # Strip a leading LABEL the model wrote before the answer. Matching
+        # only "title:" let "Session name: CDOC and GM proposal adaptation"
+        # through, and the label shipped as part of the sidebar name (live).
+        # Deliberately narrow: it must be a name-for-the-name word, so a
+        # real title that happens to contain a colon ("CDOC: a perturbation
+        # platform") keeps its own prefix.
+        raw = re.sub(
+            r"^\s*(?:suggested|proposed|possible)?\s*"
+            r"(?:session|conversation|chat)?\s*"
+            r"(?:name|title)\s*[:\-]\s*",
+            "", raw, flags=re.IGNORECASE)
         title = re.sub(r'["\'\n\r.]+', " ", raw)
         title = " ".join(title.split()).strip()
         # Backstop the 3-6-word instruction against one-line rambles.
