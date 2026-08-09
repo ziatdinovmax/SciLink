@@ -916,6 +916,53 @@ class OrchestratorTools:
             sections.append((m.group(2).strip(), text[m.start():end]))
         return sections
 
+    def _campaign_literature_topics(self) -> List[Dict[str, Any]]:
+        """What the CURRENT campaign's literature COVERS.
+
+        Returns [{'file', 'section_ref', 'question'}, ...] — the question
+        each saved section answers, addressable as '<path>#qN'. The files
+        are read, but only QUESTIONS are returned, never answer bodies, so
+        the index stays small however large the corpus is.
+
+        Ref numbers come from each file's own '# Question N' headings, not
+        from list position: _resolve_section_ref matches a ref against the
+        heading number, and a campaign whose literature accumulated across
+        several searches (each file restarting at 1, each living in its own
+        delegation folder) would otherwise be handed refs that resolve to
+        the wrong section or to nothing. A headingless single-question file
+        is addressable as '#q1', matching the resolver's own special case.
+
+        This exists because the decision to ground a document in the
+        campaign's literature was being made blind — all the agent had
+        ever seen of a 200 KB corpus was one 300-character preview, so it
+        could not know that the corpus answered the very question the
+        document was about (live: a throughput document written from
+        priors while the corpus held a 45 KB section on exactly that).
+        """
+        by_path = {}
+        for e in self._lit_registry():
+            if e.get("path"):
+                by_path[str(Path(e["path"]).resolve())] = e.get("questions") or []
+        topics = []
+        for p in self._campaign_literature_files():
+            try:
+                sections = self._split_literature_sections(p.read_text())
+            except Exception as exc:  # noqa: BLE001 - the index is advisory
+                logging.debug(f"Literature topic scan failed for {p}: {exc}")
+                continue
+            reg_qs = by_path.get(str(p.resolve())) or []
+            for question, chunk in sections:
+                m = _LIT_QUESTION_RE.match(chunk)
+                if m:
+                    ref, label = f"{p}#q{m.group(1)}", question
+                elif len(sections) == 1 and reg_qs:
+                    ref, label = f"{p}#q1", reg_qs[0]
+                else:
+                    continue  # bare title chunk — nothing addressable
+                topics.append({"file": p.name, "section_ref": ref,
+                               "question": label})
+        return topics
+
     def _load_campaign_literature(self) -> Optional[Dict[str, Any]]:
         """Auto-load the CURRENT campaign's literature corpus (issue #425).
 
@@ -1876,11 +1923,14 @@ class OrchestratorTools:
                 "answer, with per-section sizes. Costs almost nothing — "
                 "it reads no corpus into context. Call it before "
                 "refine_plan_with_results() or write_technical_document() "
-                "when the campaign may hold MORE THAN ONE literature file, "
-                "and pass the relevant selection (file paths, or "
-                "'<path>#qN' section refs) as literature_context. If you "
-                "pass nothing, ALL campaign literature is auto-loaded — "
-                "safe, but larger than a considered selection."
+                "WHENEVER YOU HAVE NOT YET SEEN WHAT THE CORPUS COVERS — "
+                "one file with several questions is as worth indexing as "
+                "several files, and you cannot judge whether literature "
+                "bears on a document without knowing what it answers. Then "
+                "pass the relevant selection (file paths, or '<path>#qN' "
+                "section refs) as literature_context. If you pass nothing, "
+                "ALL campaign literature is auto-loaded — safe, but larger "
+                "than a considered selection."
             ),
             parameters={},
             required=[]
@@ -7234,6 +7284,7 @@ class OrchestratorTools:
             source_files: str = None,
             use_literature: bool = True,
             revise_path: str = None,
+            literature_context: str = None,
         ):
             """Author a grounded technical document and save it.
 
@@ -7269,11 +7320,30 @@ class OrchestratorTools:
                             "status": "error",
                             "message": f"No such document: {rp}"})
                     current = rp.read_text(errors="replace")
+                # Literature grounding, in three tiers. An explicit
+                # selection wins (whole files, or '<path>#qN' sections —
+                # the targeted option the all-or-nothing boolean never
+                # offered, and the reason a 200 KB corpus read as too
+                # expensive to include at all). Otherwise the campaign
+                # corpus auto-loads, as before. Declining is still allowed;
+                # it is just no longer done blind.
                 lit = None
-                if use_literature:
+                declined_topics = []
+                if literature_context:
+                    lit = self._resolve_context_text(literature_context)
+                    if lit:
+                        print(f"    📚 Literature selection resolved "
+                              f"({len(lit.split()):,} words)")
+                elif use_literature:
                     _lit = self._load_campaign_literature()
                     if _lit is not None:
                         lit = _lit["text"]
+                else:
+                    # Declining is reported back with WHAT was declined, so
+                    # a wrong opt-out is visible and recoverable on the next
+                    # turn instead of silently shipping an ungrounded
+                    # document. Questions only — no answer bodies.
+                    declined_topics = self._campaign_literature_topics()
 
                 # Prior documents the agent names — this is how a revision or
                 # a merge builds on what the session already wrote instead of
@@ -7429,6 +7499,16 @@ class OrchestratorTools:
                        "sources_used": len(sources)}
                 if missing:
                     res["source_files_not_found"] = missing
+                if declined_topics:
+                    res["literature_declined"] = {
+                        "available_sections": declined_topics,
+                        "note": ("This document was written WITHOUT the "
+                                 "campaign literature above. If any section "
+                                 "answers what this document argues, re-run "
+                                 "with literature_context set to those "
+                                 "section_refs (comma-separated) — the "
+                                 "document is rewritten, not appended to."),
+                    }
                 return json.dumps(res)
             except Exception as e:
                 logging.error(f"Document authoring error: {e}", exc_info=True)
@@ -7494,13 +7574,33 @@ class OrchestratorTools:
                         "for you. Omit for a fresh document."
                     ),
                 },
+                "literature_context": {
+                    "type": "string",
+                    "description": (
+                        "The PART of the campaign's literature this document "
+                        "should be grounded in: comma-separated section refs "
+                        "('<path>#qN') or file paths, as listed by "
+                        "list_literature_searches. Prefer this over "
+                        "use_literature when the corpus is large and only "
+                        "some of it bears on this document — it is cheaper "
+                        "and sharper than loading everything. Omit to "
+                        "auto-load the whole campaign corpus."
+                    ),
+                },
                 "use_literature": {
                     "type": "boolean",
                     "description": (
-                        "Ground in the campaign's most recent literature "
-                        "search (default true). Set false for a document "
-                        "that is purely internal, e.g. merging two documents "
-                        "you already wrote."
+                        "Ground in the campaign's literature, already "
+                        "retrieved and free to include (default true). Set "
+                        "false only when the document asserts nothing the "
+                        "literature could support or contradict — building "
+                        "on earlier work, or needing no NEW search, is not "
+                        "itself a reason. Decide from what the corpus "
+                        "actually covers, not from how the request is "
+                        "phrased: call list_literature_searches first if you "
+                        "have not seen its index, or pass literature_context "
+                        "to take just the sections that bear on this "
+                        "document."
                     ),
                 },
                 "revise_path": {
