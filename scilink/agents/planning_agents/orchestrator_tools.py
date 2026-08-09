@@ -5186,29 +5186,55 @@ class OrchestratorTools:
         def rename_file(path: str, new_name: str, copy: bool = False,
                         deliverable: bool = False, title: str = ""):
             """
-            Rename (or copy) an existing session file byte-exactly, in its
-            own directory. Exists because the alternative was observed
-            live: with no rename tool, the agent reconstructed a 30 KB
-            document via save_file + append_file chunks, dropping content
-            and leaving divergent duplicates.
+            Rename an existing session file byte-exactly in its own
+            directory, or COPY one into the current output directory.
+            Exists because the alternative was observed live: with no
+            rename tool, the agent reconstructed a 30 KB document via
+            save_file + append_file chunks, dropping content and leaving
+            divergent duplicates.
             """
-            print(f"  ⚡ Tool: Renaming file '{path}' → '{new_name}'...")
+            verb_now = "Copying" if copy else "Renaming"
+            print(f"  ⚡ Tool: {verb_now} file '{path}' → '{new_name}'...")
             try:
                 from ...utils.file_edit import rename_or_copy_file
                 from .user_interface import format_path, record_deliverable
+                out_dir = Path(self._output_dir()).resolve()
                 rp = Path(path)
                 if not rp.is_absolute():
-                    rp = self._output_dir() / rp
+                    rp = out_dir / rp
                 rp = rp.resolve()
-                # A bare target name keeps the file where it lives — the
-                # rename changes identity, not location (moving between
+                # A bare target name keeps a RENAME where the file lives —
+                # it changes identity, not location (moving between
                 # delegation folders is how phantom nested copies happen).
+                # A COPY lands in the CURRENT output directory instead, so
+                # a consolidating delegation can bring a figure written by
+                # an earlier one alongside its own document and have the
+                # embed resolve. The destination is never agent-chosen:
+                # it is this delegation's folder or nowhere, which also
+                # stops a copy from writing into a sibling delegation.
                 safe_name = Path(new_name).name
                 if not safe_name:
                     return json.dumps({"status": "error",
                                        "message": "Invalid new_name."})
+                dest = ((out_dir if copy else rp.parent) / safe_name).resolve()
+                # An error here is a routing decision point: the agent
+                # asked to bring a file somewhere and needs to know which
+                # tool does that, not merely that two paths matched.
+                if rp == dest:
+                    if not copy and rp.parent != out_dir:
+                        return json.dumps({"status": "error", "message": (
+                            f"A rename keeps the file in its own folder "
+                            f"({rp.parent}), so this call changes nothing. "
+                            f"To bring it alongside the document you are "
+                            f"writing, call again with copy=true — it lands "
+                            f"in {out_dir}. To leave it where it is, "
+                            f"reference it by a relative path instead.")})
+                    return json.dumps({"status": "error", "message": (
+                        f"'{safe_name}' is already this file's name in "
+                        f"{dest.parent} — nothing to do. Give a different "
+                        f"new_name, or reference the file as it is.")})
                 out = rename_or_copy_file(
-                    rp, rp.parent / safe_name,
+                    rp, dest,
                     root=Path(self.orch.base_dir).resolve(), copy=copy)
                 if out["status"] != "success":
                     return json.dumps(out)
@@ -5229,14 +5255,17 @@ class OrchestratorTools:
             func=rename_file,
             name="rename_file",
             description=(
-                "Rename (or copy) an existing session file BYTE-EXACTLY "
-                "under a new filename in its own directory — the content "
-                "never passes through the model. Use this to land a "
-                "document under its intended filename. Never reconstruct "
-                "a file with save_file/append_file just to rename it: "
-                "that loses content and leaves divergent duplicates. A "
-                "markdown document's PDF twin follows the rename "
-                "automatically."
+                "Rename or copy an existing session file BYTE-EXACTLY — "
+                "the content never passes through the model. Two uses: "
+                "RENAME (default) lands a document under its intended "
+                "filename, in its own folder; COPY (copy=true) brings a "
+                "file into the folder you are writing in now, which is "
+                "how you embed a figure an earlier delegation produced "
+                "and have the reference resolve beside your document. "
+                "Never reconstruct a file with save_file/append_file to "
+                "rename or move it: that loses content and leaves "
+                "divergent duplicates. A markdown document's PDF twin "
+                "follows automatically."
             ),
             parameters={
                 "path": {
@@ -5250,16 +5279,20 @@ class OrchestratorTools:
                 "new_name": {
                     "type": "string",
                     "description": (
-                        "New filename (bare name, no directories). The "
-                        "file stays in its own folder."
+                        "Target filename (bare name, no directories). "
+                        "Keep the source's own name when copying a figure "
+                        "you are about to embed."
                     ),
                 },
                 "copy": {
                     "type": "boolean",
                     "description": (
-                        "Keep the original and create a copy under the "
-                        "new name instead of renaming. Default false — "
-                        "prefer a true rename; duplicates diverge."
+                        "TRUE keeps the original and puts a copy in the "
+                        "folder you are writing in now — use it to bring "
+                        "an asset from an earlier delegation alongside "
+                        "your document. FALSE (default) renames in place; "
+                        "prefer a true rename for documents, since "
+                        "duplicates diverge."
                     ),
                 },
                 "deliverable": {
