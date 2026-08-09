@@ -86,6 +86,31 @@ check(t == "Smart interventions along synthesis pathways",
 check(generate_session_title(
           FakeModel(text="Title: Flash anneal polymorph control"), "x")
       == "Flash anneal polymorph control", "leading 'Title:' prefix stripped")
+
+# The label the model writes before its answer is not always "Title:".
+# Live, a session sat in the sidebar named "Session name: CDOC and GM
+# proposal adaptation" — the label had shipped as part of the name.
+for _label in ("Session name", "Name", "Session title", "Chat name",
+               "Suggested title", "Proposed session name"):
+    check(generate_session_title(
+              FakeModel(text=f"{_label}: CDOC and GM proposal adaptation"), "x")
+          == "CDOC and GM proposal adaptation",
+          f"leading '{_label}:' prefix stripped")
+
+# ...but stripping must not eat a real title that owns its colon, or a
+# title that merely starts with those letters.
+check(generate_session_title(
+          FakeModel(text="CDOC: a perturbation response platform"), "x")
+      == "CDOC: a perturbation response platform",
+      "a real title's own colon prefix is kept")
+check(generate_session_title(
+          FakeModel(text="Phase 1: anneal schedule sweep"), "x")
+      == "Phase 1: anneal schedule sweep",
+      "a numbered-section title keeps its prefix")
+check(generate_session_title(
+          FakeModel(text="Nameplate corrosion mapping"), "x")
+      == "Nameplate corrosion mapping",
+      "a title starting with 'Name' is untouched without a colon")
 check(generate_session_title(
           FakeModel(text="\n\n  Operando XRD mapping\nmore chatter"), "x")
       == "Operando XRD mapping", "leading blank lines skipped, tail dropped")
