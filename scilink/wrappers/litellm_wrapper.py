@@ -115,6 +115,22 @@ except ImportError:
 DEFAULT_MAX_OUTPUT_TOKENS = 32000
 
 
+def _registered_max_output_tokens(model: str):
+    """litellm's registered output ceiling for ``model``, or None when it has
+    no entry for it.
+
+    The None is the point. :func:`_resolve_max_output_tokens` substitutes
+    ``DEFAULT_MAX_OUTPUT_TOKENS`` for unknown models, which is the right
+    trade where a number must be produced; callers that would rather send
+    nothing than send a guess use this instead.
+    """
+    try:
+        mt = litellm.get_max_tokens(model)
+    except Exception:  # noqa: BLE001 - unknown model is the normal miss here
+        return None
+    return int(mt) if mt else None
+
+
 def _resolve_max_output_tokens(model: str) -> int:
     """Best-effort max output tokens for a model (bedrock/ and anthropic/ paths).
 
@@ -238,14 +254,43 @@ def _scope_drop_params(model) -> None:
 
 
 def litellm_completion(*args, **kwargs):
-    """``litellm.completion`` with Bedrock-scoped param dropping.
+    """``litellm.completion`` with Bedrock-scoped param dropping and the
+    output ceiling #238 asks for.
 
     Drop-in replacement for direct ``litellm.completion`` calls; see
     :func:`_scope_drop_params`. Reads the target model from the ``model`` kwarg
     (or first positional arg) and scopes param-dropping to it before the call.
+
+    The ``max_tokens`` injection mirrors :class:`LiteLLMGenerativeModel`, which
+    has had it since #238. This function did not, and it is what every
+    chat-driven orchestrator calls — so their loops ran on Bedrock's low
+    server-side default while the fix appeared to be in place. Caught live: a
+    tool call came back ``finish_reason='length'`` at exactly 4096 completion
+    tokens with a required argument missing, and the model then "recovered"
+    into a second tool whose content hit the same wall.
+
+    Deliberately narrower than :func:`_resolve_max_output_tokens`, which
+    substitutes a flat default for models litellm does not know. A ceiling is
+    sent ONLY when the registry actually reports one; an unrecognised name —
+    a custom deployment, or simply a model litellm has not mapped yet, which
+    includes ordinary Bedrock names like
+    ``bedrock/us.anthropic.claude-sonnet-4-5-v1:0`` — is left alone rather
+    than asked for a number nobody verified. Guessing high on an unknown
+    deployment trades a silent truncation for an outright rejection, and this
+    function sits under every orchestrator chat loop.
+
+    An explicit ``max_tokens`` from the caller still wins, and non-Bedrock /
+    non-Anthropic models are untouched — litellm already gives those a sane
+    ceiling.
     """
-    _scope_drop_params(kwargs.get("model") or (args[0] if args else None))
+    model = kwargs.get("model") or (args[0] if args else None)
+    _scope_drop_params(model)
     kwargs.setdefault("num_retries", 4)   # retry transient provider errors w/ backoff
+    if ("max_tokens" not in kwargs
+            and str(model or "").startswith(("bedrock/", "anthropic/"))):
+        ceiling = _registered_max_output_tokens(model)
+        if ceiling:
+            kwargs["max_tokens"] = ceiling
     return litellm.completion(*args, **kwargs)
 
 
