@@ -1,5 +1,6 @@
 import io
 import re
+import time
 import base64
 from types import SimpleNamespace
 from PIL import Image
@@ -16,6 +17,40 @@ def _is_openai_reasoning_model(model: str) -> bool:
         return False
     name = model.split('/', 1)[-1]
     return bool(_REASONING_MODEL_RE.match(name))
+
+
+
+def _record_trace(model: str, messages, response, latency_s: float) -> None:
+    """Record one completed LLM call to the opt-in global tracer (no-op if disabled).
+
+    Mirrors ``litellm_wrapper._record_trace`` so both wrappers feed
+    ``scilink.tracing`` identically. Without this, any deployment using an
+    OpenAI-compatible endpoint — which is every ``base_url`` deployment,
+    including internal proxies — produced no trace at all, and the token
+    counts the SDK returns on ``response.usage`` were discarded.
+    """
+    try:
+        from .. import tracing
+        if not tracing.is_enabled():
+            return
+        text, finish = "", None
+        choices = getattr(response, "choices", None) or []
+        if choices:
+            message = getattr(choices[0], "message", None)
+            text = (getattr(message, "content", None) or "") if message else ""
+            finish = getattr(choices[0], "finish_reason", None)
+        usage = None
+        u = getattr(response, "usage", None)
+        if u is not None:
+            usage = {
+                "prompt_tokens": getattr(u, "prompt_tokens", None),
+                "completion_tokens": getattr(u, "completion_tokens", None),
+                "total_tokens": getattr(u, "total_tokens", None),
+            }
+        tracing.record(model=model, messages=messages, response_text=text,
+                       finish_reason=finish, usage=usage, latency_s=latency_s)
+    except Exception:
+        pass  # tracing must never break a generation
 
 
 class OpenAIAsGenerativeModel:
@@ -78,6 +113,7 @@ class OpenAIAsGenerativeModel:
         """
         messages = self._prompt_parser(contents)
         params = self._map_gen_config(generation_config)
+        _t0 = time.perf_counter()
         resp = self.client.chat.completions.create(
             model=self.model,
             messages=messages,
@@ -85,6 +121,7 @@ class OpenAIAsGenerativeModel:
             extra_body={"timeout": self.timeout},
             **params,
         )
+        _record_trace(self.model, messages, resp, time.perf_counter() - _t0)
 
         # Build Gemini-like response
         finish_map = {"stop": 1, "length": 0, "tool_calls": 2, "content_filter": 3}
