@@ -92,15 +92,26 @@ def extract_text(path: Union[str, Path], max_pages: int = None,
         info["n_ocr_pages"] = len(ocr_pages)
     elif ext == ".docx":
         try:
-            import docx
+            import docx  # noqa: F401 - checked here for a clear error
         except ImportError as e:
             raise ImportError(
                 "Reading .docx documents requires python-docx "
                 "(`pip install python-docx`)."
             ) from e
-        d = docx.Document(str(path))
-        info["n_paragraphs"] = len(d.paragraphs)
-        text = "\n".join(p.text for p in d.paragraphs)
+        # Tables were silently dropped here: paragraphs and tables are
+        # separate sequences in python-docx, so joining p.text lost every
+        # table in the document with nothing reporting the loss. The loader
+        # walks the body in order instead, so a table lands where the reader
+        # sees it. Figures are located and marked ([Figure N]) but not
+        # returned on this path — extract_document() carries the bytes for
+        # callers that can deliver images.
+        from .docx_document import count_docx_figures, load_docx
+        d = load_docx(path, include_figures=False)
+        import docx as _docx
+        info["n_paragraphs"] = len(_docx.Document(str(path)).paragraphs)
+        info["n_tables"] = len(d.tables)
+        info["n_figures"] = count_docx_figures(path)
+        text = d.composed()
     elif ext in (".md", ".txt", ".json", ".yaml", ".yml"):
         text = path.read_text(errors="replace")
     elif ext in (".csv", ".xlsx", ".xls"):
@@ -138,3 +149,25 @@ def extract_text(path: Union[str, Path], max_pages: int = None,
         while len(_EXTRACT_CACHE) > _EXTRACT_CACHE_MAX:
             _EXTRACT_CACHE.popitem(last=False)
     return info
+
+
+def extract_document(path: Union[str, Path], **kwargs):
+    """Like :func:`extract_text`, but keeps figures as image bytes.
+
+    Returns a ``ParsedDocument`` (text with ``[Figure N]`` / ``[Table N]``
+    markers, tables as markdown, figures as bytes) for ``.docx``. Every other
+    format returns a ``ParsedDocument`` carrying only the text
+    :func:`extract_text` produces, so a caller can treat all formats
+    uniformly and simply find ``figures`` empty.
+
+    Separate from ``extract_text`` on purpose: images are worth real tokens,
+    so a caller opts into carrying them rather than having every existing
+    text consumer start paying for them.
+    """
+    from .docx_document import ParsedDocument, load_docx
+
+    path = Path(path)
+    if path.suffix.lower() == ".docx":
+        return load_docx(path, include_figures=True)
+    info = extract_text(path, **kwargs)
+    return ParsedDocument(source=str(path), text=info.get("text", ""))

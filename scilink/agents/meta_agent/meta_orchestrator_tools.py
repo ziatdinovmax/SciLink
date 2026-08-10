@@ -1498,8 +1498,13 @@ class MetaOrchestratorTools:
                           ".json", ".yaml", ".yml",
                           ".csv", ".xlsx", ".xls"}
         _VIEW_DOC_MAX_CHARS = 200_000  # ~50k tokens; long docs are truncated
+        # Figures ride along automatically up to this many across the whole
+        # call. Chosen to cover the documents figures actually help with — a
+        # note or white paper carrying a few diagrams — while a figure-heavy
+        # atlas reports its count instead of spending the context on it.
+        _VIEW_DOC_MAX_FIGURES = 8
 
-        def view_document(paths) -> str:
+        def view_document(paths, figures: str = "auto") -> str:
             """Read one or more documents and return their text content."""
             if isinstance(paths, str):
                 paths = [paths]
@@ -1508,9 +1513,27 @@ class MetaOrchestratorTools:
                                    "message": "No document path provided."})
             print(f"  📄 Tool: Reading {len(paths)} document(s)...")
 
-            from scilink.parsers import extract_text
+            from scilink.parsers import extract_document, extract_text
+            from scilink.parsers.docx_document import count_docx_figures
 
-            docs, errors = [], []
+            # Whether to carry embedded figures back as images. Counted
+            # exactly rather than estimated from document length — for DOCX
+            # the images are enumerable without decoding them — so the
+            # decision is made on the real cost, before paying it. A short
+            # document with a handful of figures is the case worth spending
+            # on; an atlas of forty is not, and gets a count instead so the
+            # agent still knows they exist and can ask for a subset.
+            want = str(figures or "auto").strip().lower()
+            n_fig_total = sum(count_docx_figures(p) for p in paths
+                              if str(p).lower().endswith(".docx"))
+            if want == "on":
+                attach = True
+            elif want == "off":
+                attach = False
+            else:
+                attach = 0 < n_fig_total <= _VIEW_DOC_MAX_FIGURES
+
+            docs, errors, images_b64 = [], [], []
             for p in paths:
                 pp = Path(p)
                 if not pp.is_file():
@@ -1524,6 +1547,12 @@ class MetaOrchestratorTools:
                     continue
                 try:
                     info = extract_text(pp, ocr_model=self.orch.model)
+                    if attach and pp.suffix.lower() == ".docx":
+                        parsed = extract_document(pp)
+                        for f in parsed.figures:
+                            if len(images_b64) >= _VIEW_DOC_MAX_FIGURES:
+                                break
+                            images_b64.append(f.to_base64())
                     text = info.get("text", "")
                     truncated = len(text) > _VIEW_DOC_MAX_CHARS
                     if truncated:
@@ -1537,7 +1566,8 @@ class MetaOrchestratorTools:
                     # Format-specific metadata flows through transparently
                     # (n_pages for PDFs, n_paragraphs for DOCX, plus the
                     # OCR page count when the vision fallback fired).
-                    for k in ("n_pages", "n_paragraphs", "n_ocr_pages"):
+                    for k in ("n_pages", "n_paragraphs", "n_ocr_pages",
+                              "n_tables", "n_figures"):
                         if k in info:
                             doc_info[k] = info[k]
                     docs.append(doc_info)
@@ -1553,10 +1583,26 @@ class MetaOrchestratorTools:
                                    "message": "No documents could be read.",
                                    "errors": errors})
             n_ocr = sum(d.get("n_ocr_pages", 0) for d in docs)
+            payload_extra = {}
+            if images_b64:
+                # tool_media lifts this into real image content on providers
+                # that render images inside a tool result, and the [Figure N]
+                # markers in the text say which is which.
+                payload_extra["images_base64"] = images_b64
+            elif n_fig_total:
+                payload_extra["figures_not_attached"] = (
+                    f"{n_fig_total} embedded figure(s) were found but not "
+                    f"attached"
+                    + (" (figures='off')" if want == "off" else
+                       f" (over the {_VIEW_DOC_MAX_FIGURES}-figure auto "
+                       f"limit)")
+                    + ". The text marks their positions as [Figure N]; "
+                    "re-read with figures='on' to see them.")
             return json.dumps({
                 "status": "success",
                 "n_documents": len(docs),
                 "n_ocr_pages": n_ocr,
+                **payload_extra,
                 "ocr_note": (
                     f"{n_ocr} scanned page(s) had no text layer and were "
                     "transcribed by vision-OCR — verify any figures/numerics."
@@ -1579,7 +1625,10 @@ class MetaOrchestratorTools:
                 "adaptive parser — small files return the full table as "
                 "Markdown, large files a statistical summary; a sibling "
                 "JSON metadata file (e.g. data.json next to data.xlsx) "
-                "auto-enriches the preview. Use this to inspect / "
+                "auto-enriches the preview. A Word document's tables are "
+                "read in place, and its embedded figures come back as "
+                "images you can see, marked [Figure N] where they sit in "
+                "the text. Use this to inspect / "
                 "summarize a file's contents right here — for a routing "
                 "decision, to extract context to thread into a "
                 "delegate_to_* call, or to answer a quick question about "
@@ -1588,6 +1637,18 @@ class MetaOrchestratorTools:
                 "`knowledge_paths` in delegate_to_planning."
             ),
             parameters={
+                "figures": {
+                    "type": "string",
+                    "description": (
+                        "Whether to attach a Word document's embedded "
+                        "figures as viewable images: 'auto' (default) "
+                        "attaches them when there are few enough to be "
+                        "worth the context, 'on' forces it for a document "
+                        "whose figures you specifically need to see, 'off' "
+                        "keeps the reply text-only. Either way the text "
+                        "marks where each figure sits."
+                    ),
+                },
                 "paths": {
                     "type": "array",
                     "items": {"type": "string"},
