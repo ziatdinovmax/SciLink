@@ -1564,92 +1564,6 @@ class PlanningOrchestratorAgent:
         except Exception as e:
             logging.warning(f"Auto-checkpoint failed: {e}")
 
-    # Diagnostics for tool calls that arrive without a required argument.
-    # Cap the raw string so one runaway argument cannot fill the disk; the
-    # head is what identifies the shape, and the length is recorded exactly.
-    _RAW_ARGS_CAP = 40000
-
-    def _record_tool_arg_anomaly(self, tool_call, result, *,
-                                 finish_reason=None, response=None) -> None:
-        """TEMPORARY DIAGNOSTIC — remove once the omission is explained.
-
-        This exists to answer one open question and should not outlive the
-        answer. Everything it touches is confined to this method, the two
-        call sites that invoke it, and the ``error_kind`` marker on the
-        guard, so reverting the commit that added it removes it whole.
-
-        Append the RAW provider output for a tool call whose required
-        arguments did not arrive.
-
-        The cause of these omissions is unresolved. The output-token ceiling
-        was ruled out (it is injected explicitly on the bedrock/anthropic
-        paths and resolves far above the arguments involved), and so was tail
-        truncation: the observed calls were valid JSON missing only the FIRST
-        declared parameter while later-declared ones came through. What is
-        missing is evidence from the moment it happens, because by the time
-        the guard runs the raw response is gone — it sees parsed kwargs.
-
-        ``finish_reason`` is the decisive field: "length" would mean the
-        response really was cut, anything else rules truncation out for that
-        call. Written as JSONL so occurrences accumulate across sessions
-        instead of overwriting one another. Never raises: a diagnostic that
-        breaks the turn it is diagnosing is worse than no diagnostic.
-        """
-        try:
-            payload = json.loads(result) if isinstance(result, str) else {}
-        except (json.JSONDecodeError, TypeError):
-            return
-        if not isinstance(payload, dict):
-            return
-        if payload.get("error_kind") != "missing_required_arguments":
-            return
-
-        try:
-            raw = getattr(getattr(tool_call, "function", None),
-                          "arguments", "") or ""
-            try:
-                # Insertion order, NOT sorted: which arguments the model
-                # emitted before the response was cut is the evidence, and
-                # sorting threw it away in the first version of this.
-                parsed_keys = list(json.loads(raw).keys())
-                parses = True
-            except Exception:  # noqa: BLE001 - malformed is itself a finding
-                parsed_keys, parses = None, False
-
-            # Declared order alongside emitted order: the gap between them
-            # is what disproved the schema-order inference, so record both
-            # rather than leaving a future reader to reconstruct it.
-            try:
-                declared = self.tools._declared_params(payload.get("tool"))
-            except Exception:  # noqa: BLE001 - evidence is best-effort
-                declared = None
-
-            usage = getattr(response, "usage", None)
-            record = {
-                "timestamp": datetime.now().isoformat(timespec="seconds"),
-                "tool": payload.get("tool"),
-                "missing": payload.get("missing"),
-                # The decisive field: "length" => genuinely truncated.
-                "finish_reason": finish_reason,
-                "arguments_parse_ok": parses,
-                "arguments_keys": parsed_keys,      # emission order
-                "declared_params": declared,        # schema order
-                "arguments_len": len(raw),
-                "arguments_raw": raw[:self._RAW_ARGS_CAP],
-                "arguments_truncated_in_log": len(raw) > self._RAW_ARGS_CAP,
-                "model": getattr(self, "model_name", None),
-                "completion_tokens": getattr(usage, "completion_tokens", None),
-                "prompt_tokens": getattr(usage, "prompt_tokens", None),
-            }
-            path = Path(self.base_dir) / "tool_call_diagnostics.jsonl"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record) + "\n")
-            print(f"    🔬 Raw tool-call arguments recorded for diagnosis: "
-                  f"{path.name} (finish_reason={finish_reason!r})")
-        except Exception as e:  # noqa: BLE001 - diagnostics never break a turn
-            logging.debug(f"Tool-arg anomaly recording failed: {e}")
-
     @staticmethod
     def _parse_tool_args(tool_call, finish_reason=None):
         """Parse a tool call's JSON arguments, failing loud on bad input.
@@ -1775,9 +1689,6 @@ class PlanningOrchestratorAgent:
                     result = args_error
                 else:
                     result = self.tools.execute_tool(func_name, **args)
-                    self._record_tool_arg_anomaly(
-                        tool_call, result, finish_reason=finish_reason,
-                        response=response)
 
                 self.messages.append({
                     "role": "tool",
@@ -1935,9 +1846,6 @@ class PlanningOrchestratorAgent:
                     result = args_error
                 else:
                     result = self.tools.execute_tool(func_name, **args)
-                    self._record_tool_arg_anomaly(
-                        tool_call, result, finish_reason=finish_reason,
-                        response=response)
                 
                 self.messages.append({
                     "role": "tool",
