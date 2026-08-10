@@ -359,6 +359,32 @@ timestep 0.001
 run 50000
 """
 
+# Legitimate sequential ensembles: NPT equilibration, unfix, then NVT production
+# on the SAME group — must not be flagged as nvt+npt-on-all. Also references a
+# defined `variable scale` as v_scale and only *mentions* ${scale} in a comment
+# — must not be flagged as an unresolved template. (Regression for #409.)
+VALID_SEQUENTIAL_NVT_NPT_SCRIPT = """\
+units real
+atom_style full
+boundary p p p
+read_data system.data
+pair_style lj/cut/coul/long 10.0
+kspace_style pppm 1.0e-4
+fix SHAKE all shake 1.0e-5 100 0 m 1.008
+timestep 1.0
+
+# NPT equilibration, then hand off to NVT production on the same group
+fix NPT all npt temp 298.15 298.15 100.0 iso 1.0 1.0 1000.0
+run 1000
+unfix NPT
+
+fix NVT all nvt temp 298.15 298.15 100.0
+# reference the LAMMPS variable with v_scale, not the unresolved ${scale} template
+variable scale equal vol/(1.3806504e-23*298.15)
+variable visc equal trap(f_SACF[3])*v_scale
+run 1000
+"""
+
 # ── Error scripts (each has exactly one known problem) ──
 
 ERROR_KSPACE_WITH_EAM = """\
@@ -560,6 +586,7 @@ def fixtures_dir(tmp_path):
         "valid_ionic.lammps": VALID_IONIC_SCRIPT,
         "valid_slab.lammps": VALID_SLAB_SCRIPT,
         "valid_create_atoms.lammps": VALID_CREATE_ATOMS_SCRIPT,
+        "valid_sequential_nvt_npt.lammps": VALID_SEQUENTIAL_NVT_NPT_SCRIPT,
     }
     for name, content in valid_scripts.items():
         (script_dir / name).write_text(content)
