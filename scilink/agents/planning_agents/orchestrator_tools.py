@@ -8015,13 +8015,13 @@ class OrchestratorTools:
             return json.dumps({
                 "status": "error",
                 "tool": tool_name,
-                "message": (
-                    f"Missing required argument(s): {', '.join(missing)}. "
-                    "The tool-call arguments were likely truncated by the "
-                    "response length limit — resend the call with all required "
-                    "arguments, splitting long text across multiple smaller "
-                    "calls (e.g. save_file then append_file chunks)."
-                ),
+                # Machine-readable so the caller can capture the raw provider
+                # response for this call — the cause of the omission is still
+                # unknown, and the parsed kwargs the guard sees have already
+                # discarded the evidence.
+                "error_kind": "missing_required_arguments",
+                "missing": list(missing),
+                "message": self._missing_args_message(missing, kwargs),
             })
 
         try:
@@ -8066,5 +8066,51 @@ class OrchestratorTools:
             if fn.get("name") == tool_name:
                 return fn.get("parameters", {}).get("required", []) or []
         return []
+
+    def _declared_params(self, tool_name: str) -> list:
+        """Parameter names in schema-declaration order (dicts keep it)."""
+        for schema in self.openai_schemas:
+            fn = schema.get("function", {})
+            if fn.get("name") == tool_name:
+                return list((fn.get("parameters", {})
+                             .get("properties", {}) or {}).keys())
+        return []
+
+    def _missing_args_message(self, missing: list, kwargs: dict) -> str:
+        """Explain a missing required argument without guessing the cause.
+
+        Two wrong versions preceded this one. The first asserted the
+        arguments "were likely truncated by the response length limit" and
+        sent the model to save_file/append_file chunks — a cause it never
+        checked and a remedy that abandons the tool. The second inferred
+        the opposite from schema order: a key declared AFTER the missing one
+        having arrived was taken as proof the call was complete.
+
+        That inference is unsound, and instrumentation caught it. A live
+        save_file call came back finish_reason='length' — genuinely cut —
+        as VALID JSON missing `content` (declared second) while
+        `deliverable` and `title` (declared fourth and fifth) were present.
+        Arguments are emitted in the model's chosen order, not the schema's,
+        and when the response is cut the LONG value is the casualty while
+        short ones already emitted survive. Declaration order proves
+        nothing.
+
+        The decisive signal, finish_reason, is not visible here — it lives
+        at the dispatch site. So this states what is known, names the
+        mechanism as a possibility rather than a fact, and asks for the same
+        call again.
+        """
+        arrived = sorted(k for k in kwargs if k not in missing)
+        return (
+            f"Missing required argument(s): {', '.join(missing)}. "
+            + (f"The call did arrive with {', '.join(arrived)}. " if arrived
+               else "")
+            + "The tool was NOT run. Resend the SAME call with the missing "
+            "argument included — do not switch to another tool, which would "
+            "lose what this one does. A long value is the likeliest thing to "
+            "go missing, so if the argument you omitted was large, send a "
+            "shorter one: it is a specification of what is wanted, not the "
+            "finished text."
+        )
 
 
