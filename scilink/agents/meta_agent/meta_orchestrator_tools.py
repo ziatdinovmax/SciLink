@@ -1503,6 +1503,11 @@ class MetaOrchestratorTools:
         # note or white paper carrying a few diagrams — while a figure-heavy
         # atlas reports its count instead of spending the context on it.
         _VIEW_DOC_MAX_FIGURES = 8
+        # The most images ever put in one reply, even when explicitly asked
+        # for. An unbounded payload under the agent's control is how a
+        # context window gets spent in a single call, so 'on' raises the
+        # ceiling rather than removing it — and says when it had to stop.
+        _VIEW_DOC_HARD_FIGURE_CAP = 24
 
         def view_document(paths, figures: str = "auto") -> str:
             """Read one or more documents and return their text content."""
@@ -1527,13 +1532,18 @@ class MetaOrchestratorTools:
             n_fig_total = sum(count_docx_figures(p) for p in paths
                               if str(p).lower().endswith(".docx"))
             if want == "on":
-                attach = True
+                # Asked for explicitly: attach as many as the hard cap allows
+                # rather than silently stopping at the auto threshold, which
+                # made 'on' quietly mean 'on, up to 8' (caught live).
+                attach, fig_ceiling = True, _VIEW_DOC_HARD_FIGURE_CAP
             elif want == "off":
-                attach = False
+                attach, fig_ceiling = False, 0
             else:
                 attach = 0 < n_fig_total <= _VIEW_DOC_MAX_FIGURES
+                fig_ceiling = _VIEW_DOC_MAX_FIGURES
 
             docs, errors, images_b64 = [], [], []
+            undeliverable = []
             for p in paths:
                 pp = Path(p)
                 if not pp.is_file():
@@ -1550,8 +1560,14 @@ class MetaOrchestratorTools:
                     if attach and pp.suffix.lower() == ".docx":
                         parsed = extract_document(pp)
                         for f in parsed.figures:
-                            if len(images_b64) >= _VIEW_DOC_MAX_FIGURES:
+                            if len(images_b64) >= fig_ceiling:
                                 break
+                            if not f.deliverable:
+                                # Keeps its number; say which one and why,
+                                # so the marker is not an unexplained gap.
+                                undeliverable.append(
+                                    f"[Figure {f.index + 1}] {f.note}")
+                                continue
                             images_b64.append(f.to_base64())
                     text = info.get("text", "")
                     truncated = len(text) > _VIEW_DOC_MAX_CHARS
@@ -1589,6 +1605,15 @@ class MetaOrchestratorTools:
                 # that render images inside a tool result, and the [Figure N]
                 # markers in the text say which is which.
                 payload_extra["images_base64"] = images_b64
+                if len(images_b64) < n_fig_total:
+                    # Partial delivery must be stated, not inferred. Left
+                    # unsaid, the reply looks complete while [Figure N] for
+                    # the rest points at nothing.
+                    payload_extra["figures_attached"] = (
+                        f"{len(images_b64)} of {n_fig_total} figures are "
+                        f"attached, in document order — [Figure 1] through "
+                        f"[Figure {len(images_b64)}]. The rest were not "
+                        f"delivered; their markers remain in the text.")
             elif n_fig_total:
                 payload_extra["figures_not_attached"] = (
                     f"{n_fig_total} embedded figure(s) were found but not "
@@ -1598,6 +1623,8 @@ class MetaOrchestratorTools:
                        f"limit)")
                     + ". The text marks their positions as [Figure N]; "
                     "re-read with figures='on' to see them.")
+            if undeliverable:
+                payload_extra["figures_undisplayable"] = undeliverable
             return json.dumps({
                 "status": "success",
                 "n_documents": len(docs),
@@ -1643,10 +1670,12 @@ class MetaOrchestratorTools:
                         "Whether to attach a Word document's embedded "
                         "figures as viewable images: 'auto' (default) "
                         "attaches them when there are few enough to be "
-                        "worth the context, 'on' forces it for a document "
-                        "whose figures you specifically need to see, 'off' "
-                        "keeps the reply text-only. Either way the text "
-                        "marks where each figure sits."
+                        "worth the context, 'on' raises the limit for a "
+                        "document whose figures you specifically need to "
+                        "see, 'off' keeps the reply text-only. Even 'on' "
+                        "stops at a ceiling; when not everything fits, the "
+                        "result says how many of how many arrived. Either "
+                        "way the text marks where each figure sits."
                     ),
                 },
                 "paths": {

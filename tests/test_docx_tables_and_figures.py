@@ -162,3 +162,102 @@ def test_a_document_with_neither_is_unchanged(tmp_path):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+# --------------------------------------------------- image format handling
+
+
+def test_bmp_and_tiff_are_converted_rather_than_shipped(tmp_path):
+    """A Word document carries scanned figures as BMP/TIFF routinely. The
+    delivery layer guesses mime from magic bytes and falls back to PNG, so
+    shipping one means a BMP arrives labelled PNG and breaks the request."""
+    from docx.shared import Inches
+    from PIL import Image
+    from scilink.parsers.docx_document import SUPPORTED_IMAGE_MIMES
+
+    d = docx.Document()
+    for fmt, ext in [("PNG", "png"), ("BMP", "bmp"), ("TIFF", "tif")]:
+        img = tmp_path / f"i.{ext}"
+        Image.new("RGB", (40, 30), "orange").save(img, fmt)
+        d.add_picture(str(img), width=Inches(0.4))
+    p = tmp_path / "formats.docx"
+    d.save(p)
+
+    figs = extract_document(p).figures
+    assert len(figs) == 3, "a figure was dropped, which would renumber the rest"
+    for f in figs:
+        assert f.mime in SUPPORTED_IMAGE_MIMES, f.mime
+        assert f.deliverable
+    assert figs[1].bytes.startswith(b"\x89PNG"), "BMP was not re-encoded"
+    assert "converted from image/bmp" in figs[1].note
+
+
+def test_an_unconvertible_figure_keeps_its_number(tmp_path):
+    """Dropping it would make [Figure 3] point at what was really figure 4 —
+    the exact mis-attribution the markers exist to prevent."""
+    from scilink.parsers.docx_document import Figure, _normalize_figure
+
+    bad = Figure(index=2, ext="x-emf", bytes=b"\x01\x00\x00\x00not-an-image")
+    out = _normalize_figure(bad)
+    assert out.index == 2, "renumbered"
+    assert out.deliverable is False
+    assert "could not be decoded" in out.note
+
+
+def test_a_supported_mime_is_still_verified_not_trusted(tmp_path):
+    """The declared type is a claim the bytes need not honour: a corrupt
+    file named .png declares image/png and would pass a mime-only check on
+    its way to being rejected by the provider."""
+    from scilink.parsers.docx_document import Figure, _normalize_figure
+
+    liar = Figure(index=0, ext="png",
+                  bytes=b"\x89PNG\r\n\x1a\n" + b"\x00" * 200)
+    out = _normalize_figure(liar)
+    assert out.deliverable is False, "a corrupt PNG was trusted on its label"
+
+
+def test_a_valid_supported_image_is_passed_through_untouched(tmp_path):
+    """Verification must not re-encode what is already fine."""
+    import io
+    from PIL import Image
+    from scilink.parsers.docx_document import Figure, _normalize_figure
+
+    buf = io.BytesIO()
+    Image.new("RGB", (20, 15), "teal").save(buf, "PNG")
+    raw = buf.getvalue()
+    out = _normalize_figure(Figure(index=0, ext="png", bytes=raw))
+    assert out.bytes is raw or out.bytes == raw, "needlessly re-encoded"
+    assert out.deliverable and out.note == ""
+
+
+def test_a_figure_inside_a_table_cell_is_found(tmp_path):
+    """Cells go through the same walker; an image in one must keep its place
+    in the global numbering rather than being skipped."""
+    from docx.shared import Inches
+    from PIL import Image
+
+    img = tmp_path / "c.png"
+    Image.new("RGB", (30, 20), "navy").save(img)
+
+    d = docx.Document()
+    d.add_paragraph("Before:")
+    d.add_picture(str(img), width=Inches(0.3))          # figure 1
+    t = d.add_table(rows=1, cols=2)
+    t.rows[0].cells[0].text = "caption"
+    t.rows[0].cells[1].paragraphs[0].add_run().add_picture(
+        str(img), width=Inches(0.3))                    # figure 2, in a cell
+    d.add_paragraph("After:")
+    d.add_picture(str(img), width=Inches(0.3))          # figure 3
+    p = tmp_path / "incell.docx"
+    d.save(p)
+
+    parsed = extract_document(p)
+    composed = parsed.composed()
+    assert len(parsed.figures) == 3, "the in-cell image was missed"
+    # The in-cell marker belongs in the CELL, not the body text — that says
+    # which cell holds the figure, which body placement could not.
+    assert "| caption | [Figure 2] |" in composed, composed
+    assert "[Figure 3]" in parsed.text, "numbering after the table broke"
+    # Numbering must stay global: the in-cell image consumes slot 2, so the
+    # paragraph image after the table is 3, not 2.
+    assert parsed.text.index("[Figure 1]") < parsed.text.index("[Figure 3]")

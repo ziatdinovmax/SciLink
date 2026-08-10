@@ -78,10 +78,32 @@ def test_a_figure_heavy_document_reports_instead_of_attaching(tmp):
     assert "figures='on'" in note, "the agent must be told how to get them"
 
 
-def test_forcing_on_overrides_the_limit(tmp):
-    cap = _tools()
-    out = _call(cap, tmp / "many.docx", figures="on")
-    assert len(out.get("images_base64", [])) > 0
+def test_forcing_on_raises_the_limit_rather_than_nudging_it(tmp):
+    """'on' used to stop at the auto threshold, so it quietly meant
+    'on, up to 8'. Caught live, where the agent reported getting 8 of 20."""
+    out = _call(_tools(), tmp / "many.docx", figures="on")
+    n = len(out.get("images_base64", []))
+    assert n > 8, f"'on' still capped at the auto threshold ({n})"
+    assert n == 20, "all 20 fit under the hard ceiling and should arrive"
+
+
+def test_partial_delivery_is_stated_not_left_to_be_inferred(tmp):
+    """Past even the forced ceiling, some figures cannot be delivered.
+    Unsaid, the reply looks complete while the remaining [Figure N] markers
+    point at nothing."""
+    out = _call(_tools(), _doc(tmp / "atlas.docx", 30), figures="on")
+    n = len(out["images_base64"])
+    assert n < 30, "the hard ceiling did not bound the payload"
+    note = out.get("figures_attached", "")
+    assert f"{n} of 30" in note, note
+    assert "not delivered" in note
+
+
+def test_complete_delivery_says_nothing_extra(tmp):
+    """No note when everything arrived — silence means complete."""
+    out = _call(_tools(), _doc(tmp / "three.docx", 3), figures="on")
+    assert len(out["images_base64"]) == 3
+    assert "figures_attached" not in out
 
 
 def test_off_attaches_nothing_and_says_why(tmp):
@@ -125,3 +147,53 @@ def test_attached_images_are_valid_base64_png(tmp):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def _corrupt_one_figure(tmp, name="broken.docx"):
+    """A .docx whose SECOND image is corrupt but still declares image/png —
+    the case a mime-only check cannot catch, since the type is a claim the
+    bytes do not honour."""
+    import zipfile
+    from docx.shared import Inches
+    from PIL import Image
+    src = tmp / "_src.docx"
+    d = docx.Document()
+    for colour in ("seagreen", "crimson", "royalblue"):     # distinct, or
+        img = tmp / f"{colour}.png"                          # python-docx
+        Image.new("RGB", (40, 30), colour).save(img)         # dedupes them
+        d.add_paragraph(f"{colour}:")
+        d.add_picture(str(img), width=Inches(0.4))
+    d.save(src)
+
+    out = tmp / name
+    zin, zout = zipfile.ZipFile(src), zipfile.ZipFile(out, "w")
+    media = sorted(n for n in zin.namelist() if n.startswith("word/media/"))
+    for n in zin.namelist():
+        data = zin.read(n)
+        if n == media[1]:
+            data = b"\x89PNG\r\n\x1a\n" + b"\x00" * 400
+        zout.writestr(n, data)
+    zout.close(); zin.close()
+    return out
+
+
+def test_an_undeliverable_figure_is_named_not_silently_missing(tmp):
+    out = _call(_tools(), _corrupt_one_figure(tmp), figures="on")
+    notes = out.get("figures_undisplayable", [])
+    assert notes, "a broken figure vanished without explanation"
+    assert any("[Figure 2]" in n for n in notes), notes
+    assert any("could not be decoded" in n for n in notes), notes
+
+
+def test_the_good_figures_still_arrive_around_a_broken_one(tmp):
+    out = _call(_tools(), _corrupt_one_figure(tmp, "broken2.docx"), figures="on")
+    assert len(out["images_base64"]) == 2, "one bad image took the others down"
+
+
+def test_a_broken_figure_does_not_renumber_the_rest(tmp):
+    """If figure 2 were dropped, [Figure 3] in the text would point at the
+    image delivered second — the mis-attribution the markers prevent."""
+    from scilink.parsers.extract import extract_document
+    figs = extract_document(_corrupt_one_figure(tmp, "broken3.docx")).figures
+    assert [f.index for f in figs] == [0, 1, 2]
+    assert [f.deliverable for f in figs] == [True, False, True]

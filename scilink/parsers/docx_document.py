@@ -30,12 +30,31 @@ from pathlib import Path
 from typing import List, Optional
 
 
+#: What vision APIs actually accept. A Word document routinely carries
+#: formats outside this set — scanned figures as BMP/TIFF, Excel charts and
+#: SmartArt as EMF/WMF — and shipping one is worse than dropping it: the
+#: delivery layer guesses mime from magic bytes and falls back to PNG, so a
+#: BMP arrives labelled as a PNG and takes the whole request down with it.
+SUPPORTED_IMAGE_MIMES = frozenset(
+    {"image/jpeg", "image/png", "image/gif", "image/webp"})
+
+
 @dataclass
 class Figure:
-    """An embedded image, numbered to match its ``[Figure N]`` marker."""
+    """An embedded image, numbered to match its ``[Figure N]`` marker.
+
+    ``deliverable`` is False for an image whose format no vision API takes
+    and which could not be converted (EMF/WMF, typically an Excel chart or
+    SmartArt). Such a figure is KEPT rather than removed: dropping it would
+    renumber everything after it, so ``[Figure 5]`` in the text would point
+    at what was really figure 6 — precisely the mis-attribution the markers
+    exist to prevent.
+    """
     index: int          # 0-based; marker in the text is index + 1
     ext: str            # "png", "jpeg", ...
     bytes: bytes
+    deliverable: bool = True
+    note: str = ""
 
     @property
     def mime(self) -> str:
@@ -187,13 +206,46 @@ def load_docx(path, *, include_figures: bool = True) -> ParsedDocument:
             try:
                 blob = rel.target_part.blob
                 ctype = getattr(rel.target_part, "content_type", "image/png")
-                figures.append(Figure(index=len(figures),
-                                      ext=ctype.split("/")[-1], bytes=blob))
+                ext = ctype.split("/")[-1]
+                figures.append(_normalize_figure(
+                    Figure(index=len(figures), ext=ext, bytes=blob)))
             except Exception as e:  # noqa: BLE001 - one bad image, not a failure
                 logging.debug(f"Skipping unreadable image {rid}: {e}")
 
     return ParsedDocument(source=str(p), text="\n\n".join(text_parts),
                           tables=tables, figures=figures)
+
+
+def _normalize_figure(fig: Figure) -> Figure:
+    """Make a figure deliverable, or say why it is not.
+
+    Decodability is verified rather than inferred from the declared content
+    type, because the type lies in both directions. A corrupt or truncated
+    image stored as .png declares image/png and would pass a mime-only check
+    on its way to being rejected by the provider; conversely BMP/TIFF are
+    perfectly readable and only need re-encoding. One rule covers
+    unsupported formats, corrupt bytes and mislabelled files alike.
+
+    EMF/WMF — an Excel chart or SmartArt pasted into Word — are vector
+    metafiles Pillow cannot open, so they keep their slot in the numbering
+    and report why they are absent, which beats a silent gap.
+    """
+    try:
+        import io
+        from PIL import Image
+        im = Image.open(io.BytesIO(fig.bytes))
+        im.load()                      # force a real decode, not just a header
+        if fig.mime in SUPPORTED_IMAGE_MIMES:
+            return fig                 # decodes and is already deliverable
+        buf = io.BytesIO()
+        im.convert("RGB").save(buf, format="PNG")
+        return Figure(index=fig.index, ext="png", bytes=buf.getvalue(),
+                      note=f"converted from {fig.mime}")
+    except Exception as e:  # noqa: BLE001 - undeliverable is a normal outcome
+        logging.debug(f"Figure {fig.index + 1} not deliverable: {e}")
+        return Figure(index=fig.index, ext=fig.ext, bytes=fig.bytes,
+                      deliverable=False,
+                      note=f"{fig.mime} could not be decoded for display")
 
 
 def count_docx_figures(path) -> int:
