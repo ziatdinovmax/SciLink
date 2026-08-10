@@ -8015,6 +8015,12 @@ class OrchestratorTools:
             return json.dumps({
                 "status": "error",
                 "tool": tool_name,
+                # Machine-readable so the caller can capture the raw provider
+                # response for this call — the cause of the omission is still
+                # unknown, and the parsed kwargs the guard sees have already
+                # discarded the evidence.
+                "error_kind": "missing_required_arguments",
+                "missing": list(missing),
                 "message": self._missing_args_message(missing, kwargs),
             })
 
@@ -8059,6 +8065,15 @@ class OrchestratorTools:
             fn = schema.get("function", {})
             if fn.get("name") == tool_name:
                 return fn.get("parameters", {}).get("required", []) or []
+        return []
+
+    def _declared_params(self, tool_name: str) -> list:
+        """Parameter names in schema-declaration order (dicts keep it)."""
+        for schema in self.openai_schemas:
+            fn = schema.get("function", {})
+            if fn.get("name") == tool_name:
+                return list((fn.get("parameters", {})
+                             .get("properties", {}) or {}).keys())
         return []
 
     def _missing_args_message(self, missing: list, kwargs: dict) -> str:
