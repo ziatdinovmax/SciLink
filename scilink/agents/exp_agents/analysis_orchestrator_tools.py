@@ -40,6 +40,7 @@ from ..lit_agents.optimize_query_for_analysis import optimize_query_for_analysis
 from .recommendation_agent import RecommendationAgent
 from .feature_table import write_feature_table
 from ._locked_exec import CANDIDATES_DIR_NAME
+from ...utils.text_io import write_text_utf8
 from ...skills.loader import list_skills, list_all_skills, load_skill
 # Note: the simulation pipeline (`run_complete_workflow`) is imported lazily
 # inside `run_dft_workflow` to avoid pulling in the optional [sim] extras
@@ -3988,11 +3989,10 @@ class AnalysisOrchestratorTools:
             # same raw query → same file (re-runnable), different queries → different files.
             query_hash = hashlib.md5(query.encode("utf-8")).hexdigest()[:8]
             lit_path = self.orch.base_dir / f"literature_search_{query_hash}.md"
-            with open(lit_path, "w") as f:
-                f.write(f"# Literature Search Results\n\n**Draft query:** {query}\n")
-                if refined_query != query:
-                    f.write(f"**Refined query:** {refined_query}\n")
-                f.write(f"\n{content}")
+            header = f"# Literature Search Results\n\n**Draft query:** {query}\n"
+            if refined_query != query:
+                header += f"**Refined query:** {refined_query}\n"
+            write_text_utf8(lit_path, f"{header}\n{content}")
 
             print(f"  ✅ Literature search completed. Saved to {lit_path.name}")
 
@@ -4140,10 +4140,11 @@ class AnalysisOrchestratorTools:
             # Persist the search output (inspectable, same shape as search_literature).
             query_hash = hashlib.md5(query.encode("utf-8")).hexdigest()[:8]
             lit_path = self.orch.base_dir / f"interpretation_lit_{query_hash}.md"
-            with open(lit_path, "w") as f:
-                f.write(f"# Feature-Conditioned Literature (Channel B)\n\n"
-                        f"**Analysis:** {record.get('analysis_id')}\n"
-                        f"**Query:** {query}\n\n{content}")
+            write_text_utf8(
+                lit_path,
+                f"# Feature-Conditioned Literature (Channel B)\n\n"
+                f"**Analysis:** {record.get('analysis_id')}\n"
+                f"**Query:** {query}\n\n{content}")
 
             # 5. Tier-A refinement: text-in/text-out — revise the existing
             # interpretation against the literature. No pixel/state re-invoke.
@@ -4172,8 +4173,10 @@ class AnalysisOrchestratorTools:
 
             # Append the revised interpretation to the same document so the
             # revision is human-readable on disk, not only in session state.
-            with open(lit_path, "a") as f:
-                f.write("\n\n---\n\n## Literature-Refined Interpretation\n\n" + revised)
+            write_text_utf8(
+                lit_path,
+                "\n\n---\n\n## Literature-Refined Interpretation\n\n" + revised,
+                append=True)
 
             # Companion HTML next to the agent's original report (append-only:
             # a separate document, mirroring how assess_novelty writes its own
@@ -5690,7 +5693,7 @@ class AnalysisOrchestratorTools:
                 lit_dir.mkdir(parents=True, exist_ok=True)
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 lit_path = lit_dir / f"provided_documents_{ts}.md"
-                lit_path.write_text(combined)
+                write_text_utf8(lit_path, combined)
             except Exception as e:
                 logging.error(f"read_document: could not save literature file: {e}")
             n_ocr = sum(info.get("n_ocr_pages", 0) for _, info in docs)

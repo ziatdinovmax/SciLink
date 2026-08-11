@@ -44,6 +44,7 @@ from ...skills._shared.curve_fitting_tools import (
 )
 from ._deprecation import normalize_params
 from ...skills.loader import load_skill
+from ...utils.text_io import read_text_utf8
 
 from .instruct import (
     FITTING_INTERPRETATION_INSTRUCTIONS,
@@ -906,7 +907,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         if literature_file:
             lit_p = Path(literature_file)
             if lit_p.is_file():
-                state["literature_context"] = lit_p.read_text()
+                state["literature_context"] = read_text_utf8(lit_p)
                 # Record provenance so the result reflects that literature
                 # was consulted — the in-pipeline LiteratureSearchController
                 # is skipped on this path and never populates literature_files.
