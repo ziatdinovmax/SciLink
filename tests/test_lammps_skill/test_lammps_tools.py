@@ -335,6 +335,23 @@ class TestValidateScriptErrors:
         assert r["valid"] is False
         assert any("timestep" in e.lower() for e in r["errors"])
 
+    # ── Regression: #409 false positives on correct sequential-ensemble decks ──
+    def test_sequential_nvt_npt_no_conflict(self, script_dir):
+        # NPT equilibrate -> unfix -> NVT produce on the same group is valid;
+        # the overlap check must model unfix, not just co-occurrence.
+        r = lammps_tools.validate_script(
+            str(script_dir / "valid_sequential_nvt_npt.lammps"))
+        assert not any("nvt" in e.lower() and "npt" in e.lower()
+                       for e in r["errors"]), r["errors"]
+
+    def test_defined_var_and_comment_not_flagged_as_template(self, script_dir):
+        # ${scale} only appears in a comment, and `variable scale` is defined and
+        # used as v_scale — neither is an unrendered template.
+        r = lammps_tools.validate_script(
+            str(script_dir / "valid_sequential_nvt_npt.lammps"))
+        assert not any("template" in e.lower() or "unresolved" in e.lower()
+                       for e in r["errors"]), r["errors"]
+
     def test_nonexistent_file(self):
         r = lammps_tools.validate_script("/no/such/file.lammps")
         assert r["valid"] is False
