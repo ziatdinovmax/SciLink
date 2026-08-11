@@ -25,6 +25,7 @@ from ...skills._shared.image_processor import load_image, convert_numpy_to_jpeg_
 from ...skills._shared.curve_fitting_tools import load_curve_data, plot_curve_to_bytes
 from ...executors import require_sandbox_approval
 from ...skills.loader import load_skill
+from ...utils.text_io import read_text_utf8
 
 from ._deprecation import normalize_params
 
@@ -374,7 +375,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         if literature_file:
             lit_p = Path(literature_file)
             if lit_p.is_file():
-                literature_context = lit_p.read_text()
+                literature_context = read_text_utf8(lit_p)
                 literature_files = {"provided_file": str(lit_p)}
                 self.logger.info(f"📚 Loaded literature context from {lit_p.name}")
             else:
