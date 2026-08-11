@@ -355,3 +355,78 @@ def test_an_explicit_title_still_wins(tmp_path, monkeypatch):
     out = json.loads(t.functions_map["write_technical_document"](
         request="rename it", title="New Name", revise_path=str(orig)))
     assert out["title"] == "New Name"
+
+
+# ── source_files: text only, images by reference ─────────────────────
+
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
+
+
+def test_an_image_source_is_refused_with_routing_not_a_crash(
+        tmp_path, monkeypatch):
+    """Live: the delegation passed its freshly rendered workflow PNG in
+    source_files; the bare read_text() hit the 0x89 PNG magic byte and
+    the UnicodeDecodeError killed the WHOLE authoring call."""
+    d = tmp_path / "delegations" / "04_revise"
+    png = d.parent / "03_render" / "campaign_workflow.png"
+    png.parent.mkdir(parents=True)
+    png.write_bytes(PNG_MAGIC)
+    notes = d.parent / "03_render" / "notes.md"
+    notes.write_text("# Notes\n\nplan prose\n")
+
+    cap = {}
+    t = _doc_tool(tmp_path, monkeypatch, SECTIONS, cap)
+    OrchestratorTools._register_all_tools(t)
+    out = json.loads(t.functions_map["write_technical_document"](
+        request="PoC design doc", filename="poc.md",
+        source_files=f"{png}, {notes}", use_literature=False))
+
+    assert out["status"] == "success"                 # no crash
+    assert out["sources_used"] == 1                   # the text file
+    assert out["source_files_skipped"] == ["campaign_workflow.png"]
+    note = out["source_files_note"]
+    assert "![" in note and "cannot be inlined" in note
+    assert "plan prose" in cap["source_documents"]    # text source flowed
+
+
+def test_sibling_resolution_also_guards_binary(tmp_path, monkeypatch):
+    """The bare-name rglob fallback read the sibling file too — same
+    guard must apply on that path."""
+    d = tmp_path / "delegations" / "04_revise"
+    png = tmp_path / "delegations" / "01_a" / "diagram.png"
+    png.parent.mkdir(parents=True)
+    png.write_bytes(PNG_MAGIC)
+
+    t = _doc_tool(tmp_path, monkeypatch, SECTIONS)
+    OrchestratorTools._register_all_tools(t)
+    out = json.loads(t.functions_map["write_technical_document"](
+        request="doc", filename="d.md",
+        source_files="diagram.png", use_literature=False))
+    assert out["status"] == "success"
+    assert out["source_files_skipped"] == ["diagram.png"]
+
+
+def test_stray_bytes_in_a_text_source_do_not_kill_authoring(
+        tmp_path, monkeypatch):
+    d = tmp_path / "delegations" / "04_revise"
+    d.mkdir(parents=True, exist_ok=True)
+    weird = d / "log.txt"
+    weird.write_bytes(b"valid prose\x89here\n")
+
+    cap = {}
+    t = _doc_tool(tmp_path, monkeypatch, SECTIONS, cap)
+    OrchestratorTools._register_all_tools(t)
+    out = json.loads(t.functions_map["write_technical_document"](
+        request="doc", filename="d.md",
+        source_files=str(weird), use_literature=False))
+    assert out["status"] == "success" and out["sources_used"] == 1
+    assert "valid prose" in cap["source_documents"]
+
+
+def test_source_files_schema_says_text_only():
+    src = Path("scilink/agents/planning_agents/orchestrator_tools.py"
+               ).read_text()
+    i = src.index('"source_files"')
+    desc = src[i:i + 700]
+    assert "TEXT files" in desc
+    assert "![caption](file.png)" in desc
