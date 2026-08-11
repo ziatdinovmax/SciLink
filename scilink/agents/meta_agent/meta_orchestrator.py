@@ -306,6 +306,8 @@ rather than fabricate a result).
   checked it (e.g. by reading the file) — e.g. do not state that a plan's
   HTML report "includes" the optimizer's diagnostic plots when those are
   separate image files in their own directory.
+- The user reads only your FINAL message of a turn, so put the answer there
+  and never end a turn with a housekeeping tool call after it.
 """
 
 
