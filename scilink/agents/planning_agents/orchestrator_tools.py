@@ -7447,8 +7447,17 @@ class OrchestratorTools:
 
                 # Prior documents the agent names — this is how a revision or
                 # a merge builds on what the session already wrote instead of
-                # re-deriving it.
-                sources, missing = [], []
+                # re-deriving it. Text documents only: a freshly rendered
+                # diagram PNG passed here read as raw bytes and the
+                # UnicodeDecodeError killed the whole authoring call (live).
+                # Images enter documents BY REFERENCE (![...](path) in the
+                # text — the PDF exporter already resolves them), so a
+                # non-text source is refused with that routing hint instead
+                # of crashing or being silently dropped.
+                _text_suffixes = {".md", ".txt", ".json", ".yaml", ".yml",
+                                  ".csv", ".py", ".html", ".mmd", ".tex",
+                                  ".rst", ""}
+                sources, missing, non_text = [], [], []
                 for raw in (source_files or "").split(","):
                     raw = raw.strip()
                     if not raw:
@@ -7456,18 +7465,22 @@ class OrchestratorTools:
                     fp = Path(raw)
                     if not fp.is_absolute():
                         fp = self._output_dir() / raw
-                    if fp.exists():
-                        sources.append(f"### {fp.name}\n{fp.read_text()}")
-                    else:
+                    if not fp.exists():
                         # The agent names its own earlier file; that file
                         # lives in a SIBLING delegation directory, so search
                         # the session root by basename before giving up.
                         hits = sorted(Path(self.orch.base_dir).rglob(fp.name))
-                        if hits:
-                            sources.append(f"### {hits[0].name}\n"
-                                           + hits[0].read_text())
-                        else:
+                        if not hits:
                             missing.append(raw)
+                            continue
+                        fp = hits[0]
+                    if fp.suffix.lower() not in _text_suffixes:
+                        non_text.append(fp.name)
+                        continue
+                    # errors="replace": a stray non-UTF-8 byte in an
+                    # otherwise-text file must not kill authoring either.
+                    sources.append(f"### {fp.name}\n"
+                                   f"{fp.read_text(errors='replace')}")
 
                 # A revision inherits the document's OWN name: falling back
                 # to the request titled the deliverable with the instruction
@@ -7599,6 +7612,14 @@ class OrchestratorTools:
                        "sources_used": len(sources)}
                 if missing:
                     res["source_files_not_found"] = missing
+                if non_text:
+                    res["source_files_skipped"] = non_text
+                    res["source_files_note"] = (
+                        f"{', '.join(non_text)}: not text — an image or "
+                        "other binary cannot be inlined as source text. To "
+                        "include a figure, reference it IN the document "
+                        "body instead: ![caption](<filename>) — the "
+                        "renderer resolves it from the file's directory.")
                 if declined_topics:
                     res["literature_declined"] = {
                         "available_sections": declined_topics,
@@ -7668,10 +7689,13 @@ class OrchestratorTools:
                 "source_files": {
                     "type": "string",
                     "description": (
-                        "Comma-separated files this document should build on "
-                        "— a roadmap you are revising, two documents you are "
-                        "merging. Names of files in the session are resolved "
-                        "for you. Omit for a fresh document."
+                        "Comma-separated TEXT files this document should "
+                        "build on — a roadmap you are revising, two "
+                        "documents you are merging. Names of files in the "
+                        "session are resolved for you. Do NOT list images "
+                        "here: a figure goes in the document body by "
+                        "reference (![caption](file.png)). Omit for a "
+                        "fresh document."
                     ),
                 },
                 "literature_context": {
