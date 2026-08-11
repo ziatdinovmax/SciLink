@@ -964,9 +964,10 @@ class MetaOrchestratorTools:
             description=(
                 "Save the meta session state (mode, delegation ledger, chat "
                 "history) to checkpoint.json so the session can be resumed "
-                "later. The state is also auto-saved periodically; call this "
-                "when the user asks to save/checkpoint the session, or before "
-                "they intend to stop."
+                "later. The state is ALREADY auto-saved every few turns, so "
+                "call this ONLY when the user asks to save/checkpoint the "
+                "session or says they are stopping — never as a routine "
+                "end-of-turn step."
             ),
             parameters={},
             required=[],
