@@ -10,6 +10,9 @@ import os
 # Set on the re-exec'd child so a restart that fails to take UTF-8 mode warns
 # once instead of forking forever.
 _UTF8_REEXEC_FLAG = "SCILINK_UTF8_RESTARTED"
+# Carries the launcher's argv[0] across the restart so usage strings keep
+# saying "scilink" rather than the path to this module.
+_ARGV0_ENV = "SCILINK_ARGV0"
 
 
 def get_terminal_color_support():
@@ -141,22 +144,29 @@ def ensure_utf8_mode() -> None:
     if encoding == "utf8":
         return
 
+    # Warnings go to stderr, never stdout: under `scilink serve` stdout IS the
+    # MCP transport, and a stray line there corrupts the protocol.
+    def warn(message: str) -> None:
+        print(f"  ⚠️  {message} Non-ASCII output may fail to save — set "
+              f"PYTHONUTF8=1 before launching scilink.", file=sys.stderr)
+
     # A failed re-exec must not spawn another one.
     if os.environ.get(_UTF8_REEXEC_FLAG):
-        print(f"  ⚠️  Locale encoding is {encoding or 'unknown'}, not UTF-8, and "
-              f"the automatic restart did not take. Non-ASCII output may fail "
-              f"to save — set PYTHONUTF8=1 before launching scilink.")
+        warn(f"Locale encoding is {encoding or 'unknown'}, not UTF-8, and the "
+             f"automatic restart did not take.")
         return
 
-    env = dict(os.environ, PYTHONUTF8="1", **{_UTF8_REEXEC_FLAG: "1"})
+    # `-m` gives the child argv[0] = .../cli/main.py, which would surface as
+    # the program name in every usage string; carry the real one across.
+    env = dict(os.environ, PYTHONUTF8="1",
+               **{_UTF8_REEXEC_FLAG: "1", _ARGV0_ENV: sys.argv[0]})
     cmd = [sys.executable, "-X", "utf8", "-m", "scilink.cli.main", *sys.argv[1:]]
     try:
         completed = subprocess.run(cmd, env=env)
     except KeyboardInterrupt:
         sys.exit(130)
     except Exception as e:  # noqa: BLE001 - never block startup on this
-        print(f"  ⚠️  Could not restart under UTF-8 ({e}). Non-ASCII output may "
-              f"fail to save — set PYTHONUTF8=1 before launching scilink.")
+        warn(f"Could not restart under UTF-8 ({e}).")
         return
     sys.exit(completed.returncode)
 
@@ -167,6 +177,11 @@ def main():
     # Before anything else: a non-UTF-8 locale silently breaks every write of
     # model-generated text, so correct it while a restart is still cheap.
     ensure_utf8_mode()
+
+    # In a restarted process, present the launcher's name, not this module's
+    # path — every subcommand builds its argparse prog from sys.argv[0].
+    if os.environ.get(_ARGV0_ENV):
+        sys.argv[0] = os.environ[_ARGV0_ENV]
 
     # Skip logo for MCP server mode (stdout is the transport)
     if len(sys.argv) >= 2 and sys.argv[1] == 'serve':

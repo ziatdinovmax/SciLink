@@ -131,6 +131,9 @@ def test_restarts_under_utf8_on_a_cp1252_locale(monkeypatch, utf8_probe):
     assert cmd[-3:] == ["plan", "--data-dir", "x"]  # argv preserved
     assert utf8_probe["env"]["PYTHONUTF8"] == "1"
     assert utf8_probe["env"]["SCILINK_UTF8_RESTARTED"] == "1"
+    # `-m` would otherwise make argv[0] the module path, which every
+    # subcommand's argparse turns into the program name in its usage line.
+    assert utf8_probe["env"]["SCILINK_ARGV0"] == "scilink"
 
 
 def test_child_exit_code_propagates(monkeypatch, utf8_probe):
@@ -148,7 +151,10 @@ def test_does_not_restart_twice(monkeypatch, utf8_probe, capsys):
     monkeypatch.setenv("SCILINK_UTF8_RESTARTED", "1")
     cli_main.ensure_utf8_mode()  # must return, not exit
     assert "cmd" not in utf8_probe
-    assert "PYTHONUTF8" in capsys.readouterr().out
+    captured = capsys.readouterr()
+    # stdout is the MCP transport under `scilink serve` — warn on stderr only.
+    assert "PYTHONUTF8" in captured.err
+    assert captured.out == ""
 
 
 def test_a_failed_restart_does_not_block_startup(monkeypatch, capsys):
@@ -161,4 +167,17 @@ def test_a_failed_restart_does_not_block_startup(monkeypatch, capsys):
     monkeypatch.delenv("SCILINK_UTF8_RESTARTED", raising=False)
     _pretend_locale(monkeypatch, "cp1252")
     cli_main.ensure_utf8_mode()  # returns rather than raising
-    assert "PYTHONUTF8" in capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert "PYTHONUTF8" in captured.err
+    assert captured.out == ""
+
+
+def test_restored_argv0_keeps_the_program_name_in_usage(monkeypatch):
+    """The child restores argv[0] so `--help` still says "scilink"."""
+    monkeypatch.setenv("SCILINK_ARGV0", "scilink")
+    monkeypatch.setattr(sys, "argv", ["/site-packages/scilink/cli/main.py", "help"])
+    _pretend_locale(monkeypatch, "cp1252", utf8_mode=1)  # already restarted
+    import io, contextlib
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli_main.main()
+    assert sys.argv[0].startswith("scilink")
