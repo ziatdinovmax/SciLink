@@ -221,7 +221,7 @@ def _write_manifest(kb_dir: Path, **fields) -> Dict[str, Any]:
     manifest = read_manifest(kb_dir) or {}
     manifest.update(fields)
     manifest["updated_at"] = datetime.now().isoformat(timespec="seconds")
-    (kb_dir / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2))
+    (kb_dir / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return manifest
 
 

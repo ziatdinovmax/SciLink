@@ -617,7 +617,7 @@ def split_pickled_metadata_only(input_path, paths: dict, logger=None):
     if not meta:
         return None  # empty container — nothing to emit, report via normal path
     meta_out = Path(paths["metadata_out"])
-    meta_out.write_text(json.dumps(meta, indent=2, default=str))
+    meta_out.write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
     json.loads(meta_out.read_text())  # self-check: valid JSON round-trip
     if logger:
         logger.info(f"✅ Metadata-only split (deterministic): {meta_out}")

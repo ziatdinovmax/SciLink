@@ -95,7 +95,7 @@ def record(model: str,
     try:
         line = json.dumps(rec, default=str)
         with _lock:
-            with open(path, "a") as fh:
+            with open(path, "a", encoding="utf-8") as fh:
                 fh.write(line + "\n")
     except Exception:
         # Tracing must never break a generation.

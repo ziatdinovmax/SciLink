@@ -471,7 +471,7 @@ class PlanningAgent(BaseAgent):
             logging.warning(f"Literature compaction skipped: {e}")
             payload = self.state
         try:
-            with open(state_file, 'w') as f:
+            with open(state_file, 'w', encoding="utf-8") as f:
                 json.dump(payload, f, indent=2)
         except Exception as e:
             logging.warning(f"Failed to save {self.agent_type} state: {e}")

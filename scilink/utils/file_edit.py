@@ -246,6 +246,9 @@ def apply_surgical_edits(
             # copyfile, not write_text(current): the backup is the only
             # route back from a bad edit, so it must be the file's bytes
             # rather than a re-encoding of what we decoded from them.
+            # This supersedes the encoding="utf-8" that the package-wide
+            # sweep put on the old write_text — copying never decodes, so
+            # there is no encoding to state. Don't restore the write.
             shutil.copyfile(rp, bak)
             created = True
     except Exception as e:  # noqa: BLE001 - never block the edit

@@ -40,6 +40,7 @@ from ..lit_agents.optimize_query_for_analysis import optimize_query_for_analysis
 from .recommendation_agent import RecommendationAgent
 from .feature_table import write_feature_table
 from ._locked_exec import CANDIDATES_DIR_NAME
+from ...utils.text_io import write_text_utf8
 from ...skills.loader import list_skills, list_all_skills, load_skill
 # Note: the simulation pipeline (`run_complete_workflow`) is imported lazily
 # inside `run_dft_workflow` to avoid pulling in the optional [sim] extras
@@ -1664,7 +1665,7 @@ class AnalysisOrchestratorTools:
                     if metadata:
                         cpi_warning = self._replace_metadata(metadata)
                         output_path = self.orch.base_dir / "metadata.json"
-                        with open(output_path, 'w') as f:
+                        with open(output_path, 'w', encoding="utf-8") as f:
                             json.dump(metadata, f, indent=2)
 
                         result = {
@@ -1691,7 +1692,7 @@ class AnalysisOrchestratorTools:
             elif text_input:
                 # Create temporary file and convert
                 temp_path = self.orch.base_dir / "temp_metadata_input.txt"
-                with open(temp_path, 'w') as f:
+                with open(temp_path, 'w', encoding="utf-8") as f:
                     f.write(text_input)
                 
                 try:
@@ -1708,7 +1709,7 @@ class AnalysisOrchestratorTools:
                     if metadata:
                         cpi_warning = self._replace_metadata(metadata)
                         output_path = self.orch.base_dir / "metadata.json"
-                        with open(output_path, 'w') as f:
+                        with open(output_path, 'w', encoding="utf-8") as f:
                             json.dump(metadata, f, indent=2)
 
                         result = {
@@ -1877,7 +1878,7 @@ class AnalysisOrchestratorTools:
 
                                     cpi_warning = self._replace_metadata(synthesized)
                                     output_path = self.orch.base_dir / "metadata.json"
-                                    with open(output_path, 'w') as f:
+                                    with open(output_path, 'w', encoding="utf-8") as f:
                                         json.dump(synthesized, f, indent=2)
                                     print(
                                         f"    Synthesized global metadata from "
@@ -2719,7 +2720,7 @@ class AnalysisOrchestratorTools:
 
                 # === Save metadata copy for traceability ===
                 metadata_copy_path = analysis_output_dir / "metadata_used.json"
-                with open(metadata_copy_path, 'w') as f:
+                with open(metadata_copy_path, 'w', encoding="utf-8") as f:
                     json.dump({
                         "analysis_id": analysis_id,
                         "data_path": data_path,
@@ -3520,7 +3521,7 @@ class AnalysisOrchestratorTools:
                     "graduated_skill_sources": self.orch._graduated_skill_sources,
                 }
 
-                with open(self.orch.checkpoint_path, 'w') as f:
+                with open(self.orch.checkpoint_path, 'w', encoding="utf-8") as f:
                     json.dump(checkpoint_data, f, indent=2)
 
                 return json.dumps({
@@ -3806,7 +3807,7 @@ class AnalysisOrchestratorTools:
                 r["series_variable"] = str(svar)
                 try:
                     (self.orch.results_dir / "reconciled_series_result.json").write_text(
-                        json.dumps(r, default=str))
+                        json.dumps(r, default=str), encoding="utf-8")
                 except Exception:
                     pass
                 # Attach the reconciled figure so the orchestrator LLM sees the
@@ -3988,11 +3989,10 @@ class AnalysisOrchestratorTools:
             # same raw query → same file (re-runnable), different queries → different files.
             query_hash = hashlib.md5(query.encode("utf-8")).hexdigest()[:8]
             lit_path = self.orch.base_dir / f"literature_search_{query_hash}.md"
-            with open(lit_path, "w") as f:
-                f.write(f"# Literature Search Results\n\n**Draft query:** {query}\n")
-                if refined_query != query:
-                    f.write(f"**Refined query:** {refined_query}\n")
-                f.write(f"\n{content}")
+            header = f"# Literature Search Results\n\n**Draft query:** {query}\n"
+            if refined_query != query:
+                header += f"**Refined query:** {refined_query}\n"
+            write_text_utf8(lit_path, f"{header}\n{content}")
 
             print(f"  ✅ Literature search completed. Saved to {lit_path.name}")
 
@@ -4140,10 +4140,11 @@ class AnalysisOrchestratorTools:
             # Persist the search output (inspectable, same shape as search_literature).
             query_hash = hashlib.md5(query.encode("utf-8")).hexdigest()[:8]
             lit_path = self.orch.base_dir / f"interpretation_lit_{query_hash}.md"
-            with open(lit_path, "w") as f:
-                f.write(f"# Feature-Conditioned Literature (Channel B)\n\n"
-                        f"**Analysis:** {record.get('analysis_id')}\n"
-                        f"**Query:** {query}\n\n{content}")
+            write_text_utf8(
+                lit_path,
+                f"# Feature-Conditioned Literature (Channel B)\n\n"
+                f"**Analysis:** {record.get('analysis_id')}\n"
+                f"**Query:** {query}\n\n{content}")
 
             # 5. Tier-A refinement: text-in/text-out — revise the existing
             # interpretation against the literature. No pixel/state re-invoke.
@@ -4172,8 +4173,10 @@ class AnalysisOrchestratorTools:
 
             # Append the revised interpretation to the same document so the
             # revision is human-readable on disk, not only in session state.
-            with open(lit_path, "a") as f:
-                f.write("\n\n---\n\n## Literature-Refined Interpretation\n\n" + revised)
+            write_text_utf8(
+                lit_path,
+                "\n\n---\n\n## Literature-Refined Interpretation\n\n" + revised,
+                append=True)
 
             # Companion HTML next to the agent's original report (append-only:
             # a separate document, mirroring how assess_novelty writes its own
@@ -4215,7 +4218,7 @@ class AnalysisOrchestratorTools:
                         f"<div class='analysis-text'>{paras}</div>"
                         "<div class='footer'>Post-fit revision (feature-conditioned "
                         "literature); the original report is unchanged.</div>"
-                        "</div></body></html>")
+                        "</div></body></html>", encoding="utf-8")
                 except Exception as e:
                     logging.warning(f"Companion revision HTML failed: {e}")
                     report_html = None
@@ -4603,7 +4606,7 @@ class AnalysisOrchestratorTools:
             
             # 7. Save Results to file
             output_file = lit_output_dir / "novelty_report.json"
-            with open(output_file, "w") as f:
+            with open(output_file, "w", encoding="utf-8") as f:
                 json.dump({
                     "analysis_id": record.get("analysis_id"),
                     **novelty_assessment
@@ -4749,7 +4752,7 @@ class AnalysisOrchestratorTools:
             # 7. Persist sidecar JSON for parity with the standalone runner
             output_file = out_dir / "dft_recommendations.json"
             try:
-                with open(output_file, 'w') as f:
+                with open(output_file, 'w', encoding="utf-8") as f:
                     json.dump({
                         "reasoning": reasoning,
                         "recommendations": recommendations,
@@ -5150,7 +5153,7 @@ class AnalysisOrchestratorTools:
             knowledge_dir = self.orch.base_dir / "knowledge"
             knowledge_dir.mkdir(parents=True, exist_ok=True)
             knowledge_file = knowledge_dir / f"{entry['id']}.json"
-            with open(knowledge_file, 'w') as f:
+            with open(knowledge_file, 'w', encoding="utf-8") as f:
                 json.dump(entry, f, indent=2)
 
             response = {
@@ -5690,7 +5693,7 @@ class AnalysisOrchestratorTools:
                 lit_dir.mkdir(parents=True, exist_ok=True)
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 lit_path = lit_dir / f"provided_documents_{ts}.md"
-                lit_path.write_text(combined)
+                write_text_utf8(lit_path, combined)
             except Exception as e:
                 logging.error(f"read_document: could not save literature file: {e}")
             n_ocr = sum(info.get("n_ocr_pages", 0) for _, info in docs)

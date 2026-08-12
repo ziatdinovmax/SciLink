@@ -240,7 +240,7 @@ class DiagramAgent(BaseAgent):
                     "error": "no valid render within attempt budget",
                     "attempts": attempts}
 
-        mmd_path.write_text(code)
+        mmd_path.write_text(code, encoding="utf-8")
         return {"status": "success", "png_path": str(png_path),
                 "mmd_path": str(mmd_path), "code": code,
                 "attempts": attempts, "qc_rounds": qc_rounds,

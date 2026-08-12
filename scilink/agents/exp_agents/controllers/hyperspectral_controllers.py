@@ -3027,7 +3027,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             recs = state.get("dynamic_analysis_records") or []
             if recs:
                 _rec_path = Path(output_dir) / "dynamic_analysis_records.json"
-                _rec_path.write_text(json.dumps(recs, indent=1, default=str))
+                _rec_path.write_text(json.dumps(recs, indent=1, default=str), encoding="utf-8")
                 self.logger.info(
                     f"   📄 {len(recs)} per-target record(s) persisted: "
                     f"{_rec_path.name}")

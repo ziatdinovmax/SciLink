@@ -175,7 +175,7 @@ class BaseAgent(ABC):
         """
         state_file = self.output_dir / self._get_state_filename()
         try:
-            with open(state_file, 'w') as f:
+            with open(state_file, 'w', encoding="utf-8") as f:
                 json.dump(self.state, f, indent=2)
         except Exception as e:
             logging.warning(f"Failed to save {self.agent_type} state: {e}")

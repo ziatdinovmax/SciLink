@@ -123,12 +123,12 @@ class VaspInputAgent(PeriodicDFTAgent):
             try:
                 if "incar" in result:
                     p = os.path.join(output_dir, "INCAR")
-                    with open(p, "w") as f:
+                    with open(p, "w", encoding="utf-8") as f:
                         f.write(result["incar"])
                     saved["INCAR"] = p
                 if "kpoints" in result:
                     p = os.path.join(output_dir, "KPOINTS")
-                    with open(p, "w") as f:
+                    with open(p, "w", encoding="utf-8") as f:
                         f.write(result["kpoints"])
                     saved["KPOINTS"] = p
             except Exception as e:
@@ -140,7 +140,7 @@ class VaspInputAgent(PeriodicDFTAgent):
 
         if result.get("config_changes"):
             log_path = os.path.join(output_dir, "config_changes.log")
-            with open(log_path, "w") as f:
+            with open(log_path, "w", encoding="utf-8") as f:
                 f.write("# Changes applied by VASPProjectConfig\n")
                 for change in result["config_changes"]:
                     f.write(f"  {change}\n")

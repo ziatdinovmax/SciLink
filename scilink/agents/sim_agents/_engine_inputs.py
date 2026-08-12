@@ -191,7 +191,7 @@ def _orthogonalize_zero_tilt(data_file: str) -> None:
                 pass
         out.append(ln)
     if changed:
-        with open(data_file, "w") as fh:
+        with open(data_file, "w", encoding="utf-8") as fh:
             fh.writelines(out)
 
 

@@ -281,7 +281,7 @@ class BaseAnalysisAgent(ABC):
         exec_result = self.executor.execute_script(
             script_content=code, working_dir=str(self.output_dir))
         if exec_result.get("status") == "success":
-            (self.output_dir / f"{slug}.py").write_text(code)
+            (self.output_dir / f"{slug}.py").write_text(code, encoding="utf-8")
             parsed = self._extract_json(exec_result.get("stdout", ""))
             if parsed is not None:
                 # The script RAN and returned its JSON answer — whether it reports

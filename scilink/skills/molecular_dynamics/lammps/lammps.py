@@ -868,9 +868,13 @@ def validate_script(
     commands_seen: set = set()
     command_order: List[str] = []
 
-    # Track thermostat/barostat per group
-    npt_groups: set = set()
-    nvt_groups: set = set()
+    # Track integrator fixes over their lifecycle (fix … / unfix …) so a
+    # legitimate sequential deck — NPT equilibrate, unfix, then NVT produce on
+    # the same group — is not flagged. `active_integrators` maps fix-ID ->
+    # (group, family); a conflict is recorded only when an nvt and an npt/nph
+    # fix are active on the same group at the same time.
+    active_integrators: Dict[str, tuple] = {}
+    integrator_conflict: set = set()
 
     for line in lines:
         stripped = line.strip()
@@ -899,14 +903,21 @@ def validate_script(
         elif keyword == "run":
             result["has_run"] = True
         elif keyword == "fix" and len(parts) >= 4:
+            fix_id = parts[1]
             group = parts[2]
             style = parts[3].lower()
             if "shake" in style or "rattle" in style:
                 result["has_shake"] = True
-            if style in ("npt", "nph"):
-                npt_groups.add(group)
-            elif style == "nvt":
-                nvt_groups.add(group)
+            if style in ("npt", "nph", "nvt"):
+                family = "nvt" if style == "nvt" else "npt"
+                # Conflict only if a DIFFERENT-family integrator is already
+                # active on this same group (i.e. never unfixed).
+                for a_group, a_family in active_integrators.values():
+                    if a_group == group and a_family != family:
+                        integrator_conflict.add(group)
+                active_integrators[fix_id] = (group, family)
+        elif keyword == "unfix" and len(parts) >= 2:
+            active_integrators.pop(parts[1], None)
 
     errors = result["errors"]
     warnings = result["warnings"]
@@ -1059,9 +1070,10 @@ def validate_script(
                     break
 
     # nvt + npt on same group
-    overlap = npt_groups & nvt_groups
-    if overlap:
-        errors.append(f"fix nvt and fix npt both on group(s): {overlap}")
+    if integrator_conflict:
+        errors.append(
+            f"fix nvt and fix npt both active on group(s): {integrator_conflict}"
+        )
 
     # ── Unit-aware parameter ranges ──
     ts = result["timestep"]
@@ -1108,9 +1120,19 @@ def validate_script(
                 pass
 
     # ── Unresolved templates ──
-    templates = re.findall(r'\$\{[a-z_]+\}|\{[a-z_]+\}', content, re.IGNORECASE)
-    if templates:
-        errors.append(f"Unresolved template variables: {sorted(set(templates))}")
+    # Scan CODE only — comments legitimately mention ${var} (e.g. a note about a
+    # variable) and must not be flagged. A ${name} whose `name` has a
+    # `variable name …` definition in the deck is a valid LAMMPS variable
+    # reference, not an unrendered template. A bare {name} is not LAMMPS syntax,
+    # so it is always suspect (an unrendered template placeholder).
+    code = "\n".join(ln.split("#", 1)[0] for ln in lines)
+    defined_vars = set(re.findall(
+        r"(?mi)^\s*variable\s+([A-Za-z_]\w*)\b", code))
+    referenced = set(re.findall(r"\$\{([A-Za-z_]\w*)\}", code))
+    braces = set(re.findall(r"(?<!\$)\{([A-Za-z_]\w*)\}", code))
+    unresolved = sorted((referenced - defined_vars) | braces)
+    if unresolved:
+        errors.append(f"Unresolved template variables: {unresolved}")
 
     # ── Force field completeness ──
     if system_info:
@@ -1487,7 +1509,7 @@ def run_with_potential(
 
     os.makedirs(working_dir, exist_ok=True)
     path = os.path.join(working_dir, "in.lammps")
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write(head + body)
     return path
 

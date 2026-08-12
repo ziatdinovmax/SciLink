@@ -1637,7 +1637,7 @@ def _run_fusion_codegen(orch, ok: List[dict], branch_numerics: Dict[str, Any],
         # same way; it is best-effort.)
         try:
             script_path.write_text(best_script, encoding="utf-8")
-            with open(numerics_path, "w") as fh:
+            with open(numerics_path, "w", encoding="utf-8") as fh:
                 json.dump(best["results"], fh, indent=2, default=str)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"fusion codegen: could not restore artifacts: {e}")
@@ -2174,7 +2174,7 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
         "novelty": novelty,
     }
     try:
-        with open(report_path, "w") as fh:
+        with open(report_path, "w", encoding="utf-8") as fh:
             json.dump(fused, fh, indent=2, default=str)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"could not write fusion report: {e}")

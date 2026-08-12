@@ -278,7 +278,7 @@ $all delete
 exit
 '''
 
-        with open(script_path, 'w') as f:
+        with open(script_path, 'w', encoding="utf-8") as f:
             f.write(script_content)
         
         return script_path
@@ -454,7 +454,7 @@ exit
             )
         
         # Step 5: Write fixed data file
-        with open(data_file, 'w') as f:
+        with open(data_file, 'w', encoding="utf-8") as f:
             f.writelines(new_lines)
         
         self.logger.info(f"Wrote fixed data file: {data_file}")
@@ -492,7 +492,7 @@ $all delete
 exit
 '''
         
-        with open(script_path, 'w') as f:
+        with open(script_path, 'w', encoding="utf-8") as f:
             f.write(script_content)
             
         self._run_vmd_script(script_path)
@@ -534,7 +534,7 @@ exit
         with open(input_pdb, 'r') as f_in:
             content = f_in.readlines()
             
-        with open(output_pdb, 'w') as f_out:
+        with open(output_pdb, 'w', encoding="utf-8") as f_out:
             f_out.write(cryst_line)
             f_out.writelines(content)
             

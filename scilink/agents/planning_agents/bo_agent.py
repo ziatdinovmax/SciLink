@@ -238,7 +238,7 @@ class OptimizationAgent(BaseAgent):
     def _save_history(self, entry: Dict):
         history = self._load_history()
         history.append(entry)
-        with open(self.history_file, 'w') as f: json.dump(history, f, indent=2)
+        with open(self.history_file, 'w', encoding="utf-8") as f: json.dump(history, f, indent=2)
 
     def _validate_config(self, config: Dict, fidelity_declared: bool = False,
                          extra_surrogates: Optional[set] = None,
@@ -1166,7 +1166,7 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
         if is_retry:
             print(f"  - 🔄 Re-run detected (same {len(df)} data points). Replacing previous step.")
             history.pop()
-            with open(self.history_file, 'w') as f:
+            with open(self.history_file, 'w', encoding="utf-8") as f:
                 json.dump(history, f, indent=2)
 
         # Compute budget context

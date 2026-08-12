@@ -28,6 +28,7 @@ from .instruct import (
     SCREEN_DATABASE_CODEGEN_PROMPT,
 )
 from ..lit_agents.optimize_query import optimize_search_query, is_molecule_design_objective
+from ...utils.text_io import read_text_utf8, write_text_utf8
 from ...skills.loader import list_skills, load_skill
 
 
@@ -448,7 +449,7 @@ class OrchestratorTools:
         if not base.is_file():
             return None
         n = int(m.group("n"))
-        text = base.read_text()
+        text = read_text_utf8(base)
         sections = OrchestratorTools._split_literature_sections(text)
         for _q, chunk in sections:
             hm = _LIT_QUESTION_RE.match(chunk)
@@ -488,7 +489,7 @@ class OrchestratorTools:
                           f"question that file does not contain — skipped")
                 return sec
             p = Path(s)
-            return p.read_text() if p.is_file() else None
+            return read_text_utf8(p) if p.is_file() else None
 
         items = value if isinstance(value, list) else [value]
         pieces = []
@@ -632,7 +633,7 @@ class OrchestratorTools:
                 lines.append("")
 
         path = self._output_dir() / "ideation_report.md"
-        path.write_text("\n".join(lines))
+        write_text_utf8(path, "\n".join(lines))
         from .user_interface import format_path, record_deliverable
         record_deliverable(self.orch.base_dir, path,
                            "Ideation report — all candidate directions",
@@ -982,7 +983,7 @@ class OrchestratorTools:
         topics = []
         for p in self._campaign_literature_files():
             try:
-                sections = self._split_literature_sections(p.read_text())
+                sections = self._split_literature_sections(read_text_utf8(p))
             except Exception as exc:  # noqa: BLE001 - the index is advisory
                 logging.debug(f"Literature topic scan failed for {p}: {exc}")
                 continue
@@ -1020,7 +1021,7 @@ class OrchestratorTools:
         if not files:
             return None
         if len(files) == 1:
-            text = files[0].read_text()
+            text = read_text_utf8(files[0])
             return {"text": text, "files": [files[0].name],
                     "n_files": 1, "dropped": []}
         chunks = []  # (file_name, question, chunk_text)
@@ -1028,7 +1029,7 @@ class OrchestratorTools:
         dup_dropped = []
         for p in files:
             for question, chunk in self._split_literature_sections(
-                    p.read_text()):
+                    read_text_utf8(p)):
                 key = chunk.strip()
                 if key in seen_content:
                     dup_dropped.append((p.name, question))
@@ -1155,7 +1156,7 @@ class OrchestratorTools:
         )
         text = self._maybe_embed_workflow_diagram(text, self._output_dir())
         wp_path = self._output_dir() / "white_paper.md"
-        wp_path.write_text(text)
+        write_text_utf8(wp_path, text)
         from .user_interface import format_path, record_deliverable
         record_deliverable(self.orch.base_dir, wp_path,
                            "White paper", deliverable=True)
@@ -1760,9 +1761,9 @@ class OrchestratorTools:
                     _n += 1
                     lit_path = (self._output_dir()
                                 / f"literature_search_{label}_{_n}.md")
-                with open(lit_path, 'w') as f:
-                    f.write(f"# Literature Search Results ({label})\n\n")
-                    f.write(content)
+                write_text_utf8(
+                    lit_path,
+                    f"# Literature Search Results ({label})\n\n{content}")
                 self._record_literature_file(
                     lit_path, label=label,
                     questions=[objectives[oi]
@@ -1897,7 +1898,7 @@ class OrchestratorTools:
                         meta[str(Path(e["path"]).resolve())] = e
                 out_files = []
                 for p in files:
-                    text = p.read_text()
+                    text = read_text_utf8(p)
                     entry = meta.get(str(p.resolve()), {})
                     reg_qs = entry.get("questions") or []
                     chunks = self._split_literature_sections(text)
@@ -2006,9 +2007,10 @@ class OrchestratorTools:
 
                 # Save to file
                 mol_path = self._output_dir() / "molecule_design.md"
-                with open(mol_path, 'w') as f:
-                    f.write("# Molecular Design & Synthesis Planning Results\n\n")
-                    f.write(mol_res['content'])
+                write_text_utf8(
+                    mol_path,
+                    "# Molecular Design & Synthesis Planning Results\n\n"
+                    + mol_res['content'])
 
                 print(f"  ✅ Molecules query completed. Saved to {mol_path.name}")
 
@@ -2273,7 +2275,7 @@ class OrchestratorTools:
 
                 # Save
                 output_path = self._output_dir() / "plan.json"
-                with open(output_path, 'w') as f:
+                with open(output_path, 'w', encoding="utf-8") as f:
                     json.dump(plan, f, indent=2)
 
                 # Persist external grounding that arrived without a literature
@@ -2283,9 +2285,10 @@ class OrchestratorTools:
                 # originally motivated this save is removed.)
                 if not literature_context and plan.get("literature_search"):
                     lit_path = self._output_dir() / "literature_search.md"
-                    with open(lit_path, 'w') as f:
-                        f.write("# Literature Search Results\n\n")
-                        f.write(plan["literature_search"])
+                    write_text_utf8(
+                        lit_path,
+                        "# Literature Search Results\n\n"
+                        + plan["literature_search"])
                     self._record_literature_file(lit_path)
                     saved_extras.append(str(lit_path))
 
@@ -2542,7 +2545,7 @@ class OrchestratorTools:
             print("  ⚡ Tool: Generating white paper...")
             try:
                 wp_path = self._write_white_paper(audience_context)
-                text = Path(wp_path).read_text()
+                text = read_text_utf8(wp_path)
                 return json.dumps({
                     "status": "success",
                     "white_paper": str(wp_path),
@@ -2754,7 +2757,7 @@ class OrchestratorTools:
                 
                 # Save
                 output_path = self._output_dir() / "plan.json"
-                with open(output_path, 'w') as f:
+                with open(output_path, 'w', encoding="utf-8") as f:
                     json.dump(updated_plan, f, indent=2)
                 
                 # Regenerate HTML
@@ -2890,7 +2893,8 @@ class OrchestratorTools:
                 ext_ctx = None
                 if literature_context:
                     lp = Path(literature_context)
-                    ext_ctx = lp.read_text() if lp.is_file() else literature_context
+                    ext_ctx = (read_text_utf8(lp) if lp.is_file()
+                               else literature_context)
                     print(f"    📚 Literature context from: {lp.name if lp.is_file() else 'inline text'}")
 
                 res = self.orch.planner.perform_technoeconomic_analysis(
@@ -3056,7 +3060,7 @@ class OrchestratorTools:
 
                 # Save
                 output_path = self._output_dir() / "plan.json"
-                with open(output_path, 'w') as f:
+                with open(output_path, 'w', encoding="utf-8") as f:
                     json.dump(plan, f, indent=2)
 
                 # Generate HTML
@@ -3145,7 +3149,7 @@ class OrchestratorTools:
 
                 # Save
                 output_path = self._output_dir() / "plan.json"
-                with open(output_path, 'w') as f:
+                with open(output_path, 'w', encoding="utf-8") as f:
                     json.dump(plan, f, indent=2)
 
                 # Generate HTML
@@ -3223,7 +3227,7 @@ class OrchestratorTools:
                 
                 # Save
                 output_path = self._output_dir() / "plan_refined.json"
-                with open(output_path, 'w') as f:
+                with open(output_path, 'w', encoding="utf-8") as f:
                     json.dump(updated_plan, f, indent=2)
                 
                 # Regenerate HTML
@@ -3808,7 +3812,7 @@ class OrchestratorTools:
                     'hash': current_hash,
                     'timestamp': datetime.now().isoformat()
                 }
-                with open(self.orch.analyzed_files_path, 'w') as f:
+                with open(self.orch.analyzed_files_path, 'w', encoding="utf-8") as f:
                     json.dump(self.orch.analyzed_files, f, indent=2)
                 
                 df_final = pd.read_csv(self.orch.bo_data_path)
@@ -4183,7 +4187,7 @@ class OrchestratorTools:
                                 'row_count': 1, 'hash': current_hash,
                                 'timestamp': datetime.now().isoformat()
                             }
-                        with open(self.orch.analyzed_files_path, 'w') as f:
+                        with open(self.orch.analyzed_files_path, 'w', encoding="utf-8") as f:
                             json.dump(self.orch.analyzed_files, f, indent=2)
 
                         df_final = pd.read_csv(self.orch.bo_data_path)
@@ -4218,7 +4222,7 @@ class OrchestratorTools:
                     'hash': current_hash,
                     'timestamp': datetime.now().isoformat()
                 }
-            with open(self.orch.analyzed_files_path, 'w') as f:
+            with open(self.orch.analyzed_files_path, 'w', encoding="utf-8") as f:
                 json.dump(self.orch.analyzed_files, f, indent=2)
 
             df_final = pd.read_csv(self.orch.bo_data_path)
@@ -5426,7 +5430,7 @@ class OrchestratorTools:
             }
             
             try:
-                with open(checkpoint_path, 'w') as f:
+                with open(checkpoint_path, 'w', encoding="utf-8") as f:
                     json.dump(state, f, indent=2)
                 
                 print(f"    💾 Checkpoint saved: {checkpoint_path}")
@@ -6351,7 +6355,7 @@ class OrchestratorTools:
                     )
                     # Log raw response for debugging
                     raw_log_path = debug_dir / f"kq_dir_raw_{abs(hash(query)) % 10000:04d}_a{attempt}.txt"
-                    raw_log_path.write_text(response.text)
+                    raw_log_path.write_text(response.text, encoding="utf-8")
                     # LLM returns JSON: {"code": "...TODO lines..."}
                     result, parse_error = parse_json_from_response(response)
                     if parse_error or not result or "code" not in result:
@@ -6370,7 +6374,7 @@ class OrchestratorTools:
                     return json.dumps({"status": "error", "message": f"Code generation failed: {e}"})
 
                 script_path = scripts_dir / f"kq_dir_{Path(dir_path).name}_{abs(hash(query)) % 10000:04d}.py"
-                script_path.write_text(code)
+                script_path.write_text(code, encoding="utf-8")
                 print(f"    - Running: {script_path.name} (attempt {attempt + 1})")
 
                 try:
@@ -6523,7 +6527,7 @@ class OrchestratorTools:
 
                 # Write and execute script
                 script_path = scripts_dir / f"kq_{Path(target_path).stem}_{abs(hash(query)) % 10000:04d}.py"
-                script_path.write_text(code)
+                script_path.write_text(code, encoding="utf-8")
                 print(f"    - Running: {script_path.name} (attempt {attempt + 1})")
 
                 try:
@@ -6749,7 +6753,7 @@ class OrchestratorTools:
                         [current_prompt],
                         generation_config={"temperature": 0.0},
                     )
-                    (debug_dir / f"screen_{safe_name}_{hash_str}_a{attempt}.txt").write_text(response.text)
+                    (debug_dir / f"screen_{safe_name}_{hash_str}_a{attempt}.txt").write_text(response.text, encoding="utf-8")
                     parsed, parse_error = parse_json_from_response(response)
                     if parse_error or not parsed or "code" not in parsed:
                         body = _extract_code_block(response.text) or response.text.strip()
@@ -6782,7 +6786,7 @@ class OrchestratorTools:
                 except Exception as e:
                     return json.dumps({"status": "error", "message": f"Codegen failed: {e}"})
 
-                script_path.write_text(code)
+                script_path.write_text(code, encoding="utf-8")
                 print(f"    - Running: {script_path.name} (attempt {attempt + 1}/{max_retries})")
 
                 try:
@@ -6822,7 +6826,7 @@ class OrchestratorTools:
                         "script_path": str(script_path),
                         "attempts_used": attempt + 1,
                     }
-                    result_path.write_text(json.dumps(full, indent=2, default=str))
+                    result_path.write_text(json.dumps(full, indent=2, default=str), encoding="utf-8")
                     print(
                         f"    - ✅ Screened: {full['n_passed']} of {full['n_scanned']} "
                         f"passed; saved {result_path.name}"
@@ -6998,7 +7002,7 @@ class OrchestratorTools:
             knowledge_dir = self.orch.base_dir / "knowledge"
             knowledge_dir.mkdir(parents=True, exist_ok=True)
             knowledge_file = knowledge_dir / f"{entry['id']}.json"
-            with open(knowledge_file, 'w') as f:
+            with open(knowledge_file, 'w', encoding="utf-8") as f:
                 json.dump(entry, f, indent=2)
 
             response = {
@@ -7447,8 +7451,17 @@ class OrchestratorTools:
 
                 # Prior documents the agent names — this is how a revision or
                 # a merge builds on what the session already wrote instead of
-                # re-deriving it.
-                sources, missing = [], []
+                # re-deriving it. Text documents only: a freshly rendered
+                # diagram PNG passed here read as raw bytes and the
+                # UnicodeDecodeError killed the whole authoring call (live).
+                # Images enter documents BY REFERENCE (![...](path) in the
+                # text — the PDF exporter already resolves them), so a
+                # non-text source is refused with that routing hint instead
+                # of crashing or being silently dropped.
+                _text_suffixes = {".md", ".txt", ".json", ".yaml", ".yml",
+                                  ".csv", ".py", ".html", ".mmd", ".tex",
+                                  ".rst", ""}
+                sources, missing, non_text = [], [], []
                 for raw in (source_files or "").split(","):
                     raw = raw.strip()
                     if not raw:
@@ -7456,18 +7469,22 @@ class OrchestratorTools:
                     fp = Path(raw)
                     if not fp.is_absolute():
                         fp = self._output_dir() / raw
-                    if fp.exists():
-                        sources.append(f"### {fp.name}\n{fp.read_text()}")
-                    else:
+                    if not fp.exists():
                         # The agent names its own earlier file; that file
                         # lives in a SIBLING delegation directory, so search
                         # the session root by basename before giving up.
                         hits = sorted(Path(self.orch.base_dir).rglob(fp.name))
-                        if hits:
-                            sources.append(f"### {hits[0].name}\n"
-                                           + hits[0].read_text())
-                        else:
+                        if not hits:
                             missing.append(raw)
+                            continue
+                        fp = hits[0]
+                    if fp.suffix.lower() not in _text_suffixes:
+                        non_text.append(fp.name)
+                        continue
+                    # errors="replace": a stray non-UTF-8 byte in an
+                    # otherwise-text file must not kill authoring either.
+                    sources.append(f"### {fp.name}\n"
+                                   f"{fp.read_text(errors='replace')}")
 
                 # A revision inherits the document's OWN name: falling back
                 # to the request titled the deliverable with the instruction
@@ -7524,7 +7541,7 @@ class OrchestratorTools:
                         while bak.exists():
                             n += 1
                             bak = d / f"{rp.stem}.before_revision{n}{rp.suffix}"
-                        bak.write_text(current or "")
+                        bak.write_text(current or "", encoding="utf-8")
                         # Listed (not starred) so the replaced version shows
                         # up in the files block rather than only on disk.
                         # Under the meta this is the delegation slug; in a
@@ -7565,7 +7582,7 @@ class OrchestratorTools:
                 if not revise_path:
                     text = self._maybe_embed_workflow_diagram(
                         text, out.parent, stem=f"{out.stem}_workflow")
-                out.write_text(text)
+                out.write_text(text, encoding="utf-8")
                 # A revised document's exported PDF twin (the white paper's
                 # forwarded copy) must not keep serving the pre-revision
                 # content; re-export is deterministic, so it does not touch
@@ -7599,6 +7616,14 @@ class OrchestratorTools:
                        "sources_used": len(sources)}
                 if missing:
                     res["source_files_not_found"] = missing
+                if non_text:
+                    res["source_files_skipped"] = non_text
+                    res["source_files_note"] = (
+                        f"{', '.join(non_text)}: not text — an image or "
+                        "other binary cannot be inlined as source text. To "
+                        "include a figure, reference it IN the document "
+                        "body instead: ![caption](<filename>) — the "
+                        "renderer resolves it from the file's directory.")
                 if declined_topics:
                     res["literature_declined"] = {
                         "available_sections": declined_topics,
@@ -7668,10 +7693,13 @@ class OrchestratorTools:
                 "source_files": {
                     "type": "string",
                     "description": (
-                        "Comma-separated files this document should build on "
-                        "— a roadmap you are revising, two documents you are "
-                        "merging. Names of files in the session are resolved "
-                        "for you. Omit for a fresh document."
+                        "Comma-separated TEXT files this document should "
+                        "build on — a roadmap you are revising, two "
+                        "documents you are merging. Names of files in the "
+                        "session are resolved for you. Do NOT list images "
+                        "here: a figure goes in the document body by "
+                        "reference (![caption](file.png)). Omit for a "
+                        "fresh document."
                     ),
                 },
                 "literature_context": {

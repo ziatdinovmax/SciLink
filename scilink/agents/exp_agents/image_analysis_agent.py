@@ -47,6 +47,7 @@ from ...skills._shared.image_analysis_tools import (
 )
 from ._deprecation import normalize_params
 from ...skills.loader import load_skill
+from ...utils.text_io import read_text_utf8
 
 from .instruct import (
     IMAGE_ANALYSIS_INTERPRETATION_INSTRUCTIONS,
@@ -588,7 +589,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         if literature_file:
             lit_p = Path(literature_file)
             if lit_p.is_file():
-                state["literature_context"] = lit_p.read_text()
+                state["literature_context"] = read_text_utf8(lit_p)
                 # Record provenance so the result reflects that literature
                 # was consulted — the in-pipeline LiteratureSearchController
                 # is skipped on this path and never populates literature_files.
@@ -739,7 +740,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         # Save final merged results
         results_path = self.output_dir / "analysis_results.json"
-        with open(results_path, "w") as f:
+        with open(results_path, "w", encoding="utf-8") as f:
             serializable = self._make_serializable(final_results)
             json.dump(serializable, f, indent=2, default=str)
 
