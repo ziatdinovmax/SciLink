@@ -227,12 +227,28 @@ def test_2b_edit_and_rename_file(model_name: str):
         assert incar.read_text().startswith("ENCUT = 520")
         assert (sd / "INCAR.before_edit").exists()   # pre-edit backup kept
 
-        # 2. a non-text artifact is refused
+        # 2. a non-text artifact is refused by the suffix gate
         (sd / "view.png").write_bytes(b"x")
         r = json.loads(orch.tools.execute_tool(
             "edit_file", path=str(sd / "view.png"),
             old_text="a", new_text="b"))
         assert r["status"] == "error"
+
+        # 2b. an extensionless run OUTPUT is refused on CONTENT — the suffix
+        # gate cannot help here, because admitting "" for INCAR/POSCAR
+        # admits WAVECAR/CHGCAR/WAVEDER from the download path too.
+        out = sd / "outputs"
+        out.mkdir(exist_ok=True)
+        wavecar = out / "WAVECAR"
+        original = b"\x00\x01\x02ENCUT = 400\xff\xfe binary tail"
+        wavecar.write_bytes(original)
+        r = json.loads(orch.tools.execute_tool(
+            "edit_file", path=str(wavecar),
+            old_text="ENCUT = 400", new_text="ENCUT = 520"))
+        assert r["status"] == "error", r
+        assert "binary" in r["message"]
+        assert wavecar.read_bytes() == original          # bytes intact
+        assert not (out / "WAVECAR.before_edit").exists()  # no lossy backup
 
         # 3. a path outside the session is refused (sandbox)
         r = json.loads(orch.tools.execute_tool(

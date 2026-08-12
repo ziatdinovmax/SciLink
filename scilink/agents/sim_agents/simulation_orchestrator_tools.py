@@ -1451,6 +1451,11 @@ class SimulationOrchestratorTools:
                 out = apply_surgical_edits(
                     rp, edits, root=root, backup_dir=rp.parent,
                     allowed_suffixes=DEFAULT_EDITABLE_SUFFIXES | _SIM_EDIT_SUFFIXES,
+                    not_found_message=(
+                        "the snippet must match the file byte for byte. "
+                        "For periodic_dft, apply_input_adjustments retunes "
+                        "tags without needing an exact match and is the "
+                        "route to take when a verbatim guess misses."),
                     too_large_message=(
                         "Edit too large for edit_file. For a broader input "
                         "change — retuning several coupled parameters, or "
@@ -1475,8 +1480,8 @@ class SimulationOrchestratorTools:
                 "replacing exact text snippets — one INCAR tag, a timestep, a "
                 "thermostat damping, a pair_style cutoff. The canonical use is "
                 "'change ENCUT to 520 in this INCAR' without regenerating the "
-                "whole input. Copy old_text VERBATIM from the file (read it "
-                "first); each snippet is capped at 2000 characters. Several "
+                "whole input. Copy old_text VERBATIM from the file; each "
+                "snippet is capped at 2000 characters. Several "
                 "changes to ONE file go in a single call as the `edits` list "
                 "(atomic, in order). Retuning several coupled parameters at "
                 "once, or a change that needs the input rebuilt, is "
