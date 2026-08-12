@@ -93,10 +93,15 @@ EXPECTED_TOOLS = {
     "validate_structure",
     "generate_dft_inputs",
     "run_complete_dft_workflow",
+    "run_simulation",
+    "run_mlip_simulation",
+    "run_exafs_workflow",
     "refine_structure",
     "view_structure",
     "validate_inputs",
     "apply_input_adjustments",
+    "edit_file",
+    "rename_file",
     "list_generated_structures",
     "analyze_output",
     "route_simulation",
@@ -202,6 +207,62 @@ def test_2_tool_error_paths(model_name: str):
         assert r["status"] == "error"
 
         print("   ✅ All error paths return structured JSON")
+
+
+def test_2b_edit_and_rename_file(model_name: str):
+    """edit_file / rename_file: surgical, sandboxed, extensionless-VASP aware."""
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        orch = _make_orch(model_name, td + "/sim")
+        sd = Path(orch.base_dir) / "structures" / "mp"
+        sd.mkdir(parents=True, exist_ok=True)
+        incar = sd / "INCAR"                       # extensionless VASP input
+        incar.write_text("ENCUT = 400\nISMEAR = 0\n")
+
+        # 1. the canonical case: change ENCUT in place, no regeneration
+        r = json.loads(orch.tools.execute_tool(
+            "edit_file", path=str(incar),
+            old_text="ENCUT = 400", new_text="ENCUT = 520"))
+        assert r["status"] == "success", r
+        assert incar.read_text().startswith("ENCUT = 520")
+        assert (sd / "INCAR.before_edit").exists()   # pre-edit backup kept
+
+        # 2. a non-text artifact is refused by the suffix gate
+        (sd / "view.png").write_bytes(b"x")
+        r = json.loads(orch.tools.execute_tool(
+            "edit_file", path=str(sd / "view.png"),
+            old_text="a", new_text="b"))
+        assert r["status"] == "error"
+
+        # 2b. an extensionless run OUTPUT is refused on CONTENT — the suffix
+        # gate cannot help here, because admitting "" for INCAR/POSCAR
+        # admits WAVECAR/CHGCAR/WAVEDER from the download path too.
+        out = sd / "outputs"
+        out.mkdir(exist_ok=True)
+        wavecar = out / "WAVECAR"
+        original = b"\x00\x01\x02ENCUT = 400\xff\xfe binary tail"
+        wavecar.write_bytes(original)
+        r = json.loads(orch.tools.execute_tool(
+            "edit_file", path=str(wavecar),
+            old_text="ENCUT = 400", new_text="ENCUT = 520"))
+        assert r["status"] == "error", r
+        assert "binary" in r["message"]
+        assert wavecar.read_bytes() == original          # bytes intact
+        assert not (out / "WAVECAR.before_edit").exists()  # no lossy backup
+
+        # 3. a path outside the session is refused (sandbox)
+        r = json.loads(orch.tools.execute_tool(
+            "edit_file", path="/etc/hosts",
+            old_text="localhost", new_text="x"))
+        assert r["status"] == "error"
+
+        # 4. byte-exact rename within the file's own directory
+        r = json.loads(orch.tools.execute_tool(
+            "rename_file", path=str(incar), new_name="INCAR.bak"))
+        assert r["status"] == "success", r
+        assert (sd / "INCAR.bak").exists()
+
+        print("   ✅ edit_file/rename_file: surgical, sandboxed, VASP-aware")
 
 
 def test_3_post_run_analysis_synthetic(model_name: str):
@@ -863,6 +924,7 @@ def integration_1_hpc_slurm(model_name: str):
 TARGETED_TESTS = [
     ("Orchestrator constructs",                test_1_orchestrator_constructs),
     ("Tool error paths",                       test_2_tool_error_paths),
+    ("edit_file / rename_file",                test_2b_edit_and_rename_file),
     ("Post-run analysis (synthetic)",          test_3_post_run_analysis_synthetic),
     ("Mode switching",                         test_4_mode_switching),
     ("run_task without LLM",                   test_5_run_task_without_llm),

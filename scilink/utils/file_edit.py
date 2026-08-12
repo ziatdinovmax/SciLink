@@ -10,15 +10,17 @@ wrappers: relative-path resolution, deliverable recording, transcript
 prints, and the routing text in error hints (each mode names ITS OWN
 alternative tool for oversized edits).
 
-Consumers today: the planning orchestrator's `edit_file`. Analysis and
-simulation orchestrators are the intended follow-ups — note that VASP
-inputs (POSCAR / INCAR / KPOINTS) are extensionless, which is why the
-suffix policy is a parameter: include "" in `allowed_suffixes` to permit
-extensionless files.
+Consumers today: the planning and simulation orchestrators' `edit_file`;
+the analysis orchestrator is the intended follow-up. VASP inputs (POSCAR /
+INCAR / KPOINTS) are extensionless, which is why the suffix policy is a
+parameter: include "" in `allowed_suffixes` to permit extensionless files.
+Doing so widens the gate past what a name can decide, so the size and
+binary/UTF-8 content guards below carry the rest of that decision.
 """
 from __future__ import annotations
 
 import logging
+import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional, Set, Tuple
 
@@ -31,9 +33,29 @@ DEFAULT_EDITABLE_SUFFIXES: Set[str] = {
 # Surgical means SMALL — see module docstring.
 DEFAULT_MAX_SNIPPET_LEN = 2000
 
+# The suffix allowlist cannot carry the whole "is this editable" decision
+# once "" is in it: VASP writes its INPUTS extensionless (INCAR, POSCAR,
+# KPOINTS) and its OUTPUTS extensionless too (WAVECAR, CHGCAR, WAVEDER),
+# and the two are indistinguishable by name. So content and size are
+# checked as well — a NUL in the first few KB means binary, and a file
+# past the byte cap is a run artifact rather than a deck under edit.
+# CHGCAR is the case that needs both: it is ASCII, so only the cap stops
+# it. Cap chosen to clear the largest plausible text deck (a LAMMPS
+# .data for a few hundred thousand atoms) by a wide margin.
+DEFAULT_MAX_FILE_BYTES = 16 * 1024 * 1024
+_BINARY_SNIFF_BYTES = 8192
+
 DEFAULT_TOO_LARGE_MESSAGE = (
     "Edit too large for edit_file — split the change at a unique boundary "
     "into consecutive smaller edit_file calls."
+)
+
+# The recovery route when a verbatim snippet guess misses. Parameterized
+# for the same reason as `too_large_message`: each mode names a surface it
+# actually has (planning has read_file; simulate does not).
+DEFAULT_NOT_FOUND_MESSAGE = (
+    "read_file the document and copy the snippet verbatim, "
+    "whitespace included."
 )
 
 
@@ -43,6 +65,7 @@ def apply_snippet_edits(
     *,
     max_len: int = DEFAULT_MAX_SNIPPET_LEN,
     too_large_message: str = DEFAULT_TOO_LARGE_MESSAGE,
+    not_found_message: str = DEFAULT_NOT_FOUND_MESSAGE,
 ) -> Dict[str, Any]:
     """Atomically apply a SEQUENCE of exact-snippet replacements to text.
 
@@ -90,9 +113,8 @@ def apply_snippet_edits(
                           "edits. Nothing was applied.") if batch else ""
             return {"status": "error", "failed_edit": i + 1,
                     "message": (
-                        f"{label}old_text not found — read_file the "
-                        "document and copy the snippet verbatim, "
-                        f"whitespace included.{batch_note}")}
+                        f"{label}old_text not found — "
+                        f"{not_found_message}{batch_note}")}
         if n > 1 and not ra:
             batch_note = (" Nothing was applied." if batch else "")
             return {"status": "error", "failed_edit": i + 1,
@@ -133,7 +155,9 @@ def apply_surgical_edits(
     backup_dir: Path,
     max_len: int = DEFAULT_MAX_SNIPPET_LEN,
     allowed_suffixes: Set[str] = DEFAULT_EDITABLE_SUFFIXES,
+    max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
     too_large_message: str = DEFAULT_TOO_LARGE_MESSAGE,
+    not_found_message: str = DEFAULT_NOT_FOUND_MESSAGE,
     root_label: str = "session directory",
 ) -> Dict[str, Any]:
     """Apply an atomic batch of exact-snippet edits to `path`, guarded and
@@ -146,10 +170,13 @@ def apply_surgical_edits(
     ``status: "error"`` (plus ``message``, and ``failed_edit`` when a
     specific edit failed). Never raises for expected failures.
 
-    Path guards: sandbox (inside `root`), existence, suffix allowlist.
-    Per-edit guards live in :func:`apply_snippet_edits` (all-or-nothing);
-    `too_large_message` is the mode's routing hint — it should name that
-    mode's alternative tool.
+    Path guards: sandbox (inside `root`), existence, suffix allowlist,
+    byte cap, and a binary/UTF-8 content check. The last two exist because
+    a mode that allows "" (extensionless VASP inputs) thereby also matches
+    extensionless run OUTPUTS — see `DEFAULT_MAX_FILE_BYTES`. Per-edit
+    guards live in :func:`apply_snippet_edits` (all-or-nothing);
+    `too_large_message` and `not_found_message` are the mode's routing
+    hints — each should name a surface that mode actually has.
 
     Backup: ONE per file per `backup_dir` — ``<stem>.before_edit<suffix>``
     holds the state before this backup dir's FIRST edit of the file, and
@@ -175,9 +202,50 @@ def apply_surgical_edits(
                 "message": (f"'{rp.suffix}' is not an editable text "
                             f"format ({shown}).")}
 
-    current = rp.read_text(errors="replace")
+    size = rp.stat().st_size
+    if size > max_file_bytes:
+        return {"status": "error",
+                "message": (
+                    f"{rp.name} is {size / (1024 * 1024):.1f} MB, over the "
+                    f"{max_file_bytes // (1024 * 1024)} MB in-place edit cap "
+                    "— a file this size is a run output, not an editable "
+                    "input.")}
+    # Bytes, then a STRICT decode. read_text(errors="replace") here does not
+    # merely mangle the edit — it rewrites every undecodable byte in the
+    # whole file as U+FFFD and reports success, so refusing is the only safe
+    # answer once the file is not text.
+    try:
+        raw = rp.read_bytes()
+    except OSError as e:
+        return {"status": "error",
+                "message": f"Could not read {rp.name}: {e}"}
+    if b"\x00" in raw[:_BINARY_SNIFF_BYTES]:
+        return {"status": "error",
+                "message": (f"{rp.name} is a binary file — refusing to "
+                            "edit it as text.")}
+    try:
+        current = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return {"status": "error",
+                "message": (f"{rp.name} is not valid UTF-8 text — refusing "
+                            "to edit it as text.")}
+
+    # The old read_text() path normalized newlines on read; the strict
+    # decode above does not, so an \n-authored old_text would never match
+    # a CRLF file. Match and edit in \n form — snippets included, so an
+    # \r\n inside new_text can't survive into the re-expansion below —
+    # then restore the file's own convention on the way out.
+    uses_crlf = "\r\n" in current
+    if uses_crlf:
+        current = current.replace("\r\n", "\n")
+        edits = [{**e, **{k: e[k].replace("\r\n", "\n")
+                          for k in ("old_text", "new_text")
+                          if isinstance(e.get(k), str)}}
+                 for e in edits]
+
     res = apply_snippet_edits(current, edits, max_len=max_len,
-                              too_large_message=too_large_message)
+                              too_large_message=too_large_message,
+                              not_found_message=not_found_message)
     if res["status"] != "success":
         return res
 
@@ -188,13 +256,24 @@ def apply_surgical_edits(
         backup_dir.mkdir(parents=True, exist_ok=True)
         bak = backup_dir / f"{rp.stem}.before_edit{rp.suffix}"
         if not bak.exists():
-            bak.write_text(current, encoding="utf-8")
+            # copyfile, not write_text(current): the backup is the only
+            # route back from a bad edit, so it must be the file's bytes
+            # rather than a re-encoding of what we decoded from them.
+            # This supersedes the encoding="utf-8" that the package-wide
+            # sweep put on the old write_text — copying never decodes, so
+            # there is no encoding to state. Don't restore the write.
+            shutil.copyfile(rp, bak)
             created = True
     except Exception as e:  # noqa: BLE001 - never block the edit
         logging.warning(f"Pre-edit copy failed: {e}")
         bak = None
 
-    rp.write_text(res["text"], encoding="utf-8")
+    text = res["text"]
+    if uses_crlf:
+        text = text.replace("\n", "\r\n")
+    # newline="" so the newlines above reach the disk as-is — the default
+    # translation would expand each \r\n to \r\r\n on Windows.
+    rp.write_text(text, encoding="utf-8", newline="")
     return {
         "status": "success",
         "path": str(rp),
@@ -226,8 +305,6 @@ def rename_or_copy_file(
     one exists and the destination twin is free), preserving the
     twins-never-go-stale invariant across renames.
     """
-    import shutil
-
     src, dest, root = Path(src), Path(dest), Path(root).resolve()
     for label, p in (("path", src), ("new path", dest)):
         if root not in p.parents:

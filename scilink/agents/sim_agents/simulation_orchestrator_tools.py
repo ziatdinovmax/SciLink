@@ -1416,6 +1416,161 @@ class SimulationOrchestratorTools:
         )
 
         # =====================================================================
+        # 10b. EDIT / RENAME FILE — surgical, byte-exact, no LLM regeneration
+        # =====================================================================
+        # Editable input/deck formats: "" covers extensionless VASP inputs
+        # (INCAR/POSCAR/KPOINTS/POTCAR); the rest are LAMMPS/QE decks and job
+        # scripts. On top of the shared text defaults.
+        _SIM_EDIT_SUFFIXES = {
+            "", ".lammps", ".data", ".in", ".param", ".mod", ".inc",
+            ".sbatch", ".pwi", ".lmp",
+        }
+
+        def edit_file(path: str, old_text: str = None, new_text: str = None,
+                      replace_all: bool = False, edits: list = None) -> str:
+            """Mechanical in-place edit of a generated input/deck file:
+            replace exact text snippets, one old/new pair or a batched `edits`
+            list applied atomically. For retuning several coupled parameters,
+            use apply_input_adjustments instead."""
+            print(f"  ⚡ Tool: Editing file '{path}'...")
+            try:
+                from ...utils.file_edit import (apply_surgical_edits,
+                                                 DEFAULT_EDITABLE_SUFFIXES)
+                if not edits:
+                    if old_text is None or new_text is None:
+                        return json.dumps({"status": "error", "message": (
+                            "Provide old_text+new_text or a non-empty edits "
+                            "list.")})
+                    edits = [{"old_text": old_text, "new_text": new_text,
+                              "replace_all": replace_all}]
+                root = Path(self.orch.base_dir).resolve()
+                rp = Path(path)
+                if not rp.is_absolute():
+                    rp = root / rp
+                rp = rp.resolve()
+                out = apply_surgical_edits(
+                    rp, edits, root=root, backup_dir=rp.parent,
+                    allowed_suffixes=DEFAULT_EDITABLE_SUFFIXES | _SIM_EDIT_SUFFIXES,
+                    not_found_message=(
+                        "the snippet must match the file byte for byte. "
+                        "For periodic_dft, apply_input_adjustments retunes "
+                        "tags without needing an exact match and is the "
+                        "route to take when a verbatim guess misses."),
+                    too_large_message=(
+                        "Edit too large for edit_file. For a broader input "
+                        "change — retuning several coupled parameters, or "
+                        "regenerating a deck — use apply_input_adjustments. For "
+                        "a verbatim insertion, split the text at a unique "
+                        "boundary into consecutive smaller edit_file calls."),
+                )
+                if out["status"] == "success":
+                    n = out.get("n_edits", 1)
+                    print(f"    ✏️  Edited in place"
+                          f"{f' ({n} edits)' if n > 1 else ''}: {rp.name}")
+                return json.dumps(out)
+            except Exception as e:
+                logging.error(f"edit_file failed: {e}", exc_info=True)
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=edit_file,
+            name="edit_file",
+            description=(
+                "Surgically edit a generated input or deck file IN PLACE by "
+                "replacing exact text snippets — one INCAR tag, a timestep, a "
+                "thermostat damping, a pair_style cutoff. The canonical use is "
+                "'change ENCUT to 520 in this INCAR' without regenerating the "
+                "whole input. Copy old_text VERBATIM from the file; each "
+                "snippet is capped at 2000 characters. Several "
+                "changes to ONE file go in a single call as the `edits` list "
+                "(atomic, in order). Retuning several coupled parameters at "
+                "once, or a change that needs the input rebuilt, is "
+                "apply_input_adjustments' job, not this. A pre-edit backup is "
+                "kept automatically."
+            ),
+            parameters={
+                "path": {"type": "string", "description": (
+                    "Path of the file to edit — absolute, or relative to the "
+                    "session directory. Must be inside the session.")},
+                "old_text": {"type": "string", "description": (
+                    "Single-edit form: the exact snippet to replace, copied "
+                    "VERBATIM including whitespace. Must match exactly one "
+                    "place unless replace_all. Omit when passing `edits`.")},
+                "new_text": {"type": "string", "description": (
+                    "Single-edit form: the replacement text. Omit with "
+                    "`edits`.")},
+                "replace_all": {"type": "boolean", "description": (
+                    "Single-edit form: replace every occurrence instead of "
+                    "requiring a unique match. Default false.")},
+                "edits": {
+                    "type": "array",
+                    "items": {"type": "object", "properties": {
+                        "old_text": {"type": "string"},
+                        "new_text": {"type": "string"},
+                        "replace_all": {"type": "boolean"}},
+                        "required": ["old_text", "new_text"]},
+                    "description": (
+                        "Batched form: ALL changes for this file in one call, "
+                        "applied in order; all-or-nothing — if one edit fails "
+                        "to match, nothing is applied.")},
+            },
+            required=["path"],
+        )
+
+        def rename_file(path: str, new_name: str, copy: bool = False) -> str:
+            """Byte-exact rename (or copy) of a generated file within its own
+            directory — the content never passes through the model."""
+            print(f"  ⚡ Tool: {'Copying' if copy else 'Renaming'} "
+                  f"'{path}' → '{new_name}'...")
+            try:
+                from ...utils.file_edit import rename_or_copy_file
+                root = Path(self.orch.base_dir).resolve()
+                rp = Path(path)
+                if not rp.is_absolute():
+                    rp = root / rp
+                rp = rp.resolve()
+                safe = Path(new_name).name
+                if not safe:
+                    return json.dumps({"status": "error",
+                                       "message": "Invalid new_name."})
+                dest = (rp.parent / safe).resolve()
+                if dest == rp:
+                    return json.dumps({"status": "error", "message": (
+                        f"'{safe}' is already this file's name — nothing to "
+                        f"do.")})
+                out = rename_or_copy_file(rp, dest, root=root, copy=copy)
+                if out["status"] == "success":
+                    print(f"    📛 {'Copied' if copy else 'Renamed'}: "
+                          f"{Path(out['path']).name}")
+                return json.dumps(out)
+            except Exception as e:
+                logging.error(f"rename_file failed: {e}", exc_info=True)
+                return json.dumps({"status": "error", "message": str(e)})
+
+        self._register_tool(
+            func=rename_file,
+            name="rename_file",
+            description=(
+                "Rename or copy a generated file BYTE-EXACTLY within its own "
+                "directory — the content never passes through the model. Use "
+                "for a byte-exact rename (copy=false) or an exact duplicate "
+                "(copy=true); never reconstruct a file by regenerating it to "
+                "rename it, which risks perturbing the content."
+            ),
+            parameters={
+                "path": {"type": "string", "description": (
+                    "Path of the file to rename — absolute or relative to the "
+                    "session directory.")},
+                "new_name": {"type": "string", "description": (
+                    "The new bare filename (kept in the file's own "
+                    "directory).")},
+                "copy": {"type": "boolean", "description": (
+                    "Copy instead of rename (default false).")},
+            },
+            required=["path", "new_name"],
+        )
+
+        # =====================================================================
         # 11. LIST GENERATED STRUCTURES
         # =====================================================================
         def list_generated_structures() -> str:
