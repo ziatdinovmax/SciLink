@@ -158,7 +158,7 @@ def promote_memory(
         # No frontmatter left; drop the fence entirely.
         new_text = body.lstrip("\n")
 
-    md.write_text(new_text)
+    md.write_text(new_text, encoding="utf-8")
 
     moved_to = None
     if to_domain and to_domain != domain:
@@ -211,7 +211,7 @@ def demote_memory(domain: str, name: str, *, root: Optional[Path] = None) -> Dic
         allow_unicode=True,
         width=10_000,
     ).strip()
-    md.write_text(f"---\n{frontmatter}\n---\n{body}")
+    md.write_text(f"---\n{frontmatter}\n---\n{body}", encoding="utf-8")
     return {
         "status": "success",
         "name": name,
@@ -257,8 +257,8 @@ def edit_memory(domain: str, name: str, content: str, *,
                 "message": "The skill needs at least one '## section' heading."}
 
     backup = md.with_name(md.name + ".bak")
-    backup.write_text(md.read_text())
-    md.write_text(content)
+    backup.write_text(md.read_text(), encoding="utf-8")
+    md.write_text(content, encoding="utf-8")
     return {"status": "success", "path": str(md), "backup_path": str(backup)}
 
 
@@ -291,7 +291,7 @@ def fork_builtin(domain: str, name: str, *, root: Optional[Path] = None) -> Dict
                             f"({dest_md}); upgrade or prune that copy.")}
     dest_dir.mkdir(parents=True, exist_ok=True)
     (dest_dir / "__init__.py").touch()
-    dest_md.write_text(src_md.read_text())
+    dest_md.write_text(src_md.read_text(), encoding="utf-8")
     sibling_tools = sorted(
         f.name for f in src_md.parent.glob("*.py") if f.name != "__init__.py")
     return {

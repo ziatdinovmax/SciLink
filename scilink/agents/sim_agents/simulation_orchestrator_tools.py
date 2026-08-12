@@ -1628,7 +1628,7 @@ class SimulationOrchestratorTools:
                     extra_directives=extra_directives,
                 )
                 local_script = Path(record["structure_dir"]) / "job.sh"
-                local_script.write_text(script_content)
+                local_script.write_text(script_content, encoding="utf-8")
                 remote_script = f"{remote_dir}/job.sh"
                 conn.upload(str(local_script), remote_script)
 
@@ -2001,7 +2001,7 @@ class SimulationOrchestratorTools:
                 else Path(record["structure_dir"]) / "final_report.md"
             )
             try:
-                out_path.write_text(report_text)
+                out_path.write_text(report_text, encoding="utf-8")
             except Exception as e:
                 return json.dumps({"status": "error", "message": f"Failed to write report: {e}"})
 

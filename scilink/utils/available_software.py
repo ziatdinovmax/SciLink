@@ -357,7 +357,7 @@ class AvailableSoftware:
         """Write the state to YAML, returning the path written."""
         p = Path(path) if path else _yaml_path()
         p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "w") as f:
+        with open(p, "w", encoding="utf-8") as f:
             yaml.safe_dump(
                 self._data, f, sort_keys=True, default_flow_style=False
             )

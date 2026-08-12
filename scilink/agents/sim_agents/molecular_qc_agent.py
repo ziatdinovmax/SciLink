@@ -373,7 +373,7 @@ class MolecularQCAgent:
         try:
             for filename, content in input_files.items():
                 path = os.path.join(output_dir, filename)
-                with open(path, 'w') as f:
+                with open(path, 'w', encoding="utf-8") as f:
                     f.write(content)
                 saved[filename] = path
             return saved

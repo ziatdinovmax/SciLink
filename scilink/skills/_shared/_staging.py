@@ -99,7 +99,7 @@ def stage_solution(
     d.mkdir(parents=True, exist_ok=True)
     sid = uuid.uuid4().hex[:8]
     payload = {"id": sid, "domain": domain, "technique": technique, **record}
-    (d / f"{sid}.json").write_text(json.dumps(payload, indent=2, default=str))
+    (d / f"{sid}.json").write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     return sid
 
 
@@ -162,7 +162,7 @@ def relabel_staged(domain: str, sid: str, technique: str, *,
         return {"status": "error", "message": "Empty technique label."}
     rec["technique"] = label
     (_domain_dir(domain, root=root) / f"{sid}.json").write_text(
-        json.dumps(rec, indent=2, default=str))
+        json.dumps(rec, indent=2, default=str), encoding="utf-8")
     return {"status": "success", "technique": label, "id": sid}
 
 
@@ -541,9 +541,9 @@ def apply_skill_upgrade(
     # Back up the current version (single last-version undo; .bak is ignored by
     # the loader, which only discovers <name>.md).
     backup = target_md.with_name(target_md.name + ".bak")
-    backup.write_text(target_md.read_text())
+    backup.write_text(target_md.read_text(), encoding="utf-8")
     (target_md.parent / "__init__.py").touch()
-    target_md.write_text(proposed_content)
+    target_md.write_text(proposed_content, encoding="utf-8")
     removed = remove_staged(domain, staged_ids, root=root)
     return {
         "status": "success",

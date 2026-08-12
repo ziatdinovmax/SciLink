@@ -1226,7 +1226,7 @@ class MetaOrchestratorTools:
                     continue
                 scalars = {k: v for k, v in cond.items()
                            if isinstance(v, (int, float, str, bool))}
-                sidecar.write_text(json.dumps(scalars, indent=2))
+                sidecar.write_text(json.dumps(scalars, indent=2), encoding="utf-8")
                 written.append(str(sidecar))
             return json.dumps({
                 "status": "success" if written or skipped else "error",

@@ -4307,7 +4307,7 @@ Return JSON with:
                             / CANDIDATES_DIR_NAME / f"cand_{attempt:02d}"
                         )
                         cdir.mkdir(parents=True, exist_ok=True)
-                        with open(cdir / "attempt_result.json", "w") as f:
+                        with open(cdir / "attempt_result.json", "w", encoding="utf-8") as f:
                             json.dump({
                                 "attempt": attempt,
                                 "score": candidates[-1]["score"],
@@ -5622,7 +5622,7 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
                         r["flag_details"] = flag_info.get("details")
 
                 flagged_report_path = self.output_dir / "flagged_images.json"
-                with open(flagged_report_path, 'w') as f:
+                with open(flagged_report_path, 'w', encoding="utf-8") as f:
                     json.dump({
                         "timestamp": datetime.now().isoformat(),
                         "outlier_sigma": self.outlier_sigma,
@@ -5684,7 +5684,7 @@ Return JSON: {{"change_type": "cosmetic" | "analytical" | "rewrite", \
 
         # Save series results
         results_path = self.output_dir / "series_analysis_results.json"
-        with open(results_path, 'w') as f:
+        with open(results_path, 'w', encoding="utf-8") as f:
             serializable_results = []
             for r in series_results:
                 r_copy = {
@@ -6660,7 +6660,7 @@ Return JSON with:
             script = "import matplotlib\nmatplotlib.use('Agg')\n" + script
 
         script_path = self.output_dir / "trend_analysis.py"
-        with open(script_path, 'w') as f:
+        with open(script_path, 'w', encoding="utf-8") as f:
             f.write(script)
         result = self.executor.execute_script(
             script, working_dir=str(self.output_dir)

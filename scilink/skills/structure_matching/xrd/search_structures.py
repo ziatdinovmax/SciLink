@@ -323,7 +323,7 @@ def _materialize_cifs(
             continue
         path = output_dir / f"{cand.source}_{cand.id}.cif"
         try:
-            with open(path, "w") as f:
+            with open(path, "w", encoding="utf-8") as f:
                 f.write(struct.to(fmt="cif"))
             cand.structure_path = str(path)
         except Exception as e:

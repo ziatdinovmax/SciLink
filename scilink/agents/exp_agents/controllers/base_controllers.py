@@ -58,12 +58,12 @@ class LiteratureSearchController:
             os.makedirs(lit_dir, exist_ok=True)
 
             query_path = os.path.join(lit_dir, "search_query.txt")
-            with open(query_path, "w") as f:
+            with open(query_path, "w", encoding="utf-8") as f:
                 f.write(query)
             saved_files["query_file"] = query_path
 
             report_path = os.path.join(lit_dir, "literature_report.md")
-            with open(report_path, "w") as f:
+            with open(report_path, "w", encoding="utf-8") as f:
                 f.write(report)
             saved_files["report_file"] = report_path
         except Exception as e:

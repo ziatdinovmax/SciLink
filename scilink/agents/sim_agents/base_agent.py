@@ -317,7 +317,7 @@ class SimulationAgent(ABC):
             "Return ONLY the file. No markdown."
         )
         updated = self._clean_output(self._generate_text(prompt))
-        script_path.write_text(updated)
+        script_path.write_text(updated, encoding="utf-8")
         self.logger.info(f"Refined: {script_path}")
         return {
             "script_path": str(script_path),
@@ -350,7 +350,7 @@ class SimulationAgent(ABC):
             "Return ONLY the file. No markdown."
         )
         fixed = self._clean_output(self._generate_text(prompt))
-        script_path.write_text(fixed)
+        script_path.write_text(fixed, encoding="utf-8")
         self.logger.info(f"Fixed: {script_path}")
         return {
             "script_path": str(script_path),

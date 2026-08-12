@@ -726,7 +726,7 @@ def _mace_train(
 
     # Write config
     config_path = os.path.join(model_dir, "config.json")
-    with open(config_path, "w") as f:
+    with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)
 
     # Build CLI
@@ -744,7 +744,7 @@ def _mace_train(
 
     logger.info(f"Starting MACE training ({model_name})...")
 
-    with open(stdout_log, "w") as out, open(stderr_log, "w") as err:
+    with open(stdout_log, "w", encoding="utf-8") as out, open(stderr_log, "w", encoding="utf-8") as err:
         proc = subprocess.run(
             cli, stdout=out, stderr=err,
             cwd=working_dir,
@@ -965,10 +965,10 @@ LREAL = Auto
 LWAVE = .FALSE.
 LCHARG = .FALSE.
 """
-    with open(os.path.join(calc_dir, "INCAR"), "w") as f:
+    with open(os.path.join(calc_dir, "INCAR"), "w", encoding="utf-8") as f:
         f.write(incar)
 
-    with open(os.path.join(calc_dir, "KPOINTS"), "w") as f:
+    with open(os.path.join(calc_dir, "KPOINTS"), "w", encoding="utf-8") as f:
         f.write(f"Automatic\n0\nGamma\n{kpoints[0]} {kpoints[1]} {kpoints[2]}\n0 0 0\n")
 
 
@@ -978,7 +978,7 @@ def _write_cp2k_inputs(atoms, calc_dir, settings):
 
     ase.io.write(os.path.join(calc_dir, "structure.xyz"), atoms, format="xyz")
     # Minimal template — user should customize
-    with open(os.path.join(calc_dir, "cp2k.inp"), "w") as f:
+    with open(os.path.join(calc_dir, "cp2k.inp"), "w", encoding="utf-8") as f:
         f.write("# CP2K input template — customize for your system\n")
         f.write("# Structure: structure.xyz\n")
 

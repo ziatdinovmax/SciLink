@@ -187,7 +187,7 @@ def write_feature_table(output_dir) -> Optional[str]:
                 if key not in columns:
                     columns.append(key)
         dest = output_dir / "features.csv"
-        with open(dest, "w", newline="") as fh:
+        with open(dest, "w", newline="", encoding="utf-8") as fh:
             writer = csv.DictWriter(fh, fieldnames=columns)
             writer.writeheader()
             for row in rows:

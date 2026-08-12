@@ -192,7 +192,7 @@ Analyze the literature review and suggest specific parameter adjustments if need
 
         try:
             report_path = os.path.join(output_dir, "incar_validation_report.json")
-            with open(report_path, 'w') as f:
+            with open(report_path, 'w', encoding="utf-8") as f:
                 json.dump(validation_result, f, indent=2, default=str)
             saved_files["validation_report"] = report_path
 
@@ -200,12 +200,12 @@ Analyze the literature review and suggest specific parameter adjustments if need
                     validation_result.get("revised_incar")):
 
                 revised_path = os.path.join(output_dir, "INCAR_revised")
-                with open(revised_path, 'w') as f:
+                with open(revised_path, 'w', encoding="utf-8") as f:
                     f.write(validation_result["revised_incar"])
                 saved_files["revised_incar"] = revised_path
 
                 summary_path = os.path.join(output_dir, "incar_adjustments.txt")
-                with open(summary_path, 'w') as f:
+                with open(summary_path, 'w', encoding="utf-8") as f:
                     f.write("INCAR Parameter Adjustments\n")
                     f.write("=" * 30 + "\n\n")
                     f.write(f"Overall Assessment: {validation_result.get('overall_assessment', 'N/A')}\n\n")

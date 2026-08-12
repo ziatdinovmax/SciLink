@@ -192,7 +192,7 @@ class ClusterExecutor(Executor):
         # Materialize inputs locally too — gives the local snapshot the inputs
         # and serves as the upload source.
         for name, contents in (input_files or {}).items():
-            (run_path / name).write_text(contents)
+            (run_path / name).write_text(contents, encoding="utf-8")
 
         self._ensure_connected()
         sched = self._resolve_scheduler()
@@ -207,7 +207,7 @@ class ClusterExecutor(Executor):
             resources=self.resources, setup=self.setup,
             stdout_file=_STDOUT, stderr_file=_STDERR, rc_file=_RC,
         )
-        (run_path / self.job_script_name).write_text(script)
+        (run_path / self.job_script_name).write_text(script, encoding="utf-8")
         self.conn.upload(
             str(run_path / self.job_script_name),
             f"{remote_dir}/{self.job_script_name}",
@@ -216,8 +216,8 @@ class ClusterExecutor(Executor):
         try:
             job_id = sched.submit(self.job_script_name, work_dir=remote_dir)
         except Exception as exc:  # noqa: BLE001 — surface as an executor error
-            (run_path / _STDERR).write_text(f"Job submission failed: {exc}")
-            (run_path / _RC).write_text("submit_error")
+            (run_path / _STDERR).write_text(f"Job submission failed: {exc}", encoding="utf-8")
+            (run_path / _RC).write_text("submit_error", encoding="utf-8")
             return {
                 "status": "error", "output_dir": str(run_path),
                 "returncode": None, "error": f"Job submission failed: {exc}",
@@ -233,9 +233,9 @@ class ClusterExecutor(Executor):
                 sched.cancel(job_id)
                 self._download_outputs(remote_dir, run_path)
                 (run_path / _STDERR).write_text(
-                    f"Job {job_id} exceeded {self.timeout}s wall-clock; cancelled."
+                    f"Job {job_id} exceeded {self.timeout}s wall-clock; cancelled.", encoding="utf-8"
                 )
-                (run_path / _RC).write_text("timeout")
+                (run_path / _RC).write_text("timeout", encoding="utf-8")
                 return {
                     "status": "error", "output_dir": str(run_path),
                     "returncode": None,

@@ -7,6 +7,10 @@ Routes to different agent types: plan, simulate, analyze
 import sys
 import os
 
+# Set on the re-exec'd child so a restart that fails to take UTF-8 mode warns
+# once instead of forking forever.
+_UTF8_REEXEC_FLAG = "SCILINK_UTF8_RESTARTED"
+
 
 def get_terminal_color_support():
     """
@@ -110,9 +114,60 @@ def print_gradient_logo():
     
     print()
 
+def ensure_utf8_mode() -> None:
+    """Restart under Python's UTF-8 mode when the locale encoding cannot hold
+    scientific text.
+
+    `open()` writes in the locale encoding unless told otherwise. On a
+    Western-European Windows install that is cp1252, which has no subscript,
+    no arrow and no superscript minus — so persisting a literature answer or
+    a technical document raises UnicodeEncodeError and loses the work. There
+    are ~190 text writes across the package; pinning each one is a treadmill,
+    and it would still leave third-party writers broken.
+
+    UTF-8 mode fixes all of them at once, but it can only be enabled before
+    the interpreter starts — hence the re-exec. This is a no-op wherever the
+    locale is already UTF-8 (every Linux and macOS install, and a Windows one
+    with the UTF-8 beta option enabled), so it cannot perturb a working
+    setup. Library and notebook users bypass this entry point; for them the
+    explicit `encoding=` at each write site is what carries the fix.
+    """
+    import locale
+    import subprocess
+
+    if sys.flags.utf8_mode:
+        return
+    encoding = (locale.getpreferredencoding(False) or "").lower().replace("-", "")
+    if encoding == "utf8":
+        return
+
+    # A failed re-exec must not spawn another one.
+    if os.environ.get(_UTF8_REEXEC_FLAG):
+        print(f"  ⚠️  Locale encoding is {encoding or 'unknown'}, not UTF-8, and "
+              f"the automatic restart did not take. Non-ASCII output may fail "
+              f"to save — set PYTHONUTF8=1 before launching scilink.")
+        return
+
+    env = dict(os.environ, PYTHONUTF8="1", **{_UTF8_REEXEC_FLAG: "1"})
+    cmd = [sys.executable, "-X", "utf8", "-m", "scilink.cli.main", *sys.argv[1:]]
+    try:
+        completed = subprocess.run(cmd, env=env)
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except Exception as e:  # noqa: BLE001 - never block startup on this
+        print(f"  ⚠️  Could not restart under UTF-8 ({e}). Non-ASCII output may "
+              f"fail to save — set PYTHONUTF8=1 before launching scilink.")
+        return
+    sys.exit(completed.returncode)
+
+
 def main():
     """Main CLI entry point with subcommands"""
-    
+
+    # Before anything else: a non-UTF-8 locale silently breaks every write of
+    # model-generated text, so correct it while a restart is still cheap.
+    ensure_utf8_mode()
+
     # Skip logo for MCP server mode (stdout is the transport)
     if len(sys.argv) >= 2 and sys.argv[1] == 'serve':
         from scilink.cli.serve import main as serve_main

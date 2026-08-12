@@ -319,7 +319,7 @@ savepdb x {pdb_path.resolve()}
 quit
 """
     script_path = output_dir / "_build_test.in"
-    script_path.write_text(tleap_script)
+    script_path.write_text(tleap_script, encoding="utf-8")
 
     result = subprocess.run(
         ["tleap", "-f", str(script_path)],
@@ -461,7 +461,7 @@ def _run_preparation(
     }
 
     prep_file = output_path / "preparation.json"
-    with open(prep_file, "w") as f:
+    with open(prep_file, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2, default=str)
 
     # ── Print summary ─────────────────────────────────────────────

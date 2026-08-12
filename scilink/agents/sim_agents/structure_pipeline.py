@@ -509,7 +509,7 @@ class StructurePipeline:
         try:
             log_content = self.log_capture.getvalue()
             log_path = os.path.join(self.output_dir, "workflow_log.txt")
-            with open(log_path, 'w') as f:
+            with open(log_path, 'w', encoding="utf-8") as f:
                 f.write(f"SciLink Workflow Log\n")
                 f.write(f"{'='*30}\n\n")
                 f.write(log_content)

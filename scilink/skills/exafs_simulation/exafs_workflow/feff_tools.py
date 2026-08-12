@@ -296,7 +296,7 @@ def generate_feff_inputs_from_trajectory(
             ipots_string=ipots_string,
             atoms_string=atoms_string,
         )
-        (subdir / "feff.inp").write_text(inp_content)
+        (subdir / "feff.inp").write_text(inp_content, encoding="utf-8")
 
     neighborhoods_path = output_dir / f"neighborhoods_{target_atom}.xyz"
     write(str(neighborhoods_path), carved_regions, format="extxyz")
@@ -389,7 +389,7 @@ def average_chi(directory: str, savefile: str) -> dict[str, Any]:
 
     paired = np.vstack((k_common, chi_mean)).T
     output_file = f"{savefile}-chi_avg.dat"
-    with open(output_file, "w") as f:
+    with open(output_file, "w", encoding="utf-8") as f:
         f.writelines([" ".join(row) + "\n" for row in paired.astype(str)])
 
     return {

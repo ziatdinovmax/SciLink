@@ -225,7 +225,7 @@ def reduce_curves(curves: list, controls=None, control_source: str = "index",
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
             jpath = os.path.join(out_dir, "reduction.json")
-            with open(jpath, "w") as fh:
+            with open(jpath, "w", encoding="utf-8") as fh:
                 json.dump({**out, "score1": score1.tolist(),
                            "controls": controls.tolist()}, fh, indent=2)
             out["reduction_json_path"] = jpath

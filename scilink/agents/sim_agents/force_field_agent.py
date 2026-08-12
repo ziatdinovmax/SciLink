@@ -511,7 +511,7 @@ class ForceFieldAgent:
                 k: v for k, v in result.items()
                 if isinstance(v, (str, int, float, bool, list, dict, type(None)))
             }
-            with open(summary_file, "w") as f:
+            with open(summary_file, "w", encoding="utf-8") as f:
                 json.dump(serializable, f, indent=2)
         except Exception as e:
             self.logger.warning(f"Could not save pipeline summary: {e}")
@@ -954,7 +954,7 @@ Provide a brief summary of what the results mean and any actions needed.
         inpcrd = os.path.join(self.working_dir, "system.inpcrd")
         lines += ["check SYS", f"saveamberparm SYS {prmtop} {inpcrd}", "quit"]
         script_path = os.path.join(self.working_dir, "system_tleap.in")
-        with open(script_path, "w") as f:
+        with open(script_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
         return script_path
 
@@ -1120,7 +1120,7 @@ Provide a brief summary of what the results mean and any actions needed.
         }
 
         selection_file = os.path.join(self.working_dir, "force_field_selection.json")
-        with open(selection_file, 'w') as f:
+        with open(selection_file, 'w', encoding="utf-8") as f:
             json.dump(result, f, indent=2)
 
         return result
@@ -1253,7 +1253,7 @@ Provide a brief summary of what the results mean and any actions needed.
 
         param_file = os.path.join(self.working_dir, "parameter_info.json")
         try:
-            with open(param_file, 'w') as f:
+            with open(param_file, 'w', encoding="utf-8") as f:
                 serializable_params = {
                     k: v for k, v in params.items()
                     if k not in ["raw_data", "quantum_results"]
@@ -1339,7 +1339,7 @@ Provide a brief summary of what the results mean and any actions needed.
             header = parameter_info.get("input_header", "")
             if header:
                 header_file = os.path.join(self.working_dir, "ff_params.lammps")
-                with open(header_file, 'w') as f:
+                with open(header_file, 'w', encoding="utf-8") as f:
                     f.write(header)
                 return {"main": header_file}
             # Fall through to LLM-based generation if header is missing
@@ -1351,7 +1351,7 @@ Provide a brief summary of what the results mean and any actions needed.
 
         files = {}
         param_file = os.path.join(self.working_dir, "ff_params.lammps")
-        with open(param_file, 'w') as f:
+        with open(param_file, 'w', encoding="utf-8") as f:
             f.write(param_content["main"])
         files["main"] = param_file
 
@@ -1359,7 +1359,7 @@ Provide a brief summary of what the results mean and any actions needed.
             for name, content in param_content["additional"].items():
                 if content:
                     add_file = os.path.join(self.working_dir, f"{name}.lammps")
-                    with open(add_file, 'w') as f:
+                    with open(add_file, 'w', encoding="utf-8") as f:
                         f.write(content)
                     files[name] = add_file
 
@@ -2439,7 +2439,7 @@ Include only the JSON response with no additional text.
             charge_assignments=charge_assignments, data_info=data_info
         )
         charge_info_file = os.path.join(self.working_dir, "charge_assignments.json")
-        with open(charge_info_file, 'w') as f:
+        with open(charge_info_file, 'w', encoding="utf-8") as f:
             json.dump({
                 "charge_assignments": charge_assignments,
                 "validation": validation,
@@ -3193,7 +3193,7 @@ Return JSON mapping type ID to charge:
                     except (ValueError, IndexError):
                         pass
             new_lines.append(line)
-        with open(output_file, 'w') as f:
+        with open(output_file, 'w', encoding="utf-8") as f:
             f.writelines(new_lines)
         self.logger.info(f"Wrote data file with charges: {output_file} ({charges_written} atoms)")
         if charges_written == 0:
@@ -3443,7 +3443,7 @@ Return JSON mapping type ID to charge:
                     except (ValueError, IndexError):
                         pass
             new_lines.append(line); i += 1
-        with open(output_file, 'w') as f:
+        with open(output_file, 'w', encoding="utf-8") as f:
             f.writelines(new_lines)
         self.logger.info(f"Split {len(new_type_info)} atom types, total now: {new_type_counter}")
         return output_file
@@ -3546,7 +3546,7 @@ Return JSON:
             if corrected_ff and corrected_ff.strip() != current_ff.strip():
                 backup_path = ff_params_path + f".before_quality_{stage}"
                 shutil.copy2(ff_params_path, backup_path)
-                with open(ff_params_path, 'w') as f:
+                with open(ff_params_path, 'w', encoding="utf-8") as f:
                     f.write(corrected_ff)
                 changes = result.get("changes", [])
                 return True, {"summary": f"{len(changes)} parameter changes: {diagnosis[:80]}", "diagnosis": diagnosis, "changes": changes, "backup": backup_path}
@@ -3620,7 +3620,7 @@ Return JSON:
             shutil.copy2(data_file, backup_path)
             self._write_data_file_with_charges(data_file, data_file, int_charges, data_info)
             new_validation = self._validate_charge_assignments(int_charges, data_info)
-            with open(charge_file, 'w') as f:
+            with open(charge_file, 'w', encoding="utf-8") as f:
                 json.dump({
                     "charge_assignments": {str(k): v for k, v in int_charges.items()},
                     "validation": new_validation,

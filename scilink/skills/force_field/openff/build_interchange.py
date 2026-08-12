@@ -185,7 +185,7 @@ def build_interchange(components: List[Dict[str, Any]],
     # OpenFF Interchange (>=0.5, pydantic v2) serializes via model_dump_json;
     # the engine writer reloads with Interchange.model_validate_json. Both run in
     # the same [ff] env, so the round-trip is version-safe.
-    with open(out, "w") as fh:
+    with open(out, "w", encoding="utf-8") as fh:
         fh.write(interchange.model_dump_json())
 
     return {

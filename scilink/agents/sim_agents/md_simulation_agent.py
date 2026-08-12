@@ -388,14 +388,14 @@ class MDSimulationAgent(SimulationAgent):
             )
 
         script_path = self.working_dir / "run.lammps"
-        script_path.write_text(script)
+        script_path.write_text(script, encoding="utf-8")
 
         validation = self._validate(str(script_path), system_info, plan)
 
         if not validation.get("valid", True) and validation.get("errors"):
             self.logger.warning("Validation failed, fixing...")
             script = self._attempt_fix(script, validation["errors"], plan)
-            script_path.write_text(script)
+            script_path.write_text(script, encoding="utf-8")
             validation = self._validate(str(script_path), system_info, plan)
 
         readme = self._generate_readme(
@@ -727,7 +727,7 @@ class MDSimulationAgent(SimulationAgent):
                     "Analysis realizability: %s (no resolution)", c.message)
                 return script, info
             res = self.tools_module.split_shared_types(**c.resolution["kwargs"])
-            with open(structure_file, "w") as fh:
+            with open(structure_file, "w", encoding="utf-8") as fh:
                 fh.write(res["data_file_text"])
             self.logger.info(
                 "Analysis realizability: split shared types so %s are distinct",
@@ -816,7 +816,7 @@ class MDSimulationAgent(SimulationAgent):
         # Validate a representative member (the placeholder is already resolved).
         rep_files = stages[0]["members"][0]["input_files"]
         rep_path = self.working_dir / entry
-        rep_path.write_text(rep_files[entry])
+        rep_path.write_text(rep_files[entry], encoding="utf-8")
         validation = self._validate(str(rep_path), info, plan)
         readme = self._generate_readme(goal, desc, info, plan, str(rep_path))
 
@@ -923,7 +923,7 @@ class MDSimulationAgent(SimulationAgent):
             content = self._clean_and_fix(content, plan)
             entry = f"run_{name}.lammps"
             path = self.working_dir / entry
-            path.write_text(content)
+            path.write_text(content, encoding="utf-8")
             stage_scripts[name] = str(path)
             steps.append({"name": name, "entry_file": entry, "script": content})
 
@@ -1000,7 +1000,7 @@ class MDSimulationAgent(SimulationAgent):
 
     def _generate_readme(self, goal, desc, info, plan, script_path):
         p = self.working_dir / "README.md"
-        with open(p, "w") as f:
+        with open(p, "w", encoding="utf-8") as f:
             f.write(f"# MD Simulation: {desc}\n\n")
             f.write(f"**Skill**: {self.skill_name or 'none'}\n\n")
             f.write(f"## Goal\n{goal}\n\n")

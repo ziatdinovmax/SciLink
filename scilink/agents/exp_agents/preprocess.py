@@ -480,7 +480,7 @@ class HyperspectralPreprocessingAgent(BaseUtilityAgent):
         final_script = script_bundle.get("final_script", "# No script was returned.")
         script_save_path = os.path.join(self.output_dir, "custom_preprocessing_script.py")
         try:
-            with open(script_save_path, "w") as f:
+            with open(script_save_path, "w", encoding="utf-8") as f:
                 f.write(f"# --- SciLink Auto-Generated Preprocessing Script ---\n")
                 f.write(f"# Original Instruction: {instruction}\n")
                 f.write(f"# --------------------------------------------------\n\n")
@@ -970,7 +970,7 @@ class CurvePreprocessingAgent(BaseUtilityAgent):
                 # Save the final script and return the good data
                 final_script = script_bundle.get("final_script", "# No script was returned.")
                 try:
-                    with open(script_save_path, "w") as f:
+                    with open(script_save_path, "w", encoding="utf-8") as f:
                         f.write(f"# --- SciLink Auto-Generated 1D Preprocessing Script ---\n")
                         f.write(f"# Original Instruction: {instruction}\n")
                         f.write(f"# Final Validation: {assessment['critique']}\n")
