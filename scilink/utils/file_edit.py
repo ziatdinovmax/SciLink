@@ -230,6 +230,19 @@ def apply_surgical_edits(
                 "message": (f"{rp.name} is not valid UTF-8 text — refusing "
                             "to edit it as text.")}
 
+    # The old read_text() path normalized newlines on read; the strict
+    # decode above does not, so an \n-authored old_text would never match
+    # a CRLF file. Match and edit in \n form — snippets included, so an
+    # \r\n inside new_text can't survive into the re-expansion below —
+    # then restore the file's own convention on the way out.
+    uses_crlf = "\r\n" in current
+    if uses_crlf:
+        current = current.replace("\r\n", "\n")
+        edits = [{**e, **{k: e[k].replace("\r\n", "\n")
+                          for k in ("old_text", "new_text")
+                          if isinstance(e.get(k), str)}}
+                 for e in edits]
+
     res = apply_snippet_edits(current, edits, max_len=max_len,
                               too_large_message=too_large_message,
                               not_found_message=not_found_message)
@@ -255,7 +268,12 @@ def apply_surgical_edits(
         logging.warning(f"Pre-edit copy failed: {e}")
         bak = None
 
-    rp.write_text(res["text"], encoding="utf-8")
+    text = res["text"]
+    if uses_crlf:
+        text = text.replace("\n", "\r\n")
+    # newline="" so the newlines above reach the disk as-is — the default
+    # translation would expand each \r\n to \r\r\n on Windows.
+    rp.write_text(text, encoding="utf-8", newline="")
     return {
         "status": "success",
         "path": str(rp),

@@ -109,6 +109,37 @@ def test_undecodable_text_is_refused_not_replaced(tmp_path):
     assert f.read_bytes() == original
 
 
+def test_crlf_file_matches_lf_snippet_and_keeps_crlf(tmp_path):
+    """read_text() normalized newlines for free; the strict decode must too,
+    or \\n-authored snippets never match Windows-written files."""
+    f = tmp_path / "doc.md"
+    original = b"line one\r\nENCUT = 400\r\nline three\r\n"
+    f.write_bytes(original)
+    out = edit(f, "ENCUT = 400\nline three", "ENCUT = 520\nline three",
+               root=tmp_path)
+    assert out["status"] == "success"
+    assert f.read_bytes() == b"line one\r\nENCUT = 520\r\nline three\r\n"
+    assert Path(out["previous_version"]).read_bytes() == original
+
+
+def test_crlf_in_new_text_cannot_double_the_carriage_return(tmp_path):
+    f = tmp_path / "doc.md"
+    f.write_bytes(b"alpha\r\nbeta\r\n")
+    out = edit(f, "alpha", "alpha\r\nextra", root=tmp_path)
+    assert out["status"] == "success"
+    assert f.read_bytes() == b"alpha\r\nextra\r\nbeta\r\n"
+
+
+def test_lf_file_stays_lf_byte_for_byte(tmp_path):
+    """newline='' on the write — the platform default would emit \\r\\n
+    for every \\n on Windows, silently converting LF files."""
+    f = tmp_path / "doc.md"
+    f.write_bytes(b"alpha\nbeta\n")
+    out = edit(f, "beta", "gamma", root=tmp_path)
+    assert out["status"] == "success"
+    assert f.read_bytes() == b"alpha\ngamma\n"
+
+
 def test_file_byte_cap(tmp_path):
     """CHGCAR is ASCII, so size is the only thing that classifies it."""
     chgcar = tmp_path / "CHGCAR"
