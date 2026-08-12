@@ -58,7 +58,7 @@ class VASPConfig:
             "default_params": self.default_params,
             "potcar_map": self.potcar_map,
         }
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
     
     def apply_to_incar(self, incar_text: str) -> dict:

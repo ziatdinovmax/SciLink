@@ -1581,7 +1581,7 @@ class MetaOrchestratorAgent:
                     "knowledge_dir": str(self.knowledge_dir) if self.knowledge_dir else None,
                 }
                 tmp_path = self.checkpoint_path.with_suffix(".json.tmp")
-                with open(tmp_path, 'w') as f:
+                with open(tmp_path, 'w', encoding="utf-8") as f:
                     json.dump(checkpoint_data, f, indent=2, default=str)
                 os.replace(tmp_path, self.checkpoint_path)
             print(f"    ✅ Auto-checkpoint saved")
@@ -1670,7 +1670,7 @@ class MetaOrchestratorAgent:
         try:
             history_data = [m for m in self.messages if m["role"] != "system"]
             history_data = sanitize_history_images(history_data)
-            with open(self.history_path, 'w') as f:
+            with open(self.history_path, 'w', encoding="utf-8") as f:
                 json.dump(history_data, f, indent=2)
         except Exception as e:
             logging.warning(f"Failed to save history: {e}")

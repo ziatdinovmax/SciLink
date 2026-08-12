@@ -201,7 +201,7 @@ def simulate_gsas(
     # Work inside a scratch dir: GSAS-II writes a .gpx project + temp files.
     with tempfile.TemporaryDirectory() as tmpd:
         instprm = os.path.join(tmpd, "auto.instprm")
-        with open(instprm, "w") as fh:
+        with open(instprm, "w", encoding="utf-8") as fh:
             fh.write(_INSTPRM_TEMPLATE.format(lam=lam))
 
         # Normalize the CIF to explicit P1 (if pymatgen is available) so an
@@ -355,7 +355,7 @@ def rietveld_refine(
         esd = np.sqrt(np.maximum(y, 1.0))
         np.savetxt(xy, np.column_stack([x, y, esd]), fmt="%.6f")
         instf = os.path.join(td, "auto.instprm")
-        with open(instf, "w") as fh:
+        with open(instf, "w", encoding="utf-8") as fh:
             fh.write(_INSTPRM_TEMPLATE.format(lam=lam))
 
         gpx = G2sc.G2Project(newgpx=os.path.join(td, "riet.gpx"))
@@ -631,12 +631,12 @@ def lebail_fit(
     with tempfile.TemporaryDirectory() as td:
         cif = os.path.join(td, "lebail.cif")
         a, b, c_, al, be, ga = (float(v) for v in vals)
-        with open(cif, "w") as fh:
+        with open(cif, "w", encoding="utf-8") as fh:
             fh.write(_LEBAIL_CIF.format(a=a, b=b, c=c_, al=al, be=be, ga=ga, sg=sg))
         xy = os.path.join(td, "data.xy")
         np.savetxt(xy, np.column_stack([x, y, np.sqrt(np.maximum(y, 1.0))]), fmt="%.6f")
         instf = os.path.join(td, "auto.instprm")
-        with open(instf, "w") as fh:
+        with open(instf, "w", encoding="utf-8") as fh:
             fh.write(_INSTPRM_TEMPLATE.format(lam=lam))
 
         gpx = G2sc.G2Project(newgpx=os.path.join(td, "lb.gpx"))
@@ -1100,7 +1100,7 @@ def rietveld_refine_multiphase(
         np.savetxt(xy, np.column_stack([x, y, np.sqrt(np.maximum(y, 1.0))]),
                    fmt="%.6f")
         instf = os.path.join(td, "auto.instprm")
-        with open(instf, "w") as fh:
+        with open(instf, "w", encoding="utf-8") as fh:
             fh.write(_INSTPRM_TEMPLATE.format(lam=lam))
 
         gpx = G2sc.G2Project(newgpx=os.path.join(td, "riet.gpx"))

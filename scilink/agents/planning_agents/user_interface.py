@@ -38,7 +38,7 @@ def record_deliverable(base_dir: Any, path: Any, title: str = "",
                  "deliverable": bool(deliverable)}
         entries = [e for e in entries if e.get("path") != entry["path"]]
         entries.append(entry)
-        manifest.write_text(json.dumps(entries, indent=2))
+        manifest.write_text(json.dumps(entries, indent=2), encoding="utf-8")
     except Exception:  # noqa: BLE001 - bookkeeping must never break a tool
         pass
 

@@ -1041,7 +1041,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # dict (they were previously written before the hooks and silently
         # missing from the file).
         results_path = self.output_dir / "analysis_results.json"
-        with open(results_path, 'w') as f:
+        with open(results_path, 'w', encoding="utf-8") as f:
             serializable = self._make_serializable(final_results)
             json.dump(serializable, f, indent=2, default=str)
 

@@ -44,7 +44,7 @@ def save_session_name(session_dir, name: str, named_by: str) -> bool:
         return False
     meta.update({"name": name[:80], "named_by": named_by})
     try:
-        _meta_path(session_dir).write_text(json.dumps(meta, indent=1))
+        _meta_path(session_dir).write_text(json.dumps(meta, indent=1), encoding="utf-8")
         return True
     except OSError:
         return False

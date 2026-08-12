@@ -1509,7 +1509,7 @@ def run_with_potential(
 
     os.makedirs(working_dir, exist_ok=True)
     path = os.path.join(working_dir, "in.lammps")
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write(head + body)
     return path
 

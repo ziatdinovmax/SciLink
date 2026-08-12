@@ -386,7 +386,7 @@ def graduate_to_skill_file(
     # Loader-style bundles include __init__.py; harmless for path-loaded
     # skills, but keeps the layout consistent with built-ins.
     (skill_dir / "__init__.py").touch()
-    skill_path.write_text(skill_content)
+    skill_path.write_text(skill_content, encoding="utf-8")
 
     word_count = len(skill_content.split())
     warning = None

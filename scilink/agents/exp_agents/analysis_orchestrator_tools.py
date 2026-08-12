@@ -1665,7 +1665,7 @@ class AnalysisOrchestratorTools:
                     if metadata:
                         cpi_warning = self._replace_metadata(metadata)
                         output_path = self.orch.base_dir / "metadata.json"
-                        with open(output_path, 'w') as f:
+                        with open(output_path, 'w', encoding="utf-8") as f:
                             json.dump(metadata, f, indent=2)
 
                         result = {
@@ -1692,7 +1692,7 @@ class AnalysisOrchestratorTools:
             elif text_input:
                 # Create temporary file and convert
                 temp_path = self.orch.base_dir / "temp_metadata_input.txt"
-                with open(temp_path, 'w') as f:
+                with open(temp_path, 'w', encoding="utf-8") as f:
                     f.write(text_input)
                 
                 try:
@@ -1709,7 +1709,7 @@ class AnalysisOrchestratorTools:
                     if metadata:
                         cpi_warning = self._replace_metadata(metadata)
                         output_path = self.orch.base_dir / "metadata.json"
-                        with open(output_path, 'w') as f:
+                        with open(output_path, 'w', encoding="utf-8") as f:
                             json.dump(metadata, f, indent=2)
 
                         result = {
@@ -1878,7 +1878,7 @@ class AnalysisOrchestratorTools:
 
                                     cpi_warning = self._replace_metadata(synthesized)
                                     output_path = self.orch.base_dir / "metadata.json"
-                                    with open(output_path, 'w') as f:
+                                    with open(output_path, 'w', encoding="utf-8") as f:
                                         json.dump(synthesized, f, indent=2)
                                     print(
                                         f"    Synthesized global metadata from "
@@ -2720,7 +2720,7 @@ class AnalysisOrchestratorTools:
 
                 # === Save metadata copy for traceability ===
                 metadata_copy_path = analysis_output_dir / "metadata_used.json"
-                with open(metadata_copy_path, 'w') as f:
+                with open(metadata_copy_path, 'w', encoding="utf-8") as f:
                     json.dump({
                         "analysis_id": analysis_id,
                         "data_path": data_path,
@@ -3521,7 +3521,7 @@ class AnalysisOrchestratorTools:
                     "graduated_skill_sources": self.orch._graduated_skill_sources,
                 }
 
-                with open(self.orch.checkpoint_path, 'w') as f:
+                with open(self.orch.checkpoint_path, 'w', encoding="utf-8") as f:
                     json.dump(checkpoint_data, f, indent=2)
 
                 return json.dumps({
@@ -3807,7 +3807,7 @@ class AnalysisOrchestratorTools:
                 r["series_variable"] = str(svar)
                 try:
                     (self.orch.results_dir / "reconciled_series_result.json").write_text(
-                        json.dumps(r, default=str))
+                        json.dumps(r, default=str), encoding="utf-8")
                 except Exception:
                     pass
                 # Attach the reconciled figure so the orchestrator LLM sees the
@@ -4218,7 +4218,7 @@ class AnalysisOrchestratorTools:
                         f"<div class='analysis-text'>{paras}</div>"
                         "<div class='footer'>Post-fit revision (feature-conditioned "
                         "literature); the original report is unchanged.</div>"
-                        "</div></body></html>")
+                        "</div></body></html>", encoding="utf-8")
                 except Exception as e:
                     logging.warning(f"Companion revision HTML failed: {e}")
                     report_html = None
@@ -4606,7 +4606,7 @@ class AnalysisOrchestratorTools:
             
             # 7. Save Results to file
             output_file = lit_output_dir / "novelty_report.json"
-            with open(output_file, "w") as f:
+            with open(output_file, "w", encoding="utf-8") as f:
                 json.dump({
                     "analysis_id": record.get("analysis_id"),
                     **novelty_assessment
@@ -4752,7 +4752,7 @@ class AnalysisOrchestratorTools:
             # 7. Persist sidecar JSON for parity with the standalone runner
             output_file = out_dir / "dft_recommendations.json"
             try:
-                with open(output_file, 'w') as f:
+                with open(output_file, 'w', encoding="utf-8") as f:
                     json.dump({
                         "reasoning": reasoning,
                         "recommendations": recommendations,
@@ -5153,7 +5153,7 @@ class AnalysisOrchestratorTools:
             knowledge_dir = self.orch.base_dir / "knowledge"
             knowledge_dir.mkdir(parents=True, exist_ok=True)
             knowledge_file = knowledge_dir / f"{entry['id']}.json"
-            with open(knowledge_file, 'w') as f:
+            with open(knowledge_file, 'w', encoding="utf-8") as f:
                 json.dump(entry, f, indent=2)
 
             response = {

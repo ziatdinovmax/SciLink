@@ -83,7 +83,7 @@ def _pack_pure_box(smiles: str, n_molecules: int, init_density: float,
             f"tolerance 2.0\nseed 12345\nfiletype xyz\noutput {packed}\n"
             f"structure {single}\n  number {n_molecules}\n"
             f"  inside box 1. 1. 1. {L - 1:.3f} {L - 1:.3f} {L - 1:.3f}\n"
-            "end structure\n"
+            "end structure\n", encoding="utf-8"
         )
         with open(inp) as fh:
             subprocess.run(["packmol"], stdin=fh, cwd=str(work), check=True,

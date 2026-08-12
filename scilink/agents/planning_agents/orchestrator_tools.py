@@ -2275,7 +2275,7 @@ class OrchestratorTools:
 
                 # Save
                 output_path = self._output_dir() / "plan.json"
-                with open(output_path, 'w') as f:
+                with open(output_path, 'w', encoding="utf-8") as f:
                     json.dump(plan, f, indent=2)
 
                 # Persist external grounding that arrived without a literature
@@ -2757,7 +2757,7 @@ class OrchestratorTools:
                 
                 # Save
                 output_path = self._output_dir() / "plan.json"
-                with open(output_path, 'w') as f:
+                with open(output_path, 'w', encoding="utf-8") as f:
                     json.dump(updated_plan, f, indent=2)
                 
                 # Regenerate HTML
@@ -3060,7 +3060,7 @@ class OrchestratorTools:
 
                 # Save
                 output_path = self._output_dir() / "plan.json"
-                with open(output_path, 'w') as f:
+                with open(output_path, 'w', encoding="utf-8") as f:
                     json.dump(plan, f, indent=2)
 
                 # Generate HTML
@@ -3149,7 +3149,7 @@ class OrchestratorTools:
 
                 # Save
                 output_path = self._output_dir() / "plan.json"
-                with open(output_path, 'w') as f:
+                with open(output_path, 'w', encoding="utf-8") as f:
                     json.dump(plan, f, indent=2)
 
                 # Generate HTML
@@ -3227,7 +3227,7 @@ class OrchestratorTools:
                 
                 # Save
                 output_path = self._output_dir() / "plan_refined.json"
-                with open(output_path, 'w') as f:
+                with open(output_path, 'w', encoding="utf-8") as f:
                     json.dump(updated_plan, f, indent=2)
                 
                 # Regenerate HTML
@@ -3812,7 +3812,7 @@ class OrchestratorTools:
                     'hash': current_hash,
                     'timestamp': datetime.now().isoformat()
                 }
-                with open(self.orch.analyzed_files_path, 'w') as f:
+                with open(self.orch.analyzed_files_path, 'w', encoding="utf-8") as f:
                     json.dump(self.orch.analyzed_files, f, indent=2)
                 
                 df_final = pd.read_csv(self.orch.bo_data_path)
@@ -4187,7 +4187,7 @@ class OrchestratorTools:
                                 'row_count': 1, 'hash': current_hash,
                                 'timestamp': datetime.now().isoformat()
                             }
-                        with open(self.orch.analyzed_files_path, 'w') as f:
+                        with open(self.orch.analyzed_files_path, 'w', encoding="utf-8") as f:
                             json.dump(self.orch.analyzed_files, f, indent=2)
 
                         df_final = pd.read_csv(self.orch.bo_data_path)
@@ -4222,7 +4222,7 @@ class OrchestratorTools:
                     'hash': current_hash,
                     'timestamp': datetime.now().isoformat()
                 }
-            with open(self.orch.analyzed_files_path, 'w') as f:
+            with open(self.orch.analyzed_files_path, 'w', encoding="utf-8") as f:
                 json.dump(self.orch.analyzed_files, f, indent=2)
 
             df_final = pd.read_csv(self.orch.bo_data_path)
@@ -5430,7 +5430,7 @@ class OrchestratorTools:
             }
             
             try:
-                with open(checkpoint_path, 'w') as f:
+                with open(checkpoint_path, 'w', encoding="utf-8") as f:
                     json.dump(state, f, indent=2)
                 
                 print(f"    💾 Checkpoint saved: {checkpoint_path}")
@@ -6355,7 +6355,7 @@ class OrchestratorTools:
                     )
                     # Log raw response for debugging
                     raw_log_path = debug_dir / f"kq_dir_raw_{abs(hash(query)) % 10000:04d}_a{attempt}.txt"
-                    raw_log_path.write_text(response.text)
+                    raw_log_path.write_text(response.text, encoding="utf-8")
                     # LLM returns JSON: {"code": "...TODO lines..."}
                     result, parse_error = parse_json_from_response(response)
                     if parse_error or not result or "code" not in result:
@@ -6374,7 +6374,7 @@ class OrchestratorTools:
                     return json.dumps({"status": "error", "message": f"Code generation failed: {e}"})
 
                 script_path = scripts_dir / f"kq_dir_{Path(dir_path).name}_{abs(hash(query)) % 10000:04d}.py"
-                script_path.write_text(code)
+                script_path.write_text(code, encoding="utf-8")
                 print(f"    - Running: {script_path.name} (attempt {attempt + 1})")
 
                 try:
@@ -6527,7 +6527,7 @@ class OrchestratorTools:
 
                 # Write and execute script
                 script_path = scripts_dir / f"kq_{Path(target_path).stem}_{abs(hash(query)) % 10000:04d}.py"
-                script_path.write_text(code)
+                script_path.write_text(code, encoding="utf-8")
                 print(f"    - Running: {script_path.name} (attempt {attempt + 1})")
 
                 try:
@@ -6753,7 +6753,7 @@ class OrchestratorTools:
                         [current_prompt],
                         generation_config={"temperature": 0.0},
                     )
-                    (debug_dir / f"screen_{safe_name}_{hash_str}_a{attempt}.txt").write_text(response.text)
+                    (debug_dir / f"screen_{safe_name}_{hash_str}_a{attempt}.txt").write_text(response.text, encoding="utf-8")
                     parsed, parse_error = parse_json_from_response(response)
                     if parse_error or not parsed or "code" not in parsed:
                         body = _extract_code_block(response.text) or response.text.strip()
@@ -6786,7 +6786,7 @@ class OrchestratorTools:
                 except Exception as e:
                     return json.dumps({"status": "error", "message": f"Codegen failed: {e}"})
 
-                script_path.write_text(code)
+                script_path.write_text(code, encoding="utf-8")
                 print(f"    - Running: {script_path.name} (attempt {attempt + 1}/{max_retries})")
 
                 try:
@@ -6826,7 +6826,7 @@ class OrchestratorTools:
                         "script_path": str(script_path),
                         "attempts_used": attempt + 1,
                     }
-                    result_path.write_text(json.dumps(full, indent=2, default=str))
+                    result_path.write_text(json.dumps(full, indent=2, default=str), encoding="utf-8")
                     print(
                         f"    - ✅ Screened: {full['n_passed']} of {full['n_scanned']} "
                         f"passed; saved {result_path.name}"
@@ -7002,7 +7002,7 @@ class OrchestratorTools:
             knowledge_dir = self.orch.base_dir / "knowledge"
             knowledge_dir.mkdir(parents=True, exist_ok=True)
             knowledge_file = knowledge_dir / f"{entry['id']}.json"
-            with open(knowledge_file, 'w') as f:
+            with open(knowledge_file, 'w', encoding="utf-8") as f:
                 json.dump(entry, f, indent=2)
 
             response = {
@@ -7541,7 +7541,7 @@ class OrchestratorTools:
                         while bak.exists():
                             n += 1
                             bak = d / f"{rp.stem}.before_revision{n}{rp.suffix}"
-                        bak.write_text(current or "")
+                        bak.write_text(current or "", encoding="utf-8")
                         # Listed (not starred) so the replaced version shows
                         # up in the files block rather than only on disk.
                         # Under the meta this is the delegation slug; in a
@@ -7582,7 +7582,7 @@ class OrchestratorTools:
                 if not revise_path:
                     text = self._maybe_embed_workflow_diagram(
                         text, out.parent, stem=f"{out.stem}_workflow")
-                out.write_text(text)
+                out.write_text(text, encoding="utf-8")
                 # A revised document's exported PDF twin (the white paper's
                 # forwarded copy) must not keep serving the pre-revision
                 # content; re-export is deterministic, so it does not touch

@@ -188,13 +188,13 @@ def apply_surgical_edits(
         backup_dir.mkdir(parents=True, exist_ok=True)
         bak = backup_dir / f"{rp.stem}.before_edit{rp.suffix}"
         if not bak.exists():
-            bak.write_text(current)
+            bak.write_text(current, encoding="utf-8")
             created = True
     except Exception as e:  # noqa: BLE001 - never block the edit
         logging.warning(f"Pre-edit copy failed: {e}")
         bak = None
 
-    rp.write_text(res["text"])
+    rp.write_text(res["text"], encoding="utf-8")
     return {
         "status": "success",
         "path": str(rp),

@@ -86,7 +86,7 @@ class SimpleFeedbackCollector:
             }
         }
         
-        with open(log_file, 'w') as f:
+        with open(log_file, 'w', encoding="utf-8") as f:
             json.dump(log_data, f, indent=2)
         
         self.logger.info(f"Feedback log saved: {log_file}")

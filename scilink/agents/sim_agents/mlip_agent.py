@@ -406,7 +406,7 @@ Return JSON:
             **run,        # run_path, runner, task, notes, ...
         }
 
-        with open(os.path.join(self.working_dir, "deployment.json"), "w") as f:
+        with open(os.path.join(self.working_dir, "deployment.json"), "w", encoding="utf-8") as f:
             json.dump(
                 {k: v for k, v in result.items()
                  if isinstance(v, (str, int, float, bool, list, dict, type(None)))},
@@ -562,7 +562,7 @@ Return JSON:
 
         # Save
         report_file = os.path.join(self.working_dir, "quality_report.json")
-        with open(report_file, "w") as f:
+        with open(report_file, "w", encoding="utf-8") as f:
             json.dump(result, f, indent=2, default=str)
 
         return result
@@ -1158,7 +1158,7 @@ Return JSON:
         }
 
         # Save
-        with open(os.path.join(self.working_dir, "finetune_result.json"), "w") as f:
+        with open(os.path.join(self.working_dir, "finetune_result.json"), "w", encoding="utf-8") as f:
             json.dump(
                 {k: v for k, v in result.items()
                  if isinstance(v, (str, int, float, bool, list, dict, type(None)))},

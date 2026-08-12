@@ -445,7 +445,7 @@ class PackmolGeneratorAgent:
                 final_script = script_content.format(output_filename=output_filename)
                 
                 script_path = os.path.join(self.working_dir, "input.inp")
-                with open(script_path, "w") as f:
+                with open(script_path, "w", encoding="utf-8") as f:
                     f.write(final_script)
                 
                 self.logger.info(f"PACKMOL script written to: {script_path}")

@@ -468,7 +468,7 @@ class PeriodicDFTAgent:
         try:
             for filename, content in input_files.items():
                 path = os.path.join(output_dir, filename)
-                with open(path, 'w') as f:
+                with open(path, 'w', encoding="utf-8") as f:
                     f.write(content)
                 saved[filename] = path
             return saved
@@ -619,7 +619,7 @@ class PeriodicDFTAgent:
         improved_paths = {}
         for filename, content in result["input_files"].items():
             path = os.path.join(output_dir, f"{filename}_improved")
-            with open(path, 'w') as f:
+            with open(path, 'w', encoding="utf-8") as f:
                 f.write(content)
             improved_paths[filename] = path
 

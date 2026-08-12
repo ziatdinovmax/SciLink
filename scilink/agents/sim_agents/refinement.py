@@ -226,7 +226,7 @@ class LocalExecutor(Executor):
         run_path.mkdir(parents=True, exist_ok=True)
 
         for name, contents in (input_files or {}).items():
-            (run_path / name).write_text(contents)
+            (run_path / name).write_text(contents, encoding="utf-8")
 
         logger.info("LocalExecutor: running %r in %s", run_command, run_dir)
         try:
@@ -240,9 +240,9 @@ class LocalExecutor(Executor):
             )
         except subprocess.TimeoutExpired as e:
             (run_path / self.STDERR_FILE).write_text(
-                f"Timed out after {self.timeout}s\n{e}"
+                f"Timed out after {self.timeout}s\n{e}", encoding="utf-8"
             )
-            (run_path / self.RETURNCODE_FILE).write_text("timeout")
+            (run_path / self.RETURNCODE_FILE).write_text("timeout", encoding="utf-8")
             return {
                 "status": "error",
                 "output_dir": str(run_path),
@@ -250,8 +250,8 @@ class LocalExecutor(Executor):
                 "error": f"Run timed out after {self.timeout}s",
             }
         except (OSError, FileNotFoundError) as e:
-            (run_path / self.STDERR_FILE).write_text(str(e))
-            (run_path / self.RETURNCODE_FILE).write_text("launch_error")
+            (run_path / self.STDERR_FILE).write_text(str(e), encoding="utf-8")
+            (run_path / self.RETURNCODE_FILE).write_text("launch_error", encoding="utf-8")
             return {
                 "status": "error",
                 "output_dir": str(run_path),
@@ -259,9 +259,9 @@ class LocalExecutor(Executor):
                 "error": f"Could not launch run command: {e}",
             }
 
-        (run_path / self.STDOUT_FILE).write_text(proc.stdout or "")
-        (run_path / self.STDERR_FILE).write_text(proc.stderr or "")
-        (run_path / self.RETURNCODE_FILE).write_text(str(proc.returncode))
+        (run_path / self.STDOUT_FILE).write_text(proc.stdout or "", encoding="utf-8")
+        (run_path / self.STDERR_FILE).write_text(proc.stderr or "", encoding="utf-8")
+        (run_path / self.RETURNCODE_FILE).write_text(str(proc.returncode), encoding="utf-8")
         return {
             "status": "completed",
             "output_dir": str(run_path),
@@ -732,7 +732,7 @@ def _run_dry_run_gate(phase, executor, run_critic, ctx, prepare, entry,
         out_dir = result.get("output_dir", dry_dir)
         # Put the REAL deck where the critic judges, so a fix patches the full
         # deck (run lengths preserved), not the run-0 twin.
-        with open(os.path.join(out_dir, entry), "w") as fh:
+        with open(os.path.join(out_dir, entry), "w", encoding="utf-8") as fh:
             fh.write(real_deck)
         # Coverage is a static (goal, deck) check independent of setup success:
         # the trimmed twin never exercises observables, so a deck that starts

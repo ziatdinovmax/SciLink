@@ -259,7 +259,7 @@ class LAMMPSAnalysisAgent:
     
                     # Save code
                     code_path = self.output_dir / f"quality_check_{check_name}.py"
-                    with open(code_path, 'w') as f:
+                    with open(code_path, 'w', encoding="utf-8") as f:
                         f.write(code)
     
                     # Execute
@@ -306,7 +306,7 @@ class LAMMPSAnalysisAgent:
     
             # Save assessment
             assessment_path = self.output_dir / f"quality_assessment_{stage}.json"
-            with open(assessment_path, 'w') as f:
+            with open(assessment_path, 'w', encoding="utf-8") as f:
                 json.dump(assessment, f, indent=2, default=str)
     
             self.logger.info(f"Quality assessment: {assessment.get('status', 'unknown')}")
@@ -410,7 +410,7 @@ class LAMMPSAnalysisAgent:
     
                     # Save code
                     code_path = self.output_dir / f"analysis_{name}.py"
-                    with open(code_path, 'w') as f:
+                    with open(code_path, 'w', encoding="utf-8") as f:
                         f.write(code)
     
                     # Execute
@@ -1179,7 +1179,7 @@ Return ONLY JSON.
             html_content = html_content.strip()
             
             # Save report
-            with open(report_path, 'w') as f:
+            with open(report_path, 'w', encoding="utf-8") as f:
                 f.write(html_content)
             
             self.logger.info(f"HTML report generated: {report_path}")
@@ -1205,7 +1205,7 @@ Return ONLY JSON.
             
             # Fallback HTML report
             fallback_html = self._generate_fallback_report(research_goal, results, figures)
-            with open(report_path, 'w') as f:
+            with open(report_path, 'w', encoding="utf-8") as f:
                 f.write(fallback_html)
             
             return str(report_path)
@@ -1412,7 +1412,7 @@ Return ONLY JSON.
         
         # Save Dockerfile
         dockerfile_path = self.output_dir / "Dockerfile.analysis"
-        with open(dockerfile_path, 'w') as f:
+        with open(dockerfile_path, 'w', encoding="utf-8") as f:
             f.write(dockerfile_content)
         
         self.logger.info(f"Custom Dockerfile generated: {dockerfile_path}")
@@ -1458,7 +1458,7 @@ Return ONLY JSON.
         build_script_content = '\n'.join(script_lines)
         
         script_path = self.output_dir / "build_scilink_analysis.sbatch"
-        with open(script_path, 'w') as f:
+        with open(script_path, 'w', encoding="utf-8") as f:
             f.write(build_script_content)
         
         os.chmod(script_path, 0o755)
@@ -1605,7 +1605,7 @@ Return ONLY JSON.
         try:
             # Save code to file
             code_path = self.output_dir / f"{analysis_name}.py"
-            with open(code_path, 'w') as f:
+            with open(code_path, 'w', encoding="utf-8") as f:
                 f.write(code)
             
             # Execute using ScriptExecutor
@@ -1773,7 +1773,7 @@ Return ONLY JSON.
                 if corrected_code and corrected_code.strip() != code.strip():
                     # Save refined code
                     refined_path = self.output_dir / f"{analysis_name}_refined_{attempt}.py"
-                    with open(refined_path, 'w') as f:
+                    with open(refined_path, 'w', encoding="utf-8") as f:
                         f.write(corrected_code)
     
                     # Execute refined code

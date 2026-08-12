@@ -243,6 +243,6 @@ if __name__ == "__main__":
     content = (header + body).replace("{script}", script_name)
     os.makedirs(working_dir, exist_ok=True)
     path = os.path.join(working_dir, script_name)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write(content)
     return path

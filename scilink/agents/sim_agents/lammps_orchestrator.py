@@ -240,7 +240,7 @@ class LAMMPSOrchestrator:
                     
                     # Save error details for this attempt
                     error_log_path = self.working_dir / f"error_details_{stage_name}_attempt{attempt}.txt"
-                    with open(error_log_path, 'w') as f:
+                    with open(error_log_path, 'w', encoding="utf-8") as f:
                         f.write(f"Stage: {stage_name}\n")
                         f.write(f"Attempt: {attempt}\n")
                         f.write(f"Script: {stage_script_path}\n")
@@ -572,7 +572,7 @@ class LAMMPSOrchestrator:
             
             # Create comprehensive error log for the updater
             combined_log = self.working_dir / "log_for_correction.lammps"
-            with open(combined_log, 'w') as f:
+            with open(combined_log, 'w', encoding="utf-8") as f:
                 f.write(log_content)
                 if stderr_content:
                     f.write("\n\n# === STDERR FROM LAMMPS EXECUTION ===\n")
@@ -702,7 +702,7 @@ class LAMMPSOrchestrator:
             # SAVE ANALYSIS TO FILE
             # ============================================================
             analysis_path = self.working_dir / f"error_analysis_{Path(script_path).stem}.json"
-            with open(analysis_path, 'w') as f:
+            with open(analysis_path, 'w', encoding="utf-8") as f:
                 json.dump(analysis, f, indent=2)
             print(f"     💾 Analysis saved: {analysis_path.name}")
             
@@ -762,7 +762,7 @@ class LAMMPSOrchestrator:
             attempt_num = len(list(self.working_dir.glob(f"{base_name}_corrected_*.lammps"))) + 1
             new_script_path = self.working_dir / f"{base_name}_corrected_{attempt_num}.lammps"
             
-            with open(new_script_path, 'w') as f:
+            with open(new_script_path, 'w', encoding="utf-8") as f:
                 f.write(corrected_script)
             
             correction_info = {
@@ -971,7 +971,7 @@ class LAMMPSOrchestrator:
                 attempt_num = len(list(self.working_dir.glob(f"{base_name}_quality_*.lammps"))) + 1
                 new_script_path = self.working_dir / f"{base_name}_quality_{attempt_num}.lammps"
                 
-                with open(new_script_path, 'w') as f:
+                with open(new_script_path, 'w', encoding="utf-8") as f:
                     f.write(corrected_script)
                 
                 corrections_made.append(("script", {"new_script": str(new_script_path)}))
@@ -1078,7 +1078,7 @@ class LAMMPSOrchestrator:
         """
         report_path = self.working_dir / "simulation_orchestration_report.md"
         
-        with open(report_path, 'w') as f:
+        with open(report_path, 'w', encoding="utf-8") as f:
             f.write("# Supervised Simulation Report\n\n")
             f.write(f"**Working Directory:** `{self.working_dir}`\n\n")
             

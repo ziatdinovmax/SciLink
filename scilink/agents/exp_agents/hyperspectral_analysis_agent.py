@@ -572,7 +572,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "extracted_features": feats,
             }
             path = self.output_dir / "analysis_results.json"
-            with open(path, "w") as fh:
+            with open(path, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh, indent=2, default=str)
             self.logger.info(
                 f"   📄 Numeric features persisted for downstream fusion: "

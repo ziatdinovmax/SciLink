@@ -1556,7 +1556,7 @@ class PlanningOrchestratorAgent:
                 "custom_skills": self._custom_skills,
             }
             
-            with open(self.checkpoint_path, 'w') as f:
+            with open(self.checkpoint_path, 'w', encoding="utf-8") as f:
                 json.dump(checkpoint_data, f, indent=2)
             
             print(f"    ✅ Auto-checkpoint saved")
@@ -1890,7 +1890,7 @@ class PlanningOrchestratorAgent:
             # Filter out system messages for saved history
             history_data = [m for m in self.messages if m["role"] != "system"]
             
-            with open(self.history_path, 'w') as f: 
+            with open(self.history_path, 'w', encoding="utf-8") as f: 
                 json.dump(history_data, f, indent=2)
                 
         except Exception as e:

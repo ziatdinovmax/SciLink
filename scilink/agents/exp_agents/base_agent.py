@@ -1260,7 +1260,7 @@ class BaseAnalysisAgent(LLMAgentMixin, ABC):
         """Persist state to disk."""
         state_file = self.output_dir / self._get_state_filename()
         try:
-            with open(state_file, 'w') as f:
+            with open(state_file, 'w', encoding="utf-8") as f:
                 json.dump(self.state, f, indent=2, default=str)
         except Exception as e:
             self.logger.warning(f"Failed to save {self.agent_type} state: {e}")

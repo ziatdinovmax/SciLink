@@ -96,7 +96,7 @@ def stage_and_run(executor, script, primary_array, item_dir, *,
         np.save(item_dir / name, arr)
     if metadata:
         try:
-            with open(item_dir / meta_name, "w") as _fh:
+            with open(item_dir / meta_name, "w", encoding="utf-8") as _fh:
                 json.dump(metadata, _fh, indent=2, default=str)
         except Exception:
             pass   # sidecar is best-effort; never block execution on it
