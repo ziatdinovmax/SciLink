@@ -78,14 +78,23 @@ water model, and the right set depends on the ion's CHARGE.
 | Trivalent (Al3+, Fe3+, lanthanides) | Li-Merz **12-6-4** | 12-6 is worst here; charge-induced polarisation dominates |
 
 Decision rule: For monovalent ions use Joung-Cheatham matched to the water
-model. For divalent and trivalent cations use the Li-Merz **12-6-4** set
-whenever the research goal involves coordination number, hydration structure,
-ion-water distances, or binding free energies — the r^-4 term represents
-charge-induced dipole and is what lets one parameter set reproduce hydration
-free energy and coordination geometry simultaneously. A plain 12-6 set is
-acceptable only when the ion is a spectator (bulk neutralising counter-ions).
-Never leave a multivalent cation on a generic point-charge Lennard-Jones
-model when its coordination is what is being measured.
+model. For divalent and trivalent cations the Li-Merz **12-6-4** set is the
+physically right answer whenever the research goal involves coordination
+number, hydration structure, ion-water distances, or binding free energies —
+the r^-4 term represents charge-induced dipole and is what lets one parameter
+set reproduce hydration free energy and coordination geometry simultaneously.
+A plain 12-6 set is fine when the ion is a spectator (bulk neutralising
+counter-ions).
+
+**12-6-4 needs a C4 term this pipeline does not currently carry.** The AMBER
+to LAMMPS route here is `lj/charmm/coul/long` / `lj/cut/coul/long`, both 12-6
+forms, and the ParmEd conversion does not transport `LENNARD_JONES_CCOEF`.
+Selecting 12-6-4 where it cannot be implemented is worse than not selecting
+it: the run proceeds on plain 12-6 while carrying parameters fitted on the
+assumption that C4 is present. So when the workflow cannot implement C4,
+choose the 12-6 set fitted to the ION-OXYGEN DISTANCE rather than the
+HFE-fitted one — the goals above are structural — and record both the
+substitution and its consequence for the target observable in `cautions`.
 
 ### Charge method selection for small molecules
 
