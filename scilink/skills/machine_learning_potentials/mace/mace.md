@@ -1,5 +1,5 @@
 ---
-description: MACE — equivariant message-passing neural network potential with production-ready foundation models for inorganic and organic systems; supports both ASE and LAMMPS pair_style.
+description: MACE — equivariant message-passing neural network potential with production-ready foundation models for inorganic and organic systems; supports both ASE and LAMMPS pair_style. Includes the MACE-POLAR-1 family with explicit long-range electrostatics for charged/polar systems and external fields.
 detect:
   binaries: []
   env_vars: []
@@ -10,6 +10,13 @@ detect:
     runs, also check for the `lammps-mace` plugin (`pip install lammps-mace`)
     or a LAMMPS build with the ML-IAP package linked against libtorch
     (`lmp -help | grep mace`).
+
+    The MACE-POLAR-1 (PolarMACE) electrostatic models need `mace-torch>=0.3.16`
+    PLUS the `graph_electrostatics` package, which provides the
+    `graph_longrange` module required at runtime:
+    `pip install git+https://github.com/WillBaldwin0/graph_electrostatics.git@v0.4.0`.
+    A successful `from mace.calculators import mace_polar` plus `import
+    graph_longrange` confirms the polar backend is usable.
 ---
 # MACE (Multi-ACE)
 
@@ -34,12 +41,38 @@ organic chemistry, and it supports large-scale LAMMPS production runs via
 | MACE-MATPES-r2SCAN-0 | 89               | MATPES-r2SCAN         | DFT (r2SCAN)                  | Materials                                  | medium               | >=v0.3.10      | Better functional for materials.                                   |
 | MACE-MH-0/1          | 89               | OMAT/OMOL/OC20/MATPES | DFT (PBE/R2SCAN/wB97M-VV10)   | Inorganic crystals, molecules and surfaces | mh-0 mh-1            | >=v0.3.14      | Very good cross domain performance on surfaces/bulk/molecules.     |
 | MACE-MDP             | 10               | SPICE                 | DFT (wB97M-D3(BJ)/def2-TZVPP) | Organic systems                            | model                | >=v0.3.16      | Dipoles & polarizabilities only; not for energies/forces.          |
+| MACE-POLAR-1         | 83               | OMol25                | DFT (ωB97M-V hybrid)          | Charged/polar systems, external fields     | polar-1-s/m/l        | >=v0.3.16      | Explicit long-range electrostatics; arbitrary charge/spin; dipoles & partial charges. Needs `graph_electrostatics`. |
 
 MACE-MPA-0, achieves state-of-the-art accuracy on the Matbench benchmarks and
 significantly improves accuracy compared to the MACE-MP-0 models on material systems.
 
 Second generation models are not guaranteed to be better than first generation
 models in all cases, but they are expected to be more stable during MD simulations.
+
+### MACE-POLAR-1 (Electrostatic / PolarMACE)
+
+MACE-POLAR-1 is a foundation-model family that extends the MACE architecture
+with explicit long-range electrostatics. It keeps the local MACE backbone
+for short-range chemistry and adds a non-self-consistent polarisable-field
+update on spin-resolved atomic multipoles: it learns atomic charge and spin
+densities (multipole expansions in a Gaussian-type-orbital basis) directly from
+energy and force labels, enforces total charge and spin through learnable Fukui
+equilibration, and sums local, explicit-electrostatic, and learned non-local
+terms for the final energy. This lets it handle arbitrary charge and spin
+states, respond to external electric fields, and expose physically
+interpretable per-atom charges/dipoles.
+
+Trained on the OMol25 dataset (100M structures at the ωB97M-V hybrid-DFT level).
+Two receptive-field sizes are documented — `polar-1-m` (medium, 12 Å receptive
+field) and `polar-1-l` (large, 18 Å receptive field); a `polar-1-s` (small)
+checkpoint is also available. Reported improvements over the standard backbone
+include protein–ligand binding (×2), molecular crystals (×4), supramolecular
+complexes (×2), and better redox potentials for transition-metal complexes.
+
+When to reach for MACE-POLAR-1 (see Planning for the full selection rule):
+charged/ionic systems, redox chemistry, response to an applied electric field,
+long-range electrostatics (charge transfer across fragments), or when per-atom
+charges/dipoles are the target observable.
 
 ## planning
 
@@ -48,6 +81,17 @@ Model selection:
 - Elements are organic (C, H, N, O, S, P, halogens) and energy/forces are needed → `mace-off23`
 - Mixed inorganic/organic system → `mace-mh-0` (cross domain coverage)
 - Speed over accuracy is required → `mace-mp-0b`
+- System is charged/ionic, redox-active, in an applied electric field, or has
+  long-range electrostatics (charge transfer, solvated ions) → `polar-1-m`
+  (12 Å field) or `polar-1-l` (18 Å field, longer-range electrostatics) via the
+  `mace_polar` loader
+- Per-atom charges/dipoles or spin-resolved charge densities are the target
+  observable → `polar-1-m` / `polar-1-l`
+
+`polar-1-*` models require the extra `graph_electrostatics` dependency (see the
+detect guidance) and use a dedicated `mace_polar` loader rather than `mace_mp`.
+Choose `polar-1-l` over `polar-1-m` when the electrostatics extend beyond ~12 Å;
+it is more expensive per step.
 
 Deployment path:
 - System < 10k atoms, Python workflow → ASE calculator path
@@ -61,6 +105,10 @@ Fine-tuning hyperparameters:
 - `batch_size`: 4 (16 GB GPU), 8–16 (40+ GB GPU)
 - `learning_rate`: 0.001 for fine-tuning (10× lower than from-scratch)
 - `max_num_epochs`: 100 for fine-tuning (vs 200+ from scratch)
+
+Fine-tuning from a MACE-POLAR-1 checkpoint uses `mace_run_train` with
+`--model="PolarMACE"` and `--foundation_model="polar-1-m"` (or `polar-1-l`); see
+Implementation for the full command.
 
 ## implementation
 
@@ -93,6 +141,54 @@ Requirements:
 - OR: `pip install lammps-mace` (lammps-mace plugin)
 - Verify: `lmp -help | grep mace`
 
+MACE-POLAR-1 (electrostatic) ASE path — use the dedicated `mace_polar` loader,
+which resolves the checkpoint by name. Set charge, spin, and any external field
+in `atoms.info` before evaluating; the model handles arbitrary charge/spin
+states and responds to the field:
+
+```python
+from mace.calculators import mace_polar
+
+calc = mace_polar(
+    model="polar-1-m",      # or "polar-1-s" / "polar-1-l"
+    device="cpu",           # or "cuda"
+    default_dtype="float64",  # use "float32" for faster MD
+)
+
+atoms.info["charge"] = 0
+atoms.info["spin"] = 1
+atoms.info["external_field"] = [0.0, 0.0, 0.0]   # applied E-field, V/Å
+atoms.calc = calc
+
+energy = atoms.get_potential_energy()   # populates calc.results
+forces = atoms.get_forces()
+stress = atoms.get_stress()
+```
+
+Reading dipoles and per-atom charge density (call a property first so
+`calc.results` is populated):
+
+```python
+_ = atoms.get_potential_energy()
+
+# Total dipole — only well-defined for NON-PERIODIC systems; ignore for PBC.
+mu = calc.results["dipole"]                 # shape (3,)
+
+# Atom-centred multipole coefficients, shape (n_atoms, 4)
+p = calc.results["density_coefficients"]
+atomic_charges = p[:, 0]                     # monopole (partial charge)
+atomic_dipoles = p[:, [1, 2, 3]]             # cartesian (px, py, pz)
+
+# Spin-resolved multipoles (spin-capable models), shape (n_atoms, 2, 4)
+p_spin = calc.results["spin_charge_density"]
+charges_up   = p_spin[:, 0, 0]
+charges_down = p_spin[:, 1, 0]               # sum over axis 1 recovers `p`
+```
+
+Partial charges/dipoles are not uniquely defined; sums over clusters or
+molecules are meaningful only for isolated fragments (no atom within ~6 Å of
+another fragment).
+
 ## interpretation
 
 Post-run checks:
@@ -107,6 +203,16 @@ Post-run checks:
 Trajectories from the ASE path are standard `.traj` files readable with
 `ase.io.read` or `ase.io.iread`. The LAMMPS path writes standard dump/thermo
 output processed with the usual LAMMPS tools (OVITO, MDAnalysis, etc.).
+
+MACE-POLAR-1 electrostatic outputs:
+- The total dipole (`calc.results["dipole"]`) is physical only for
+  non-periodic systems; under PBC it is ill-defined and should be ignored.
+- Partial charges/dipoles (`density_coefficients`) are interpretive, not
+  uniquely defined — use them for trends and per-atom insight, and only sum
+  them over fragments that are truly isolated (>~6 Å from any other atom).
+- For an applied-field study, confirm the response is sensible (dipole aligns
+  with the field, charge transfer scales with field strength) before trusting
+  the magnitudes.
 
 ## validation
 
