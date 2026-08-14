@@ -160,10 +160,85 @@ def _pending_questions(state: dict, job_id: str = None) -> list:
     return out
 
 
+# ── Per-job narration buffer (real-time log_tail for job_status) ───────
+
+class _JobLogHandler(logging.Handler):
+    """Streams this job's log records into its bounded line buffer.
+
+    Thread-scoped via ``log_context.effective_thread`` (same mapping the
+    UI panel uses), so narration from worker threads the job spawns
+    (best-of-N candidates, fan-out branches) lands in the right job's
+    buffer while concurrent jobs stay separated.
+    """
+
+    def __init__(self, lines, root_thread_id: int) -> None:
+        super().__init__(level=logging.INFO)
+        self._lines = lines
+        self._root_tid = root_thread_id
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            from scilink.utils.log_context import effective_thread
+            if effective_thread(record.thread) != self._root_tid:
+                return
+            self._lines.append(record.getMessage())
+        except Exception:  # noqa: BLE001 — never break the run over the tail
+            pass
+
+
+class _TeeIO(io.StringIO):
+    """StringIO that also appends complete lines to the job's buffer."""
+
+    def __init__(self, lines) -> None:
+        super().__init__()
+        self._lines = lines
+        self._partial = ""
+
+    def write(self, s: str) -> int:
+        try:
+            self._partial += s
+            while "\n" in self._partial:
+                line, self._partial = self._partial.split("\n", 1)
+                if line.strip():
+                    self._lines.append(line)
+        except Exception:  # noqa: BLE001
+            pass
+        return super().write(s)
+
+
+class _job_narration:
+    """Context manager: route this thread's narration into ``lines``."""
+
+    def __init__(self, lines) -> None:
+        self._lines = lines
+        self._handler = None
+
+    def __enter__(self):
+        if self._lines is not None:
+            import threading
+
+            self._handler = _JobLogHandler(self._lines,
+                                           threading.get_ident())
+            logging.getLogger().addHandler(self._handler)
+        return self
+
+    def __exit__(self, *exc):
+        if self._handler is not None:
+            logging.getLogger().removeHandler(self._handler)
+        return False
+
+
+def _new_job_lines():
+    from collections import deque
+
+    return deque(maxlen=400)
+
+
 # ── Stdout capture ──────────────────────────────────────────────────────
 
 def _execute_tool_captured(tools, tool_name: str, kwargs: dict,
-                           state: dict = None, job_id: str = None) -> str:
+                           state: dict = None, job_id: str = None,
+                           log_lines=None) -> str:
     """Execute a tool while capturing stdout so it doesn't corrupt stdio MCP transport."""
     from scilink.hitl import set_thread_channel
 
@@ -171,9 +246,9 @@ def _execute_tool_captured(tools, tool_name: str, kwargs: dict,
         set_thread_channel(_MCPChannel(
             state, job_id=job_id,
             timeout_s=state["config"].get("hitl_timeout_s", 1800.0)))
-    captured = io.StringIO()
+    captured = _TeeIO(log_lines) if log_lines is not None else io.StringIO()
     try:
-        with contextlib.redirect_stdout(captured):
+        with _job_narration(log_lines), contextlib.redirect_stdout(captured):
             result = tools.execute_tool(tool_name, **kwargs)
     finally:
         if state is not None:
@@ -388,7 +463,9 @@ def create_server(
             name="scilink_job_status",
             description=(
                 "Check the status of a background job started with "
-                "background=true. Returns 'running', 'completed', or 'failed'."
+                "background=true. Returns 'running', 'awaiting_input', "
+                "'completed', or 'failed', plus a log_tail of the job's "
+                "recent narration so progress is visible in real time."
             ),
             inputSchema={
                 "type": "object",
@@ -396,6 +473,13 @@ def create_server(
                     "job_id": {
                         "type": "string",
                         "description": "The job ID returned by the original tool call.",
+                    },
+                    "tail_lines": {
+                        "type": "integer",
+                        "description": (
+                            "How many recent narration lines to include as "
+                            "log_tail (default 25, max 200, 0 to omit)."
+                        ),
                     },
                 },
                 "required": ["job_id"],
@@ -600,9 +684,10 @@ def create_server(
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             job_id = f"job_{ts}_{state['job_counter']:03d}"
 
+            log_lines = _new_job_lines()
             future = _executor.submit(
                 _execute_tool_captured, orch.tools, original_name, arguments,
-                state, job_id,
+                state, job_id, log_lines,
             )
             state["jobs"][job_id] = {
                 "future": future,
@@ -610,6 +695,7 @@ def create_server(
                 "started_at": ts,
                 "status": "running",
                 "result": None,
+                "log_lines": log_lines,
             }
 
             return [types.TextContent(
@@ -859,6 +945,17 @@ def _handle_job_status(
         "tool": job["tool"],
         "started_at": job["started_at"],
     }
+    # Real-time narration tail: the job's recent log/print lines, so any
+    # MCP client (including remote transports with no stderr access) can
+    # watch progress in-band while the job runs.
+    try:
+        n = int(arguments.get("tail_lines", 25))
+    except (TypeError, ValueError):
+        n = 25
+    n = max(0, min(200, n))
+    lines = job.get("log_lines")
+    if n and lines:
+        payload["log_tail"] = "\n".join(list(lines)[-n:])
     # A running job blocked on a human question reports awaiting_input
     # with the parked question(s) so the client can scilink_respond.
     if job["status"] == "running":
@@ -931,7 +1028,8 @@ def _execute_chat_captured(orch, prompt: str) -> str:
 
 def _execute_run_task_captured(orch, prompt: str, autonomy_str: str,
                                state: dict = None,
-                               job_id: str = None) -> str:
+                               job_id: str = None,
+                               log_lines=None) -> str:
     """Execute orch.run_task() under the server's autonomy, stdout captured.
 
     Returns the structured run_task contract as JSON, with the legacy chat
@@ -962,9 +1060,9 @@ def _execute_run_task_captured(orch, prompt: str, autonomy_str: str,
         set_thread_channel(_MCPChannel(
             state, job_id=job_id,
             timeout_s=state["config"].get("hitl_timeout_s", 1800.0)))
-    captured = io.StringIO()
+    captured = _TeeIO(log_lines) if log_lines is not None else io.StringIO()
     try:
-        with contextlib.redirect_stdout(captured):
+        with _job_narration(log_lines), contextlib.redirect_stdout(captured):
             res = orch.run_task(prompt, autonomy=autonomy)
     finally:
         if state is not None:
@@ -1023,14 +1121,16 @@ async def _handle_orchestrate(
         ts = _dt.now().strftime("%Y%m%d_%H%M%S")
         job_id = f"job_{ts}_{state['job_counter']:03d}"
 
+        log_lines = _new_job_lines()
         future = executor.submit(_execute_run_task_captured, orch, prompt,
-                                 autonomy_str, state, job_id)
+                                 autonomy_str, state, job_id, log_lines)
         state["jobs"][job_id] = {
             "future": future,
             "tool": tool_label,
             "started_at": ts,
             "status": "running",
             "result": None,
+            "log_lines": log_lines,
         }
 
         return [types.TextContent(
