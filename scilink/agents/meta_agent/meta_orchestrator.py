@@ -1686,6 +1686,12 @@ class MetaOrchestratorAgent:
 
     def chat(self, user_input: str) -> str:
         """Main chat interface with robust function calling support."""
+        # Bind this turn's human-feedback prompts to the session's
+        # durable feedback log (nested child chats rebind to their own;
+        # run_task restores the caller's binding on exit).
+        from ...hitl import set_thread_feedback_log as _set_fblog
+        from pathlib import Path as _P
+        _set_fblog(str(_P(self.base_dir) / "feedback_log.jsonl"))
         self.message_count += 1
         self._last_chat_hit_iter_cap = False
 

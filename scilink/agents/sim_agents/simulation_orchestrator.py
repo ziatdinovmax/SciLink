@@ -449,6 +449,12 @@ class SimulationOrchestratorAgent:
 
     def chat(self, user_input: str) -> str:
         """Interactive chat — used by the CLI and UI."""
+        # Bind this turn's human-feedback prompts to the session's
+        # durable feedback log (nested child chats rebind to their own;
+        # run_task restores the caller's binding on exit).
+        from ...hitl import set_thread_feedback_log as _set_fblog
+        from pathlib import Path as _P
+        _set_fblog(str(_P(self.base_dir) / "feedback_log.jsonl"))
         # ── Console display features not yet wired here (parity TODO) ──────────
         # Analysis, meta, and planning distinguish three console output classes;
         # this orchestrator currently emits only structural logs. To bring it to
@@ -538,6 +544,8 @@ class SimulationOrchestratorAgent:
         run_mode = autonomy if autonomy is not None else SimulationMode.AUTONOMOUS
         original_mode = self.simulation_mode
         original_max_iter = self.max_iterations
+        from ...hitl import get_thread_feedback_log, set_thread_feedback_log
+        _prev_fblog = get_thread_feedback_log()
         try:
             self.set_simulation_mode(run_mode)
             if max_iterations is not None:
@@ -564,6 +572,9 @@ class SimulationOrchestratorAgent:
             # Always restore the original mode, even if chat() raised.
             self.set_simulation_mode(original_mode)
             self.max_iterations = original_max_iter
+            # chat() bound the feedback log to THIS session; restore the
+            # caller's binding (a delegating meta keeps logging to its own).
+            set_thread_feedback_log(_prev_fblog)
 
         # Derive the structured summary from session state.
         new_structures = (self.generated_structures or [])[n_before:]

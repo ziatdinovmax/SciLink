@@ -36,6 +36,9 @@ __all__ = [
     "set_default_channel",
     "set_thread_channel",
     "use_channel",
+    "set_thread_feedback_log",
+    "get_thread_feedback_log",
+    "use_feedback_log",
 ]
 
 _counter = itertools.count(1)
@@ -176,6 +179,69 @@ def get_channel() -> FeedbackChannel:
     return channel if channel is not None else _default_channel
 
 
+# --------------------------------------------------------------- durability
+
+def set_thread_feedback_log(path) -> None:
+    """Bind this thread's prompts to a session feedback log.
+
+    ``path`` is the JSONL file (conventionally
+    ``<session>/feedback_log.jsonl``); every request asked on this thread
+    is appended at ask time and again at answer time, and a
+    ``pending_question.json`` sidecar next to the log marks the question
+    currently awaiting an answer (removed once answered — if a run dies
+    while blocked, the sidecar says what it was waiting for). ``None``
+    unbinds. Orchestrators bind their session file around each chat turn.
+    """
+    _thread_local.feedback_log = path
+
+
+def get_thread_feedback_log():
+    return getattr(_thread_local, "feedback_log", None)
+
+
+@contextmanager
+def use_feedback_log(path):
+    """Scoped thread-local feedback-log binding (re-entrant safe)."""
+    previous = get_thread_feedback_log()
+    _thread_local.feedback_log = path
+    try:
+        yield
+    finally:
+        _thread_local.feedback_log = previous
+
+
+def _append_record(path, record: Dict[str, Any]) -> None:
+    """Best-effort append — the log must never break the prompt itself."""
+    import json
+
+    try:
+        p = __import__("pathlib").Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _write_pending(path, req: FeedbackRequest) -> None:
+    import json
+
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"id": req.id, "kind": req.kind, "prompt": req.prompt,
+                       "origin": req.origin, "asked_at": req.created_at},
+                      f, ensure_ascii=False, default=str)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _clear_pending(path) -> None:
+    try:
+        __import__("pathlib").Path(path).unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def request_human_feedback(
     prompt: str,
     *,
@@ -201,4 +267,31 @@ def request_human_feedback(
         context=context,
         origin=origin or {},
     )
-    return get_channel().ask(req)
+    log = get_thread_feedback_log()
+    pending = None
+    if log:
+        from pathlib import Path as _Path
+
+        _append_record(log, {"id": req.id, "event": "asked",
+                             "kind": req.kind, "prompt": req.prompt,
+                             "options": req.options, "default": req.default,
+                             "origin": req.origin, "t": req.created_at})
+        pending = _Path(log).parent / "pending_question.json"
+        _write_pending(pending, req)
+    try:
+        answer = get_channel().ask(req)
+    except BaseException as exc:
+        if log:
+            _append_record(log, {
+                "id": req.id, "event": "interrupted",
+                "error": type(exc).__name__,
+                "elapsed_s": round(time.time() - req.created_at, 3)})
+        raise
+    finally:
+        if pending is not None:
+            _clear_pending(pending)
+    if log:
+        _append_record(log, {
+            "id": req.id, "event": "answered", "answer": answer,
+            "elapsed_s": round(time.time() - req.created_at, 3)})
+    return answer
