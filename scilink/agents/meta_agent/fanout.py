@@ -46,6 +46,8 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from ...hitl import request_human_feedback
+
 logger = logging.getLogger("meta_agent.fanout")
 
 # Concurrency + sizing. The complementary SET (post-gate) is what these bound,
@@ -550,7 +552,13 @@ def _confirm_fanout(orch, verdict: dict, fanout_set: List[str],
     print("\n".join(lines))
 
     try:
-        ans = input("\n🤔 Launch this parallel analysis? [y/N]: ").strip().lower()
+        ans = request_human_feedback(
+            "\n🤔 Launch this parallel analysis? [y/N]: ",
+            kind="confirm",
+            options=["y", "n"],
+            default="n",
+            origin={"stage": "fanout_confirm"},
+        ).strip().lower()
     except (EOFError, KeyboardInterrupt):
         # No usable input channel in a mode that expects one → do not fire an
         # expensive parallel op on a guess.

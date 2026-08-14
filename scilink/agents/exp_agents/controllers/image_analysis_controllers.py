@@ -42,6 +42,7 @@ from .._locked_exec import (
 from .._qc_engine import CodegenQCEngine, QCEngineSpec, QCItemContext
 from ....utils.codegen_parse import parse_codegen_response
 from ....utils.synthesis_parse import salvage_synthesis_from_response
+from ....hitl import request_human_feedback
 
 
 # Anthropic's API rejects images over 5 MB. Cap below that with headroom
@@ -1154,7 +1155,11 @@ class ImagePlanningController:
 
     def _get_human_feedback(self, state: dict) -> dict:
         self._display_plan(state)
-        feedback = input("\nYour feedback (or Enter to accept): ").strip()
+        feedback = request_human_feedback(
+            "\nYour feedback (or Enter to accept): ",
+            kind="review_plan",
+            origin={"stage": "analysis_plan"},
+        ).strip()
 
         if feedback == "":
             print("Plan accepted.")
@@ -3220,7 +3225,11 @@ Return JSON with the refined analysis approach:
         )
         print(prompt)
 
-        feedback = input("\nYour input: ").strip()
+        feedback = request_human_feedback(
+            "\nYour input: ",
+            kind="review_result",
+            origin={"stage": "poor_quality_review"},
+        ).strip()
 
         if not feedback:
             print("No feedback provided. Proceeding with best available result.")
@@ -3282,7 +3291,11 @@ Return JSON with the refined analysis approach:
         print("  - Type feedback to modify the analysis approach")
         print("-" * 60)
 
-        feedback = input("\nYour feedback (or Enter to accept): ").strip()
+        feedback = request_human_feedback(
+            "\nYour feedback (or Enter to accept): ",
+            kind="review_result",
+            origin={"stage": "result_review"},
+        ).strip()
 
         if review_viz_path and review_viz_path.exists():
             try:
@@ -3313,7 +3326,12 @@ Return JSON with the refined analysis approach:
         print(f"  - Type 'keep' to use the user-guided result anyway (score = {user_score:.2f})")
         print(f"  - Press Enter to revert to original result (score = {original_score:.2f})")
 
-        response = input("\nYour choice: ").strip().lower()
+        response = request_human_feedback(
+            "\nYour choice: ",
+            kind="keep_or_revert",
+            options=["keep", ""],
+            origin={"stage": "user_guided_result"},
+        ).strip().lower()
 
         if response == 'keep':
             print("Keeping user-guided result.")
@@ -4582,9 +4600,11 @@ Return JSON with:
             print("-" * 60)
 
             for _ in range(3):
-                response = input(
+                response = request_human_feedback(
                     f"\nYour choice (Enter = accept candidate "
-                    f"{winner['attempt']}): "
+                    f"{winner['attempt']}): ",
+                    kind="bestofn_select",
+                    origin={"stage": "bestofn_join"},
                 ).strip()
 
                 if not response:
@@ -6107,7 +6127,11 @@ class ImageAdaptiveRefitController:
         print("  - Press Enter to keep the independent results as-is")
         print("-" * 60)
 
-        response = input("\nYour choice: ").strip()
+        response = request_human_feedback(
+            "\nYour choice: ",
+            kind="consensus_select",
+            origin={"stage": "series_consensus"},
+        ).strip()
         if not response:
             print("Keeping independent refit results.")
             return None
@@ -6272,7 +6296,12 @@ class ImageAdaptiveRefitController:
         )
         print(f"  - Press Enter to keep '{original_pipeline}'")
 
-        response = input("\nYour choice: ").strip().lower()
+        response = request_human_feedback(
+            "\nYour choice: ",
+            kind="keep_or_revert",
+            options=["consensus", ""],
+            origin={"stage": "consistency_result"},
+        ).strip().lower()
         if response == "consensus":
             print(f"Using consensus pipeline for [{idx}] {name}")
             return True

@@ -9,6 +9,7 @@ from typing import Dict, Any, Optional, List
 import PIL.Image as PIL_Image
 
 from ...auth import get_internal_proxy_key
+from ...hitl import request_human_feedback
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from ...executors import require_sandbox_approval
@@ -674,7 +675,11 @@ class ScalarizerAgent(BaseAgent):
                     print(f"    • {col}: [{preview}]")
                 print(f"  Plot: {exec_res['plot_path']}")
                 print("-" * 60)
-                user_fb = input("> Press [ENTER] to confirm or type feedback: ").strip()
+                user_fb = request_human_feedback(
+                    "> Press [ENTER] to confirm or type feedback: ",
+                    kind="review_metrics",
+                    origin={"stage": "scalarizer_review"},
+                ).strip()
                 
                 if user_fb:
                     human_feedback_collected = user_fb

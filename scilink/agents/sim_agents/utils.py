@@ -438,29 +438,6 @@ def save_generated_script(script_content: str, description: str, attempt: int, o
         return None
     
 
-def ask_user_proceed_or_refine(validation_feedback, structure_file):
-    """Ask user whether to proceed with current structure or attempt refinement."""
-    import sys
-    
-    print(f"\n--- Validation Issues Found ---")
-    issues = validation_feedback.get('all_identified_issues', [])
-    for i, issue in enumerate(issues, 1):
-        print(f"  {i}. {issue}")
-    
-    print(f"\nOptions:")
-    print(f"  [p] PROCEED - Use current structure: {structure_file}")
-    print(f"  [r] REFINE   - Attempt to fix issues")
-    
-    while True:
-        try:
-            choice = input("Choice [p/r]: ").strip().lower()
-            if choice in ['p', 'proceed']: return 'proceed'
-            elif choice in ['r', 'refine']: return 'refine'
-            else: print("Please enter 'p' or 'r'")
-        except (KeyboardInterrupt, EOFError):
-            return 'refine'
-
-
 def generate_structure_views(structure_path: str, output_dir: str = None) -> Dict[str, str]:
     """Render PNG views of a structure for the validator and the user.
 

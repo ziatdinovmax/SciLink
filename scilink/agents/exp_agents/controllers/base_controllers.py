@@ -4,6 +4,8 @@ import textwrap
 from typing import Any, Callable, Optional
 import json
 
+from ....hitl import request_human_feedback
+
 
 # Generic Tier-A synthesis re-entry instructions (issue #322). Deliberately
 # modality-neutral: the payload critique + surfaced features carry the
@@ -301,7 +303,11 @@ class IterativeFeedbackController:
         print("-" * 80)
         
         try:
-            user_feedback = input("\n🤔 Your feedback to adjust the targets/plan (or press Enter to accept): ").strip()
+            user_feedback = request_human_feedback(
+                "\n🤔 Your feedback to adjust the targets/plan (or press Enter to accept): ",
+                kind="review_plan",
+                origin={"stage": "preprocess_plan"},
+            ).strip()
         except KeyboardInterrupt:
             self.logger.warning("User interrupted feedback. Accepting original decision.")
             return state

@@ -40,6 +40,7 @@ from .._locked_exec import (
 from .._qc_engine import CodegenQCEngine, QCEngineSpec, QCItemContext
 from ....utils.codegen_parse import parse_codegen_response
 from ....utils.synthesis_parse import salvage_synthesis_from_response
+from ....hitl import request_human_feedback
 
 # Canonical fitted-curve output the fit script saves alongside visualization.png.
 # Best-effort: when present it powers controller-side residual diagnostics; when
@@ -1919,7 +1920,11 @@ class CurveFittingPlanningController:
 
     def _get_human_feedback(self, state: dict) -> dict:
         self._display_plan(state)
-        feedback = input("\n🤔 Your feedback (or Enter to accept): ").strip()
+        feedback = request_human_feedback(
+            "\n🤔 Your feedback (or Enter to accept): ",
+            kind="review_plan",
+            origin={"stage": "fitting_plan"},
+        ).strip()
         
         if feedback == "":
             print("✅ Plan accepted.")
@@ -4257,9 +4262,13 @@ Return JSON with the refined fitting approach:
             example_threshold=self.r2_threshold - self._r2_soft_margin(self.r2_threshold),
         )
         print(prompt)
-        
-        feedback = input("\nYour input: ").strip()
-        
+
+        feedback = request_human_feedback(
+            "\nYour input: ",
+            kind="review_fit",
+            origin={"stage": "poor_fit_review"},
+        ).strip()
+
         if not feedback:
             print("No feedback provided. Proceeding with best available fit.")
             return None
@@ -4324,9 +4333,13 @@ Return JSON with the refined fitting approach:
         print("  • Type feedback to modify the fitting approach (e.g., 'add baseline', ")
         print("    'use Voigt instead of Gaussian', 'fit two peaks instead of one')")
         print("-" * 60)
-        
-        feedback = input("\n🤔 Your feedback (or Enter to accept): ").strip()
-        
+
+        feedback = request_human_feedback(
+            "\n🤔 Your feedback (or Enter to accept): ",
+            kind="review_fit",
+            origin={"stage": "fit_review"},
+        ).strip()
+
         # Clean up the review file - it's only for user viewing during this step
         if review_viz_path and review_viz_path.exists():
             try:
@@ -4348,9 +4361,14 @@ Return JSON with the refined fitting approach:
         print("Options:")
         print(f"  • Type 'keep' to use the user-guided fit anyway (R² = {user_r2:.4f})")
         print(f"  • Press Enter to revert to original fit (R² = {original_r2:.4f})")
-        
-        response = input("\nYour choice: ").strip().lower()
-        
+
+        response = request_human_feedback(
+            "\nYour choice: ",
+            kind="keep_or_revert",
+            options=["keep", ""],
+            origin={"stage": "user_guided_fit"},
+        ).strip().lower()
+
         if response == 'keep':
             print("✅ Keeping user-guided fit.")
             return True
@@ -5653,9 +5671,11 @@ Return JSON with:
             print("-" * 60)
 
             for _ in range(3):
-                response = input(
+                response = request_human_feedback(
                     f"\nYour choice (Enter = accept candidate "
-                    f"{winner['attempt']}): "
+                    f"{winner['attempt']}): ",
+                    kind="bestofn_select",
+                    origin={"stage": "bestofn_join"},
                 ).strip()
 
                 if not response:
@@ -6927,7 +6947,11 @@ class AdaptiveRefitController:
         print("  • Press Enter to keep the independent results as-is")
         print("-" * 60)
 
-        response = input("\n🤔 Your choice: ").strip()
+        response = request_human_feedback(
+            "\n🤔 Your choice: ",
+            kind="consensus_select",
+            origin={"stage": "series_consensus"},
+        ).strip()
         if not response:
             print("✅ Keeping independent refit results.")
             return None
@@ -7040,7 +7064,12 @@ class AdaptiveRefitController:
         print(f"  • Type 'consensus' to use '{consensus_model}' for consistency")
         print(f"  • Press Enter to keep '{original_model}'")
 
-        response = input("\nYour choice: ").strip().lower()
+        response = request_human_feedback(
+            "\nYour choice: ",
+            kind="keep_or_revert",
+            options=["consensus", ""],
+            origin={"stage": "consistency_result"},
+        ).strip().lower()
         if response == "consensus":
             print(f"✅ Using consensus model for [{idx}] {name}")
             return True
