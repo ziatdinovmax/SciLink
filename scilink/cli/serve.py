@@ -59,6 +59,15 @@ def main():
         help="Session directory for outputs (default: auto-generated)",
     )
     parser.add_argument(
+        "--hitl-timeout",
+        type=float,
+        default=1800.0,
+        help=(
+            "Seconds an agent question waits for scilink_respond before "
+            "falling back to its default answer (default: 1800)"
+        ),
+    )
+    parser.add_argument(
         "--transport",
         type=str,
         choices=["stdio", "sse"],
@@ -131,6 +140,7 @@ def main():
         session_dir=args.session_dir,
         analysis_mode=args.autonomy,
         futurehouse_api_key=args.futurehouse_key,
+        hitl_timeout_s=args.hitl_timeout,
     )
 
     # Initialize orchestrators eagerly so tools/list responds instantly.

@@ -4,6 +4,8 @@ import re
 import textwrap
 from pathlib import Path
 
+from ...hitl import request_human_feedback
+
 DELIVERABLES_MANIFEST = "deliverables.json"
 
 
@@ -522,7 +524,11 @@ def get_candidate_selection(n_candidates: int, judge_pick: int) -> int:
     print(f"• Or type a candidate number (1-{n_candidates}) to choose a "
           "different plan.")
 
-    reply = input(f"\n> Selection (ENTER to accept plan candidate {judge_pick}): ").strip()
+    reply = request_human_feedback(
+        f"\n> Selection (ENTER to accept plan candidate {judge_pick}): ",
+        kind="plan_candidate_select",
+        origin={"stage": "plan_candidates"},
+    ).strip()
 
     if reply.isdigit() and 1 <= int(reply) <= n_candidates:
         return int(reply)
@@ -546,7 +552,11 @@ def get_user_feedback() -> Optional[str]:
     print("• To REVISE (e.g. address the caveats, or your own changes): "
           "Type instructions and press [ENTER].")
     
-    feedback = input("\n> Instruction: ").strip()
+    feedback = request_human_feedback(
+        "\n> Instruction: ",
+        kind="approve_or_revise",
+        origin={"stage": "plan_review"},
+    ).strip()
     
     if not feedback:
         return None # User accepted the plan
@@ -577,7 +587,11 @@ def get_dataset_description(filename: str) -> str:
     print("• Option 2: Type a brief description (e.g., 'Yield results from Suzuki coupling').")
 
     try:
-        return input("\n> Context: ").strip()
+        return request_human_feedback(
+            "\n> Context: ",
+            kind="dataset_description",
+            origin={"stage": "missing_metadata", "filename": str(filename)},
+        ).strip()
     except (EOFError, KeyboardInterrupt, OSError):
         print("  - ℹ️  No interactive session to answer; continuing without "
               "metadata (the parser will infer from headers).")

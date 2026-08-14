@@ -1282,6 +1282,12 @@ class PlanningOrchestratorAgent:
 
     def chat(self, user_input: str) -> str:
         """Main chat interface with robust function calling support."""
+        # Bind this turn's human-feedback prompts to the session's
+        # durable feedback log (nested child chats rebind to their own;
+        # run_task restores the caller's binding on exit).
+        from ...hitl import set_thread_feedback_log as _set_fblog
+        from pathlib import Path as _P
+        _set_fblog(str(_P(self.base_dir) / "feedback_log.jsonl"))
         self.message_count += 1
         self._last_chat_hit_iter_cap = False
         
@@ -1399,6 +1405,8 @@ class PlanningOrchestratorAgent:
         run_level = autonomy if autonomy is not None else AutonomyLevel.AUTONOMOUS
         original_level = self.autonomy_level
         original_max_iter = self.max_iterations
+        from ...hitl import get_thread_feedback_log, set_thread_feedback_log
+        _prev_fblog = get_thread_feedback_log()
         try:
             self.set_autonomy_level(run_level)
             if max_iterations is not None:
@@ -1425,6 +1433,9 @@ class PlanningOrchestratorAgent:
             # Always restore the original level, even if chat() raised.
             self.set_autonomy_level(original_level)
             self.max_iterations = original_max_iter
+            # chat() bound the feedback log to THIS session; restore the
+            # caller's binding (a delegating meta keeps logging to its own).
+            set_thread_feedback_log(_prev_fblog)
             # _active_output_subdir is scoped to this call; clear it so a
             # later direct chat() on the same instance writes to base_dir.
             self._active_output_subdir = None

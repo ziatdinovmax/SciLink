@@ -35,6 +35,7 @@ import numpy as np
 from .base_agent import BaseAnalysisAgent, AnalysisInput
 from .human_feedback import SimpleFeedbackMixin
 from ...executors import ScriptExecutor, require_sandbox_approval
+from ...hitl import request_human_feedback
 from ..lit_agents.literature_agent import FittingModelLiteratureAgent
 from .pipelines.image_analysis_pipelines import create_unified_image_analysis_pipeline
 from .controllers.image_analysis_controllers import compute_image_statistics
@@ -1241,9 +1242,12 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         print("─" * 60)
 
         try:
-            response = input(
+            response = request_human_feedback(
                 "Proceed with deeper analysis? "
-                "(yes / skip / or provide guidance): "
+                "(yes / skip / or provide guidance): ",
+                kind="confirm",
+                options=["yes", "skip"],
+                origin={"stage": "tier2_escalation"},
             ).strip()
         except EOFError:
             return True, None

@@ -105,13 +105,154 @@ def _openai_to_mcp_tool(schema: dict, prefix: str = "scilink") -> types.Tool:
     )
 
 
+# ── Human-in-the-loop channel (agent prompts over MCP) ─────────────────
+
+class _MCPChannel:
+    """hitl.FeedbackChannel that parks agent prompts in the server's
+    pending queue for a client to answer via ``scilink_respond``.
+
+    The asking worker thread blocks on an event with a mandatory timeout;
+    on timeout the request's declared default answer is returned so an
+    unattended run degrades to accept-as-is instead of hanging a tool
+    call forever. ``job_id`` ties questions to their background job so
+    ``scilink_job_status`` can report ``awaiting_input``.
+    """
+
+    def __init__(self, state: dict, job_id: str = None,
+                 timeout_s: float = 1800.0) -> None:
+        self._state = state
+        self._job_id = job_id
+        self._timeout_s = timeout_s
+
+    def ask(self, req) -> str:
+        import threading
+
+        event = threading.Event()
+        holder: dict = {}
+        self._state["pending"][req.id] = {
+            "type": "question", "req": req, "event": event,
+            "holder": holder, "job_id": self._job_id,
+        }
+        try:
+            answered = event.wait(self._timeout_s)
+        finally:
+            self._state["pending"].pop(req.id, None)
+        if not answered:
+            logging.warning(
+                f"[hitl] question {req.id} ({req.kind}) unanswered after "
+                f"{self._timeout_s}s — using its default answer")
+            return req.default
+        return holder.get("answer", req.default)
+
+
+def _pending_questions(state: dict, job_id: str = None) -> list:
+    """Structured list of parked agent questions (optionally per job)."""
+    out = []
+    for rid, item in list(state.get("pending", {}).items()):
+        if item.get("type") != "question":
+            continue
+        if job_id is not None and item.get("job_id") != job_id:
+            continue
+        req = item["req"]
+        out.append({"request_id": rid, "kind": req.kind,
+                    "prompt": req.prompt, "options": req.options,
+                    "origin": req.origin, "job_id": item.get("job_id")})
+    return out
+
+
+# ── Per-job narration buffer (real-time log_tail for job_status) ───────
+
+class _JobLogHandler(logging.Handler):
+    """Streams this job's log records into its bounded line buffer.
+
+    Thread-scoped via ``log_context.effective_thread`` (same mapping the
+    UI panel uses), so narration from worker threads the job spawns
+    (best-of-N candidates, fan-out branches) lands in the right job's
+    buffer while concurrent jobs stay separated.
+    """
+
+    def __init__(self, lines, root_thread_id: int) -> None:
+        super().__init__(level=logging.INFO)
+        self._lines = lines
+        self._root_tid = root_thread_id
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            from scilink.utils.log_context import effective_thread
+            if effective_thread(record.thread) != self._root_tid:
+                return
+            self._lines.append(record.getMessage())
+        except Exception:  # noqa: BLE001 — never break the run over the tail
+            pass
+
+
+class _TeeIO(io.StringIO):
+    """StringIO that also appends complete lines to the job's buffer."""
+
+    def __init__(self, lines) -> None:
+        super().__init__()
+        self._lines = lines
+        self._partial = ""
+
+    def write(self, s: str) -> int:
+        try:
+            self._partial += s
+            while "\n" in self._partial:
+                line, self._partial = self._partial.split("\n", 1)
+                if line.strip():
+                    self._lines.append(line)
+        except Exception:  # noqa: BLE001
+            pass
+        return super().write(s)
+
+
+class _job_narration:
+    """Context manager: route this thread's narration into ``lines``."""
+
+    def __init__(self, lines) -> None:
+        self._lines = lines
+        self._handler = None
+
+    def __enter__(self):
+        if self._lines is not None:
+            import threading
+
+            self._handler = _JobLogHandler(self._lines,
+                                           threading.get_ident())
+            logging.getLogger().addHandler(self._handler)
+        return self
+
+    def __exit__(self, *exc):
+        if self._handler is not None:
+            logging.getLogger().removeHandler(self._handler)
+        return False
+
+
+def _new_job_lines():
+    from collections import deque
+
+    return deque(maxlen=400)
+
+
 # ── Stdout capture ──────────────────────────────────────────────────────
 
-def _execute_tool_captured(tools, tool_name: str, kwargs: dict) -> str:
+def _execute_tool_captured(tools, tool_name: str, kwargs: dict,
+                           state: dict = None, job_id: str = None,
+                           log_lines=None) -> str:
     """Execute a tool while capturing stdout so it doesn't corrupt stdio MCP transport."""
-    captured = io.StringIO()
-    with contextlib.redirect_stdout(captured):
-        result = tools.execute_tool(tool_name, **kwargs)
+    from scilink.hitl import set_thread_channel
+
+    if state is not None:
+        set_thread_channel(_MCPChannel(
+            state, job_id=job_id,
+            timeout_s=state["config"].get("hitl_timeout_s", 1800.0)))
+    captured = _TeeIO(log_lines) if log_lines is not None else io.StringIO()
+    try:
+        with _job_narration(log_lines), contextlib.redirect_stdout(captured):
+            result = tools.execute_tool(tool_name, **kwargs)
+    finally:
+        if state is not None:
+            set_thread_channel(None)
 
     log_output = captured.getvalue().strip()
     if log_output:
@@ -167,6 +308,7 @@ def create_server(
     session_dir: str = None,
     analysis_mode: str = "autonomous",
     futurehouse_api_key: str = None,
+    hitl_timeout_s: float = 1800.0,
 ) -> "Server":
     """Create and return a configured MCP Server instance.
 
@@ -193,7 +335,13 @@ def create_server(
     state: Dict[str, Any] = {
         "analysis_orch": None,
         "planning_orch": None,
-        "pending_action": None,
+        # Pending items awaiting a client's scilink_respond, keyed by
+        # request id. Two shapes: {"type": "tool_approval", "action":
+        # PendingAction} for gated tool calls, and {"type": "question",
+        # "req": FeedbackRequest, "event": ..., "holder": ..., "job_id":
+        # ...} for agent prompts parked by _MCPChannel. A queue, not a
+        # slot — concurrent questions never overwrite each other.
+        "pending": {},
         "initialized": False,
         "jobs": {},
         "job_counter": 0,
@@ -205,6 +353,7 @@ def create_server(
             "session_dir": session_dir,
             "analysis_mode": analysis_mode,
             "futurehouse_api_key": futurehouse_api_key,
+            "hitl_timeout_s": hitl_timeout_s,
         },
     }
 
@@ -277,9 +426,13 @@ def create_server(
         tools.append(types.Tool(
             name="scilink_respond",
             description=(
-                "Send a response to a pending SciLink action that requires "
-                "human approval. Only needed in co-pilot or autopilot mode. "
-                "Call this after receiving a 'needs_input' status from another tool."
+                "Answer a pending SciLink request. Two cases: (1) a tool "
+                "approval from co-pilot/autopilot mode ('needs_input' "
+                "status) — respond 'yes'/'approve' to proceed or anything "
+                "else to cancel; (2) an agent question surfaced while a "
+                "job runs ('awaiting_input' in scilink_job_status) — the "
+                "response text is delivered verbatim as the answer (empty "
+                "string usually means accept as-is)."
             ),
             inputSchema={
                 "type": "object",
@@ -287,8 +440,17 @@ def create_server(
                     "response": {
                         "type": "string",
                         "description": (
-                            "User's response: 'yes'/'approve' to proceed, "
-                            "'no'/'reject' to cancel, or free-text feedback."
+                            "The answer. For tool approvals: 'yes'/'approve' "
+                            "to proceed, anything else cancels. For agent "
+                            "questions: delivered verbatim ('' = accept)."
+                        ),
+                    },
+                    "request_id": {
+                        "type": "string",
+                        "description": (
+                            "Which pending request to answer (from the "
+                            "'needs_input' payload or scilink_job_status). "
+                            "Optional when exactly one request is pending."
                         ),
                     },
                 },
@@ -301,7 +463,9 @@ def create_server(
             name="scilink_job_status",
             description=(
                 "Check the status of a background job started with "
-                "background=true. Returns 'running', 'completed', or 'failed'."
+                "background=true. Returns 'running', 'awaiting_input', "
+                "'completed', or 'failed', plus a log_tail of the job's "
+                "recent narration so progress is visible in real time."
             ),
             inputSchema={
                 "type": "object",
@@ -309,6 +473,13 @@ def create_server(
                     "job_id": {
                         "type": "string",
                         "description": "The job ID returned by the original tool call.",
+                    },
+                    "tail_lines": {
+                        "type": "integer",
+                        "description": (
+                            "How many recent narration lines to include as "
+                            "log_tail (default 25, max 200, 0 to omit)."
+                        ),
                     },
                 },
                 "required": ["job_id"],
@@ -483,16 +654,22 @@ def create_server(
         # Co-pilot / autopilot: intercept tools that need approval
         if _needs_approval(original_name, autonomy):
             prompt = _build_approval_prompt(original_name, arguments)
-            state["pending_action"] = PendingAction(
-                tool_name=original_name,
-                kwargs=arguments,
-                prompt=prompt,
-                context={"orch_key": orch_key},
-            )
+            state["job_counter"] += 1
+            request_id = f"act_{state['job_counter']:04d}"
+            state["pending"][request_id] = {
+                "type": "tool_approval",
+                "action": PendingAction(
+                    tool_name=original_name,
+                    kwargs=arguments,
+                    prompt=prompt,
+                    context={"orch_key": orch_key},
+                ),
+            }
             return [types.TextContent(
                 type="text",
                 text=json.dumps({
                     "status": "needs_input",
+                    "request_id": request_id,
                     "message": prompt,
                     "tool": original_name,
                     "arguments": arguments,
@@ -507,8 +684,10 @@ def create_server(
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             job_id = f"job_{ts}_{state['job_counter']:03d}"
 
+            log_lines = _new_job_lines()
             future = _executor.submit(
-                _execute_tool_captured, orch.tools, original_name, arguments
+                _execute_tool_captured, orch.tools, original_name, arguments,
+                state, job_id, log_lines,
             )
             state["jobs"][job_id] = {
                 "future": future,
@@ -516,6 +695,7 @@ def create_server(
                 "started_at": ts,
                 "status": "running",
                 "result": None,
+                "log_lines": log_lines,
             }
 
             return [types.TextContent(
@@ -533,7 +713,8 @@ def create_server(
             )]
 
         result = await asyncio.to_thread(
-            _execute_tool_captured, orch.tools, original_name, arguments
+            _execute_tool_captured, orch.tools, original_name, arguments,
+            state, None,
         )
 
         return [types.TextContent(type="text", text=result)]
@@ -758,15 +939,36 @@ def _handle_job_status(
                 "status": "error", "message": str(exc),
             })
 
-    return [types.TextContent(
-        type="text",
-        text=json.dumps({
-            "job_id": job_id,
-            "status": job["status"],
-            "tool": job["tool"],
-            "started_at": job["started_at"],
-        }),
-    )]
+    payload = {
+        "job_id": job_id,
+        "status": job["status"],
+        "tool": job["tool"],
+        "started_at": job["started_at"],
+    }
+    # Real-time narration tail: the job's recent log/print lines, so any
+    # MCP client (including remote transports with no stderr access) can
+    # watch progress in-band while the job runs.
+    try:
+        n = int(arguments.get("tail_lines", 25))
+    except (TypeError, ValueError):
+        n = 25
+    n = max(0, min(200, n))
+    lines = job.get("log_lines")
+    if n and lines:
+        payload["log_tail"] = "\n".join(list(lines)[-n:])
+    # A running job blocked on a human question reports awaiting_input
+    # with the parked question(s) so the client can scilink_respond.
+    if job["status"] == "running":
+        questions = _pending_questions(state, job_id=job_id)
+        if questions:
+            payload["status"] = "awaiting_input"
+            payload["questions"] = questions
+            payload["message"] = (
+                "The job is paused on a question. Answer with "
+                "scilink_respond(request_id=..., response=...) — empty "
+                "response usually means accept as-is.")
+
+    return [types.TextContent(type="text", text=json.dumps(payload))]
 
 
 def _handle_job_result(
@@ -824,6 +1026,57 @@ def _execute_chat_captured(orch, prompt: str) -> str:
     return result
 
 
+def _execute_run_task_captured(orch, prompt: str, autonomy_str: str,
+                               state: dict = None,
+                               job_id: str = None,
+                               log_lines=None) -> str:
+    """Execute orch.run_task() under the server's autonomy, stdout captured.
+
+    Returns the structured run_task contract as JSON, with the legacy chat
+    text preserved in the ``response`` field (run_task's ``summary`` IS the
+    chat return string) so clients that read the text keep working. The
+    per-call ``autonomy`` override means co-pilot/autopilot serving works
+    without mutating the orchestrator's resting mode, and prompts raised
+    mid-run park in the server's pending queue via the thread channel.
+    """
+    from scilink.hitl import set_thread_channel
+
+    level_name = {"co-pilot": "CO_PILOT", "co_pilot": "CO_PILOT",
+                  "copilot": "CO_PILOT", "autopilot": "AUTOPILOT",
+                  "autonomous": "AUTONOMOUS"}.get(
+                      (autonomy_str or "autonomous").lower(), "AUTONOMOUS")
+    mode_enum = type(orch).__module__  # resolved below per orchestrator
+    if "planning_orchestrator" in mode_enum:
+        from scilink.agents.planning_agents.planning_orchestrator import (
+            AutonomyLevel as _Level,
+        )
+    else:
+        from scilink.agents.exp_agents.analysis_orchestrator import (
+            AnalysisMode as _Level,
+        )
+    autonomy = _Level[level_name]
+
+    if state is not None:
+        set_thread_channel(_MCPChannel(
+            state, job_id=job_id,
+            timeout_s=state["config"].get("hitl_timeout_s", 1800.0)))
+    captured = _TeeIO(log_lines) if log_lines is not None else io.StringIO()
+    try:
+        with _job_narration(log_lines), contextlib.redirect_stdout(captured):
+            res = orch.run_task(prompt, autonomy=autonomy)
+    finally:
+        if state is not None:
+            set_thread_channel(None)
+
+    log_output = captured.getvalue().strip()
+    if log_output:
+        logging.info(f"[orchestrate] {log_output}")
+
+    out = dict(res)
+    out["response"] = res.get("summary", "")
+    return json.dumps(out, default=str)
+
+
 async def _handle_orchestrate(
     state: dict, name: str, arguments: dict, executor
 ) -> List["types.TextContent"]:
@@ -861,18 +1114,23 @@ async def _handle_orchestrate(
     run_in_background = arguments.pop("background", False)
     tool_label = name.replace("scilink_", "")
 
+    autonomy_str = state["config"]["analysis_mode"]
+
     if run_in_background:
         state["job_counter"] += 1
         ts = _dt.now().strftime("%Y%m%d_%H%M%S")
         job_id = f"job_{ts}_{state['job_counter']:03d}"
 
-        future = executor.submit(_execute_chat_captured, orch, prompt)
+        log_lines = _new_job_lines()
+        future = executor.submit(_execute_run_task_captured, orch, prompt,
+                                 autonomy_str, state, job_id, log_lines)
         state["jobs"][job_id] = {
             "future": future,
             "tool": tool_label,
             "started_at": ts,
             "status": "running",
             "result": None,
+            "log_lines": log_lines,
         }
 
         return [types.TextContent(
@@ -889,7 +1147,8 @@ async def _handle_orchestrate(
             }),
         )]
 
-    result = await asyncio.to_thread(_execute_chat_captured, orch, prompt)
+    result = await asyncio.to_thread(_execute_run_task_captured, orch,
+                                     prompt, autonomy_str, state, None)
     return [types.TextContent(type="text", text=result)]
 
 
@@ -913,8 +1172,36 @@ def _handle_set_autonomy(
     old_mode = state["config"]["analysis_mode"]
     state["config"]["analysis_mode"] = new_mode
 
-    # Clear any pending action from the previous mode
-    state["pending_action"] = None
+    # Propagate to the LIVE orchestrators too — the server-side gate and
+    # the agents' own human-feedback behavior must agree (previously this
+    # only mutated the config dict, leaving the orchestrators in their
+    # construction-time mode).
+    _level_name = {"co-pilot": "CO_PILOT", "autopilot": "AUTOPILOT",
+                   "autonomous": "AUTONOMOUS"}[new_mode]
+    if state.get("analysis_orch") is not None:
+        try:
+            from scilink.agents.exp_agents.analysis_orchestrator import (
+                AnalysisMode,
+            )
+            state["analysis_orch"].set_analysis_mode(
+                AnalysisMode[_level_name])
+        except Exception as exc:  # noqa: BLE001
+            logging.warning(f"set_autonomy: analysis orch not updated: {exc}")
+    if state.get("planning_orch") is not None:
+        try:
+            from scilink.agents.planning_agents.planning_orchestrator import (
+                AutonomyLevel,
+            )
+            state["planning_orch"].set_autonomy_level(
+                AutonomyLevel[_level_name])
+        except Exception as exc:  # noqa: BLE001
+            logging.warning(f"set_autonomy: planning orch not updated: {exc}")
+
+    # Clear pending tool approvals from the previous mode; parked agent
+    # questions belong to running jobs and stay answerable.
+    for rid in [r for r, it in state.get("pending", {}).items()
+                if it.get("type") == "tool_approval"]:
+        state["pending"].pop(rid, None)
 
     return [types.TextContent(
         type="text",
@@ -937,22 +1224,78 @@ def _handle_set_autonomy(
 async def _handle_respond(
     state: dict, arguments: dict
 ) -> List["types.TextContent"]:
-    """Handle user response to a pending action."""
-    pending = state.get("pending_action")
-    if pending is None:
+    """Answer a pending tool approval or a parked agent question."""
+    pending = state.get("pending", {})
+    request_id = (arguments.get("request_id") or "").strip()
+
+    if request_id:
+        item = pending.get(request_id)
+        if item is None:
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({
+                    "status": "error",
+                    "message": f"Unknown request_id: {request_id}",
+                    "pending": _pending_questions(state) + [
+                        {"request_id": rid, "kind": "tool_approval",
+                         "tool": it["action"].tool_name}
+                        for rid, it in pending.items()
+                        if it.get("type") == "tool_approval"],
+                }),
+            )]
+    elif len(pending) == 1:
+        request_id, item = next(iter(pending.items()))
+    elif not pending:
         return [types.TextContent(
             type="text",
             text=json.dumps({
                 "status": "error",
-                "message": "No pending action to respond to.",
+                "message": "No pending request to respond to.",
+            }),
+        )]
+    else:
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({
+                "status": "error",
+                "message": ("Multiple requests pending — pass request_id "
+                            "to pick one."),
+                "pending": _pending_questions(state) + [
+                    {"request_id": rid, "kind": "tool_approval",
+                     "tool": it["action"].tool_name}
+                    for rid, it in pending.items()
+                    if it.get("type") == "tool_approval"],
             }),
         )]
 
-    response = arguments.get("response", "").strip().lower()
-    state["pending_action"] = None
+    raw_response = arguments.get("response", "")
+
+    # Agent question: deliver the response VERBATIM — free text is the
+    # answer (the asking code interprets it), never an implicit cancel.
+    if item.get("type") == "question":
+        item["holder"]["answer"] = raw_response
+        item["event"].set()
+        # The asking thread pops the entry itself on wake-up.
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({
+                "status": "answered",
+                "request_id": request_id,
+                "kind": item["req"].kind,
+                "message": ("Answer delivered; the run resumes. Poll "
+                            "scilink_job_status for progress if this was "
+                            "a background job."),
+            }),
+        )]
+
+    # Tool approval: keyword gate (unchanged semantics), but a cancel now
+    # echoes the feedback instead of silently discarding it.
+    action = item["action"]
+    state["pending"].pop(request_id, None)
+    response = raw_response.strip().lower()
 
     if response in ("yes", "y", "approve", "ok", "proceed"):
-        orch_key = pending.context.get("orch_key", "analysis_orch")
+        orch_key = action.context.get("orch_key", "analysis_orch")
         orch = state.get(orch_key)
         if orch is None:
             return [types.TextContent(
@@ -964,19 +1307,22 @@ async def _handle_respond(
             )]
 
         result = await asyncio.to_thread(
-            _execute_tool_captured, orch.tools, pending.tool_name, pending.kwargs
+            _execute_tool_captured, orch.tools, action.tool_name,
+            action.kwargs, state, None,
         )
         return [types.TextContent(type="text", text=result)]
 
-    else:
-        return [types.TextContent(
-            type="text",
-            text=json.dumps({
-                "status": "cancelled",
-                "message": f"Action cancelled by user: {response}",
-                "tool": pending.tool_name,
-            }),
-        )]
+    return [types.TextContent(
+        type="text",
+        text=json.dumps({
+            "status": "cancelled",
+            "message": f"Action cancelled by user: {raw_response}",
+            "tool": action.tool_name,
+            "note": ("Free-text feedback on a tool approval cancels the "
+                     "call — re-issue the tool call with adjusted "
+                     "arguments to apply the feedback."),
+        }),
+    )]
 
 
 # ── Server runner ────────────────────────────────────────────────────────
