@@ -19,16 +19,18 @@ from __future__ import annotations
 
 import builtins
 import itertools
+import queue as _queue_mod
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 __all__ = [
     "FeedbackRequest",
     "FeedbackChannel",
     "ConsoleChannel",
+    "QueueChannel",
     "request_human_feedback",
     "get_channel",
     "set_default_channel",
@@ -82,6 +84,60 @@ class ConsoleChannel:
 
     def ask(self, req: FeedbackRequest) -> str:
         return builtins.input(req.prompt)
+
+
+class QueueChannel:
+    """Parks requests from concurrent worker threads for serial serving.
+
+    Worker threads (fan-out branches) install this as their thread channel;
+    ``ask`` enqueues the request and blocks until a coordinator thread —
+    the one that owns the human — answers it via ``serve_pending``, which
+    relays each queued request through the coordinator's own active
+    channel (console prompt, UI modal, ...) one at a time.
+
+    ``timeout_s`` bounds how long a worker waits for an answer; on timeout
+    the request's ``default`` answer is returned so an unattended branch
+    degrades to accept-as-is instead of hanging forever.
+    """
+
+    def __init__(self, timeout_s: Optional[float] = None) -> None:
+        self._queue: _queue_mod.Queue = _queue_mod.Queue()
+        self.timeout_s = timeout_s
+
+    def ask(self, req: FeedbackRequest) -> str:
+        event = threading.Event()
+        holder: Dict[str, str] = {}
+        self._queue.put((req, holder, event))
+        if not event.wait(self.timeout_s):
+            holder.setdefault("answer", req.default)
+        return holder.get("answer", req.default)
+
+    def serve_pending(self, through: Optional[FeedbackChannel] = None) -> int:
+        """Serve every queued request now; returns how many were answered.
+
+        Called periodically from the coordinator's wait loop. A label from
+        ``origin['branch_label']`` is prefixed onto the prompt so the human
+        knows which branch is asking. If the serving channel raises (EOF,
+        stop, interrupt), the waiting worker is unblocked with the
+        request's default answer before the exception propagates.
+        """
+        served = 0
+        while True:
+            try:
+                req, holder, event = self._queue.get_nowait()
+            except _queue_mod.Empty:
+                return served
+            label = req.origin.get("branch_label")
+            to_serve = (replace(req, prompt=f"\n[branch: {label}]{req.prompt}")
+                        if label else req)
+            try:
+                holder["answer"] = (through or get_channel()).ask(to_serve)
+            except BaseException:
+                holder.setdefault("answer", req.default)
+                event.set()
+                raise
+            event.set()
+            served += 1
 
 
 _default_channel: FeedbackChannel = ConsoleChannel()

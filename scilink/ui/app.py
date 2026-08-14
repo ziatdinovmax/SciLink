@@ -503,42 +503,72 @@ def _parse_plan_candidate_review(context: str, prompt: str):
     return ordered, pick
 
 
-def _run_agent_chat(task: ChatTask, agent, user_input: str) -> None:
-    """Target for the background thread."""
-    import logging
+class _UIChannel:
+    """hitl.FeedbackChannel that publishes prompts to the Streamlit UI.
 
-    original_input = builtins.input
-    _metadata_cache: dict[str, str] = {}
+    Carries the structured kind/options/origin through to the widget
+    chooser; the metadata auto-reply cache keys on ``origin['filename']``
+    when the prompt came through the chokepoint, with the legacy
+    context-regex fallback for stray raw ``input()`` calls.
+    """
 
-    def _streamlit_input(prompt: str = "") -> str:
-        if task.stopped:
-            raise AgentStoppedError("Agent stopped by user")
-        context = cap.getvalue()
-        # Auto-reply for repeated metadata prompts (same file asked twice)
-        if "Context" in prompt and "MISSING METADATA" in context:
+    def __init__(self, task: ChatTask, cap) -> None:
+        self._task = task
+        self._cap = cap
+        self._metadata_cache: dict[str, str] = {}
+
+    def _metadata_key(self, hreq, context: str):
+        if hreq.kind == "dataset_description" and hreq.origin.get("filename"):
+            return str(hreq.origin["filename"])
+        if "Context" in hreq.prompt and "MISSING METADATA" in context:
             import re
             m = re.search(r"MISSING METADATA FOR:\s*(.+)", context)
             if m:
-                fname = m.group(1).strip()
-                if fname in _metadata_cache:
-                    return _metadata_cache[fname]
-        req = FeedbackRequest(prompt=prompt, context=context)
+                return m.group(1).strip()
+        return None
+
+    def ask(self, hreq) -> str:
+        task = self._task
+        if task.stopped:
+            raise AgentStoppedError("Agent stopped by user")
+        context = self._cap.getvalue()
+        # Auto-reply for repeated metadata prompts (same file asked twice)
+        key = self._metadata_key(hreq, context)
+        if key is not None and key in self._metadata_cache:
+            return self._metadata_cache[key]
+        req = FeedbackRequest(
+            prompt=hreq.prompt, context=context,
+            kind=hreq.kind, options=hreq.options, origin=dict(hreq.origin),
+        )
         task.feedback_request = req
         req.event.wait()
         task.feedback_request = None
         if task.stopped:
             raise AgentStoppedError("Agent stopped by user")
         response = req.response or ""
-        # Cache metadata descriptions so repeated prompts auto-reply
-        if "Context" in prompt and "MISSING METADATA" in context:
-            import re
-            m = re.search(r"MISSING METADATA FOR:\s*(.+)", context)
-            if m:
-                _metadata_cache[m.group(1).strip()] = response
+        if key is not None:
+            self._metadata_cache[key] = response
         return response
+
+
+def _run_agent_chat(task: ChatTask, agent, user_input: str) -> None:
+    """Target for the background thread."""
+    import logging
+
+    from scilink import hitl as _hitl
+
+    original_input = builtins.input
 
     cap = OutputCapture()
     task.live_capture = cap
+
+    channel = _UIChannel(task, cap)
+
+    def _streamlit_input(prompt: str = "") -> str:
+        # Raw-input fallback: covers third-party code and agent worker
+        # threads (fan-out branches, best-of-N workers) that bypass the
+        # thread-local channel. Same UI slot, generic free-text request.
+        return channel.ask(_hitl.FeedbackRequest(prompt=prompt))
 
     # Route logging output through the capture buffer so that
     # logging.info() messages (used by the verification-correction
@@ -585,6 +615,7 @@ def _run_agent_chat(task: ChatTask, agent, user_input: str) -> None:
 
     try:
         builtins.input = _streamlit_input
+        _hitl.set_thread_channel(channel)
         with cap:
             result = agent.chat(user_input)
         if not task.stopped:
@@ -599,6 +630,7 @@ def _run_agent_chat(task: ChatTask, agent, user_input: str) -> None:
             task.verbose_log = cap.getvalue()
     finally:
         builtins.input = original_input
+        _hitl.set_thread_channel(None)
         root_logger.removeHandler(log_handler)
         task.live_capture = None
         if not task.stopped:
@@ -998,8 +1030,11 @@ else:
                             with st.expander(f"📄 {fname}", expanded=len(code_files) == 1):
                                 st.code(content, language="python")
     
-                _is_fanout_confirm = ("parallel multi-dataset analysis"
-                                      in (req.context or "").lower())
+                _is_fanout_confirm = (
+                    req.origin.get("stage") == "fanout_confirm"
+                    or "parallel multi-dataset analysis"
+                    in (req.context or "").lower()
+                )
                 if _is_fanout_confirm:
                     _render_fanout_confirm(req.context)
                 elif req.context:
@@ -1059,7 +1094,11 @@ else:
                 # the buffer accumulates all stdout from the session.
                 _ctx_tail = (req.context or "")[-1500:]
                 _prompt = req.prompt or ""
-                _is_keep_revert = "revert to original" in _ctx_tail.lower()
+                _is_keep_revert = (
+                    (req.kind == "keep_or_revert"
+                     and (req.options or [""])[0] == "keep")
+                    or "revert to original" in _ctx_tail.lower()
+                )
                 # Best-of-N candidate review: parse the candidate list so we can
                 # render a radio selector (scales to any N, unlike one button
                 # per candidate). None -> falls through to the generic text box.
@@ -1067,7 +1106,8 @@ else:
                 # Plan-mode best-of-N: same radio UX, its own parser/markers.
                 _plan_cand_data = _parse_plan_candidate_review(req.context or "", _prompt)
                 # (_is_fanout_confirm computed above, before the context render)
-                if "Context" in _prompt or "MISSING METADATA" in _ctx_tail:
+                if (req.kind == "dataset_description"
+                        or "Context" in _prompt or "MISSING METADATA" in _ctx_tail):
                     _input_label = "Describe your data (optional):"
                     _submit_label = "Submit description"
                     _accept_label = "Skip (let agent guess)"
@@ -1079,7 +1119,7 @@ else:
                     _input_label = "Your plan feedback (optional):"
                     _submit_label = "Request changes"
                     _accept_label = "Approve plan"
-                elif "SCALARIZER REVIEW" in _ctx_tail:
+                elif req.kind == "review_metrics" or "SCALARIZER REVIEW" in _ctx_tail:
                     _input_label = "Your extraction feedback (optional):"
                     _submit_label = "Request changes"
                     _accept_label = "Approve extraction"

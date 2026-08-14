@@ -9,11 +9,20 @@ import streamlit as st
 
 @dataclass
 class FeedbackRequest:
-    """A pending input() call from the agent thread waiting for the user."""
+    """A pending human-feedback request from the agent thread.
+
+    ``kind``/``options``/``origin`` mirror the structured fields of
+    ``scilink.hitl.FeedbackRequest`` when the prompt arrives through the
+    chokepoint; a stray raw ``input()`` (third-party code) produces the
+    defaults, and the widget chooser falls back to prompt/context sniffing.
+    """
     prompt: str = ""
-    context: str = ""  # stdout captured before the input() call
+    context: str = ""  # stdout captured before the prompt
     response: Optional[str] = None
     event: threading.Event = field(default_factory=threading.Event)
+    kind: str = ""
+    options: Optional[list] = None
+    origin: dict = field(default_factory=dict)
 
 
 @dataclass

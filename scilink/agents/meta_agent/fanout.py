@@ -547,7 +547,11 @@ def _confirm_fanout(orch, verdict: dict, fanout_set: List[str],
     if n > FANOUT_SOFT_CAP:
         lines.append(f"  ⚠️  {n}-way mesh exceeds the soft cap ({FANOUT_SOFT_CAP}) "
                      "— this is expensive.")
-    lines.append("  Branches run AUTONOMOUSLY (no per-branch approval pauses).")
+    if _branch_hitl_enabled(orch):
+        lines.append("  Branches will PAUSE for approvals (served one at a "
+                     "time, labeled per branch).")
+    else:
+        lines.append("  Branches run AUTONOMOUSLY (no per-branch approval pauses).")
     lines.append("=" * 78)
     print("\n".join(lines))
 
@@ -571,6 +575,31 @@ def _confirm_fanout(orch, verdict: dict, fanout_set: List[str],
 # ======================================================================
 # Branch execution
 # ======================================================================
+
+def _branch_hitl_enabled(orch) -> bool:
+    """Per-branch human-in-the-loop is OPT-IN (default off).
+
+    When ``orch.fanout_branch_hitl`` is truthy AND the meta has a human
+    attached, branches keep the meta's autonomy level and their prompts are
+    queued to the coordinator instead of being suppressed. Default-off
+    preserves the historical contract: branches run AUTONOMOUS.
+    """
+    return bool(getattr(orch, "fanout_branch_hitl", False)) \
+        and orch._enable_human_feedback
+
+
+class _BranchChannel:
+    """Tags a branch's requests with its label, then parks them on the
+    shared queue for the coordinator to serve."""
+
+    def __init__(self, queue_channel, label: str) -> None:
+        self._qch = queue_channel
+        self._label = label
+
+    def ask(self, req):
+        req.origin.setdefault("branch_label", self._label)
+        return self._qch.ask(req)
+
 
 def _make_ephemeral_analysis_child(orch, base_dir: Path):
     """Build an isolated, one-shot analysis orchestrator for one branch.
@@ -721,7 +750,8 @@ def _mesh_task(branch: dict, companions: List[dict]) -> str:
 
 
 def _run_one_branch(orch, branch: dict, companions: List[dict],
-                    entry: dict) -> None:
+                    entry: dict, queue_channel=None,
+                    branch_autonomy=None) -> None:
     """Execute a single fan-out branch into its preallocated ledger slot.
 
     Each worker touches ONLY its own ``entry`` dict, so there is no shared
@@ -744,6 +774,10 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
                   branch.get("label") or slug)
     entry["_started_at"] = time.monotonic()
     entry["_branch_tid"] = threading.get_ident()
+    if queue_channel is not None:
+        from ...hitl import set_thread_channel
+        set_thread_channel(_BranchChannel(
+            queue_channel, branch.get("label") or slug))
     try:
         try:
             from ..exp_agents.analysis_orchestrator import AnalysisMode
@@ -751,7 +785,8 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
             result = child.run_task(
                 _mesh_task(branch, companions),
                 context=branch.get("context"),
-                autonomy=AnalysisMode.AUTONOMOUS,
+                autonomy=(branch_autonomy if branch_autonomy is not None
+                          else AnalysisMode.AUTONOMOUS),
             )
         except Exception as e:  # noqa: BLE001
             logger.exception(f"fan-out branch {index} failed: {e}")
@@ -759,6 +794,9 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
                       "key_findings": [], "files_produced": [],
                       "suggested_followups": [], "warnings": []}
     finally:
+        if queue_channel is not None:
+            from ...hitl import set_thread_channel
+            set_thread_channel(None)
         _release_branch(mem_key)
     if entry.get("timed_out"):
         logger.warning(
@@ -996,12 +1034,23 @@ def run_fanout(orch, branches: List[dict],
     # No context manager: an abandoned (timed-out) branch thread cannot be
     # killed, and `with` would join it — the pool is shut down without
     # waiting instead (#358).
+    # Per-branch HITL (opt-in): branches keep the meta's autonomy and their
+    # prompts are parked on a queue the coordinator serves serially below.
+    queue_channel = None
+    branch_autonomy = None
+    if _branch_hitl_enabled(orch):
+        from ...hitl import QueueChannel
+        from ..exp_agents.analysis_orchestrator import AnalysisMode
+        queue_channel = QueueChannel()
+        branch_autonomy = AnalysisMode[orch.meta_mode.name]
+
     pool = ThreadPoolExecutor(max_workers=max_workers)
     try:
         fut_label, fut_entry = {}, {}
         for i in range(n_total):
             fut = pool.submit(_run_one_branch, orch, run_branches[i],
-                              branch_companions[i], entries[i])
+                              branch_companions[i], entries[i],
+                              queue_channel, branch_autonomy)
             fut_label[fut] = run_branches[i]["label"]
             fut_entry[fut] = entries[i]
         # Wait with a periodic heartbeat so the user can see the parallel run is
@@ -1020,6 +1069,11 @@ def run_fanout(orch, branches: List[dict],
             t0 = time.monotonic()
             done, pending = wait(pending, timeout=_FANOUT_POLL_S)
             since_tick += time.monotonic() - t0
+            if queue_channel is not None:
+                # Serve queued branch prompts through the coordinator's own
+                # channel (console prompt / UI modal), one at a time.
+                if queue_channel.serve_pending():
+                    since_tick = 0.0  # a served prompt shows the run is alive
             for f in done:
                 f.result()  # _run_one_branch never raises; just surfaces oddities
                 print(f"  ✅ analysis branch finished: {fut_label[f]}  "
