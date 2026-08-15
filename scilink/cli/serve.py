@@ -41,9 +41,14 @@ def main():
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["analyze", "plan", "both"],
+        choices=["analyze", "plan", "both", "meta"],
         default="both",
-        help="Which tool sets to expose (default: both)",
+        help=(
+            "Which tool sets to expose (default: both). 'meta' exposes "
+            "SciLink's meta orchestrator instead — one surface that routes "
+            "across the specialists, with parallel multi-modal fan-out + "
+            "fusion and cross-mode delegation."
+        ),
     )
     parser.add_argument(
         "--autonomy",
