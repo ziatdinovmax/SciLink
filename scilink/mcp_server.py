@@ -49,6 +49,10 @@ _COPILOT_APPROVAL_TOOLS = {
     "get_recommendations", "run_optimization", "generate_initial_plan",
     "generate_implementation_code", "run_economic_analysis",
     "discard_plan",
+    # Meta-mode granular delegations (each one launches a full specialist
+    # workflow — co-pilot gates them; in autopilot they run and the
+    # children's own questions surface via awaiting_input instead).
+    "delegate_to_analysis", "delegate_to_planning", "delegate_to_simulation",
 }
 _AUTOPILOT_APPROVAL_TOOLS = {
     "run_analysis", "run_optimization", "discard_plan",
@@ -74,6 +78,10 @@ _BACKGROUND_CAPABLE_TOOLS = {
     "run_economic_analysis",
     "orchestrate_analysis",
     "orchestrate_planning",
+    "orchestrate_meta",
+    "delegate_to_analysis",
+    "delegate_to_planning",
+    "delegate_to_simulation",
 }
 
 
@@ -335,6 +343,7 @@ def create_server(
     state: Dict[str, Any] = {
         "analysis_orch": None,
         "planning_orch": None,
+        "meta_orch": None,
         # Pending items awaiting a client's scilink_respond, keyed by
         # request id. Two shapes: {"type": "tool_approval", "action":
         # PendingAction} for gated tool calls, and {"type": "question",
@@ -390,6 +399,12 @@ def create_server(
                         mcp_name = f"scilink_plan_{fn_name}"
                     tool_map[mcp_name] = ("planning_orch", fn_name)
 
+        if state["meta_orch"]:
+            for schema in state["meta_orch"].tools.openai_schemas:
+                fn_name = schema.get("function", {}).get("name", "")
+                if fn_name:
+                    tool_map[f"scilink_{fn_name}"] = ("meta_orch", fn_name)
+
         state["initialized"] = True
 
     # ── Eager init (call before starting transport) ────────────────
@@ -419,6 +434,10 @@ def create_server(
                 else:
                     prefix = "scilink"
                 tools.append(_openai_to_mcp_tool(schema, prefix=prefix))
+
+        if state["meta_orch"]:
+            for schema in state["meta_orch"].tools.openai_schemas:
+                tools.append(_openai_to_mcp_tool(schema, prefix="scilink"))
 
         # Always include scilink_respond so it's available if the user
         # switches to co-pilot/autopilot mode mid-session via
@@ -607,6 +626,49 @@ def create_server(
                 },
             ))
 
+        if state["meta_orch"]:
+            tools.append(types.Tool(
+                name="scilink_orchestrate_meta",
+                description=(
+                    "Delegate a complete multi-step scientific investigation to "
+                    "SciLink's META orchestrator — its orchestrator-of-"
+                    "orchestrators. The meta routes work across the analysis and "
+                    "planning specialists, runs complementary datasets as a "
+                    "PARALLEL fan-out with cross-modal fusion, and bridges "
+                    "findings between modes (e.g. analysis results feeding an "
+                    "optimization campaign). Send one natural-language "
+                    "instruction describing the whole investigation. Use "
+                    "background=true (recommended): poll scilink_job_status for "
+                    "progress (log_tail) and answer its questions "
+                    "(awaiting_input -> scilink_respond)."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "prompt": {
+                            "type": "string",
+                            "description": (
+                                "Natural-language instruction for the meta "
+                                "orchestrator, e.g. 'Analyze A.csv and B.csv in "
+                                "parallel (they are complementary modalities of "
+                                "one sample), fuse the findings, then design a "
+                                "follow-up experiment.'"
+                            ),
+                        },
+                        "background": {
+                            "type": "boolean",
+                            "description": (
+                                "If true, run in the background and return a "
+                                "job_id immediately. Recommended. Poll with "
+                                "scilink_job_status; fetch with "
+                                "scilink_job_result. Default: false."
+                            ),
+                        },
+                    },
+                    "required": ["prompt"],
+                },
+            ))
+
         return tools
 
     # ── tools/call ───────────────────────────────────────────────────
@@ -636,6 +698,9 @@ def create_server(
             return await _handle_orchestrate(
                 state, name, arguments, _executor
             )
+
+        if name == "scilink_orchestrate_meta":
+            return await _handle_orchestrate_meta(state, arguments, _executor)
 
         # Look up which orchestrator owns this tool
         if name not in tool_map:
@@ -909,6 +974,28 @@ def _init_orchestrators(state: dict, config: dict) -> None:
         except Exception as exc:
             logging.warning(f"Planning orchestrator not available: {exc}")
 
+    if config["mode"] == "meta":
+        # The meta is its own surface (it constructs and routes to its
+        # specialist children internally) — exposed INSTEAD of the
+        # analysis/planning tool sets, mirroring how bare `scilink`
+        # launches mission control. MetaMode has two levels: autonomous
+        # serving maps to AUTONOMOUS, everything else to AUTOPILOT (the
+        # meta has no co-pilot; children's prompts surface either way).
+        from scilink.agents.meta_agent.meta_orchestrator import (
+            MetaOrchestratorAgent, MetaMode,
+        )
+        meta_mode = (MetaMode.AUTONOMOUS
+                     if config["analysis_mode"].lower() == "autonomous"
+                     else MetaMode.AUTOPILOT)
+        state["meta_orch"] = MetaOrchestratorAgent(
+            base_dir=session_dir,
+            api_key=api_key,
+            model_name=model_name,
+            base_url=base_url,
+            meta_mode=meta_mode,
+            futurehouse_api_key=fh_key,
+        )
+
 
 # ── Background job handlers ──────────────────────────────────────────────
 
@@ -1077,6 +1164,118 @@ def _execute_run_task_captured(orch, prompt: str, autonomy_str: str,
     return json.dumps(out, default=str)
 
 
+def _execute_meta_chat_captured(orch, prompt: str, autonomy_str: str,
+                                state: dict = None, job_id: str = None,
+                                log_lines=None) -> str:
+    """Run one meta-orchestrator chat turn under the server's autonomy.
+
+    The meta has no run_task (it IS the top-level caller), so this runs
+    ``chat()`` with the mode set for the call and restored after —
+    AUTONOMOUS serving maps to MetaMode.AUTONOMOUS, autopilot/co-pilot to
+    MetaMode.AUTOPILOT (the meta's only human-attached level). Prompts
+    raised anywhere in the tree — the meta's own confirms, delegated
+    children's plan reviews — park in the server's pending queue via the
+    thread channel and surface as awaiting_input.
+    """
+    from scilink.agents.meta_agent.meta_orchestrator import MetaMode
+    from scilink.hitl import set_thread_channel
+
+    run_mode = (MetaMode.AUTONOMOUS
+                if (autonomy_str or "autonomous").lower() == "autonomous"
+                else MetaMode.AUTOPILOT)
+    original_mode = orch.meta_mode
+
+    if state is not None:
+        set_thread_channel(_MCPChannel(
+            state, job_id=job_id,
+            timeout_s=state["config"].get("hitl_timeout_s", 1800.0)))
+    captured = _TeeIO(log_lines) if log_lines is not None else io.StringIO()
+    try:
+        orch.set_meta_mode(run_mode)
+        with _job_narration(log_lines), contextlib.redirect_stdout(captured):
+            response = orch.chat(prompt)
+    finally:
+        orch.set_meta_mode(original_mode)
+        if state is not None:
+            set_thread_channel(None)
+
+    log_output = captured.getvalue().strip()
+    if log_output:
+        logging.info(f"[orchestrate_meta] {log_output}")
+
+    is_error = response.strip().startswith("❌")
+    return json.dumps({
+        "status": "error" if is_error else "success",
+        "response": response,
+    }, default=str)
+
+
+async def _handle_orchestrate_meta(
+    state: dict, arguments: dict, executor
+) -> List["types.TextContent"]:
+    """Handle the meta-orchestrator chat tool."""
+    from datetime import datetime as _dt
+
+    orch = state.get("meta_orch")
+    if orch is None:
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({
+                "status": "error",
+                "message": ("Meta orchestrator is not available. Start the "
+                            "server with --mode meta."),
+            }),
+        )]
+
+    prompt = arguments.get("prompt", "")
+    if not prompt.strip():
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({
+                "status": "error",
+                "message": "Empty prompt. Provide a natural-language instruction.",
+            }),
+        )]
+
+    run_in_background = arguments.pop("background", False)
+    autonomy_str = state["config"]["analysis_mode"]
+
+    if run_in_background:
+        state["job_counter"] += 1
+        ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+        job_id = f"job_{ts}_{state['job_counter']:03d}"
+
+        log_lines = _new_job_lines()
+        future = executor.submit(_execute_meta_chat_captured, orch, prompt,
+                                 autonomy_str, state, job_id, log_lines)
+        state["jobs"][job_id] = {
+            "future": future,
+            "tool": "orchestrate_meta",
+            "started_at": ts,
+            "status": "running",
+            "result": None,
+            "log_lines": log_lines,
+        }
+
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({
+                "status": "started",
+                "job_id": job_id,
+                "tool": "orchestrate_meta",
+                "message": (
+                    f"Meta orchestrator running in background (job {job_id}). "
+                    "Use scilink_job_status to watch progress (log_tail) and "
+                    "answer its questions; scilink_job_result for the result."
+                ),
+            }),
+        )]
+
+    result = await asyncio.to_thread(_execute_meta_chat_captured, orch,
+                                     prompt, autonomy_str, state, None)
+    return [types.TextContent(type="text", text=result)]
+
+
 async def _handle_orchestrate(
     state: dict, name: str, arguments: dict, executor
 ) -> List["types.TextContent"]:
@@ -1196,6 +1395,14 @@ def _handle_set_autonomy(
                 AutonomyLevel[_level_name])
         except Exception as exc:  # noqa: BLE001
             logging.warning(f"set_autonomy: planning orch not updated: {exc}")
+    if state.get("meta_orch") is not None:
+        try:
+            from scilink.agents.meta_agent.meta_orchestrator import MetaMode
+            state["meta_orch"].set_meta_mode(
+                MetaMode.AUTONOMOUS if new_mode == "autonomous"
+                else MetaMode.AUTOPILOT)
+        except Exception as exc:  # noqa: BLE001
+            logging.warning(f"set_autonomy: meta orch not updated: {exc}")
 
     # Clear pending tool approvals from the previous mode; parked agent
     # questions belong to running jobs and stay answerable.
