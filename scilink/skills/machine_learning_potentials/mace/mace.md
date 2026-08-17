@@ -74,6 +74,16 @@ charged/ionic systems, redox chemistry, response to an applied electric field,
 long-range electrostatics (charge transfer across fragments), or when per-atom
 charges/dipoles are the target observable.
 
+Scope through SciLink's MD pipeline. The atoms.info charge/spin/field
+inputs above apply to the direct ASE path (single-point evaluation, or an
+ASE script you drive yourself). The orchestrated MLIP→MD path
+(MLIPAgent/MDSimulationAgent) does not yet propagate per-frame system
+state, so a polar-1 model selected through it runs at neutral charge,
+default spin, no field — i.e. as a standard MACE run. Until SciLink#463
+adds a system-state carrier to DeployedPotential, use polar-1 for
+single-point charge/dipole analysis rather than charged/field/redox MD
+through the agent.
+
 ## planning
 
 Model selection:
@@ -91,7 +101,8 @@ Model selection:
 `polar-1-*` models require the extra `graph_electrostatics` dependency (see the
 detect guidance) and use a dedicated `mace_polar` loader rather than `mace_mp`.
 Choose `polar-1-l` over `polar-1-m` when the electrostatics extend beyond ~12 Å;
-it is more expensive per step.
+it is more expensive per step. (single-point/ASE path today; MD-through-the-agent
+for charged/field systems is pending SciLink#463)" 
 
 Deployment path:
 - System < 10k atoms, Python workflow → ASE calculator path
