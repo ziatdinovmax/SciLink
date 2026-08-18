@@ -702,6 +702,7 @@ class PlanningOrchestratorAgent:
         self.target_directions = {}  # e.g. {"Yield": "maximize", "Defect_Density": "minimize"}
         self.expected_input_types = None  # {col: "continuous" | "categorical"} from scalarizer
         self.expected_input_levels = None  # {col: [level0, level1, ...]} for categorical inputs
+        self.input_bounds_override = None  # {col: (min, max)} caller-stated search box (run_optimization input_bounds)
         self.fidelity_spec = None  # {column, target_fidelity?, costs?} when the data has a fidelity axis
         self.latest_tea_results = None
 
@@ -1224,6 +1225,9 @@ class PlanningOrchestratorAgent:
             self.target_directions = state.get("target_directions", {})
             self.expected_input_types = state.get("expected_input_types")
             self.expected_input_levels = state.get("expected_input_levels")
+            _ib = state.get("input_bounds_override")
+            self.input_bounds_override = (
+                {k: tuple(v) for k, v in _ib.items()} if isinstance(_ib, dict) else None)
             self.fidelity_spec = state.get("fidelity_spec")
             self.latest_tea_results = state.get("latest_tea_results")
             self._delegation_counter = state.get("delegation_counter", 0)
@@ -1552,6 +1556,9 @@ class PlanningOrchestratorAgent:
                 "target_directions": self.target_directions,
                 "expected_input_types": self.expected_input_types,
                 "expected_input_levels": self.expected_input_levels,
+                "input_bounds_override": (
+                    {k: list(v) for k, v in self.input_bounds_override.items()}
+                    if self.input_bounds_override else None),
                 "fidelity_spec": self.fidelity_spec,
                 "data_points_collected": len(pd.read_csv(self.bo_data_path)) if self.bo_data_path.exists() else 0,
                 "planner_state": compact_planner_state(self.planner.state),

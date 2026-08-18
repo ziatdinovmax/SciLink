@@ -4357,7 +4357,8 @@ class OrchestratorTools:
             targets: list[str] = None,
             strategy_hint: str = None,
             skill: str = None,
-            candidate_pool: str = None
+            candidate_pool: str = None,
+            input_bounds: dict = None,
         ):
             """
             Runs Bayesian Optimization to suggest next parameters.
@@ -4482,6 +4483,42 @@ class OrchestratorTools:
                             scientific_bounds[name] = (float(min_v), float(max_v))
                             print(f"  🔬 Scientific Constraint Found: {name} must be between {min_v} and {max_v}")
 
+            # Caller-stated ranges (instrument limits, safe operating window,
+            # allowed concentration range) — the strongest source: whoever
+            # runs the instrument knows what it can actually reach. Sticky:
+            # remembered on the orchestrator (and checkpointed) so later
+            # rounds inherit them until a call overrides them.
+            bounds_warnings: List[str] = []
+            if input_bounds:
+                cleaned: Dict[str, tuple] = {}
+                if not isinstance(input_bounds, dict):
+                    bounds_warnings.append(
+                        "input_bounds must be a dict {column: [min, max]}; ignored.")
+                else:
+                    known = list(self.orch.expected_input_columns or [])
+                    for name, rng in input_bounds.items():
+                        if str(name) not in known:
+                            bounds_warnings.append(
+                                f"input_bounds for unknown input column "
+                                f"'{name}' ignored; campaign inputs are {known}.")
+                            continue
+                        try:
+                            lo, hi = float(rng[0]), float(rng[1])
+                        except (TypeError, ValueError, IndexError):
+                            bounds_warnings.append(
+                                f"input_bounds['{name}'] must be [min, max]; ignored.")
+                            continue
+                        if not lo < hi:
+                            bounds_warnings.append(
+                                f"input_bounds['{name}'] needs min < max; ignored.")
+                            continue
+                        cleaned[str(name)] = (lo, hi)
+                if cleaned:
+                    prev = getattr(self.orch, "input_bounds_override", None) or {}
+                    self.orch.input_bounds_override = {**prev, **cleaned}
+            caller_bounds: Dict[str, tuple] = dict(
+                getattr(self.orch, "input_bounds_override", None) or {})
+
             # Resolve input types: scalarizer is the source of truth on type;
             # planner is the source of truth on the level universe (so BO can
             # recommend levels not yet observed in the data).
@@ -4568,16 +4605,29 @@ class OrchestratorTools:
             self.orch.expected_input_columns = optimization_inputs
             self.orch.expected_input_levels = level_maps if level_maps else None
 
-            # Build bounds (continuous: scientific or data-derived; categorical: [0, n-1])
+            # Build bounds. Precedence per continuous input: caller-stated >
+            # planner (plan optimization_params) > data-derived (observed
+            # range +/-10%). Categorical inputs are index-encoded [0, n-1].
             input_bounds = []
+            bounds_sources: Dict[str, str] = {}
             for col in optimization_inputs:
                 if col in level_maps:
                     n = len(level_maps[col])
                     input_bounds.append([0.0, float(n - 1)])
+                    bounds_sources[col] = "categorical"
+                    if col in caller_bounds:
+                        bounds_warnings.append(
+                            f"input_bounds['{col}'] ignored: categorical input.")
                     print(f"     -> Bound for '{col}': [0, {n - 1}] (Source: CATEGORICAL — {n} levels)")
+                elif col in caller_bounds:
+                    lo, hi = caller_bounds[col]
+                    input_bounds.append([lo, hi])
+                    bounds_sources[col] = "caller"
+                    print(f"     -> Bound for '{col}': [{lo}, {hi}] (Source: CALLER)")
                 elif col in scientific_bounds:
                     sci_min, sci_max = scientific_bounds[col]
                     input_bounds.append([sci_min, sci_max])
+                    bounds_sources[col] = "planner"
                     print(f"     -> Bound for '{col}': [{sci_min}, {sci_max}] (Source: PLANNER)")
                 else:
                     data_min = float(df[col].min())
@@ -4592,7 +4642,10 @@ class OrchestratorTools:
                     safe_max = data_max + margin
 
                     input_bounds.append([safe_min, safe_max])
+                    bounds_sources[col] = "data"
                     print(f"     -> Bound for '{col}': [{safe_min:.2f}, {safe_max:.2f}] (Source: DATA)")
+            for w in bounds_warnings:
+                print(f"  ⚠️ {w}")
 
             # Build cat_dims (positional indices) and integer-encode CSV
             cat_dims = [
@@ -4811,6 +4864,16 @@ class OrchestratorTools:
                 if res.get("candidate_pool"):
                     response["candidate_pool"] = res["candidate_pool"]
 
+                # The search box actually used and where each range came
+                # from (caller / planner / data / categorical), so a caller
+                # can see a data-derived box and pass input_bounds next time.
+                response["input_bounds"] = {
+                    col: [float(lo), float(hi)]
+                    for col, (lo, hi) in zip(optimization_inputs, input_bounds)}
+                response["input_bounds_source"] = bounds_sources
+                if bounds_warnings:
+                    response["input_bounds_warnings"] = bounds_warnings
+
                 # Include budget context
                 if res.get("budget"):
                     response["budget"] = res["budget"]
@@ -4918,6 +4981,24 @@ class OrchestratorTools:
                 "skill": {
                     "type": "string",
                     "description": _build_optimization_skill_description()
+                },
+                "input_bounds": {
+                    "type": "object",
+                    "description": (
+                        "Hard search-box limits per input column, "
+                        "{\"column\": [min, max]} — the range the instrument or "
+                        "process can actually reach (e.g. {\"anneal_time_min\": "
+                        "[5, 60], \"temperature_C\": [300, 700]}). Pass whenever the "
+                        "user or calling system states an achievable / safe / "
+                        "allowed range for a parameter, in this call or earlier in "
+                        "the conversation. These take precedence over ranges from the "
+                        "campaign plan and over the default (observed data range "
+                        "+/-10%, which can extrapolate outside what is physically "
+                        "realizable). Sticky: once given they apply to every later "
+                        "call in this campaign until overridden. Only the columns "
+                        "given are affected; others keep their plan/data-derived "
+                        "range. Ignored for categorical inputs."
+                    )
                 }
             },
             required=[]
