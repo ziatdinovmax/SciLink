@@ -276,17 +276,24 @@ def fit_pattern(
         else:
             centers_for_sweep = centers_locked
         trials = []
+        last_err: Optional[Exception] = None
         for it in iters_list:
             bg = fit_background(x.tolist(), y.tolist(), method="snip", iterations=it)
             ycorr = np.asarray(bg["intensity_corrected"], dtype=float)
             try:
                 res = _fit_corrected(x, ycorr, centers_for_sweep, step, **fit_kw)
-            except (RuntimeError, ValueError):
+            except (RuntimeError, ValueError) as e:
+                last_err = e
                 continue
             res["_iters"] = it
             trials.append(res)
         if not trials:
-            raise RuntimeError("fit_pattern: no SNIP iteration count converged")
+            # Surface the underlying cause: the sweep swallowing it left the
+            # correction loop guessing at "convergence" when the fit was
+            # rejected for a different reason (bounds, no peaks, ...).
+            raise RuntimeError(
+                f"fit_pattern: every SNIP iteration count "
+                f"({iters_list}) failed; last error: {last_err}") from last_err
         # Favour R² first (attempt-1 must clear the acceptance gate, especially
         # in fast/low-iteration mode); only take a cleaner-residual background
         # when its R² is within a hair (0.002) of the best, i.e. essentially
@@ -348,6 +355,16 @@ def _fit_corrected(
     split = peak_shape == "split_pseudo_voigt"
     model = _multi_split if split else _multi
     fwhm_lo = max(2.0 * step, 0.02)
+    if fwhm_lo >= max_fwhm_deg:
+        raise ValueError(
+            f"fit_pattern: the sampling step ({step:.4g}) is too coarse for "
+            f"max_fwhm_deg={max_fwhm_deg}: the narrowest resolvable FWHM is "
+            f"2*step={fwhm_lo:.4g}. Raise max_fwhm_deg.")
+    # The initial FWHM must sit inside [fwhm_lo, max_fwhm_deg]: on coarsely
+    # sampled patterns 2*step exceeds the default init_fwhm_deg and
+    # least_squares rejects the whole fit ("initial guess is outside of
+    # provided bounds") — nothing to do with convergence.
+    fwhm0 = min(max(float(init_fwhm_deg), fwhm_lo), max_fwhm_deg)
     noise = _estimate_noise(ycorr)
 
     if centers_locked is not None:
@@ -366,15 +383,15 @@ def _fit_corrected(
         j = int(np.argmin(np.abs(x - c)))
         amp0 = max(ycorr[j], noise)
         if split:
-            p0 += [amp0, c, init_fwhm_deg, init_fwhm_deg, 0.5]
+            p0 += [amp0, c, fwhm0, fwhm0, 0.5]
             lo += [0.0, c - center_leeway_deg, fwhm_lo, fwhm_lo, 0.0]
             hi += [5.0 * amp0 + 1.0, c + center_leeway_deg, max_fwhm_deg, max_fwhm_deg, 1.0]
-            scale += [amp0, center_leeway_deg, init_fwhm_deg, init_fwhm_deg, 1.0]
+            scale += [amp0, center_leeway_deg, fwhm0, fwhm0, 1.0]
         else:
-            p0 += [amp0, c, init_fwhm_deg, 0.5]
+            p0 += [amp0, c, fwhm0, 0.5]
             lo += [0.0, c - center_leeway_deg, fwhm_lo, 0.0]
             hi += [5.0 * amp0 + 1.0, c + center_leeway_deg, max_fwhm_deg, 1.0]
-            scale += [amp0, center_leeway_deg, init_fwhm_deg, 1.0]
+            scale += [amp0, center_leeway_deg, fwhm0, 1.0]
     p0 += [0.0, 0.0]                       # linear baseline slope, intercept
     lo += [-np.inf, -np.inf]
     hi += [np.inf, np.inf]
