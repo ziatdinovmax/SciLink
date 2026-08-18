@@ -4408,7 +4408,12 @@ class OrchestratorTools:
                 return json.dumps({
                     "status": "error",
                     "message": "Schema not established",
-                    "hint": "This shouldn't happen. Try reset_analysis_logic."
+                    "hint": ("No analyze_file has established inputs/targets in "
+                             "this session. Ingest your data with analyze_file "
+                             "(inputs=[...], targets=[...]) first; if it reports "
+                             "the file as already analyzed, the session was "
+                             "reused from an earlier process — call analyze_file "
+                             "with force_regenerate=true.")
                 })
 
             # TARGET NARROWING — allows switching from MOO to SOO
