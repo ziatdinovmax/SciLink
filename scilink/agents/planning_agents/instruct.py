@@ -1333,6 +1333,46 @@ portfolio names directions; benchwork is designed later, once one is chosen.
 """
 
 
+# One-page memo style for write_technical_document(style="memo"). A house
+# template distilled from a set of facility-design memos: header block, one
+# CORE line, a few short lead-in paragraphs, a decision at the end. Stated
+# as principles (what a memo IS), not as phrases to copy.
+TECHNICAL_MEMO_STYLE_RULES = """
+
+**THIS IS A ONE-PAGE TECHNICAL MEMO, NOT A REPORT.** Hard budget: the whole
+document is 350-500 words and reads on a single page. Drafts always run
+long, so write to 400 words and stop; a 400-word memo that omits a point
+is right, a 600-word one is not a memo. Density comes from cutting, not
+from compressing sentences.
+
+Shape (return it through the same "sections" contract):
+- FIRST section: heading "" (empty) — the header block, one line each in
+  this order: an italic one-line subtitle stating what the memo defines;
+  "**Purpose:** ..." (one sentence); "**Scope:** ..." (one sentence: what
+  is in, what is out — or "**Operating premise:** ..." when a working
+  assumption frames the memo); "**Date:** <today>"; then a blank line and
+  ONE bold line beginning "**CORE RULE**", "**CORE UNIT**", "**CORE
+  METRIC**" or "**CORE FRAMING**" (choose the one that fits) followed by
+  two spaces and the whole memo in one sentence.
+- Then 3-5 sections with short headings (three to six words). Each is
+  one to three paragraphs; a paragraph opens with a bold lead-in of one
+  to three words ending in a period ("**Role.** ...", "**Estimate
+  basis.** ...", "**Before and during.** ...") that names its point, then
+  two to four plain sentences. Bullets only for a genuine list of
+  parallel items; at most one small table, and only if the request has
+  a comparison an "At a glance" table serves.
+- LAST section is the decision: heading such as "Planning implication",
+  "Development approach" or "Common platform requirements" — what to do
+  next and what it commits the reader to, not a summary of the above.
+
+Do not add: an executive summary, background section, methods narrative,
+risks catalogue, references section (unless the context supplies real
+references you cite), or a closing summary. Every number carries its
+basis in the same sentence ("assumes", "at 2-5 episodes/week"). If the
+request asks for more than a memo can hold, cover what matters most and
+say in the Scope line what was left out.
+"""
+
 # Revision mode for write_technical_document. Authoring a fresh document and
 # revising one are different jobs: a revision must preserve everything it was
 # not asked to change, and must return the WHOLE document, because the tool

@@ -24,6 +24,7 @@ from .instruct import (
     IDEATION_AUTHOR_OVERRIDE,
     IDEATION_OUTPUT_RULES,
     TECHNICAL_DOCUMENT_INSTRUCTIONS,
+    TECHNICAL_MEMO_STYLE_RULES,
     IDEATION_PORTFOLIO_INSTRUCTIONS,
     PORTFOLIO_REFINEMENT_RULES,
     IDEATION_PORTFOLIO_INSTRUCTIONS_FALLBACK,
@@ -1075,6 +1076,13 @@ def refine_code_with_feedback(result: Dict[str, Any],
         print(f"    - ❌ Error during code refinement: {e}")
         return result
 
+MEMO_REVISION_OVERRIDE = """
+**Memo revision override.** Because the target is a one-page memo, the
+"return everything verbatim" rule above yields to the memo budget: keep the
+substance and any real references, but condense to the memo shape.
+"""
+
+
 def author_technical_document(request: str,
                               kb_docs: Any,
                               model: Any,
@@ -1085,9 +1093,14 @@ def author_technical_document(request: str,
                               additional_context: Optional[str] = None,
                               skill_context: Optional[str] = None,
                               revise_document: Optional[str] = None,
+                              style: str = "report",
                               task_name: str = "Technical Document"
                               ) -> Dict[str, Any]:
     """Author a grounded technical document (roadmap, estimate, memo, brief).
+
+    ``style="memo"`` appends the one-page memo template rules (header
+    block, CORE line, 3-5 lead-in sections, 350-550 words); the default
+    ``"report"`` is the unconstrained document.
 
     Same retrieval path as plan generation, different contract: the model
     returns SECTIONS, not an experiment. Sections rather than one markdown
@@ -1112,6 +1125,16 @@ def author_technical_document(request: str,
     if revise_document:
         _instr += TECHNICAL_DOCUMENT_REVISION_RULES
         _fallback += TECHNICAL_DOCUMENT_REVISION_RULES
+    if style == "memo":
+        # After the revision rules on purpose: a memo revision keeps the
+        # memo's shape, and condensing a long document INTO a memo is a
+        # legitimate revision — the memo budget then overrides "return
+        # everything verbatim".
+        _instr += TECHNICAL_MEMO_STYLE_RULES
+        _fallback += TECHNICAL_MEMO_STYLE_RULES
+        if revise_document:
+            _instr += MEMO_REVISION_OVERRIDE
+            _fallback += MEMO_REVISION_OVERRIDE
     result = run_rag(
         query=request,
         instructions=_instr,
@@ -1127,6 +1150,48 @@ def author_technical_document(request: str,
     if not isinstance(result, dict):
         return {"error": f"Document generation returned {type(result).__name__}"}
     return result
+
+
+MEMO_CONDENSE_INSTRUCTIONS = """
+You are tightening a ONE-PAGE technical memo that came back too long. The
+draft is given below in full. Return the SAME memo condensed to the word
+budget stated in the objective — same header block (subtitle, Purpose,
+Scope, Date), the same single CORE line, 3-5 sections of bold-lead-in
+paragraphs, the same closing decision section. Cut by dropping the
+paragraphs, bullets and sections that matter least and by removing
+restatement; do not compress sentences into clause chains, do not add
+anything, keep every real citation you keep a claim for.
+
+Return a JSON object with a "sections" list; each entry has "heading" (the
+header block keeps heading "") and "body" (markdown). Return ONLY the JSON.
+"""
+
+
+def condense_memo(draft_markdown: str,
+                  model: Any,
+                  generation_config: Any,
+                  *,
+                  max_words: int = 400,
+                  task_name: str = "Technical Memo (condense)"
+                  ) -> Dict[str, Any]:
+    """Tighten an over-budget memo draft — the draft ALONE, no retrieval,
+    no source documents.
+
+    Structural support for the memo length rule: re-asking the RAG author
+    re-injects the full source corpus and the draft comes back long again
+    (live: 788 → 639 → still over). Condensing a finished draft is a
+    narrower task the model does reliably.
+    """
+    return run_rag(
+        query=(f"Condense the memo below to NO MORE THAN {max_words} words "
+               f"(count them), keeping its shape."),
+        instructions=MEMO_CONDENSE_INSTRUCTIONS + TECHNICAL_MEMO_STYLE_RULES,
+        kb=None,
+        model=model,
+        generation_config=generation_config,
+        additional_context="## THE DRAFT MEMO (condense THIS):\n" + draft_markdown,
+        task_name=task_name,
+    )
 
 
 def document_to_markdown(title: str, sections: List[Dict[str, Any]]) -> str:
