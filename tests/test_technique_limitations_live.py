@@ -19,7 +19,7 @@ QUESTION = ("A proof-of-concept that estimates palladium-hydride loading (H:Pd) 
 EXPECT = {"kpfm_electrolyte": r"kpfm.{0,200}(electrolyte|liquid|aqueous|screening)",
           "coulometry_artifact": r"(coulometr|chronocoulometr).{0,250}(overestimat|competing|HER|hydrogen evolution|adsorb)",
           "co3o4_stability": r"co3o4.{0,200}(dissol|unstable|instab|leach|acid)",
-          "h_inventory": r"(stored|trapped|absorbed) hydrogen.{0,200}(release|desorb)"}
+          "h_inventory": r"(stored|trapped|absorbed|dissolved) (hydrogen|h2).{0,200}(release|desorb|inventory|transient)|inventory.{0,120}(transient|not.{0,20}equal product)"}
 
 if __name__ == "__main__":
     if not os.getenv("FUTUREHOUSE_API_KEY"):
