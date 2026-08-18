@@ -122,3 +122,26 @@ def test_parser_does_not_override_explicit_db_matches_in_fit_payload():
     )
     out = _parse_script_markers(stdout)
     assert out["db_matches"] == explicit  # setdefault, not overwrite
+
+
+def test_has_fit_parameters_requires_nonempty_top_level_dict():
+    """The marker alone is not the contract: a payload without a non-empty
+    top-level ``parameters`` dict (e.g. a script that invents its own
+    layout) must be treated as a missing output so the correction loop
+    runs — otherwise the series feature table has nothing to optimize."""
+    from scilink.agents.exp_agents.controllers.curve_fitting_controllers import (
+        _has_fit_parameters,
+    )
+    good = "FIT_RESULTS_JSON:" + json.dumps(
+        {"model_type": "gauss", "parameters": {"peak_1": {"center": 532.0}},
+         "fit_quality": {"r_squared": 0.99}})
+    assert _has_fit_parameters(good)
+    own_layout = "FIT_RESULTS_JSON:" + json.dumps(
+        {"model": "pv", "spectra": [{"peak": {"amplitude": 1.0}}]})
+    assert not _has_fit_parameters(own_layout)
+    assert not _has_fit_parameters(
+        "FIT_RESULTS_JSON:" + json.dumps({"parameters": {}}))
+    assert not _has_fit_parameters(
+        "FIT_RESULTS_JSON:" + json.dumps({"parameters": [1, 2]}))
+    assert not _has_fit_parameters("no marker at all")
+    assert not _has_fit_parameters(None)

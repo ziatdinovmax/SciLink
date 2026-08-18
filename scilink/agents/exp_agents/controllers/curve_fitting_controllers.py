@@ -537,6 +537,14 @@ def _tool_inventory_text(state: dict) -> str:
     )
 
 
+def _has_fit_parameters(stdout: Optional[str]) -> bool:
+    """True iff the FIT_RESULTS_JSON payload carries a non-empty top-level
+    ``parameters`` dict — the part of the I/O contract every downstream
+    consumer (series trends, feature table, BO) actually reads."""
+    params = _parse_script_markers(stdout).get("parameters")
+    return isinstance(params, dict) and bool(params)
+
+
 def _parse_script_markers(stdout: Optional[str]) -> dict:
     """Parse FIT_RESULTS_JSON and DB_MATCHES_JSON markers from script stdout.
 
@@ -3481,20 +3489,37 @@ Your guidance: '''
                 if run["status"] == "success":
                     has_fit_results = "FIT_RESULTS_JSON:" in run["stdout"]
                     has_visualization = run["visualization_path"] is not None
+                    # The marker alone is not the contract: the payload must
+                    # carry a non-empty top-level ``parameters`` dict, or every
+                    # downstream consumer (series trends, the feature table
+                    # that feeds BO) sees a fit with no fitted values even
+                    # though R² (recomputed from fit.npy) passed the gate.
+                    has_parameters = _has_fit_parameters(run["stdout"]) \
+                        if has_fit_results else False
 
-                    if has_fit_results and has_visualization:
+                    if has_fit_results and has_parameters and has_visualization:
                         break
                     else:
                         missing = []
                         if not has_fit_results:
                             missing.append("FIT_RESULTS_JSON output")
+                        elif not has_parameters:
+                            missing.append(
+                                "a non-empty top-level 'parameters' dict inside "
+                                "FIT_RESULTS_JSON (the fitted values keyed by "
+                                "component, e.g. {\"peak_1\": {\"center\": .., "
+                                "\"amplitude\": .., \"fwhm\": ..}}) — do NOT "
+                                "nest them under another key or emit a "
+                                "different layout")
                         if not has_visualization:
                             missing.append("visualization file")
                         last_error = (
                             f"Script executed but did not produce expected outputs. "
                             f"Missing: {', '.join(missing)}. The script must print "
-                            f"'FIT_RESULTS_JSON:{{...}}' with fit results and save "
-                            f"'visualization.png' in the working directory."
+                            f"'FIT_RESULTS_JSON:{{...}}' with top-level keys "
+                            f"'model_type', 'parameters' (non-empty dict), "
+                            f"'fit_quality' and save 'visualization.png' in the "
+                            f"working directory."
                         )
                         self.logger.warning(f"    ⚠️ Attempt {attempt}: Script ran but missing outputs: {', '.join(missing)}")
                         consecutive_timeouts = 0
@@ -3514,7 +3539,8 @@ Your guidance: '''
         # "success" even when outputs are missing.
         ok = (run is not None and run["status"] == "success"
               and run["visualization_path"] is not None
-              and "FIT_RESULTS_JSON:" in run["stdout"])
+              and "FIT_RESULTS_JSON:" in run["stdout"]
+              and _has_fit_parameters(run["stdout"]))
         if not ok:
             failure = {
                 "index": spectrum_idx,
