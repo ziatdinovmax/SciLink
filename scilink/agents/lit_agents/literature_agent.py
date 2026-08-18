@@ -464,6 +464,36 @@ class LiteratureSearchAgent:
         )
         return self._execute_crow_task(formatted_query, task_type="CrossDomain")
 
+    def search_for_technique_limitations(self, objective: str) -> Dict[str, Any]:
+        """
+        Formats an ADVERSARIAL query: what is known to go wrong with the
+        techniques, materials and reference methods a plan relies on.
+
+        ``search_for_hypothesis_context`` retrieves why a technique works —
+        the review that grounds a design also anchors it. This leg asks only
+        for the limitations, so the plan author can address them and the
+        plan critic's evidence lens can cite a stated limitation instead of
+        relying on recall. Live: an expert reviewer's most valuable
+        objections (a probe that cannot operate in the stated medium, a
+        calibration reference that is one of the estimator's own inputs, a
+        support unstable under the operating conditions, a transient that
+        mimics the effect) were all in this category and absent from the
+        supportive retrieval.
+        """
+        formatted_query = (
+            f"For each measurement technique, material and reference/calibration "
+            f"method named or clearly implied in: '{objective}', report the known "
+            f"LIMITATIONS, ARTIFACTS and FAILURE MODES under the stated operating "
+            f"conditions: media or environments in which it cannot operate; "
+            f"contributions that confound the quantity it is meant to measure; "
+            f"calibration references that are not independent of the measurement; "
+            f"instability, dissolution or degradation under the conditions; "
+            f"transients or inventories that mimic the effect of interest; "
+            f"sampling or replication pitfalls. Cite specific studies for each. "
+            f"Do NOT review what the technique does well."
+        )
+        return self._execute_crow_task(formatted_query, task_type="Limitations")
+
     def search_for_fitting_models(self, objective: str) -> Dict[str, Any]:
         """
         Formats a query specifically for finding mathematical equations.

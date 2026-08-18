@@ -197,3 +197,28 @@ def test_write_technical_document_clean_doc_has_no_notes(tmp_path, monkeypatch):
     out = json.loads(cap["write_technical_document"](
         request="doc", filename="d.md", use_literature=False))
     assert "review_notes" not in out
+
+
+# ------------------------------------------------------------ Phase 2: adversarial retrieval
+
+def test_literature_agent_has_adversarial_leg():
+    from scilink.agents.lit_agents.literature_agent import LiteratureSearchAgent as LiteratureAgent
+    calls = []
+    agent = LiteratureAgent.__new__(LiteratureAgent)
+    agent._execute_crow_task = lambda q, task_type=None: calls.append((q, task_type)) or {"ok": True}
+    out = agent.search_for_technique_limitations("KPFM in 0.1 M HClO4; coulometric H:Pd")
+    q, tt = calls[0]
+    assert out == {"ok": True} and tt == "Limitations"
+    assert "LIMITATIONS, ARTIFACTS and FAILURE MODES" in q
+    assert "KPFM in 0.1 M HClO4" in q
+    assert "Do NOT review what the technique does well" in q
+
+
+def test_search_literature_tool_registers_technique_limitations(tmp_path):
+    tools, cap, deleg = make_tools(tmp_path)
+    tools.orch.lit_agent = SimpleNamespace(
+        search_for_hypothesis_context=lambda o: {}, search_for_cross_domain=lambda o: {},
+        search_for_technique_limitations=lambda o: {}, search_for_economic_data=lambda o: {},
+        search_for_fitting_models=lambda o: {})
+    out = json.loads(cap["search_literature"]("x", search_type="no_such_type"))
+    assert out["status"] == "error" and "technique_limitations" in out["message"]

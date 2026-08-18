@@ -1453,6 +1453,7 @@ class OrchestratorTools:
             search_methods = {
                 "hypothesis_context": self.orch.lit_agent.search_for_hypothesis_context,
                 "cross_domain": self.orch.lit_agent.search_for_cross_domain,
+                "technique_limitations": self.orch.lit_agent.search_for_technique_limitations,
                 "economic_data": self.orch.lit_agent.search_for_economic_data,
                 "fitting_models": self.orch.lit_agent.search_for_fitting_models,
             }
@@ -1886,6 +1887,16 @@ class OrchestratorTools:
                         "field and belongs to hypothesis_context — sending it to "
                         "cross_domain asks for a review and forbids it in the "
                         "same breath. "
+                        "'technique_limitations': the ADVERSARIAL leg — known "
+                        "limitations, artifacts and failure modes of the "
+                        "techniques, materials and calibration references the "
+                        "plan will rely on, under its operating conditions. "
+                        "Include it whenever a plan names its measurement "
+                        "techniques (as a per-type mapping: give it a question "
+                        "that NAMES those techniques and conditions); it is what "
+                        "the plan critic reads to catch a probe that cannot work "
+                        "in the stated medium or a reference that is not "
+                        "independent. "
                         "'economic_data' (TEA); 'fitting_models' "
                         "(curve fitting)."
                     ),
