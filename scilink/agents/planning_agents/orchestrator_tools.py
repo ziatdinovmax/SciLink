@@ -3790,6 +3790,38 @@ class OrchestratorTools:
                     if available:
                         df_to_append = df_to_append[available]
 
+                # Rows with a missing input or target cannot be optimized;
+                # admitting them only defers the failure to run_optimization
+                # ("Missing values detected"), by which point the caller can
+                # no longer tell which rows or why. Skip them here and say
+                # so (typical source: a per-unit re-analysis whose model
+                # named a quantity differently from the locked script).
+                _schema_cols = [
+                    c for c in ((self.orch.expected_input_columns or [])
+                                + (self.orch.expected_target_columns or []))
+                    if c in df_to_append.columns] or list(df_to_append.columns)
+                _n_before = len(df_to_append)
+                _keep = df_to_append[_schema_cols].notna().all(axis=1)
+                rows_skipped_missing = int((~_keep).sum())
+                if rows_skipped_missing:
+                    _bad_cols = [c for c in _schema_cols
+                                 if df_to_append.loc[~_keep, c].isna().any()]
+                    df_to_append = df_to_append[_keep]
+                    num_new = len(df_to_append)
+                    print(f"    ⚠️  Skipping {rows_skipped_missing}/{_n_before} row(s) "
+                          f"with missing values in {_bad_cols}")
+                    if df_to_append.empty:
+                        return json.dumps({
+                            "status": "error",
+                            "message": (f"All {_n_before} rows have missing values in "
+                                        f"{_bad_cols}; nothing to ingest."),
+                            "hint": ("Check the extraction: the target/input column "
+                                     "exists but is empty for every row. If this is a "
+                                     "feature table from an analysis run, the "
+                                     "quantity may be reported under another column "
+                                     "name — pass that name as the target."),
+                        })
+
                 # SCHEMA ENFORCEMENT ON SAVE
                 if df_existing is not None:
                     if set(df_to_append.columns) != set(df_existing.columns):
@@ -3818,14 +3850,22 @@ class OrchestratorTools:
                 df_final = pd.read_csv(self.orch.bo_data_path)
                 data_count = len(df_final)
                 
-                return json.dumps({
+                _resp = {
                     "status": "success",
                     "data_points_collected": data_count,
                     "rows_added": num_new,
                     "optimization_ready": data_count >= 3,
                     "inputs": self.orch.expected_input_columns,
                     "targets": self.orch.expected_target_columns
-                })
+                }
+                if rows_skipped_missing:
+                    _resp["rows_skipped_missing"] = rows_skipped_missing
+                    _resp["warning"] = (
+                        f"{rows_skipped_missing} row(s) skipped: missing values in "
+                        f"{_bad_cols}. If those units report the quantity under a "
+                        f"different column, re-ingest a table where it is filled in "
+                        f"under the target name.")
+                return json.dumps(_resp)
                 
             except Exception as e:
                 logging.error(f"Analyze file error: {e}", exc_info=True)

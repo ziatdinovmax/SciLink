@@ -6918,7 +6918,12 @@ class AdaptiveRefitController:
             f"Do NOT simply retry the same model with different initial parameters.\n\n"
             f"PARSIMONY: Use the SIMPLEST model that achieves R² ≥ {self.r2_threshold}. "
             f"Do not add extra components beyond what the data clearly requires. "
-            f"If two peaks are visible, use a two-component model — not three or more."
+            f"If two peaks are visible, use a two-component model — not three or more.\n\n"
+            f"NAMING: report every quantity the locked model also reports "
+            f"({', '.join(locked_config.get('parameters_to_extract', []) or ['its parameters'])}) "
+            f"under the SAME parameter names — the series trends and the feature "
+            f"table align units by name, so a renamed quantity becomes a hole in "
+            f"this unit's row. Add new parameters only in addition."
         )
 
         fresh_config = {
