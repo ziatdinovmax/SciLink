@@ -1460,8 +1460,9 @@ class SimulationOrchestratorTools:
                         "Edit too large for edit_file. For a broader input "
                         "change — retuning several coupled parameters, or "
                         "regenerating a deck — use apply_input_adjustments. For "
-                        "a verbatim insertion, split the text at a unique "
-                        "boundary into consecutive smaller edit_file calls."),
+                        "a verbatim insertion, split the text at unique "
+                        "boundaries into snippets under the cap and pass "
+                        "them TOGETHER as one `edits` list in a single call."),
                 )
                 if out["status"] == "success":
                     n = out.get("n_edits", 1)

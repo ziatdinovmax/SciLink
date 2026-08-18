@@ -5153,10 +5153,13 @@ class OrchestratorTools:
                         "revision use write_technical_document with "
                         "revise_path (whole-document rewrite under its "
                         "length guard). For a VERBATIM insertion, split "
-                        "the text at a unique boundary into consecutive "
-                        "smaller edit_file calls — do not rewrite the "
-                        "whole file with save_file, which keeps no "
-                        "backup and has no truncation guard."),
+                        "the text at unique boundaries into snippets under "
+                        "the cap and pass them TOGETHER as one `edits` "
+                        "list in a single call (each snippet inserted "
+                        "after the previous one) — not a chain of one-edit "
+                        "calls, which burns the turn's tool budget. Do not "
+                        "rewrite the whole file with save_file, which "
+                        "keeps no backup and has no truncation guard."),
                 )
                 if out["status"] != "success":
                     return json.dumps(out)
@@ -5300,6 +5303,21 @@ class OrchestratorTools:
                             f"writing, call again with copy=true — it lands "
                             f"in {out_dir}. To leave it where it is, "
                             f"reference it by a relative path instead.")})
+                    if copy:
+                        # The file is already in this delegation's folder;
+                        # the agent usually wanted it beside a document
+                        # that lives ELSEWHERE (an earlier delegation's).
+                        # A copy can only land here, so route to the
+                        # relative-path embed instead of a dead end.
+                        return json.dumps({"status": "error", "message": (
+                            f"'{safe_name}' already lives in this "
+                            f"delegation's folder ({dest.parent}); a copy "
+                            f"only ever lands here. To embed it in a "
+                            f"document stored in ANOTHER folder, do not "
+                            f"copy — reference it with a relative path "
+                            f"from that document's folder (e.g. "
+                            f"../{dest.parent.name}/{safe_name}); the "
+                            f"PDF twin resolves it.")})
                     return json.dumps({"status": "error", "message": (
                         f"'{safe_name}' is already this file's name in "
                         f"{dest.parent} — nothing to do. Give a different "
