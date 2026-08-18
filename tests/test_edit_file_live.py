@@ -526,11 +526,113 @@ def part10_readability_pass():
     check("p10 PDF twin refreshed", "PDF twin refreshed" in log)
 
 
+# A ~6 KB, six-paragraph section: three times the per-snippet cap, so it
+# cannot go in as one edit — it must go in as ONE batched `edits` call.
+def _big_section():
+    paras = []
+    for i in range(1, 7):
+        paras.append(
+            f"**Layer {i} — MARKER-L{i}X.** " + (
+                "This paragraph is part of a verbatim insertion whose total "
+                "length is deliberately far above the per-snippet cap of the "
+                "surgical editor, so that a faithful transcription cannot fit "
+                "in a single old/new pair and the agent must decide how to "
+                "split it. The correct move is a single batched call whose "
+                "edits list carries the paragraphs in order, each anchored on "
+                "the previous one; the wrong move is a chain of one-edit calls "
+                "that burns the turn's tool budget one paragraph at a time. "
+            ) * 3)
+    return "## Role of AI/ML/Agents\n\n" + "\n\n".join(paras)
+
+
+def part11_big_insertion_batched():
+    print("\n=== 11. oversized verbatim INSERTION goes in as ONE batched call ===")
+    run = BASE / "p11"
+    orch = _seed_session(run, {"report.md": REPORT}, with_pdf=("report.md",))
+    base = Path(orch.base_dir)
+    section = _big_section()
+    assert len(section) > 5000
+
+    buf = Tee()
+    with contextlib.redirect_stdout(buf):
+        orch.chat(
+            "Insert the following new section into report.md VERBATIM "
+            "(do not paraphrase, shorten, or reflow it), placed "
+            "immediately BEFORE the '## Approach' heading. Leave every "
+            "other part of the document exactly as it is:\n\n" + section)
+    log = buf.getvalue()
+
+    text = (base / "report.md").read_text()
+    check("p11 all six paragraphs landed",
+          all(f"MARKER-L{i}X" in text for i in range(1, 7)))
+    check("p11 placed before Approach, other sections intact",
+          text.find("MARKER-L6X") < text.find("## Approach")
+          and "![Campaign workflow]" in text and "rocking-curve width" in text)
+    n_edit_calls = log.count("Tool: Editing file")
+    n_too_large = log.count("Edit too large")
+    print(f"    edit_file calls: {n_edit_calls}, too-large rejections: {n_too_large}")
+    used_revision = "Revised IN PLACE" in log
+    check("p11 batched: at most 3 edit_file calls (was: 11 live), or revision",
+          used_revision or (1 <= n_edit_calls <= 3))
+    check("p11 no save_file rewrite", "Tool: Saving file" not in log)
+    check("p11 PDF twin refreshed (log)", "PDF twin refreshed" in log)
+
+
+def part12_embed_into_earlier_delegation():
+    print("\n=== 12. figure HERE, document in an EARLIER delegation: relative embed ===")
+    run = BASE / "p12"
+    orch = _seed_session(run, {})
+    base = Path(orch.base_dir)
+    d01 = base / "delegations" / "01_author_white_paper"
+    d02 = base / "delegations" / "02_add_ai_loop_figure"
+    d01.mkdir(parents=True)
+    d02.mkdir(parents=True)
+    _write_png(d01 / "campaign_workflow.png", "navy")
+    _write_png(d02 / "ai_loop.png", "teal")
+    doc = d01 / "white_paper.md"
+    doc.write_text(REPORT.replace("old_diagram.png", "campaign_workflow.png"))
+    from scilink.utils.md_to_pdf import markdown_to_pdf
+    markdown_to_pdf(doc)
+    orch._active_output_subdir = d02
+
+    buf = Tee()
+    with contextlib.redirect_stdout(buf):
+        orch.chat(
+            f"The figure {d02 / 'ai_loop.png'} was rendered in this "
+            "delegation. Embed it in white_paper.md (the document from "
+            "delegation 01) as a new figure at the end of the Motivation "
+            "section, with the caption 'Figure 2 — AI loop.', so that the "
+            "reference resolves and the PDF twin carries it. Do not alter "
+            "any other prose.")
+    log = buf.getvalue()
+
+    text = doc.read_text()
+    check("p12 document references the figure", "ai_loop.png" in text)
+    ref = next((l for l in text.splitlines() if "ai_loop.png" in l), "")
+    resolves = False
+    m = __import__("re").search(r"\((.*?ai_loop\.png)\)", ref)
+    if m:
+        resolves = (d01 / m.group(1)).resolve().exists() \
+            or Path(m.group(1)).exists()
+    check("p12 reference resolves from the document's folder", resolves)
+    check("p12 no phantom copy of the doc in delegation 02",
+          not (d02 / "white_paper.md").exists())
+    check("p12 caption present", "Figure 2" in text)
+    check("p12 no save_file rewrite", "Tool: Saving file" not in log)
+    check("p12 PDF twin refreshed (log)", "PDF twin refreshed" in log)
+    n_calls = log.count("Tool: ")
+    print(f"    tool calls this turn: {n_calls}")
+    check("p12 finished within budget (no iteration cap)",
+          "Maximum tool iterations" not in log)
+
+
 PARTS = {"1": part1_mechanical_swap, "2": part2_content_revision,
          "3": part3_replace_all, "4": part4_delegation_layout,
          "5": part5_disambiguation, "6": part6_cap_fallback,
          "7": part7_sandbox_honesty, "8": part8_html_edit,
-         "9": part9_rename, "10": part10_readability_pass}
+         "9": part9_rename, "10": part10_readability_pass,
+         "11": part11_big_insertion_batched,
+         "12": part12_embed_into_earlier_delegation}
 
 if __name__ == "__main__":
     want = sys.argv[1:] or sorted(PARTS)
