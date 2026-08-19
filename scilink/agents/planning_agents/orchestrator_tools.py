@@ -4918,6 +4918,15 @@ class OrchestratorTools:
                     col: [float(lo), float(hi)]
                     for col, (lo, hi) in zip(optimization_inputs, input_bounds)}
                 response["input_bounds_source"] = bounds_sources
+                _data_bounded = [c for c, src in bounds_sources.items() if src == "data"]
+                if _data_bounded:
+                    bounds_warnings = list(bounds_warnings) + [(
+                        f"Search box for {_data_bounded} was derived from the "
+                        f"observed data (range +/-10%): no plan or caller bounds "
+                        f"cover them, so recommendations may fall outside what "
+                        f"the instrument or process can reach. Pass "
+                        f"input_bounds={{col: [min, max]}} with the achievable "
+                        f"range to fix the box.")]
                 if bounds_warnings:
                     response["input_bounds_warnings"] = bounds_warnings
 

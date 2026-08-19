@@ -85,6 +85,10 @@ with tempfile.TemporaryDirectory() as tmp:
     check("data_source_reported",
           out.get("input_bounds_source") == {"T": "data", "t": "data"}
           and out.get("input_bounds") == {"T": [24.0, 96.0], "t": [6.0, 54.0]})
+    check("data_derived_box_warned",
+          any("derived from the observed data" in w
+              for w in out.get("input_bounds_warnings", []))
+          and "['T', 't']" in " ".join(out.get("input_bounds_warnings", [])))
 
     out = run(orch, input_bounds={"t": [10, 50]})
     check("caller_bounds_win_for_given_column",
@@ -92,6 +96,9 @@ with tempfile.TemporaryDirectory() as tmp:
           str(captured.get("input_bounds")))
     check("caller_source_reported",
           out.get("input_bounds_source") == {"T": "data", "t": "caller"})
+    check("warning_names_only_data_bounded_columns",
+          any("['T']" in w for w in out.get("input_bounds_warnings", []))
+          and not any("'t'" in w for w in out.get("input_bounds_warnings", [])))
 
     out = run(orch)
     check("sticky_across_calls",
@@ -104,7 +111,7 @@ with tempfile.TemporaryDirectory() as tmp:
     out = run(orch, input_bounds={"t": [50, 10], "nope": [0, 1], "T": "bad"})
     check("malformed_and_unknown_ignored_with_warning",
           captured.get("input_bounds") == [[40.0, 80.0], [10.0, 50.0]]
-          and len(out.get("input_bounds_warnings", [])) == 3,
+          and len(out.get("input_bounds_warnings", [])) == 3,   # no data-box note: all caller
           str(out.get("input_bounds_warnings")))
 
     # Checkpoint round-trip.
