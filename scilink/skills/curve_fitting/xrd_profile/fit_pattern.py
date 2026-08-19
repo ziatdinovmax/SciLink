@@ -58,7 +58,7 @@ TOOL_SPEC = ToolSpec(
     signature=(
         "fit_pattern(exp_two_theta, exp_intensity, peak_centers=None, "
         "background='snip', snip_iterations='auto', prominence_frac=0.02, "
-        "max_peaks=30, min_distance_deg=0.15, init_fwhm_deg=0.2, "
+        "min_prominence_sigma=None, max_peaks=30, min_distance_deg=0.15, init_fwhm_deg=0.2, "
         "center_leeway_deg=0.3, max_fwhm_deg=3.0, "
         "peak_shape='split_pseudo_voigt', fit_range=None) -> dict"
     ),
@@ -71,7 +71,8 @@ TOOL_SPEC = ToolSpec(
         },
         "background": {"type": "str", "description": "'snip' (default), 'polynomial', or 'none' (data already background-subtracted)."},
         "snip_iterations": {"type": "int | str", "description": "SNIP iteration count. 'auto' (default) sweeps a few counts and keeps the one with the cleanest residual at the best R² — avoids apex over-subtraction on sharp peaks without hand-tuning. Pass an int to fix it (e.g. reuse the value reported in background_method to skip the sweep on locked series frames)."},
-        "prominence_frac": {"type": "float", "description": "Auto-detect: min peak prominence as a fraction of the corrected pattern range. Default 0.02 (2%). Lower (0.01) to catch weak reflections the verifier may flag as unmodelled residual; raise (0.03) if noise peaks are being fit."},
+        "prominence_frac": {"type": "float", "description": "Auto-detect: min peak prominence as a fraction of the corrected pattern range. Default 0.02 (2%). Lower (0.01) to catch weak reflections the verifier may flag as unmodelled residual; raise (0.03) if noise peaks are being fit. The effective threshold is the LARGER of this and the noise floor (min_prominence_sigma)."},
+        "min_prominence_sigma": {"type": "float | None", "description": "Auto-detect: noise floor for peak prominence, in units of the estimated noise sigma. None (default) = a sample-size-aware floor (~2*sqrt(2 ln N): ~7 sigma at 700 points, ~8.5 at 8000) below which excursions are indistinguishable from noise. LOWER (e.g. 4-5) to recover genuinely weak reflections the verifier flags as unmodelled residual; RAISE if noise peaks are still being fit. Reported in the result as noise_prominence_sigma."},
         "max_peaks": {"type": "int", "description": "Auto-detect cap. Default 30."},
         "min_distance_deg": {"type": "float", "description": "Auto-detect: minimum separation between peaks (degrees). Default 0.15."},
         "init_fwhm_deg": {"type": "float", "description": "Initial FWHM guess per peak (degrees). Default 0.2 (typical CuKa)."},
@@ -169,10 +170,28 @@ def _split_pv_area(amp, fwhm_l, fwhm_r, eta):
     return 0.5 * (_pv_area(amp, fwhm_l, eta) + _pv_area(amp, fwhm_r, eta))
 
 
-def _detect_centers(x, ycorr, step, prominence_frac, max_peaks, min_distance_deg):
-    """Auto-detect significant peak centers on a background-corrected pattern."""
+def noise_prominence_floor(n_points: int) -> float:
+    """Prominence floor, in units of the noise sigma, below which a "peak" is
+    indistinguishable from noise: the expected extreme peak-to-valley
+    excursion of ``n_points`` white-noise samples, ~2*sqrt(2 ln N) sigma
+    (~7 sigma at 700 points, ~8.5 sigma at 8000). A fixed 3 sigma admitted
+    hundreds of noise peaks on any pattern longer than a few hundred points
+    while real reflections at >=10 sigma are untouched by this floor."""
+    n = max(int(n_points), 2)
+    return float(max(5.0, 2.0 * np.sqrt(2.0 * np.log(n))))
+
+
+def _detect_centers(x, ycorr, step, prominence_frac, max_peaks, min_distance_deg,
+                    min_prominence_sigma=None):
+    """Auto-detect significant peak centers on a background-corrected pattern.
+
+    Prominence threshold = max(prominence_frac * range, k * noise_sigma) with
+    k = ``min_prominence_sigma`` or, when None, the sample-size-aware floor
+    from :func:`noise_prominence_floor`."""
     noise = _estimate_noise(ycorr)
-    prom = max(prominence_frac * (ycorr.max() - ycorr.min()), 3.0 * noise)
+    k = (float(min_prominence_sigma) if min_prominence_sigma is not None
+         else noise_prominence_floor(len(ycorr)))
+    prom = max(prominence_frac * (ycorr.max() - ycorr.min()), k * noise)
     dist = max(1, int(round(min_distance_deg / step)))
     idx, _ = find_peaks(ycorr, prominence=prom, distance=dist)
     idx = idx[np.argsort(ycorr[idx])[::-1][:max_peaks]]
@@ -194,6 +213,7 @@ def fit_pattern(
     background: str = "snip",
     snip_iterations: Any = "auto",
     prominence_frac: float = 0.02,
+    min_prominence_sigma: Optional[float] = None,
     max_peaks: int = 30,
     min_distance_deg: float = 0.15,
     init_fwhm_deg: float = 0.2,
@@ -240,7 +260,7 @@ def fit_pattern(
         prominence_frac=prominence_frac, max_peaks=max_peaks,
         min_distance_deg=min_distance_deg, init_fwhm_deg=init_fwhm_deg,
         center_leeway_deg=center_leeway_deg, max_fwhm_deg=max_fwhm_deg,
-        peak_shape=peak_shape,
+        peak_shape=peak_shape, min_prominence_sigma=min_prominence_sigma,
     )
 
     # --- background + fit ---
@@ -272,7 +292,8 @@ def fit_pattern(
                 x.tolist(), y.tolist(), method="snip", iterations=max(iters_list))
             centers_for_sweep = _detect_centers(
                 x, np.asarray(ref_bg["intensity_corrected"], dtype=float), step,
-                prominence_frac, max_peaks, min_distance_deg)
+                prominence_frac, max_peaks, min_distance_deg,
+                min_prominence_sigma=min_prominence_sigma)
         else:
             centers_for_sweep = centers_locked
         trials = []
@@ -346,6 +367,7 @@ def _fit_corrected(
     center_leeway_deg: float,
     max_fwhm_deg: float,
     peak_shape: str = "split_pseudo_voigt",
+    min_prominence_sigma: Optional[float] = None,
 ) -> dict[str, Any]:
     """Global multi-peak fit of an already background-corrected pattern.
 
@@ -371,7 +393,8 @@ def _fit_corrected(
         centers = list(centers_locked)
     else:
         centers = _detect_centers(
-            x, ycorr, step, prominence_frac, max_peaks, min_distance_deg)
+            x, ycorr, step, prominence_frac, max_peaks, min_distance_deg,
+            min_prominence_sigma=min_prominence_sigma)
     if not centers:
         raise ValueError("no peaks detected; lower prominence_frac or pass peak_centers")
 
@@ -473,6 +496,9 @@ def _fit_corrected(
         "n_peaks": len(centers),
         "peaks": peaks,
         "peak_centers": [p["center"] for p in peaks],
+        "noise_prominence_sigma": (float(min_prominence_sigma)
+                                   if min_prominence_sigma is not None
+                                   else noise_prominence_floor(len(ycorr))),
         "intensity_corrected": [float(v) for v in ycorr],
         "fit_curve": [float(v) for v in fit_curve],
         "noise_estimate": noise,
