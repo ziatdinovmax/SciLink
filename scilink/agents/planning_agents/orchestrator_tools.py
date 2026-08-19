@@ -224,6 +224,35 @@ class OrchestratorTools:
             out[col] = levels[idx]
         return out
 
+    def _apply_directions(self, directions, targets) -> list:
+        """Merge caller-stated {target: maximize|minimize} into the campaign's
+        target_directions (caller wins). Returns warnings for entries that
+        were ignored (unknown target, bad value). Sticky on the orchestrator
+        and carried by its checkpoint."""
+        warns: list = []
+        if not directions:
+            return warns
+        if not isinstance(directions, dict):
+            return ["directions must be a dict {column: 'maximize'|'minimize'}; ignored."]
+        known = list(targets or [])
+        current = dict(self.orch.target_directions or {})
+        for col, d in directions.items():
+            dn = str(d).strip().lower()
+            if dn in ("max", "maximise"):
+                dn = "maximize"
+            if dn in ("min", "minimise"):
+                dn = "minimize"
+            if dn not in ("maximize", "minimize"):
+                warns.append(f"directions['{col}']={d!r} ignored: use 'maximize' or 'minimize'.")
+                continue
+            if known and str(col) not in known:
+                warns.append(f"directions['{col}'] ignored: not a target column "
+                             f"(targets are {known}).")
+                continue
+            current[str(col)] = dn
+        self.orch.target_directions = current
+        return warns
+
     def _capture_input_types(self, column_roles: Dict, input_columns: List[str]) -> None:
         """Persist scalarizer input_types onto the orchestrator state.
 
@@ -3270,7 +3299,8 @@ class OrchestratorTools:
                 extraction_goal: str = None,
                 force_regenerate: bool = False,
                 inputs: list[str] = None,
-                targets: list[str] = None):
+                targets: list[str] = None,
+                directions: dict = None):
             """
             Analyzes a raw data file (CSV/XLSX) to extract metrics.
             
@@ -3642,6 +3672,11 @@ class OrchestratorTools:
                     opt_dir = column_roles.get("optimization_direction", {})
                     if opt_dir:
                         self.orch.target_directions = opt_dir
+                    # Caller-stated directions win: a pass-through feature table
+                    # never runs the scalarizer's classification, so without
+                    # this the optimizer silently defaulted to maximize — a
+                    # 'loss' target was maximized.
+                    _dir_warn = self._apply_directions(directions, targets)
                     self._capture_input_types(column_roles, inputs)
                     print(f"    📊 Schema Enforced (User-Specified):")
                     print(f"       Inputs: {self.orch.expected_input_columns}")
@@ -3657,6 +3692,8 @@ class OrchestratorTools:
                         opt_dir = column_roles.get("optimization_direction", {})
                         if opt_dir:
                             self.orch.target_directions = opt_dir
+                    _dir_warn = self._apply_directions(
+                        directions, self.orch.expected_target_columns)
                     if not getattr(self.orch, "expected_input_types", None):
                         self._capture_input_types(column_roles, self.orch.expected_input_columns)
                     print(f"    📊 Schema Enforced (From Previous Analysis):")
@@ -3856,8 +3893,19 @@ class OrchestratorTools:
                     "rows_added": num_new,
                     "optimization_ready": data_count >= 3,
                     "inputs": self.orch.expected_input_columns,
-                    "targets": self.orch.expected_target_columns
+                    "targets": self.orch.expected_target_columns,
+                    "target_directions": dict(self.orch.target_directions or {}),
                 }
+                _missing_dir = [t for t in (self.orch.expected_target_columns or [])
+                                if t not in (self.orch.target_directions or {})]
+                if _missing_dir:
+                    _resp["direction_warning"] = (
+                        f"No optimization direction known for {_missing_dir}; the "
+                        f"optimizer will MAXIMIZE them unless you pass "
+                        f"directions={{col: 'minimize'|'maximize'}} (here or on "
+                        f"run_optimization).")
+                if locals().get("_dir_warn"):
+                    _resp["direction_warnings"] = _dir_warn
                 if rows_skipped_missing:
                     _resp["rows_skipped_missing"] = rows_skipped_missing
                     _resp["warning"] = (
@@ -3908,6 +3956,18 @@ class OrchestratorTools:
                     "type": "array", 
                     "items": {"type": "string"}, 
                     "description": "List of column names to treat as OPTIMIZATION TARGETS"
+                },
+                "directions": {
+                    "type": "object",
+                    "description": (
+                        "Optimization direction per target, {\"column\": \"maximize\"|"
+                        "\"minimize\"}. Pass whenever the objective says minimize / "
+                        "reduce / lowest (loss, cost, overpotential, band gap, "
+                        "instability, error) — a ready feature table skips the "
+                        "automatic classification and the optimizer otherwise "
+                        "MAXIMIZES every target. Sticky for the campaign; can also be "
+                        "set or changed on run_optimization."
+                    )
                 }
             },
             required=["file_path"]
@@ -4400,6 +4460,7 @@ class OrchestratorTools:
             candidate_pool: str = None,
             input_bounds: dict = None,
             seed: int = None,
+            directions: dict = None,
         ):
             """
             Runs Bayesian Optimization to suggest next parameters.
@@ -4445,6 +4506,8 @@ class OrchestratorTools:
                     "current_data_count": len(df)
                 })
             
+            _dir_warn = self._apply_directions(directions, self.orch.expected_target_columns)
+
             if not self.orch.expected_target_columns or not self.orch.expected_input_columns:
                 return json.dumps({
                     "status": "error",
@@ -4935,6 +4998,20 @@ class OrchestratorTools:
                     response["budget"] = res["budget"]
                 if res.get("seed") is not None:
                     response["seed"] = res["seed"]
+                # Direction actually used per target; warn when it was assumed.
+                _td = dict(self.orch.target_directions or {})
+                _targets_used = list(self.orch.expected_target_columns or [])
+                response["target_directions"] = {
+                    t: _td.get(t, "maximize (assumed)") for t in _targets_used}
+                _assumed = [t for t in _targets_used if t not in _td]
+                if _assumed:
+                    response.setdefault("warnings", [])
+                    response["warnings"].append(
+                        f"No optimization direction was given for {_assumed}; "
+                        f"MAXIMIZE was assumed. If the goal is to minimize, pass "
+                        f"directions={{col: 'minimize'}} and re-run.")
+                if _dir_warn:
+                    response.setdefault("warnings", []).extend(_dir_warn)
                 
                 return json.dumps(response)
                 
@@ -5056,6 +5133,17 @@ class OrchestratorTools:
                         "call in this campaign until overridden. Only the columns "
                         "given are affected; others keep their plan/data-derived "
                         "range. Ignored for categorical inputs."
+                    )
+                },
+                "directions": {
+                    "type": "object",
+                    "description": (
+                        "Optimization direction per target, {\"column\": \"maximize\"|"
+                        "\"minimize\"}. Pass whenever the user or calling system "
+                        "states it (minimize loss / cost / overpotential / band gap; "
+                        "maximize yield / conductivity). Sticky for the campaign and "
+                        "overrides what analyze_file inferred; absent any statement "
+                        "the optimizer MAXIMIZES and says so in the response."
                     )
                 },
                 "seed": {
