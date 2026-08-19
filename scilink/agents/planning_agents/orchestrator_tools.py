@@ -4399,6 +4399,7 @@ class OrchestratorTools:
             skill: str = None,
             candidate_pool: str = None,
             input_bounds: dict = None,
+            seed: int = None,
         ):
             """
             Runs Bayesian Optimization to suggest next parameters.
@@ -4852,6 +4853,7 @@ class OrchestratorTools:
                     skill=skill,
                     fidelity_config=fidelity_config,
                     candidate_pool=resolved_pool,
+                    seed=seed,
                 )
                 
                 if res.get("status") != "success":
@@ -4922,6 +4924,8 @@ class OrchestratorTools:
                 # Include budget context
                 if res.get("budget"):
                     response["budget"] = res["budget"]
+                if res.get("seed") is not None:
+                    response["seed"] = res["seed"]
                 
                 return json.dumps(response)
                 
@@ -5043,6 +5047,17 @@ class OrchestratorTools:
                         "call in this campaign until overridden. Only the columns "
                         "given are affected; others keep their plan/data-derived "
                         "range. Ignored for categorical inputs."
+                    )
+                },
+                "seed": {
+                    "type": "integer",
+                    "description": (
+                        "Random seed for the numeric part of this step (surrogate "
+                        "fitting restarts, acquisition optimisation). Pass when "
+                        "reproducible / comparable reruns are wanted (benchmarks, "
+                        "audits, re-running a step after fixing data); omit for "
+                        "normal campaigns. The strategy the agent chooses is not "
+                        "seeded — it is reported in the response."
                     )
                 }
             },
