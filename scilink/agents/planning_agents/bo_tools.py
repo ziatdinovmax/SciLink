@@ -635,11 +635,15 @@ class SingleObjectiveOptimizer:
             }
             n_combos = int(np.prod([len(v) for v in levels.values()]))
             n_dims = int(self.bounds.shape[-1])
-            if n_combos <= 512 and len(levels) == n_dims:
+            if len(levels) == n_dims and n_combos <= 50_000:
                 # Every input is categorical: the design space IS the finite
                 # set of level combinations, so score it as a candidate
-                # library. (optimize_acqf_mixed with all features fixed
-                # returns (d,) for q=1 and fails inside botorch for q>1.)
+                # library — pointwise posterior scoring is cheap at this
+                # size, and the gradient-based alternatives cannot work here
+                # (optimize_acqf_mixed with all features fixed returns (d,)
+                # for q=1 and fails inside botorch for q>1; the continuous
+                # relaxation has no gradient w.r.t. categorical dims and
+                # raises 'differentiated Tensors ... not used in the graph').
                 from itertools import product
                 keys = list(levels)
                 grid = np.array([[combo[keys.index(d)] for d in range(n_dims)]
