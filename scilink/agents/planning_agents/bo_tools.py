@@ -634,6 +634,22 @@ class SingleObjectiveOptimizer:
                 for d in cat_dims
             }
             n_combos = int(np.prod([len(v) for v in levels.values()]))
+            n_dims = int(self.bounds.shape[-1])
+            if n_combos <= 512 and len(levels) == n_dims:
+                # Every input is categorical: the design space IS the finite
+                # set of level combinations, so score it as a candidate
+                # library. (optimize_acqf_mixed with all features fixed
+                # returns (d,) for q=1 and fails inside botorch for q>1.)
+                from itertools import product
+                keys = list(levels)
+                grid = np.array([[combo[keys.index(d)] for d in range(n_dims)]
+                                 for combo in product(*levels.values())], dtype=float)
+                seen = self.X_train.detach().cpu().numpy()
+                unmeasured = grid[~np.array([np.any(np.all(np.isclose(seen, g), axis=1))
+                                             for g in grid])]
+                if len(unmeasured) >= 1:
+                    return self._recommend_from_candidates(
+                        strategy, params, min(n_candidates, len(unmeasured)), unmeasured)
             if n_combos <= 512:
                 from itertools import product
                 keys = list(levels)
@@ -648,7 +664,11 @@ class SingleObjectiveOptimizer:
                     raw_samples=128 if is_large_batch else 512,
                     fixed_features_list=fixed_features_list,
                 )
-                return candidates.detach().cpu().numpy()
+                # botorch returns (d,) instead of (q, d) when EVERY dimension is
+                # a fixed feature (all inputs categorical) — normalise so callers
+                # can always iterate rows.
+                out = candidates.detach().cpu().numpy()
+                return out.reshape(-1, self.bounds.shape[-1]) if out.ndim == 1 else out
             logging.warning(
                 f"cat_dims level combinations ({n_combos}) exceed the mixed-"
                 "optimizer cap (512); falling back to continuous relaxation."
