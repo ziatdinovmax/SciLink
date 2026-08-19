@@ -73,24 +73,28 @@ with tempfile.TemporaryDirectory() as tmp:
     check("categorical_declared_gives_cat_dims", cap.get("cat_dims") == [0] and r["input_types"]["L"] == "categorical")
     enc_pool = cap.get("candidate_pool")
     pdf = pd.read_csv(enc_pool)
-    levels = sorted(["0.0", "1.0", "2.0", "10.0"])          # string order: 0.0, 1.0, 10.0, 2.0
+    levels = sorted(["0", "1", "2", "10"])          # normalised labels, string order: 0, 1, 10, 2
     check("pool_encoded_through_same_level_map",
-          enc_pool != str(pool) and pdf["L"].tolist() == [levels.index("0.0"), levels.index("1.0"),
-                                                            levels.index("2.0"), levels.index("10.0")],
+          enc_pool != str(pool) and pdf["L"].tolist() == [levels.index("0"), levels.index("1"),
+                                                            levels.index("2"), levels.index("10")],
           f"{pdf['L'].tolist()} levels={levels}")
     # the encoded data must use the same indices
     ddf = pd.read_csv(cap["data_path"])
-    check("data_encoded_with_same_map", ddf["L"].tolist()[:4] == [levels.index(v) for v in ("0.0", "1.0", "2.0", "10.0")])
-    # recommendation decoded back to the original label (index 3 -> '2.0' in string order)
+    check("data_encoded_with_same_map", ddf["L"].tolist()[:4] == [levels.index(v) for v in ("0", "1", "2", "10")])
+    # recommendation decoded back to the original label (index 3 -> '2' in string order)
     rec = r["recommended_parameters"]
     check("recommendation_decoded_to_label", str(rec["L"]) == levels[3], str(rec))
 
     r = call(o, "run_optimization", candidate_pool=str(pool))
     check("sticky_on_next_call", cap.get("cat_dims") == [0])
 
-    bad = Path(tmp) / "badpool.csv"; bad.write_text("L,t\n0.0,12\n7.0,20\n")
-    r = call(o, "run_optimization", candidate_pool=str(bad))
-    check("unknown_pool_level_is_clean_error", r.get("status") == "error" and "not seen" in r.get("message", ""), str(r)[:140])
+    # a pool level the data has not measured yet is legitimate: it joins the universe
+    wide = Path(tmp) / "widepool.csv"; wide.write_text("L,t\n0,12\n7,20\n")
+    r = call(o, "run_optimization", candidate_pool=str(wide))
+    wdf = pd.read_csv(cap["candidate_pool"])
+    check("unmeasured_pool_level_joins_universe",
+          r.get("status") == "success" and sorted(wdf["L"].tolist()) == [0.0, 4.0],   # '7' sorts last of 0,1,10,2,7
+          f"{r.get('status')} {wdf['L'].tolist()}")
 
     r = call(o, "run_optimization", candidate_pool=str(pool), input_types={"t": "sideways", "zz": "categorical"})
     check("bad_entries_warned", len([w for w in r.get("warnings", []) if "input_types" in w]) == 2, str(r.get("warnings")))

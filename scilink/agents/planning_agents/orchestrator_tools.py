@@ -173,6 +173,22 @@ def resolve_n_candidates(requested, planner_state, new_campaign: bool = False) -
     return 3 if is_first_plan else 1
 
 
+
+def _norm_level(v) -> str:
+    """Canonical label for a categorical level: numeric-looking values compare
+    as numbers ('3', '3.0', 3 -> '3'; '2.5' -> '2.5'), everything else as the
+    stripped string. Used for data, pool and decode so an integer code written
+    once as int and once as float still means the same level."""
+    sv = str(v).strip()
+    try:
+        f = float(sv)
+    except (TypeError, ValueError):
+        return sv
+    if f != f:  # NaN
+        return sv
+    return str(int(f)) if f.is_integer() else repr(f)
+
+
 class OrchestratorTools:
     """
     Manages tool definitions, schemas, and execution for the OrchestratorAgent.
@@ -4633,7 +4649,7 @@ class OrchestratorTools:
                         if ptype == "categorical":
                             levels = param.get("levels") or []
                             if levels:
-                                planner_levels[name] = [str(lv) for lv in levels]
+                                planner_levels[name] = [_norm_level(lv) for lv in levels]
                                 print(f"  🔬 Scientific Constraint Found: {name} ∈ {planner_levels[name]}")
                             continue
                         min_v = param.get("min_value")
@@ -4687,6 +4703,21 @@ class OrchestratorTools:
             level_maps: Dict[str, List[str]] = {}
             type_conflict_warnings: List[str] = []
 
+            # A candidate pool contributes to the categorical level universe:
+            # unmeasured candidates are its whole point, so their levels are
+            # legitimate even when no campaign row has them yet (a plan, when
+            # present, stays authoritative).
+            _pool_df = None
+            if candidate_pool:
+                _pool_path, _pool_err = self._resolve_data_path(candidate_pool)
+                if _pool_err:
+                    return _pool_err
+                try:
+                    _pool_df = pd.read_csv(_pool_path)
+                except Exception as _e:  # noqa: BLE001
+                    return json.dumps({"status": "error",
+                                       "message": f"candidate_pool unreadable: {_e}"})
+
             for col in self.orch.expected_input_columns:
                 if col not in df.columns:
                     print(f"  ⚠️ Skipping missing input column: {col}")
@@ -4715,7 +4746,9 @@ class OrchestratorTools:
                     is_categorical = False
 
                 if is_categorical:
-                    observed = sorted(df[col].dropna().astype(str).unique().tolist())
+                    observed = sorted({_norm_level(v) for v in df[col].dropna().tolist()})
+                    if _pool_df is not None and col in _pool_df.columns and not planner_levels.get(col):
+                        observed = sorted(set(observed) | {_norm_level(v) for v in _pool_df[col].dropna().tolist()})
                     if planner_levels.get(col):
                         # Planner is authoritative on the level universe.
                         # Observed values that aren't in the planner-declared
@@ -4815,7 +4848,7 @@ class OrchestratorTools:
                 df_encoded = df.copy()
                 for col, levels in level_maps.items():
                     idx = {lv: i for i, lv in enumerate(levels)}
-                    encoded = df[col].astype(str).map(idx)
+                    encoded = df[col].map(_norm_level).map(idx)
                     if encoded.isnull().any():
                         unknown = sorted(
                             df.loc[encoded.isnull(), col].astype(str).unique().tolist()
@@ -4950,27 +4983,24 @@ class OrchestratorTools:
                     if level_maps:
                         # The campaign data was level-encoded above; the pool
                         # must go through the SAME maps or its rows never match
-                        # the surrogate's space (and unknown levels are a real
-                        # mismatch, not something to guess).
-                        try:
-                            pool_df = pd.read_csv(resolved_pool)
-                        except Exception as _e:  # noqa: BLE001
-                            return json.dumps({"status": "error",
-                                               "message": f"candidate_pool unreadable: {_e}"})
+                        # the surrogate's space. Its levels were folded into the
+                        # universe above (unless a plan declares it), so a
+                        # leftover unknown is a genuine plan/data mismatch.
+                        pool_df = _pool_df.copy() if _pool_df is not None else pd.read_csv(resolved_pool)
                         for col, levels in level_maps.items():
                             if col not in pool_df.columns:
                                 continue
                             idx = {lv: i for i, lv in enumerate(levels)}
-                            enc = pool_df[col].astype(str).map(idx)
+                            enc = pool_df[col].map(_norm_level).map(idx)
                             if enc.isnull().any():
-                                unknown = sorted(pool_df.loc[enc.isnull(), col].astype(str).unique().tolist())
+                                unknown = sorted({_norm_level(v) for v in pool_df.loc[enc.isnull(), col].tolist()})
                                 return json.dumps({
                                     "status": "error",
                                     "message": (f"candidate_pool has levels for categorical input "
-                                                f"'{col}' not seen in the campaign data/plan: "
+                                                f"'{col}' outside the plan-declared level universe: "
                                                 f"{unknown[:10]}. Known levels: {levels}."),
-                                    "hint": "Encode the pool with the same labels as the data, or "
-                                            "declare the level universe in the plan."})
+                                    "hint": "Encode the pool with the plan's level names, or "
+                                            "correct the plan's optimization_params.levels."})
                             pool_df[col] = enc.astype(float)
                         encoded_pool = self.orch.base_dir / "bo_artifacts" / "candidate_pool_encoded.csv"
                         encoded_pool.parent.mkdir(parents=True, exist_ok=True)
