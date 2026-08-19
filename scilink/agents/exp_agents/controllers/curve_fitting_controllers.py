@@ -6798,6 +6798,10 @@ class AdaptiveRefitController:
         self.plot_fn = plot_fn
         self.r2_threshold = r2_threshold
         self.enable_human_feedback = enable_human_feedback
+        self.model = model
+        self.generation_config = generation_config
+        self.safety_settings = safety_settings
+        self.executor = executor
 
         # Compose a fitting helper to reuse _fit_with_quality_control
         self._fitting_helper = UnifiedSeriesProcessingController(
@@ -6818,6 +6822,116 @@ class AdaptiveRefitController:
             max_verification_iterations=max_verification_iterations,
             conformance_instructions=conformance_instructions,
         )
+
+    @staticmethod
+    def locked_schema_gap(refit_params: Any, locked_params: Any) -> List[str]:
+        """Flattened parameter names the locked run reported for this unit that
+        the refit's ``parameters`` do not carry (a ``null`` counts as missing —
+        it becomes an empty feature-table cell either way)."""
+        from ..feature_table import _flatten_scalars
+        locked_keys = list(_flatten_scalars(locked_params or {}).keys())
+        have = set(_flatten_scalars(refit_params or {}).keys())
+        return [k for k in locked_keys if k not in have]
+
+    def _complete_locked_schema(self, refit_result: dict, original_result: Optional[dict],
+                                curve_data: np.ndarray, idx: int, state: dict) -> dict:
+        """Structural conformance of a refit to the locked run's schema.
+
+        A refit that adopts a different model tends to rename or drop the
+        quantities the locked script reported, and downstream consumers
+        (series trends, the feature table that feeds BO) align units BY
+        NAME — so a renamed quantity is a hole in this unit's row. This
+        pass (1) computes the gap deterministically against the locked
+        fit of the SAME unit, (2) asks the codegen LLM once to ADD the
+        missing entries under the locked names — computed from its own
+        fitted model where a counterpart exists (e.g. evaluate its curve
+        at the same wavelength), ``null`` where none does — without
+        changing the model, the fit, or any existing value, (3) re-runs
+        the script and accepts the completion only if every previous key
+        survived and R² did not degrade. Whatever remains missing is
+        recorded as ``locked_schema_gap`` on the result so callers can
+        report it instead of discovering NaNs later."""
+        locked_params = (original_result or {}).get("parameters") or {}
+        missing = self.locked_schema_gap(refit_result.get("parameters"), locked_params)
+        if not missing:
+            refit_result["locked_schema_gap"] = []
+            return refit_result
+        self.logger.info(
+            f"  🧩 Refit schema gap vs locked run: {len(missing)} parameter(s) "
+            f"missing ({', '.join(missing[:6])}{'…' if len(missing) > 6 else ''}) "
+            f"— asking the refit script to also report them under the locked names")
+        script = refit_result.get("script")
+        if script:
+            locked_cfg = state.get("locked_fitting_config") or {}
+            prompt = f"""You wrote the fitting script below for one spectrum of a series. The rest of the series was fitted with a DIFFERENT (locked) model, and downstream consumers align all spectra BY PARAMETER NAME. Your FIT_RESULTS_JSON 'parameters' must therefore ALSO contain the locked run's entries for this spectrum, with EXACTLY the same nesting and names.
+
+**Locked model (rest of the series):** {locked_cfg.get('physical_model', 'unknown')}
+
+**Locked run's `parameters` for THIS spectrum (naming/nesting template; values are the locked fit's, do NOT copy them):**
+```json
+{json.dumps(locked_params, indent=1)[:4000]}
+```
+
+**Your current `parameters`:**
+```json
+{json.dumps(refit_result.get('parameters') or {}, indent=1)[:4000]}
+```
+
+**Missing (flattened name = nested keys joined by '_'):** {missing}
+
+Modify the script so that, in addition to everything it already reports, `parameters` carries every missing entry under the locked name/nesting:
+- compute it from YOUR fitted model where a physical counterpart exists (e.g. an extinction/intensity at a stated wavelength = your fitted curve evaluated there; an integrated area = the integral of your model; an amplitude/center/width of a component your model also has = your value; `_err` = your covariance-based uncertainty for that quantity);
+- set it to null where your model has no counterpart (e.g. the center of a peak your model does not contain) — never a fake 0.
+Do NOT change the model, the fit, the initial guesses, or any existing parameter value or key; keep saving fit.npy and visualization.png and printing FIT_RESULTS_JSON exactly as before.
+
+**SCRIPT:**
+```python
+{script}
+```
+
+Return JSON: {{"script": "<the complete modified script>"}}
+"""
+            try:
+                response = self.model.generate_content(
+                    contents=[prompt], generation_config=self.generation_config,
+                    safety_settings=self.safety_settings)
+                result_json, _ = parse_codegen_response(response, field="script", logger=self.logger)
+                new_script = (result_json or {}).get("script")
+            except Exception as e:  # noqa: BLE001 - completion is best effort
+                self.logger.warning(f"  Schema completion request failed: {e}")
+                new_script = None
+            if new_script:
+                item_dir = self.output_dir / f"spectrum_{idx:04d}"
+                run = stage_and_run_adaptive(self.executor, new_script, curve_data,
+                                             item_dir, logger=self.logger)
+                if run["status"] == "success" and "FIT_RESULTS_JSON:" in run["stdout"]:
+                    fr = _parse_script_markers(run["stdout"])
+                    new_params = fr.get("parameters") or {}
+                    from ..feature_table import _flatten_scalars
+                    have_before = set(_flatten_scalars(refit_result.get("parameters") or {}).keys())
+                    have_after = set(_flatten_scalars(new_params).keys())
+                    lost = sorted(have_before - have_after)
+                    old_r2 = (refit_result.get("fit_quality") or {}).get("r_squared")
+                    new_r2 = (fr.get("fit_quality") or {}).get("r_squared")
+                    r2_ok = (old_r2 is None or new_r2 is None
+                             or float(new_r2) >= float(old_r2) - 0.005)
+                    if not lost and r2_ok:
+                        refit_result["parameters"] = new_params
+                        refit_result["script"] = new_script
+                        still = [k for k in missing if k not in have_after]
+                        self.logger.info(
+                            f"  ✅ Schema completion accepted: "
+                            f"{len(missing) - len(still)}/{len(missing)} added"
+                            + (f"; still missing {still}" if still else ""))
+                        missing = still
+                    else:
+                        self.logger.warning(
+                            f"  Schema completion rejected (lost keys {lost}, "
+                            f"R² {old_r2} → {new_r2}); keeping the refit as is")
+                else:
+                    self.logger.warning("  Schema completion script did not run cleanly; keeping the refit as is")
+        refit_result["locked_schema_gap"] = missing
+        return refit_result
 
     def _load_spectrum(self, idx, spectrum_paths, spectrum_stack, column_mapping=None):
         """Load spectrum data for re-analysis (honors the locked column mapping)."""
@@ -7049,6 +7163,9 @@ class AdaptiveRefitController:
 
             if result["success"] and new_r2 >= prev_r2 * 0.99:
                 self.logger.info(f"  ✅ Consistent: R² {new_r2:.4f} with '{target_model}'")
+                result = self._complete_locked_schema(
+                    result, {"parameters": state.get("_locked_params_by_idx", {}).get(idx)},
+                    curve_data, idx, state)
                 result["adaptively_refitted"] = True
                 result["original_r2"] = entry["original_r2"]
                 result["refit_model_type"] = result.get("model_type")
@@ -7064,6 +7181,9 @@ class AdaptiveRefitController:
                     entry["new_model"], prev_r2,
                 )
                 if keep:
+                    result = self._complete_locked_schema(
+                        result, {"parameters": state.get("_locked_params_by_idx", {}).get(idx)},
+                        curve_data, idx, state)
                     result["adaptively_refitted"] = True
                     result["original_r2"] = entry["original_r2"]
                     result["refit_model_type"] = result.get("model_type")
@@ -7188,6 +7308,14 @@ class AdaptiveRefitController:
 
             if refit_result["success"] and (original_r2 is None or new_r2 > original_r2):
                 self.logger.info(f"  ✅ Improved: R² {original_r2} → {new_r2:.4f}")
+                original_result = series_results[idx] if idx < len(series_results) else None
+                # Remember the locked fit's parameters for this unit: the
+                # consistency pass below may replace the refit again and
+                # must complete against the SAME locked reference.
+                state.setdefault("_locked_params_by_idx", {})[idx] = (
+                    (original_result or {}).get("parameters") or {})
+                refit_result = self._complete_locked_schema(
+                    refit_result, original_result, curve_data, idx, state)
                 refit_result["adaptively_refitted"] = True
                 refit_result["original_r2"] = original_r2
                 refit_result["refit_model_type"] = refit_result.get("model_type")
