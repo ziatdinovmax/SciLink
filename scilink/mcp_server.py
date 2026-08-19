@@ -258,6 +258,7 @@ def _execute_tool_captured(tools, tool_name: str, kwargs: dict,
     try:
         with _job_narration(log_lines), contextlib.redirect_stdout(captured):
             result = tools.execute_tool(tool_name, **kwargs)
+            _checkpoint_after_tool(tools, tool_name)
     finally:
         if state is not None:
             set_thread_channel(None)
@@ -267,6 +268,24 @@ def _execute_tool_captured(tools, tool_name: str, kwargs: dict,
         logging.info(f"[tool:{tool_name}] {log_output}")
 
     return result
+
+
+def _checkpoint_after_tool(tools, tool_name: str) -> None:
+    """Persist the owning orchestrator's state after a granular tool call.
+
+    The chat loops checkpoint after every turn; granular MCP calls bypassed
+    that, so a server restarted on the same --session-dir came back with the
+    data files but none of the state (schema, selected agent, results
+    ledger) — the client's campaign silently lost its footing. Cheap JSON
+    write; never fatal."""
+    orch = getattr(tools, "orch", None)
+    ckpt = getattr(orch, "_auto_checkpoint", None)
+    if ckpt is None:
+        return
+    try:
+        ckpt()
+    except Exception as exc:  # noqa: BLE001 - durability must not break the call
+        logging.warning(f"[tool:{tool_name}] checkpoint after call failed: {exc}")
 
 
 # ── Pending action support (co-pilot / autopilot) ──────────────────────
@@ -916,6 +935,25 @@ def _init_orchestrators(state: dict, config: dict) -> None:
     base_url = config["base_url"]
     fh_key = config["futurehouse_api_key"] or os.environ.get("FUTUREHOUSE_API_KEY")
 
+    # Restart durability. Each orchestrator gets its own base dir (in
+    # --mode both they nest as <session>/analysis and <session>/planning,
+    # the meta's own layout — sharing one dir made their checkpoint.json
+    # files clobber each other) and restores its checkpoint when one exists,
+    # so a server restarted on the same --session-dir resumes the campaign
+    # instead of starting a half-state next to the old files.
+    def _base_for(kind: str) -> str:
+        if config["mode"] == "both":
+            d = Path(session_dir) / kind
+            d.mkdir(parents=True, exist_ok=True)
+            return str(d)
+        return session_dir
+
+    def _restore(base: str) -> bool:
+        has = (Path(base) / "checkpoint.json").exists()
+        if has:
+            logging.info(f"Restoring session state from {base}/checkpoint.json")
+        return has
+
     if config["mode"] in ("analyze", "both"):
         from scilink.agents.exp_agents.analysis_orchestrator import (
             AnalysisOrchestratorAgent, AnalysisMode,
@@ -930,13 +968,15 @@ def _init_orchestrators(state: dict, config: dict) -> None:
         analysis_mode = mode_map.get(
             config["analysis_mode"].lower(), AnalysisMode.AUTONOMOUS
         )
+        _abase = _base_for("analysis")
         state["analysis_orch"] = AnalysisOrchestratorAgent(
-            base_dir=session_dir,
+            base_dir=_abase,
             api_key=api_key,
             model_name=model_name,
             base_url=base_url,
             analysis_mode=analysis_mode,
             futurehouse_api_key=fh_key,
+            restore_checkpoint=_restore(_abase),
         )
 
     if config["mode"] in ("plan", "both"):
@@ -957,12 +997,13 @@ def _init_orchestrators(state: dict, config: dict) -> None:
             # Planning orchestrator needs data_dir and knowledge_dir
             # to avoid creating directories with relative paths
             # (fails when Claude Desktop runs from /).
-            data_dir = str(Path(session_dir) / "data")
-            knowledge_dir = str(Path(session_dir) / "kb_storage")
+            _pbase = _base_for("planning")
+            data_dir = str(Path(_pbase) / "data")
+            knowledge_dir = str(Path(_pbase) / "kb_storage")
             Path(data_dir).mkdir(parents=True, exist_ok=True)
             Path(knowledge_dir).mkdir(parents=True, exist_ok=True)
             state["planning_orch"] = PlanningOrchestratorAgent(
-                base_dir=session_dir,
+                base_dir=_pbase,
                 api_key=api_key,
                 model_name=model_name,
                 base_url=base_url,
@@ -970,6 +1011,7 @@ def _init_orchestrators(state: dict, config: dict) -> None:
                 autonomy_level=autonomy_level,
                 data_dir=data_dir,
                 knowledge_dir=knowledge_dir,
+                restore_checkpoint=_restore(_pbase),
             )
         except Exception as exc:
             logging.warning(f"Planning orchestrator not available: {exc}")
@@ -994,6 +1036,7 @@ def _init_orchestrators(state: dict, config: dict) -> None:
             base_url=base_url,
             meta_mode=meta_mode,
             futurehouse_api_key=fh_key,
+            restore_checkpoint=_restore(session_dir),
         )
 
 
