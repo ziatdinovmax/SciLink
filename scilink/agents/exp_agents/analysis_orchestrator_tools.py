@@ -38,7 +38,7 @@ from .metadata_converter import (
 from ..lit_agents import OwlLiteratureAgent, NoveltyScorer, FittingModelLiteratureAgent
 from ..lit_agents.optimize_query_for_analysis import optimize_query_for_analysis
 from .recommendation_agent import RecommendationAgent
-from .feature_table import write_feature_table
+from .feature_table import write_feature_table, describe_feature_table
 from ._locked_exec import CANDIDATES_DIR_NAME
 from ...utils.text_io import write_text_utf8
 from ...skills.loader import list_skills, list_all_skills, load_skill
@@ -2996,6 +2996,16 @@ class AnalysisOrchestratorTools:
                     feature_table = write_feature_table(analysis_output_dir)
                     if feature_table:
                         response["feature_table"] = feature_table
+                        # Describe the table in the response itself: a client
+                        # that cannot open server files (remote MCP) — or the
+                        # orchestrator LLM choosing BO inputs/targets — needs
+                        # the column names and where the holes are.
+                        _desc = describe_feature_table(feature_table)
+                        if _desc:
+                            response["feature_columns"] = _desc["columns"]
+                            response["feature_rows"] = _desc["n_rows"]
+                            if _desc["missing"]:
+                                response["feature_missing"] = _desc["missing"]
                     # #172: surface the locked-script reuse verdict so the
                     # orchestrator can act on a non-`good` outcome (a poorly
                     # fitting reused recipe, or a re-derived schema).
