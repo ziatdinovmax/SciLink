@@ -2317,11 +2317,33 @@ class AnalysisOrchestratorTools:
                     "message": "No data path provided. Use examine_data first."
                 })
             
+            _agent_inferred = None
             if agent_id is None:
-                return json.dumps({
-                    "status": "error",
-                    "message": "No agent selected. Use select_agent first."
-                })
+                # Tool-only callers (MCP clients, run_task) do not run the
+                # examine_data -> select_agent preamble a chat turn would.
+                # Probe the data ourselves and, when exactly one agent fits,
+                # use it — the same decision the orchestrator would make.
+                try:
+                    _probe = json.loads(self.execute_tool("examine_data", data_path=data_path))
+                except Exception as _e:  # noqa: BLE001 - fall through to the error below
+                    _probe = {"error": str(_e)}
+                _sugg = _probe.get("suggested_agents") or []
+                if len(_sugg) == 1 and _sugg[0] in self.AGENT_NAMES:
+                    agent_id = int(_sugg[0])
+                    self.orch.selected_agent_id = agent_id
+                    _agent_inferred = self.AGENT_NAMES.get(agent_id)
+                    print(f"  🤖 Agent inferred from data probe "
+                          f"({_probe.get('data_type')}): {_agent_inferred}")
+                else:
+                    return json.dumps({
+                        "status": "error",
+                        "message": (
+                            "No agent selected and the data probe could not pick "
+                            f"one unambiguously (data_type={_probe.get('data_type')!r}, "
+                            f"suggested_agents={_sugg}). Pass agent_id "
+                            "(0=CurveFitting, 1=ImageAnalysis, 2=Hyperspectral) or "
+                            "use select_agent first."),
+                    })
             
             # Dataset-aware metadata resolution (issue #411). The loaded
             # document may serve this run only if it is unbound (freshly
@@ -2329,6 +2351,7 @@ class AnalysisOrchestratorTools:
             # *different* dataset is stale and must be re-resolved — never
             # silently reused across techniques.
             _stale_owner = None
+            _metadata_minimal = False
             if self.orch.current_metadata is not None:
                 _owner = getattr(self.orch, "current_metadata_owner", None)
                 if _owner and not _same_dataset(_owner, data_path):
@@ -2395,10 +2418,32 @@ class AnalysisOrchestratorTools:
                                 )
                             })
                         if self.orch.current_metadata is None:
-                            return json.dumps({
-                                "status": "error",
-                                "message": "No metadata available. Use load_metadata or convert_metadata first."
-                            })
+                            _goal_bits = {k: v for k, v in (
+                                ("analysis_goal", analysis_goal),
+                                ("objective", objective), ("hints", hints)) if v}
+                            if _goal_bits:
+                                # Minimal metadata from the call itself: a tool-only
+                                # caller with no metadata file still stated what the
+                                # data is and what to do with it. Better a run with
+                                # thin context than a hard stop nobody can answer.
+                                self.orch.current_metadata = {
+                                    **_goal_bits,
+                                    "_source": "run_analysis arguments (no metadata "
+                                               "file or sidecar provided)",
+                                }
+                                self.orch.current_metadata_owner = None
+                                _metadata_minimal = True
+                                print("  📎 No metadata file/sidecar; using the call's "
+                                      "analysis_goal/objective/hints as minimal metadata")
+                            else:
+                                return json.dumps({
+                                    "status": "error",
+                                    "message": (
+                                        "No metadata available. Use load_metadata or "
+                                        "convert_metadata first, drop a stem-matched JSON "
+                                        "sidecar next to the data, or state what the data "
+                                        "is in analysis_goal."),
+                                })
             # Bind unbound metadata to the dataset now consuming it.
             if (self.orch.current_metadata is not None
                     and not getattr(self.orch, "current_metadata_owner", None)):
@@ -2983,6 +3028,15 @@ class AnalysisOrchestratorTools:
                         "note": f"All outputs saved to: {analysis_output_dir}",
                         "next_steps": "Use assess_novelty to check literature for these claims, or get_recommendations for follow-up experiments.",
                     }
+                    if _agent_inferred:
+                        response["agent_inferred"] = _agent_inferred
+                    if _metadata_minimal:
+                        response["metadata_note"] = (
+                            "No metadata file or sidecar was available; the run used "
+                            "the call's analysis_goal/objective/hints as minimal "
+                            "metadata. Provide load_metadata/convert_metadata or a "
+                            "JSON sidecar for richer context (units, technique, "
+                            "sample).")
                     if result.get("status") == "partial":
                         response["confidence"] = result.get("confidence")
                         response["warnings"] = result.get("warnings") or []
@@ -3097,11 +3151,20 @@ class AnalysisOrchestratorTools:
                 },
                 "agent_id": {
                     "type": "integer",
-                    "description": "Agent ID to use (0-3, uses selected if not specified)"
+                    "description": (
+                        "Agent ID to use (0=CurveFitting, 1=ImageAnalysis, "
+                        "2=Hyperspectral). Optional: uses the selected agent, else "
+                        "the one the data probe suggests when that is unambiguous "
+                        "(the response then reports agent_inferred).")
                 },
                 "analysis_goal": {
                     "type": "string",
-                    "description": "Specific analysis objective (saved with results for traceability)"
+                    "description": (
+                        "Specific analysis objective (saved with results for "
+                        "traceability). When no metadata file or JSON sidecar is "
+                        "available it also serves as the run's minimal metadata, "
+                        "so say what the data is (technique, units, sample) as "
+                        "well as what to extract.")
                 },
                 "objective": {
                     "type": "string",
