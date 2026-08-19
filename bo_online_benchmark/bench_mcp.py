@@ -8,11 +8,10 @@ experimental_budget=<remaining>) -> recommended row -> measured from the
 pool -> appended through analyze_file. Same inits / pool / recording as
 bench.py so results_mcp/ compares directly with results_regress_pool/.
 
-Differences from the direct harness (by construction of the MCP surface):
-  * no cat_dims argument — encoded categorical inputs arrive as numeric
-    columns and are modelled as continuous (candidate_pool still restricts
-    recommendations to real pool rows);
-  * the planning orchestrator's scalarizer ingests each CSV (pass-through).
+Differences from the direct harness: the planning orchestrator's scalarizer
+ingests each CSV (pass-through); categorical inputs are declared with
+input_types (the orchestrator level-encodes data + pool and decodes the
+recommendation) and the objective direction with directions.
 
 Usage:
   python bench_mcp.py <dataset> <seed> [n_iters]     (client venv: deepagents_bo_demo/.venv)
@@ -92,7 +91,8 @@ async def run(dataset, seed, n_iters):
         ing = _text(await tools["scilink_analyze_file"].ainvoke({
             "file_path": str(seed_csv), "extraction_goal": goal,
             "inputs": pool.input_cols, "targets": [pool.target_col],
-            "directions": {pool.target_col: pool.direction}}))
+            "directions": {pool.target_col: pool.direction},
+            "input_types": {pool.input_cols[i]: "categorical" for i in (pool.cat_dims or [])}}))
         if ing.get("status") != "success":
             raise RuntimeError(f"seed ingest failed: {ing}")
         if ing.get("target_directions", {}).get(pool.target_col) != pool.direction:
@@ -124,6 +124,7 @@ async def run(dataset, seed, n_iters):
                                    "surrogate": (strat.get("model_config") or {}).get("surrogate"),
                                    "bounds_source": res.get("input_bounds_source"),
                                    "directions": res.get("target_directions"),
+                                   "input_types": res.get("input_types"),
                                    "pool": res.get("candidate_pool"), "fallback": False})
             else:
                 fallbacks += 1

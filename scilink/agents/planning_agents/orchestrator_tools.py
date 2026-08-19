@@ -224,6 +224,35 @@ class OrchestratorTools:
             out[col] = levels[idx]
         return out
 
+    def _apply_input_types(self, input_types, inputs) -> list:
+        """Merge caller-stated {input: categorical|continuous} into the
+        campaign's expected_input_types (caller wins; a pass-through feature
+        table never runs the scalarizer's classification, so without this a
+        numeric-coded categorical is modelled as continuous). Returns warnings
+        for ignored entries. Sticky and checkpointed."""
+        warns: list = []
+        if not input_types:
+            return warns
+        if not isinstance(input_types, dict):
+            return ["input_types must be a dict {column: 'categorical'|'continuous'}; ignored."]
+        known = list(inputs or [])
+        current = dict(getattr(self.orch, "expected_input_types", None) or {})
+        for col, t in input_types.items():
+            tn = str(t).strip().lower()
+            if tn in ("cat", "category", "discrete", "nominal"):
+                tn = "categorical"
+            if tn in ("cont", "numeric", "number", "float", "real"):
+                tn = "continuous"
+            if tn not in ("categorical", "continuous"):
+                warns.append(f"input_types['{col}']={t!r} ignored: use 'categorical' or 'continuous'.")
+                continue
+            if known and str(col) not in known:
+                warns.append(f"input_types['{col}'] ignored: not an input column (inputs are {known}).")
+                continue
+            current[str(col)] = tn
+        self.orch.expected_input_types = current
+        return warns
+
     def _apply_directions(self, directions, targets) -> list:
         """Merge caller-stated {target: maximize|minimize} into the campaign's
         target_directions (caller wins). Returns warnings for entries that
@@ -3300,7 +3329,8 @@ class OrchestratorTools:
                 force_regenerate: bool = False,
                 inputs: list[str] = None,
                 targets: list[str] = None,
-                directions: dict = None):
+                directions: dict = None,
+                input_types: dict = None):
             """
             Analyzes a raw data file (CSV/XLSX) to extract metrics.
             
@@ -3678,6 +3708,7 @@ class OrchestratorTools:
                     # 'loss' target was maximized.
                     _dir_warn = self._apply_directions(directions, targets)
                     self._capture_input_types(column_roles, inputs)
+                    _dir_warn = list(_dir_warn) + self._apply_input_types(input_types, inputs)
                     print(f"    📊 Schema Enforced (User-Specified):")
                     print(f"       Inputs: {self.orch.expected_input_columns}")
                     print(f"       Targets: {self.orch.expected_target_columns}")
@@ -3694,6 +3725,8 @@ class OrchestratorTools:
                             self.orch.target_directions = opt_dir
                     _dir_warn = self._apply_directions(
                         directions, self.orch.expected_target_columns)
+                    _dir_warn = list(_dir_warn) + self._apply_input_types(
+                        input_types, self.orch.expected_input_columns)
                     if not getattr(self.orch, "expected_input_types", None):
                         self._capture_input_types(column_roles, self.orch.expected_input_columns)
                     print(f"    📊 Schema Enforced (From Previous Analysis):")
@@ -3895,6 +3928,7 @@ class OrchestratorTools:
                     "inputs": self.orch.expected_input_columns,
                     "targets": self.orch.expected_target_columns,
                     "target_directions": dict(self.orch.target_directions or {}),
+                    "input_types": dict(getattr(self.orch, "expected_input_types", None) or {}),
                 }
                 _missing_dir = [t for t in (self.orch.expected_target_columns or [])
                                 if t not in (self.orch.target_directions or {})]
@@ -3956,6 +3990,19 @@ class OrchestratorTools:
                     "type": "array", 
                     "items": {"type": "string"}, 
                     "description": "List of column names to treat as OPTIMIZATION TARGETS"
+                },
+                "input_types": {
+                    "type": "object",
+                    "description": (
+                        "Input kind per column, {\"column\": \"categorical\"|\"continuous\"}. "
+                        "Pass when an input is a choice among discrete options (ligand, "
+                        "solvent, base, material id) — especially when it is stored as a "
+                        "numeric code, which a ready feature table would otherwise be "
+                        "modelled as a continuous knob. Categorical inputs are "
+                        "level-encoded for the surrogate and decoded in the "
+                        "recommendations. Sticky for the campaign; can also be set on "
+                        "run_optimization."
+                    )
                 },
                 "directions": {
                     "type": "object",
@@ -4461,6 +4508,7 @@ class OrchestratorTools:
             input_bounds: dict = None,
             seed: int = None,
             directions: dict = None,
+            input_types: dict = None,
         ):
             """
             Runs Bayesian Optimization to suggest next parameters.
@@ -4507,6 +4555,8 @@ class OrchestratorTools:
                 })
             
             _dir_warn = self._apply_directions(directions, self.orch.expected_target_columns)
+            _dir_warn = list(_dir_warn) + self._apply_input_types(
+                input_types, self.orch.expected_input_columns)
 
             if not self.orch.expected_target_columns or not self.orch.expected_input_columns:
                 return json.dumps({
@@ -4897,6 +4947,36 @@ class OrchestratorTools:
                     if pool_err:
                         return pool_err
                     print(f"    🎯 Candidate pool: {Path(resolved_pool).name}")
+                    if level_maps:
+                        # The campaign data was level-encoded above; the pool
+                        # must go through the SAME maps or its rows never match
+                        # the surrogate's space (and unknown levels are a real
+                        # mismatch, not something to guess).
+                        try:
+                            pool_df = pd.read_csv(resolved_pool)
+                        except Exception as _e:  # noqa: BLE001
+                            return json.dumps({"status": "error",
+                                               "message": f"candidate_pool unreadable: {_e}"})
+                        for col, levels in level_maps.items():
+                            if col not in pool_df.columns:
+                                continue
+                            idx = {lv: i for i, lv in enumerate(levels)}
+                            enc = pool_df[col].astype(str).map(idx)
+                            if enc.isnull().any():
+                                unknown = sorted(pool_df.loc[enc.isnull(), col].astype(str).unique().tolist())
+                                return json.dumps({
+                                    "status": "error",
+                                    "message": (f"candidate_pool has levels for categorical input "
+                                                f"'{col}' not seen in the campaign data/plan: "
+                                                f"{unknown[:10]}. Known levels: {levels}."),
+                                    "hint": "Encode the pool with the same labels as the data, or "
+                                            "declare the level universe in the plan."})
+                            pool_df[col] = enc.astype(float)
+                        encoded_pool = self.orch.base_dir / "bo_artifacts" / "candidate_pool_encoded.csv"
+                        encoded_pool.parent.mkdir(parents=True, exist_ok=True)
+                        pool_df.to_csv(encoded_pool, index=False)
+                        resolved_pool = str(encoded_pool)
+                        print(f"    🔡 Candidate pool level-encoded → {encoded_pool.name}")
 
                 res = self.orch.bo.run_optimization_loop(
                     data_path=bo_data_path_for_run,
@@ -4981,6 +5061,9 @@ class OrchestratorTools:
                     col: [float(lo), float(hi)]
                     for col, (lo, hi) in zip(optimization_inputs, input_bounds)}
                 response["input_bounds_source"] = bounds_sources
+                response["input_types"] = {
+                    c: ("categorical" if c in level_maps else "continuous")
+                    for c in optimization_inputs}
                 _data_bounded = [c for c, src in bounds_sources.items() if src == "data"]
                 if _data_bounded:
                     bounds_warnings = list(bounds_warnings) + [(
@@ -5133,6 +5216,16 @@ class OrchestratorTools:
                         "call in this campaign until overridden. Only the columns "
                         "given are affected; others keep their plan/data-derived "
                         "range. Ignored for categorical inputs."
+                    )
+                },
+                "input_types": {
+                    "type": "object",
+                    "description": (
+                        "Input kind per column, {\"column\": \"categorical\"|\"continuous\"}. "
+                        "Declare categorical inputs (discrete choices — ligands, "
+                        "solvents, material ids — even when stored as numeric codes) so "
+                        "the surrogate treats them as levels, not a continuous axis. "
+                        "Sticky for the campaign; overrides what analyze_file inferred."
                     )
                 },
                 "directions": {
