@@ -7262,6 +7262,29 @@ Return JSON: {{"script": "<the complete modified script>"}}
             self.logger.info("\n🔄 Adaptive refit: Flagged spectra are statistical outliers only, skipping.")
             return state
 
+        # Refit budget: each independent re-analysis is a full LLM planning /
+        # codegen / verification loop (minutes per unit), so a large series
+        # with many flagged units can spend most of its wall-clock here.
+        # Cap it — worst fits first; the rest keep their locked-model result
+        # (still a valid, schema-consistent row) and are listed so the caller
+        # sees exactly what was not re-analyzed.
+        max_refits = state.get("max_series_refits")
+        skipped_by_budget: List[dict] = []
+        if isinstance(max_refits, int) and max_refits >= 0 and len(refit_candidates) > max_refits:
+            ranked = sorted(refit_candidates,
+                            key=lambda f: (f.get("r_squared") is None,
+                                           f.get("r_squared") if f.get("r_squared") is not None else 0.0))
+            refit_candidates, skipped_by_budget = ranked[:max_refits], ranked[max_refits:]
+            self.logger.info(
+                f"\n🔄 Adaptive refit budget: {max_refits} of {len(ranked)} flagged "
+                f"spectra will be re-analyzed (worst R² first); skipping "
+                f"{[f['name'] for f in skipped_by_budget]}")
+        state["refit_skipped_by_budget"] = [
+            {"index": f["index"], "name": f["name"], "r_squared": f.get("r_squared"),
+             "reason": f.get("reason")} for f in skipped_by_budget]
+        if not refit_candidates:
+            return state
+
         self.logger.info(f"\n🔄 ADAPTIVE REFIT: {len(refit_candidates)} spectra to re-analyze independently")
 
         series_results = state.get("series_results", [])

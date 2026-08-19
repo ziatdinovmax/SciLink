@@ -314,6 +314,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         max_model_retries: Optional[int] = None,
         outlier_sigma: Optional[float] = None,
         max_verification_iterations: Optional[int] = None,
+        max_series_refits: Optional[int] = None,
         # Annealing schedule start level for THIS run (None/0 = current
         # behavior: start frozen at T=0 and escalate adaptively). A re-run may
         # start higher (e.g. hot) so it does not re-obey early constraint stages
@@ -835,6 +836,11 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             # Operating profile name ("thorough" | "realtime") — controllers
             # gate realtime-only behavior (drift check, bank suppression) on it.
             "_qc_profile": qc_profile.name,
+            # Wall-clock budget for per-unit re-analysis of flagged spectra
+            # in a series (None = unlimited). Worst fits go first; skipped
+            # units keep their locked-model result and are listed under
+            # refit_skipped_by_budget.
+            "max_series_refits": max_series_refits,
             # Annealing schedule start level (None/0 = start frozen at T=0).
             "_starting_annealing_level": starting_annealing_level,
 
@@ -1864,6 +1870,8 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             results["flagged_spectra"] = flagged_spectra
             results["flagged_spectra_analysis"] = synthesis.get("flagged_spectra_analysis", {})
             results["refit_summary"] = refit_summary
+            if state.get("refit_skipped_by_budget"):
+                results["refit_skipped_by_budget"] = state["refit_skipped_by_budget"]
             results["refit_analysis"] = synthesis.get("refit_analysis", {})
             results["trend_analysis"] = state.get("trend_analysis_results", {})
             results["parameter_trends"] = synthesis.get("parameter_trends", {})

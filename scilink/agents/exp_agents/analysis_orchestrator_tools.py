@@ -2247,6 +2247,7 @@ class AnalysisOrchestratorTools:
             literature_file: str = None,
             r2_threshold: float = None,
             max_verification_iterations: int = None,
+            max_series_refits: int = None,
             starting_annealing_level: int = None,
             n_candidates: int = None,
             executor_timeout: int = None,
@@ -2881,6 +2882,17 @@ class AnalysisOrchestratorTools:
                             f"   max_verification_iterations={max_verification_iterations} ignored: "
                             f"{self.AGENT_NAMES.get(agent_id, 'agent')} has no verification loop."
                         )
+                if max_series_refits is not None:
+                    # Wall-clock budget for per-unit re-analysis in a series;
+                    # forwarded only to agents whose analyze() has the knob.
+                    import inspect as _inspect
+                    if "max_series_refits" in _inspect.signature(agent.analyze).parameters:
+                        analyze_kwargs["max_series_refits"] = int(max_series_refits)
+                    else:
+                        self.logger.info(
+                            f"   max_series_refits={max_series_refits} ignored: "
+                            f"{self.AGENT_NAMES.get(agent_id, 'agent')} has no series refit stage."
+                        )
                 if starting_annealing_level is not None:
                     # Annealing-schedule override for a RE-RUN: start the
                     # constraint-relaxation schedule higher (e.g. hot) so the
@@ -3009,6 +3021,8 @@ class AnalysisOrchestratorTools:
                     # #172: surface the locked-script reuse verdict so the
                     # orchestrator can act on a non-`good` outcome (a poorly
                     # fitting reused recipe, or a re-derived schema).
+                    if result.get("refit_skipped_by_budget"):
+                        response["refit_skipped_by_budget"] = result["refit_skipped_by_budget"]
                     reuse_validity = result.get("reuse_validity")
                     if reuse_validity:
                         response["reuse_validity"] = reuse_validity
@@ -3347,6 +3361,23 @@ class AnalysisOrchestratorTools:
                         "single fit legitimately needs longer; LOWER it (e.g. "
                         "30-60) for real-time/quick-look turnaround where a "
                         "slow fit should fail fast. Leave unset otherwise."
+                    )
+                },
+                "max_series_refits": {
+                    "type": "integer",
+                    "description": (
+                        "Curve fitting, SERIES runs only. Caps how many flagged "
+                        "spectra (fits below the R² threshold with the locked "
+                        "model) get an independent full re-analysis after the "
+                        "series pass — each such refit is a complete LLM "
+                        "planning/codegen/verification loop (minutes per unit). "
+                        "Worst fits are re-analyzed first; the rest keep their "
+                        "locked-model result (a valid, schema-consistent row) and "
+                        "are listed under refit_skipped_by_budget. Set for large "
+                        "series when turnaround matters (0 = no refits, e.g. a "
+                        "closed loop that only needs the locked features); leave "
+                        "unset for the standard behaviour (re-analyze every "
+                        "flagged spectrum)."
                     )
                 },
                 "max_verification_iterations": {
