@@ -46,8 +46,9 @@ DEFAULT_MAX_FILE_BYTES = 16 * 1024 * 1024
 _BINARY_SNIFF_BYTES = 8192
 
 DEFAULT_TOO_LARGE_MESSAGE = (
-    "Edit too large for edit_file — split the change at a unique boundary "
-    "into consecutive smaller edit_file calls."
+    "Edit too large for edit_file — split the change at unique boundaries "
+    "into smaller snippets and pass them TOGETHER as one `edits` list in a "
+    "single call, not as a chain of one-edit calls."
 )
 
 # The recovery route when a verbatim snippet guess misses. Parameterized

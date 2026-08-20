@@ -94,7 +94,10 @@ def test_copy_of_a_file_already_here_under_the_same_name_is_refused(tmp_path):
                                         copy=True))
 
     assert out["status"] == "error"
-    assert "already this file's name" in out["message"]
+    # Routing, not a dead end: a copy can only land here, so the agent is
+    # told to embed by relative path from the other document's folder.
+    assert "relative path" in out["message"]
+    assert "../09_consolidate/campaign_workflow.png" in out["message"]
     assert fig.exists()
 
 
