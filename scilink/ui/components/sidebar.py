@@ -1242,6 +1242,13 @@ def resume_session(
 
 
 def _reset_session() -> None:
+    # This session is being torn down deliberately — drop its registry entry
+    # so the welcome screen does not offer to reattach to a dead run.
+    try:
+        from scilink.ui import registry as _session_registry
+        _session_registry.unregister(st.session_state.get("session_dir"))
+    except Exception:  # noqa: BLE001 - teardown must not fail
+        pass
     # Stop the agent thread if it's still running
     task = st.session_state.get("chat_task")
     if task and task.is_running:

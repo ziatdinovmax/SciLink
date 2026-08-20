@@ -140,6 +140,15 @@ if st.query_params.get("reset"):
 
 inject_theme()
 init_session_state()
+
+# Keep the process-global session registry current while attached, so a
+# browser disconnect (new session_state on reconnect) can REATTACH to the
+# still-running agent thread instead of losing sight of it.
+from scilink.ui import registry as _session_registry  # noqa: E402
+
+if st.session_state.agent_initialized and st.session_state.session_dir:
+    _session_registry.sync_from(st.session_state)
+
 render_sidebar()
 
 
@@ -704,6 +713,44 @@ if not st.session_state.agent_initialized:
         # the error invisible behind the dimmed sidebar.
         st.rerun()
 
+    # ── Reattach banner: live sessions in THIS server process ──
+    # A dropped connection gives the reconnected page a fresh session_state
+    # while the agent thread keeps running; offer to pick it back up. This is
+    # reference reattachment, not checkpoint resume — nothing is re-created.
+    _live = _session_registry.live_entries()
+    if _live:
+        _status_label = {
+            "running": "🟢 running",
+            "awaiting input": "🟠 awaiting your input",
+            "finished": "🔵 finished — result not yet shown",
+            "idle": "⚪ idle (in memory)",
+        }
+        _bl, _bc, _br = st.columns([1, 2, 1])
+        with _bc:
+            st.info("This server has live session(s) from a previous "
+                    "connection — reattach to continue where it left off.")
+            for _e in _live:
+                _name = Path(_e["session_dir"]).name
+                _cfg = _e["config"]
+                _desc = " · ".join(x for x in (
+                    _e.get("app_mode"), _cfg.get("model"),
+                    f"{_e['n_messages']} messages") if x)
+                _c1, _c2 = st.columns([3, 1])
+                with _c1:
+                    st.markdown(f"**{_name}**  \n"
+                                f"{_status_label.get(_e['status'], _e['status'])}"
+                                f"{' · ' + _desc if _desc else ''}")
+                with _c2:
+                    if st.button("Reattach", key=f"reattach_{_e['session_dir']}",
+                                 type="primary"):
+                        if _session_registry.attach_to(
+                                st.session_state, _e["session_dir"]):
+                            st.rerun()
+                        else:
+                            st.warning("That session is no longer in memory — "
+                                       "use Resume from checkpoint instead.")
+            st.divider()
+
     # ── Normal welcome screen ────────────────────────────────
     col_l, col_c, col_r = st.columns([1, 2, 1])
     with col_c:
@@ -941,6 +988,15 @@ else:
                 # Strip markdown image tags with local file paths — images are
                 # rendered separately via st.image() from _find_new_images()
                 content = re.sub(r"!\[[^\]]*\]\([^)]+\)\n?", "", content).strip()
+                # If another attached view of this session already consumed
+                # this completion (reattach can briefly leave two observers),
+                # do not append the same turn twice — just clear the task.
+                _msgs = st.session_state.chat_messages
+                if (_msgs and _msgs[-1].get("role") == "assistant"
+                        and _msgs[-1].get("content") == content):
+                    st.session_state.chat_task = ChatTask()
+                    st.rerun(scope="app")
+                    return
                 new_images = _find_new_images()
                 new_reports = _find_new_html_reports()
                 new_docs = _find_new_md_documents()
