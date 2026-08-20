@@ -15,12 +15,14 @@ The ``mcp`` package is installed by default with SciLink.
 """
 
 import asyncio
+import os
 import concurrent.futures
 import contextlib
 import io
 import json
 import logging
 import sys
+from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -115,6 +117,131 @@ def _openai_to_mcp_tool(schema: dict, prefix: str = "scilink") -> types.Tool:
 
 # ── Human-in-the-loop channel (agent prompts over MCP) ─────────────────
 
+# ── Job / pending-question durability (issue #469) ─────────────────────
+# The jobs table and parked questions lived only in server memory: after a
+# restart a supervising client got "Unknown job_id" and its questions
+# evaporated. Every transition is now mirrored to <session_dir>/mcp_jobs.json
+# (atomic replace, never fatal); on start, unfinished jobs come back as
+# status "interrupted" with a structured re-entry hint, and finished ones
+# keep answering job_status/job_result with their stored result.
+
+_JOBS_STORE_NAME = "mcp_jobs.json"
+_INTERRUPTED_HINT = (
+    "The server restarted while this job was in flight; its Python stack "
+    "cannot be resumed, but the campaign/session state is checkpointed. "
+    "Re-issue the orchestrate call to continue from where the checkpoints "
+    "left off. The narration tail from before the restart is attached."
+)
+
+
+def _jobs_store_path(state: dict):
+    sd = (state.get("config") or {}).get("session_dir")
+    return (Path(sd) / _JOBS_STORE_NAME) if sd else None
+
+
+def _persist_jobs(state: dict) -> None:
+    """Mirror the jobs table + parked questions to the session dir.
+
+    Called on every transition (create / finish / question parked or
+    answered). Best-effort and atomic; a persistence failure must never
+    break the tool call it rides on."""
+    path = _jobs_store_path(state)
+    if path is None:
+        return
+    try:
+        with state.get("_persist_lock") or contextlib.nullcontext():
+            jobs = {}
+            for jid, job in state.get("jobs", {}).items():
+                jobs[jid] = {
+                    "tool": job.get("tool"),
+                    "started_at": job.get("started_at"),
+                    "status": job.get("status"),
+                    "result": job.get("result"),
+                    "log_tail": list(job.get("log_lines") or [])[-100:],
+                }
+            questions = []
+            for q in _pending_questions(state):
+                questions.append({**q, "asked_at": datetime.now().isoformat()})
+            payload = {"job_counter": state.get("job_counter", 0),
+                       "jobs": jobs, "pending_questions": questions}
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(payload, indent=1, default=str),
+                           encoding="utf-8")
+            tmp.replace(path)
+    except Exception as exc:  # noqa: BLE001 - durability is best-effort
+        logging.warning(f"Could not persist MCP job state: {exc}")
+
+
+def _finalize_job(state: dict, job_id: str) -> None:
+    """Done-callback on a job's future: capture status/result immediately
+    (not just when a client happens to poll) and persist, so a job that
+    finishes moments before a crash is recoverable."""
+    job = state.get("jobs", {}).get(job_id)
+    if job is None or job.get("future") is None:
+        return
+    try:
+        job["result"] = job["future"].result()
+        job["status"] = "completed"
+    except Exception as exc:  # noqa: BLE001 - failure is a terminal state too
+        job["result"] = json.dumps({"status": "error", "message": str(exc)})
+        job["status"] = "failed"
+    _persist_jobs(state)
+
+
+def _register_job(state: dict, job_id: str, job: dict) -> None:
+    """Insert a job and wire durability (done-callback + persist)."""
+    state["jobs"][job_id] = job
+    fut = job.get("future")
+    if fut is not None:
+        fut.add_done_callback(lambda _f, _j=job_id: _finalize_job(state, _j))
+    _persist_jobs(state)
+
+
+def _restore_jobs(state: dict) -> None:
+    """Load the persisted jobs table on server start.
+
+    Finished jobs keep answering job_status/job_result with their stored
+    result; unfinished ones become status "interrupted" with a re-entry
+    hint. Parked questions cannot survive (their asking thread is gone) —
+    they are surfaced once via state["interrupted_questions"] so a
+    scilink_respond against them explains what happened instead of
+    erroring as unknown."""
+    path = _jobs_store_path(state)
+    if path is None or not path.exists():
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        logging.warning(f"Could not read persisted MCP job state: {exc}")
+        return
+    n_restored = n_interrupted = 0
+    for jid, rec in (payload.get("jobs") or {}).items():
+        if jid in state["jobs"]:
+            continue
+        job = {"future": None, "tool": rec.get("tool"),
+               "started_at": rec.get("started_at"),
+               "status": rec.get("status"), "result": rec.get("result"),
+               "log_lines": list(rec.get("log_tail") or [])}
+        if job["status"] in ("running", "awaiting_input"):
+            job["status"] = "interrupted"
+            job["result"] = json.dumps({
+                "status": "interrupted", "job_id": jid,
+                "message": _INTERRUPTED_HINT,
+                "log_tail": "\n".join(job["log_lines"][-25:])})
+            n_interrupted += 1
+        state["jobs"][jid] = job
+        n_restored += 1
+    state["interrupted_questions"] = {
+        q.get("request_id"): q for q in payload.get("pending_questions") or []}
+    state["job_counter"] = max(state.get("job_counter", 0),
+                               int(payload.get("job_counter", 0)))
+    if n_restored:
+        logging.info(
+            f"Restored {n_restored} background job record(s) from "
+            f"{path.name} ({n_interrupted} interrupted by the restart)")
+    _persist_jobs(state)
+
+
 class _MCPChannel:
     """hitl.FeedbackChannel that parks agent prompts in the server's
     pending queue for a client to answer via ``scilink_respond``.
@@ -141,10 +268,12 @@ class _MCPChannel:
             "type": "question", "req": req, "event": event,
             "holder": holder, "job_id": self._job_id,
         }
+        _persist_jobs(self._state)
         try:
             answered = event.wait(self._timeout_s)
         finally:
             self._state["pending"].pop(req.id, None)
+            _persist_jobs(self._state)
         if not answered:
             logging.warning(
                 f"[hitl] question {req.id} ({req.kind}) unanswered after "
@@ -258,6 +387,7 @@ def _execute_tool_captured(tools, tool_name: str, kwargs: dict,
     try:
         with _job_narration(log_lines), contextlib.redirect_stdout(captured):
             result = tools.execute_tool(tool_name, **kwargs)
+            _checkpoint_after_tool(tools, tool_name)
     finally:
         if state is not None:
             set_thread_channel(None)
@@ -267,6 +397,24 @@ def _execute_tool_captured(tools, tool_name: str, kwargs: dict,
         logging.info(f"[tool:{tool_name}] {log_output}")
 
     return result
+
+
+def _checkpoint_after_tool(tools, tool_name: str) -> None:
+    """Persist the owning orchestrator's state after a granular tool call.
+
+    The chat loops checkpoint after every turn; granular MCP calls bypassed
+    that, so a server restarted on the same --session-dir came back with the
+    data files but none of the state (schema, selected agent, results
+    ledger) — the client's campaign silently lost its footing. Cheap JSON
+    write; never fatal."""
+    orch = getattr(tools, "orch", None)
+    ckpt = getattr(orch, "_auto_checkpoint", None)
+    if ckpt is None:
+        return
+    try:
+        ckpt()
+    except Exception as exc:  # noqa: BLE001 - durability must not break the call
+        logging.warning(f"[tool:{tool_name}] checkpoint after call failed: {exc}")
 
 
 # ── Pending action support (co-pilot / autopilot) ──────────────────────
@@ -307,6 +455,27 @@ def _build_approval_prompt(tool_name: str, kwargs: dict) -> str:
 
 # ── Server factory ──────────────────────────────────────────────────────
 
+_HEADLESS_BACKENDS = {"agg", "pdf", "ps", "svg", "template", "cairo"}
+
+
+def _ensure_headless_matplotlib() -> None:
+    """An MCP server has no display and executes tools off the main thread;
+    GUI matplotlib backends (macOS Cocoa in particular) refuse that and kill
+    the tool call. Default MPLBACKEND to Agg and force-switch away from a GUI
+    backend if one was already resolved — operators should not need to know
+    this (it was integration rule 2 of every MCP client)."""
+    os.environ.setdefault("MPLBACKEND", "Agg")
+    try:
+        import matplotlib
+        backend = str(matplotlib.get_backend())
+        if (backend.lower() not in _HEADLESS_BACKENDS
+                and not backend.lower().startswith("module://")):
+            matplotlib.use("Agg", force=True)
+            logging.info(f"matplotlib backend {backend} → Agg (headless MCP server)")
+    except Exception as exc:  # noqa: BLE001 - never block serving over a plot backend
+        logging.warning(f"Could not enforce headless matplotlib backend: {exc}")
+
+
 def create_server(
     *,
     api_key: str = None,
@@ -336,6 +505,9 @@ def create_server(
 
     server = Server("scilink")
 
+    _ensure_headless_matplotlib()
+    import threading as _threading
+
     # ── State (initialized lazily on first tool list) ────────────────
     # Thread pool for background jobs
     _executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
@@ -354,6 +526,8 @@ def create_server(
         "initialized": False,
         "jobs": {},
         "job_counter": 0,
+        "interrupted_questions": {},
+        "_persist_lock": _threading.Lock(),
         "config": {
             "api_key": api_key,
             "model_name": model_name,
@@ -754,14 +928,14 @@ def create_server(
                 _execute_tool_captured, orch.tools, original_name, arguments,
                 state, job_id, log_lines,
             )
-            state["jobs"][job_id] = {
+            _register_job(state, job_id, {
                 "future": future,
                 "tool": original_name,
                 "started_at": ts,
                 "status": "running",
                 "result": None,
                 "log_lines": log_lines,
-            }
+            })
 
             return [types.TextContent(
                 type="text",
@@ -910,11 +1084,34 @@ def _init_orchestrators(state: dict, config: dict) -> None:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         session_dir = str(Path.home() / "scilink_mcp_sessions" / f"session_{ts}")
     Path(session_dir).mkdir(parents=True, exist_ok=True)
+    # Persisted job state (issue #469) lives here; record the resolved dir
+    # so persistence works even when the caller left session_dir unset.
+    config["session_dir"] = session_dir
+    _restore_jobs(state)
 
     api_key = config["api_key"]
     model_name = config["model_name"]
     base_url = config["base_url"]
     fh_key = config["futurehouse_api_key"] or os.environ.get("FUTUREHOUSE_API_KEY")
+
+    # Restart durability. Each orchestrator gets its own base dir (in
+    # --mode both they nest as <session>/analysis and <session>/planning,
+    # the meta's own layout — sharing one dir made their checkpoint.json
+    # files clobber each other) and restores its checkpoint when one exists,
+    # so a server restarted on the same --session-dir resumes the campaign
+    # instead of starting a half-state next to the old files.
+    def _base_for(kind: str) -> str:
+        if config["mode"] == "both":
+            d = Path(session_dir) / kind
+            d.mkdir(parents=True, exist_ok=True)
+            return str(d)
+        return session_dir
+
+    def _restore(base: str) -> bool:
+        has = (Path(base) / "checkpoint.json").exists()
+        if has:
+            logging.info(f"Restoring session state from {base}/checkpoint.json")
+        return has
 
     if config["mode"] in ("analyze", "both"):
         from scilink.agents.exp_agents.analysis_orchestrator import (
@@ -930,13 +1127,15 @@ def _init_orchestrators(state: dict, config: dict) -> None:
         analysis_mode = mode_map.get(
             config["analysis_mode"].lower(), AnalysisMode.AUTONOMOUS
         )
+        _abase = _base_for("analysis")
         state["analysis_orch"] = AnalysisOrchestratorAgent(
-            base_dir=session_dir,
+            base_dir=_abase,
             api_key=api_key,
             model_name=model_name,
             base_url=base_url,
             analysis_mode=analysis_mode,
             futurehouse_api_key=fh_key,
+            restore_checkpoint=_restore(_abase),
         )
 
     if config["mode"] in ("plan", "both"):
@@ -957,12 +1156,13 @@ def _init_orchestrators(state: dict, config: dict) -> None:
             # Planning orchestrator needs data_dir and knowledge_dir
             # to avoid creating directories with relative paths
             # (fails when Claude Desktop runs from /).
-            data_dir = str(Path(session_dir) / "data")
-            knowledge_dir = str(Path(session_dir) / "kb_storage")
+            _pbase = _base_for("planning")
+            data_dir = str(Path(_pbase) / "data")
+            knowledge_dir = str(Path(_pbase) / "kb_storage")
             Path(data_dir).mkdir(parents=True, exist_ok=True)
             Path(knowledge_dir).mkdir(parents=True, exist_ok=True)
             state["planning_orch"] = PlanningOrchestratorAgent(
-                base_dir=session_dir,
+                base_dir=_pbase,
                 api_key=api_key,
                 model_name=model_name,
                 base_url=base_url,
@@ -970,6 +1170,7 @@ def _init_orchestrators(state: dict, config: dict) -> None:
                 autonomy_level=autonomy_level,
                 data_dir=data_dir,
                 knowledge_dir=knowledge_dir,
+                restore_checkpoint=_restore(_pbase),
             )
         except Exception as exc:
             logging.warning(f"Planning orchestrator not available: {exc}")
@@ -994,6 +1195,7 @@ def _init_orchestrators(state: dict, config: dict) -> None:
             base_url=base_url,
             meta_mode=meta_mode,
             futurehouse_api_key=fh_key,
+            restore_checkpoint=_restore(session_dir),
         )
 
 
@@ -1015,7 +1217,7 @@ def _handle_job_status(
         )]
 
     future = job["future"]
-    if future.done():
+    if future is not None and future.done():
         try:
             result = future.result()
             job["status"] = "completed"
@@ -1043,6 +1245,8 @@ def _handle_job_status(
     lines = job.get("log_lines")
     if n and lines:
         payload["log_tail"] = "\n".join(list(lines)[-n:])
+    if job["status"] == "interrupted":
+        payload["message"] = _INTERRUPTED_HINT
     # A running job blocked on a human question reports awaiting_input
     # with the parked question(s) so the client can scilink_respond.
     if job["status"] == "running":
@@ -1054,6 +1258,12 @@ def _handle_job_status(
                 "The job is paused on a question. Answer with "
                 "scilink_respond(request_id=..., response=...) — empty "
                 "response usually means accept as-is.")
+
+    # Heartbeat persistence: the narration buffer fills between transitions,
+    # and a supervising client polls job_status regularly — mirror the tail
+    # to disk here so a crash loses at most one polling interval of narration.
+    if job.get("future") is not None:
+        _persist_jobs(state)
 
     return [types.TextContent(type="text", text=json.dumps(payload))]
 
@@ -1074,6 +1284,11 @@ def _handle_job_result(
         )]
 
     future = job["future"]
+    if future is None:
+        # Restored from a previous server process: the stored result is the
+        # answer (completed/failed), or the interrupted re-entry hint.
+        return [types.TextContent(type="text", text=job["result"] or json.dumps(
+            {"status": job["status"], "job_id": job_id}))]
     if not future.done():
         return [types.TextContent(
             type="text",
@@ -1248,14 +1463,14 @@ async def _handle_orchestrate_meta(
         log_lines = _new_job_lines()
         future = executor.submit(_execute_meta_chat_captured, orch, prompt,
                                  autonomy_str, state, job_id, log_lines)
-        state["jobs"][job_id] = {
+        _register_job(state, job_id, {
             "future": future,
             "tool": "orchestrate_meta",
             "started_at": ts,
             "status": "running",
             "result": None,
             "log_lines": log_lines,
-        }
+        })
 
         return [types.TextContent(
             type="text",
@@ -1323,14 +1538,14 @@ async def _handle_orchestrate(
         log_lines = _new_job_lines()
         future = executor.submit(_execute_run_task_captured, orch, prompt,
                                  autonomy_str, state, job_id, log_lines)
-        state["jobs"][job_id] = {
+        _register_job(state, job_id, {
             "future": future,
             "tool": tool_label,
             "started_at": ts,
             "status": "running",
             "result": None,
             "log_lines": log_lines,
-        }
+        })
 
         return [types.TextContent(
             type="text",
@@ -1435,6 +1650,18 @@ async def _handle_respond(
     pending = state.get("pending", {})
     request_id = (arguments.get("request_id") or "").strip()
 
+    if request_id and request_id not in pending:
+        dead = (state.get("interrupted_questions") or {}).get(request_id)
+        if dead:
+            return [types.TextContent(type="text", text=json.dumps({
+                "status": "interrupted",
+                "request_id": request_id,
+                "message": (
+                    "This question belonged to a job interrupted by a server "
+                    "restart; its asking thread is gone, so the answer cannot "
+                    "be delivered. " + _INTERRUPTED_HINT),
+                "question": dead,
+            }))]
     if request_id:
         item = pending.get(request_id)
         if item is None:

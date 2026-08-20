@@ -173,6 +173,22 @@ def resolve_n_candidates(requested, planner_state, new_campaign: bool = False) -
     return 3 if is_first_plan else 1
 
 
+
+def _norm_level(v) -> str:
+    """Canonical label for a categorical level: numeric-looking values compare
+    as numbers ('3', '3.0', 3 -> '3'; '2.5' -> '2.5'), everything else as the
+    stripped string. Used for data, pool and decode so an integer code written
+    once as int and once as float still means the same level."""
+    sv = str(v).strip()
+    try:
+        f = float(sv)
+    except (TypeError, ValueError):
+        return sv
+    if f != f:  # NaN
+        return sv
+    return str(int(f)) if f.is_integer() else repr(f)
+
+
 class OrchestratorTools:
     """
     Manages tool definitions, schemas, and execution for the OrchestratorAgent.
@@ -223,6 +239,64 @@ class OrchestratorTools:
             idx = max(0, min(idx, len(levels) - 1))
             out[col] = levels[idx]
         return out
+
+    def _apply_input_types(self, input_types, inputs) -> list:
+        """Merge caller-stated {input: categorical|continuous} into the
+        campaign's expected_input_types (caller wins; a pass-through feature
+        table never runs the scalarizer's classification, so without this a
+        numeric-coded categorical is modelled as continuous). Returns warnings
+        for ignored entries. Sticky and checkpointed."""
+        warns: list = []
+        if not input_types:
+            return warns
+        if not isinstance(input_types, dict):
+            return ["input_types must be a dict {column: 'categorical'|'continuous'}; ignored."]
+        known = list(inputs or [])
+        current = dict(getattr(self.orch, "expected_input_types", None) or {})
+        for col, t in input_types.items():
+            tn = str(t).strip().lower()
+            if tn in ("cat", "category", "discrete", "nominal"):
+                tn = "categorical"
+            if tn in ("cont", "numeric", "number", "float", "real"):
+                tn = "continuous"
+            if tn not in ("categorical", "continuous"):
+                warns.append(f"input_types['{col}']={t!r} ignored: use 'categorical' or 'continuous'.")
+                continue
+            if known and str(col) not in known:
+                warns.append(f"input_types['{col}'] ignored: not an input column (inputs are {known}).")
+                continue
+            current[str(col)] = tn
+        self.orch.expected_input_types = current
+        return warns
+
+    def _apply_directions(self, directions, targets) -> list:
+        """Merge caller-stated {target: maximize|minimize} into the campaign's
+        target_directions (caller wins). Returns warnings for entries that
+        were ignored (unknown target, bad value). Sticky on the orchestrator
+        and carried by its checkpoint."""
+        warns: list = []
+        if not directions:
+            return warns
+        if not isinstance(directions, dict):
+            return ["directions must be a dict {column: 'maximize'|'minimize'}; ignored."]
+        known = list(targets or [])
+        current = dict(self.orch.target_directions or {})
+        for col, d in directions.items():
+            dn = str(d).strip().lower()
+            if dn in ("max", "maximise"):
+                dn = "maximize"
+            if dn in ("min", "minimise"):
+                dn = "minimize"
+            if dn not in ("maximize", "minimize"):
+                warns.append(f"directions['{col}']={d!r} ignored: use 'maximize' or 'minimize'.")
+                continue
+            if known and str(col) not in known:
+                warns.append(f"directions['{col}'] ignored: not a target column "
+                             f"(targets are {known}).")
+                continue
+            current[str(col)] = dn
+        self.orch.target_directions = current
+        return warns
 
     def _capture_input_types(self, column_roles: Dict, input_columns: List[str]) -> None:
         """Persist scalarizer input_types onto the orchestrator state.
@@ -3301,7 +3375,9 @@ class OrchestratorTools:
                 extraction_goal: str = None,
                 force_regenerate: bool = False,
                 inputs: list[str] = None,
-                targets: list[str] = None):
+                targets: list[str] = None,
+                directions: dict = None,
+                input_types: dict = None):
             """
             Analyzes a raw data file (CSV/XLSX) to extract metrics.
             
@@ -3673,7 +3749,13 @@ class OrchestratorTools:
                     opt_dir = column_roles.get("optimization_direction", {})
                     if opt_dir:
                         self.orch.target_directions = opt_dir
+                    # Caller-stated directions win: a pass-through feature table
+                    # never runs the scalarizer's classification, so without
+                    # this the optimizer silently defaulted to maximize — a
+                    # 'loss' target was maximized.
+                    _dir_warn = self._apply_directions(directions, targets)
                     self._capture_input_types(column_roles, inputs)
+                    _dir_warn = list(_dir_warn) + self._apply_input_types(input_types, inputs)
                     print(f"    📊 Schema Enforced (User-Specified):")
                     print(f"       Inputs: {self.orch.expected_input_columns}")
                     print(f"       Targets: {self.orch.expected_target_columns}")
@@ -3688,6 +3770,10 @@ class OrchestratorTools:
                         opt_dir = column_roles.get("optimization_direction", {})
                         if opt_dir:
                             self.orch.target_directions = opt_dir
+                    _dir_warn = self._apply_directions(
+                        directions, self.orch.expected_target_columns)
+                    _dir_warn = list(_dir_warn) + self._apply_input_types(
+                        input_types, self.orch.expected_input_columns)
                     if not getattr(self.orch, "expected_input_types", None):
                         self._capture_input_types(column_roles, self.orch.expected_input_columns)
                     print(f"    📊 Schema Enforced (From Previous Analysis):")
@@ -3821,6 +3907,38 @@ class OrchestratorTools:
                     if available:
                         df_to_append = df_to_append[available]
 
+                # Rows with a missing input or target cannot be optimized;
+                # admitting them only defers the failure to run_optimization
+                # ("Missing values detected"), by which point the caller can
+                # no longer tell which rows or why. Skip them here and say
+                # so (typical source: a per-unit re-analysis whose model
+                # named a quantity differently from the locked script).
+                _schema_cols = [
+                    c for c in ((self.orch.expected_input_columns or [])
+                                + (self.orch.expected_target_columns or []))
+                    if c in df_to_append.columns] or list(df_to_append.columns)
+                _n_before = len(df_to_append)
+                _keep = df_to_append[_schema_cols].notna().all(axis=1)
+                rows_skipped_missing = int((~_keep).sum())
+                if rows_skipped_missing:
+                    _bad_cols = [c for c in _schema_cols
+                                 if df_to_append.loc[~_keep, c].isna().any()]
+                    df_to_append = df_to_append[_keep]
+                    num_new = len(df_to_append)
+                    print(f"    ⚠️  Skipping {rows_skipped_missing}/{_n_before} row(s) "
+                          f"with missing values in {_bad_cols}")
+                    if df_to_append.empty:
+                        return json.dumps({
+                            "status": "error",
+                            "message": (f"All {_n_before} rows have missing values in "
+                                        f"{_bad_cols}; nothing to ingest."),
+                            "hint": ("Check the extraction: the target/input column "
+                                     "exists but is empty for every row. If this is a "
+                                     "feature table from an analysis run, the "
+                                     "quantity may be reported under another column "
+                                     "name — pass that name as the target."),
+                        })
+
                 # SCHEMA ENFORCEMENT ON SAVE
                 if df_existing is not None:
                     if set(df_to_append.columns) != set(df_existing.columns):
@@ -3849,14 +3967,34 @@ class OrchestratorTools:
                 df_final = pd.read_csv(self.orch.bo_data_path)
                 data_count = len(df_final)
                 
-                return json.dumps({
+                _resp = {
                     "status": "success",
                     "data_points_collected": data_count,
                     "rows_added": num_new,
                     "optimization_ready": data_count >= 3,
                     "inputs": self.orch.expected_input_columns,
-                    "targets": self.orch.expected_target_columns
-                })
+                    "targets": self.orch.expected_target_columns,
+                    "target_directions": dict(self.orch.target_directions or {}),
+                    "input_types": dict(getattr(self.orch, "expected_input_types", None) or {}),
+                }
+                _missing_dir = [t for t in (self.orch.expected_target_columns or [])
+                                if t not in (self.orch.target_directions or {})]
+                if _missing_dir:
+                    _resp["direction_warning"] = (
+                        f"No optimization direction known for {_missing_dir}; the "
+                        f"optimizer will MAXIMIZE them unless you pass "
+                        f"directions={{col: 'minimize'|'maximize'}} (here or on "
+                        f"run_optimization).")
+                if locals().get("_dir_warn"):
+                    _resp["direction_warnings"] = _dir_warn
+                if rows_skipped_missing:
+                    _resp["rows_skipped_missing"] = rows_skipped_missing
+                    _resp["warning"] = (
+                        f"{rows_skipped_missing} row(s) skipped: missing values in "
+                        f"{_bad_cols}. If those units report the quantity under a "
+                        f"different column, re-ingest a table where it is filled in "
+                        f"under the target name.")
+                return json.dumps(_resp)
                 
             except Exception as e:
                 logging.error(f"Analyze file error: {e}", exc_info=True)
@@ -3899,6 +4037,31 @@ class OrchestratorTools:
                     "type": "array", 
                     "items": {"type": "string"}, 
                     "description": "List of column names to treat as OPTIMIZATION TARGETS"
+                },
+                "input_types": {
+                    "type": "object",
+                    "description": (
+                        "Input kind per column, {\"column\": \"categorical\"|\"continuous\"}. "
+                        "Pass when an input is a choice among discrete options (ligand, "
+                        "solvent, base, material id) — especially when it is stored as a "
+                        "numeric code, which a ready feature table would otherwise be "
+                        "modelled as a continuous knob. Categorical inputs are "
+                        "level-encoded for the surrogate and decoded in the "
+                        "recommendations. Sticky for the campaign; can also be set on "
+                        "run_optimization."
+                    )
+                },
+                "directions": {
+                    "type": "object",
+                    "description": (
+                        "Optimization direction per target, {\"column\": \"maximize\"|"
+                        "\"minimize\"}. Pass whenever the objective says minimize / "
+                        "reduce / lowest (loss, cost, overpotential, band gap, "
+                        "instability, error) — a ready feature table skips the "
+                        "automatic classification and the optimizer otherwise "
+                        "MAXIMIZES every target. Sticky for the campaign; can also be "
+                        "set or changed on run_optimization."
+                    )
                 }
             },
             required=["file_path"]
@@ -4388,7 +4551,11 @@ class OrchestratorTools:
             targets: list[str] = None,
             strategy_hint: str = None,
             skill: str = None,
-            candidate_pool: str = None
+            candidate_pool: str = None,
+            input_bounds: dict = None,
+            seed: int = None,
+            directions: dict = None,
+            input_types: dict = None,
         ):
             """
             Runs Bayesian Optimization to suggest next parameters.
@@ -4434,11 +4601,20 @@ class OrchestratorTools:
                     "current_data_count": len(df)
                 })
             
+            _dir_warn = self._apply_directions(directions, self.orch.expected_target_columns)
+            _dir_warn = list(_dir_warn) + self._apply_input_types(
+                input_types, self.orch.expected_input_columns)
+
             if not self.orch.expected_target_columns or not self.orch.expected_input_columns:
                 return json.dumps({
                     "status": "error",
                     "message": "Schema not established",
-                    "hint": "This shouldn't happen. Try reset_analysis_logic."
+                    "hint": ("No analyze_file has established inputs/targets in "
+                             "this session. Ingest your data with analyze_file "
+                             "(inputs=[...], targets=[...]) first; if it reports "
+                             "the file as already analyzed, the session was "
+                             "reused from an earlier process — call analyze_file "
+                             "with force_regenerate=true.")
                 })
 
             # TARGET NARROWING — allows switching from MOO to SOO
@@ -4504,7 +4680,7 @@ class OrchestratorTools:
                         if ptype == "categorical":
                             levels = param.get("levels") or []
                             if levels:
-                                planner_levels[name] = [str(lv) for lv in levels]
+                                planner_levels[name] = [_norm_level(lv) for lv in levels]
                                 print(f"  🔬 Scientific Constraint Found: {name} ∈ {planner_levels[name]}")
                             continue
                         min_v = param.get("min_value")
@@ -4512,6 +4688,42 @@ class OrchestratorTools:
                         if min_v is not None and max_v is not None:
                             scientific_bounds[name] = (float(min_v), float(max_v))
                             print(f"  🔬 Scientific Constraint Found: {name} must be between {min_v} and {max_v}")
+
+            # Caller-stated ranges (instrument limits, safe operating window,
+            # allowed concentration range) — the strongest source: whoever
+            # runs the instrument knows what it can actually reach. Sticky:
+            # remembered on the orchestrator (and checkpointed) so later
+            # rounds inherit them until a call overrides them.
+            bounds_warnings: List[str] = []
+            if input_bounds:
+                cleaned: Dict[str, tuple] = {}
+                if not isinstance(input_bounds, dict):
+                    bounds_warnings.append(
+                        "input_bounds must be a dict {column: [min, max]}; ignored.")
+                else:
+                    known = list(self.orch.expected_input_columns or [])
+                    for name, rng in input_bounds.items():
+                        if str(name) not in known:
+                            bounds_warnings.append(
+                                f"input_bounds for unknown input column "
+                                f"'{name}' ignored; campaign inputs are {known}.")
+                            continue
+                        try:
+                            lo, hi = float(rng[0]), float(rng[1])
+                        except (TypeError, ValueError, IndexError):
+                            bounds_warnings.append(
+                                f"input_bounds['{name}'] must be [min, max]; ignored.")
+                            continue
+                        if not lo < hi:
+                            bounds_warnings.append(
+                                f"input_bounds['{name}'] needs min < max; ignored.")
+                            continue
+                        cleaned[str(name)] = (lo, hi)
+                if cleaned:
+                    prev = getattr(self.orch, "input_bounds_override", None) or {}
+                    self.orch.input_bounds_override = {**prev, **cleaned}
+            caller_bounds: Dict[str, tuple] = dict(
+                getattr(self.orch, "input_bounds_override", None) or {})
 
             # Resolve input types: scalarizer is the source of truth on type;
             # planner is the source of truth on the level universe (so BO can
@@ -4521,6 +4733,21 @@ class OrchestratorTools:
             optimization_inputs: List[str] = []
             level_maps: Dict[str, List[str]] = {}
             type_conflict_warnings: List[str] = []
+
+            # A candidate pool contributes to the categorical level universe:
+            # unmeasured candidates are its whole point, so their levels are
+            # legitimate even when no campaign row has them yet (a plan, when
+            # present, stays authoritative).
+            _pool_df = None
+            if candidate_pool:
+                _pool_path, _pool_err = self._resolve_data_path(candidate_pool)
+                if _pool_err:
+                    return _pool_err
+                try:
+                    _pool_df = pd.read_csv(_pool_path)
+                except Exception as _e:  # noqa: BLE001
+                    return json.dumps({"status": "error",
+                                       "message": f"candidate_pool unreadable: {_e}"})
 
             for col in self.orch.expected_input_columns:
                 if col not in df.columns:
@@ -4550,7 +4777,9 @@ class OrchestratorTools:
                     is_categorical = False
 
                 if is_categorical:
-                    observed = sorted(df[col].dropna().astype(str).unique().tolist())
+                    observed = sorted({_norm_level(v) for v in df[col].dropna().tolist()})
+                    if _pool_df is not None and col in _pool_df.columns and not planner_levels.get(col):
+                        observed = sorted(set(observed) | {_norm_level(v) for v in _pool_df[col].dropna().tolist()})
                     if planner_levels.get(col):
                         # Planner is authoritative on the level universe.
                         # Observed values that aren't in the planner-declared
@@ -4599,16 +4828,29 @@ class OrchestratorTools:
             self.orch.expected_input_columns = optimization_inputs
             self.orch.expected_input_levels = level_maps if level_maps else None
 
-            # Build bounds (continuous: scientific or data-derived; categorical: [0, n-1])
+            # Build bounds. Precedence per continuous input: caller-stated >
+            # planner (plan optimization_params) > data-derived (observed
+            # range +/-10%). Categorical inputs are index-encoded [0, n-1].
             input_bounds = []
+            bounds_sources: Dict[str, str] = {}
             for col in optimization_inputs:
                 if col in level_maps:
                     n = len(level_maps[col])
                     input_bounds.append([0.0, float(n - 1)])
+                    bounds_sources[col] = "categorical"
+                    if col in caller_bounds:
+                        bounds_warnings.append(
+                            f"input_bounds['{col}'] ignored: categorical input.")
                     print(f"     -> Bound for '{col}': [0, {n - 1}] (Source: CATEGORICAL — {n} levels)")
+                elif col in caller_bounds:
+                    lo, hi = caller_bounds[col]
+                    input_bounds.append([lo, hi])
+                    bounds_sources[col] = "caller"
+                    print(f"     -> Bound for '{col}': [{lo}, {hi}] (Source: CALLER)")
                 elif col in scientific_bounds:
                     sci_min, sci_max = scientific_bounds[col]
                     input_bounds.append([sci_min, sci_max])
+                    bounds_sources[col] = "planner"
                     print(f"     -> Bound for '{col}': [{sci_min}, {sci_max}] (Source: PLANNER)")
                 else:
                     data_min = float(df[col].min())
@@ -4623,7 +4865,10 @@ class OrchestratorTools:
                     safe_max = data_max + margin
 
                     input_bounds.append([safe_min, safe_max])
+                    bounds_sources[col] = "data"
                     print(f"     -> Bound for '{col}': [{safe_min:.2f}, {safe_max:.2f}] (Source: DATA)")
+            for w in bounds_warnings:
+                print(f"  ⚠️ {w}")
 
             # Build cat_dims (positional indices) and integer-encode CSV
             cat_dims = [
@@ -4634,7 +4879,7 @@ class OrchestratorTools:
                 df_encoded = df.copy()
                 for col, levels in level_maps.items():
                     idx = {lv: i for i, lv in enumerate(levels)}
-                    encoded = df[col].astype(str).map(idx)
+                    encoded = df[col].map(_norm_level).map(idx)
                     if encoded.isnull().any():
                         unknown = sorted(
                             df.loc[encoded.isnull(), col].astype(str).unique().tolist()
@@ -4766,6 +5011,33 @@ class OrchestratorTools:
                     if pool_err:
                         return pool_err
                     print(f"    🎯 Candidate pool: {Path(resolved_pool).name}")
+                    if level_maps:
+                        # The campaign data was level-encoded above; the pool
+                        # must go through the SAME maps or its rows never match
+                        # the surrogate's space. Its levels were folded into the
+                        # universe above (unless a plan declares it), so a
+                        # leftover unknown is a genuine plan/data mismatch.
+                        pool_df = _pool_df.copy() if _pool_df is not None else pd.read_csv(resolved_pool)
+                        for col, levels in level_maps.items():
+                            if col not in pool_df.columns:
+                                continue
+                            idx = {lv: i for i, lv in enumerate(levels)}
+                            enc = pool_df[col].map(_norm_level).map(idx)
+                            if enc.isnull().any():
+                                unknown = sorted({_norm_level(v) for v in pool_df.loc[enc.isnull(), col].tolist()})
+                                return json.dumps({
+                                    "status": "error",
+                                    "message": (f"candidate_pool has levels for categorical input "
+                                                f"'{col}' outside the plan-declared level universe: "
+                                                f"{unknown[:10]}. Known levels: {levels}."),
+                                    "hint": "Encode the pool with the plan's level names, or "
+                                            "correct the plan's optimization_params.levels."})
+                            pool_df[col] = enc.astype(float)
+                        encoded_pool = self.orch.base_dir / "bo_artifacts" / "candidate_pool_encoded.csv"
+                        encoded_pool.parent.mkdir(parents=True, exist_ok=True)
+                        pool_df.to_csv(encoded_pool, index=False)
+                        resolved_pool = str(encoded_pool)
+                        print(f"    🔡 Candidate pool level-encoded → {encoded_pool.name}")
 
                 res = self.orch.bo.run_optimization_loop(
                     data_path=bo_data_path_for_run,
@@ -4785,6 +5057,7 @@ class OrchestratorTools:
                     skill=skill,
                     fidelity_config=fidelity_config,
                     candidate_pool=resolved_pool,
+                    seed=seed,
                 )
                 
                 if res.get("status") != "success":
@@ -4842,9 +5115,47 @@ class OrchestratorTools:
                 if res.get("candidate_pool"):
                     response["candidate_pool"] = res["candidate_pool"]
 
+                # The search box actually used and where each range came
+                # from (caller / planner / data / categorical), so a caller
+                # can see a data-derived box and pass input_bounds next time.
+                response["input_bounds"] = {
+                    col: [float(lo), float(hi)]
+                    for col, (lo, hi) in zip(optimization_inputs, input_bounds)}
+                response["input_bounds_source"] = bounds_sources
+                response["input_types"] = {
+                    c: ("categorical" if c in level_maps else "continuous")
+                    for c in optimization_inputs}
+                _data_bounded = [c for c, src in bounds_sources.items() if src == "data"]
+                if _data_bounded:
+                    bounds_warnings = list(bounds_warnings) + [(
+                        f"Search box for {_data_bounded} was derived from the "
+                        f"observed data (range +/-10%): no plan or caller bounds "
+                        f"cover them, so recommendations may fall outside what "
+                        f"the instrument or process can reach. Pass "
+                        f"input_bounds={{col: [min, max]}} with the achievable "
+                        f"range to fix the box.")]
+                if bounds_warnings:
+                    response["input_bounds_warnings"] = bounds_warnings
+
                 # Include budget context
                 if res.get("budget"):
                     response["budget"] = res["budget"]
+                if res.get("seed") is not None:
+                    response["seed"] = res["seed"]
+                # Direction actually used per target; warn when it was assumed.
+                _td = dict(self.orch.target_directions or {})
+                _targets_used = list(self.orch.expected_target_columns or [])
+                response["target_directions"] = {
+                    t: _td.get(t, "maximize (assumed)") for t in _targets_used}
+                _assumed = [t for t in _targets_used if t not in _td]
+                if _assumed:
+                    response.setdefault("warnings", [])
+                    response["warnings"].append(
+                        f"No optimization direction was given for {_assumed}; "
+                        f"MAXIMIZE was assumed. If the goal is to minimize, pass "
+                        f"directions={{col: 'minimize'}} and re-run.")
+                if _dir_warn:
+                    response.setdefault("warnings", []).extend(_dir_warn)
                 
                 return json.dumps(response)
                 
@@ -4949,6 +5260,56 @@ class OrchestratorTools:
                 "skill": {
                     "type": "string",
                     "description": _build_optimization_skill_description()
+                },
+                "input_bounds": {
+                    "type": "object",
+                    "description": (
+                        "Hard search-box limits per input column, "
+                        "{\"column\": [min, max]} — the range the instrument or "
+                        "process can actually reach (e.g. {\"anneal_time_min\": "
+                        "[5, 60], \"temperature_C\": [300, 700]}). Pass whenever the "
+                        "user or calling system states an achievable / safe / "
+                        "allowed range for a parameter, in this call or earlier in "
+                        "the conversation. These take precedence over ranges from the "
+                        "campaign plan and over the default (observed data range "
+                        "+/-10%, which can extrapolate outside what is physically "
+                        "realizable). Sticky: once given they apply to every later "
+                        "call in this campaign until overridden. Only the columns "
+                        "given are affected; others keep their plan/data-derived "
+                        "range. Ignored for categorical inputs."
+                    )
+                },
+                "input_types": {
+                    "type": "object",
+                    "description": (
+                        "Input kind per column, {\"column\": \"categorical\"|\"continuous\"}. "
+                        "Declare categorical inputs (discrete choices — ligands, "
+                        "solvents, material ids — even when stored as numeric codes) so "
+                        "the surrogate treats them as levels, not a continuous axis. "
+                        "Sticky for the campaign; overrides what analyze_file inferred."
+                    )
+                },
+                "directions": {
+                    "type": "object",
+                    "description": (
+                        "Optimization direction per target, {\"column\": \"maximize\"|"
+                        "\"minimize\"}. Pass whenever the user or calling system "
+                        "states it (minimize loss / cost / overpotential / band gap; "
+                        "maximize yield / conductivity). Sticky for the campaign and "
+                        "overrides what analyze_file inferred; absent any statement "
+                        "the optimizer MAXIMIZES and says so in the response."
+                    )
+                },
+                "seed": {
+                    "type": "integer",
+                    "description": (
+                        "Random seed for the numeric part of this step (surrogate "
+                        "fitting restarts, acquisition optimisation). Pass when "
+                        "reproducible / comparable reruns are wanted (benchmarks, "
+                        "audits, re-running a step after fixing data); omit for "
+                        "normal campaigns. The strategy the agent chooses is not "
+                        "seeded — it is reported in the response."
+                    )
                 }
             },
             required=[]

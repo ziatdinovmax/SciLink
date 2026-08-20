@@ -283,7 +283,9 @@ rather than fabricate a result).
   experimental conditions + extracted scalar features). When a follow-up
   planning or Bayesian-optimization task needs those quantitative results, pass
   the feature-table file PATH to `delegate_to_planning` (in `context`, and name
-  it in `task`).
+  it in `task`). `feature_tables_schema` lists each table's columns, row count
+  and any columns with missing values — use it to name the input/target
+  columns instead of opening the file.
 - Do NOT re-summarize the numbers as prose for the planning specialist to
   retype — that loses precision and risks transcription errors. The planning
   specialist ingests the file directly with its `analyze_file` tool.
@@ -1374,6 +1376,7 @@ class MetaOrchestratorAgent:
             "key_findings": result.get("key_findings", []),
             "files_produced": result.get("files_produced", []),
             "feature_tables": result.get("feature_tables", []),
+            "feature_tables_schema": result.get("feature_tables_schema", []),
             "staged_solutions": result.get("staged_solutions", []),
             "suggested_followups": result.get("suggested_followups", []),
             "warnings": result.get("warnings", []),
@@ -1396,6 +1399,7 @@ class MetaOrchestratorAgent:
             "key_findings": result.get("key_findings", []),
             "files_produced": result.get("files_produced", []),
             "feature_tables": result.get("feature_tables", []),
+            "feature_tables_schema": result.get("feature_tables_schema", []),
             "suggested_followups": result.get("suggested_followups", []),
             "warnings": result.get("warnings", []),
         }

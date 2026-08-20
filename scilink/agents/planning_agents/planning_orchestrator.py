@@ -708,6 +708,7 @@ class PlanningOrchestratorAgent:
         self.target_directions = {}  # e.g. {"Yield": "maximize", "Defect_Density": "minimize"}
         self.expected_input_types = None  # {col: "continuous" | "categorical"} from scalarizer
         self.expected_input_levels = None  # {col: [level0, level1, ...]} for categorical inputs
+        self.input_bounds_override = None  # {col: (min, max)} caller-stated search box (run_optimization input_bounds)
         self.fidelity_spec = None  # {column, target_fidelity?, costs?} when the data has a fidelity axis
         self.latest_tea_results = None
 
@@ -743,6 +744,14 @@ class PlanningOrchestratorAgent:
         
         if restore_checkpoint and self.checkpoint_path.exists():
             self._restore_checkpoint()
+        elif not restore_checkpoint and not self.checkpoint_path.exists():
+            # A session dir with campaign data from an earlier process but
+            # nothing to restore from: without this, the on-disk dedup
+            # ledger says every file is "already analyzed" while the
+            # in-memory schema is empty and run_optimization fails with
+            # "Schema not established". Archive the stale files and start
+            # clean; nothing is deleted.
+            self._archive_stale_campaign_files()
         
         # --- Init Sub-Agents ---
         print("🤖 Agent: Hiring sub-agents...")
@@ -1201,6 +1210,33 @@ class PlanningOrchestratorAgent:
         logging.info(f"🔌 Disconnected MCP server '{server_name}'")
         self._rebuild_system_prompt()
 
+    def _archive_stale_campaign_files(self) -> Optional[Path]:
+        """Move campaign data files left by an earlier process (no checkpoint
+        to restore them with) into ``stale_campaign_<ts>/`` and reset the
+        dedup ledger, so this process starts a consistent, empty campaign.
+        Returns the archive dir, or None when there was nothing to move."""
+        candidates = [self.bo_data_path, self.analyzed_files_path,
+                      self.bo_data_path.with_suffix(".csv.backup")]
+        present = [c for c in candidates if c.exists()]
+        if not present:
+            self.analyzed_files = {}
+            return None
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        archive = self.base_dir / f"stale_campaign_{stamp}"
+        archive.mkdir(parents=True, exist_ok=True)
+        for c in present:
+            try:
+                c.rename(archive / c.name)
+            except OSError as e:  # noqa: PERF203 - best effort, never fatal
+                logging.warning(f"Could not archive {c.name}: {e}")
+        self.analyzed_files = {}
+        print(f"  📦 Session dir held campaign data from an earlier run with no "
+              f"checkpoint to restore; moved {[c.name for c in present]} to "
+              f"{archive.name}/ and started a fresh campaign. Re-ingest your "
+              f"data with analyze_file (or construct with restore_checkpoint=True "
+              f"when a checkpoint exists).")
+        return archive
+
     def _restore_checkpoint(self):
         """Restore campaign state from checkpoint."""
         print(f"  📂 Restoring checkpoint from: {self.checkpoint_path}")
@@ -1230,6 +1266,9 @@ class PlanningOrchestratorAgent:
             self.target_directions = state.get("target_directions", {})
             self.expected_input_types = state.get("expected_input_types")
             self.expected_input_levels = state.get("expected_input_levels")
+            _ib = state.get("input_bounds_override")
+            self.input_bounds_override = (
+                {k: tuple(v) for k, v in _ib.items()} if isinstance(_ib, dict) else None)
             self.fidelity_spec = state.get("fidelity_spec")
             self.latest_tea_results = state.get("latest_tea_results")
             self._delegation_counter = state.get("delegation_counter", 0)
@@ -1558,6 +1597,9 @@ class PlanningOrchestratorAgent:
                 "target_directions": self.target_directions,
                 "expected_input_types": self.expected_input_types,
                 "expected_input_levels": self.expected_input_levels,
+                "input_bounds_override": (
+                    {k: list(v) for k, v in self.input_bounds_override.items()}
+                    if self.input_bounds_override else None),
                 "fidelity_spec": self.fidelity_spec,
                 "data_points_collected": len(pd.read_csv(self.bo_data_path)) if self.bo_data_path.exists() else 0,
                 "planner_state": compact_planner_state(self.planner.state),

@@ -1473,6 +1473,12 @@ class AnalysisOrchestratorAgent:
             # chat() bound the feedback log to THIS session; restore the
             # caller's binding (a delegating meta keeps logging to its own).
             set_thread_feedback_log(_prev_fblog)
+            # A delegation-driven child may never reach the chat loop's
+            # auto-checkpoint cadence, and an interrupted delegation must
+            # leave current state behind for the restart/resume path
+            # (issue #469) — checkpoint after every run_task, like the
+            # planning orchestrator.
+            self._auto_checkpoint()
 
         # Derive the structured summary from the session-state delta.
         new_analyses = self.analysis_results[n_before:]
@@ -1528,12 +1534,21 @@ class AnalysisOrchestratorAgent:
         # feature_tables: per-analysis flat CSVs (conditions + extracted scalar
         # features) for downstream planning / BO — see feature_table.py.
         feature_tables: List[str] = []
+        feature_tables_schema: List[Dict[str, Any]] = []
         for rec in new_analyses:
             out_dir = rec.get("output_directory")
             if out_dir:
                 ft = Path(out_dir) / "features.csv"
                 if ft.is_file():
                     feature_tables.append(str(ft.resolve()))
+                    # Column names / row count / holes travel with the path so
+                    # a caller (meta, remote MCP client) can pick BO inputs and
+                    # targets without opening the file.
+                    from .feature_table import describe_feature_table
+                    _d = describe_feature_table(ft)
+                    if _d:
+                        feature_tables_schema.append(
+                            {"path": str(ft.resolve()), **_d})
 
         # staged_solutions: raw T=2 (hot-annealing) solutions filed in the
         # staging buffer during this run. Surfaced so the meta agent can offer
@@ -1553,6 +1568,7 @@ class AnalysisOrchestratorAgent:
             "summary": summary_text,
             "files_produced": files_produced,
             "feature_tables": feature_tables,
+            "feature_tables_schema": feature_tables_schema,
             "staged_solutions": staged_solutions,
             "key_findings": key_findings,
             "suggested_followups": suggested_followups,

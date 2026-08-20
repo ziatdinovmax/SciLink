@@ -161,6 +161,36 @@ def _extracted_feature_rows(output_dir: Path) -> List[Dict[str, Any]]:
     return [row]
 
 
+def describe_feature_table(path) -> Optional[Dict[str, Any]]:
+    """Schema summary of a feature CSV for callers that cannot open the file
+    (a remote MCP client, an LLM deciding inputs/targets): column names, row
+    count, and per-column missing counts (only columns with any missing).
+    Never raises."""
+    try:
+        with open(path, newline="", encoding="utf-8") as fh:
+            reader = csv.reader(fh)
+            header = next(reader, None)
+            if header is None:
+                return None
+            missing = [0] * len(header)
+            n = 0
+            for row in reader:
+                n += 1
+                for i, v in enumerate(row[:len(header)]):
+                    if v == "" or v.lower() == "nan":
+                        missing[i] += 1
+                if len(row) < len(header):
+                    for i in range(len(row), len(header)):
+                        missing[i] += 1
+        return {
+            "columns": header,
+            "n_rows": n,
+            "missing": {c: m for c, m in zip(header, missing) if m},
+        }
+    except Exception:  # noqa: BLE001 - descriptive only
+        return None
+
+
 def write_feature_table(output_dir) -> Optional[str]:
     """Write ``<output_dir>/features.csv`` — a flat per-unit feature table
     derived from the run's structured result files.

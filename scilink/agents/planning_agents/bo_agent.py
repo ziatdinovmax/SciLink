@@ -987,7 +987,8 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
                              dkl_config: Optional[Dict[str, int]] = None,
                              fidelity_config: Optional[Dict[str, Any]] = None,
                              skill: Union[str, List[str], None] = None,
-                             candidate_pool: Union[str, List[List[float]], np.ndarray, None] = None) -> Dict[str, Any]:
+                             candidate_pool: Union[str, List[List[float]], np.ndarray, None] = None,
+                             seed: Optional[int] = None) -> Dict[str, Any]:
         """
         Run one iteration of the Bayesian Optimization loop.
         
@@ -1049,6 +1050,19 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             output_dir = str(self.output_dir)
 
         Path(output_dir).mkdir(exist_ok=True, parents=True)
+
+        # Numeric reproducibility: GP fitting (random restarts) and
+        # acquisition optimisation (random raw samples) are stochastic, so two
+        # runs on identical data can recommend different batches. A caller
+        # that wants comparable reruns passes a seed; the strategy chosen by
+        # the LLM is outside this (it is recorded in the returned strategy).
+        if seed is not None:
+            import torch
+            torch.manual_seed(int(seed))
+            np.random.seed(int(seed) % (2**32))
+            self._run_seed = int(seed)
+        else:
+            self._run_seed = None
 
         # Initialize state
         self._init_state(objective=objective_text, data_path=data_path)
@@ -1549,6 +1563,8 @@ zone is around each center (per parameter). Wider spread = more forgiving placem
             "inspection": c.inspection,
             "budget": c.budget_ctx,
         }
+        if getattr(self, "_run_seed", None) is not None:
+            result["seed"] = self._run_seed
         if c.acq_plot_path:
             result["acq_plot_path"] = c.acq_plot_path
         if c.acq_data_path:
