@@ -7407,8 +7407,12 @@ class OrchestratorTools:
             use_literature: bool = True,
             revise_path: str = None,
             literature_context: str = None,
+            style: str = "report",
         ):
             """Author a grounded technical document and save it.
+
+            style="memo" is the one-page house memo (header block, CORE
+            line, 3-5 lead-in sections, 350-550 words) with a .docx twin.
 
             Not a plan: no experiment schema, no campaign state, no plan
             report. A roadmap or estimate that went through the plan tool
@@ -7515,6 +7519,16 @@ class OrchestratorTools:
                                  else rp.stem.replace("_", " "))
                 doc_title = doc_title or (request[:70].strip()
                                           or "Technical document")
+                memo = (style or "report").strip().lower() == "memo"
+                # A memo has a hard length budget. The prompt states it; the
+                # guard enforces it with ONE re-ask that names the overshoot,
+                # then ships with a warning rather than looping.
+                MEMO_MAX_WORDS = 600
+                date_note = None
+                if memo:
+                    from datetime import datetime as _dt
+                    date_note = (f"## TODAY (for the memo's Date line): "
+                                 f"{_dt.now():%B %-d, %Y}")
                 result = author_technical_document(
                     request=request,
                     kb_docs=planner.kb_docs,
@@ -7522,10 +7536,13 @@ class OrchestratorTools:
                     generation_config=planner.generation_config,
                     external_context=lit,
                     source_documents=("\n\n".join(sources) if sources else None),
+                    additional_context=date_note,
                     skill_context=planner._build_skill_context("planning"),
                     revise_document=current,
-                    task_name=("Technical Document (revision)" if current
-                               else "Technical Document"),
+                    style="memo" if memo else "report",
+                    task_name=(("Technical Memo" if memo
+                                else "Technical Document")
+                               + (" (revision)" if current else "")),
                 )
                 if result.get("error"):
                     return json.dumps({"status": "error",
@@ -7535,8 +7552,37 @@ class OrchestratorTools:
                     return json.dumps({
                         "status": "error",
                         "message": "The author returned no sections."})
-
                 text = document_to_markdown(doc_title, sections)
+                n_words = len(text.split())
+                if memo and n_words > MEMO_MAX_WORDS:
+                    # Structural support for the length rule: condense
+                    # passes over the DRAFT ALONE (no sources, no
+                    # retrieval) — at most two, each keeping the shorter
+                    # text. If they fail or it is still long, the draft
+                    # ships with a warning; the guard never fails the call.
+                    from .planning_rag import condense_memo
+                    for _pass in range(2):
+                        print(f"    ✂️  Memo draft is {n_words} words — over "
+                              f"the one-page budget; condensing")
+                        tight = condense_memo(text, planner.model,
+                                              planner.generation_config,
+                                              max_words=400)
+                        tsecs = ([] if not isinstance(tight, dict)
+                                 or tight.get("error")
+                                 else (tight.get("sections") or []))
+                        if not tsecs:
+                            print("    ⚠️  Condense pass failed; keeping "
+                                  "the draft")
+                            break
+                        ttext = document_to_markdown(doc_title, tsecs)
+                        tn = len(ttext.split())
+                        if tn >= n_words:
+                            # A "condense" that grew is a failed pass.
+                            break
+                        text, sections, n_words = ttext, tsecs, tn
+                        print(f"    ✂️  Condensed to {tn} words")
+                        if n_words <= MEMO_MAX_WORDS:
+                            break
                 if revise_path:
                     out = rp
                     # Revising in place crosses delegation isolation, which
@@ -7576,7 +7622,7 @@ class OrchestratorTools:
                     # A revision that came back shorter than the original is
                     # nearly always the model summarising instead of
                     # revising. Refuse rather than overwrite the good copy.
-                    if len(text) < 0.5 * len(current or ""):
+                    if not memo and len(text) < 0.5 * len(current or ""):
                         return json.dumps({
                             "status": "error",
                             "message": (
@@ -7597,10 +7643,23 @@ class OrchestratorTools:
                 # white paper does. Skipped on a revision: the document
                 # already has its figure, and a second pass would append a
                 # duplicate section.
-                if not revise_path:
+                if not revise_path and not memo:
                     text = self._maybe_embed_workflow_diagram(
                         text, out.parent, stem=f"{out.stem}_workflow")
                 out.write_text(text, encoding="utf-8")
+                # The memo's circulating form is .docx (house style: label,
+                # header block, Heading 1 sections). Deterministic, no LLM.
+                docx_path = None
+                if memo:
+                    try:
+                        from ...utils.md_to_docx import markdown_to_docx
+                        docx_path = markdown_to_docx(out)
+                        print(f"    📝 Memo .docx: {format_path(docx_path)}")
+                        record_deliverable(self.orch.base_dir, docx_path,
+                                           f"{doc_title} (.docx)",
+                                           deliverable=True)
+                    except Exception as e:  # noqa: BLE001 - never block the write
+                        logging.warning(f"Memo .docx export failed: {e}")
                 # A revised document's exported PDF twin (the white paper's
                 # forwarded copy) must not keep serving the pre-revision
                 # content; re-export is deterministic, so it does not touch
@@ -7630,6 +7689,8 @@ class OrchestratorTools:
                        "sections": [s.get("heading") for s in sections
                                     if isinstance(s, dict)],
                        "words": len(text.split()),
+                       "style": "memo" if memo else "report",
+                       "docx": (str(docx_path) if docx_path else None),
                        "literature_used": bool(lit),
                        "sources_used": len(sources)}
                 if missing:
@@ -7642,6 +7703,13 @@ class OrchestratorTools:
                         "include a figure, reference it IN the document "
                         "body instead: ![caption](<filename>) — the "
                         "renderer resolves it from the file's directory.")
+                if memo and len(text.split()) > MEMO_MAX_WORDS:
+                    res["length_warning"] = (
+                        f"Memo is {len(text.split())} words after "
+                        f"condensing; the one-page budget is ~550. Do NOT "
+                        f"add content. If it must be shorter, name what to "
+                        f"cut in a revise_path pass with style='memo'; "
+                        f"otherwise ship it as is.")
                 if declined_topics:
                     res["literature_declined"] = {
                         "available_sections": declined_topics,
@@ -7664,7 +7732,11 @@ class OrchestratorTools:
                 "Author a grounded technical DOCUMENT and save it as the "
                 "deliverable: a roadmap, staging or build plan, cost or "
                 "footprint estimate, consolidation memo, brief, summary or "
-                "review. USE THIS — not generate_initial_plan — whenever the "
+                "review. For a ONE-PAGE memo / one-pager / brief — a "
+                "'short memo on X', 'one page for the director' — pass "
+                "style='memo': the house memo template (header block, one "
+                "CORE line, 3-5 lead-in sections, 350-550 words) with a "
+                ".docx twin. USE THIS — not generate_initial_plan — whenever the "
                 "user says 'plan' in the everyday sense of a course of "
                 "action ('plan how we build the facility', 'outline the "
                 "stages', 'estimate the space we need'). "
@@ -7764,6 +7836,23 @@ class OrchestratorTools:
                         "current delegation folder instead, and a save_file "
                         "call truncates what is already there. Omit for a new "
                         "document; `filename` is ignored when this is set."
+                    ),
+                },
+                "style": {
+                    "type": "string",
+                    "enum": ["report", "memo"],
+                    "description": (
+                        "'report' (default): unconstrained document — white "
+                        "paper, roadmap, review. 'memo': ONE-PAGE technical "
+                        "memo in the house template — header block "
+                        "(subtitle, Purpose, Scope, Date), one CORE line, "
+                        "3-5 short sections of bold-lead-in paragraphs, a "
+                        "closing decision section, 350-550 words, exported "
+                        "as .md + .docx. Use whenever the user asks for a "
+                        "memo, one-pager, brief or 'a page on'. With "
+                        "revise_path, style='memo' CONDENSES the existing "
+                        "document into a memo (the verbatim-revision rule "
+                        "yields to the length budget)."
                     ),
                 },
             },
