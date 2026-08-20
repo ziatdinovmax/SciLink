@@ -15,6 +15,7 @@ The ``mcp`` package is installed by default with SciLink.
 """
 
 import asyncio
+import os
 import concurrent.futures
 import contextlib
 import io
@@ -326,6 +327,27 @@ def _build_approval_prompt(tool_name: str, kwargs: dict) -> str:
 
 # ── Server factory ──────────────────────────────────────────────────────
 
+_HEADLESS_BACKENDS = {"agg", "pdf", "ps", "svg", "template", "cairo"}
+
+
+def _ensure_headless_matplotlib() -> None:
+    """An MCP server has no display and executes tools off the main thread;
+    GUI matplotlib backends (macOS Cocoa in particular) refuse that and kill
+    the tool call. Default MPLBACKEND to Agg and force-switch away from a GUI
+    backend if one was already resolved — operators should not need to know
+    this (it was integration rule 2 of every MCP client)."""
+    os.environ.setdefault("MPLBACKEND", "Agg")
+    try:
+        import matplotlib
+        backend = str(matplotlib.get_backend())
+        if (backend.lower() not in _HEADLESS_BACKENDS
+                and not backend.lower().startswith("module://")):
+            matplotlib.use("Agg", force=True)
+            logging.info(f"matplotlib backend {backend} → Agg (headless MCP server)")
+    except Exception as exc:  # noqa: BLE001 - never block serving over a plot backend
+        logging.warning(f"Could not enforce headless matplotlib backend: {exc}")
+
+
 def create_server(
     *,
     api_key: str = None,
@@ -354,6 +376,8 @@ def create_server(
     _require_mcp()
 
     server = Server("scilink")
+
+    _ensure_headless_matplotlib()
 
     # ── State (initialized lazily on first tool list) ────────────────
     # Thread pool for background jobs
