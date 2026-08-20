@@ -575,6 +575,12 @@ class SimulationOrchestratorAgent:
             # chat() bound the feedback log to THIS session; restore the
             # caller's binding (a delegating meta keeps logging to its own).
             set_thread_feedback_log(_prev_fblog)
+            # A delegation-driven child may never reach the chat loop's
+            # auto-checkpoint cadence, and an interrupted delegation must
+            # leave current state behind for the restart/resume path
+            # (issue #469) — checkpoint after every run_task, like the
+            # planning orchestrator.
+            self._auto_checkpoint()
 
         # Derive the structured summary from session state.
         new_structures = (self.generated_structures or [])[n_before:]
