@@ -68,6 +68,63 @@ def summarize_experiment(exp: Dict[str, Any], index: int) -> str:
     return "\n".join(lines)
 
 
+# The critic's dimensions. Each is a lens the reviewer of a proposal actually
+# applies; findings carry one of these as ``dimension`` and are rendered
+# generically downstream (format_caveats), so adding a lens is prompt-only.
+CRITIC_DIMENSIONS = ("physics", "consistency", "design", "statistics",
+                     "method", "evidence")
+
+_CRITIC_DIRECTION_CLIP = 2500   # chars of `details` per direction shown to the critic
+
+
+def summarize_plan_for_critic(result: Dict[str, Any]) -> str:
+    """The plan as the CRITIC should see it — everything the author decided.
+
+    ``summarize_experiment`` (used by the conformance pass) is deliberately a
+    coverage-and-identity view: it clips a portfolio direction to title /
+    hypothesis / novelty. That view hides exactly what a reviewer checks —
+    arms and replicate counts, control construction, the continuity mode,
+    the named support, the estimator's reference — which for portfolios
+    lives in ``directions[*].details`` and ``shared_protocol``. Live: an
+    "every policy paired with a yoked control" + "5 policies × 6–8
+    trajectories" arithmetic contradiction and a "quenched coupons" Track-2
+    mode both sat in ``details`` and never reached the critic.
+
+    Returns the conformance summary plus, when present, each direction's
+    ``details`` (clipped per direction, marked), the ``shared_protocol``, and
+    the author's ``open_questions`` (so the critic does not re-raise what the
+    author already flagged, and can judge whether a flagged risk is framed
+    the right way round).
+    """
+    experiments = result.get("proposed_experiments", []) or []
+    parts = [summarize_experiment(exp, i + 1) for i, exp in enumerate(experiments)]
+    directions = result.get("directions")
+    if isinstance(directions, list) and directions:
+        parts.append("DIRECTION DETAILS (the author's full design per direction):")
+        for d in directions:
+            if not isinstance(d, dict):
+                continue
+            head = " ".join(str(d.get(k)) for k in ("id", "tier") if d.get(k))
+            parts.append(f"[{head}] {str(d.get('title', 'Untitled'))[:200]}")
+            det = d.get("details")
+            if isinstance(det, list):
+                det = "\n".join(f"  - {str(x)}" for x in det)
+            det = str(det or "").strip()
+            if det:
+                if len(det) > _CRITIC_DIRECTION_CLIP:
+                    det = det[:_CRITIC_DIRECTION_CLIP] + "\n  [clipped]"
+                parts.append(det)
+    sp = result.get("shared_protocol")
+    if sp:
+        body = "\n".join(f"  - {x}" for x in sp) if isinstance(sp, list) else str(sp)
+        parts.append("SHARED PROTOCOL (applies to every direction):\n" + body)
+    oq = result.get("open_questions")
+    if oq:
+        body = "\n".join(f"  - {x}" for x in oq) if isinstance(oq, list) else str(oq)
+        parts.append("OPEN QUESTIONS THE AUTHOR ALREADY RAISED:\n" + body)
+    return "\n".join(parts)
+
+
 def verify_plan_relevance(objective: str,
                           result: Dict[str, Any],
                           model: Any,
@@ -214,8 +271,7 @@ def critique_plan(objective: str,
     if not experiments:
         return {"findings": []}
 
-    plan_summary = "\n".join(summarize_experiment(exp, i + 1)
-                             for i, exp in enumerate(experiments))
+    plan_summary = summarize_plan_for_critic(result)
 
     # --- Evidence: mirror what the plan author saw so checks are grounded. ---
     evidence_parts = []
@@ -248,7 +304,8 @@ def critique_plan(objective: str,
         evidence_section = (
             "\n────────────────────────────────────\n"
             "EVIDENCE THE PLAN AUTHOR USED — anchor your physics checks to the\n"
-            "data values here:\n"
+            "data values here, and read it for stated limitations, artifacts or\n"
+            "instabilities of the techniques and materials the plan names:\n"
             + "\n\n".join(evidence_parts) + "\n"
         )
     else:
@@ -295,24 +352,42 @@ def critique_plan(objective: str,
         prior_section = ""
 
     eval_prompt = f"""
-You are reviewing an experimental plan for PHYSICAL REALISM and INTERNAL CONSISTENCY.
-A separate check has already confirmed the plan is relevant to the objective, so do
-NOT re-litigate objective-relevance or document grounding here.
+You are reviewing an experimental plan the way an expert referee reviews a proposal:
+for physical realism, internal consistency, design and statistical rigor, and method
+feasibility. A separate check has already confirmed the plan is relevant to the
+objective, so do NOT re-litigate objective-relevance or document grounding here.
 
 OBJECTIVE: "{objective}"
 
 PROPOSED PLAN:
 {plan_summary}
 {evidence_section}{prior_section}
-Assume the plan may be flawed and try to break it on two axes:
+Assume the plan may be flawed and try to break it on these axes:
   • physics — parameters or conditions that are physically impossible or implausible;
               a technique that cannot measure the stated quantity or resolve the
               claimed scale; violated conservation laws or instrument limits.
   • consistency — a justification that contradicts its own hypothesis; steps that do
               not actually test the stated hypothesis; equipment that does not match
               the steps; two experiments that contradict each other.
-Report only a flaw you can name concretely. Do NOT invent problems to appear
-thorough; if an axis is clean, report nothing for it.
+  • design — the arms, controls, replicates and totals must add up and every control
+              must be constructible; each gate must protect the claim it is said to
+              protect; a confirmatory comparison must be fixed before its data are
+              taken — no unresolved either/or choices of material, support or
+              endpoint — and not adapted while under test.
+  • statistics — the independent experimental unit must be named; nested repeats on
+              one sample are not replicates; power is estimated from a pilot, never
+              asserted from a replicate count.
+  • method — each technique must be able to operate under the stated conditions and
+              measure the stated quantity; a calibration reference must be independent
+              of the estimator's inputs; the endpoint must be a named quantity with one
+              primary normalization, with transient or inventory contributions excluded.
+  • evidence — a limitation, artifact or instability of a named technique or material
+              that the evidence above states and the plan relies on without addressing.
+Work axis by axis: for EACH axis, name the single most material flaw you can find on
+it (or nothing if that axis is clean), then add further findings on any axis. Report
+only a flaw you can name concretely. Do NOT invent problems to appear thorough. Do not
+repeat a risk the author already raised under OPEN QUESTIONS unless it is framed the
+wrong way round. Report at most 10 findings, most material first.
 
 SEVERITY:
   • critical — would make the plan infeasible or scientifically wrong.
@@ -320,7 +395,7 @@ SEVERITY:
 
 OUTPUT — a single JSON object:
 {{"findings": [
-   {{"dimension": "physics|consistency",
+   {{"dimension": "physics|consistency|design|statistics|method|evidence",
      "severity": "critical|minor",
      "experiment": "<experiment name or 'plan-wide'>",
      "issue": "<one concrete sentence>"}}

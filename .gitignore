@@ -267,3 +267,4 @@ packmol_test_output/
 *.model
 claude_resume
 lammps_make_notes
+tests/_critic_lenses_fixtures/

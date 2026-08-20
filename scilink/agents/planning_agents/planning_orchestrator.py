@@ -243,6 +243,12 @@ generate_initial_plan designs ONE bench experiment; a portfolio forced
 through it comes back with its directions flattened into protocol steps. Use
 it for ideation only when the user has PICKED a direction and wants its
 runnable protocol.
+When the objective (or the design you are about to author) names the
+measurement techniques, materials or calibration references it will rely on,
+add the ADVERSARIAL leg in the same call as a per-type mapping — a question
+that names those techniques and their operating conditions under
+'technique_limitations' — so the plan is authored against, and the critic can
+cite, what is known to go wrong with them, not only what works.
 Literature of any type reduces constraint COVERAGE — plans stay on-topic but
 omit individual requirements. When the objective carries hard equipment or
 process constraints, pass them as additional_context (each is then mapped to a

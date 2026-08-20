@@ -1311,6 +1311,26 @@ class OrchestratorTools:
             "hint": "Check filename spelling or use /files command to see available files"
         })
     
+    def _source_document_texts(self, cap_chars: int = 400_000) -> List[str]:
+        """Text of the documents the session is grounded in — the KB's chunks
+        (uploads / knowledge dir) — for the acronym-fidelity check. Bounded;
+        best-effort; empty when no KB is loaded."""
+        try:
+            kb = getattr(self.orch.planner, "kb_docs", None)
+            chunks = getattr(kb, "chunks", None) or []
+            out, n = [], 0
+            for c in chunks:
+                txt = c.get("text") if isinstance(c, dict) else str(c)
+                if not txt:
+                    continue
+                out.append(txt)
+                n += len(txt)
+                if n > cap_chars:
+                    break
+            return out
+        except Exception:  # noqa: BLE001
+            return []
+
     def _output_dir(self):
         """Directory for plan artifacts (plan.json, tea_analysis, output_scripts,
         literature_search*, molecule_design, ...).
@@ -1433,6 +1453,7 @@ class OrchestratorTools:
             search_methods = {
                 "hypothesis_context": self.orch.lit_agent.search_for_hypothesis_context,
                 "cross_domain": self.orch.lit_agent.search_for_cross_domain,
+                "technique_limitations": self.orch.lit_agent.search_for_technique_limitations,
                 "economic_data": self.orch.lit_agent.search_for_economic_data,
                 "fitting_models": self.orch.lit_agent.search_for_fitting_models,
             }
@@ -1866,6 +1887,16 @@ class OrchestratorTools:
                         "field and belongs to hypothesis_context — sending it to "
                         "cross_domain asks for a review and forbids it in the "
                         "same breath. "
+                        "'technique_limitations': the ADVERSARIAL leg — known "
+                        "limitations, artifacts and failure modes of the "
+                        "techniques, materials and calibration references the "
+                        "plan will rely on, under its operating conditions. "
+                        "Include it whenever a plan names its measurement "
+                        "techniques (as a per-type mapping: give it a question "
+                        "that NAMES those techniques and conditions); it is what "
+                        "the plan critic reads to catch a probe that cannot work "
+                        "in the stated medium or a reference that is not "
+                        "independent. "
                         "'economic_data' (TEA); 'fitting_models' "
                         "(curve fitting)."
                     ),
@@ -7667,6 +7698,24 @@ class OrchestratorTools:
                 pdf_refreshed = self._refresh_pdf_twin(out) if revise_path \
                     else False
 
+                # Advisory hygiene review of what was just written — figure
+                # links, agent meta-language, design arithmetic, acronym
+                # fidelity to the source documents. Deterministic; the notes
+                # are returned to the agent and printed, never applied.
+                review_notes = []
+                try:
+                    from ...utils.doc_hygiene import check_document_hygiene
+                    _src_texts = [s for s in sources]
+                    if lit:
+                        _src_texts.append(lit)
+                    _src_texts.extend(self._source_document_texts())
+                    review_notes = check_document_hygiene(text, out.parent, _src_texts)
+                    if review_notes:
+                        print(f"    🔎 Review notes ({len(review_notes)}):")
+                        for n in review_notes[:8]:
+                            print(f"       - [{n['lens']}/{n['severity']}] {n['note']}")
+                except Exception as e:  # noqa: BLE001 - advisory, never blocks
+                    logging.warning(f"Document hygiene review skipped: {e}")
                 record_deliverable(self.orch.base_dir, out, doc_title,
                                    deliverable=True)
                 if revise_path:
@@ -7693,6 +7742,11 @@ class OrchestratorTools:
                        "docx": (str(docx_path) if docx_path else None),
                        "literature_used": bool(lit),
                        "sources_used": len(sources)}
+                if review_notes:
+                    res["review_notes"] = review_notes[:8]
+                    res["review_note"] = ("Advisory checks on the saved document; "
+                                          "fix with edit_file or revise_path if "
+                                          "warranted — nothing was changed.")
                 if missing:
                     res["source_files_not_found"] = missing
                 if non_text:
