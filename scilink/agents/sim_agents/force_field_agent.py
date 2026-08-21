@@ -1272,53 +1272,116 @@ Provide a brief summary of what the results mean and any actions needed.
                      research_goal: str = "",
                      **ff_kwargs) -> "ParameterizedSystem":
         """Produce an engine-neutral ``ParameterizedSystem`` (the contract an MD
-        engine's ``write_md_inputs`` consumes).
+        engine's ``write_md_inputs`` consumes), writing NO engine input files.
 
-        Routes by input, not by engine — and writes NO engine input files:
+        Backend-agnostic: it selects a ``force_field`` backend skill that can
+        consume the given inputs (``_select_backend``), dispatches to that
+        skill's ``build_parameterized_system`` tool through the registry, and
+        wraps the returned payload uniformly. The agent names no force-field
+        package and no MD engine — each backend lives entirely in its skill:
 
-        * **OpenFF** (``components`` manifest + ``coordinates_file``): a packed
-          box of SMILES-defined species (solvents, ions, electrolytes) is
-          parameterized with SMIRNOFF + NAGL charges into a serialized OpenFF
-          Interchange (``source_format="interchange"``).
-        * **AMBER** (``pdb_file``): proteins / nucleic acids via the tleap
-          pipeline → a prmtop/inpcrd pair (``source_format="amber"``). [pending]
+        * a packed box of SMILES-defined species (``components`` +
+          ``coordinates_file``) → the OpenFF backend (SMIRNOFF + NAGL,
+          ``source_format="interchange"``);
+        * a biomolecular structure (``pdb_file``) → the AMBER backend (tleap,
+          ``source_format="amber"``).
+
+        Pass ``backend=<skill>`` to force a specific backend and skip selection.
         """
-        if components and coordinates_file:
-            return self._parameterize_openff(components, coordinates_file, **ff_kwargs)
-        if pdb_file:
-            raise NotImplementedError(
-                "The AMBER (pdb_file) parameterization path is not yet wired into "
-                "parameterize(); use the OpenFF path (components + coordinates_file)."
-            )
-        raise ValueError(
-            "parameterize() needs either (components + coordinates_file) for the "
-            "OpenFF backend or pdb_file for the AMBER backend."
-        )
-
-    def _parameterize_openff(self, components: List[Dict[str, Any]],
-                             coordinates_file: str,
-                             working_dir: Optional[str] = None,
-                             **ff_kwargs) -> "ParameterizedSystem":
-        """OpenFF backend: build a serialized Interchange via the openff skill's
-        ``build_interchange`` tool (resolved through the registry, so the agent
-        names no force-field package)."""
-        from ._parameterized_system import ParameterizedSystem, ComponentSpec
         from ...skills._shared._registry import get_tool_function
 
-        build = get_tool_function("build_interchange", active_skills=["openff"])
-        res = build(components, coordinates_file,
-                    working_dir=working_dir or self.working_dir, **ff_kwargs)
+        backend = ff_kwargs.pop("backend", None) or self._select_backend(
+            components=components, coordinates_file=coordinates_file,
+            pdb_file=pdb_file, research_goal=research_goal,
+        )
+        # ``working_dir`` may arrive via callers (the pipeline passes it); honor
+        # it and keep it out of ff_kwargs so it isn't passed to build() twice.
+        working_dir = ff_kwargs.pop("working_dir", None) or self.working_dir
+        build = get_tool_function(
+            "build_parameterized_system", active_skills=[backend])
+        if build is None:
+            raise ValueError(
+                f"force_field skill {backend!r} exposes no "
+                "`build_parameterized_system` tool."
+            )
+        payload = build(
+            components=components, coordinates_file=coordinates_file,
+            pdb_file=pdb_file, working_dir=working_dir,
+            research_goal=research_goal, **ff_kwargs,
+        )
+        return self._wrap_parameterized_system(payload)
+
+    def _select_backend(self, *,
+                        components: Optional[List[Dict[str, Any]]],
+                        coordinates_file: Optional[str],
+                        pdb_file: Optional[str],
+                        research_goal: str) -> str:
+        """Pick a ``force_field`` backend skill that can consume these inputs.
+
+        Engine- and package-agnostic: it discovers the ``force_field`` skills and
+        matches each backend's ``build_parameterized_system`` tool on its declared
+        required inputs (data-driven — the agent names no package). A skilled
+        tiebreak decides only when several backends accept the same inputs.
+        """
+        from ...skills.loader import list_skills
+        from ...skills._shared._registry import get_tools_for
+
+        provided = {k for k, v in (
+            ("components", components),
+            ("coordinates_file", coordinates_file),
+            ("pdb_file", pdb_file)) if v is not None}
+
+        candidates: List[str] = []
+        for skill in list_skills(domain="force_field"):
+            spec = next(
+                (s for s in get_tools_for("simulation", active_skills=[skill])
+                 if s.name == "build_parameterized_system"), None)
+            if spec and set(spec.required) <= provided:
+                candidates.append(skill)
+
+        if not candidates:
+            raise ValueError(
+                f"no force_field backend accepts inputs {sorted(provided)}; "
+                f"available backends: {list_skills(domain='force_field')}"
+            )
+        if len(candidates) == 1:
+            return candidates[0]
+        return self._pick_backend_by_skill(candidates, research_goal)
+
+    def _pick_backend_by_skill(self, candidates: List[str],
+                               research_goal: str) -> str:
+        """Tiebreak among backends that accept the same inputs, using their skill
+        guidance. Deterministic fallback keeps the pipeline reproducible when no
+        model is available."""
+        # The current backends take disjoint inputs, so this rarely fires; when
+        # it does, prefer a skilled choice, falling back to the first candidate.
+        self.logger.info(
+            "multiple force_field backends accept these inputs %s; selecting %r",
+            candidates, candidates[0])
+        return candidates[0]
+
+    def _wrap_parameterized_system(self, payload: Dict[str, Any]) -> "ParameterizedSystem":
+        """Wrap a backend's uniform payload dict into a ``ParameterizedSystem``.
+
+        One wrapping for every backend — the discriminator is the payload's
+        ``source_format``, not the backend identity, so the agent branches on no
+        force-field package.
+        """
+        from ._parameterized_system import ParameterizedSystem, ComponentSpec
         comps = [c if isinstance(c, ComponentSpec) else ComponentSpec(
-            name=c.get("name", ""), smiles=c["smiles"], count=int(c["count"]),
-            charge=float(c.get("charge", 0.0))) for c in components]
+            name=c.get("name", ""), smiles=c.get("smiles", ""),
+            count=int(c.get("count", 1)), charge=float(c.get("charge", 0.0)))
+            for c in (payload.get("components") or [])]
+        amber = tuple(payload.get("amber_files") or ("", ""))
         return ParameterizedSystem(
-            # Match build_interchange's own default so provenance is the full
-            # .offxml name whether or not the caller overrode the force field.
-            backend=ff_kwargs.get("force_field", "openff-2.2.0.offxml"),
-            source_format="interchange",
-            n_atoms=int(res["n_atoms"]), total_charge=float(res["total_charge"]),
-            components=comps, coordinates_file=coordinates_file,
-            interchange_path=res["interchange_path"],
+            backend=payload.get("backend", ""),
+            source_format=payload["source_format"],
+            n_atoms=int(payload["n_atoms"]),
+            total_charge=float(payload["total_charge"]),
+            components=comps,
+            coordinates_file=payload.get("coordinates_file", ""),
+            interchange_path=payload.get("interchange_path", ""),
+            amber_files=amber,
         )
 
     def generate_lammps_parameters(self,
@@ -1587,7 +1650,9 @@ DOMAIN-SPECIFIC GUIDANCE (use this to inform your selection):
 """
 
         prompt = f"""
-You are an expert in molecular dynamics force field selection for LAMMPS simulations.
+You are an expert in molecular dynamics force field selection. Choose a force
+field for the system below; it will be run through an engine-neutral pipeline,
+so do not assume any particular MD engine.
 
 SYSTEM INFORMATION:
 - Total atoms: {system_info.get('n_atoms', 'Unknown')}

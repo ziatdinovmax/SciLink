@@ -162,6 +162,19 @@ inside `generate_structure` when MP_API_KEY is available.
 - When a user request contains parameters you had to infer (polymorph
   choice, default supercell, etc.), say so explicitly so they can confirm
   or override.
+- For a small, exact change to an existing input file — `ENCUT = 520` in an
+  INCAR, a timestep or temperature in a LAMMPS deck — use `edit_file` (a
+  byte-exact surgical edit that leaves everything else untouched), NOT
+  `apply_input_adjustments`. Reserve `apply_input_adjustments` for a larger or
+  physics-changing revision that retunes several coupled settings at once (it
+  regenerates the inputs and can perturb parameters you did not mean to change);
+  `edit_file`'s cap-exceeded hint points you there when a change is too big for a
+  surgical edit. Use `rename_file` to change a filename byte-exactly.
+- `run_simulation` builds the structure itself when none is given. If you have
+  ALREADY built the structure this run (a prior `generate_structure` call),
+  pass that structure's `structure_path` to `run_simulation`'s `structure_file`
+  argument so it reuses it instead of rebuilding — don't run `generate_structure`
+  and then let `run_simulation` build a second copy of the same system.
 """
 
 

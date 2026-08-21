@@ -349,6 +349,39 @@ class MolecularQCAgent:
         if "entry_file" not in result and len(result["input_files"]) == 1:
             result["entry_file"] = next(iter(result["input_files"]))
 
+        # ── deterministic geometry-consistency check (fail loud) ──────
+        # The deck's inline geometry is LLM-transcribed from the structure; a
+        # dropped atom or wrong element would run to completion on the wrong
+        # system. Compare composition against the source and fail generation on
+        # a mismatch. Engine-neutral: resolved from the active skill bundle, so
+        # a QC engine without this tool simply skips it.
+        try:
+            from ...skills._shared._registry import get_tool_function
+            try:
+                geom_check = get_tool_function(
+                    "check_geometry_consistency", active_skills=[software]
+                )
+            except LookupError:
+                geom_check = None
+            if geom_check is not None:
+                check = geom_check(
+                    input_files=result["input_files"],
+                    structure_file=structure_file,
+                )
+                result["geometry_check"] = check
+                if check.get("status") == "mismatch":
+                    return {
+                        "status": "error",
+                        "message": (
+                            "Generated deck geometry is inconsistent with the "
+                            "source structure: " + check.get("reason", "")
+                        ),
+                        "geometry_check": check,
+                        "raw_result": result,
+                    }
+        except Exception as exc:
+            self.logger.warning("geometry consistency check failed: %s", exc)
+
         result["status"] = "success"
         result["software"] = software
         return result

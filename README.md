@@ -169,7 +169,7 @@ scilink serve --transport sse --host 127.0.0.1 --port 8000
 
 The server exposes all orchestrator tools (prefixed `scilink_` for analysis, `scilink_plan_` for planning), plus job management tools for long-running operations. Autonomy modes control which tools require human approval before execution.
 
-Client setup is one command — `scilink serve --print-mcp-json` emits a ready-to-paste, secret-free config entry (zero-install `uvx` spec when available) — and credentials live in one place, `~/.scilink/credentials.env`, loaded by the server at startup. While tools run, their narration streams to the client as MCP log notifications; sessions and background jobs survive server restarts (a fixed `--session-dir` resumes the campaign). See [docs/claude_code_integration.md](docs/claude_code_integration.md) for the full MCP server guide.
+Client setup is one command — `scilink serve --print-mcp-json` emits a ready-to-paste, secret-free config entry (zero-install `uvx` spec when available) — and credentials live in one place, `~/.scilink/credentials.env`, loaded by the server at startup. While tools run, their narration streams to the client as MCP log notifications; sessions and background jobs survive server restarts (a fixed `--session-dir` resumes the campaign). See [docs/connecting_agent_clients.md](docs/connecting_agent_clients.md) for the unified guide — every client (Claude Code/Desktop, Deep Agents, VS Code, your own framework), the three server placements, and the container layouts — and [docs/claude_code_integration.md](docs/claude_code_integration.md) for the Claude-specific walkthrough.
 
 ### As an MCP Client
 
@@ -579,18 +579,21 @@ analysis_session/
 # Simulation Agents
 
 Drive atomistic simulations from natural-language goals. The interactive chat surface
-is `scilink simulate`; the underlying orchestrators (`SimulationOrchestratorAgent`,
-`StructureOrchestrator`, `DFTOrchestrator`, `LAMMPSOrchestrator`) can also be driven
-programmatically.
+is `scilink simulate`, backed by the engine-neutral `SimulationOrchestratorAgent`; the
+same pipeline is available programmatically as `run_complete_workflow` (one-shot:
+structure → inputs → optional validation → optional run). Every scale flows through one
+scale-agnostic path — the routing decision selects the *scale* (periodic DFT / molecular
+QC / classical MD / MLIP) and the engine is supplied by a markdown **skill bundle**, so
+no engine filenames are hardcoded in agent code.
 
 ## Structure generation
 
-`StructureOrchestrator` runs the build → validate → refine loop for four structure
-classes (`crystal`, `molecular`, `condensed`, `biomolecular`), each driven by a
+`StructurePipeline` runs the build → validate → refine loop for five structure classes
+(`crystal`, `molecular`, `condensed`, `biomolecular`, `aimsgb`), each driven by a
 markdown skill bundle that supplies the build guidance, the output format
-(POSCAR / xyz / pdb), and the class-specific validation rubric. `StructurePlanner`
+(POSCAR / xyz / pdb / extxyz), and the class-specific validation rubric. `StructurePlanner`
 maps a free-text request onto the right `structure_class` and downstream
-`simulation_scale` (periodic DFT / molecular DFT / classical MD / MLIP).
+`simulation_scale`.
 
 ## Periodic DFT
 
@@ -599,19 +602,18 @@ engines ship today — **VASP** and **Quantum ESPRESSO** — under
 `scilink/skills/periodic_dft/{vasp,qe}/`. Adding ABINIT or CP2K is a drop-in
 markdown bundle, no agent code changes.
 
-| Agent | Purpose |
-|---|---|
-| `DFTOrchestrator` | End-to-end VASP pipeline (structure → inputs → optional literature validation) |
-| `PeriodicDFTAgent` | Engine-agnostic input generation (`software="vasp"` or `software="qe"`) |
-| `VaspUpdater` | Recover from failed VASP runs by parsing stdout/stderr logs |
-| `VaspQualityAgent` | Post-run quality assessment with structured findings + recommendations |
-
 ## Classical MD and MLIPs
 
-`LAMMPSOrchestrator` drives the LAMMPS chain (`LAMMPSSimulationAgent`,
-`ForceFieldAgent`, `PackmolAgent`, `LAMMPSAnalysisAgent`, `LAMMPSUpdater`).
-`MLIPAgent` handles machine-learned-potential training and deployment.
-Less developed than the DFT side today but built on the same orchestrator pattern.
+`MDSimulationAgent` generates classical-MD inputs (engine selected by skill bundle —
+LAMMPS ships today), with `ForceFieldAgent` assigning the potential and `StructurePipeline`
+packing the condensed-phase box. `MLIPAgent` deploys machine-learned potentials as an
+engine-neutral runner. Force-field vs MLIP is chosen downstream of routing once the
+structure exists — an MLIP is a potential source, not a separate scale.
+
+## Post-run analysis
+
+`SimulationAnalysisAgent` computes properties from a finished run's output via verified
+codegen (scalar values and non-scalar observables — curves, images, datacubes), engine-agnostic.
 
 ## CLI
 
@@ -625,31 +627,25 @@ scilink simulate --request "rutile TiO2 supercell with one O vacancy"
 
 ```python
 from scilink.agents.sim_agents import (
-    StructureOrchestrator, DFTOrchestrator, PeriodicDFTAgent,
-    VaspQualityAgent, VaspUpdater,
+    StructurePipeline, PeriodicDFTAgent, run_complete_workflow,
 )
 
 # Structure-only build (engine-agnostic, class-aware)
-so = StructureOrchestrator(generator_model="claude-opus-4-6")
-res = so.build_structure("a single water molecule", structure_class="molecular")
+sp = StructurePipeline(generator_model="claude-opus-4-6")
+res = sp.build_structure("a single water molecule", structure_class="molecular")
 # → res["final_structure_path"] points at structure.xyz
 
-# Full VASP pipeline (structure + inputs together)
-DFTOrchestrator().run_complete_workflow("diamond Si, 2-atom primitive cell, ground-state SCF")
+# Full one-shot pipeline (structure + inputs together), any scale/engine
+run_complete_workflow(
+    "diamond Si, 2-atom primitive cell, ground-state SCF",
+    scale="periodic_dft", software="vasp",
+)
 
 # Quantum ESPRESSO inputs via the engine-agnostic agent
 PeriodicDFTAgent().generate_inputs(
     structure_file="POSCAR",
     request="vc-relax of Cu fcc",
     software="qe",
-)
-
-# Post-run quality check and error-log-driven recovery
-VaspQualityAgent().run_quality_check(output_dir="./run/", research_goal="diamond Si SCF")
-VaspUpdater().refine_inputs(
-    poscar_path="POSCAR", incar_path="INCAR", kpoints_path="KPOINTS",
-    vasp_log=open("vasp.out").read(),
-    original_request="diamond Si ground-state SCF",
 )
 ```
 
