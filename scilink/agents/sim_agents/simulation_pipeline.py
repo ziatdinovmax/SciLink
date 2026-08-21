@@ -53,6 +53,18 @@ _DEFAULT_ENGINE = {
 }
 
 
+# Default structure class per scale, used when the caller does not specify one.
+# A classical-MD run is a liquid / solvated / condensed-phase box, NOT a crystal
+# (issue #474): building and validating it under the crystal rubric applies the
+# wrong packing guidance and validation criteria. Periodic DFT is crystalline;
+# molecular QC is a finite molecule. Explicit callers still win (None sentinel).
+_SCALE_STRUCTURE_CLASS = {
+    "periodic_dft": "crystal",
+    "molecular_qc": "molecular",
+    "molecular_dynamics": "condensed",
+}
+
+
 def _generate_classical_md_inputs(
     *, software, structure_file, request, output_dir, api_key, base_url,
     model_name, force_field_files, staged, required_observables,
@@ -409,7 +421,7 @@ def _run_workflow_once(
     scale: str = "periodic_dft",
     software: Optional[str] = None,
     method: str = "llm",
-    structure_class: str = "crystal",
+    structure_class: Optional[str] = None,
     output_dir: str = "simulation_workflow_output",
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
@@ -444,7 +456,10 @@ def _run_workflow_once(
             foundation agent's generation; a named backend (e.g.
             ``"atomate2"``) resolves to a skill-bundle generation tool.
         structure_class: Structure-class hint forwarded to structure
-            generation.
+            generation. When ``None`` (the default) it is derived from ``scale``
+            (``molecular_dynamics`` -> ``condensed``, ``periodic_dft`` ->
+            ``crystal``, ``molecular_qc`` -> ``molecular``); an explicit value
+            wins, so a biomolecular MD run can still pass ``"biomolecular"``.
         output_dir: Directory for all generated files.
         api_key, base_url, model_name: LLM credentials.
         futurehouse_api_key: Optional FutureHouse key enabling
@@ -492,6 +507,12 @@ def _run_workflow_once(
     """
     software = software or _DEFAULT_ENGINE.get(scale)
     os.makedirs(output_dir, exist_ok=True)
+    # Derive the structure class from the scale when the caller didn't set one,
+    # so a classical-MD run builds/validates as a condensed system rather than a
+    # crystal (issue #474). An explicit structure_class always wins.
+    if structure_class is None:
+        structure_class = _SCALE_STRUCTURE_CLASS.get(scale, "crystal")
+
     result: Dict[str, Any] = {
         "user_request": user_request,
         "scale": scale,

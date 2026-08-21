@@ -861,6 +861,7 @@ class SimulationOrchestratorTools:
         # =====================================================================
         def run_simulation(description: str, run_command: str = None,
                            scale: str = None, software: str = None,
+                           structure_class: str = None,
                            max_refinement_cycles: int = 4,
                            max_run_cycles: int = 3,
                            run_timeout: int = 3600) -> str:
@@ -910,6 +911,7 @@ class SimulationOrchestratorTools:
                 result = run_complete_workflow(
                     description,
                     scale=scale, software=software,
+                    structure_class=structure_class,
                     output_dir=str(workdir),
                     api_key=self.orch.api_key, base_url=self.orch.base_url,
                     model_name=self.orch.model_name,
@@ -996,6 +998,16 @@ class SimulationOrchestratorTools:
                     "type": "string",
                     "description": ("Optional engine override "
                                     "('vasp' | 'lammps'); routed if omitted."),
+                },
+                "structure_class": {
+                    "type": "string",
+                    "description": (
+                        "Optional structure-class override ('crystal' | "
+                        "'molecular' | 'condensed' | 'biomolecular'). Omit to "
+                        "derive it from the scale (molecular_dynamics -> "
+                        "condensed, periodic_dft -> crystal); set it explicitly "
+                        "for a biomolecular MD system."
+                    ),
                 },
                 "max_run_cycles": {
                     "type": "integer",
