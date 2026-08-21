@@ -213,15 +213,19 @@ class BaseAnalysisAgent(ABC):
                 out["attempts"] = attempt + 1
                 # Non-scalar outputs (curve/image/datacube) hand back a file; the
                 # script writes it into OUTPUT_DIR and references it. Resolve and
-                # require it — a success with no artifact on disk is an error.
+                # require it. A success with no artifact on disk is a fixable
+                # codegen slip — feed the refine loop and retry (like a
+                # missing-JSON result), not a terminal error.
                 if output_type != "scalar" and out.get("status") == "success":
                     artifact = self._resolve_artifact(out.get("artifact"))
                     if artifact is None:
-                        return {"status": "error", "attempts": attempt + 1,
-                                "message": ("script reported success but wrote no "
-                                            "readable artifact for output_type "
-                                            f"{output_type!r}")}
+                        error_info = {
+                            "message": ("reported success but wrote no readable "
+                                        f"artifact for output_type {output_type!r}"),
+                            "concise_error": "success without artifact on disk"}
+                        continue
                     out["artifact"] = artifact
+                    out["output_type"] = output_type
                 if (verify and out.get("status") == "success"
                         and (out.get("value") is not None or out.get("artifact"))):
                     out["verification"] = self._verify_result(
