@@ -129,3 +129,19 @@ def test_branding_tool_titles_and_icons():
     assert out[1].title == "SciLink · Run Optimization"
     assert out[2].title == "Custom"                    # explicit titles kept
     assert _tool_title("scilink_generate_initial_plan") == "SciLink · Generate Initial Plan"
+
+
+def test_server_instructions_carry_cross_tool_patterns():
+    """The initialize-time instructions are the MCP-native home for patterns
+    that span tool calls (supervision loop, series reuse, division of
+    labor, data discipline) — every client receives them without any
+    repo-side prompt file. Kept tight: they ride every connection."""
+    from scilink.mcp_server import create_server
+    srv = create_server(api_key="sk-dummy", mode="plan", session_dir=None)
+    text = srv.instructions
+    for needle in ("background=true", "scilink_job_status", "scilink_respond",
+                   "interrupted", "prior_analysis_paths",
+                   "reuse_locked_script", "force_regenerate",
+                   "detailed_analysis", "attribute"):
+        assert needle in text, needle
+    assert len(text) < 2500          # guard against instruction bloat
