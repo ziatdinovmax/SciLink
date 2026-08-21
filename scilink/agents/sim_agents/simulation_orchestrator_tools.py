@@ -897,6 +897,16 @@ class SimulationOrchestratorTools:
                            run_timeout: int = 3600) -> str:
             from .simulation_pipeline import run_complete_workflow
 
+            # Explicit opt-out: structure_file="new" forces a fresh build for
+            # THIS description, even if the session already holds a structure.
+            # It is the escape hatch from automatic reuse — the only way, short
+            # of building first with generate_structure, to start a DIFFERENT
+            # system in a session that already has one.
+            force_new = (isinstance(structure_file, str)
+                         and structure_file.strip().lower() == "new")
+            if force_new:
+                structure_file = None
+
             # Reuse an already-built structure instead of rebuilding it. If a
             # prior generate_structure produced a structure for this condition,
             # pass its `structure_path` here (the caller may give a path or the
@@ -927,14 +937,15 @@ class SimulationOrchestratorTools:
             # already built rather than rebuilding it in a fresh dir. Rebuilding
             # both duplicates work AND can diverge or fail — leaving an empty,
             # differently-slugged workdir with no run output that the caller then
-            # retries forever (the #4 double-build loop). Reuse is silent-safe: it
-            # is announced in the result, and the caller can force a specific
-            # structure with structure_file. Records are appended only when a
-            # structure was actually written, so a prior empty/failed run is never
-            # picked up here.
+            # retries forever (the #4 double-build loop). Automatic reuse ASSUMES
+            # this run targets the session's current system; for a DIFFERENT
+            # system, build it first (generate_structure) or pass
+            # structure_file="new" to force a fresh build. Records are appended
+            # only when a structure was actually written, so a prior empty/failed
+            # run is never picked up here.
             reused_from = None
             reused_dir = None
-            if structure_file is None:
+            if structure_file is None and not force_new:
                 prior = next(
                     (s for s in reversed(self.orch.generated_structures or [])
                      if s.get("structure_path")
@@ -990,11 +1001,20 @@ class SimulationOrchestratorTools:
                 from .refinement import LocalExecutor
                 executor = LocalExecutor(timeout=run_timeout)
 
-            # Run in the reused structure's own dir so the run output lands next
-            # to the structure/deck already there; otherwise a fresh slug dir.
+            # A reused structure lands each run in its own subdir under the
+            # structure dir (runs/<NN>_<slug>/), so repeated runs on one structure
+            # — a temperature/pressure sweep, the common same-structure-many-runs
+            # case — don't clobber each other's log/outputs; the structure is
+            # referenced by path. A fresh build gets its own slug dir (structure +
+            # run together).
             slug = self._make_slug(description)
-            workdir = (Path(reused_dir) if reused_dir
-                       else self.orch.structures_dir / slug)
+            if reused_dir:
+                runs_root = Path(reused_dir) / "runs"
+                runs_root.mkdir(parents=True, exist_ok=True)
+                n = sum(1 for p in runs_root.iterdir() if p.is_dir()) + 1
+                workdir = runs_root / f"{n:02d}_{slug}"
+            else:
+                workdir = self.orch.structures_dir / slug
             workdir.mkdir(parents=True, exist_ok=True)
 
             try:
@@ -1121,14 +1141,16 @@ class SimulationOrchestratorTools:
                     "type": "string",
                     "description": (
                         "Optional path (or session slug) of an already-built "
-                        "structure to REUSE. Omitting it is usually fine: if this "
-                        "session already built a structure (e.g. a prior "
-                        "generate_structure or run_simulation), it is reused "
-                        "automatically and the run happens in its dir — no rebuild. "
-                        "Set this only to force a SPECIFIC structure (e.g. in a "
-                        "multi-system run where the latest one isn't the one you "
-                        "want). A fresh structure is built only when the session "
-                        "has none."
+                        "structure to REUSE. Omitting it means AUTOMATIC reuse of "
+                        "the session's most-recent structure, which assumes this "
+                        "run targets the SAME system you last built/ran. "
+                        "IMPORTANT: for a DIFFERENT system, do NOT just reword the "
+                        "description — either build it first with generate_structure, "
+                        "or pass structure_file=\"new\" to force a fresh build for "
+                        "this description (otherwise your request runs against the "
+                        "previous system's structure). Pass a specific path/slug to "
+                        "reuse a particular earlier structure. A fresh structure is "
+                        "built automatically only when the session has none."
                     ),
                 },
                 "max_run_cycles": {

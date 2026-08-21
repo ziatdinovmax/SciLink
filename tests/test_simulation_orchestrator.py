@@ -395,11 +395,33 @@ def test_2d_run_simulation_reuses_prebuilt_structure(model_name: str):
                 run_command="lmp -in {script}"))
             assert captured.get("structure_file") == str(struct)
             assert r["reused_structure"] == "myslug"
-            assert captured.get("output_dir") == str(struct.parent)   # ran in its dir
+            # runs land in a per-call subdir of the structure dir, not the dir
+            # itself, so a same-structure sweep doesn't clobber prior outputs
+            run1 = Path(captured["output_dir"])
+            assert run1.parent == struct.parent / "runs"
+            assert run1.name.startswith("01_")
+
+            # a second reuse run gets its own subdir (02_...), no clobber
+            captured.clear()
+            json.loads(orch.tools.execute_tool(
+                "run_simulation", description="reworded MD of the same H",
+                scale="molecular_dynamics", software="lammps",
+                run_command="lmp -in {script}"))
+            assert Path(captured["output_dir"]).name.startswith("02_")
+
+            # (e) THE OPT-OUT: structure_file="new" forces a fresh build even
+            #     though the session holds a structure (a DIFFERENT system)
+            captured.clear()
+            r = json.loads(orch.tools.execute_tool(
+                "run_simulation", description="MD of a different system",
+                scale="molecular_dynamics", software="lammps",
+                run_command="lmp -in {script}", structure_file="new"))
+            assert captured.get("structure_file") is None      # fresh build
+            assert r["reused_structure"] is None
         finally:
             sp.run_complete_workflow = orig
 
-        # (e) a bogus structure_file is a structured error, not a rebuild
+        # (f) a bogus structure_file is a structured error, not a rebuild
         r = json.loads(orch.tools.execute_tool(
             "run_simulation", description="MD of H",
             scale="molecular_dynamics", software="lammps",
@@ -407,7 +429,7 @@ def test_2d_run_simulation_reuses_prebuilt_structure(model_name: str):
             structure_file="/no/such/structure.extxyz"))
         assert r["status"] == "error" and "not found" in r["message"]
 
-        print("   ✅ run_simulation reuses an in-session structure (auto / path / slug)")
+        print("   ✅ run_simulation reuses / per-run subdir / new-opt-out / errors")
 
 
 def test_2e_run_simulation_executes_in_allocation(model_name: str):
