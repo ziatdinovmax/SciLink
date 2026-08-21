@@ -5,6 +5,7 @@ canned scripts) but a REAL sandbox executor: static helpers, construction, scrip
 execution + JSON parsing, the compute_property loop, and error-driven refinement.
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -64,6 +65,61 @@ class TestExecution:
         )
         r = agent.compute_property("double it", {"d": str(data)}, verify=False)
         assert r["status"] == "success" and r["value"] == 42
+
+
+class TestOutputTypes:
+    """The non-scalar (curve/image/datacube) output-type generalization."""
+
+    _CURVE_SCRIPT = (
+        "import json, numpy as np, os\n"
+        "q = np.linspace(0.5, 12.0, 100)\n"
+        "S = 1.0 + 0.3 * np.exp(-(q - 2.0) ** 2)\n"
+        "np.save(os.path.join(OUTPUT_DIR, 'sq.npy'), np.vstack([q, S]))\n"
+        "print(json.dumps({'status': 'success', 'output_type': 'curve',"
+        " 'artifact': {'path': 'sq.npy', 'format': 'npy', 'shape': [2, 100]},"
+        " 'summary': {'n_points': 100, 'q_max': 12.0, 'peak': 1.3, 'nan': 0}}))"
+    )
+
+    def test_curve_output_collects_artifact(self, agent):
+        agent._llm = lambda p: self._CURVE_SCRIPT
+        r = agent.compute_property("S(q)", {"traj": "/nope"},
+                                   verify=False, output_type="curve")
+        assert r["status"] == "success" and r["output_type"] == "curve"
+        art = r["artifact"]
+        assert os.path.isabs(art["path"]) and os.path.exists(art["path"])
+        assert art["format"] == "npy" and art["shape"] == [2, 100]
+
+    def test_curve_missing_artifact_is_error(self, agent):
+        # Reports success + an artifact path it never wrote -> fail loud.
+        agent._llm = lambda p: (
+            "import json\n"
+            "print(json.dumps({'status': 'success', 'output_type': 'curve',"
+            " 'artifact': {'path': 'ghost.npy', 'format': 'npy'},"
+            " 'summary': {}}))"
+        )
+        r = agent.compute_property("S(q)", {"traj": "/nope"},
+                                   verify=False, output_type="curve")
+        assert r["status"] == "error" and "artifact" in r["message"]
+
+    def test_verify_runs_on_curve_summary(self, agent):
+        # _llm serves both the codegen prompt (script) and the curve gate (JSON).
+        def _llm(prompt):
+            if "produced a curve" in prompt:      # the curve verification gate
+                return '{"plausible": true, "reasoning": "sensible S(q)"}'
+            return TestOutputTypes._CURVE_SCRIPT
+        agent._llm = _llm
+        r = agent.compute_property("S(q)", {"traj": "/nope"},
+                                   verify=True, output_type="curve")
+        assert r["status"] == "success"
+        assert r["verification"]["plausible"] is True
+
+    def test_scalar_default_unchanged(self, agent):
+        # Regression: the default scalar path is untouched (no artifact).
+        agent._llm = lambda p: ('import json; print(json.dumps('
+                                '{"status":"success","value":3.14,"units":"x"}))')
+        r = agent.compute_property("x", {"d": "/nope"}, verify=False)
+        assert r["status"] == "success" and r["value"] == 3.14
+        assert "artifact" not in r
 
 
 class TestComputePropertyLoop:

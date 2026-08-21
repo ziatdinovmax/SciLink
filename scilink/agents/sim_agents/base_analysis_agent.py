@@ -170,6 +170,7 @@ class BaseAnalysisAgent(ABC):
         recipe: str = "",
         packages: Optional[List[str]] = None,
         verify: bool = True,
+        output_type: str = "scalar",
     ) -> Dict[str, Any]:
         """Compute one property from ``data_files`` via verified codegen.
 
@@ -198,7 +199,7 @@ class BaseAnalysisAgent(ABC):
             f"DATA_FILES = {json.dumps(data_files)}\n"
             f"OUTPUT_DIR = {json.dumps(str(self.output_dir))}\n\n"
         )
-        code = self._generate_code(task, data_files, recipe, pkgs)
+        code = self._generate_code(task, data_files, recipe, pkgs, output_type)
         error_info: Dict[str, Any] = {}
         for attempt in range(self.max_refinement_attempts + 1):
             if attempt > 0:
@@ -210,19 +211,58 @@ class BaseAnalysisAgent(ABC):
                 # honest error with success.
                 out = {k: v for k, v in result.items() if k != "ok"}
                 out["attempts"] = attempt + 1
+                # Non-scalar outputs (curve/image/datacube) hand back a file; the
+                # script writes it into OUTPUT_DIR and references it. Resolve and
+                # require it — a success with no artifact on disk is an error.
+                if output_type != "scalar" and out.get("status") == "success":
+                    artifact = self._resolve_artifact(out.get("artifact"))
+                    if artifact is None:
+                        return {"status": "error", "attempts": attempt + 1,
+                                "message": ("script reported success but wrote no "
+                                            "readable artifact for output_type "
+                                            f"{output_type!r}")}
+                    out["artifact"] = artifact
                 if (verify and out.get("status") == "success"
-                        and result.get("value") is not None):
-                    out["verification"] = self._verify_result(task, result)
+                        and (out.get("value") is not None or out.get("artifact"))):
+                    out["verification"] = self._verify_result(
+                        task, out, output_type)
                 return out
             error_info = result
         return {"status": "error", "message": error_info.get("message", "unknown"),
                 "attempts": self.max_refinement_attempts + 1}
 
     def _generate_code(self, task: str, data_files: Dict[str, str],
-                       recipe: str, packages: List[str]) -> str:
-        """Generate a self-contained analysis script for ``task``."""
+                       recipe: str, packages: List[str],
+                       output_type: str = "scalar") -> str:
+        """Generate a self-contained analysis script for ``task``.
+
+        ``output_type`` selects the output contract the script must satisfy: a
+        ``scalar`` prints ``value``/``units``; a ``curve``/``image``/``datacube``
+        writes the artifact into ``OUTPUT_DIR`` and returns a reference plus
+        summary statistics the verification gate can judge.
+        """
         files_desc = "\n".join(f"  - {name}: {path}"
                                for name, path in data_files.items())
+        if output_type == "scalar":
+            output_contract = (
+                "- Compute the property and print EXACTLY ONE JSON object as the "
+                'last stdout line: {"status": "success", "value": <number>, '
+                '"units": <str>, ...} — or {"status": "error", "message": <str>} '
+                "if it cannot be computed.\n"
+            )
+        else:
+            output_contract = (
+                f"- This is a {output_type} observable. WRITE the computed "
+                f"{output_type} into OUTPUT_DIR (a .npy or .csv for a curve or "
+                "datacube; a .png for an image), then print EXACTLY ONE JSON "
+                'object as the last stdout line: {"status": "success", '
+                f'"output_type": "{output_type}", "artifact": {{"path": '
+                '"<file you wrote under OUTPUT_DIR>", "format": "<npy|csv|png>", '
+                '"shape": [...]}, "summary": {<a few SCALAR summary statistics so '
+                "the result can be judged — e.g. n_points, x/y ranges, peak "
+                'value, NaN count>}} — or {"status": "error", "message": <str>} '
+                "if it cannot be computed.\n"
+            )
         prompt = (
             "You are a scientific data-analysis engineer. Write a complete, "
             "self-contained Python script that computes the requested property "
@@ -236,12 +276,9 @@ class BaseAnalysisAgent(ABC):
             "- `DATA_FILES` (dict name->path) and `OUTPUT_DIR` (str) are ALREADY "
             "defined as globals at runtime — reference them directly; do NOT "
             "import, redefine, guard, or reassign them. Read inputs from "
-            "DATA_FILES; write any figures into OUTPUT_DIR.\n"
-            "- Compute the property and print EXACTLY ONE JSON object as the last "
-            'stdout line: {"status": "success", "value": <number>, "units": '
-            '<str>, ...} — or {"status": "error", "message": <str>} if it cannot '
-            "be computed.\n"
-            "- Handle missing/short data gracefully; never hang or prompt.\n\n"
+            "DATA_FILES; write any files into OUTPUT_DIR.\n"
+            + output_contract
+            + "- Handle missing/short data gracefully; never hang or prompt.\n\n"
             "Return ONLY the Python code, no markdown."
         )
         return self._clean_code(self._llm(prompt))
@@ -328,30 +365,72 @@ class BaseAnalysisAgent(ABC):
                 continue
         return None
 
-    def _verify_result(self, task: str, result: Dict[str, Any]) -> Dict[str, Any]:
-        """LLM plausibility gate on a computed value (the exp-agent-style check).
+    def _resolve_artifact(self, artifact: Any) -> Optional[Dict[str, Any]]:
+        """Validate a non-scalar artifact reference and absolutize its path.
 
-        Returns ``{"plausible": bool, "reasoning": str}``. Errs toward accepting
-        when unsure — it flags clearly-wrong magnitudes, it is not a second
-        physics reviewer. A failure to parse is treated as non-blocking.
+        Returns the artifact dict with an absolute, existing ``path`` (resolved
+        against ``OUTPUT_DIR`` when relative), or ``None`` when the script
+        claimed an artifact it did not actually write.
         """
-        details = {
-            k: v for k, v in result.items()
-            if k not in ("code_path", "ok", "status", "attempts",
-                         "verification", "raw_output")
-            and isinstance(v, (int, float, str, bool))
-        }
-        prompt = (
-            "A simulation-analysis script computed a property. Judge whether the "
-            "result is physically plausible AND adequately converged — take the "
-            "reported diagnostic/convergence fields into account: a "
-            "`plateau_reached` / `linear_regime` / `converged`-style flag that is "
-            "false means the value is NOT trustworthy and must NOT be judged "
-            "plausible on magnitude alone. Respond with JSON: "
-            '{"plausible": true|false, "reasoning": "<one sentence>"}.\n\n'
-            f"TASK: {task}\n"
-            f"RESULT FIELDS: {json.dumps(details, default=str)}\n"
-        )
+        if not isinstance(artifact, dict) or not artifact.get("path"):
+            return None
+        p = Path(artifact["path"])
+        if not p.is_absolute():
+            p = self.output_dir / p
+        if not p.exists():
+            return None
+        resolved = dict(artifact)
+        resolved["path"] = str(p)
+        return resolved
+
+    def _verify_result(self, task: str, result: Dict[str, Any],
+                       output_type: str = "scalar") -> Dict[str, Any]:
+        """LLM plausibility gate on a computed result (the exp-agent-style check).
+
+        For a scalar it judges the value (+ convergence flags); for a
+        curve/image/datacube it judges the artifact's summary statistics and
+        shape. Returns ``{"plausible": bool, "reasoning": str}``, erring toward
+        accepting when unsure — it flags clearly-wrong results, it is not a
+        second physics reviewer. A failure to parse is non-blocking.
+        """
+        if output_type == "scalar":
+            details = {
+                k: v for k, v in result.items()
+                if k not in ("code_path", "ok", "status", "attempts",
+                             "verification", "raw_output", "artifact")
+                and isinstance(v, (int, float, str, bool))
+            }
+            prompt = (
+                "A simulation-analysis script computed a property. Judge whether "
+                "the result is physically plausible AND adequately converged — "
+                "take the reported diagnostic/convergence fields into account: a "
+                "`plateau_reached` / `linear_regime` / `converged`-style flag that "
+                "is false means the value is NOT trustworthy and must NOT be "
+                "judged plausible on magnitude alone. Respond with JSON: "
+                '{"plausible": true|false, "reasoning": "<one sentence>"}.\n\n'
+                f"TASK: {task}\n"
+                f"RESULT FIELDS: {json.dumps(details, default=str)}\n"
+            )
+        else:
+            artifact = result.get("artifact") or {}
+            details = {
+                "output_type": output_type,
+                "summary": result.get("summary") or {},
+                "artifact_shape": artifact.get("shape"),
+                "artifact_format": artifact.get("format"),
+            }
+            prompt = (
+                f"A forward-model script produced a {output_type} observable "
+                "(saved to a file) and reported summary statistics about it. "
+                "Judge whether those statistics and the shape are physically "
+                "plausible for the task — e.g. a spectrum/curve spans a sensible "
+                "range with no NaNs and a reasonable number of points; an image "
+                "has non-degenerate dimensions. This is a sanity gate, not a "
+                "second physics review. Respond with JSON: "
+                '{"plausible": true|false, "reasoning": "<one sentence>"}.\n\n'
+                f"TASK: {task}\n"
+                f"RESULT: {json.dumps(details, default=str)}\n"
+            )
         parsed = self._extract_json(self._llm(prompt))
         if not parsed or "plausible" not in parsed:
             return {"plausible": True, "reasoning": "verification unavailable"}

@@ -29,6 +29,11 @@ class SimulationAnalysisAgent(BaseAnalysisAgent):
     """
 
     DOMAIN = "simulation_analysis"
+    # Sibling domains served by the same agent — e.g. forward models that return
+    # a curve/image/datacube instead of a scalar. Discovered, availability-gated,
+    # and selected identically to the scalar skills; the only difference is the
+    # skill's ``output:`` frontmatter, which routes ``compute_property``.
+    EXTRA_DOMAINS = ("forward_models",)
 
     def _output_format_map(self) -> Dict[str, set]:
         """Build ``{data_kind: {patterns}}`` from engine skills' ``outputs:``.
@@ -95,11 +100,13 @@ class SimulationAnalysisAgent(BaseAnalysisAgent):
         from ...skills.loader import list_skills, load_skill
 
         catalog: List[Dict[str, Any]] = []
-        for name in list_skills(domain=self.DOMAIN):
-            try:
-                catalog.append(load_skill(name, domain=self.DOMAIN))
-            except Exception as exc:  # a broken skill must not sink selection
-                self.logger.warning("Skill %r failed to load: %s", name, exc)
+        for domain in (self.DOMAIN, *self.EXTRA_DOMAINS):
+            for name in list_skills(domain=domain):
+                try:
+                    catalog.append(load_skill(name, domain=domain))
+                except Exception as exc:  # a broken skill must not sink selection
+                    self.logger.warning("Skill %r (%s) failed to load: %s",
+                                        name, domain, exc)
         return catalog
 
     def eligible_skills(self, present_kinds, catalog=None) -> List[Dict[str, Any]]:
@@ -193,10 +200,12 @@ class SimulationAnalysisAgent(BaseAnalysisAgent):
             if isinstance(computes, str):
                 computes = [computes]
             recipe = skill.get("implementation") or skill.get("analysis") or ""
+            output_type = meta.get("output", "scalar")
             for prop in computes:
                 results[prop] = self.compute_property(
                     task=f"{prop} for the research goal: {research_goal}",
-                    data_files=data_files, recipe=recipe)
+                    data_files=data_files, recipe=recipe,
+                    output_type=output_type)
 
         return {"status": "success", "results": results,
                 "output_directory": str(self.output_dir),
