@@ -33,26 +33,24 @@ Restart Claude Code after adding.
 
 ### 2b. Claude Desktop — edit config
 
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
+Generate the entry instead of hand-writing it — it is secret-free by design:
 
-```json
-{
-  "mcpServers": {
-    "scilink": {
-      "command": "/path/to/scilink",
-      "args": ["serve", "--mode", "analyze"],
-      "env": {
-        "GEMINI_API_KEY": "your-key",
-        "UNSAFE_EXECUTION_OK": "true",
-        "PATH": "/path/to/python/bin:/usr/local/bin:/usr/bin:/bin"
-      }
-    }
-  }
-}
+```bash
+scilink serve --print-mcp-json --mode analyze --session-dir ~/scilink_sessions/desktop
 ```
 
-Replace `/path/to/scilink` with the full path (find it with `which scilink`).
-Restart Claude Desktop after editing.
+Paste the printed `mcpServers` block into
+`~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or
+`%APPDATA%\Claude\claude_desktop_config.json` (Windows) and restart Claude
+Desktop. When `uvx` is on PATH the entry is **zero-install** (the machine
+only needs [uv](https://docs.astral.sh/uv/)); otherwise it points at this
+installation's `scilink` executable.
+
+**Credentials go in one file, not in client configs:** put `KEY=VALUE`
+lines (e.g. `ANTHROPIC_API_KEY=...` or `AWS_BEARER_TOKEN_BEDROCK=...` +
+`AWS_REGION_NAME=...`) in `~/.scilink/credentials.env`. The server loads it
+at startup; an explicitly exported variable always wins. This removes the
+old need for `env` blocks with secrets in every client's config.
 
 ### 2c. SSE transport — any MCP client
 
@@ -207,6 +205,32 @@ scilink serve --help
 | `--api-key` | from env vars | Override API key |
 | `--base-url` | none | OpenAI-compatible endpoint |
 | `--futurehouse-key` | from env vars | FutureHouse/Edison API key |
+| `--hitl-timeout` | `1800` | Seconds a question waits for `scilink_respond` before its default answer |
+| `--print-mcp-json` | — | Print a ready-to-paste, secret-free `.mcp.json` entry and exit |
+
+## What the client sees while tools run
+
+- **Live narration.** Foreground tool calls stream their progress lines to
+  the client as MCP log notifications (`notifications/message`, logger
+  `scilink`) while they run; clients that render log messages show SciLink
+  working in real time. Disable with `SCILINK_MCP_NARRATION=0`. Background
+  jobs additionally expose the same narration via `log_tail` on
+  `scilink_job_status`.
+- **Restart durability.** Every tool call checkpoints the session; a server
+  restarted on the same `--session-dir` resumes the campaign. Background
+  jobs and parked questions are persisted too: after a restart an
+  unfinished job reports status `interrupted` with a re-entry hint instead
+  of "unknown job", and finished jobs still return their results.
+- **Self-describing results.** Analysis responses carry
+  `feature_columns` / `feature_rows` / `feature_missing` alongside the
+  `feature_table` path, so remote clients can wire results into
+  optimization without reading server files.
+- **Explicit campaign facts.** The optimization tools accept
+  `directions={target: "maximize"|"minimize"}`,
+  `input_types={col: "categorical"|"continuous"}`,
+  `input_bounds={col: [min, max]}` and `seed` — each sticky for the
+  campaign, each echoed back in responses, with warnings whenever a
+  direction or search box had to be assumed.
 
 ## Autonomy modes
 
