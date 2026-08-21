@@ -167,7 +167,9 @@ scilink serve --mode analyze --autonomy co-pilot
 scilink serve --transport sse --host 127.0.0.1 --port 8000
 ```
 
-The server exposes all orchestrator tools (prefixed `scilink_` for analysis, `scilink_plan_` for planning), plus job management tools for long-running operations. Autonomy modes control which tools require human approval before execution. See [docs/claude_code_integration.md](docs/claude_code_integration.md) for the full MCP server guide.
+The server exposes all orchestrator tools (prefixed `scilink_` for analysis, `scilink_plan_` for planning), plus job management tools for long-running operations. Autonomy modes control which tools require human approval before execution.
+
+Client setup is one command — `scilink serve --print-mcp-json` emits a ready-to-paste, secret-free config entry (zero-install `uvx` spec when available) — and credentials live in one place, `~/.scilink/credentials.env`, loaded by the server at startup. While tools run, their narration streams to the client as MCP log notifications; sessions and background jobs survive server restarts (a fixed `--session-dir` resumes the campaign). See [docs/claude_code_integration.md](docs/claude_code_integration.md) for the full MCP server guide.
 
 ### As an MCP Client
 

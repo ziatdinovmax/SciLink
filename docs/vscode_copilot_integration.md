@@ -70,6 +70,14 @@ Add the following configuration (replace the `command` path with the output from
 }
 ```
 
+> **Shortcut:** `scilink serve --print-mcp-json --mode both --model <model>`
+> prints a ready-made, secret-free entry (adapt the outer key from
+> `mcpServers` to VS Code's `servers`). And instead of the `env`/`inputs`
+> blocks you can put credentials in `~/.scilink/credentials.env`
+> (`KEY=VALUE` lines) — the server loads it at startup, and an explicitly
+> set variable always wins. The `${input:...}` keychain pattern below
+> remains a good VS Code-native alternative.
+
 ### Configuration explained
 
 - **`command`**: The absolute path to your `scilink` binary. Using the full path avoids PATH-resolution issues when VS Code is launched from the OS app launcher rather than a terminal.
