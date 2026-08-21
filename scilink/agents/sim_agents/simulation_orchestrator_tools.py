@@ -1003,10 +1003,16 @@ class SimulationOrchestratorTools:
                     "type": "string",
                     "description": (
                         "Optional structure-class override ('crystal' | "
-                        "'molecular' | 'condensed' | 'biomolecular'). Omit to "
-                        "derive it from the scale (molecular_dynamics -> "
-                        "condensed, periodic_dft -> crystal); set it explicitly "
-                        "for a biomolecular MD system."
+                        "'molecular' | 'condensed' | 'biomolecular'). Omit and it "
+                        "is derived from the scale, where the molecular_dynamics "
+                        "default 'condensed' means a liquid / solution / solvated "
+                        "box. MD also covers crystalline and biomolecular systems, "
+                        "and the derived default is wrong for those — so SET IT "
+                        "EXPLICITLY from the task: 'crystal' for a crystalline "
+                        "solid, a melt-from-crystal, or a slab interface (e.g. "
+                        "melting Cu, Li diffusion in LiCoO2, water on a TiO2 slab); "
+                        "'biomolecular' for a protein. periodic_dft derives "
+                        "'crystal', molecular_qc derives 'molecular'."
                     ),
                 },
                 "max_run_cycles": {

@@ -54,14 +54,22 @@ _DEFAULT_ENGINE = {
 
 
 # Default structure class per scale, used when the caller does not specify one.
-# A classical-MD run is a liquid / solvated / condensed-phase box, NOT a crystal
-# (issue #474): building and validating it under the crystal rubric applies the
-# wrong packing guidance and validation criteria. Periodic DFT is crystalline;
-# molecular QC is a finite molecule. Explicit callers still win (None sentinel).
+# For MD, ``condensed`` is the *liquids / solutions* default: a solvated box built
+# and validated under the crystal rubric gets the wrong packing guidance and
+# validation criteria (issue #474). It is only a default — since #432 the MD scale
+# also absorbs crystalline solids, melts-from-crystal, and slab interfaces, and
+# those must be built as ``crystal``; the caller (an LLM reading the
+# ``structure_class`` description) sets it explicitly for those. Periodic DFT is
+# crystalline; molecular QC is a finite molecule. Explicit callers always win
+# (None sentinel). ``machine_learning_potentials`` is a deprecated MLIP-as-scale
+# shim that this module treats as an MD task, so it shares MD's ``condensed``
+# default deliberately (rather than falling through to ``crystal``); a crystalline
+# MLIP-MD run passes ``structure_class="crystal"`` the same way classical MD does.
 _SCALE_STRUCTURE_CLASS = {
     "periodic_dft": "crystal",
     "molecular_qc": "molecular",
     "molecular_dynamics": "condensed",
+    "machine_learning_potentials": "condensed",
 }
 
 
@@ -457,9 +465,13 @@ def _run_workflow_once(
             ``"atomate2"``) resolves to a skill-bundle generation tool.
         structure_class: Structure-class hint forwarded to structure
             generation. When ``None`` (the default) it is derived from ``scale``
-            (``molecular_dynamics`` -> ``condensed``, ``periodic_dft`` ->
-            ``crystal``, ``molecular_qc`` -> ``molecular``); an explicit value
-            wins, so a biomolecular MD run can still pass ``"biomolecular"``.
+            (``periodic_dft`` -> ``crystal``, ``molecular_qc`` -> ``molecular``,
+            ``molecular_dynamics`` -> ``condensed``). The MD default of
+            ``condensed`` is the *liquids / solutions* case; pass an explicit
+            value for the others the MD scale now covers (since #432):
+            ``"crystal"`` for a crystalline solid, a melt-from-crystal, or a
+            slab interface, and ``"biomolecular"`` for a protein. An explicit
+            value always wins.
         output_dir: Directory for all generated files.
         api_key, base_url, model_name: LLM credentials.
         futurehouse_api_key: Optional FutureHouse key enabling
@@ -509,7 +521,9 @@ def _run_workflow_once(
     os.makedirs(output_dir, exist_ok=True)
     # Derive the structure class from the scale when the caller didn't set one,
     # so a classical-MD run builds/validates as a condensed system rather than a
-    # crystal (issue #474). An explicit structure_class always wins.
+    # crystal (issue #474). This is only the default for the scale's typical case
+    # (liquids for MD); crystalline-solid / slab MD and biomolecular MD rely on
+    # the caller passing structure_class explicitly. An explicit value always wins.
     if structure_class is None:
         structure_class = _SCALE_STRUCTURE_CLASS.get(scale, "crystal")
 

@@ -60,6 +60,21 @@ def test_explicit_class_wins(captured, tmp_path):
     assert got == "biomolecular"
 
 
+def test_explicit_crystal_wins_for_crystalline_md(captured, tmp_path):
+    # Crystalline-solid / slab MD (which the MD scale absorbs since #432) is
+    # built as a crystal when the caller says so, not the condensed default.
+    got = _run(captured, tmp_path, scale="molecular_dynamics",
+               structure_class="crystal")
+    assert got == "crystal"
+
+
+def test_mlip_shim_derives_condensed(captured, tmp_path):
+    # The deprecated machine_learning_potentials scale is treated as an MD task,
+    # so it deliberately shares MD's condensed default (not a crystal fall-through).
+    assert _run(captured, tmp_path,
+                scale="machine_learning_potentials") == "condensed"
+
+
 def test_unknown_scale_defaults_crystal(captured, tmp_path):
     assert _run(captured, tmp_path, scale="something_new") == "crystal"
 
