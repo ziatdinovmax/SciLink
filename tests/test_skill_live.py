@@ -278,7 +278,6 @@ def test_all_analysis_agents_import_cleanly():
         "scilink.agents.exp_agents.controllers.atomistic_microscopy_controllers",
         "scilink.agents.exp_agents.controllers.hyperspectral_controllers",
         "scilink.agents.sim_agents.force_field_agent",
-        "scilink.agents.sim_agents.lammps_orchestrator",
         "scilink.agents.planning_agents.bo_agent",
         "scilink.cli.prepare_ff",
     ]

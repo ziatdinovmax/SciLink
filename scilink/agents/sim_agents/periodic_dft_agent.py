@@ -77,8 +77,8 @@ class PeriodicDFTAgent:
             Base URL for internal proxy.
 
         Software-specific project-config / deterministic-enforcement
-        layers (e.g. ``VASPProjectConfig``) are kept on the per-software
-        subclasses (e.g. ``VaspInputAgent``) so this base class stays
+        layers (e.g. ``VASPProjectConfig``) come from the engine's skill
+        bundle, selected by ``software``, so this agent stays
         software-agnostic.
         """
         self.logger = logging.getLogger(__name__)

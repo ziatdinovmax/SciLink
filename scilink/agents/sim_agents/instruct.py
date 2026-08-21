@@ -443,11 +443,10 @@ IMPORTANT: Return ONLY the raw LAMMPS script content without any markdown format
 
 
 # ── Skill graduation (sim-agents) ─────────────────────────────────────
-# Used by VaspUpdater / VaspQualityAgent (and any future sim agent) via
-# scilink/agents/sim_agents/skill_graduation.py to crystallize a recorded
-# observation into a reusable skill .md file. Mirrors the planning side's
-# PLANNING_KNOWLEDGE_TO_SKILL_INSTRUCTIONS / PLANNING_SKILL_UPDATE_INSTRUCTIONS
-# but tailored to VASP / sim-side vocabulary.
+# Used by the sim agents via scilink/agents/sim_agents/skill_graduation.py to
+# crystallize a recorded observation into a reusable skill .md file. Mirrors the
+# planning side's PLANNING_KNOWLEDGE_TO_SKILL_INSTRUCTIONS /
+# PLANNING_SKILL_UPDATE_INSTRUCTIONS but tailored to sim-side vocabulary.
 
 VASP_KNOWLEDGE_TO_SKILL_INSTRUCTIONS = """You are an expert VASP computational materials scientist. \
 Convert accumulated VASP-running knowledge into a structured skill description for downstream agents.

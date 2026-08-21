@@ -2,9 +2,9 @@
 
 Symmetric to the LAMMPS wizard in `sim_workflow.py`, but drives
 `SimulationOrchestratorAgent.run_task()` to generate VASP inputs
-(POSCAR, INCAR, KPOINTS) instead of building a self-contained run
-script around `LAMMPSOrchestrator`. Submission, monitoring, and results
-phases reuse the engine-agnostic implementations from `sim_workflow.py`.
+(POSCAR, INCAR, KPOINTS) rather than a self-contained MD run script.
+Submission, monitoring, and results phases reuse the engine-agnostic
+implementations from `sim_workflow.py`.
 """
 from __future__ import annotations
 

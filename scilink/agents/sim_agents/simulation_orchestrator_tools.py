@@ -5,8 +5,8 @@ Mirrors the shape of AnalysisOrchestratorTools — each tool is a closure
 registered via _register_tool with an OpenAI-format JSONSchema. Tools are
 dispatched from the chat loop's manual tool-call handler.
 
-Each tool wraps a piece of the existing sim_agents stack
-(StructureGenerator, StructureValidatorAgent, VaspInputAgent, etc.) and
+Each tool wraps a piece of the engine-neutral sim_agents stack
+(StructureGenerator, StructureValidatorAgent, PeriodicDFTAgent, etc.) and
 records a structure-centric session record in
 `orch.generated_structures` so subsequent tools can find prior work.
 
