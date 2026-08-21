@@ -242,9 +242,8 @@ Inputs phase
   validate_incar(incar, request)              # literature validation
   apply_incar_improvements(...)
 
-Post-run (currently orphaned in the codebase)
-  analyze_vasp_output(output_dir)             # OUTCAR / vasprun.xml summary
-  suggest_incar_fixes(log_path)               # wraps existing VaspUpdater
+Post-run
+  analyze_output(output_dir, research_goal, software)   # engine-neutral, via SimulationAnalysisAgent
 
 Pipeline shortcut
   run_complete_dft_workflow(description)      # what analyze mode exposes today
@@ -420,7 +419,7 @@ Every simulation agent fits the same loop:
    For MD-shaped runs the engine sweeps multiple phases
    (optim → equilib → production) within this single stage.
 3. **Branch on outcome**:
-   - **Engine error** → debugger (`VaspUpdater` / `LAMMPSUpdater`)
+   - **Engine error** → the engine-neutral refinement loop (`refinement.py`)
      parses the log, proposes corrected inputs, loops back to **Run**.
    - **Phase success** → quality check fires *per phase*, not just at
      the end. Pass → next phase or done. Questionable → refine and
