@@ -150,6 +150,50 @@ def test_ghost_atoms_excluded(co2_xyz):
     assert r["composition"] == {"C": 1, "O": 2}
 
 
+def test_lowercase_deck_ok(co2_xyz):
+    """NWChem element tags are case-insensitive — a lowercase deck is valid."""
+    deck = textwrap.dedent("""\
+        geometry units angstrom
+          o 0.0 0.0 0.0
+          c 0.0 0.0 1.16
+          o 0.0 0.0 2.32
+        end
+    """)
+    r = check_geometry_consistency(input_files={"m.nw": deck},
+                                   structure_file=co2_xyz)
+    assert r["status"] == "ok"
+    assert r["composition"] == {"C": 1, "O": 2}
+
+
+def test_mixed_case_element_ok(co2_xyz):
+    """`CL`, `cl`, `Cl` all normalize to the same element."""
+    deck = textwrap.dedent("""\
+        geometry units angstrom
+          O 0.0 0.0 0.0
+          C 0.0 0.0 1.16
+          o 0.0 0.0 2.32
+        end
+    """)
+    r = check_geometry_consistency(input_files={"m.nw": deck},
+                                   structure_file=co2_xyz)
+    assert r["status"] == "ok" and r["composition"] == {"C": 1, "O": 2}
+
+
+def test_unrecognized_atom_line_skipped(co2_xyz):
+    """A >=4-token line that doesn't parse as a real element -> skip, not fail."""
+    deck = textwrap.dedent("""\
+        geometry units angstrom
+          O  0.0 0.0 0.0
+          Zz 0.0 0.0 1.16
+          O  0.0 0.0 2.32
+        end
+    """)
+    r = check_geometry_consistency(input_files={"m.nw": deck},
+                                   structure_file=co2_xyz)
+    assert r["status"] == "skipped"
+    assert "unrecognized" in r["reason"]
+
+
 def test_registry_resolves_the_tool():
     from scilink.skills._shared._registry import get_tool_function
     fn = get_tool_function("check_geometry_consistency", active_skills=["nwchem"])
