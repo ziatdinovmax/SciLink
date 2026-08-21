@@ -106,9 +106,22 @@ def _probe_env_vars(env_vars: List[str], binary_names: List[str]) -> Optional[Di
 
 
 def _probe_python_modules(modules: List[str]) -> Optional[Dict[str, Any]]:
-    """Look for any of ``modules`` as importable Python packages."""
+    """Look for any of ``modules`` as importable Python packages.
+
+    ``find_spec`` does not merely return ``None`` for a missing module: probing
+    a submodule (e.g. ``fairchem.core``) imports its parent package first, so an
+    absent parent raises ``ModuleNotFoundError`` — and a broken/partial install
+    can raise other ``ImportError``s. Any such failure means "not importable
+    here", so treat it exactly like a ``None`` spec rather than letting it
+    propagate and abort detection of every other engine.
+    """
     for mod in modules:
-        spec = importlib.util.find_spec(mod)
+        try:
+            spec = importlib.util.find_spec(mod)
+        except (ImportError, ValueError):
+            # ImportError covers ModuleNotFoundError (missing parent package);
+            # ValueError guards the __spec__-is-None edge case find_spec raises.
+            spec = None
         if spec is not None:
             return {
                 "available": True,
