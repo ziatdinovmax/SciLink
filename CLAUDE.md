@@ -30,7 +30,7 @@ a new subagent class is justified only when its execution structure
 itself cannot be expressed within an existing agent. This applies
 across all three modes. For example, adding an XRD or Raman skill for 
 existing CurveFittingAgent is strongly preferred over creating two new agents
-for Ramand and XRD.
+for Raman and XRD.
 
 ## Foundation agents
 

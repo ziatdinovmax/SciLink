@@ -102,6 +102,10 @@ EXPECTED_TOOLS = {
     "apply_input_adjustments",
     "edit_file",
     "rename_file",
+    "save_file",
+    "append_file",
+    "read_file",
+    "read_document",
     "list_generated_structures",
     "analyze_output",
     "route_simulation",
@@ -114,7 +118,7 @@ EXPECTED_TOOLS = {
 
 
 def test_1_orchestrator_constructs(model_name: str):
-    """Orchestrator builds without an LLM call; all 16 tools registered."""
+    """Orchestrator builds without an LLM call; the full tool set registers."""
     with tempfile.TemporaryDirectory() as td:
         orch = _make_orch(model_name, td + "/sim")
         assert set(orch.tools.functions_map.keys()) == EXPECTED_TOOLS
@@ -263,6 +267,72 @@ def test_2b_edit_and_rename_file(model_name: str):
         assert (sd / "INCAR.bak").exists()
 
         print("   ✅ edit_file/rename_file: surgical, sandboxed, VASP-aware")
+
+
+def test_2c_generic_file_io(model_name: str):
+    """save_file / append_file / read_file / read_document — the generic
+    file surface shared with the analysis and planning orchestrators."""
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        orch = _make_orch(model_name, td + "/sim")
+        base = Path(orch.base_dir)
+
+        # save_file writes into the session dir (subfolder created on demand)
+        r = json.loads(orch.tools.execute_tool(
+            "save_file", filename="run_notes.md",
+            content="# Notes\nline1\n", subfolder="reports"))
+        assert r["status"] == "success", r
+        dest = base / "reports" / "run_notes.md"
+        assert dest.read_text() == "# Notes\nline1\n"
+
+        # append_file grows it
+        r = json.loads(orch.tools.execute_tool(
+            "append_file", filename="run_notes.md",
+            content="line2\n", subfolder="reports"))
+        assert r["status"] == "success", r
+        assert dest.read_text().endswith("line2\n")
+
+        # read_file: whole-file read for a report-stemmed file
+        r = json.loads(orch.tools.execute_tool(
+            "read_file", file_path="reports/run_notes.md"))
+        assert r["status"] == "success" and r["truncated"] is False
+        assert "line2" in r["content"]
+
+        # read_file: regex search over an extensionless VASP input
+        sd = base / "structures" / "mp"
+        sd.mkdir(parents=True, exist_ok=True)
+        (sd / "INCAR").write_text("ENCUT = 400\nNELM = 60\nISMEAR = 0\n")
+        r = json.loads(orch.tools.execute_tool(
+            "read_file", file_path=str(sd / "INCAR"), search="ENCUT"))
+        assert r["status"] == "success" and r["matches"] == 1
+        assert r["match_lines"] == [1]
+
+        # read_file: tail of a long log
+        (base / "run.log").write_text(
+            "\n".join(f"L{i}" for i in range(500)))
+        r = json.loads(orch.tools.execute_tool(
+            "read_file", file_path="run.log", tail=True, max_lines=3))
+        assert r["status"] == "success" and r["mode"] == "tail"
+
+        # read_file: JSON is pretty-printed
+        (base / "meta.json").write_text(json.dumps({"a": 1, "b": [1, 2]}))
+        r = json.loads(orch.tools.execute_tool(
+            "read_file", file_path="meta.json"))
+        assert r["status"] == "success" and '"a": 1' in r["content"]
+
+        # read_file: missing file is a structured error, not a raise
+        r = json.loads(orch.tools.execute_tool(
+            "read_file", file_path="nope.txt"))
+        assert r["status"] == "error"
+
+        # read_document: plain-text extraction into context
+        (base / "protocol.txt").write_text("methods protocol body")
+        r = json.loads(orch.tools.execute_tool(
+            "read_document", paths=["protocol.txt"]))
+        assert r["status"] == "success" and r["n_documents"] == 1
+        assert "protocol body" in r["text"]
+
+        print("   ✅ save/append/read_file/read_document: generic file I/O")
 
 
 def test_3_post_run_analysis_synthetic(model_name: str):
@@ -925,6 +995,7 @@ TARGETED_TESTS = [
     ("Orchestrator constructs",                test_1_orchestrator_constructs),
     ("Tool error paths",                       test_2_tool_error_paths),
     ("edit_file / rename_file",                test_2b_edit_and_rename_file),
+    ("Generic file I/O",                       test_2c_generic_file_io),
     ("Post-run analysis (synthetic)",          test_3_post_run_analysis_synthetic),
     ("Mode switching",                         test_4_mode_switching),
     ("run_task without LLM",                   test_5_run_task_without_llm),

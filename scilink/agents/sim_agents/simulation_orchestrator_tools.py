@@ -22,6 +22,34 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+import pandas as pd
+
+# read_document character cap — longer documents are truncated (~50k tokens).
+_READ_DOC_MAX_CHARS = 200_000
+
+
+def _extract_document_text(path: Path, ocr_model: Any = None) -> Dict[str, Any]:
+    """Extract plain text from a PDF / DOCX / Markdown / text file.
+
+    Thin wrapper over the shared ``scilink.parsers.extract_text`` (which adds
+    table-aware PDF extraction); it applies read_document's character cap.
+    When ``ocr_model`` is supplied, scanned/sparse PDF pages are transcribed
+    via the vision-OCR fallback. Returns a dict with ``text`` plus metadata
+    (page/paragraph count, ``n_chars``, ``truncated``, ``n_ocr_pages``).
+    Raises ValueError for an unsupported extension; reader errors propagate
+    to the caller.
+    """
+    from ...parsers import extract_text
+
+    info = extract_text(path, ocr_model=ocr_model)
+    text = info.get("text", "")
+    info["truncated"] = len(text) > _READ_DOC_MAX_CHARS
+    if info["truncated"]:
+        text = text[:_READ_DOC_MAX_CHARS]
+        info["text"] = text
+        info["n_chars"] = len(text)
+    return info
+
 
 class SimulationOrchestratorTools:
     """Tool registry + dispatch for SimulationOrchestratorAgent.
@@ -1587,6 +1615,524 @@ class SimulationOrchestratorTools:
                     "Copy instead of rename (default false).")},
             },
             required=["path", "new_name"],
+        )
+
+        # =====================================================================
+        # 10c. SAVE / APPEND / READ FILE — generic session-dir file I/O
+        # =====================================================================
+        # These mirror the generic file tools the analysis/planning
+        # orchestrators expose (save_file, append_file, read_file,
+        # read_document): the simulation agent can persist a report or a
+        # scratch script, read back a log/deck/config, or extract text from a
+        # provided document — the same non-domain-specific surface, without
+        # touching the domain tools (generate_structure, run_simulation, …).
+        def save_file(filename: str, content: str, subfolder: str = "") -> str:
+            """Save text content (reports, notes, small scripts) to a NEW file
+            in the session directory. Use edit_file to change an existing
+            file; use append_file to grow a large file in chunks."""
+            print(f"  ⚡ Tool: Saving file '{filename}'...")
+
+            # Sanitise: strip path separators from filename to prevent traversal.
+            safe_name = Path(filename).name
+            if not safe_name:
+                return json.dumps({
+                    "status": "error",
+                    "message": "Invalid filename.",
+                })
+
+            target_dir = Path(self.orch.base_dir)
+            if subfolder:
+                safe_sub = Path(subfolder).name
+                target_dir = target_dir / safe_sub
+            target_dir.mkdir(parents=True, exist_ok=True)
+            dest = target_dir / safe_name
+
+            try:
+                dest.write_text(content, encoding="utf-8")
+                print(f"    💾 Saved: {dest}")
+                return json.dumps({
+                    "status": "success",
+                    "path": str(dest),
+                    "size_bytes": dest.stat().st_size,
+                })
+            except Exception as e:
+                logging.error(f"save_file failed: {e}")
+                return json.dumps({
+                    "status": "error",
+                    "message": str(e),
+                })
+
+        self._register_tool(
+            func=save_file,
+            name="save_file",
+            description=(
+                "Save text content (a report, summary, notes, or a small "
+                "script you have already composed) to a NEW file in the "
+                "session directory. To change an EXISTING file, use edit_file "
+                "for a snippet swap or rename_file to change its name — those "
+                "keep the content byte-safe. Large content may not survive the "
+                "trip as a single tool-call argument — for anything long "
+                "(roughly >100 lines), save the first chunk with save_file and "
+                "the rest with append_file. Do NOT use this to hand-write "
+                "simulation inputs or structures — generate_structure, "
+                "generate_dft_inputs, and run_simulation build those."
+            ),
+            parameters={
+                "filename": {
+                    "type": "string",
+                    "description": (
+                        "Name of the file to create, e.g. 'run_notes.md', "
+                        "'energies.csv', or 'analysis.py'."
+                    ),
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The text content to write to the file.",
+                },
+                "subfolder": {
+                    "type": "string",
+                    "description": (
+                        "Optional subfolder within the session directory, "
+                        "e.g. 'reports' or 'scripts'. Created if it doesn't "
+                        "exist."
+                    ),
+                },
+            },
+            required=["filename", "content"],
+        )
+
+        def append_file(filename: str, content: str, subfolder: str = "") -> str:
+            """Append text content to a file in the session directory (created
+            if it doesn't exist). Companion to save_file for chunked writes of
+            large content."""
+            print(f"  ⚡ Tool: Appending to file '{filename}'...")
+
+            safe_name = Path(filename).name
+            if not safe_name:
+                return json.dumps({
+                    "status": "error",
+                    "message": "Invalid filename.",
+                })
+
+            target_dir = Path(self.orch.base_dir)
+            if subfolder:
+                safe_sub = Path(subfolder).name
+                target_dir = target_dir / safe_sub
+            target_dir.mkdir(parents=True, exist_ok=True)
+            dest = target_dir / safe_name
+
+            try:
+                with open(dest, "a", encoding="utf-8") as f:
+                    f.write(content)
+                print(f"    💾 Appended: {dest}")
+                return json.dumps({
+                    "status": "success",
+                    "path": str(dest),
+                    "size_bytes": dest.stat().st_size,
+                })
+            except Exception as e:
+                logging.error(f"append_file failed: {e}")
+                return json.dumps({
+                    "status": "error",
+                    "message": str(e),
+                })
+
+        self._register_tool(
+            func=append_file,
+            name="append_file",
+            description=(
+                "Append text content to a file in the session directory "
+                "(created if it doesn't exist). Use together with save_file "
+                "to write large files in chunks — save_file for the first "
+                "chunk, then append_file for each subsequent chunk — keeping "
+                "every chunk small enough to pass reliably as a tool argument."
+            ),
+            parameters={
+                "filename": {
+                    "type": "string",
+                    "description": "Name of the file to append to.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The text content to append to the file.",
+                },
+                "subfolder": {
+                    "type": "string",
+                    "description": (
+                        "Optional subfolder within the session directory, "
+                        "e.g. 'reports' or 'scripts'. Created if it doesn't "
+                        "exist."
+                    ),
+                },
+            },
+            required=["filename", "content"],
+        )
+
+        # Some files are read for their whole content, never their head (a
+        # report's sections sit in sequence, so a head-only read hides all but
+        # the first). These get the whole body up to a cap; past it the read
+        # truncates but emits the section outline so offset= reaches the rest.
+        _FULL_READ_STEMS = ("report", "summary", "literature_search")
+        _FULL_READ_MAX_CHARS = 250_000
+
+        def read_file(file_path: str, max_lines: int = 200,
+                      tail: bool = False, search: str = None,
+                      offset: int = None) -> str:
+            """Read and return the contents of a text/JSON/CSV/log file — an
+            INCAR, a POSCAR, a LAMMPS deck, an OUTCAR/log, a job script, a
+            generated report — without triggering any simulation. PDF/DOCX are
+            extracted to text. Reads from the top by default; use offset to
+            jump to the middle, tail to read the end, or search to find a
+            pattern."""
+            print(f"  ⚡ Tool: Reading file '{file_path}'...")
+
+            # Resolve path: absolute as-is, else relative to the session dir.
+            path = Path(file_path)
+            if not path.is_absolute():
+                path = Path(self.orch.base_dir) / path
+            if not path.is_file():
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Not a file: {file_path}",
+                })
+
+            try:
+                ext = path.suffix.lower()
+
+                # Size guard — skip for Excel/CSV since we cap at 100 rows × 40
+                # cols. Documents get more headroom: extraction is page-based
+                # and a figure-heavy PDF is megabytes of images, not of text.
+                if ext not in ('.xlsx', '.xls', '.csv'):
+                    size_mb = path.stat().st_size / (1024 * 1024)
+                    cap_mb = 25 if ext in ('.pdf', '.docx') else 5
+                    if size_mb > cap_mb:
+                        return json.dumps({
+                            "status": "error",
+                            "message": f"File too large ({size_mb:.1f} MB).",
+                        })
+
+                if ext == ".json":
+                    with open(path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    content = json.dumps(data, indent=2)
+                    return json.dumps({
+                        "status": "success",
+                        "file_path": str(path),
+                        "content": content,
+                    })
+
+                if ext in ('.xlsx', '.xls', '.csv'):
+                    MAX_PREVIEW_ROWS = 100
+                    MAX_PREVIEW_COLS = 40
+                    MAX_PREVIEW_CHARS = 30000
+                    if ext == '.csv':
+                        df_preview = pd.read_csv(path, nrows=MAX_PREVIEW_ROWS)
+                        with open(path) as _f:
+                            total_rows = sum(1 for _ in _f) - 1
+                    else:
+                        df_preview = pd.read_excel(path, nrows=MAX_PREVIEW_ROWS)
+                        try:
+                            import openpyxl
+                            _wb = openpyxl.load_workbook(path, read_only=True)
+                            total_rows = _wb.active.max_row - 1
+                            _wb.close()
+                        except Exception:
+                            total_rows = len(df_preview)
+                    total_cols = len(df_preview.columns)
+                    display_df = df_preview.iloc[:, :MAX_PREVIEW_COLS]
+                    preview_text = display_df.to_string()
+                    if len(preview_text) > MAX_PREVIEW_CHARS and len(display_df) > 5:
+                        ratio = MAX_PREVIEW_CHARS / len(preview_text)
+                        fewer_rows = max(5, int(len(display_df) * ratio))
+                        display_df = display_df.iloc[:fewer_rows]
+                        preview_text = display_df.to_string()
+                        if len(preview_text) > MAX_PREVIEW_CHARS:
+                            preview_text = preview_text[:MAX_PREVIEW_CHARS] + "\n... (truncated)"
+                    shown_rows = len(display_df)
+                    shown_cols = len(display_df.columns)
+                    trunc_parts = []
+                    if shown_rows < total_rows:
+                        trunc_parts.append(f"first {shown_rows} rows")
+                    if shown_cols < total_cols:
+                        trunc_parts.append(f"first {shown_cols} columns")
+                    trunc = f" (showing {', '.join(trunc_parts)})" if trunc_parts else ""
+                    content = f"Shape: {total_rows} rows × {total_cols} columns{trunc}\n\n{preview_text}"
+                    return json.dumps({
+                        "status": "success",
+                        "file_path": str(path),
+                        "content": content,
+                    })
+
+                doc_meta = {}
+                if ext in ('.pdf', '.docx'):
+                    # Opened as text a PDF returns its compressed byte streams;
+                    # route through the shared extractor instead (table-aware,
+                    # OCR fallback via the session model).
+                    from ...parsers.extract import extract_text
+                    info = extract_text(
+                        str(path), ocr_model=getattr(self.orch, "model", None))
+                    raw = info.get("text") or ""
+                    if not raw.strip():
+                        return json.dumps({
+                            "status": "error",
+                            "message": (
+                                f"No extractable text in {path.name} "
+                                "(empty or image-only document)."),
+                        })
+                    lines = raw.splitlines(keepends=True)
+                    doc_meta = {k: info[k] for k in
+                                ("n_pages", "n_ocr_pages", "n_paragraphs")
+                                if info.get(k) is not None}
+                    doc_meta["extracted"] = ext.lstrip(".")
+                else:
+                    with open(path, 'r', encoding='utf-8',
+                              errors='replace') as f:
+                        lines = f.readlines()
+                total = len(lines)
+
+                if search:
+                    # The real question behind most repeat reads is "is X in
+                    # here, and where" — a search, not a read. Answer it
+                    # directly, cheaply, however long the file is.
+                    try:
+                        rx = re.compile(search, re.I)
+                    except re.error as e:
+                        return json.dumps({
+                            "status": "error",
+                            "message": f"Invalid search pattern: {e}"})
+                    hits = [i for i, ln in enumerate(lines) if rx.search(ln)]
+                    CAP = 40
+                    shown, out = hits[:CAP], []
+                    for i in shown:
+                        lo, hi = max(0, i - 1), min(total, i + 2)
+                        out.append(f"@@ line {i + 1}\n"
+                                   + "".join(lines[lo:hi]).rstrip("\n"))
+                    body = "\n\n".join(out) if out else "(no matches)"
+                    note = (f"{len(hits)} matching line(s) in {total} total"
+                            + (f"; showing the first {CAP}" if len(hits) > CAP
+                               else ""))
+                    return json.dumps({
+                        "status": "success",
+                        "file_path": str(path),
+                        "mode": "search",
+                        "pattern": search,
+                        "matches": len(hits),
+                        "match_lines": [i + 1 for i in shown],
+                        "total_lines": total,
+                        "content": f"{note}\n\n{body}",
+                        **doc_meta,
+                    })
+
+                # A truncated read must say what it is missing and where, or the
+                # agent cannot tell a short file from a short read.
+                def _outline():
+                    heads = [(i + 1, ln.strip()) for i, ln in
+                             enumerate(lines) if ln.startswith('#')]
+                    if len(heads) < 2:
+                        return ""
+                    return "\nSections: " + " · ".join(
+                        f"{h.lstrip('# ')[:44]} @ line {n}"
+                        for n, h in heads[:12]) + (
+                        " …" if len(heads) > 12 else "")
+
+                # Files read for their whole content, not their head.
+                whole = (any(s in path.name.lower()
+                             for s in _FULL_READ_STEMS)
+                         and offset is None and not tail
+                         and len("".join(lines)) <= _FULL_READ_MAX_CHARS)
+
+                truncated = True
+                if whole or total <= max_lines:
+                    first, last, content = 1, total, "".join(lines)
+                    truncated = False
+                elif offset is not None:
+                    start = max(0, offset - 1)
+                    shown = lines[start:start + max_lines]
+                    first, last = start + 1, min(total, start + max_lines)
+                    content = "".join(shown) + (
+                        f"\n... (showing lines {first}-{last} of {total}."
+                        f"{_outline()})")
+                elif tail:
+                    shown = lines[-max_lines:]
+                    first, last = total - max_lines + 1, total
+                    more = (f"... ({first - 1} earlier lines not shown; "
+                            f"omit tail to read from the top)")
+                    content = more + "\n" + "".join(shown)
+                else:
+                    shown = lines[:max_lines]
+                    first, last = 1, max_lines
+                    content = "".join(shown) + (
+                        f"\n... ({total - max_lines} more lines not "
+                        f"shown — this is a TRUNCATED READ, not the whole "
+                        f"file. Jump to any part with offset=<line>; read "
+                        f"the END with tail=true; find something with "
+                        f"search='<pattern>'; or raise max_lines."
+                        f"{_outline()})")
+
+                return json.dumps({
+                    "status": "success",
+                    "file_path": str(path),
+                    "mode": "tail" if tail else "head",
+                    "total_lines": total,
+                    "shown_lines": f"{first}-{last}",
+                    "truncated": truncated,
+                    "content": content,
+                    **doc_meta,
+                })
+
+            except Exception as e:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Failed to read file: {e}",
+                })
+
+        self._register_tool(
+            func=read_file,
+            name="read_file",
+            description=(
+                "Read a text, JSON, CSV, or log file — an INCAR, POSCAR, "
+                "KPOINTS, a LAMMPS deck, an OUTCAR / vasprun / MD log, a job "
+                "script, or a report generated this session. PDF and Word "
+                "documents are extracted to text automatically (tables "
+                "preserved, scanned pages OCR'd). Reads from the TOP by "
+                "default. For a long file do not read it repeatedly hoping to "
+                "see more — you will get the same lines back. A truncated read "
+                "lists the section headings and their line numbers: use "
+                "offset=<line> to jump to one, search='<pattern>' to find "
+                "where something is (and whether it is there at all), or "
+                "tail=true to read the END (e.g. whether a run log ends in "
+                "success). Path is absolute or relative to the session "
+                "directory."
+            ),
+            parameters={
+                "file_path": {
+                    "type": "string",
+                    "description": "Path to the file to read.",
+                },
+                "max_lines": {
+                    "type": "integer",
+                    "description": "Maximum lines to return (default: 200).",
+                },
+                "tail": {
+                    "type": "boolean",
+                    "description": (
+                        "Read the LAST max_lines lines instead of the first. "
+                        "Use to check how a long log or file ENDS — that a run "
+                        "converged, that a file was not truncated."
+                    ),
+                },
+                "search": {
+                    "type": "string",
+                    "description": (
+                        "Case-insensitive regex. Returns every matching line "
+                        "with its line number and one line of context either "
+                        "side, plus the total match count — instead of the "
+                        "file body. The right tool for 'did this run raise an "
+                        "error', 'which lines set ENCUT', 'is NELM in here'. "
+                        "Far cheaper than reading a long file, and it answers "
+                        "presence/absence definitively."
+                    ),
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": (
+                        "1-based line to start reading from — the way to read "
+                        "the MIDDLE of a file. A truncated read lists the "
+                        "section headings with their line numbers; pass one "
+                        "here to jump straight there. Do NOT re-read from the "
+                        "top hoping to see more — you will get the same lines "
+                        "back."
+                    ),
+                },
+            },
+            required=["file_path"],
+        )
+
+        def read_document(paths) -> str:
+            """Read one or more PDF / DOCX / MD / TXT documents and return the
+            combined extracted text — a methods paper, a protocol, prior notes
+            the user provided."""
+            if isinstance(paths, str):
+                paths = [paths]
+            if not paths:
+                return json.dumps({
+                    "status": "error",
+                    "message": "No document path provided.",
+                })
+            print(f"  📄 Tool: Reading {len(paths)} document(s)...")
+            docs, errors = [], []
+            for p in paths:
+                dp = Path(p)
+                if not dp.is_absolute():
+                    dp = Path(self.orch.base_dir) / dp
+                if not dp.is_file():
+                    errors.append(f"Not a file: {p}")
+                    continue
+                try:
+                    docs.append((dp, _extract_document_text(
+                        dp, ocr_model=getattr(self.orch, "model", None))))
+                except ValueError as e:
+                    errors.append(str(e))
+                except Exception as e:
+                    logging.error(f"read_document failed for {p}: {e}")
+                    errors.append(f"Could not read {dp.name}: {e}")
+            if not docs:
+                return json.dumps({
+                    "status": "error",
+                    "message": "No documents could be read.",
+                    "errors": errors,
+                })
+            combined = "\n\n---\n\n".join(
+                f"## {dp.name}\n\n{info['text']}" for dp, info in docs
+            )
+            combined_truncated = len(combined) > _READ_DOC_MAX_CHARS
+            if combined_truncated:
+                combined = combined[:_READ_DOC_MAX_CHARS]
+            n_ocr = sum(info.get("n_ocr_pages", 0) for _, info in docs)
+            return json.dumps({
+                "status": "success",
+                "n_documents": len(docs),
+                "n_ocr_pages": n_ocr,
+                "ocr_note": (
+                    f"{n_ocr} scanned page(s) had no text layer and were "
+                    "transcribed by vision-OCR — verify any figures/numerics."
+                ) if n_ocr else None,
+                "documents": [
+                    {"name": dp.name,
+                     **{k: v for k, v in info.items() if k != "text"}}
+                    for dp, info in docs
+                ],
+                "errors": errors or None,
+                "combined_truncated": combined_truncated,
+                "text": combined,
+            })
+
+        self._register_tool(
+            func=read_document,
+            name="read_document",
+            description=(
+                "Read one or more documents the user provided — PDF, DOCX, "
+                "Markdown, or text files (a methods paper, a computational "
+                "protocol, a prior report, notes). Returns the combined "
+                "extracted text straight into context: tables are preserved "
+                "and scanned pages are OCR'd. For a handful of documents you "
+                "want to read in full. To inspect a single local file (a deck, "
+                "a log, a config) prefer read_file, which supports "
+                "offset/tail/search over long files. Pass absolute paths (or "
+                "paths relative to the session directory)."
+            ),
+            parameters={
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Path(s) to the document(s) to read (.pdf, .docx, .md, "
+                        "or .txt). Multiple documents are combined into one "
+                        "text block."
+                    ),
+                },
+            },
+            required=["paths"],
         )
 
         # =====================================================================
