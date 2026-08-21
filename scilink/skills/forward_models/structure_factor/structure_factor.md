@@ -27,7 +27,10 @@ Compute S(q) for the configuration in `DATA_FILES` and write the curve into
   either via the Debye scattering equation over pairwise distances,
   `S(q) = 1 + (1/N) Σ_{i≠j} sinc(q r_ij)`, or from the radial distribution
   function g(r) by Fourier transform using the number density from the cell
-  volume.
+  volume. Here `sinc(x)` means `sin(x)/x` (the unnormalized cardinal sine).
+  NOTE: `numpy.sinc` is the *normalized* form `sin(πx)/(πx)`, so do NOT write
+  `np.sinc(q*r)` — that shifts every peak. Use `np.sinc(q*r/np.pi)`, or write
+  `sin(q*r)/(q*r)` explicitly (guarding the `r_ij → 0` limit, which is 1).
 - Save the curve to `OUTPUT_DIR` as a two-column CSV or an `.npy` array of shape
   `(2, n_q)` (`[q, S]`), and report a `summary` with `n_points`, the q-range,
   the peak S value and the q at which it occurs, and a NaN count.
