@@ -125,6 +125,51 @@ def _openai_to_mcp_tool(schema: dict, prefix: str = "scilink") -> types.Tool:
 # status "interrupted" with a structured re-entry hint, and finished ones
 # keep answering job_status/job_result with their stored result.
 
+# ── SciLink branding for MCP clients ───────────────────────────────────
+# For a general audience it must be obvious where the client agent ends and
+# SciLink begins. Three text-surface layers (plus the server/tool `icons`
+# below, rendered as a real logo by GUI clients): the server identity, a
+# "SciLink · <Tool Name>" display title on every tool, and a marker on each
+# streamed narration line.
+
+SCILINK_MARK = "🔬 SciLink"
+_LOGO_PATH = Path(__file__).parent / "ui" / "assets" / "scilink_logo_v3_light.svg"
+
+
+def _scilink_icons():
+    """Server/tool icon list: the packaged SVG logo as a data URI. Empty
+    list when the asset is missing (source checkouts stay functional)."""
+    try:
+        import base64
+        raw = _LOGO_PATH.read_bytes()
+        uri = "data:image/svg+xml;base64," + base64.b64encode(raw).decode()
+        return [types.Icon(src=uri, mimeType="image/svg+xml")]
+    except Exception:  # noqa: BLE001 - branding must never break serving
+        return []
+
+
+def _tool_title(name: str) -> str:
+    """Display title: 'SciLink · Run Analysis' from 'scilink_run_analysis'."""
+    base = name
+    for pre in ("scilink_plan_", "scilink_"):
+        if base.startswith(pre):
+            base = base[len(pre):]
+            break
+    return "SciLink · " + base.replace("_", " ").title()
+
+
+def _brand_tools(tools):
+    """Uniform display branding on every listed tool (title + icon).
+    Tool NAMES and descriptions are untouched — they are model-facing."""
+    icons = _scilink_icons()
+    for t in tools:
+        if t.title is None:
+            t.title = _tool_title(t.name)
+        if not t.icons:
+            t.icons = icons
+    return tools
+
+
 _JOBS_STORE_NAME = "mcp_jobs.json"
 _INTERRUPTED_HINT = (
     "The server restarted while this job was in flight; its Python stack "
@@ -522,16 +567,30 @@ def _narration_enabled() -> bool:
         "0", "false", "no", "off")
 
 
-async def _to_thread_streaming(fn, *args) -> str:
+async def _to_thread_streaming(fn, *args, label: str = None) -> str:
     """Run a captured executor (signature ``fn(*args, log_lines)``) in a
     worker thread; while it runs, forward newly captured narration lines to
-    the client as info-level log notifications. Notification failures stop
-    the streaming but never affect the call."""
+    the client as info-level log notifications. Every line carries the
+    SciLink marker, bracketed by start/finish banners, so in an interleaved
+    client transcript it is obvious which output is SciLink's and which is
+    the client agent's. Notification failures stop the streaming but never
+    affect the call."""
     if not _narration_enabled():
         return await asyncio.to_thread(fn, *args, None)
     lines: list = []          # plain list: append-only, no maxlen truncation
     task = asyncio.ensure_future(asyncio.to_thread(fn, *args, lines))
     session = _MCP_SESSION.get()
+
+    async def _emit(text):
+        nonlocal session
+        if session is None:
+            return
+        try:
+            await session.send_log_message("info", text, logger="scilink")
+        except Exception:  # noqa: BLE001 - client gone / no support
+            session = None
+
+    await _emit(f"{SCILINK_MARK} ▶ {label or 'working'} …")
     sent = 0
     while True:
         done = task.done()
@@ -541,15 +600,13 @@ async def _to_thread_streaming(fn, *args) -> str:
             for line in batch:
                 if not str(line).strip():
                     continue
-                try:
-                    await session.send_log_message(
-                        "info", str(line), logger="scilink")
-                except Exception:  # noqa: BLE001 - client gone / no support
-                    session = None
+                await _emit(f"{SCILINK_MARK} │ {str(line).rstrip()}")
+                if session is None:
                     break
         if done:
             break
         await asyncio.sleep(_NARRATION_POLL_S)
+    await _emit(f"{SCILINK_MARK} ✓ {label or 'done'}")
     return task.result()
 
 
@@ -580,7 +637,24 @@ def create_server(
     """
     _require_mcp()
 
-    server = Server("scilink")
+    try:
+        from importlib.metadata import version as _pkg_version
+        _server_version = _pkg_version("scilink")
+    except Exception:  # noqa: BLE001
+        _server_version = None
+    server = Server(
+        "scilink",
+        version=_server_version,
+        instructions=(
+            "SciLink — autonomous scientific analysis, simulation and "
+            "experiment planning. Every tool here is served by SciLink's "
+            "own orchestrators and specialist agents (curve fitting, "
+            "image/hyperspectral analysis, Bayesian optimization, "
+            "planning); attribute their results to SciLink when reporting."
+        ),
+        website_url="https://github.com/ziatdinovmax/SciLink",
+        icons=_scilink_icons() or None,
+    )
 
     _ensure_headless_matplotlib()
     _load_shared_credentials()
@@ -921,7 +995,7 @@ def create_server(
                 },
             ))
 
-        return tools
+        return _brand_tools(tools)
 
     # ── tools/call ───────────────────────────────────────────────────
 
@@ -1038,7 +1112,7 @@ def create_server(
 
         result = await _to_thread_streaming(
             _execute_tool_captured, orch.tools, original_name, arguments,
-            state, None,
+            state, None, label=original_name,
         )
 
         return [types.TextContent(type="text", text=result)]
@@ -1572,7 +1646,8 @@ async def _handle_orchestrate_meta(
         )]
 
     result = await _to_thread_streaming(_execute_meta_chat_captured, orch,
-                                        prompt, autonomy_str, state, None)
+                                        prompt, autonomy_str, state, None,
+                                        label="orchestrate_meta")
     return [types.TextContent(type="text", text=result)]
 
 
@@ -1647,7 +1722,8 @@ async def _handle_orchestrate(
         )]
 
     result = await _to_thread_streaming(_execute_run_task_captured, orch,
-                                        prompt, autonomy_str, state, None)
+                                        prompt, autonomy_str, state, None,
+                                        label=tool_label)
     return [types.TextContent(type="text", text=result)]
 
 
@@ -1827,7 +1903,7 @@ async def _handle_respond(
 
         result = await _to_thread_streaming(
             _execute_tool_captured, orch.tools, action.tool_name,
-            action.kwargs, state, None,
+            action.kwargs, state, None, label=action.tool_name,
         )
         return [types.TextContent(type="text", text=result)]
 
