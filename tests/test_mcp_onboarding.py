@@ -60,7 +60,9 @@ def test_narration_streams_lines():
     finally:
         _MCP_SESSION.reset(tok)
     assert json.loads(out)["sum"] == 3
-    assert [m[1] for m in sess.msgs] == ["step 0", "step 1", "step 2"]
+    body = [m[1] for m in sess.msgs]
+    assert body[0].startswith("🔬 SciLink ▶") and body[-1].startswith("🔬 SciLink ✓")
+    assert body[1:-1] == [f"🔬 SciLink │ step {i}" for i in range(3)]
     assert all(m[0] == "info" and m[2] == "scilink" for m in sess.msgs)
 
 
@@ -92,7 +94,7 @@ def test_notification_failure_never_breaks_the_call():
     finally:
         _MCP_SESSION.reset(tok)
     assert json.loads(out)["sum"] == 11
-    assert len(sess.msgs) == 1          # stopped streaming after the failure
+    assert len(sess.msgs) == 1          # stopped streaming after the failure (banner)
 
 
 def test_print_mcp_json_forms():
@@ -112,3 +114,18 @@ def test_print_mcp_json_forms():
                        capture_output=True, text=True, env=env, timeout=120)
     e = json.loads(r.stdout)["mcpServers"]["scilink"]
     assert e == {"type": "sse", "url": "http://127.0.0.1:8123/sse"}
+
+
+def test_branding_tool_titles_and_icons():
+    from scilink.mcp_server import _brand_tools, _tool_title, _scilink_icons
+    import mcp.types as t
+    icons = _scilink_icons()
+    assert icons and icons[0].src.startswith("data:image/svg+xml;base64,")
+    tools = [t.Tool(name="scilink_run_analysis", description="d", inputSchema={"type": "object"}),
+             t.Tool(name="scilink_plan_run_optimization", description="d", inputSchema={"type": "object"}),
+             t.Tool(name="scilink_x", title="Custom", description="d", inputSchema={"type": "object"})]
+    out = _brand_tools(tools)
+    assert out[0].title == "SciLink · Run Analysis" and out[0].icons
+    assert out[1].title == "SciLink · Run Optimization"
+    assert out[2].title == "Custom"                    # explicit titles kept
+    assert _tool_title("scilink_generate_initial_plan") == "SciLink · Generate Initial Plan"
