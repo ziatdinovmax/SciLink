@@ -30,7 +30,28 @@ rather than packed here. Pack explicitly here for generic liquids / solutions / 
 3. **Explicit solvent:** classical MD uses **explicit** solvent — actually place the solvent
    molecules (unlike molecular DFT's implicit model). Add counter-ions to neutralize a charged
    solute when relevant.
-4. **Packing:** plan a non-overlapping random packing. Equilibration (NPT/NVT) is a downstream
+4. **Charge neutrality (derive the counter-ion count; never silently mutate a requested one):**
+   the box **must be net-neutral**, and each ion count follows from *charge balance* weighting
+   every ion by its valence, not from a 1:1 pairing:
+
+   > Σ (nᵢ · zᵢ) over **all** cations  =  Σ (nⱼ · |zⱼ|) over **all** anions.
+
+   A multivalent ion needs **|z| monovalent counter-ions**, and a shared counter-ion neutralizes
+   *every* cation at once — the commonest mistake is pairing it with only one species. Worked
+   example (a Na⁺ system with a Mg²⁺ salt, neutralized by hydroxide): 4 Na⁺ (+4) and 1 Mg²⁺ (+2)
+   give **+6**; with 2 Cl⁻ present (−2), the free hydroxide count must close the rest → **4 OH⁻**
+   (−4), for 4 OH⁻ + 2 Cl⁻ = −6. Two OH⁻ (a naive 1-per-Na, ignoring Mg²⁺) leaves the box at **+2**.
+
+   Apply this only to a **free counter-ion** — a species you are adding *solely* to neutralize,
+   whose count carries no independent scientific meaning. **Do not change the count of any species
+   the request pins** — a fixed concentration, a stoichiometric salt (NaCl → equal Na⁺/Cl⁻), or a
+   controlled/swept variable (e.g. the OH⁻/H⁺ that sets pH). If, after laying out every requested
+   species and deriving the free counter-ion, the signed charge sum is still non-zero — i.e. the
+   requested composition itself is charged and no free counter-ion can absorb it without altering a
+   pinned quantity — **fail the build loudly**, reporting the net charge and the offending ions.
+   Silently "fixing" it (e.g. nudging OH⁻) builds a clean box of the *wrong* system — the wrong
+   point in a pH/composition scan — which is far worse than a loud failure the caller can act on.
+5. **Packing:** plan a non-overlapping random packing. Equilibration (NPT/NVT) is a downstream
    MD step — here you only need a valid, non-overlapping start near the target density.
 
 ## Implementation
@@ -59,6 +80,14 @@ fallback for when no packing library is available.
   molecular-centre distances lets light atoms of neighbouring molecules interpenetrate. Wrap each
   molecule into the cell as a rigid unit (shift by one reference atom's image), never per-atom
   (`positions % L` applied atom-by-atom splits a molecule across the boundary).
+- **Neutrality check (compute it, fail loud if it can't be met honestly):** derive the free
+  counter-ion count from the charge-balance equation above, then, in the script, compute the
+  signed charge sum `Q = Σ nᵢ zᵢ` from the final composition *before* packing as a verification.
+  `Q` should already be 0 by construction. If `|Q| > 0`, either the free counter-ion count is
+  wrong (recompute it) or the requested composition is itself charged — in the latter case
+  **raise with a clear message** naming `Q` and the ions, and exit non-zero; do **not** paper over
+  it by nudging a requested/pinned ion (that would build the wrong system silently). A loud failure
+  is recoverable; a silently-mis-composed box is not.
 - **Cell & PBC:** set an orthorhombic/cubic `cell` and `pbc=True` sized to the target density.
 - **Output:** write engine-neutral periodic **extended XYZ** (carries the cell + PBC), e.g.
   `ase.io.write("structure.extxyz", atoms, format="extxyz")`, then print the exact

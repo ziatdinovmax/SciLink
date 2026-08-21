@@ -335,6 +335,66 @@ def test_2c_generic_file_io(model_name: str):
         print("   ✅ save/append/read_file/read_document: generic file I/O")
 
 
+def test_2d_run_simulation_reuses_prebuilt_structure(model_name: str):
+    """run_simulation threads a prebuilt structure through instead of rebuilding.
+
+    A structure_file (path or session slug) is forwarded to run_complete_workflow
+    so structure generation is skipped; a missing file is a structured error.
+    """
+    import scilink.agents.sim_agents.simulation_pipeline as sp
+    with tempfile.TemporaryDirectory() as td:
+        orch = _make_orch(model_name, td + "/sim")
+        struct = Path(td) / "prebuilt.extxyz"
+        struct.write_text('1\nLattice="5 0 0 0 5 0 0 0 5" pbc="T T T"\nH 0 0 0\n')
+
+        captured = {}
+
+        def _fake_workflow(user_request, **kwargs):
+            captured.clear()
+            captured.update(kwargs)
+            return {"final_status": "completed", "scale": kwargs.get("scale"),
+                    "engine": kwargs.get("software"), "structure_generation": {},
+                    "output_directory": kwargs.get("output_dir")}
+
+        orig = sp.run_complete_workflow
+        sp.run_complete_workflow = _fake_workflow
+        try:
+            # (a) explicit path is forwarded as structure_file
+            json.loads(orch.tools.execute_tool(
+                "run_simulation", description="MD of H",
+                scale="molecular_dynamics", software="lammps",
+                run_command="lmp -in {script}", structure_file=str(struct)))
+            assert captured.get("structure_file") == str(struct)
+
+            # (b) a session slug resolves to the recorded structure_path
+            orch.generated_structures.append(
+                {"slug": "myslug", "structure_path": str(struct)})
+            json.loads(orch.tools.execute_tool(
+                "run_simulation", description="MD of H",
+                scale="molecular_dynamics", software="lammps",
+                run_command="lmp -in {script}", structure_file="myslug"))
+            assert captured.get("structure_file") == str(struct)
+
+            # (c) omitting it leaves the workflow to build (structure_file=None)
+            json.loads(orch.tools.execute_tool(
+                "run_simulation", description="MD of H",
+                scale="molecular_dynamics", software="lammps",
+                run_command="lmp -in {script}"))
+            assert captured.get("structure_file") is None
+        finally:
+            sp.run_complete_workflow = orig
+
+        # (d) a bogus structure_file is a structured error, not a rebuild
+        r = json.loads(orch.tools.execute_tool(
+            "run_simulation", description="MD of H",
+            scale="molecular_dynamics", software="lammps",
+            run_command="lmp -in {script}",
+            structure_file="/no/such/structure.extxyz"))
+        assert r["status"] == "error" and "not found" in r["message"]
+
+        print("   ✅ run_simulation reuses a prebuilt structure (path or slug)")
+
+
 def test_3_post_run_analysis_synthetic(model_name: str):
     """The live VASP snapshot tool (skill bundle) handles synthetic run dirs.
 
@@ -996,6 +1056,7 @@ TARGETED_TESTS = [
     ("Tool error paths",                       test_2_tool_error_paths),
     ("edit_file / rename_file",                test_2b_edit_and_rename_file),
     ("Generic file I/O",                       test_2c_generic_file_io),
+    ("run_simulation reuses structure",        test_2d_run_simulation_reuses_prebuilt_structure),
     ("Post-run analysis (synthetic)",          test_3_post_run_analysis_synthetic),
     ("Mode switching",                         test_4_mode_switching),
     ("run_task without LLM",                   test_5_run_task_without_llm),
