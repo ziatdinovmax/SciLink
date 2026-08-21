@@ -410,6 +410,48 @@ def test_2d_run_simulation_reuses_prebuilt_structure(model_name: str):
         print("   ✅ run_simulation reuses an in-session structure (auto / path / slug)")
 
 
+def test_2e_run_simulation_executes_in_allocation(model_name: str):
+    """In a SLURM allocation, run_simulation runs the deck locally even with an
+    hpc_connection attached — the compute is here, so don't defer to a submit."""
+    import scilink.agents.sim_agents.simulation_pipeline as sp
+    with tempfile.TemporaryDirectory() as td:
+        orch = _make_orch(model_name, td + "/sim")
+        orch.hpc_connection = object()          # a remote connection is attached
+
+        def _fake_workflow(user_request, **kwargs):
+            return {"final_status": "completed", "scale": kwargs.get("scale"),
+                    "engine": kwargs.get("software"), "structure_generation": {},
+                    "output_directory": kwargs.get("output_dir")}
+
+        orig = sp.run_complete_workflow
+        sp.run_complete_workflow = _fake_workflow
+        saved = os.environ.get("SLURM_JOB_ID")
+        try:
+            # not in an allocation + hpc_connection -> generate only, no executor
+            os.environ.pop("SLURM_JOB_ID", None)
+            r = json.loads(orch.tools.execute_tool(
+                "run_simulation", description="MD of H",
+                scale="molecular_dynamics", software="lammps",
+                run_command="lmp -in {script}"))
+            assert r["executed"] is False
+
+            # inside a SLURM allocation -> execute locally despite hpc_connection
+            os.environ["SLURM_JOB_ID"] = "999999"
+            r = json.loads(orch.tools.execute_tool(
+                "run_simulation", description="MD of H",
+                scale="molecular_dynamics", software="lammps",
+                run_command="lmp -in {script}"))
+            assert r["executed"] is True
+        finally:
+            sp.run_complete_workflow = orig
+            if saved is None:
+                os.environ.pop("SLURM_JOB_ID", None)
+            else:
+                os.environ["SLURM_JOB_ID"] = saved
+
+        print("   ✅ run_simulation executes in-allocation even with hpc_connection")
+
+
 def test_3_post_run_analysis_synthetic(model_name: str):
     """The live VASP snapshot tool (skill bundle) handles synthetic run dirs.
 
@@ -1072,6 +1114,7 @@ TARGETED_TESTS = [
     ("edit_file / rename_file",                test_2b_edit_and_rename_file),
     ("Generic file I/O",                       test_2c_generic_file_io),
     ("run_simulation reuses structure",        test_2d_run_simulation_reuses_prebuilt_structure),
+    ("run_simulation executes in-allocation",  test_2e_run_simulation_executes_in_allocation),
     ("Post-run analysis (synthetic)",          test_3_post_run_analysis_synthetic),
     ("Mode switching",                         test_4_mode_switching),
     ("run_task without LLM",                   test_5_run_task_without_llm),

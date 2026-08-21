@@ -17,6 +17,7 @@ Tools are constructed fresh per call (StructureGenerator's per-call
 import glob
 import json
 import logging
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -972,12 +973,20 @@ class SimulationOrchestratorTools:
                 except Exception:
                     run_command = None
 
-            # 3. Executor: local when a run_command is available and no HPC
-            #    connection is attached. (HPC-submission via hpc_connection is a
-            #    follow-up; with no executor the workflow still generates +
-            #    validates inputs, it just does not run them.)
+            # 3. Executor: run locally when a run_command is available and either
+            #    no HPC connection is attached OR we are already inside a scheduler
+            #    allocation (SLURM_JOB_ID set). In-allocation the compute node IS
+            #    here, so run the deck directly (LocalExecutor -> `lmp -in ...`)
+            #    rather than deferring to a remote submit — a remote hpc_connection
+            #    otherwise leaves the ready deck unexecuted and pushes the caller
+            #    toward submit_simulation_job, which is wrong when the job is us.
+            #    (With no executor the workflow still generates + validates inputs,
+            #    it just does not run them.)
+            in_allocation = bool(os.environ.get("SLURM_JOB_ID")
+                                 or os.environ.get("SLURM_JOBID"))
             executor = None
-            if run_command and getattr(self.orch, "hpc_connection", None) is None:
+            if run_command and (getattr(self.orch, "hpc_connection", None) is None
+                                or in_allocation):
                 from .refinement import LocalExecutor
                 executor = LocalExecutor(timeout=run_timeout)
 
