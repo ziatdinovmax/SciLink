@@ -109,6 +109,7 @@ EXPECTED_TOOLS = {
     "list_generated_structures",
     "analyze_output",
     "route_simulation",
+    "list_available_software",
     # HPC tools
     "submit_simulation_job",
     "get_job_status",
@@ -333,6 +334,46 @@ def test_2c_generic_file_io(model_name: str):
         assert "protocol body" in r["text"]
 
         print("   ✅ save/append/read_file/read_document: generic file I/O")
+
+
+def test_2d_list_available_software(model_name: str):
+    """list_available_software: deterministic inventory, zero LLM calls.
+
+    'List available MLIPs' must resolve here, not misroute through
+    route_simulation's LLM call + JSON parse (which surfaced as a
+    'transient JSON-parsing error' when the model was used as an
+    inventory lookup).
+    """
+    with tempfile.TemporaryDirectory() as td:
+        orch = _make_orch(model_name, td + "/sim")
+        # orch.model is a live wrapper, but this tool must never touch it —
+        # replace it with a poison object so any LLM use raises loudly.
+        class _NoLLM:
+            def __getattr__(self, _):
+                raise AssertionError(
+                    "list_available_software must not call the LLM")
+        orch.model = _NoLLM()
+
+        # MLIP filter
+        r = json.loads(orch.tools.execute_tool(
+            "list_available_software",
+            domain="machine_learning_potentials"))
+        assert r["status"] == "ok", r
+        mlips = r["mlip_backends"]
+        assert isinstance(mlips["installed"], list)
+        assert "general" not in mlips["known"]      # strategy bundle excluded
+        # installed ⊆ known, and known partitions into installed + not_installed
+        assert set(mlips["installed"]) <= set(mlips["known"])
+        assert set(mlips["not_installed"]) == set(mlips["known"]) - set(mlips["installed"])
+
+        # No-domain call lists every populated domain
+        r = json.loads(orch.tools.execute_tool("list_available_software"))
+        assert r["status"] == "ok"
+        assert isinstance(r["installed_by_domain"], dict)
+        # only non-empty domains are reported
+        assert all(v for v in r["installed_by_domain"].values())
+
+        print("   ✅ list_available_software: deterministic, no LLM call")
 
 
 def test_3_post_run_analysis_synthetic(model_name: str):
@@ -996,6 +1037,7 @@ TARGETED_TESTS = [
     ("Tool error paths",                       test_2_tool_error_paths),
     ("edit_file / rename_file",                test_2b_edit_and_rename_file),
     ("Generic file I/O",                       test_2c_generic_file_io),
+    ("List available software",                test_2d_list_available_software),
     ("Post-run analysis (synthetic)",          test_3_post_run_analysis_synthetic),
     ("Mode switching",                         test_4_mode_switching),
     ("run_task without LLM",                   test_5_run_task_without_llm),

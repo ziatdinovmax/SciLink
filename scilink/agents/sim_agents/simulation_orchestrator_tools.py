@@ -309,6 +309,92 @@ class SimulationOrchestratorTools:
         )
 
         # =====================================================================
+        # 0b-ii. LIST AVAILABLE SOFTWARE  (deterministic inventory — no LLM)
+        # =====================================================================
+        def list_available_software(domain: str = None) -> str:
+            """List installed simulation engines and MLIP backends.
+
+            A pure inventory lookup over AvailableSoftware + skill-bundle
+            discovery — NO LLM call, so it cannot fail to parse. This is the
+            tool for 'what MLIPs / engines can I use', distinct from
+            route_simulation (which CHOOSES one for a goal via the LLM).
+            """
+            from ...utils.available_software import AvailableSoftware
+            from ...skills.loader import list_skills
+
+            try:
+                sw = AvailableSoftware.auto()
+            except Exception as exc:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Could not detect available software: {exc!r}",
+                })
+
+            # Known MLIP backends = the shipped skill bundles, minus the
+            # domain-level 'general' strategy bundle (not a runnable backend).
+            try:
+                known_mlips = sorted(
+                    b for b in list_skills(domain="machine_learning_potentials")
+                    if b != "general"
+                )
+            except Exception:
+                known_mlips = []
+            installed_mlips = sw.list_available(
+                domain="machine_learning_potentials")
+
+            if domain:
+                installed = {domain: sw.list_available(domain=domain)}
+            else:
+                installed = {d: sw.list_available(domain=d)
+                             for d in sw.domains()}
+                installed = {d: e for d, e in installed.items() if e}
+
+            return json.dumps({
+                "status": "ok",
+                "mlip_backends": {
+                    "installed": installed_mlips,
+                    "known": known_mlips,
+                    "not_installed": [b for b in known_mlips
+                                      if b not in installed_mlips],
+                },
+                "installed_by_domain": installed,
+                "hint": (
+                    "These are what's INSTALLED. To install a missing MLIP "
+                    "backend, pip-install its package (e.g. `pip install "
+                    "mace-torch`) and re-detect. Use route_simulation to pick "
+                    "an engine for a specific goal."
+                ),
+            }, indent=2)
+
+        self._register_tool(
+            func=list_available_software,
+            name="list_available_software",
+            description=(
+                "List the simulation engines and MLIP backends available in "
+                "this environment — a deterministic inventory lookup with NO "
+                "LLM call (it cannot hit a parsing error). This is the right "
+                "tool for questions like 'which MLIPs can I use', 'what "
+                "backends are installed', or 'list available engines'. It "
+                "reports installed MLIP backends (e.g. mace, chgnet, uma) "
+                "alongside the full set the code knows how to drive, plus "
+                "every installed engine per scale. Use route_simulation "
+                "instead when you need to CHOOSE an engine for a specific "
+                "goal; use THIS when you just need the inventory."
+            ),
+            parameters={
+                "domain": {
+                    "type": "string",
+                    "description": (
+                        "Optional scale to filter by, e.g. "
+                        "'machine_learning_potentials', 'periodic_dft', "
+                        "'molecular_dynamics'. Omit to list every domain."
+                    ),
+                },
+            },
+            required=[],
+        )
+
+        # =====================================================================
         # 0c. PLAN STRUCTURE  (structure_class + simulation_scale + constraints)
         # =====================================================================
         def plan_structure(description: str, system_description: str = None) -> str:
