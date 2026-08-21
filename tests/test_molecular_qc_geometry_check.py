@@ -103,6 +103,53 @@ def test_composition_is_order_independent(co2_xyz):
     assert r["status"] == "ok"
 
 
+def test_symmetry_group_skipped(co2_xyz):
+    """A non-C1 symmetry group may list only the asymmetric unit -> skip, not fail."""
+    deck = textwrap.dedent("""\
+        geometry units angstrom
+          symmetry d2h
+          O 0.0 0.0 0.0
+        end
+    """)
+    r = check_geometry_consistency(input_files={"m.nw": deck},
+                                   structure_file=co2_xyz)
+    assert r["status"] == "skipped"
+    assert "symmetry" in r["reason"]
+
+
+def test_zmatrix_skipped(co2_xyz):
+    """A Z-matrix geometry isn't a plain Cartesian list -> skip, not false-fail."""
+    deck = textwrap.dedent("""\
+        geometry
+          zmatrix
+            O
+            C 1 1.16
+            O 1 1.16 2 180.0
+          end
+        end
+    """)
+    r = check_geometry_consistency(input_files={"m.nw": deck},
+                                   structure_file=co2_xyz)
+    assert r["status"] == "skipped"
+    assert "zmatrix" in r["reason"]
+
+
+def test_ghost_atoms_excluded(co2_xyz):
+    """BSSE ghost (bq) / dummy centers are not physical atoms -> excluded, still ok."""
+    deck = textwrap.dedent("""\
+        geometry units angstrom
+          O  0.0 0.0 0.0
+          C  0.0 0.0 1.16
+          O  0.0 0.0 2.32
+          Bq 5.0 5.0 5.0
+        end
+    """)
+    r = check_geometry_consistency(input_files={"m.nw": deck},
+                                   structure_file=co2_xyz)
+    assert r["status"] == "ok"
+    assert r["composition"] == {"C": 1, "O": 2}
+
+
 def test_registry_resolves_the_tool():
     from scilink.skills._shared._registry import get_tool_function
     fn = get_tool_function("check_geometry_consistency", active_skills=["nwchem"])

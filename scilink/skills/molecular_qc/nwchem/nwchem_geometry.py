@@ -18,44 +18,68 @@ from typing import Any, Dict, List, Optional
 
 from ..._shared._spec import ToolSpec
 
-# Non-atom lines that can appear inside a `geometry` block.
+# Plain non-atom directive lines that can appear inside a `geometry` block.
 _GEOMETRY_DIRECTIVES = {
-    "units", "symmetry", "zcoord", "zmatrix", "load", "system", "adjust",
-    "autosym", "noautosym", "autoz", "noautoz", "center", "nocenter", "print",
+    "units", "autosym", "noautosym", "autoz", "noautoz", "center", "nocenter",
+    "print", "system", "adjust",
 }
+# Sub-directives whose presence means the block is NOT a plain Cartesian list we
+# can count atom-for-atom (internal coords, external/loaded coords, nested
+# blocks with their own `end`). We skip the check rather than risk a false fail.
+_NONCARTESIAN = {"zmatrix", "zcoord", "load", "constraints"}
+# NWChem placeholders that are not physical atoms (ghost / dummy centers).
+_GHOST_DUMMY = {"x", "bq"}
 _ELEMENT_RE = re.compile(r"^([A-Z][a-z]?)")
 
 
-def _parse_geometry_elements(deck: str) -> Optional[List[str]]:
-    """Element symbols from the first ``geometry ... end`` block.
+def _parse_geometry_block(deck: str) -> Optional[Dict[str, Any]]:
+    """Parse the first ``geometry ... end`` block.
 
-    Each atom line is ``<Element> <x> <y> <z>``; directive lines (``units``,
-    ``symmetry``, ``zcoord``, …) inside the block are skipped. Returns ``None``
-    when the deck has no parseable geometry block.
+    Returns ``None`` when there is no geometry block, otherwise
+    ``{"elements": [...], "reliable": bool, "note": str}``. ``reliable`` is
+    ``False`` when the block uses a form we cannot safely count atom-for-atom (a
+    Z-matrix, external/loaded coordinates, or a non-C1 symmetry group that may
+    list only the asymmetric unit) — the caller then skips instead of failing.
     """
     in_block = False
     elements: List[str] = []
     for raw in deck.splitlines():
         line = raw.split("#", 1)[0].strip()
+        toks = line.split()
         if not in_block:
-            if line.lower().startswith("geometry"):
+            if toks and toks[0].lower() == "geometry":   # whole-word match
                 in_block = True
             continue
-        low = line.lower()
-        if low == "end" or low.startswith("end "):
-            return elements
-        if not line:
+        if not toks:
             continue
-        first = line.split()[0]
-        if first.lower().rstrip(":") in _GEOMETRY_DIRECTIVES:
+        head = toks[0].lower().rstrip(":")
+        if head == "end":
+            return {"elements": elements, "reliable": True, "note": ""}
+        if head in _NONCARTESIAN:
+            return {"elements": [], "reliable": False,
+                    "note": f"geometry uses `{head}` (non-Cartesian / external "
+                            "coordinates); atom-count check skipped"}
+        if head == "symmetry":
+            grp = toks[1].lower() if len(toks) > 1 else "c1"
+            if grp not in ("c1", ""):
+                return {"elements": [], "reliable": False,
+                        "note": f"geometry declares symmetry `{grp}`; the block "
+                                "may list only the asymmetric unit — check skipped"}
             continue
-        parts = line.split()
-        if len(parts) < 4:            # an atom line needs an element + x y z
+        if head in _GEOMETRY_DIRECTIVES:
             continue
-        m = _ELEMENT_RE.match(first)  # strip tags/charges: "O1" -> "O"
-        if m:
-            elements.append(m.group(1))
-    return elements if in_block else None
+        if len(toks) < 4:                 # an atom line needs an element + x y z
+            continue
+        m = _ELEMENT_RE.match(toks[0])    # strip tags/charges: "O1" -> "O"
+        if not m:
+            continue
+        el = m.group(1)
+        if el.lower() in _GHOST_DUMMY:    # ghost/dummy: not a physical atom
+            continue
+        elements.append(el)
+    # Block opened but no explicit `end` — use what we parsed.
+    return ({"elements": elements, "reliable": True, "note": ""}
+            if in_block else None)
 
 
 def _source_elements(structure_file: str) -> Optional[List[str]]:
@@ -79,16 +103,19 @@ def check_geometry_consistency(*, input_files: Dict[str, str],
       * ``skipped``  — no parseable geometry block, or the structure file can't
                        be read (never block on an inapplicable case).
     """
-    deck_elems: Optional[List[str]] = None
+    parsed: Optional[Dict[str, Any]] = None
     for content in (input_files or {}).values():
         if isinstance(content, str):
-            parsed = _parse_geometry_elements(content)
-            if parsed is not None:
-                deck_elems = parsed
+            block = _parse_geometry_block(content)
+            if block is not None:
+                parsed = block
                 break
-    if deck_elems is None:
+    if parsed is None:
         return {"status": "skipped",
                 "reason": "no parseable `geometry` block in the deck"}
+    if not parsed["reliable"]:
+        return {"status": "skipped", "reason": parsed["note"]}
+    deck_elems = parsed["elements"]
 
     src_elems = _source_elements(structure_file)
     if src_elems is None:
