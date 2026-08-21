@@ -890,10 +890,37 @@ class SimulationOrchestratorTools:
         def run_simulation(description: str, run_command: str = None,
                            scale: str = None, software: str = None,
                            structure_class: str = None,
+                           structure_file: str = None,
                            max_refinement_cycles: int = 4,
                            max_run_cycles: int = 3,
                            run_timeout: int = 3600) -> str:
             from .simulation_pipeline import run_complete_workflow
+
+            # Reuse an already-built structure instead of rebuilding it. If a
+            # prior generate_structure produced a structure for this condition,
+            # pass its `structure_path` here (the caller may give a path or the
+            # slug of a session-generated structure) — the workflow then skips
+            # structure generation entirely. This avoids the duplicated build
+            # (and the divergent workdir slugs) when the orchestrator runs
+            # generate_structure before run_simulation.
+            if structure_file and not Path(structure_file).is_file():
+                match = next(
+                    (s for s in (self.orch.generated_structures or [])
+                     if s.get("slug") == structure_file
+                     or s.get("structure_path") == structure_file),
+                    None,
+                )
+                if match:
+                    structure_file = match.get("structure_path")
+            if structure_file and not Path(structure_file).is_file():
+                return json.dumps({
+                    "status": "error",
+                    "message": (
+                        f"structure_file {structure_file!r} not found. Pass the "
+                        "structure_path returned by generate_structure, or omit it "
+                        "to build the structure in this call."
+                    ),
+                })
 
             # 1. Route (scale, engine) if not supplied — reuse a prior routing
             #    decision so we don't re-route every call. Engine-neutral: any
@@ -940,6 +967,7 @@ class SimulationOrchestratorTools:
                     description,
                     scale=scale, software=software,
                     structure_class=structure_class,
+                    structure_file=structure_file,
                     output_dir=str(workdir),
                     api_key=self.orch.api_key, base_url=self.orch.base_url,
                     model_name=self.orch.model_name,
@@ -1041,6 +1069,17 @@ class SimulationOrchestratorTools:
                         "melting Cu, Li diffusion in LiCoO2, water on a TiO2 slab); "
                         "'biomolecular' for a protein. periodic_dft derives "
                         "'crystal', molecular_qc derives 'molecular'."
+                    ),
+                },
+                "structure_file": {
+                    "type": "string",
+                    "description": (
+                        "Optional path (or session slug) of an already-built "
+                        "structure to REUSE. If you already ran generate_structure "
+                        "for this system, pass the structure_path it returned here "
+                        "so the simulation skips rebuilding it — this avoids a "
+                        "duplicated structure build. Omit to build the structure "
+                        "as part of this call."
                     ),
                 },
                 "max_run_cycles": {
