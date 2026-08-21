@@ -111,6 +111,27 @@ def _build_prompt(guidance: str, species, n_atoms: int, research_goal: str) -> s
     )
 
 
+def _available_families(available_software) -> set:
+    """Potential families that can actually run, from installed software.
+
+    Classical FF runs through a classical MD engine; an MLIP runs through ASE
+    or its own backend. Returns the empty set when availability can't be probed
+    (the choice is then left unconstrained). See issue #429.
+    """
+    try:
+        from ...utils.available_software import AvailableSoftware
+        sw = available_software or AvailableSoftware.auto()
+        fams = set()
+        if sw.list_available(domain="molecular_dynamics"):
+            fams.add("force_field")
+        if sw.list_available(domain="machine_learning_potentials"):
+            fams.add("mlip")
+        return fams
+    except Exception as exc:
+        logger.debug("could not determine available potential families: %r", exc)
+        return set()
+
+
 def select_potential_family(
     *,
     structure_file: str,
@@ -119,17 +140,37 @@ def select_potential_family(
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
     force_field_files: Optional[Dict[str, str]] = None,
+    available_software: Any = None,
 ) -> Dict[str, Any]:
     """Decide classical-FF vs MLIP for a molecular-dynamics task.
 
-    Returns ``{"family": "force_field"|"mlip", "reasoning": str,
-    "source": "forced"|"llm"|"fallback"}``. A caller that supplied
-    ``force_field_files`` has already chosen classical, so no LLM call is made.
+    Returns ``{"family": "force_field"|"mlip", "reasoning": str, "source": ...}``.
+    The family is constrained to what is installed (``available_software``, or
+    ``AvailableSoftware.auto()`` when None): a caller that supplied
+    ``force_field_files`` has already chosen classical; when only one family is
+    installed the decision is forced with no LLM call; otherwise the model
+    chooses and its pick (and the fallback) are clamped to installed families,
+    so an MLIP is never selected without an MLIP backend present (issue #429).
     """
     if force_field_files:
         return {"family": "force_field",
                 "reasoning": "caller supplied force-field files",
                 "source": "forced"}
+
+    # Availability gate: a family that isn't installed can't run.
+    available = _available_families(available_software)
+    if len(available) == 1:
+        fam = next(iter(available))
+        logger.info("only the %s potential family is installed; selecting it "
+                    "without an LLM call", fam)
+        return {"family": fam,
+                "reasoning": f"only the {fam} family is installed",
+                "source": "forced-availability"}
+
+    def _fallback_family(reason: str) -> Dict[str, Any]:
+        # Prefer an installed family; the MLIP degrades most gracefully.
+        fam = "mlip" if (not available or "mlip" in available) else "force_field"
+        return {"family": fam, "reasoning": reason, "source": "fallback"}
 
     species, n_atoms = _species_from_structure(structure_file)
     try:
@@ -149,25 +190,23 @@ def select_potential_family(
         text = getattr(response, "text", None) or str(response)
         decision = _parse_decision(text)
     except Exception as exc:
-        logger.warning(
-            "potential selection failed (%r); defaulting to %s",
-            exc, _FALLBACK_FAMILY,
-        )
-        return {"family": _FALLBACK_FAMILY,
-                "reasoning": f"selection failed, defaulted to "
-                             f"{_FALLBACK_FAMILY}: {exc!r}",
-                "source": "fallback"}
+        logger.warning("potential selection failed (%r); falling back", exc)
+        return _fallback_family(f"selection failed: {exc!r}")
 
     family = decision.get("family")
     if family not in _FAMILIES:
-        logger.warning(
-            "potential selection returned invalid family %r; defaulting to %s",
-            family, _FALLBACK_FAMILY,
-        )
-        return {"family": _FALLBACK_FAMILY,
-                "reasoning": f"invalid family {family!r}, defaulted to "
-                             f"{_FALLBACK_FAMILY}",
-                "source": "fallback"}
+        logger.warning("potential selection returned invalid family %r; "
+                       "falling back", family)
+        return _fallback_family(f"invalid family {family!r}")
+
+    if available and family not in available:
+        fam = next(iter(available))
+        logger.info("model chose %s but only %s is installed; using %s",
+                    family, sorted(available), fam)
+        return {"family": fam,
+                "reasoning": f"model chose {family}, constrained to installed "
+                             f"{fam}: {decision.get('reasoning', '')}",
+                "source": "constrained"}
 
     return {"family": family,
             "reasoning": decision.get("reasoning", ""),

@@ -193,11 +193,20 @@ class SimulationRouter:
             engines are omitted.
         """
         scale_agents = discover_scale_agents()
+        mlip_backends = self.available_software.list_available(
+            domain="machine_learning_potentials")
         out: Dict[str, List[str]] = {}
         for scale, info in scale_agents.items():
             agent_supports = set(info.get("supported", []))
             user_has = set(self.available_software.list_available(domain=scale))
             intersection = sorted(agent_supports & user_has)
+            if scale == "molecular_dynamics" and not intersection and mlip_backends:
+                # The MD scale can be served by an MLIP through the ASE runner,
+                # which needs no classical MD engine — so keep it routable for
+                # the MLIP-only audience (e.g. pip ``mace-torch``, no LAMMPS).
+                # The potential-selection step picks the MLIP family and the
+                # pipeline runs it via ASE (issue #429, availability gate).
+                intersection = ["ase"]
             if intersection:
                 out[scale] = intersection
         return out
