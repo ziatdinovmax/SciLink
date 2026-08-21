@@ -19,6 +19,7 @@ skill loader, and ``ScriptExecutor``).
 from __future__ import annotations
 
 import json
+import os
 import re
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -37,6 +38,12 @@ _STANDARD_PACKAGES = (
     "numpy", "scipy", "pandas", "matplotlib", "json", "math", "os", "sys",
     "re", "pathlib", "collections", "itertools", "MDAnalysis", "ase",
 )
+
+# The output-type vocabulary a skill's ``output:`` frontmatter may name. A
+# ``scalar`` prints value/units; the rest hand back a written artifact. An
+# off-vocabulary value is treated as non-scalar but warned about (a typo would
+# otherwise flow silently into the codegen prompt).
+_OUTPUT_TYPES = frozenset({"scalar", "curve", "image", "datacube"})
 
 
 class BaseAnalysisAgent(ABC):
@@ -170,6 +177,7 @@ class BaseAnalysisAgent(ABC):
         recipe: str = "",
         packages: Optional[List[str]] = None,
         verify: bool = True,
+        output_type: str = "scalar",
     ) -> Dict[str, Any]:
         """Compute one property from ``data_files`` via verified codegen.
 
@@ -192,17 +200,23 @@ class BaseAnalysisAgent(ABC):
             returned a value, else ``"error"`` with a ``message``.
         """
         pkgs = packages or list(_STANDARD_PACKAGES)
+        if output_type not in _OUTPUT_TYPES:
+            self.logger.warning(
+                "output_type %r is not one of %s; treating it as a non-scalar "
+                "artifact output. Check the skill's `output:` frontmatter.",
+                output_type, sorted(_OUTPUT_TYPES))
         # Inject the inputs the generated body references as globals, so it needs
         # no hardcoded paths and stays engine-neutral.
         preamble = (
             f"DATA_FILES = {json.dumps(data_files)}\n"
             f"OUTPUT_DIR = {json.dumps(str(self.output_dir))}\n\n"
         )
-        code = self._generate_code(task, data_files, recipe, pkgs)
+        code = self._generate_code(task, data_files, recipe, pkgs, output_type)
         error_info: Dict[str, Any] = {}
         for attempt in range(self.max_refinement_attempts + 1):
             if attempt > 0:
-                code = self._refine_code(code, error_info, task, recipe, pkgs)
+                code = self._refine_code(code, error_info, task, recipe, pkgs,
+                                         output_type)
             result = self._execute_script(preamble + code, task)
             if result.get("ok"):
                 # The script ran and produced its answer (success OR an honest
@@ -210,19 +224,43 @@ class BaseAnalysisAgent(ABC):
                 # honest error with success.
                 out = {k: v for k, v in result.items() if k != "ok"}
                 out["attempts"] = attempt + 1
+                # Non-scalar outputs (curve/image/datacube) hand back a file; the
+                # script writes it into OUTPUT_DIR and references it. Resolve and
+                # require it. A success with no artifact on disk is a fixable
+                # codegen slip — feed the refine loop and retry (like a
+                # missing-JSON result), not a terminal error.
+                if output_type != "scalar" and out.get("status") == "success":
+                    artifact = self._resolve_artifact(out.get("artifact"))
+                    if artifact is None:
+                        error_info = {
+                            "message": ("reported success but wrote no readable "
+                                        f"artifact for output_type {output_type!r}"),
+                            "concise_error": "success without artifact on disk"}
+                        continue
+                    out["artifact"] = artifact
+                    out["output_type"] = output_type
                 if (verify and out.get("status") == "success"
-                        and result.get("value") is not None):
-                    out["verification"] = self._verify_result(task, result)
+                        and (out.get("value") is not None or out.get("artifact"))):
+                    out["verification"] = self._verify_result(
+                        task, out, output_type)
                 return out
             error_info = result
         return {"status": "error", "message": error_info.get("message", "unknown"),
                 "attempts": self.max_refinement_attempts + 1}
 
     def _generate_code(self, task: str, data_files: Dict[str, str],
-                       recipe: str, packages: List[str]) -> str:
-        """Generate a self-contained analysis script for ``task``."""
+                       recipe: str, packages: List[str],
+                       output_type: str = "scalar") -> str:
+        """Generate a self-contained analysis script for ``task``.
+
+        ``output_type`` selects the output contract the script must satisfy: a
+        ``scalar`` prints ``value``/``units``; a ``curve``/``image``/``datacube``
+        writes the artifact into ``OUTPUT_DIR`` and returns a reference plus
+        summary statistics the verification gate can judge.
+        """
         files_desc = "\n".join(f"  - {name}: {path}"
                                for name, path in data_files.items())
+        output_contract = self._output_contract(output_type)
         prompt = (
             "You are a scientific data-analysis engineer. Write a complete, "
             "self-contained Python script that computes the requested property "
@@ -236,25 +274,60 @@ class BaseAnalysisAgent(ABC):
             "- `DATA_FILES` (dict name->path) and `OUTPUT_DIR` (str) are ALREADY "
             "defined as globals at runtime — reference them directly; do NOT "
             "import, redefine, guard, or reassign them. Read inputs from "
-            "DATA_FILES; write any figures into OUTPUT_DIR.\n"
-            "- Compute the property and print EXACTLY ONE JSON object as the last "
-            'stdout line: {"status": "success", "value": <number>, "units": '
-            '<str>, ...} — or {"status": "error", "message": <str>} if it cannot '
-            "be computed.\n"
-            "- Handle missing/short data gracefully; never hang or prompt.\n\n"
+            "DATA_FILES; write any files into OUTPUT_DIR.\n"
+            + output_contract
+            + "- Handle missing/short data gracefully; never hang or prompt.\n\n"
             "Return ONLY the Python code, no markdown."
         )
         return self._clean_code(self._llm(prompt))
 
+    @staticmethod
+    def _output_contract(output_type: str) -> str:
+        """The output contract clause for ``output_type``.
+
+        Shared by :meth:`_generate_code` and :meth:`_refine_code` so the
+        non-scalar artifact contract reaches BOTH the first attempt and every
+        retry — the "success without artifact" error deliberately routes into the
+        refine loop, so the retry that exists to fix a contract violation must
+        itself state the contract.
+        """
+        if output_type == "scalar":
+            return (
+                "- Compute the property and print EXACTLY ONE JSON object as the "
+                'last stdout line: {"status": "success", "value": <number>, '
+                '"units": <str>, ...} — or {"status": "error", "message": <str>} '
+                "if it cannot be computed.\n"
+            )
+        return (
+            f"- This is a {output_type} observable. WRITE the computed "
+            f"{output_type} into OUTPUT_DIR (a .npy or .csv for a curve or "
+            "datacube; a .png for an image), then print EXACTLY ONE JSON "
+            'object as the last stdout line: {"status": "success", '
+            f'"output_type": "{output_type}", "artifact": {{"path": '
+            '"<file you wrote under OUTPUT_DIR>", "format": "<npy|csv|png>", '
+            '"shape": [...]}, "summary": {<a few SCALAR summary statistics so '
+            "the result can be judged — e.g. n_points, x/y ranges, peak "
+            'value, NaN count>}} — or {"status": "error", "message": <str>} '
+            "if it cannot be computed.\n"
+        )
+
     def _refine_code(self, code: str, error_info: Dict[str, Any], task: str,
-                     recipe: str, packages: List[str]) -> str:
-        """Regenerate a failed script from its error."""
+                     recipe: str, packages: List[str],
+                     output_type: str = "scalar") -> str:
+        """Regenerate a failed script from its error.
+
+        The output contract is restated here for the same ``output_type`` as the
+        first attempt: the artifact-contract retry ("success without artifact")
+        is routed through this path, so the fix prompt must carry the contract it
+        is meant to enforce rather than the scalar default.
+        """
         err = error_info.get("concise_error") or error_info.get("message", "")
         prompt = (
             "The following analysis script failed. Fix it and return the full "
-            "corrected script (same contract: use globals DATA_FILES / OUTPUT_DIR, "
-            "print one JSON object on the last stdout line).\n\n"
-            f"TASK: {task}\n\n"
+            "corrected script. Use globals DATA_FILES / OUTPUT_DIR (already "
+            "defined; do not redefine). It MUST satisfy this output contract:\n"
+            + self._output_contract(output_type)
+            + f"\nTASK: {task}\n\n"
             + (f"RECIPE:\n{recipe}\n\n" if recipe else "")
             + f"ERROR:\n{err}\n\nSCRIPT:\n{code}\n\n"
             f"Import only from: {', '.join(packages)}. Return ONLY the code."
@@ -328,30 +401,161 @@ class BaseAnalysisAgent(ABC):
                 continue
         return None
 
-    def _verify_result(self, task: str, result: Dict[str, Any]) -> Dict[str, Any]:
-        """LLM plausibility gate on a computed value (the exp-agent-style check).
+    def _resolve_artifact(self, artifact: Any) -> Optional[Dict[str, Any]]:
+        """Validate a non-scalar artifact reference and absolutize its path.
 
-        Returns ``{"plausible": bool, "reasoning": str}``. Errs toward accepting
-        when unsure — it flags clearly-wrong magnitudes, it is not a second
-        physics reviewer. A failure to parse is treated as non-blocking.
+        Returns the artifact dict with an absolute, existing ``path`` (resolved
+        against ``OUTPUT_DIR`` when relative), or ``None`` when the script did not
+        actually write the artifact it claimed. ``None`` is returned when:
+
+        * the reference is malformed or names no path;
+        * the resolved real path is not contained in ``OUTPUT_DIR`` — a script
+          must not pass off an input file (e.g. the trajectory it read) as its
+          output; only files it wrote into ``OUTPUT_DIR`` count;
+        * the file does not exist; or
+        * the file cannot be read back as its declared format — a plain-text
+          file claimed as ``npy`` with a fabricated shape is a lie the summary
+          gate cannot see, so it is caught here deterministically.
+
+        On success the artifact carries a ``measured`` block with facts read
+        from the file itself (shape / NaN count / image size), so the
+        verification gate judges MEASURED statistics, not the script's
+        self-reported ones. The declared ``shape`` is overwritten with the
+        measured shape when one is available.
         """
-        details = {
-            k: v for k, v in result.items()
-            if k not in ("code_path", "ok", "status", "attempts",
-                         "verification", "raw_output")
-            and isinstance(v, (int, float, str, bool))
-        }
-        prompt = (
-            "A simulation-analysis script computed a property. Judge whether the "
-            "result is physically plausible AND adequately converged — take the "
-            "reported diagnostic/convergence fields into account: a "
-            "`plateau_reached` / `linear_regime` / `converged`-style flag that is "
-            "false means the value is NOT trustworthy and must NOT be judged "
-            "plausible on magnitude alone. Respond with JSON: "
-            '{"plausible": true|false, "reasoning": "<one sentence>"}.\n\n'
-            f"TASK: {task}\n"
-            f"RESULT FIELDS: {json.dumps(details, default=str)}\n"
-        )
+        if not isinstance(artifact, dict) or not artifact.get("path"):
+            return None
+        p = Path(artifact["path"])
+        if not p.is_absolute():
+            p = self.output_dir / p
+        # Containment: the resolved real path must live under OUTPUT_DIR. realpath
+        # on both sides so a symlink cannot escape the output tree.
+        out_root = os.path.realpath(str(self.output_dir))
+        real = os.path.realpath(str(p))
+        try:
+            if os.path.commonpath([out_root, real]) != out_root:
+                return None
+        except ValueError:      # different drives / mixed path kinds -> not contained
+            return None
+        if not os.path.exists(real):
+            return None
+        measured = self._measure_artifact(real, artifact.get("format"))
+        if measured is None:
+            # Declared a structured format we could not read back -> a format /
+            # shape lie; reject so the refine loop retries.
+            return None
+        resolved = dict(artifact)
+        resolved["path"] = str(real)
+        resolved["measured"] = measured
+        if measured.get("shape") is not None:
+            resolved["shape"] = measured["shape"]
+        return resolved
+
+    def _measure_artifact(self, path: str,
+                          fmt: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Deterministically read a written artifact and return measured facts.
+
+        Returns a dict of facts read from the file (``shape``, ``nan_count``,
+        ``image_size``), or ``None`` when a declared structured format
+        (``npy`` / ``csv`` / ``png``) cannot be read back — the signal of a
+        fabricated artifact. An unknown/blank format is not a lie (existence was
+        already checked): it returns a minimal fact dict rather than failing.
+        """
+        fmt = (fmt or "").lower()
+        try:
+            if fmt == "npy":
+                import numpy as np
+                arr = np.load(path, allow_pickle=False)
+                nan = int(np.isnan(arr).sum()) if arr.dtype.kind == "f" else 0
+                return {"format": "npy", "shape": list(arr.shape),
+                        "nan_count": nan}
+            if fmt == "csv":
+                import numpy as np
+                arr = np.atleast_2d(np.genfromtxt(path, delimiter=","))
+                return {"format": "csv", "shape": list(arr.shape),
+                        "nan_count": int(np.isnan(arr).sum())}
+            if fmt == "png":
+                size = self._png_size(path)
+                if size is None:
+                    return None
+                return {"format": "png", "image_size": list(size)}
+        except Exception:
+            return None
+        return {"format": fmt or None}
+
+    @staticmethod
+    def _png_size(path: str) -> Optional[tuple]:
+        """(width, height) from a PNG's IHDR header, or None if it isn't a PNG.
+
+        Header-only and dependency-free, so a non-PNG claimed as ``png`` is
+        caught without requiring an image library.
+        """
+        try:
+            with open(path, "rb") as f:
+                header = f.read(24)
+            if len(header) < 24 or header[:8] != b"\x89PNG\r\n\x1a\n":
+                return None
+            if header[12:16] != b"IHDR":
+                return None
+            width = int.from_bytes(header[16:20], "big")
+            height = int.from_bytes(header[20:24], "big")
+            return (width, height)
+        except Exception:
+            return None
+
+    def _verify_result(self, task: str, result: Dict[str, Any],
+                       output_type: str = "scalar") -> Dict[str, Any]:
+        """LLM plausibility gate on a computed result (the exp-agent-style check).
+
+        For a scalar it judges the value (+ convergence flags); for a
+        curve/image/datacube it judges the artifact's summary statistics and
+        shape. Returns ``{"plausible": bool, "reasoning": str}``, erring toward
+        accepting when unsure — it flags clearly-wrong results, it is not a
+        second physics reviewer. A failure to parse is non-blocking.
+        """
+        if output_type == "scalar":
+            details = {
+                k: v for k, v in result.items()
+                if k not in ("code_path", "ok", "status", "attempts",
+                             "verification", "raw_output", "artifact")
+                and isinstance(v, (int, float, str, bool))
+            }
+            prompt = (
+                "A simulation-analysis script computed a property. Judge whether "
+                "the result is physically plausible AND adequately converged — "
+                "take the reported diagnostic/convergence fields into account: a "
+                "`plateau_reached` / `linear_regime` / `converged`-style flag that "
+                "is false means the value is NOT trustworthy and must NOT be "
+                "judged plausible on magnitude alone. Respond with JSON: "
+                '{"plausible": true|false, "reasoning": "<one sentence>"}.\n\n'
+                f"TASK: {task}\n"
+                f"RESULT FIELDS: {json.dumps(details, default=str)}\n"
+            )
+        else:
+            artifact = result.get("artifact") or {}
+            measured = artifact.get("measured") or {}
+            details = {
+                "output_type": output_type,
+                # Facts read from the file itself take precedence over the
+                # script's self-reported summary/shape (those can be fabricated).
+                "measured": measured,
+                "artifact_shape": measured.get("shape", artifact.get("shape")),
+                "artifact_format": artifact.get("format"),
+                "reported_summary": result.get("summary") or {},
+            }
+            prompt = (
+                f"A forward-model script produced a {output_type} observable "
+                "(saved to a file). The `measured` fields were read back from the "
+                "file itself (deterministically) and take precedence over the "
+                "script's self-reported summary. Judge whether the measured shape "
+                "and statistics are physically plausible for the task — e.g. a "
+                "spectrum/curve spans a sensible number of points with no NaNs; an "
+                "image has non-degenerate dimensions. This is a sanity gate, not a "
+                "second physics review. Respond with JSON: "
+                '{"plausible": true|false, "reasoning": "<one sentence>"}.\n\n'
+                f"TASK: {task}\n"
+                f"RESULT: {json.dumps(details, default=str)}\n"
+            )
         parsed = self._extract_json(self._llm(prompt))
         if not parsed or "plausible" not in parsed:
             return {"plausible": True, "reasoning": "verification unavailable"}

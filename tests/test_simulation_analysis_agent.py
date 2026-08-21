@@ -126,6 +126,34 @@ class TestRealSkills:
         # a thermo-only run: viscosity eligible, T1 not
         assert elig({"thermo_log"}) & targets == {"viscosity_greenkubo"}
 
+    def test_forward_model_domain_served(self, agent):
+        """The forward_models domain is served by the same agent + gated identically."""
+        cat = agent._skill_catalog()
+        sf = [c for c in cat if c["name"] == "structure_factor"]
+        assert sf, "structure_factor (forward_models) skill not discovered"
+        meta = sf[0]["meta"]
+        assert meta["computes"] == ["structure_factor"]
+        assert meta["requires"] == ["trajectory"]
+        assert meta.get("output") == "curve"           # routes compute_property
+        elig = lambda kinds: {c["name"] for c in agent.eligible_skills(kinds, catalog=cat)}
+        assert "structure_factor" in elig({"trajectory"})
+        assert "structure_factor" not in elig({"thermo_log"})
+
+    def test_run_analysis_threads_output_type(self, agent, tmp_path, monkeypatch):
+        """A curve skill's `output:` frontmatter reaches compute_property."""
+        (tmp_path / "prod.lammpstrj").write_text("x")   # a trajectory data kind
+        curve_skill = {"name": "structure_factor", "implementation": "recipe",
+                       "meta": {"computes": ["structure_factor"],
+                                "requires": ["trajectory"], "output": "curve"}}
+        monkeypatch.setattr(agent, "_skill_catalog", lambda: [curve_skill])
+        monkeypatch.setattr(agent, "_select_properties", lambda goal, elig: elig)
+        captured = {}
+        monkeypatch.setattr(
+            agent, "compute_property",
+            lambda **kw: captured.update(kw) or {"status": "success"})
+        agent.run_analysis("compute S(q)", run_dir=str(tmp_path))
+        assert captured.get("output_type") == "curve"
+
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
