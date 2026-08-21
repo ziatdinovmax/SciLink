@@ -922,6 +922,29 @@ class SimulationOrchestratorTools:
                     ),
                 })
 
+            # No structure supplied: reuse the most-recent structure this session
+            # already built rather than rebuilding it in a fresh dir. Rebuilding
+            # both duplicates work AND can diverge or fail — leaving an empty,
+            # differently-slugged workdir with no run output that the caller then
+            # retries forever (the #4 double-build loop). Reuse is silent-safe: it
+            # is announced in the result, and the caller can force a specific
+            # structure with structure_file. Records are appended only when a
+            # structure was actually written, so a prior empty/failed run is never
+            # picked up here.
+            reused_from = None
+            reused_dir = None
+            if structure_file is None:
+                prior = next(
+                    (s for s in reversed(self.orch.generated_structures or [])
+                     if s.get("structure_path")
+                     and Path(s["structure_path"]).is_file()),
+                    None,
+                )
+                if prior:
+                    structure_file = prior["structure_path"]
+                    reused_from = prior.get("slug")
+                    reused_dir = prior.get("structure_dir")
+
             # 1. Route (scale, engine) if not supplied — reuse a prior routing
             #    decision so we don't re-route every call. Engine-neutral: any
             #    engine the router picks flows through run_complete_workflow.
@@ -958,8 +981,11 @@ class SimulationOrchestratorTools:
                 from .refinement import LocalExecutor
                 executor = LocalExecutor(timeout=run_timeout)
 
+            # Run in the reused structure's own dir so the run output lands next
+            # to the structure/deck already there; otherwise a fresh slug dir.
             slug = self._make_slug(description)
-            workdir = self.orch.structures_dir / slug
+            workdir = (Path(reused_dir) if reused_dir
+                       else self.orch.structures_dir / slug)
             workdir.mkdir(parents=True, exist_ok=True)
 
             try:
@@ -989,7 +1015,9 @@ class SimulationOrchestratorTools:
                 structure_gen.get("final_structure_path")
                 or (workdir / "structure.extxyz")
             )
-            if structure_path.exists():
+            # Record the structure only when this call actually built one; on
+            # reuse it is already in the session, so don't duplicate it.
+            if structure_path.exists() and reused_from is None:
                 self.orch.generated_structures.append({
                     "slug": slug, "description": description,
                     "structure_dir": str(workdir),
@@ -1000,19 +1028,28 @@ class SimulationOrchestratorTools:
 
             refinement = result.get("refinement") or {}
             executed = executor is not None
+            notes = []
+            if reused_from is not None:
+                notes.append(
+                    f"Reused the structure already built this session "
+                    f"('{reused_from}') instead of rebuilding; ran in its dir. "
+                    "Pass structure_file to force a different one."
+                )
+            if not executed:
+                notes.append(
+                    "No run_command available (no engine binary on PATH and none "
+                    "supplied) — generated and validated inputs only, did NOT "
+                    "run. Pass run_command to execute."
+                )
             return json.dumps({
                 "status": final_status if final_status else "error",
                 "scale": scale, "engine": software,
                 "executed": executed,
+                "reused_structure": reused_from,
                 "run_command_source": rc_source,
                 "refinement_status": refinement.get("status"),
                 "output_directory": str(workdir),
-                "note": (
-                    None if executed else
-                    "No run_command available (no engine binary on PATH and none "
-                    "supplied) — generated and validated inputs only, did NOT "
-                    "run. Pass run_command to execute."
-                ),
+                "note": " ".join(notes) if notes else None,
             })
 
         self._register_tool(
@@ -1075,11 +1112,14 @@ class SimulationOrchestratorTools:
                     "type": "string",
                     "description": (
                         "Optional path (or session slug) of an already-built "
-                        "structure to REUSE. If you already ran generate_structure "
-                        "for this system, pass the structure_path it returned here "
-                        "so the simulation skips rebuilding it — this avoids a "
-                        "duplicated structure build. Omit to build the structure "
-                        "as part of this call."
+                        "structure to REUSE. Omitting it is usually fine: if this "
+                        "session already built a structure (e.g. a prior "
+                        "generate_structure or run_simulation), it is reused "
+                        "automatically and the run happens in its dir — no rebuild. "
+                        "Set this only to force a SPECIFIC structure (e.g. in a "
+                        "multi-system run where the latest one isn't the one you "
+                        "want). A fresh structure is built only when the session "
+                        "has none."
                     ),
                 },
                 "max_run_cycles": {

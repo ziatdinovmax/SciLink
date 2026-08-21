@@ -336,10 +336,13 @@ def test_2c_generic_file_io(model_name: str):
 
 
 def test_2d_run_simulation_reuses_prebuilt_structure(model_name: str):
-    """run_simulation threads a prebuilt structure through instead of rebuilding.
+    """run_simulation reuses an in-session structure instead of rebuilding (#4).
 
-    A structure_file (path or session slug) is forwarded to run_complete_workflow
-    so structure generation is skipped; a missing file is a structured error.
+    - an explicit structure_file (path or slug) is forwarded to the workflow;
+    - with none given, the session's most-recent built structure is reused and
+      the run happens in its dir — no double build, no divergent empty dir;
+    - a fresh build happens only when the session has no structure yet;
+    - a missing structure_file is a structured error.
     """
     import scilink.agents.sim_agents.simulation_pipeline as sp
     with tempfile.TemporaryDirectory() as td:
@@ -359,32 +362,44 @@ def test_2d_run_simulation_reuses_prebuilt_structure(model_name: str):
         orig = sp.run_complete_workflow
         sp.run_complete_workflow = _fake_workflow
         try:
-            # (a) explicit path is forwarded as structure_file
+            # (a) empty session + no structure_file -> a fresh build (None passed)
+            json.loads(orch.tools.execute_tool(
+                "run_simulation", description="MD of H",
+                scale="molecular_dynamics", software="lammps",
+                run_command="lmp -in {script}"))
+            assert captured.get("structure_file") is None
+
+            # (b) explicit path is forwarded as structure_file
             json.loads(orch.tools.execute_tool(
                 "run_simulation", description="MD of H",
                 scale="molecular_dynamics", software="lammps",
                 run_command="lmp -in {script}", structure_file=str(struct)))
             assert captured.get("structure_file") == str(struct)
 
-            # (b) a session slug resolves to the recorded structure_path
+            # (c) a session slug resolves to the recorded structure_path
             orch.generated_structures.append(
-                {"slug": "myslug", "structure_path": str(struct)})
+                {"slug": "myslug", "structure_path": str(struct),
+                 "structure_dir": str(struct.parent)})
             json.loads(orch.tools.execute_tool(
                 "run_simulation", description="MD of H",
                 scale="molecular_dynamics", software="lammps",
                 run_command="lmp -in {script}", structure_file="myslug"))
             assert captured.get("structure_file") == str(struct)
 
-            # (c) omitting it leaves the workflow to build (structure_file=None)
-            json.loads(orch.tools.execute_tool(
-                "run_simulation", description="MD of H",
+            # (d) THE #4 FIX: no structure_file, but the session already built one
+            #     -> auto-reuse it instead of rebuilding, and say so
+            captured.clear()
+            r = json.loads(orch.tools.execute_tool(
+                "run_simulation", description="reworded MD of the same H",
                 scale="molecular_dynamics", software="lammps",
                 run_command="lmp -in {script}"))
-            assert captured.get("structure_file") is None
+            assert captured.get("structure_file") == str(struct)
+            assert r["reused_structure"] == "myslug"
+            assert captured.get("output_dir") == str(struct.parent)   # ran in its dir
         finally:
             sp.run_complete_workflow = orig
 
-        # (d) a bogus structure_file is a structured error, not a rebuild
+        # (e) a bogus structure_file is a structured error, not a rebuild
         r = json.loads(orch.tools.execute_tool(
             "run_simulation", description="MD of H",
             scale="molecular_dynamics", software="lammps",
@@ -392,7 +407,7 @@ def test_2d_run_simulation_reuses_prebuilt_structure(model_name: str):
             structure_file="/no/such/structure.extxyz"))
         assert r["status"] == "error" and "not found" in r["message"]
 
-        print("   ✅ run_simulation reuses a prebuilt structure (path or slug)")
+        print("   ✅ run_simulation reuses an in-session structure (auto / path / slug)")
 
 
 def test_3_post_run_analysis_synthetic(model_name: str):
