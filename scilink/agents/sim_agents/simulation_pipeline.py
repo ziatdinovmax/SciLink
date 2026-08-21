@@ -647,6 +647,36 @@ def _run_workflow_once(
                 result["final_status"] = "failed_force_field"
                 result["force_field"] = {"status": "error", "message": str(e)}
                 return result
+        elif str(structure_path).lower().endswith(".pdb") or \
+                structure_class == "biomolecular":
+            # Biomolecular MD: a PDB (no packed-box manifest) parameterizes
+            # through the engine-neutral AMBER backend chosen by
+            # ForceFieldAgent.parameterize. write_md_inputs bridges the
+            # resulting prmtop/inpcrd to whatever engine ``software`` names.
+            try:
+                from .force_field_agent import ForceFieldAgent
+                from ._engine_inputs import write_md_inputs
+                ff_agent = ForceFieldAgent(
+                    working_dir=output_dir, api_key=api_key,
+                    base_url=base_url, model_name=model_name,
+                )
+                psystem = ff_agent.parameterize(
+                    pdb_file=structure_path, research_goal=user_request,
+                    working_dir=output_dir,
+                )
+                written = write_md_inputs(psystem, software, output_dir)
+                structure_path = written["structure_file"]
+                force_field_files = written["force_field_files"] or None
+                result["force_field"] = {
+                    "status": "success", "backend": psystem.backend,
+                    "n_atoms": psystem.n_atoms,
+                    "total_charge": psystem.total_charge,
+                }
+                result["steps_completed"].append("force_field")
+            except Exception as e:
+                result["final_status"] = "failed_force_field"
+                result["force_field"] = {"status": "error", "message": str(e)}
+                return result
         else:
             result.setdefault("warnings", []).append(
                 "molecular_dynamics run with no components.json manifest next to "
