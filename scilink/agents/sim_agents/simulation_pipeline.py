@@ -53,6 +53,26 @@ _DEFAULT_ENGINE = {
 }
 
 
+# Default structure class per scale, used when the caller does not specify one.
+# For MD, ``condensed`` is the *liquids / solutions* default: a solvated box built
+# and validated under the crystal rubric gets the wrong packing guidance and
+# validation criteria (issue #474). It is only a default — since #432 the MD scale
+# also absorbs crystalline solids, melts-from-crystal, and slab interfaces, and
+# those must be built as ``crystal``; the caller (an LLM reading the
+# ``structure_class`` description) sets it explicitly for those. Periodic DFT is
+# crystalline; molecular QC is a finite molecule. Explicit callers always win
+# (None sentinel). ``machine_learning_potentials`` is a deprecated MLIP-as-scale
+# shim that this module treats as an MD task, so it shares MD's ``condensed``
+# default deliberately (rather than falling through to ``crystal``); a crystalline
+# MLIP-MD run passes ``structure_class="crystal"`` the same way classical MD does.
+_SCALE_STRUCTURE_CLASS = {
+    "periodic_dft": "crystal",
+    "molecular_qc": "molecular",
+    "molecular_dynamics": "condensed",
+    "machine_learning_potentials": "condensed",
+}
+
+
 def _generate_classical_md_inputs(
     *, software, structure_file, request, output_dir, api_key, base_url,
     model_name, force_field_files, staged, required_observables,
@@ -409,7 +429,7 @@ def _run_workflow_once(
     scale: str = "periodic_dft",
     software: Optional[str] = None,
     method: str = "llm",
-    structure_class: str = "crystal",
+    structure_class: Optional[str] = None,
     output_dir: str = "simulation_workflow_output",
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
@@ -444,7 +464,14 @@ def _run_workflow_once(
             foundation agent's generation; a named backend (e.g.
             ``"atomate2"``) resolves to a skill-bundle generation tool.
         structure_class: Structure-class hint forwarded to structure
-            generation.
+            generation. When ``None`` (the default) it is derived from ``scale``
+            (``periodic_dft`` -> ``crystal``, ``molecular_qc`` -> ``molecular``,
+            ``molecular_dynamics`` -> ``condensed``). The MD default of
+            ``condensed`` is the *liquids / solutions* case; pass an explicit
+            value for the others the MD scale now covers (since #432):
+            ``"crystal"`` for a crystalline solid, a melt-from-crystal, or a
+            slab interface, and ``"biomolecular"`` for a protein. An explicit
+            value always wins.
         output_dir: Directory for all generated files.
         api_key, base_url, model_name: LLM credentials.
         futurehouse_api_key: Optional FutureHouse key enabling
@@ -492,6 +519,14 @@ def _run_workflow_once(
     """
     software = software or _DEFAULT_ENGINE.get(scale)
     os.makedirs(output_dir, exist_ok=True)
+    # Derive the structure class from the scale when the caller didn't set one,
+    # so a classical-MD run builds/validates as a condensed system rather than a
+    # crystal (issue #474). This is only the default for the scale's typical case
+    # (liquids for MD); crystalline-solid / slab MD and biomolecular MD rely on
+    # the caller passing structure_class explicitly. An explicit value always wins.
+    if structure_class is None:
+        structure_class = _SCALE_STRUCTURE_CLASS.get(scale, "crystal")
+
     result: Dict[str, Any] = {
         "user_request": user_request,
         "scale": scale,

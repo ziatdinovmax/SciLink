@@ -861,6 +861,7 @@ class SimulationOrchestratorTools:
         # =====================================================================
         def run_simulation(description: str, run_command: str = None,
                            scale: str = None, software: str = None,
+                           structure_class: str = None,
                            max_refinement_cycles: int = 4,
                            max_run_cycles: int = 3,
                            run_timeout: int = 3600) -> str:
@@ -910,6 +911,7 @@ class SimulationOrchestratorTools:
                 result = run_complete_workflow(
                     description,
                     scale=scale, software=software,
+                    structure_class=structure_class,
                     output_dir=str(workdir),
                     api_key=self.orch.api_key, base_url=self.orch.base_url,
                     model_name=self.orch.model_name,
@@ -996,6 +998,22 @@ class SimulationOrchestratorTools:
                     "type": "string",
                     "description": ("Optional engine override "
                                     "('vasp' | 'lammps'); routed if omitted."),
+                },
+                "structure_class": {
+                    "type": "string",
+                    "description": (
+                        "Optional structure-class override ('crystal' | "
+                        "'molecular' | 'condensed' | 'biomolecular'). Omit and it "
+                        "is derived from the scale, where the molecular_dynamics "
+                        "default 'condensed' means a liquid / solution / solvated "
+                        "box. MD also covers crystalline and biomolecular systems, "
+                        "and the derived default is wrong for those — so SET IT "
+                        "EXPLICITLY from the task: 'crystal' for a crystalline "
+                        "solid, a melt-from-crystal, or a slab interface (e.g. "
+                        "melting Cu, Li diffusion in LiCoO2, water on a TiO2 slab); "
+                        "'biomolecular' for a protein. periodic_dft derives "
+                        "'crystal', molecular_qc derives 'molecular'."
+                    ),
                 },
                 "max_run_cycles": {
                     "type": "integer",
