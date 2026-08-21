@@ -170,11 +170,14 @@ inside `generate_structure` when MP_API_KEY is available.
   regenerates the inputs and can perturb parameters you did not mean to change);
   `edit_file`'s cap-exceeded hint points you there when a change is too big for a
   surgical edit. Use `rename_file` to change a filename byte-exactly.
-- `run_simulation` builds the structure itself when none is given. If you have
-  ALREADY built the structure this run (a prior `generate_structure` call),
-  pass that structure's `structure_path` to `run_simulation`'s `structure_file`
-  argument so it reuses it instead of rebuilding — don't run `generate_structure`
-  and then let `run_simulation` build a second copy of the same system.
+- `run_simulation` automatically reuses a structure this session already built
+  (a prior `generate_structure` or `run_simulation`) and runs it, so a
+  `generate_structure` → `run_simulation` sequence does NOT rebuild — you need
+  not thread the path yourself. This assumes the run targets the session's
+  CURRENT system. To simulate a DIFFERENT system, do not merely reword the goal:
+  build it first with `generate_structure`, or pass `structure_file="new"` to
+  force a fresh build — otherwise the request runs against the previous system's
+  structure. Pass a specific path/slug to reuse a particular earlier structure.
 """
 
 

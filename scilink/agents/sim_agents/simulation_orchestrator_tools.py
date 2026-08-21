@@ -17,6 +17,7 @@ Tools are constructed fresh per call (StructureGenerator's per-call
 import glob
 import json
 import logging
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -982,6 +983,16 @@ class SimulationOrchestratorTools:
                            run_timeout: int = 3600) -> str:
             from .simulation_pipeline import run_complete_workflow
 
+            # Explicit opt-out: structure_file="new" forces a fresh build for
+            # THIS description, even if the session already holds a structure.
+            # It is the escape hatch from automatic reuse — the only way, short
+            # of building first with generate_structure, to start a DIFFERENT
+            # system in a session that already has one.
+            force_new = (isinstance(structure_file, str)
+                         and structure_file.strip().lower() == "new")
+            if force_new:
+                structure_file = None
+
             # Reuse an already-built structure instead of rebuilding it. If a
             # prior generate_structure produced a structure for this condition,
             # pass its `structure_path` here (the caller may give a path or the
@@ -1007,6 +1018,30 @@ class SimulationOrchestratorTools:
                         "to build the structure in this call."
                     ),
                 })
+
+            # No structure supplied: reuse the most-recent structure this session
+            # already built rather than rebuilding it in a fresh dir. Rebuilding
+            # both duplicates work AND can diverge or fail — leaving an empty,
+            # differently-slugged workdir with no run output that the caller then
+            # retries forever (the #4 double-build loop). Automatic reuse ASSUMES
+            # this run targets the session's current system; for a DIFFERENT
+            # system, build it first (generate_structure) or pass
+            # structure_file="new" to force a fresh build. Records are appended
+            # only when a structure was actually written, so a prior empty/failed
+            # run is never picked up here.
+            reused_from = None
+            reused_dir = None
+            if structure_file is None and not force_new:
+                prior = next(
+                    (s for s in reversed(self.orch.generated_structures or [])
+                     if s.get("structure_path")
+                     and Path(s["structure_path"]).is_file()),
+                    None,
+                )
+                if prior:
+                    structure_file = prior["structure_path"]
+                    reused_from = prior.get("slug")
+                    reused_dir = prior.get("structure_dir")
 
             # 1. Route (scale, engine) if not supplied — reuse a prior routing
             #    decision so we don't re-route every call. Engine-neutral: any
@@ -1035,17 +1070,37 @@ class SimulationOrchestratorTools:
                 except Exception:
                     run_command = None
 
-            # 3. Executor: local when a run_command is available and no HPC
-            #    connection is attached. (HPC-submission via hpc_connection is a
-            #    follow-up; with no executor the workflow still generates +
-            #    validates inputs, it just does not run them.)
+            # 3. Executor: run locally when a run_command is available and either
+            #    no HPC connection is attached OR we are already inside a scheduler
+            #    allocation (SLURM_JOB_ID set). In-allocation the compute node IS
+            #    here, so run the deck directly (LocalExecutor -> `lmp -in ...`)
+            #    rather than deferring to a remote submit — a remote hpc_connection
+            #    otherwise leaves the ready deck unexecuted and pushes the caller
+            #    toward submit_simulation_job, which is wrong when the job is us.
+            #    (With no executor the workflow still generates + validates inputs,
+            #    it just does not run them.)
+            in_allocation = bool(os.environ.get("SLURM_JOB_ID")
+                                 or os.environ.get("SLURM_JOBID"))
             executor = None
-            if run_command and getattr(self.orch, "hpc_connection", None) is None:
+            if run_command and (getattr(self.orch, "hpc_connection", None) is None
+                                or in_allocation):
                 from .refinement import LocalExecutor
                 executor = LocalExecutor(timeout=run_timeout)
 
+            # A reused structure lands each run in its own subdir under the
+            # structure dir (runs/<NN>_<slug>/), so repeated runs on one structure
+            # — a temperature/pressure sweep, the common same-structure-many-runs
+            # case — don't clobber each other's log/outputs; the structure is
+            # referenced by path. A fresh build gets its own slug dir (structure +
+            # run together).
             slug = self._make_slug(description)
-            workdir = self.orch.structures_dir / slug
+            if reused_dir:
+                runs_root = Path(reused_dir) / "runs"
+                runs_root.mkdir(parents=True, exist_ok=True)
+                n = sum(1 for p in runs_root.iterdir() if p.is_dir()) + 1
+                workdir = runs_root / f"{n:02d}_{slug}"
+            else:
+                workdir = self.orch.structures_dir / slug
             workdir.mkdir(parents=True, exist_ok=True)
 
             try:
@@ -1075,7 +1130,9 @@ class SimulationOrchestratorTools:
                 structure_gen.get("final_structure_path")
                 or (workdir / "structure.extxyz")
             )
-            if structure_path.exists():
+            # Record the structure only when this call actually built one; on
+            # reuse it is already in the session, so don't duplicate it.
+            if structure_path.exists() and reused_from is None:
                 self.orch.generated_structures.append({
                     "slug": slug, "description": description,
                     "structure_dir": str(workdir),
@@ -1086,19 +1143,28 @@ class SimulationOrchestratorTools:
 
             refinement = result.get("refinement") or {}
             executed = executor is not None
+            notes = []
+            if reused_from is not None:
+                notes.append(
+                    f"Reused the structure already built this session "
+                    f"('{reused_from}') instead of rebuilding; ran in its dir. "
+                    "Pass structure_file to force a different one."
+                )
+            if not executed:
+                notes.append(
+                    "No run_command available (no engine binary on PATH and none "
+                    "supplied) — generated and validated inputs only, did NOT "
+                    "run. Pass run_command to execute."
+                )
             return json.dumps({
                 "status": final_status if final_status else "error",
                 "scale": scale, "engine": software,
                 "executed": executed,
+                "reused_structure": reused_from,
                 "run_command_source": rc_source,
                 "refinement_status": refinement.get("status"),
                 "output_directory": str(workdir),
-                "note": (
-                    None if executed else
-                    "No run_command available (no engine binary on PATH and none "
-                    "supplied) — generated and validated inputs only, did NOT "
-                    "run. Pass run_command to execute."
-                ),
+                "note": " ".join(notes) if notes else None,
             })
 
         self._register_tool(
@@ -1161,11 +1227,16 @@ class SimulationOrchestratorTools:
                     "type": "string",
                     "description": (
                         "Optional path (or session slug) of an already-built "
-                        "structure to REUSE. If you already ran generate_structure "
-                        "for this system, pass the structure_path it returned here "
-                        "so the simulation skips rebuilding it — this avoids a "
-                        "duplicated structure build. Omit to build the structure "
-                        "as part of this call."
+                        "structure to REUSE. Omitting it means AUTOMATIC reuse of "
+                        "the session's most-recent structure, which assumes this "
+                        "run targets the SAME system you last built/ran. "
+                        "IMPORTANT: for a DIFFERENT system, do NOT just reword the "
+                        "description — either build it first with generate_structure, "
+                        "or pass structure_file=\"new\" to force a fresh build for "
+                        "this description (otherwise your request runs against the "
+                        "previous system's structure). Pass a specific path/slug to "
+                        "reuse a particular earlier structure. A fresh structure is "
+                        "built automatically only when the session has none."
                     ),
                 },
                 "max_run_cycles": {

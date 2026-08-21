@@ -375,10 +375,13 @@ def test_2d_list_available_software(model_name: str):
 
         print("   ✅ list_available_software: deterministic, no LLM call")
 def test_2d_run_simulation_reuses_prebuilt_structure(model_name: str):
-    """run_simulation threads a prebuilt structure through instead of rebuilding.
+    """run_simulation reuses an in-session structure instead of rebuilding (#4).
 
-    A structure_file (path or session slug) is forwarded to run_complete_workflow
-    so structure generation is skipped; a missing file is a structured error.
+    - an explicit structure_file (path or slug) is forwarded to the workflow;
+    - with none given, the session's most-recent built structure is reused and
+      the run happens in its dir — no double build, no divergent empty dir;
+    - a fresh build happens only when the session has no structure yet;
+    - a missing structure_file is a structured error.
     """
     import scilink.agents.sim_agents.simulation_pipeline as sp
     with tempfile.TemporaryDirectory() as td:
@@ -398,32 +401,66 @@ def test_2d_run_simulation_reuses_prebuilt_structure(model_name: str):
         orig = sp.run_complete_workflow
         sp.run_complete_workflow = _fake_workflow
         try:
-            # (a) explicit path is forwarded as structure_file
+            # (a) empty session + no structure_file -> a fresh build (None passed)
+            json.loads(orch.tools.execute_tool(
+                "run_simulation", description="MD of H",
+                scale="molecular_dynamics", software="lammps",
+                run_command="lmp -in {script}"))
+            assert captured.get("structure_file") is None
+
+            # (b) explicit path is forwarded as structure_file
             json.loads(orch.tools.execute_tool(
                 "run_simulation", description="MD of H",
                 scale="molecular_dynamics", software="lammps",
                 run_command="lmp -in {script}", structure_file=str(struct)))
             assert captured.get("structure_file") == str(struct)
 
-            # (b) a session slug resolves to the recorded structure_path
+            # (c) a session slug resolves to the recorded structure_path
             orch.generated_structures.append(
-                {"slug": "myslug", "structure_path": str(struct)})
+                {"slug": "myslug", "structure_path": str(struct),
+                 "structure_dir": str(struct.parent)})
             json.loads(orch.tools.execute_tool(
                 "run_simulation", description="MD of H",
                 scale="molecular_dynamics", software="lammps",
                 run_command="lmp -in {script}", structure_file="myslug"))
             assert captured.get("structure_file") == str(struct)
 
-            # (c) omitting it leaves the workflow to build (structure_file=None)
-            json.loads(orch.tools.execute_tool(
-                "run_simulation", description="MD of H",
+            # (d) THE #4 FIX: no structure_file, but the session already built one
+            #     -> auto-reuse it instead of rebuilding, and say so
+            captured.clear()
+            r = json.loads(orch.tools.execute_tool(
+                "run_simulation", description="reworded MD of the same H",
                 scale="molecular_dynamics", software="lammps",
                 run_command="lmp -in {script}"))
-            assert captured.get("structure_file") is None
+            assert captured.get("structure_file") == str(struct)
+            assert r["reused_structure"] == "myslug"
+            # runs land in a per-call subdir of the structure dir, not the dir
+            # itself, so a same-structure sweep doesn't clobber prior outputs
+            run1 = Path(captured["output_dir"])
+            assert run1.parent == struct.parent / "runs"
+            assert run1.name.startswith("01_")
+
+            # a second reuse run gets its own subdir (02_...), no clobber
+            captured.clear()
+            json.loads(orch.tools.execute_tool(
+                "run_simulation", description="reworded MD of the same H",
+                scale="molecular_dynamics", software="lammps",
+                run_command="lmp -in {script}"))
+            assert Path(captured["output_dir"]).name.startswith("02_")
+
+            # (e) THE OPT-OUT: structure_file="new" forces a fresh build even
+            #     though the session holds a structure (a DIFFERENT system)
+            captured.clear()
+            r = json.loads(orch.tools.execute_tool(
+                "run_simulation", description="MD of a different system",
+                scale="molecular_dynamics", software="lammps",
+                run_command="lmp -in {script}", structure_file="new"))
+            assert captured.get("structure_file") is None      # fresh build
+            assert r["reused_structure"] is None
         finally:
             sp.run_complete_workflow = orig
 
-        # (d) a bogus structure_file is a structured error, not a rebuild
+        # (f) a bogus structure_file is a structured error, not a rebuild
         r = json.loads(orch.tools.execute_tool(
             "run_simulation", description="MD of H",
             scale="molecular_dynamics", software="lammps",
@@ -431,7 +468,49 @@ def test_2d_run_simulation_reuses_prebuilt_structure(model_name: str):
             structure_file="/no/such/structure.extxyz"))
         assert r["status"] == "error" and "not found" in r["message"]
 
-        print("   ✅ run_simulation reuses a prebuilt structure (path or slug)")
+        print("   ✅ run_simulation reuses / per-run subdir / new-opt-out / errors")
+
+
+def test_2e_run_simulation_executes_in_allocation(model_name: str):
+    """In a SLURM allocation, run_simulation runs the deck locally even with an
+    hpc_connection attached — the compute is here, so don't defer to a submit."""
+    import scilink.agents.sim_agents.simulation_pipeline as sp
+    with tempfile.TemporaryDirectory() as td:
+        orch = _make_orch(model_name, td + "/sim")
+        orch.hpc_connection = object()          # a remote connection is attached
+
+        def _fake_workflow(user_request, **kwargs):
+            return {"final_status": "completed", "scale": kwargs.get("scale"),
+                    "engine": kwargs.get("software"), "structure_generation": {},
+                    "output_directory": kwargs.get("output_dir")}
+
+        orig = sp.run_complete_workflow
+        sp.run_complete_workflow = _fake_workflow
+        saved = os.environ.get("SLURM_JOB_ID")
+        try:
+            # not in an allocation + hpc_connection -> generate only, no executor
+            os.environ.pop("SLURM_JOB_ID", None)
+            r = json.loads(orch.tools.execute_tool(
+                "run_simulation", description="MD of H",
+                scale="molecular_dynamics", software="lammps",
+                run_command="lmp -in {script}"))
+            assert r["executed"] is False
+
+            # inside a SLURM allocation -> execute locally despite hpc_connection
+            os.environ["SLURM_JOB_ID"] = "999999"
+            r = json.loads(orch.tools.execute_tool(
+                "run_simulation", description="MD of H",
+                scale="molecular_dynamics", software="lammps",
+                run_command="lmp -in {script}"))
+            assert r["executed"] is True
+        finally:
+            sp.run_complete_workflow = orig
+            if saved is None:
+                os.environ.pop("SLURM_JOB_ID", None)
+            else:
+                os.environ["SLURM_JOB_ID"] = saved
+
+        print("   ✅ run_simulation executes in-allocation even with hpc_connection")
 
 
 def test_3_post_run_analysis_synthetic(model_name: str):
@@ -1097,6 +1176,7 @@ TARGETED_TESTS = [
     ("Generic file I/O",                       test_2c_generic_file_io),
     ("List available software",                test_2d_list_available_software),
     ("run_simulation reuses structure",        test_2d_run_simulation_reuses_prebuilt_structure),
+    ("run_simulation executes in-allocation",  test_2e_run_simulation_executes_in_allocation),
     ("Post-run analysis (synthetic)",          test_3_post_run_analysis_synthetic),
     ("Mode switching",                         test_4_mode_switching),
     ("run_task without LLM",                   test_5_run_task_without_llm),
