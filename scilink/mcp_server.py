@@ -476,6 +476,83 @@ def _ensure_headless_matplotlib() -> None:
         logging.warning(f"Could not enforce headless matplotlib backend: {exc}")
 
 
+def _load_shared_credentials() -> list:
+    """Load ``~/.scilink/credentials.env`` (KEY=VALUE lines) into the process
+    environment with setdefault semantics — an explicitly set variable always
+    wins. Lets every MCP client config stay secret-free: put the LLM
+    credentials in ONE file instead of into each client's .mcp.json."""
+    path = Path.home() / ".scilink" / "credentials.env"
+    loaded = []
+    if not path.exists():
+        return loaded
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k, v = k.strip(), v.strip().strip('"').strip("'")
+            if k and v and k not in os.environ:
+                os.environ[k] = v
+                loaded.append(k)
+        if loaded:
+            logging.info(f"Loaded credentials from {path}: {loaded}")
+    except Exception as exc:  # noqa: BLE001 - never block serving
+        logging.warning(f"Could not read {path}: {exc}")
+    return loaded
+
+
+# ── Foreground narration (log-message notifications) ────────────────────
+# Foreground tool calls used to be silent until the final JSON (stdout must
+# stay clean for the stdio transport). The captured narration is now also
+# streamed to the client as MCP `notifications/message` entries while the
+# call runs, so any client that renders log notifications shows live
+# progress with no background-job dance. Disable: SCILINK_MCP_NARRATION=0.
+import contextvars as _contextvars
+
+_MCP_SESSION: "_contextvars.ContextVar" = _contextvars.ContextVar(
+    "scilink_mcp_session", default=None)
+
+_NARRATION_POLL_S = 1.0
+_NARRATION_MAX_PER_POLL = 50
+
+
+def _narration_enabled() -> bool:
+    return os.environ.get("SCILINK_MCP_NARRATION", "1").lower() not in (
+        "0", "false", "no", "off")
+
+
+async def _to_thread_streaming(fn, *args) -> str:
+    """Run a captured executor (signature ``fn(*args, log_lines)``) in a
+    worker thread; while it runs, forward newly captured narration lines to
+    the client as info-level log notifications. Notification failures stop
+    the streaming but never affect the call."""
+    if not _narration_enabled():
+        return await asyncio.to_thread(fn, *args, None)
+    lines: list = []          # plain list: append-only, no maxlen truncation
+    task = asyncio.ensure_future(asyncio.to_thread(fn, *args, lines))
+    session = _MCP_SESSION.get()
+    sent = 0
+    while True:
+        done = task.done()
+        if session is not None and len(lines) > sent:
+            batch = lines[sent:sent + _NARRATION_MAX_PER_POLL]
+            sent += len(batch)
+            for line in batch:
+                if not str(line).strip():
+                    continue
+                try:
+                    await session.send_log_message(
+                        "info", str(line), logger="scilink")
+                except Exception:  # noqa: BLE001 - client gone / no support
+                    session = None
+                    break
+        if done:
+            break
+        await asyncio.sleep(_NARRATION_POLL_S)
+    return task.result()
+
+
 def create_server(
     *,
     api_key: str = None,
@@ -506,6 +583,7 @@ def create_server(
     server = Server("scilink")
 
     _ensure_headless_matplotlib()
+    _load_shared_credentials()
     import threading as _threading
 
     # ── State (initialized lazily on first tool list) ────────────────
@@ -852,6 +930,13 @@ def create_server(
         name: str, arguments: dict
     ) -> List[types.TextContent]:
         _ensure_initialized()
+        # Session handle for foreground narration (log-message
+        # notifications). Best effort: absent a request context we just
+        # run silently, exactly as before.
+        try:
+            _MCP_SESSION.set(server.request_context.session)
+        except Exception:  # noqa: BLE001
+            _MCP_SESSION.set(None)
 
         # Handle the respond tool
         if name == "scilink_respond":
@@ -951,7 +1036,7 @@ def create_server(
                 }),
             )]
 
-        result = await asyncio.to_thread(
+        result = await _to_thread_streaming(
             _execute_tool_captured, orch.tools, original_name, arguments,
             state, None,
         )
@@ -1486,8 +1571,8 @@ async def _handle_orchestrate_meta(
             }),
         )]
 
-    result = await asyncio.to_thread(_execute_meta_chat_captured, orch,
-                                     prompt, autonomy_str, state, None)
+    result = await _to_thread_streaming(_execute_meta_chat_captured, orch,
+                                        prompt, autonomy_str, state, None)
     return [types.TextContent(type="text", text=result)]
 
 
@@ -1561,8 +1646,8 @@ async def _handle_orchestrate(
             }),
         )]
 
-    result = await asyncio.to_thread(_execute_run_task_captured, orch,
-                                     prompt, autonomy_str, state, None)
+    result = await _to_thread_streaming(_execute_run_task_captured, orch,
+                                        prompt, autonomy_str, state, None)
     return [types.TextContent(type="text", text=result)]
 
 
@@ -1740,7 +1825,7 @@ async def _handle_respond(
                 }),
             )]
 
-        result = await asyncio.to_thread(
+        result = await _to_thread_streaming(
             _execute_tool_captured, orch.tools, action.tool_name,
             action.kwargs, state, None,
         )
