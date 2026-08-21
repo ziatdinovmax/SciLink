@@ -110,10 +110,12 @@ within a scale.
 - `periodic_dft` (`vasp`, `qe`) -> fully dispatched via the tools above.
 - `molecular_dynamics` (`lammps` / …) -> structure + the one-shot pipeline
   work; the granular per-step generate tool is the next-step follow-up.
-  When the router picks one of these, you can still run the complete
+  The interatomic potential (classical force field vs MLIP) is chosen
+  downstream of routing, once the structure exists, so an inorganic-solid,
+  interface, or reactive MD task routes here too and is handed an MLIP
+  automatically — an MLIP is a potential source, not a separate scale
+  (issue #429). When the router picks this, you can still run the complete
   workflow; point the user at `MDSimulationAgent` for granular control.
-- `machine_learning_potentials` (`mace` / …) -> point at `MLIPAgent`
-  directly until the dispatch tools land.
 
 **HPC integration:**
 When an HPC connection is active (`submit_simulation_job` is available), you

@@ -55,21 +55,24 @@ DEFAULT_SCALE_DESCRIPTIONS: Dict[str, str] = {
         "installed.)"
     ),
     "molecular_dynamics": (
-        "Classical force-field molecular dynamics. Best for: "
-        "biomolecular systems (proteins, DNA, lipids), polymers, "
-        "liquids, large interfaces, long timescales (>nanoseconds), "
-        "well-parameterized systems. Requires force-field params for "
-        "every atom type. Engines: LAMMPS, GROMACS, OpenMM, AMBER."
-    ),
-    "machine_learning_potentials": (
-        "ML interatomic potentials (MACE, NequIP, DeePMD, CHGNet, ...) "
-        "for near-DFT accuracy at classical-MD speed. Best for: medium "
-        "systems (~10k atoms) without good classical force fields, "
-        "reactive chemistry, novel materials, when DFT is too expensive "
-        "but classical FF is too inaccurate. Engines: MACE (universal "
-        "pretrained), NequIP, DeePMD."
+        "Molecular dynamics — ensemble sampling of atomic motion for "
+        "structure, transport, thermodynamics, and phase behavior at "
+        "classical-MD cost. Covers biomolecules, polymers, and liquids "
+        "as well as inorganic solids, metals, interfaces, and reactive "
+        "or novel materials. The interatomic potential — a classical "
+        "force field OR a machine-learning potential (MACE, CHGNet, "
+        "NequIP, ...) — is selected AFTER routing, once the structure "
+        "and its species are known, so whether a good classical force "
+        "field exists for the chemistry does NOT affect this routing "
+        "choice. Use for any dynamics / sampling goal (diffusion, "
+        "viscosity, melting point, RDFs, free energies), regardless of "
+        "chemistry. Engines: LAMMPS, GROMACS, OpenMM, AMBER."
     ),
 }
+# NOTE: ``machine_learning_potentials`` is deliberately NOT a scale. An MLIP
+# is a *potential source*, not a physical regime — the classical-FF-vs-MLIP
+# choice is made downstream by the potential-selection step once the species
+# are known (see docs/proposals/mlip-as-potential-source.md, issue #429).
 
 
 def discover_scale_agents() -> Dict[str, Dict[str, Any]]:
@@ -122,19 +125,9 @@ def discover_scale_agents() -> Dict[str, Dict[str, Any]]:
     except ImportError as exc:
         _logger.debug("MDSimulationAgent not importable: %s", exc)
 
-    try:
-        from .mlip_agent import MLIPAgent
-        from ...skills.loader import list_skills
-        # The MLIPAgent has a "general" meta-skill that isn't itself an
-        # engine — filter it out so it doesn't appear as a candidate.
-        ml_skills = list_skills(domain="machine_learning_potentials")
-        engines = [s for s in ml_skills if s != "general"]
-        found["machine_learning_potentials"] = {
-            "agent_class": MLIPAgent,
-            "supported": engines,
-        }
-    except ImportError as exc:
-        _logger.debug("MLIPAgent not importable: %s", exc)
+    # NB: MLIPAgent is intentionally NOT registered as a scale. An MLIP is a
+    # potential source selected downstream of ``molecular_dynamics`` routing,
+    # not a physical regime the router chooses among (issue #429).
 
     return found
 
@@ -159,9 +152,10 @@ class SimulationRouter:
             "reasoning":   "Metallic Cu(111) with CO adsorbate is a "
                            "classic catalysis system; VASP is...",
             "alternatives": [
-                {"scale": "machine_learning_potentials",
-                 "engine": "mace",
-                 "tradeoff": "Faster, but mace-mp-0 may underbind CO"}
+                {"scale": "molecular_dynamics",
+                 "engine": "lammps",
+                 "tradeoff": "Faster sampling; an MLIP would be selected "
+                             "downstream since Cu/CO lacks a good classical FF"}
             ],
             "candidates_considered": {"periodic_dft": ["vasp"], ...},
         }
@@ -199,11 +193,20 @@ class SimulationRouter:
             engines are omitted.
         """
         scale_agents = discover_scale_agents()
+        mlip_backends = self.available_software.list_available(
+            domain="machine_learning_potentials")
         out: Dict[str, List[str]] = {}
         for scale, info in scale_agents.items():
             agent_supports = set(info.get("supported", []))
             user_has = set(self.available_software.list_available(domain=scale))
             intersection = sorted(agent_supports & user_has)
+            if scale == "molecular_dynamics" and not intersection and mlip_backends:
+                # The MD scale can be served by an MLIP through the ASE runner,
+                # which needs no classical MD engine — so keep it routable for
+                # the MLIP-only audience (e.g. pip ``mace-torch``, no LAMMPS).
+                # The potential-selection step picks the MLIP family and the
+                # pipeline runs it via ASE (issue #429, availability gate).
+                intersection = ["ase"]
             if intersection:
                 out[scale] = intersection
         return out

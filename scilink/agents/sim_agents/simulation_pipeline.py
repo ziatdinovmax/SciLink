@@ -46,8 +46,86 @@ _DEFAULT_ENGINE = {
     "periodic_dft": "vasp",
     "molecular_qc": "nwchem",
     "molecular_dynamics": "lammps",
+    # Retained only for the deprecated ``machine_learning_potentials`` scale
+    # (issue #429): an MLIP is a potential source selected downstream of a
+    # ``molecular_dynamics`` task, not a scale of its own.
     "machine_learning_potentials": "mace",
 }
+
+
+def _generate_classical_md_inputs(
+    *, software, structure_file, request, output_dir, api_key, base_url,
+    model_name, force_field_files, staged, required_observables,
+) -> Dict[str, Any]:
+    """Classical-force-field MD inputs via ``MDSimulationAgent``."""
+    from .md_simulation_agent import MDSimulationAgent
+    agent = MDSimulationAgent(
+        working_dir=output_dir,
+        api_key=api_key, base_url=base_url, model_name=model_name,
+    )
+    # Staged generation emits an optimization → equilibration → production
+    # chain as a normalized sequential campaign; one-shot generation emits a
+    # single phase (or a parallel sweep when the plan calls for one). Both
+    # return the same normalized result shape the pipeline consumes.
+    gen = (agent.generate_staged_simulation if staged
+           else agent.generate_simulation)
+    result = gen(
+        structure_file=structure_file, research_goal=request, runner=software,
+        force_field_files=force_field_files,
+        required_observables=required_observables,
+    )
+    # Normalize the MD agent's single script_path into the common input_files
+    # map so the pipeline stays engine-neutral downstream, and record the
+    # entry script so the refinement loop knows what to run.
+    script_path = result.get("script_path")
+    if "input_files" not in result and script_path and Path(script_path).exists():
+        result["input_files"] = {
+            Path(script_path).name: Path(script_path).read_text()
+        }
+    if script_path:
+        result["entry_file"] = Path(script_path).name
+    result.setdefault("status", "success")
+    return result
+
+
+def _generate_mlip_inputs(
+    *, backend, structure_file, request, output_dir, api_key, base_url,
+    model_name,
+) -> Dict[str, Any]:
+    """MLIP MD inputs via ``MLIPAgent.deploy_pretrained`` (ASE runner).
+
+    ``backend`` names a specific MLIP (mace, chgnet, …) or is ``None`` to let
+    ``MLIPAgent`` choose from the goal + system using its own skills.
+    """
+    from .mlip_agent import MLIPAgent
+    agent = MLIPAgent(
+        working_dir=output_dir,
+        api_key=api_key, base_url=base_url, model_name=model_name,
+    )
+    from ase.io import read as _ase_read
+    try:
+        atoms = _ase_read(structure_file)
+        elements = sorted(set(atoms.get_chemical_symbols()))
+        n_atoms = len(atoms)
+    except Exception:
+        elements = []
+        n_atoms = 0
+    system_info = {"elements": {e: None for e in elements}, "n_atoms": n_atoms}
+    result = agent.deploy_pretrained(
+        system_info=system_info,
+        research_goal=request,
+        structure_file=structure_file,
+        backend=backend,
+        runner="ase",
+    )
+    # Normalize to the common input_files shape: the generated run script is
+    # the single input artifact.
+    run_path = result.get("run_path") or result.get("script_path")
+    if run_path and Path(run_path).exists():
+        result.setdefault("input_files", {Path(run_path).name: run_path})
+        result.setdefault("entry_file", Path(run_path).name)
+    result.setdefault("status", "success")
+    return result
 
 
 def _generate_inputs(
@@ -129,69 +207,55 @@ def _generate_inputs(
         return result
 
     if scale == "molecular_dynamics":
-        from .md_simulation_agent import MDSimulationAgent
-        agent = MDSimulationAgent(
-            working_dir=output_dir,
-            api_key=api_key, base_url=base_url, model_name=model_name,
-        )
-        # Staged generation emits an optimization → equilibration → production
-        # chain as a normalized sequential campaign; one-shot generation emits a
-        # single phase (or a parallel sweep when the plan calls for one). Both
-        # return the same normalized result shape the pipeline consumes.
-        gen = (agent.generate_staged_simulation if staged
-               else agent.generate_simulation)
-        result = gen(
-            structure_file=structure_file, research_goal=request, runner=software,
+        # Potential selection (issue #429): now that the structure exists and
+        # the species are known, decide whether the interatomic potential
+        # comes from a classical force field or an MLIP, then dispatch. The
+        # router no longer makes this choice — it only picks the MD scale.
+        from .potential_selection import select_potential_family
+        selection = select_potential_family(
+            structure_file=structure_file, research_goal=request,
+            model_name=model_name, api_key=api_key, base_url=base_url,
             force_field_files=force_field_files,
-            required_observables=required_observables,
         )
-        # Normalize the MD agent's single script_path into the common
-        # input_files map so the pipeline stays engine-neutral downstream,
-        # and record the entry script so the refinement loop knows what to run.
-        script_path = result.get("script_path")
-        if "input_files" not in result and script_path and Path(script_path).exists():
-            result["input_files"] = {
-                Path(script_path).name: Path(script_path).read_text()
-            }
-        if script_path:
-            result["entry_file"] = Path(script_path).name
-        result.setdefault("status", "success")
+        logger.info(
+            "potential selection: family=%s source=%s (%s)",
+            selection.get("family"), selection.get("source"),
+            selection.get("reasoning", ""),
+        )
+        if selection.get("family") == "mlip":
+            result = _generate_mlip_inputs(
+                backend=None, structure_file=structure_file, request=request,
+                output_dir=output_dir, api_key=api_key, base_url=base_url,
+                model_name=model_name,
+            )
+        else:
+            result = _generate_classical_md_inputs(
+                software=software, structure_file=structure_file, request=request,
+                output_dir=output_dir, api_key=api_key, base_url=base_url,
+                model_name=model_name, force_field_files=force_field_files,
+                staged=staged, required_observables=required_observables,
+            )
+        result.setdefault("potential_selection", selection)
         return result
 
     if scale == "machine_learning_potentials":
-        from .mlip_agent import MLIPAgent
-        # ``software`` is the MLIP backend name (mace, chgnet, deepmd, …).
-        # The structure file is the absorbing structure; system_info is
-        # inferred from it by MLIPAgent. ``request`` drives backend and
-        # model selection when no explicit backend is forced.
-        agent = MLIPAgent(
-            working_dir=output_dir,
-            api_key=api_key, base_url=base_url, model_name=model_name,
+        # Deprecated scale (issue #429): an MLIP is a potential source, not a
+        # scale. Treat an explicit request as a molecular_dynamics task with a
+        # forced MLIP potential; ``software`` is the MLIP backend name here.
+        logger.warning(
+            "scale='machine_learning_potentials' is deprecated: an MLIP is a "
+            "potential source, not a scale. Treating as a molecular_dynamics "
+            "task with a forced MLIP potential. Route to 'molecular_dynamics' "
+            "and let potential selection choose the family."
         )
-        from ase.io import read as _ase_read
-        try:
-            atoms = _ase_read(structure_file)
-            elements = sorted(set(atoms.get_chemical_symbols()))
-            n_atoms = len(atoms)
-        except Exception:
-            elements = []
-            n_atoms = 0
-        system_info = {"elements": {e: None for e in elements}, "n_atoms": n_atoms}
-        result = agent.deploy_pretrained(
-            system_info=system_info,
-            research_goal=request,
-            structure_file=structure_file,
-            backend=software if software != _DEFAULT_ENGINE["machine_learning_potentials"] else None,
-            runner="ase",
+        backend = (software
+                   if software != _DEFAULT_ENGINE["machine_learning_potentials"]
+                   else None)
+        return _generate_mlip_inputs(
+            backend=backend, structure_file=structure_file, request=request,
+            output_dir=output_dir, api_key=api_key, base_url=base_url,
+            model_name=model_name,
         )
-        # Normalize to the common input_files shape: the generated run
-        # script is the single input artifact.
-        run_path = result.get("run_path") or result.get("script_path")
-        if run_path and Path(run_path).exists():
-            result.setdefault("input_files", {Path(run_path).name: run_path})
-            result.setdefault("entry_file", Path(run_path).name)
-        result.setdefault("status", "success")
-        return result
 
     raise ValueError(
         f"Unsupported simulation scale: {scale!r}. "
