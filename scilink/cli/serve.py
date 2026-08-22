@@ -89,12 +89,15 @@ def main():
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["analyze", "plan", "both", "meta"],
+        choices=["analyze", "plan", "simulate", "both", "meta"],
         default="both",
         help=(
-            "Which tool sets to expose (default: both). 'meta' exposes "
-            "SciLink's meta orchestrator instead — one surface that routes "
-            "across the specialists, with parallel multi-modal fan-out + "
+            "Which tool sets to expose (default: both, i.e. analyze+plan). "
+            "'simulate' exposes the simulation tools (structure building, "
+            "engine inputs, run + refine; DFT/MD/MLIP) as a standalone "
+            "surface. 'meta' exposes SciLink's meta orchestrator instead — "
+            "one surface that routes across the specialists (analysis, "
+            "planning, simulation), with parallel multi-modal fan-out + "
             "fusion and cross-mode delegation."
         ),
     )
