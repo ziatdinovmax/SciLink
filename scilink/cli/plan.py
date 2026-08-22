@@ -144,6 +144,15 @@ Supported Models:
         )
     )
 
+    parser.add_argument(
+        '--skills',
+        type=str,
+        nargs='+',
+        dest='skill_files',
+        metavar='SKILL_FILE',
+        help='Path(s) to custom skill .md files.'
+    )
+
     # MCP server arguments
     parser.add_argument(
         '--mcp',
@@ -237,6 +246,7 @@ Supported Models:
         'knowledge_dir': args.knowledge_dir,
         'code_dir': args.code_dir,
         'tool_files': args.tool_files,
+        'skill_files': args.skill_files,
         'mcp_servers': args.mcp_servers,
     }
     
@@ -272,6 +282,7 @@ class OrchestratorPlayground:
         self.knowledge_dir = None
         self.code_dir = None
         self._tool_files = self.config.get('tool_files')
+        self._skill_files = self.config.get('skill_files')
         self._mcp_servers = self.config.get('mcp_servers')
         
     def _infer_provider(self, model_name: str) -> tuple:
@@ -461,6 +472,10 @@ class OrchestratorPlayground:
         if self._tool_files:
             self._load_custom_tools(self._tool_files)
 
+        # === REGISTER CUSTOM SKILLS ===
+        if self._skill_files:
+            self._register_custom_skills(self._skill_files)
+
         # === CONNECT MCP SERVERS ===
         if self._mcp_servers:
             self._connect_mcp_servers(self._mcp_servers)
@@ -569,6 +584,17 @@ class OrchestratorPlayground:
             self.agent.register_tools(schemas, factory)
             count = sum(1 for s in schemas if s.get('type') == 'function')
             print(f"   ✅ Registered {count} tool(s) from {path.name}")
+
+    def _register_custom_skills(self, skill_files: list) -> None:
+        """Register user-supplied .md skill bundles into the orchestrator."""
+        for file_path in skill_files:
+            path = Path(file_path).resolve()
+            print(f"\n📖 Registering custom skill: {path}")
+            try:
+                name = self.agent.register_skill(str(path))
+                print(f"   ✅ Registered skill '{name}'")
+            except Exception as e:
+                print(f"   ❌ Failed to register {path.name}: {e}")
 
     def _connect_mcp_servers(self, mcp_configs: list) -> None:
         """Parse MCP server configs and connect to each."""
