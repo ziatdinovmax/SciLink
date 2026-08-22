@@ -80,8 +80,52 @@ def test_md_agent_assembly():
         print(f"    analyze_system  = {info['atom_count']} atoms, {info['elements']}")
 
 
+def test_generate_json_retries_empty_response():
+    """base_agent._generate_json rides through an empty/garbled completion
+    instead of aborting the whole generation on the first bad response (an
+    empty proxy completion otherwise burned the caller's retry budget)."""
+    import types
+    from scilink.agents.sim_agents import MDSimulationAgent
+
+    with tempfile.TemporaryDirectory() as td:
+        agent = MDSimulationAgent(working_dir=td, skill="lammps", **_agent_kwargs())
+
+        # empty twice, then valid JSON -> returns the parsed object, no raise
+        calls = {"n": 0}
+
+        def _gen(prompt, generation_config=None):
+            calls["n"] += 1
+            txt = "" if calls["n"] < 3 else '{"ok": true}'
+            return types.SimpleNamespace(text=txt)
+
+        agent.model = types.SimpleNamespace(generate_content=_gen)
+        assert agent._generate_json("x") == {"ok": True}
+        assert calls["n"] == 3
+
+        # an object embedded in prose is salvaged
+        agent.model = types.SimpleNamespace(
+            generate_content=lambda p, generation_config=None:
+                types.SimpleNamespace(text='sure: {"a": 1} done'))
+        assert agent._generate_json("x") == {"a": 1}
+
+        # persistently empty -> raises AFTER the retry budget, not on attempt 1
+        agent.model = types.SimpleNamespace(
+            generate_content=lambda p, generation_config=None:
+                types.SimpleNamespace(text=""))
+        try:
+            agent._generate_json("x")
+            raise AssertionError("should raise after exhausting retries")
+        except ValueError:
+            pass
+
+        print("  _generate_json: retries empty / salvages / raises after budget: OK")
+
+
 if __name__ == "__main__":
-    print("=== smoke: MDSimulationAgent(skill='lammps') ===")
+    print("=== smoke 1: MDSimulationAgent(skill='lammps') ===")
     test_md_agent_assembly()
     print()
-    print("Smoke passed.")
+    print("=== smoke 2: _generate_json robustness ===")
+    test_generate_json_retries_empty_response()
+    print()
+    print("All smokes passed.")
