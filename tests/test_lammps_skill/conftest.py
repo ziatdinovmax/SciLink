@@ -245,6 +245,53 @@ Bonds
 9 2 6 10
 """
 
+# Toy aqueous electrolyte: water + NaCl + a small organic co-solvent. Bonded,
+# carbon-bearing, but N-free — a "biomolecular"-by-any-bonded-carbon rule would
+# mislabel it; it should classify as "electrolyte".
+ELECTROLYTE_DATA = """\
+LAMMPS data file for a toy aqueous electrolyte (water + NaCl + organic)
+
+11 atoms
+6 bonds
+5 atom types
+2 bond types
+
+0.0 20.0 xlo xhi
+0.0 20.0 ylo yhi
+0.0 20.0 zlo zhi
+
+Masses
+
+1 15.999 # O
+2  1.008 # H
+3 22.990 # Na
+4 35.453 # Cl
+5 12.011 # C
+
+Atoms # full
+
+1  1 1 -0.8 5.0 5.0 5.0
+2  1 2  0.4 5.8 5.0 5.0
+3  1 2  0.4 5.0 5.8 5.0
+4  2 1 -0.8 9.0 5.0 5.0
+5  2 2  0.4 9.8 5.0 5.0
+6  2 2  0.4 9.0 5.8 5.0
+7  3 3  1.0 3.0 3.0 3.0
+8  4 4 -1.0 7.0 3.0 3.0
+9  5 5 -0.2 12.0 5.0 5.0
+10 5 5 -0.2 13.5 5.0 5.0
+11 5 2  0.1 12.0 6.0 5.0
+
+Bonds
+
+1 1 1 2
+2 1 1 3
+3 1 4 5
+4 1 4 6
+5 2 9 10
+6 2 9 11
+"""
+
 
 # ─── Script Fixtures ─────────────────────────────────────────────────
 
@@ -558,6 +605,57 @@ run 250
 
 # ─── Pytest Fixtures ─────────────────────────────────────────────────
 
+# N-bearing small-molecule electrolyte: acetonitrile (CH3CN) + NaCl + water.
+# Bonded, carbon- AND nitrogen-bearing but NOT a biopolymer. The nitrogen-proxy
+# heuristic mislabels it "biomolecular" (see #494); this fixture pins that known
+# limitation so it stays visible until a size/topology discriminator lands.
+MECN_ELECTROLYTE_DATA = """\
+LAMMPS data file for a toy MeCN/NaCl/water electrolyte (N-bearing solvent)
+
+11 atoms
+7 bonds
+6 atom types
+4 bond types
+
+0.0 20.0 xlo xhi
+0.0 20.0 ylo yhi
+0.0 20.0 zlo zhi
+
+Masses
+
+1 15.999 # O
+2  1.008 # H
+3 22.990 # Na
+4 35.453 # Cl
+5 12.011 # C
+6 14.007 # N
+
+Atoms # full
+
+1  1 1 -0.8 5.0 5.0 5.0
+2  1 2  0.4 5.8 5.0 5.0
+3  1 2  0.4 5.0 5.8 5.0
+4  2 3  1.0 3.0 3.0 3.0
+5  3 4 -1.0 7.0 3.0 3.0
+6  4 5 -0.2 12.0 5.0 5.0
+7  4 2  0.1 11.5 5.8 5.0
+8  4 2  0.1 11.5 4.2 5.0
+9  4 2  0.1 12.0 5.0 6.0
+10 4 5  0.4 13.5 5.0 5.0
+11 4 6 -0.5 14.7 5.0 5.0
+
+Bonds
+
+1 1 1 2
+2 1 1 3
+3 3 6 7
+4 3 6 8
+5 3 6 9
+6 2 6 10
+7 4 10 11
+"""
+
+
 @pytest.fixture
 def fixtures_dir(tmp_path):
     """Create a temporary directory with all fixture files."""
@@ -575,6 +673,8 @@ def fixtures_dir(tmp_path):
         "cu_slab.data": CU_SLAB_DATA,
         "mgo.data": MGO_DATA,
         "protein.data": BIOMOLECULAR_DATA,
+        "electrolyte.data": ELECTROLYTE_DATA,
+        "mecn_electrolyte.data": MECN_ELECTROLYTE_DATA,
     }
     for name, content in data_files.items():
         (data_dir / name).write_text(content)
