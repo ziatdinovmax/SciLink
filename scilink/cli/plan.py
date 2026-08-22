@@ -41,6 +41,12 @@ Examples:
   # Use internal proxy with custom endpoint
   scilink plan --base-url https://my-proxy.example.com/v1 --model my-model
 
+  # Save to a named session directory
+  scilink plan --session-dir ./my_campaign
+
+  # Resume the most recent campaign session (or a named one with --session-dir)
+  scilink plan --restore
+
 Autonomy Levels:
   co-pilot (default)  Human leads, AI assists. Reviews every step.
   autopilot           AI leads, human monitors. Human reviews plans/code only.
@@ -92,6 +98,22 @@ Supported Models:
         type=str,
         dest='api_key',
         help='API key for LLM provider (overrides environment variables)'
+    )
+
+    parser.add_argument(
+        '--embedding-api-key',
+        type=str,
+        dest='embedding_api_key',
+        help='API key for the embedding model (defaults to --api-key / env). '
+             'Ignored when --base-url is set (the proxy key is reused).'
+    )
+
+    parser.add_argument(
+        '--futurehouse-api-key',
+        type=str,
+        dest='futurehouse_api_key',
+        help='FutureHouse API key for literature search (or set '
+             'FUTUREHOUSE_API_KEY env var). Optional.'
     )
 
     # Autonomy arguments
@@ -163,6 +185,23 @@ Supported Models:
         )
     )
 
+    # Session arguments
+    parser.add_argument(
+        '--session-dir',
+        type=str,
+        dest='session_dir',
+        help='Session directory for outputs (default: prompted interactively, '
+             'or auto-generated when combined with --autonomy autopilot/autonomous)'
+    )
+
+    parser.add_argument(
+        '--restore',
+        action='store_true',
+        help='Restore from a previous checkpoint. With --session-dir, restores '
+             'that session; otherwise restores the most recent campaign_session_* '
+             'directory in the current folder.'
+    )
+
     # Deprecated arguments (hidden but functional)
     parser.add_argument(
         '--local-model',
@@ -232,12 +271,16 @@ Supported Models:
         'base_url': base_url,
         'embedding_model': args.embedding_model,
         'api_key': api_key,
+        'embedding_api_key': args.embedding_api_key,
+        'futurehouse_api_key': args.futurehouse_api_key,
         'autonomy_level': args.autonomy,
         'data_dir': args.data_dir,
         'knowledge_dir': args.knowledge_dir,
         'code_dir': args.code_dir,
         'tool_files': args.tool_files,
         'mcp_servers': args.mcp_servers,
+        'session_dir': args.session_dir,
+        'restore': args.restore,
     }
     
     # Run the interactive orchestrator
@@ -273,6 +316,10 @@ class OrchestratorPlayground:
         self.code_dir = None
         self._tool_files = self.config.get('tool_files')
         self._mcp_servers = self.config.get('mcp_servers')
+        self._embedding_api_key = self.config.get('embedding_api_key')
+        self._futurehouse_api_key = self.config.get('futurehouse_api_key')
+        self._session_dir_arg = self.config.get('session_dir')
+        self._restore = self.config.get('restore', False)
         
     def _infer_provider(self, model_name: str) -> tuple:
         """
@@ -392,7 +439,8 @@ class OrchestratorPlayground:
                         api_key = user_key
 
         # === FUTUREHOUSE API KEY (Optional) ===
-        futurehouse_key = os.getenv("FUTUREHOUSE_API_KEY")
+        # Flag takes priority, then env; only prompt when neither is set.
+        futurehouse_key = self._futurehouse_api_key or os.getenv("FUTUREHOUSE_API_KEY")
         if not futurehouse_key:
             print("\n📚 FutureHouse API Key (Optional - for literature search)")
             print("   Enables scientific literature queries if you have a key.")
@@ -419,13 +467,31 @@ class OrchestratorPlayground:
         self._objective = objective
         
         # === SESSION DIRECTORY ===
-        default_dir = f"./campaign_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        print(f"\n📁 Where should I save session data?")
-        session_dir = input(f"   Path (default: {default_dir}): ").strip()
-        if not session_dir:
-            session_dir = default_dir
-        
-        self.session_dir = Path(session_dir)
+        if self._session_dir_arg:
+            # Explicit --session-dir wins; skip the interactive prompt.
+            self.session_dir = Path(self._session_dir_arg)
+            if self._restore:
+                print(f"\n📂 Restoring session: {self.session_dir}")
+        elif self._restore:
+            # Discover the most recent campaign session to restore.
+            import glob
+            sessions = sorted(glob.glob("./campaign_session_*"), reverse=True)
+            if sessions:
+                self.session_dir = Path(sessions[0])
+                print(f"\n📂 Found session to restore: {self.session_dir}")
+            else:
+                self._restore = False
+                default_dir = f"./campaign_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                print("\n⚠️  No existing campaign sessions found. Creating a new session.")
+                self.session_dir = Path(default_dir)
+        else:
+            default_dir = f"./campaign_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            print(f"\n📁 Where should I save session data?")
+            session_dir = input(f"   Path (default: {default_dir}): ").strip()
+            if not session_dir:
+                session_dir = default_dir
+            self.session_dir = Path(session_dir)
+
         self.session_dir.mkdir(parents=True, exist_ok=True)
         
         # === INITIALIZE AGENT ===
@@ -438,11 +504,13 @@ class OrchestratorPlayground:
                 model_name=model_name,
                 base_url=base_url,
                 embedding_model=embedding_model,
+                embedding_api_key=self._embedding_api_key,
                 futurehouse_api_key=futurehouse_key,
                 autonomy_level=autonomy_level,
                 data_dir=self.data_dir,
                 knowledge_dir=self.knowledge_dir,
                 code_dir=self.code_dir,
+                restore_checkpoint=self._restore,
             )
             print("✅ Agent ready!")
 
@@ -923,8 +991,13 @@ class OrchestratorPlayground:
         print("Type /help for commands, or just chat naturally!\n")
         
         # Process initial workspace based on autonomy level ===
-        # Note: This does nothing for co-pilot mode (backward compatible)
-        self._process_initial_inputs()
+        # Note: This does nothing for co-pilot mode (backward compatible).
+        # Skip on restore — the campaign state is already loaded and we must
+        # not re-run the autopilot/autonomous pipeline over it.
+        if self._restore:
+            print("📂 Session restored from checkpoint. Continuing where you left off.\n")
+        else:
+            self._process_initial_inputs()
         
         # === Main chat loop ===
         while True:
