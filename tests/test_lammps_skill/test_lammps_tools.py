@@ -204,6 +204,24 @@ class TestParseDataFileElectrolyte:
         assert info["has_organic"] is True
 
 
+class TestParseDataFileNBearingElectrolyteLimitation:
+    """KNOWN LIMITATION (#494): a small N-bearing electrolyte solvent —
+    acetonitrile here, and by extension imidazolium ionic liquids and amide
+    solvents — is mislabeled 'biomolecular' because the category heuristic keys
+    on nitrogen as a biomolecule proxy. This test PINS the current (wrong)
+    behavior so the limitation stays visible and tracked; when a size/topology
+    discriminator lands (#494), flip this assertion to the correct label."""
+
+    def test_mecn_electrolyte_currently_mislabeled_biomolecular(self, data_dir):
+        info = lammps_tools.parse_data_file(
+            str(data_dir / "mecn_electrolyte.data"))
+        # It IS a water + NaCl + acetonitrile electrolyte...
+        assert info["has_water"] is True
+        assert info["has_ions"] is True
+        # ...but the N in acetonitrile trips the nitrogen proxy. Wrong, tracked.
+        assert info["system_category"] == "biomolecular"   # FIXME(#494): -> electrolyte
+
+
 class TestParseDataFileSlab:
     """Cu slab with vacuum gap."""
 

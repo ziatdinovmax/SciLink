@@ -486,20 +486,33 @@ def parse_data_file(data_file: str) -> Dict[str, Any]:
         and ec.get("H", 0) >= 2 * ec.get("O", 0)
         and info["has_bonds"]
     )
+    # Monatomic cations common in electrolytes (alkali, alkaline-earth, and a few
+    # multivalent cations incl. Zn2+) plus halide anions. NOTE: this does not see
+    # polyatomic anions (triflate, sulfate, nitrate) — a halide-free box with such
+    # an anion falls to "solution" rather than "electrolyte" (both non-biomolecular,
+    # so nothing downstream breaks). Teaching the ion check about polyatomic anions
+    # is tracked in #494.
     info["has_ions"] = bool(elems & _HALIDES) or bool(
-        elems & {"Na", "K", "Ca", "Mg", "Li", "Rb", "Cs"}
+        elems & {"Na", "K", "Ca", "Mg", "Li", "Rb", "Cs", "Zn", "Al", "Sr", "Ba"}
     )
     info["has_organic"] = "C" in ec and info["has_bonds"]
     info["has_metal"] = bool(elems & _METALS) and not info["has_bonds"]
     info["has_semiconductor"] = bool(elems & _SEMICONDUCTORS) and not info["has_bonds"]
 
     # Category (bonded molecular systems first, then non-bonded solids).
-    # "biomolecular" requires nitrogen, not just any bonded carbon: proteins and
-    # nucleic acids carry N in their amide/amine/base backbones, whereas most
-    # organic electrolyte and solvent species (triflate, sulfone, carbonates,
-    # glymes) are carbon-bearing but N-free. Keying on N (rather than "C or N")
-    # stops those liquids from being swept up as biomolecular, while a solvated
-    # small molecule with N is rare enough to accept the occasional miss.
+    # KNOWN LIMITATION (#494): "biomolecular" keys on nitrogen (proteins and
+    # nucleic acids carry N in their amide/amine/base backbones; N-free organic
+    # electrolyte/solvent species — triflate, sulfone, carbonates, glymes — do
+    # not). N is a PROXY, not a biomolecule signature: it mislabels N-bearing
+    # SMALL-molecule electrolytes and solvents — acetonitrile, imidazolium /
+    # ammonium / pyridinium ionic liquids, amide solvents (DMF/DMAc/NMP),
+    # organic-nitrate systems — as biomolecular, because this branch is checked
+    # before the electrolyte/solution ones. Those are common chemistries, not
+    # rare misses. The honest discriminator is size/topology (biopolymers are
+    # large; MeCN, imidazolium, triflate are small), but atom/bond counts alone
+    # don't separate them cleanly (alanine dipeptide ~22 atoms overlaps
+    # imidazolium ~19). N is the interim heuristic pending #494; the
+    # MeCN+NaCl+water test pins the current (wrong) behavior so it stays visible.
     if info["has_bonds"]:
         if "N" in ec and "C" in ec:
             info["system_category"] = "biomolecular"
