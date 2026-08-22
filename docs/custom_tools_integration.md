@@ -52,7 +52,7 @@ Two things to know about the factory:
 - **The first parameter name decides what the orchestrator passes you.** Names like `image`, `data`, or `array` mean "load the current file and pass it as a NumPy array (or a pandas DataFrame for CSV)." Names like `data_path`, `path`, or `file` mean "just pass the file path as a string."
 - **Add an `output_dir` keyword argument** if your tool wants to save plots or data files. The orchestrator auto-injects the session's `results/custom_tools/` directory so your outputs land next to the other session results.
 
-Working examples live in `examples/custom_image_tools.py` and `examples/custom_stats_tools.py`.
+The file above is the complete contract — a `tool_schemas` list plus a `create_tool_functions` factory in one `.py` file.
 
 ## Step 2: register your tool
 
@@ -67,7 +67,7 @@ scilink analyze --tools ./preprocess.py ./morphology.py
 
 ### Web UI
 
-In the Streamlit UI, open the **Tools & Agents** tab and upload your `.py` file under **Custom Tools**. Registered tools appear with their descriptions and remain available for the session.
+In the Streamlit UI, open the **Tools** tab and upload your `.py` file under **Upload Tools**. Registered tools appear with their descriptions and remain available for the session.
 
 ### Programmatic
 
@@ -174,7 +174,7 @@ If you'd rather be explicit than trust the hint, just say so in chat: *"now exam
 
 Custom tools are the lightest extension. SciLink also supports two heavier ones:
 
-- **`--agents ./my_agent.py`** — register a full analysis agent with its own `analyze()` method. Useful when the workflow is more involved than a single function. See `examples/custom_peak_agent.py` and `examples/custom_outlier_agent.py`.
+- **`--agents ./my_agent.py`** — register a full analysis agent with its own `analyze()` method. Useful when the workflow is more involved than a single function. The file contains one or more `BaseAnalysisAgent` subclasses; all subclasses found are registered automatically.
 - **`--skills ./my_skill.md`** — register a markdown skill file that built-in agents can load via the `skill` parameter of `run_analysis`. Useful for encoding domain-specific fitting or analysis recipes as guidance.
 
 All three flags combine in one command:
@@ -183,4 +183,4 @@ All three flags combine in one command:
 scilink analyze --tools ./preprocess.py --agents ./my_agent.py --skills ./raman.md
 ```
 
-The **Tools & Agents** tab in the web UI supports all three as well.
+In the web UI, custom tools upload via the **Tools** tab and custom skills via the **Skills** tab; custom agents are CLI/API only. The flags are not analyze-only either: `scilink plan`, `scilink simulate`, and `scilink explore` also accept both `--tools` and `--skills`.
