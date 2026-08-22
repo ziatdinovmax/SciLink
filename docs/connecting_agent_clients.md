@@ -49,6 +49,13 @@ This prints a secret-free `mcpServers` entry — a **zero-install** `uvx`
 spec when [uv](https://docs.astral.sh/uv/) is on PATH (the machine needs
 nothing else), or a path to this installation's `scilink` otherwise.
 
+`--mode` selects which tool set the server exposes: `analyze` (data
+analysis), `plan` (optimization + experiment planning), `both` (the
+default — analysis + planning together), `simulate` (structure building,
+engine inputs, and running DFT / MD / ML-potential simulations), or `meta`
+(a single orchestrator that routes across all of them). Pick the narrowest
+mode your campaign needs; `meta` is the widest surface.
+
 **B. Long-lived service on the host (SSE).** Start it in a terminal you
 keep visible (all narration appears there) and point clients at the URL:
 
