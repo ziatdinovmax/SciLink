@@ -51,6 +51,10 @@ _COPILOT_APPROVAL_TOOLS = {
     "get_recommendations", "run_optimization", "generate_initial_plan",
     "generate_implementation_code", "run_economic_analysis",
     "discard_plan",
+    # Simulation-mode tools that build/run a calculation (expensive; co-pilot
+    # gates them, as it does the analysis/planning run tools).
+    "run_simulation", "run_complete_dft_workflow", "run_mlip_simulation",
+    "run_exafs_workflow", "submit_simulation_job",
     # Meta-mode granular delegations (each one launches a full specialist
     # workflow — co-pilot gates them; in autopilot they run and the
     # children's own questions surface via awaiting_input instead).
@@ -58,6 +62,8 @@ _COPILOT_APPROVAL_TOOLS = {
 }
 _AUTOPILOT_APPROVAL_TOOLS = {
     "run_analysis", "run_optimization", "discard_plan",
+    # High-impact simulation execution (real engine / HPC time).
+    "run_simulation", "run_complete_dft_workflow",
 }
 
 # Tools that support optional background execution via ``background=true``.
@@ -81,9 +87,19 @@ _BACKGROUND_CAPABLE_TOOLS = {
     "orchestrate_analysis",
     "orchestrate_planning",
     "orchestrate_meta",
+    "orchestrate_simulation",
     "delegate_to_analysis",
     "delegate_to_planning",
     "delegate_to_simulation",
+    # Simulation tools with long engine / DFT / MD / HPC runtimes — a blocking
+    # call would routinely exceed a client's tool-call timeout.
+    "run_simulation",
+    "run_complete_dft_workflow",
+    "run_mlip_simulation",
+    "run_exafs_workflow",
+    "analyze_output",
+    "submit_simulation_job",
+    "generate_final_report",
 }
 
 
@@ -694,6 +710,7 @@ def create_server(
     state: Dict[str, Any] = {
         "analysis_orch": None,
         "planning_orch": None,
+        "simulation_orch": None,
         "meta_orch": None,
         # Pending items awaiting a client's scilink_respond, keyed by
         # request id. Two shapes: {"type": "tool_approval", "action":
@@ -752,6 +769,15 @@ def create_server(
                         mcp_name = f"scilink_plan_{fn_name}"
                     tool_map[mcp_name] = ("planning_orch", fn_name)
 
+        # Simulation is a standalone mode (its tools are never registered
+        # alongside analysis/planning), so plain `scilink_` names — no
+        # collision handling needed.
+        if state["simulation_orch"]:
+            for schema in state["simulation_orch"].tools.openai_schemas:
+                fn_name = schema.get("function", {}).get("name", "")
+                if fn_name:
+                    tool_map[f"scilink_{fn_name}"] = ("simulation_orch", fn_name)
+
         if state["meta_orch"]:
             for schema in state["meta_orch"].tools.openai_schemas:
                 fn_name = schema.get("function", {}).get("name", "")
@@ -787,6 +813,10 @@ def create_server(
                 else:
                     prefix = "scilink"
                 tools.append(_openai_to_mcp_tool(schema, prefix=prefix))
+
+        if state["simulation_orch"]:
+            for schema in state["simulation_orch"].tools.openai_schemas:
+                tools.append(_openai_to_mcp_tool(schema, prefix="scilink"))
 
         if state["meta_orch"]:
             for schema in state["meta_orch"].tools.openai_schemas:
@@ -979,6 +1009,47 @@ def create_server(
                 },
             ))
 
+        if state["simulation_orch"]:
+            tools.append(types.Tool(
+                name="scilink_orchestrate_simulation",
+                description=(
+                    "Delegate a complete simulation workflow to SciLink's "
+                    "simulation orchestrator. Send a natural-language prompt and "
+                    "the orchestrator handles the entire flow: routing to the right "
+                    "scale/engine, building and validating the atomic structure, "
+                    "generating engine inputs, running the calculation, and "
+                    "refining it to convergence — engine-neutral across periodic "
+                    "DFT (VASP/QE), classical MD (LAMMPS), and ML-potential MD. Best "
+                    "for a full task where SciLink's domain expertise should drive "
+                    "the workflow; use background=true, as a real run can take "
+                    "minutes to hours."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "prompt": {
+                            "type": "string",
+                            "description": (
+                                "Natural-language instruction for the simulation "
+                                "orchestrator, e.g. 'Build a rutile TiO2 supercell "
+                                "with one oxygen vacancy and generate a spin-polarized "
+                                "VASP relaxation.'"
+                            ),
+                        },
+                        "background": {
+                            "type": "boolean",
+                            "description": (
+                                "If true, run in the background and return a job_id "
+                                "immediately. Recommended for most requests. Use "
+                                "scilink_job_status and scilink_job_result to poll "
+                                "and retrieve results. Default: false."
+                            ),
+                        },
+                    },
+                    "required": ["prompt"],
+                },
+            ))
+
         if state["meta_orch"]:
             tools.append(types.Tool(
                 name="scilink_orchestrate_meta",
@@ -1054,7 +1125,9 @@ def create_server(
             return _handle_job_result(state, arguments)
 
         # Handle orchestrator-level chat tools
-        if name in ("scilink_orchestrate_analysis", "scilink_orchestrate_planning"):
+        if name in ("scilink_orchestrate_analysis",
+                    "scilink_orchestrate_planning",
+                    "scilink_orchestrate_simulation"):
             return await _handle_orchestrate(
                 state, name, arguments, _executor
             )
@@ -1361,6 +1434,39 @@ def _init_orchestrators(state: dict, config: dict) -> None:
         except Exception as exc:
             logging.warning(f"Planning orchestrator not available: {exc}")
 
+    if config["mode"] == "simulate":
+        # Standalone simulation surface (structure + inputs + run + refine,
+        # engine-neutral). Guarded like the planning block: the sim package
+        # pulls the optional `[sim]` extra (ase/pymatgen/…), so a checkout
+        # without it must not break `scilink serve` — it just won't offer the
+        # simulate mode.
+        try:
+            from scilink.agents.sim_agents.simulation_orchestrator import (
+                SimulationOrchestratorAgent, SimulationMode,
+            )
+            sim_mode_map = {
+                "co-pilot": SimulationMode.CO_PILOT,
+                "co_pilot": SimulationMode.CO_PILOT,
+                "copilot": SimulationMode.CO_PILOT,
+                "autopilot": SimulationMode.AUTOPILOT,
+                "autonomous": SimulationMode.AUTONOMOUS,
+            }
+            sim_mode = sim_mode_map.get(
+                config["analysis_mode"].lower(), SimulationMode.AUTONOMOUS
+            )
+            _sbase = _base_for("simulation")
+            state["simulation_orch"] = SimulationOrchestratorAgent(
+                base_dir=_sbase,
+                api_key=api_key,
+                model_name=model_name,
+                base_url=base_url,
+                simulation_mode=sim_mode,
+                futurehouse_api_key=fh_key,
+                restore_checkpoint=_restore(_sbase),
+            )
+        except Exception as exc:
+            logging.warning(f"Simulation orchestrator not available: {exc}")
+
     if config["mode"] == "meta":
         # The meta is its own surface (it constructs and routes to its
         # specialist children internally) — exposed INSTEAD of the
@@ -1538,6 +1644,10 @@ def _execute_run_task_captured(orch, prompt: str, autonomy_str: str,
         from scilink.agents.planning_agents.planning_orchestrator import (
             AutonomyLevel as _Level,
         )
+    elif "simulation_orchestrator" in mode_enum:
+        from scilink.agents.sim_agents.simulation_orchestrator import (
+            SimulationMode as _Level,
+        )
     else:
         from scilink.agents.exp_agents.analysis_orchestrator import (
             AnalysisMode as _Level,
@@ -1684,20 +1794,25 @@ async def _handle_orchestrate(
     """Handle orchestrator-level chat tools."""
     from datetime import datetime as _dt
 
-    orch_key = (
-        "analysis_orch" if name == "scilink_orchestrate_analysis"
-        else "planning_orch"
-    )
+    orch_key = {
+        "scilink_orchestrate_analysis": "analysis_orch",
+        "scilink_orchestrate_planning": "planning_orch",
+        "scilink_orchestrate_simulation": "simulation_orch",
+    }.get(name, "analysis_orch")
     orch = state.get(orch_key)
     if orch is None:
-        mode_label = "analysis" if "analysis" in name else "planning"
+        if "simulation" in name:
+            mode_label, hint = "simulation", "--mode simulate"
+        else:
+            mode_label = "analysis" if "analysis" in name else "planning"
+            hint = f"--mode {mode_label} or --mode both"
         return [types.TextContent(
             type="text",
             text=json.dumps({
                 "status": "error",
                 "message": (
                     f"{mode_label.title()} orchestrator is not available. "
-                    f"Start the server with --mode {mode_label} or --mode both."
+                    f"Start the server with {hint}."
                 ),
             }),
         )]
@@ -1798,6 +1913,15 @@ def _handle_set_autonomy(
                 AutonomyLevel[_level_name])
         except Exception as exc:  # noqa: BLE001
             logging.warning(f"set_autonomy: planning orch not updated: {exc}")
+    if state.get("simulation_orch") is not None:
+        try:
+            from scilink.agents.sim_agents.simulation_orchestrator import (
+                SimulationMode,
+            )
+            state["simulation_orch"].set_simulation_mode(
+                SimulationMode[_level_name])
+        except Exception as exc:  # noqa: BLE001
+            logging.warning(f"set_autonomy: simulation orch not updated: {exc}")
     if state.get("meta_orch") is not None:
         try:
             from scilink.agents.meta_agent.meta_orchestrator import MetaMode
