@@ -96,7 +96,15 @@ Metadata Options:
         help='Materials Project API key (or set MP_API_KEY env var). '
              'Enables the MP tool-resolver in structure generation.'
     )
-    
+
+    parser.add_argument(
+        '--futurehouse-api-key',
+        type=str,
+        dest='futurehouse_api_key',
+        help='FutureHouse API key for novelty assessment / literature search '
+             '(or set FUTUREHOUSE_API_KEY env var). Optional.'
+    )
+
     # Mode arguments
     parser.add_argument(
         '--mode',
@@ -285,6 +293,7 @@ Metadata Options:
         'model_name': args.model,
         'base_url': base_url,
         'api_key': api_key,
+        'futurehouse_api_key': args.futurehouse_api_key,
         'analysis_mode': args.mode,
         'data_path': args.data_path,
         'metadata_path': args.metadata_path,
@@ -446,7 +455,8 @@ Supported data types:
                         api_key = user_key
 
         # === FUTUREHOUSE API KEY (Optional) ===
-        futurehouse_key = os.getenv("FUTUREHOUSE_API_KEY")
+        # Flag takes priority, then env; only prompt when neither is set.
+        futurehouse_key = self.config.get('futurehouse_api_key') or os.getenv("FUTUREHOUSE_API_KEY")
         if not futurehouse_key:
             print("\n📚 FutureHouse API Key (Optional - for novelty assessment)")
             print("   Enables literature search to check if findings are novel.")
