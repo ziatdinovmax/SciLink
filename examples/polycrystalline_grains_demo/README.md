@@ -13,8 +13,7 @@ No specific goal required, jsut let the agent figure out the analysis goals on i
 scilink ui
 ```
 
-— upload `image.npy` and `image.json` (requires
-`pip install scilink[ui]`).
+— upload `image.npy` and `image.json`.
 
 **CLI**:
 

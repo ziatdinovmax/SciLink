@@ -1,21 +1,14 @@
 import logging
 from typing import Callable, List
 from ..controllers.hyperspectral_controllers import (
-    RunPreprocessingController,
-    GetInitialComponentParamsController,
-    RunComponentTestLoopController,
-    CreateElbowPlotController,
-    GetFinalComponentSelectionController,
-    RunFinalSpectralUnmixingController,
-    CreateAnalysisPlotsController,
+    DecompositionController,
     BuildHyperspectralPromptController,
     RunDynamicAnalysisController,
     SelectRefinementTargetController,
-    GenerateRefinementTasksController,
     BuildHolisticSynthesisPromptController,
     GenerateHTMLReportController,
-    RunSelfReflectionController,      
-    ApplyReflectionUpdatesController   
+    RunSelfReflectionController,
+    ApplyReflectionUpdatesController
 )
 from ..controllers.base_controllers import (
     RunFinalInterpretationController,
@@ -33,7 +26,9 @@ def create_hyperspectral_iteration_pipeline(
     safety_settings,
     settings: dict,
     preprocessor: HyperspectralPreprocessingAgent,
-    parse_fn: Callable
+    parse_fn: Callable,
+    executor_timeout: int = 600,
+    max_verification_iterations: int = None,
 ) -> List:
     """
     Assembles the pipeline that runs *per-iteration* of the recursive analysis.
@@ -42,33 +37,18 @@ def create_hyperspectral_iteration_pipeline(
 
     pipeline = []
 
-    # --- 1. PREPROCESSING (Only on first iteration) ---
-    if settings.get('run_preprocessing', True):
-        pipeline.append(RunPreprocessingController(logger, preprocessor))
-
-    # --- 2. SPECTRAL UNMIXING ---
+    # --- SPECTRAL DECOMPOSITION (one cohesive, model-bearing step) ---
+    # The decomposition is a single composite controller that owns its own input
+    # prep, component estimation, elbow scan, LLM selection, final unmixing, and
+    # validation plots, and leaves the decomposition contract in `state`. It
+    # cleans the cube *for decomposition* internally; the per-pixel codegen
+    # downstream receives the RAW cube and owns its own fittability denoising.
+    # See issue #220 / docs/hyperspectral_codegen_relocation.md.
     if settings.get('enabled', True):
-
-        # 2a. Auto-component workflow
-        if settings.get('auto_components', True):
-            # [🧠 LLM] Get initial component guess
-            pipeline.append(GetInitialComponentParamsController(
-                model, logger, generation_config, safety_settings, parse_fn
-            ))
-            # [🛠️ Tool] Run NMF loop to get errors
-            pipeline.append(RunComponentTestLoopController(logger, settings))
-            # [🛠️ Tool] Create elbow plot from errors
-            pipeline.append(CreateElbowPlotController(logger, settings))
-            # [🛠️ LLM] Select final n_components from elbow plot
-            pipeline.append(GetFinalComponentSelectionController(
-                model, logger, generation_config, safety_settings, parse_fn
-            ))
-
-        # 2b. [🛠️ Tool] Run final NMF
-        pipeline.append(RunFinalSpectralUnmixingController(logger, settings))
-
-        # 2c. [🛠️ Tool] Create all plots for analysis
-        pipeline.append(CreateAnalysisPlotsController(logger, settings))
+        pipeline.append(DecompositionController(
+            model, logger, generation_config, safety_settings,
+            settings, preprocessor, parse_fn
+        ))
 
     # --- 3. ITERATION ANALYSIS & REFINEMENT DECISION ---
 
@@ -93,13 +73,12 @@ def create_hyperspectral_iteration_pipeline(
 
     # 3e. [🧠/💻] Dynamic Analysis
     pipeline.append(RunDynamicAnalysisController(
-        model, logger, generation_config, safety_settings, parse_fn
+        model, logger, generation_config, safety_settings, parse_fn,
+        executor_timeout=executor_timeout,
+        max_verification_iterations=max_verification_iterations,
     ))
-    
-    # 3f. [🛠️ Tool] Prepare data for next loop (Standard NMF tasks)
-    pipeline.append(GenerateRefinementTasksController(logger))
 
-    logger.info(f"Hyperspectral *iteration* pipeline created with {len(pipeline)} steps.")
+    logger.info(f"Hyperspectral iteration pipeline created with {len(pipeline)} steps.")
     return pipeline
 
 def create_hyperspectral_synthesis_pipeline(

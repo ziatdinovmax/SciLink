@@ -8,9 +8,48 @@ from typing import Dict, Any, Optional
 
 try:
     from edison_client import EdisonClient, JobNames
-except ImportError:
-    logging.error("Error: edison_client is not installed. Please install it with 'pip install edison-client'")
-    raise
+    _EDISON_IMPORT_ERROR = None
+except Exception as _e:  # noqa: BLE001 - ImportError OR any transitive
+    # breakage inside the FutureHouse chain (edison-client -> ldp -> fhlmi;
+    # e.g. a mismatched fhlmi raising "No module named 'lmi.config'").
+    EdisonClient, JobNames = None, None
+    _EDISON_IMPORT_ERROR = _e
+    logging.warning(
+        "Literature stack unavailable (%s). Core analysis is unaffected; "
+        "literature tools will report this when invoked.", _e)
+
+
+def _require_edison():
+    """Fail at CONSTRUCTION, not import, when the optional literature stack
+    is broken or absent — a module-scope raise here used to brick the whole
+    agent initialization (UI startup) over an ancillary feature. Same
+    pattern as the meta agent's guarded `ase` import (see CLAUDE.md,
+    'guarded import inside the function')."""
+    if EdisonClient is None:
+        raise RuntimeError(
+            f"Literature features are unavailable: {_EDISON_IMPORT_ERROR}. "
+            "The literature stack is optional for core analysis. To enable "
+            "it, install a mutually consistent set: "
+            "pip install -U edison-client ldp fhlmi fhaviary"
+        )
+
+_TERMINAL_STATUS_MARKERS = ("fail", "error", "cancel", "crash", "timeout",
+                            "abort", "kill", "reject")
+
+
+def _is_terminal_failure(status: object) -> bool:
+    """Has the remote task stopped for good?
+
+    Matched by SUBSTRING rather than against a fixed list. The lists here
+    were exactly {failed, error} (or {FAILED, ERROR, error}), so any other
+    spelling of "this job is dead" — cancelled, crashed, timeout — read as
+    "still running" and was polled until the entire wait budget expired,
+    blocking every other search in the batch behind it. Observed live: one
+    job pinned a five-search call for 45+ minutes. No healthy in-progress
+    state name contains any of these markers.
+    """
+    return any(m in str(status).lower() for m in _TERMINAL_STATUS_MARKERS)
+
 
 class OwlLiteratureAgent:
     """
@@ -31,6 +70,7 @@ class OwlLiteratureAgent:
         if not api_key:
             raise ValueError("API key not provided and FUTUREHOUSE_API_KEY environment variable is not set.")
         
+        _require_edison()
         self.client = EdisonClient(api_key=api_key)
         self.max_wait_time = max_wait_time
         logging.info("OWLLiteratureAgent initialized with max wait time of %d seconds.", max_wait_time)
@@ -107,7 +147,7 @@ class OwlLiteratureAgent:
                         "query": has_anyone_question
                     }
                 
-                if task_status.status in ["FAILED", "ERROR", "error"]:
+                if _is_terminal_failure(task_status.status):
                     error_msg = f"OWL query failed with status: {task_status.status}"
                     logging.error(error_msg)
                     return {"status": "error", "message": error_msg, "task_id": task_id}
@@ -135,47 +175,80 @@ class IncarLiteratureAgent:
         if not api_key:
             raise ValueError("API key required")
         
+        _require_edison()
         self.client = EdisonClient(api_key=api_key)
         self.max_wait_time = max_wait_time
         self.logger = logging.getLogger(__name__)
 
-    def validate_incar(self, incar_content: str, system_description: str) -> dict:
-        """Validate INCAR parameters against literature."""
-        
-        # Clean system description - remove additional instructions
+    def validate_inputs(self, input_files_text: str, system_description: str,
+                        engine_label: str = "DFT") -> dict:
+        """Validate engine input parameters against literature.
+
+        Engine-neutral entry point: ``engine_label`` names the engine in
+        the query (e.g. "VASP INCAR", "Quantum ESPRESSO", "LAMMPS") so the
+        same literature mechanism grounds parameter review for any engine.
+
+        Args:
+            input_files_text: The input file contents to review.
+            system_description: What system the inputs are for.
+            engine_label: Human-readable engine name for the query.
+
+        Returns:
+            ``{status, response, task_id}`` on success, or an error /
+            timeout status dict.
+        """
         clean_description = self._clean_system_description(system_description)
-        
-        query = f"""Are these VASP INCAR parameters appropriate for {clean_description}?
+        query = (
+            f"Are these {engine_label} input parameters appropriate for "
+            f"{clean_description}?\n\n{input_files_text}"
+        )
+        return self._run_literature_query(query)
 
-{incar_content}"""
+    def validate_incar(self, incar_content: str, system_description: str) -> dict:
+        """Validate VASP INCAR parameters against literature.
 
+        Thin VASP-specific wrapper over :meth:`validate_inputs`.
+        """
+        return self.validate_inputs(
+            input_files_text=incar_content,
+            system_description=system_description,
+            engine_label="VASP INCAR",
+        )
+
+    def _run_literature_query(self, query: str) -> dict:
+        """Submit a literature query to CROW and poll until it resolves.
+
+        Args:
+            query: The fully-built natural-language query.
+
+        Returns:
+            ``{status, response, task_id}`` on success; an error or
+            timeout status dict otherwise.
+        """
         try:
-            # Submit to CROW
             task_data = {"name": JobNames.LITERATURE, "query": query}
             task_id = self.client.create_task(task_data)
-            
-            # Wait for completion
+
             import time
             start_time = time.time()
-            
+
             while time.time() - start_time < self.max_wait_time:
                 task_status = self.client.get_task(task_id)
-                
+
                 if task_status.status == "success":
-                    # Clean response to remove repeated question
                     clean_response = self._clean_response(task_status.formatted_answer, query)
                     return {
-                        "status": "success", 
+                        "status": "success",
                         "response": clean_response,
-                        "task_id": task_id
+                        "task_id": task_id,
                     }
-                elif task_status.status in ["FAILED", "ERROR", "error"]:
+                elif _is_terminal_failure(task_status.status):
                     return {"status": "error", "message": f"CROW failed: {task_status.status}"}
-                
+
                 sleep(10)
-            
+
             return {"status": "timeout", "message": f"Timed out after {self.max_wait_time}s"}
-            
+
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
@@ -226,6 +299,7 @@ class FittingModelLiteratureAgent:
         if not api_key:
             raise ValueError("API key not provided and FUTUREHOUSE_API_KEY env variable is not set.")
         
+        _require_edison()
         self.client = EdisonClient(api_key=api_key)
         self.max_wait_time = max_wait_time
         self.logger = logging.getLogger(__name__)
@@ -262,7 +336,7 @@ class FittingModelLiteratureAgent:
                         "formatted_answer": task_status.formatted_answer,
                         "task_id": task_id
                     }
-                elif task_status.status in ["FAILED", "ERROR", "error"]:
+                elif _is_terminal_failure(task_status.status):
                     error_msg = f"CROW model search failed with status: {task_status.status}"
                     self.logger.error(error_msg)
                     return {"status": "error", "message": error_msg}
@@ -289,6 +363,7 @@ class LiteratureSearchAgent:
         if not self.api_key:
             raise ValueError("API Key required for Literature Agent.")
         
+        _require_edison()
         self.client = EdisonClient(api_key=self.api_key)
         self.max_wait_time = max_wait_time
         self.logger = logging.getLogger("LitAgent")
@@ -306,6 +381,7 @@ class LiteratureSearchAgent:
             
             # 2. Poll for Completion
             start_time = time.time()
+            seen_states: set = set()
             while (time.time() - start_time) < self.max_wait_time:
                 task_status = self.client.get_task(task_id)
                 status = task_status.status.lower()
@@ -317,12 +393,21 @@ class LiteratureSearchAgent:
                         "content": task_status.formatted_answer,
                         "sources": [s.url for s in getattr(task_status, 'sources', [])] 
                     }
-                elif status in ["failed", "error"]:
+                elif _is_terminal_failure(status):
                     return {"status": "error", "message": f"Remote status: {status}"}
-                
+                seen_states.add(status)
+
                 time.sleep(5) # Wait before next poll
-            
-            return {"status": "timeout", "message": "Request timed out."}
+
+            # Name the states actually seen: the remote vocabulary is not
+            # documented, so a hang is only diagnosable if we report it.
+            self.logger.warning(
+                "⏱️ %s task %s never finished in %ss; states seen: %s",
+                task_type, task_id, self.max_wait_time,
+                sorted(seen_states) or "none")
+            return {"status": "timeout",
+                    "message": f"Timed out after {self.max_wait_time}s "
+                               f"(states seen: {sorted(seen_states) or 'none'})"}
 
         except Exception as e:
             return {"status": "error", "message": str(e)}
@@ -331,15 +416,83 @@ class LiteratureSearchAgent:
 
     def search_for_hypothesis_context(self, objective: str) -> Dict[str, Any]:
         """
-        Formats a query specifically for generating experimental plans.
-        Focuses on mechanisms, methods, and gaps.
+        Formats a query for grounding a research plan. Focuses on methods,
+        mechanisms, and gaps — framed neutrally across experimental and
+        computational work, so a modeling/simulation objective is not
+        answered through a lab-technique lens (and vice versa).
         """
         formatted_query = (
-            f"Provide a comprehensive review of experimental methods, "
-            f"underlying physical mechanisms, and recent advancements related to: '{objective}'. "
-            f"Highlight any common experimental pitfalls."
+            f"Provide a comprehensive review of the relevant methods — "
+            f"experimental and/or computational, as fits the topic — "
+            f"underlying physical mechanisms, and recent advancements "
+            f"related to: '{objective}'. "
+            f"Highlight common pitfalls of these methods."
         )
         return self._execute_crow_task(formatted_query, task_type="Hypothesis")
+
+    def search_for_cross_domain(self, objective: str) -> Dict[str, Any]:
+        """
+        Formats a query for INSPIRATION retrieval: mechanisms and design
+        principles from adjacent or unrelated fields that could TRANSFER to
+        this problem.
+
+        Deliberately not a topical review. ``search_for_hypothesis_context``
+        retrieves the problem's own subfield — which grounds a plan but also
+        anchors it to established approaches. This one asks for analogies
+        whose mechanism might carry over, which is where a genuinely new
+        mechanistic idea usually comes from.
+
+        Intended for ideation. Benchmarking showed cross-domain context
+        raises idea novelty and non-obviousness, but degrades adherence to
+        hard equipment/process constraints — so pair it with grounding
+        retrieval, and prefer grounding alone when a plan must satisfy
+        stated constraints.
+        """
+        formatted_query = (
+            "Survey mechanisms and design principles from ADJACENT and "
+            "UNRELATED domains that could TRANSFER to the problem below. "
+            "State the FUNCTION to be transferred toward in one sentence "
+            "first — drawing on the problem's own field only for that, never "
+            "as the answer — then leave that field behind: the body must NOT "
+            "be a topical review of its methods. For each analogous system "
+            "(a different chemistry, biology, or engineering field achieving "
+            "a similar function), name the field and describe the underlying "
+            "mechanism, how it is measured or realized, why it might "
+            "transfer, and what would break in transfer. Emphasize "
+            "unconventional and emerging approaches.\n\n"
+            f"PROBLEM: {objective}"
+        )
+        return self._execute_crow_task(formatted_query, task_type="CrossDomain")
+
+    def search_for_technique_limitations(self, objective: str) -> Dict[str, Any]:
+        """
+        Formats an ADVERSARIAL query: what is known to go wrong with the
+        techniques, materials and reference methods a plan relies on.
+
+        ``search_for_hypothesis_context`` retrieves why a technique works —
+        the review that grounds a design also anchors it. This leg asks only
+        for the limitations, so the plan author can address them and the
+        plan critic's evidence lens can cite a stated limitation instead of
+        relying on recall. Live: an expert reviewer's most valuable
+        objections (a probe that cannot operate in the stated medium, a
+        calibration reference that is one of the estimator's own inputs, a
+        support unstable under the operating conditions, a transient that
+        mimics the effect) were all in this category and absent from the
+        supportive retrieval.
+        """
+        formatted_query = (
+            f"For each measurement technique, material and reference/calibration "
+            f"method named or clearly implied in: '{objective}', report the known "
+            f"LIMITATIONS, ARTIFACTS and FAILURE MODES under the stated operating "
+            f"conditions: media or environments in which it cannot operate; "
+            f"contributions that confound the quantity it is meant to measure; "
+            f"calibration references that are not independent of the measurement; "
+            f"instability, dissolution or degradation under the conditions; "
+            f"transients or inventories that mimic the effect of interest; "
+            f"sampling or replication pitfalls. Cite specific studies for each. "
+            f"Do NOT review what the technique does well."
+        )
+        return self._execute_crow_task(formatted_query, task_type="Limitations")
 
     def search_for_fitting_models(self, objective: str) -> Dict[str, Any]:
         """

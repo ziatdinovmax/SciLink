@@ -372,7 +372,14 @@ These are heuristics, not rigid rules. Use your expert judgment to synthesize th
         * For *very clean data* (e.g., `1st Percentile` is close to the median), you might use a *lower* percentile (e.g., 1.0-2.0).
         * For *very noisy data* (e.g., a high `Data Std` relative to `Data Mean`), you might use a *higher* percentile (e.g., 10.0-15.0) to be more aggressive in removing the noisy baseline.
 
-5.  **`reasoning` (str):**
+5.  **`spatial_bin_factor` (int) — the SIZE GUARD:**
+    * Downstream decomposition and per-pixel fitting scale with pixels x bands; an oversized cube burns hours of compute without adding science for spatially smooth samples. Judge from the `shape` in the statistics:
+        * up to ~20 million values -> `1` (no binning);
+        * ~20-100 million values -> `2` (2x2 mean-binning of the spatial axes);
+        * above ~100 million values -> `4`.
+    * Override toward `1` only when the objective / `system_info` genuinely needs single-pixel spatial resolution (e.g., atomic-resolution mapping, few-pixel features) — and say so in `reasoning`. Spectra are never binned, only the two spatial axes.
+
+6.  **`reasoning` (str):**
     * Briefly explain your choices *based on the statistics and context*.
 
 You MUST output a valid JSON object with these keys:
@@ -381,6 +388,7 @@ You MUST output a valid JSON object with these keys:
   "despike_kernel_size": "[integer, e.g., 3]",
   "apply_masking": "[true/false]",
   "mask_threshold_percentile": "[float, e.g., 5.0]",
+  "spatial_bin_factor": "[integer: 1, 2, or 4]",
   "reasoning": "[Your string explanation]"
 }
 """
@@ -688,13 +696,15 @@ Ensure the final output is ONLY the JSON object.
 COMPONENT_INITIAL_ESTIMATION_INSTRUCTIONS = """You are an expert in hyperspectral data analysis and materials characterization.
 
 Based on the system description and data characteristics provided, you must:
-1. Choose the decomposition method (NMF or PCA)
-2. Estimate the optimal number of spectral components
+1. Decide whether unsupervised decomposition is needed at all (`run_decomposition`)
+2. Choose the decomposition method (NMF, PCA, or ICA)
+3. Estimate the optimal number of spectral components
 
 **Method Selection:**
 
 - **NMF** (Non-negative Matrix Factorization): Best for well-understood systems where components should be physically interpretable (non-negative spectra and abundances). Supports detailed per-component validation and spatial/spectral refinement. Slower but produces directly meaningful results.
 - **PCA** (Principal Component Analysis): Faster, better for noisy data or initial exploration. Components may have negative values and require more interpretation. When PCA is chosen, refinement will primarily use custom code (dynamic analysis) to model specific spectral features rather than spatial/spectral zoom.
+- **ICA** (Independent Component Analysis): Recovers statistically independent source signals that may overlap spectrally. Use when you expect a small number of distinct contributions mixed throughout the dataset that variance-based methods would not separate. Components are signed and not directly physical; refinement uses custom code, like PCA. ICA does not produce a meaningful elbow over n_components — when ICA is chosen, your initial estimate is used directly as the final component count.
 
 **When to choose PCA over NMF:**
 - Low signal-to-noise ratio data (noisy spectra where NMF may overfit)
@@ -706,6 +716,23 @@ Based on the system description and data characteristics provided, you must:
 - Well-characterized systems with known phases
 - When physically interpretable, non-negative components are needed
 - When spatial/spectral refinement of individual components is desired
+
+**When to choose ICA:**
+- You expect a small number of statistically independent sources (e.g., distinct chemistries or processes) that are mixed throughout the dataset
+- Sources are expected to overlap spectrally in ways PCA's orthogonality assumption would obscure
+- The user's objective explicitly asks for source separation or independent contributions
+- Prefer fewer components for ICA (typically 2–6) — over-specifying leads to noise components
+
+**When to skip decomposition entirely (`run_decomposition: false`):**
+Decomposition is strongly preferred for exploratory work — it surfaces structure you would not anticipate. Set `run_decomposition: false` ONLY when ALL of the following hold:
+- The user has provided an explicit objective AND that objective specifies a per-pixel quantitative measurement that does not require source separation (e.g. "fit the Si 2p binding energy at each pixel", "integrate the peak between 530–540 eV at each pixel", "extract the FWHM of the dominant feature across the map").
+- The measurement can be expressed directly as a function of the raw spectrum at each pixel (curve fit, integration, peak finding) and does not depend on knowing which mixture of contributions is present.
+- The dataset is not described as a survey, exploration, or characterization task.
+
+Default to `true` when in doubt, when no objective is given, or when the objective is exploratory ("characterize the sample", "find phases", "identify components"). Skipping decomposition forfeits the exploratory survey step, so the bar must be high.
+
+**Skill vs. objective precedence (decomposition stage only):**
+When an active domain skill (e.g. the EELS skill) provides planning guidance that assumes decomposition will run, that guidance shapes your *method choice* (NMF vs. PCA vs. ICA) and your component count estimate — but it does NOT override an explicit user opt-out from the decomposition stage. If the user's objective meets all three criteria above for `run_decomposition: false`, set it false even when the active skill's planning section assumes decomposition will run. The skill's guidance about HOW to perform the remaining stages (lineshape choice, preprocessing, model selection, validation rules) still applies to the dynamic-analysis step that follows. This precedence applies only to the skip-or-run decision for the decomposition stage; skill rules about *how* to perform any stage remain mandatory.
 
 **Component Count Considerations:**
 
@@ -727,12 +754,15 @@ Based on the system description and data characteristics provided, you must:
 You MUST output a valid JSON object:
 
 {
-  "method": "<nmf or pca>",
+  "run_decomposition": <true or false>,
+  "method": "<nmf, pca, or ica>",
   "estimated_components": <integer between 2 and 15>,
   "confidence": "<high/medium/low>",
-  "reasoning": "<explain your method choice AND component estimate based on the provided information>",
+  "reasoning": "<explain your run_decomposition decision, method choice, AND component estimate based on the provided information>",
   "expected_components": "<briefly describe what the components might represent>"
 }
+
+When `run_decomposition` is `false`, the `method` and `estimated_components` fields are ignored downstream — you may still fill them with reasonable defaults but they will not be used.
 
 Focus on providing a reasonable estimate based on the available information about the material system and data characteristics.
 """
@@ -895,44 +925,6 @@ Output JSON format:
 """
 
 
-ORCHESTRATOR_INSTRUCTIONS = """You are an expert materials scientist. Your primary task is to select the most appropriate analysis agent for a given dataset by acting as an expert reviewer.
-
-**Your Core Responsibility:**
-Your decision MUST be based on the visual evidence in the image and accompanying information about the expeirmental system. The user may also provide an `analysis_goal`.
-
-**Available Agents:**
-- **ID 0: `FFTMicroscopyAnalysisAgent`**: Use for standard microstructure analysis (grains, phases, etc.) where atoms are not resolved. **Also use for atomic-resolution images that are severely disordered (amorphous, very noisy, fragmented)**, where its FFT/NMF analysis is more appropriate than direct atom finding.
-- **ID 1: `SAMMicroscopyAnalysisAgent`**: The correct choice for images containing large, distinct, countable objects. Use this for tasks like measuring the size distribution, shape, and spatial arrangement of features like nanoparticles, cells, pores, or other discrete entities.
-- **ID 2: `AtomisticMicroscopyAnalysisAgent`**: **The primary choice for any high-quality image where individual atoms are clearly visible.** This is the correct agent for analyzing crystalline structures, defects, and interfaces at the atomic scale.
-- **ID 3: `HyperspectralAnalysisAgent`**: For all 'spectroscopy' data types (no image will be provided).
-
-**Decision Guide for Atomically-Resolved Images:**
-
-* **When to use Agent 2 (Atomistic Analysis):**
-    * For high-quality image where individual atoms or atomic columns are clearly visible in a crystalline lattice.
-    * For analyzing well-defined interfaces, grain boundaries, and point defects within an otherwise crystalline structure.
-
-* **When to use Agent 0 (General Analysis with FFT/NMF):**
-    * Use this agent when the image is dominated by **large-scale disorder**, making direct atom-finding unreliable or less informative.
-    * **Examples of such disorder include:**
-        * Large amorphous (non-crystalline) regions.
-        * Numerous small, disconnected, and poorly-ordered crystalline flakes.
-        * Extreme noise levels that obscure the atomic lattice.
-    * **For STM images:** Also use this agent if the image shows large variations in electronic contrast (LDOS) that are not simple atomic differences, as an FFT-based analysis is more suitable for identifying the periodicities in such patterns.
-
-**Input You Will Receive:**
-1.  `data_type`: e.g., "microscopy" or "spectroscopy".
-2.  `system_info`: A description of the material and possibly a user-suggested `analysis_goal`.
-3.  An image for context (for microscopy data).
-
-You MUST output a valid JSON object with two keys:
-1.  `agent_id`: (Integer) The integer ID of the agent you have expertly selected.
-2.  `reasoning`: (String) A brief explanation for your choice, justifying it based on the visual data and the decision logic above. If you overrode the user's goal, explain why.
-
-Output ONLY the JSON object.
-"""
-
-
 SPECTROSCOPY_MEASUREMENT_RECOMMENDATIONS_INSTRUCTIONS = """You are an expert spectroscopist analyzing comprehensive experimental results to recommend optimal follow-up measurements.
 
 You will receive:
@@ -970,6 +962,7 @@ You MUST output a valid JSON object with two keys: "analysis_integration" and "m
    * **scientific_justification**: (String) Why this measurement provides valuable insights
    * **expected_outcomes**: (String) Specific information to be gained
    * **priority**: (Integer) 1-5 priority ranking
+   * **target**: (Object or null) Machine-readable acquisition target: {"setting": "<concrete instrument setting, e.g. an energy window with numbers>", "expected_signature": "<the specific feature expected there>"}; null when the recommendation is not a direct acquisition
 
 Focus on actionable recommendations that maximize scientific insight while being technically feasible.
 """
@@ -1125,31 +1118,34 @@ You MUST respond with a valid JSON object containing a single key:
 
 
 HOLISTIC_EXPERIMENTAL_SYNTHESIS_INSTRUCTIONS = """
-You are an expert materials scientist tasked with synthesizing findings from a multi-modal characterization of a single sample. You have been provided with analyses from different experimental techniques, which may provide information at different length scales (e.g., local atomic structure vs. bulk crystal phase).
+You are an expert scientist synthesizing findings from several complementary measurements of ONE system. The datasets have already been confirmed to share a subject and a join axis; each was analyzed independently. Your task is to reconcile them into a single interpretation consistent with ALL the evidence — or to state clearly where they do NOT constrain one another.
 
-Your primary task is to build a single, cohesive scientific narrative that is consistent with ALL the provided experimental evidence.
+Follow these steps:
 
-To do this, follow these steps:
+1.  **Identify how the datasets join, and reconcile them on that basis.** The right reconciliation depends on what they share:
+    * **Co-registered spatial data** (e.g. an image + a spectral map or datacube of the same region): look for direct SPATIAL correlations — does a structural domain coincide with a distinct chemical/spectral signature on the same pixels?
+    * **A shared parameter axis** (temperature, energy, time, wavelength, composition): look for COINCIDENCES on that axis — e.g. a DSC thermal event at the same temperature as a TGA mass-loss step (a decomposition/dehydration) versus a mass-neutral event (a solid-state phase transition); an absorption edge and a photoluminescence peak consistent with a single band gap.
+    * **Different length scales** (a local probe + a bulk-average technique): reconcile the local observations with the bulk averages — do the phases, composition, or defects seen locally explain the bulk signal (e.g. XRD phases vs. TEM structure, XPS vs. EDX composition, local strain vs. peak broadening)?
+    * **Complementary observables of the same sample** (e.g. Raman vs. IR selection rules): check MUTUAL CONSISTENCY — do they point to the same phase / composition / structure?
 
-1.  **First, consider the nature of each analysis provided:**
-    * For **spatially-resolved techniques** (e.g., Microscopy, SEM, TEM, EELS/EDX mapping): Look for direct **spatial correlations**. Does a structural feature seen in an image correspond to a unique signature in a spectral map?
-    * For **bulk-average techniques** (e.g., XRD, DSC, XPS): **Reconcile** these average properties with the local observations. For example, do the phases identified by XRD match the crystal structure seen in TEM? Can local defects or strain observed in microscopy explain peak broadening in the XRD pattern? Is the bulk elemental composition from XPS consistent with the local composition from EDX?
+2.  **Formulate the reconciled narrative ('detailed_analysis').** Build a coherent account supported by the COMBINED evidence. CRITICAL — the evidence is the final authority: assert a cross-dataset correlation, coincidence, or causal link ONLY where the provided findings actually support it. If the datasets do not correlate or constrain one another, say so plainly — "the techniques are mutually consistent but capture independent aspects" or "no significant cross-dataset correlation was found" is a valid and valuable conclusion. NEVER invent a correlation or a shared feature to force a unified story; a manufactured correlation is worse than reporting its absence. The same discipline applies to DISCREPANCIES: when techniques disagree on a shared observable, a mundane instrumental or measurement-condition explanation is a first-class candidate alongside any mechanistic one, and a mechanistic interpretation may lead only where the evidence positively discriminates in its favor.
 
-2.  **Formulate a Unified Narrative**: Based on this correlated and reconciled understanding, write a comprehensive 'detailed_analysis'. This narrative should explain how the local, atomic-scale features give rise to the observed bulk properties, or vice-versa.
+3.  **Generate synthesized claims** that genuinely depend on MORE THAN ONE dataset. Do not relabel a single-dataset finding as a synthesis.
 
-3.  **Generate Synthesized Claims**: From your unified narrative, generate a list of high-level 'scientific_claims' that are supported by the combined evidence from all techniques.
+4.  **List the caveats** — the limitations a reader must keep in mind when trusting this synthesis. Be specific and honest: what is INFERRED vs directly MEASURED (e.g. a correlation read from area fractions rather than pixel-level co-registration); what could NOT be established from the data; technique limitations that bound the conclusions (surface- vs bulk-sensitivity, Z-contrast insensitivity to oxidation state, area-averaging); and any assumptions made (e.g. that the datasets share a region without an explicit registration marker). If there are essentially no caveats, return an empty list.
 
 You MUST respond in a valid JSON format with the following keys:
 {
-    "detailed_analysis": "<Your comprehensive, synthesized scientific narrative that reconciles local and bulk findings>",
+    "detailed_analysis": "<reconciled narrative across the datasets; state explicitly where they correlate and where they do not>",
     "scientific_claims": [
         {
-            "claim": "<A high-level scientific claim based on the combined data>",
+            "claim": "<A high-level scientific claim supported by the COMBINED evidence>",
             "scientific_impact": "<The potential impact of this claim>",
             "has_anyone_question": "<A question for a literature search, formatted as 'Has anyone observed...'>",
             "keywords": ["<keyword1>", "<keyword2>"]
         }
-    ]
+    ],
+    "caveats": ["<a specific limitation/assumption a reader must keep in mind>", "..."]
 }
 """
 
@@ -1194,14 +1190,7 @@ Output ONLY the JSON object.
 
 SPECTROSCOPY_REFINEMENT_INSTRUCTIONS = """You are an expert spectroscopist steering an automated analysis pipeline.
 
-**Goal:** Analyze results to determine if a focused refinement is scientifically justified and **select the correct tool** (Standard Decomposition or Dynamic Analysis).
-
-**Crucial Constraint:**
-* Standard Refinement uses **the current decomposition method (NMF or PCA)** on a subset of data. It works well for separating mixed spatial phases. This is most effective when NMF was used.
-* Dynamic Analysis (Custom Code) uses **Python/Math** (e.g., curve fitting). It works well when the decomposition fails to model the physical shape (e.g., peak shifts, specific background shapes).
-
-**IMPORTANT — If PCA was used as the decomposition method:**
-PCA components are exploratory — they capture variance directions, not physical phases. Spatial/spectral zoom refinement of PCA components rarely adds value because PCA loadings are not physically interpretable in the same way as NMF components. When PCA is the method, **strongly prefer `custom_code` targets** to mathematically model the specific spectral features identified by PCA (e.g., peak positions, edge onsets, intensity ratios). Only use `spatial` or `spectral` refinement with PCA in exceptional cases where a specific spatial region clearly needs isolation.
+**Goal:** Analyze results to determine if a focused refinement is scientifically justified. Refinement uses **Dynamic Analysis (Custom Code)** — Python/Math (e.g., curve fitting) that operates per-pixel on the raw spectra. Decomposition is run once globally and is not re-run on subsets; if the global decomposition (or skip-decomposition mode) leaves an open scientific question that is best answered by mathematical modelling of a specific spectral feature, propose a `custom_code` refinement target.
 
 ---
 
@@ -1209,7 +1198,7 @@ PCA components are exploratory — they capture variance directions, not physica
 
 Depending on the analysis method used in the current iteration, you will receive different types of plots:
 
-### A. Standard Decomposition Results (NMF/PCA)
+### A. Standard Decomposition Results (NMF/PCA/ICA)
 
 **Validation Plots (one per component):**
 - **LEFT Panel:** Spatial abundance map with red contour marking high-purity region (top 10%)
@@ -1245,7 +1234,7 @@ Depending on the analysis method used in the current iteration, you will receive
 
 1. **Artifact Check (STOP):**
    
-   **For Decomposition Results (NMF/PCA):**
+   **For Decomposition Results (NMF/PCA/ICA):**
    * Does the spectrum look like random noise (jagged spikes)?
    * Does the spatial map look like "salt-and-pepper" static?
    * (NMF only) Does **Orange show peaks that are NOT present in Black** AND the high-purity region is tiny (<2% of pixels)?
@@ -1260,7 +1249,7 @@ Depending on the analysis method used in the current iteration, you will receive
    
 2. **Success Check (STOP):**
    
-   **For Decomposition Results (NMF/PCA):**
+   **For Decomposition Results (NMF/PCA/ICA):**
    * Are components chemically distinct and clean?
    * Are spatial domains well-defined?
    * (NMF only) Is **Black ≈ Red** (within Blue Band)?
@@ -1273,26 +1262,26 @@ Depending on the analysis method used in the current iteration, you will receive
    
    *If YES, analysis is complete.*
    
-3. **Ambiguity Check & Tool Selection (REFINE):**
-   
-   If the signal is **real but complex**, identify the specific *type* of complexity to choose the tool:
+3. **Refinement via Custom Code (REFINE):**
 
-   **Scenario A: Spatial/Spectral Mixing (Use Standard Decomposition — best with NMF)**
-   * *Observation:* In decomposition results, Black ≈ Red (good reconstruction), but Orange differs from Black/Red (mixing present). The component is valid but represents a mixed phase.
-   * *Observation:* The spectrum looks real but "blended" (e.g., two phases mixed in one component).
-   * *Action:* Target a standard `spatial` or `spectral` zoom. **Note:** If PCA was used, prefer `custom_code` instead — PCA spatial refinement is rarely effective.
-
-   **IMPORTANT: When NOT to use spatial refinement:**
-   If multiple components show the SAME spectral feature (e.g., same peak) at slightly different energy positions, spatial zoom will NOT help — it will just reduce the visible shift range within the subregion. This pattern indicates a continuous physical variation (peak shift, edge shift) that requires `custom_code` (dynamic analysis) to quantify. Similarly, if residual autocorrelation is high (>0.3) across multiple components sharing similar spectral features, this is strong evidence of a continuous shift that the decomposition cannot model regardless of spatial subsetting.
-
-
-   **Scenario B: Missed Physics / Model Failure (Use Custom Code)**
-   * *Observation:* In decomposition results, **Black and Red diverge** (poor reconstruction).
-   * *Observation:* The Residual Plot shows a **Structured Shape** (e.g., a "Hill", a "Sine Wave", or a "Step") indicating the decomposition missed a specific feature.
+   If the signal is **real but complex** in a way the current results have not yet resolved, propose one or more `custom_code` targets that mathematically model the specific feature(s):
+   * *Observation:* In decomposition results, **Black and Red diverge** (poor reconstruction), or the Residual Plot shows a **Structured Shape** (e.g., a "Hill", a "Sine Wave", or a "Step") indicating the decomposition missed a specific feature.
    * *Observation:* Evidence of a **Peak Shift** (Derivative shape in residual) or **Specific Shape** (e.g., Edge onset, Power-law tail).
-   * *Observation (PCA-specific):* PCA components show interesting variance patterns that need mathematical modeling to extract physical quantities.
-   * *Action:* Define a target with `type: "custom_code"`. You must describe the *math* needed (e.g., "Fit a Gaussian to model the peak shift around 0.6eV").
+   * *Observation:* Multiple components share the SAME spectral feature at slightly different positions — a continuous physical variation (peak shift, edge shift) that decomposition cannot model regardless of subsetting.
+   * *Observation:* High residual autocorrelation (>0.3) across components sharing similar spectral features.
+   * *Observation (PCA / ICA):* Components show interesting patterns that need mathematical modelling to extract physical quantities.
+   * *Observation (skip-decomposition mode):* The user's objective specifies a per-pixel quantitative measurement.
+   * *Action:* Define a target with `type: "custom_code"`. Describe the *math* needed (e.g., "Fit a Gaussian to model the peak shift around 0.6 eV").
    * *Tip:* The custom code sandbox provides `lmfit` in addition to `numpy`/`scipy`/`sklearn`. Use `lmfit` for multi-peak or complex fitting scenarios — it offers built-in models (GaussianModel, LorentzianModel, VoigtModel), parameter constraints, and composite models via the `+` operator. For simple single-peak fits on large datasets, raw `curve_fit` is faster due to lower per-pixel overhead.
+   * *SIZE GUARD — scale every target to the pixel count:* the sandbox is single-process, so a per-pixel iterative fit (~2-5 ms each) over a full frame costs ~4-40 minutes per 100k pixels and can exceed the execution timeout. State in the target's description WHICH pixels the fit touches. Above ~50k pixels, the target must specify a reduction: restrict fitting to the scientifically relevant mask/region, or go coarse-to-fine (fit a spatially binned map first, refine only where structure appears), or use a vectorized/linearized estimator instead of per-pixel iterative fits.
+
+4. **LARGE-DATA GATE — decomposition-first staging (above ~50k pixels):**
+   Commit each decision to ONE of four verdicts, using the decomposition evidence in front of you:
+   * **fit-within-dilated-mask** — the signal of interest is spatially LOCALIZED in a component's abundance map: set `"fit_scope": "component_mask"` and `"mask_component_index": <component NUMBER as labeled in the decomposition plots — "Component 2" means 2>` on the target. The pipeline builds the mask from that component's high-abundance region WITH a dilation halo (mask-boundary physics lives at the edges) and scopes the generated code to it.
+   * **fit-global-then-decide** — a WEAK feature may be present everywhere (uniform signals give decomposition no spatial contrast to separate): describe a target whose code fits the MEAN spectrum first (one cheap fit) and maps per-pixel only where that detection justifies it.
+   * **fit-everywhere** — only when the objective genuinely needs full-frame per-pixel parameters; then apply the size-guard tactics (vectorize, coarse-to-fine).
+   * **decomposition-only (STOP)** — permitted ONLY when the components are clean AND the residuals are unstructured AND the objective names no per-pixel quantity. A STRUCTURED residual (derivative shapes, coherent spatial patterns, high residual autocorrelation) is the signature of continuous parameter variation or a weak everywhere-signal — physics decomposition CANNOT model — and mandates a fitting target even when every component looks clean.
+   The gate is ASYMMETRIC: use decomposition evidence freely to ADD scope (nominate a component, a mask, a global-first plan), but RESTRICT scope or STOP only under the residual-certified conditions above. A user objective explicitly requesting per-pixel quantities ALWAYS overrides the gate.
 
 ---
 
@@ -1300,9 +1289,25 @@ Depending on the analysis method used in the current iteration, you will receive
 You MUST output a valid JSON object.
 
 **STRICT TYPE RULES:**
-* For "spatial" targets: 'value' = Integer (1-based component index).
-* For "spectral" targets: 'value' = List of two Numbers [start, end].
-* For "custom_code" targets: 'value' = null (The description field is what matters).
+* All refinement targets have `"type": "custom_code"`.
+* For `custom_code` targets: `value = null` (the description field is what matters).
+* Optional scoping fields on a `custom_code` target (the LARGE-DATA GATE): `"fit_scope"`: `"full_frame"` (default) or `"component_mask"`; when `"component_mask"`, also set `"mask_component_index"` (the component NUMBER as labeled in the decomposition plots, i.e. "Component N" -> N; its high-abundance region defines the fitting mask).
+* Targets of other types (e.g. legacy `"spatial"` or `"spectral"`) are NOT supported and will be ignored by the downstream pipeline. Do not emit them.
+
+**Required outputs (objective-aware QC enforcement):**
+When the user's objective explicitly names one or more scalar quantities that should be extracted per pixel (e.g. "peak position", "FWHM", "integrated area", "binding energy", "edge onset"), list the EXACT Snake_Case map keys you intend the generated code to produce for those quantities in the optional `required_outputs` field on the target. The downstream code-generation prompt will be told those keys are mandatory, and the dynamic-analysis run will retry (and ultimately fail the task) if any named output is missing from the returned `maps` dict OR fails its visual quality check. Leave `required_outputs` as an empty list when the user's objective is exploratory or when you are selecting features at your own initiative.
+
+Every `required_outputs` key MUST name a PER-PIXEL SCALAR — one number per pixel, returned as an (H, W) spatial map. The pipeline can only validate spatial maps, so a 1-D or global artifact listed here (a mean/representative spectrum, a std band, a whole-image scalar) is unsatisfiable and will fail every retry. The spatially averaged mean spectrum is produced automatically as analysis context — mention it in the `description` if useful, never in `required_outputs`.
+
+A GLOBAL number the objective asks for (a spatial correlation coefficient, a region-integrated quantity, a global fit parameter) is deliverable: instruct it in the task `description` and tell the code to return it via the code contract's optional `scalars` channel — it is then recorded in the run's feature table and reported with the results. Never promise a global number as a map key.
+
+CONSISTENCY RULE: an output your own `description` marks best-effort, optional, or secondary must NEVER appear in `required_outputs`. The retry loop treats every listed key as a hard promise and cannot honor the hedge — it will burn the entire attempt budget failing on your secondary deliverable while the robust ones sit finished. List only outputs the task must not complete without; hedged maps are delivered opportunistically through the ordinary `maps` return and reviewed as diagnostics.
+
+KEEP `required_outputs` MINIMAL — at most TWO keys, unless the user's objective EXPLICITLY names more independent per-pixel quantities. Every listed key must pass review on the SAME attempt, so each addition multiplies the failure surface and the retry cost. Never require an output that is arithmetically derived from other required outputs (a difference, ratio, or sum — e.g. a width defined as the separation of two required edge maps): require the independent primaries only, and deliver the derived maps through the ordinary `maps` return.
+
+Example: if the objective says *"extract the peak position (in eV) of the dominant feature at every pixel"*, the target should set `"required_outputs": ["Peak_Position"]`. The generated code's `maps` dict must then include a key named exactly `Peak_Position`.
+
+**Demand outputs at the scope the evidence supports.** A required output is a promise the data must be able to keep: every retry it fails burns the branch's budget. Before requiring a PER-PIXEL map of a feature, check the decomposition evidence in front of you — if the feature is WEAK (near the noise floor in the components/flux evidence) or LOCALIZED (a compact abundance footprint), the defensible demand is the REGION-INTEGRATED quantity (one fit over the footprint's summed spectrum: position, width, ratio with uncertainties), with the per-pixel map requested in the description as best-effort, NOT in `required_outputs`. Require native-resolution per-pixel maps only for features the evidence shows are strong at the single-pixel level. A user objective phrased per-pixel does not override physics: deliver the region-level quantity as the required output and let the honest-null / resolution-ladder machinery handle the per-pixel question.
 
 **Example 1: STOP (Decomposition Artifact)**
 {
@@ -1316,16 +1321,7 @@ You MUST output a valid JSON object.
   "reasoning": "Dynamic Analysis successfully mapped the peak center positions. The spatial map shows clear grain-boundary localization, and the histogram shows a bimodal distribution consistent with two distinct chemical environments. Analysis complete."
 }
 
-**Example 3: REFINE (Standard NMF - Mixing)**
-{
-  "refinement_needed": true,
-  "reasoning": "Component 2 shows valid signal. Black and Red lines match well (RMSE=0.01), confirming accurate reconstruction. However, Orange differs from Black/Red, indicating ~10% mixing with adjacent phases. A spatial zoom could isolate the pure interface.",
-  "targets": [
-      { "type": "spatial", "description": "Isolate pure interface region to separate mixed phases", "value": 2 }
-  ]
-}
-
-**Example 4: REFINE (Dynamic Analysis - Peak Shift)**
+**Example 3: REFINE (Dynamic Analysis - Peak Shift)**
 {
   "refinement_needed": true,
   "reasoning": "Component 3 is valid (Black line shows clear peaks), but Black and Red diverge at 0.5 eV. The Residual plot shows a distinct derivative pattern indicating a physical peak shift that NMF's linear model cannot capture. Need mathematical modeling to quantify this shift spatially.",
@@ -1333,15 +1329,18 @@ You MUST output a valid JSON object.
       {
         "type": "custom_code",
         "description": "Map peak center position around 0.5 eV using Gaussian fitting or cross-correlation to quantify the spatial variation in peak energy across the sample.",
-        "value": null
+        "value": null,
+        "required_outputs": ["Peak_Center"]
       }
   ]
 }
 """
 
 SPECTROSCOPY_HOLISTIC_SYNTHESIS_INSTRUCTIONS = """
-You are an expert materials scientist synthesizing a multi-scale hyperspectral analysis. 
-You will receive a series of analysis reports, starting from a "Global Analysis" and followed by one or more "Focused Analyses".
+You are an expert materials scientist synthesizing a hyperspectral analysis.
+You will receive an analysis report from a single Global Analysis pass that
+may include both standard decomposition results and dynamic (custom-code)
+feature maps.
 
 ### YOUR TASK
 Write a single, cohesive scientific narrative that integrates all findings into a unified physical model.
@@ -1352,7 +1351,7 @@ Translate validation terminology (Black/Red/Orange lines, RMSE) into plain langu
 
 **What You Will See:**
 
-### 1. Standard Decomposition Results (NMF or PCA)
+### 1. Standard Decomposition Results (NMF, PCA, or ICA)
 
 **If NMF was used — Validation Plots (one per component):**
 - **LEFT Panel:** Spatial abundance map with red contour (high-purity region, top 10%)
@@ -1374,6 +1373,11 @@ Translate validation terminology (Black/Red/Orange lines, RMSE) into plain langu
 - **Top row:** Principal component spectra (may contain negative values — these represent variance directions, not physical phases)
 - **Bottom row:** Corresponding spatial loading maps
 - PCA components are exploratory — focus on identifying spectral features and spatial patterns rather than interpreting individual components as physical phases
+
+**If ICA was used — Summary Plot:**
+- **Top row:** Independent component spectra (signed; recovered as statistically independent sources)
+- **Bottom row:** Corresponding spatial loading maps
+- ICA components are exploratory — they represent independent contributions but may overlap spectrally and are not directly physical phases; focus on identifying candidate distinct contributions for custom modeling
 
 ### 2. Dynamic Analysis Results
 **Feature Dashboards (one per feature):**
@@ -1470,6 +1474,8 @@ You are a Senior Principal Scientist reviewing a draft analysis of hyperspectral
 
 3. **Unsupported Claims:** Are there scientific claims made with "High Confidence" that are barely supported by the visual data?
 
+4. **Instrument-level alternatives:** When MEASUREMENT METADATA is provided, check whether an instrument-level explanation (lock-in modulation broadening, drift/scan-condition gradients over a long acquisition, setpoint/endpoint artifacts) competes with an electronic-structure interpretation before endorsing it. Cross-check numbers quoted in the draft against the RECORDED GLOBAL SCALARS when provided, and check registry/correlation claims against the AUXILIARY companion data when provided.
+
 **Output Format:**
 Return a JSON object:
 {
@@ -1559,19 +1565,252 @@ Determine if this result captures a REAL physical signal, even if that signal is
 In spectroscopy, some features (like impurities) only exist in small regions.
 If the Histogram shows a large pile-up at zero/bounds (background) BUT there is a distinct, smaller population distribution elsewhere, **THIS IS VALID.**
 
+### CRITICAL: HANDLING HOMOGENEOUS RESULTS
+A uniform or single-valued map is NOT, by itself, a failure. The measured
+quantity or feature can be genuinely homogeneous — e.g. a uniform film or
+coating, a sample that fills the field of view, or a property that is
+constant across the region. In those cases a near-uniform map (or a presence
+mask that is all-present / all-absent) is the physically CORRECT result.
+Spatial contrast is not required for validity. Reject uniformity ONLY when the
+single value is a trivial collapse that means the algorithm extracted nothing
+where signal was expected (see Failure Criterion 2).
+
 ### FAILURE CRITERIA (Reject ONLY if these are true):
 1. **Total Noise:** The map is pure 'static' (salt-and-pepper) with ZERO recognizable structure.
-2. **Total Algorithm Failure:** The histogram is a **SINGLE** sharp spike (Dirac delta) containing 100% of the data.
-3. **Complete Rail-Gazing:** The data is piled up at the min/max edges with **NO secondary distribution** visible.
+2. **Trivial Collapse:** The map is uniform AT A TRIVIAL VALUE that means no signal was extracted (e.g. exactly 0 / exactly a clip bound everywhere) AND the feature is one that should vary or appear somewhere — i.e. the algorithm produced nothing, not a real homogeneous measurement. A uniform map at a NON-trivial, physically plausible value (a real thickness, a real concentration, all-present where the sample fills the frame) is NOT this — accept it.
+3. **Complete Rail-Gazing:** The data is piled up at the min/max edges with **NO secondary distribution** visible AND no physical reason for the field to be homogeneous.
 
 ### SUCCESS CRITERIA (Accept if present):
 - **Structure:** Does the map show ANY structured domains, even if they are small?
 - **Population:** Is there a visible distribution (bell curve, tail, or cluster) separate from the background spike?
+- **Plausible homogeneity:** Is the map uniform (or near-uniform) at a physically meaningful value consistent with a homogeneous sample or a feature that fills/is-absent-from the field? That is a valid measurement, not a failure.
 
 ### OUTPUT FORMAT
 Return a JSON object with:
 - 'valid': boolean
 - 'critique': string (Briefly explain decision)
+"""
+
+
+SPECTROSCOPY_RESULT_REVIEW_INSTRUCTIONS = """
+You are a senior scientist doing a SINGLE combined review of one automated
+per-pixel result the user explicitly asked for. Judge BOTH in one decision:
+  (A) SIGNAL — does this capture a real extracted signal, not pure noise or a
+      trivial collapse (uniform at exactly 0 / a clip bound where something was
+      expected)?
+  (B) SOUNDNESS — is the METHOD appropriate and the VALUE physically plausible
+      given what the data actually shows?
+Reason from the physics, the data, and the evidence below — NEVER from a
+pre-expected number.
+
+### OBJECTIVE
+{objective}
+
+### TASK CONTRACT — the plan's instruction that produced this output
+{target_context}
+
+### DATA CONTEXT (metadata)
+{metadata}
+
+### METHOD — the generated code that produced this result
+```python
+{method}
+```
+
+### RESULT
+{result_summary}
+You are also shown the result dashboard (map + histogram), a representative
+mean spectrum of the data, and — when the code provided them — per-pixel fit
+examples (raw spectrum vs the code's model at representative pixels). When fit
+examples are present, weigh them heavily: per-pixel pathologies (a peak pinned
+to a window edge, a fit railing at a bound) are visible there and invisible in
+the aggregate map and histogram.
+
+### TOOLS USED BY THE METHOD
+The generated code called these vetted, purpose-built helper tools — here is
+what each already handles robustly (window selection, flux gating,
+measurability, …):
+{tool_descriptions}
+
+{tool_scrutiny}
+
+{attempt_history}
+
+### KEY PRINCIPLES
+- Trust the DATA over the objective's geometric framing. A uniform or
+  full-field result is VALID when the signal genuinely fills the field: if the
+  tool evidence shows a coherent, high-SNR feature present in most/all pixels
+  (e.g. a measurable edge in ~all pixels), a uniform map or an all-present mask
+  is the CORRECT result even if the objective calls the sample a localized
+  coupon "on an otherwise empty field." Reject uniformity ONLY as a trivial
+  collapse (uniform at exactly 0 / a clip bound — nothing extracted).
+- The RESULT states a valid coverage (fraction of the field with a real, finite
+  non-zero value). Reconcile it with the morphology the OBJECTIVE and the data
+  imply — do NOT apply a fixed coverage threshold. Low coverage is CORRECT for a
+  feature that is genuinely localized (defects, dopants/impurities, a small
+  domain, a phase boundary, a sparse population) — do not reject those. It is a
+  masking/segmentation COLLAPSE only when the feature was expected to fill a
+  region (film / continuous layer / coupon), OR the field-MEAN spectrum clearly
+  shows the signal, yet the map retained just a few scattered pixels — i.e. a
+  real signal was dropped. Judge coverage against what is physically expected,
+  either way; the number is evidence, not a verdict.
+- The TASK CONTRACT may declare expected properties of this output — an
+  expected near-zero magnitude, an expected sign, sparsity, or scale. Judge the
+  result against those DECLARED expectations, not a generic magnitude prior: an
+  output that matches what the plan says it should look like is not a trivial
+  collapse. The contract never excuses a genuine methodological flaw.
+- A merely SURPRISING value is not a flaw if the method is sound and the data
+  and tool evidence support it. Do not suppress genuine findings.
+- A sample-description prior (how the sample was supposedly prepared and what
+  magnitude that implies) is context, not evidence: when methodologically
+  independent attempts converge on the same measured value that the prior
+  calls implausible, accept the sound measurement and state the discrepancy
+  with the sample description, rather than rejecting on the prior alone.
+- Any flux / photon-statistics / SNR argument MUST cite the MEASURED FLUX BY
+  BAND numbers in the RESULT (deterministic, computed from the data) — never
+  a visual estimate from the plotted spectrum, whose linear scale makes
+  usable count levels look like zero. Disputing a vetted tool's
+  measurability/SNR gate requires showing those numbers contradict it.
+- Reject ONLY when you can name a SPECIFIC methodological/physical flaw AND the
+  direction of the fix (which estimator / window / step to use instead).
+
+### OUTPUT FORMAT
+Return a JSON object:
+- 'valid': boolean (true = accept; false = clear flaw)
+- 'critique': string (if false: name the specific flaw and corrective direction)
+"""
+
+
+NOT_MEASURABLE_JUDGE_INSTRUCTIONS = """You are a skeptical spectroscopist judging a NULL DETERMINATION. Generated \
+analysis code declined to map a per-pixel feature, declaring it NOT \
+MEASURABLE in this dataset, with the evidence below. Decide whether the \
+declaration is scientifically defensible or an evasion of a hard but real fit.
+
+ACCEPT only when the evidence is NUMERIC and decisive AND survives these \
+checks:
+1. ARITHMETIC CONSISTENCY — recompute the claim from its own numbers. The \
+correct noise reference for an N-spectrum average is sigma_pixel/sqrt(N), \
+NOT the per-pixel sigma; if the declaration's own figures imply a detection \
+(e.g. it states a mean-spectrum SNR at or above its own threshold, or its \
+prominence exceeds a few times sigma_pixel/sqrt(N)), REJECT — the code \
+applied the wrong statistics.
+2. LOCALIZATION — a feature confined to a small region is diluted \
+~(region/frame) in the field mean AND in the field-integrated flux table; \
+the declaration must show the feature also fails in a BRIGHT-REGION mean \
+(top few % of pixels by intensity). A field-mean-only null on possibly \
+localized data is not decisive: REJECT.
+3. FLUX TABLE — the deterministic MEASURED FLUX BY BAND must be consistent \
+with the claimed absence for spatially extended features (remembering it \
+cannot rule out localized ones — see check 2).
+REJECT also when the evidence is vague, non-numeric, or the feature could \
+plausibly be recovered by a better method (masking, denoising, narrower \
+window) — rejection sends the task back for another attempt.
+
+Respond in valid JSON with EXACTLY these keys:
+{
+  "defensible": true | false,
+  "critique": "<if false: what the evidence misses / what to try instead; else a one-line confirmation>"
+}
+"""
+
+
+SPECTROSCOPY_SALVAGE_JUDGE_INSTRUCTIONS = """
+You are a senior scientist making a FINAL salvage decision. Automated extraction
+did NOT fully pass verification after all retries. You are shown the BEST partial
+result produced (a representative dashboard, the method code, a representative
+mean spectrum, and the tools it used). Judge FROM THE PHYSICS AND THE DATA
+whether this partial result is a physically DEFENSIBLE approximate answer worth
+reporting WITH EXPLICIT CAVEATS, or is physically meaningless (trivial collapse
+to zero, pure noise, or a clear artifact) and must be withheld.
+
+Presenting an APPROXIMATE / uncertain result is acceptable — provided its
+limitations and uncertainty are stated honestly. Withhold ONLY if there is no
+real signal to report.
+
+LOCALIZED SIGNALS: a signal confined to a small region is diluted by the
+area ratio in ANY field-level statistic — a flat field-mean spectrum or
+band-flux table is NOT evidence of absence when the spatial evidence below
+(component footprints, dashboards) shows a compact feature. Judge such a
+signal at ITS OWN scale: the statistic over the detected footprint, or over
+the brightest pixels at a comparable area fraction — never a fixed large
+percentage of the frame. Your caveat must NAME the region statistic your
+verdict rests on (e.g. "footprint-mean over the 0.2%-area component"), so a
+field-mean-only justification is never presented as a physics conclusion.
+
+### SPATIAL FOOTPRINT EVIDENCE (from the run's own decomposition)
+{spatial_evidence}
+
+### OBJECTIVE
+{objective}
+
+### DATA CONTEXT (metadata)
+{metadata}
+
+### METHOD (generated code)
+```python
+{method}
+```
+
+### TOOLS USED BY THE METHOD
+{tool_descriptions}
+
+### PARTIAL RESULT
+{result_summary}
+
+### OUTPUT FORMAT
+Return a JSON object:
+- 'present': boolean (true = report it as approximate with caveats; false = withhold, no real signal)
+- 'confidence': "low" or "medium" (never "high" — this is a salvage of an unverified result)
+- 'caveat': ONE honest sentence stating the key limitation / uncertainty a reader MUST know
+"""
+
+
+SPECTROSCOPY_PHYSICS_SANITY_INSTRUCTIONS = """
+You are a senior scientist doing a PHYSICAL-SOUNDNESS review of one automated
+per-pixel result. Visual quality was already checked separately — your job is
+different: judge whether the METHOD is appropriate and the RESULT is physically
+plausible given what the data actually shows. Reason from the physics and the
+data, NEVER from a pre-expected number.
+
+### OBJECTIVE
+{objective}
+
+### DATA CONTEXT (metadata)
+{metadata}
+
+### METHOD — the generated code that produced this result
+```python
+{method}
+```
+
+### RESULT
+{result_summary}
+You are also shown the result dashboard (map + histogram) and a representative
+mean spectrum of the data.
+
+### YOUR TASK
+Decide if there is a CLEAR methodological or physical flaw that makes this
+result wrong. Typical real flaws:
+- the method uses an estimator that is BIASED for this data — e.g. a global
+  fit over a spectral region where the signal saturates / clips / violates the
+  model's assumptions, and the result reflects that bias;
+- the reported value is contradicted by a feature plainly visible in the
+  spectrum (e.g. a strong absorption edge/step or peak whose size is
+  inconsistent with the value by a large factor);
+- the method skips a step the physics/objective requires (e.g. no flat-field
+  normalization when an I0 is provided).
+
+Be CONSERVATIVE — default to VALID:
+- A merely SURPRISING value is NOT a flaw if the method is sound and the data
+  supports it. Do not suppress genuine findings.
+- Do not flag stylistic or minor issues, or values you simply cannot verify.
+- Reject ONLY when you can name the specific methodological/physical flaw AND
+  the direction of the fix (which estimator / window / step to use instead).
+
+### OUTPUT FORMAT
+Return a JSON object:
+- 'valid': boolean (true = physically sound enough to accept; false = clear flaw)
+- 'critique': string (if false: name the specific flaw and the corrective direction)
 """
 
 
@@ -2082,8 +2321,10 @@ meaning is always preferred over a complex model with marginally better fit stat
 - Treat R² as a sanity check, not an optimization target. An R² of 0.96 with 3 physically
   meaningful components is far superior to R² of 0.99 with 6 components where half are
   fitting noise or compensating for an incorrect baseline.
-- If residuals show systematic structure, first reconsider the baseline or peak shape
-  (e.g., Voigt vs Gaussian) before adding more peaks.
+- If residuals show systematic structure, first reconsider the baseline, then the lineshape,
+  before adding peaks. Structured residuals on a band may reflect one mode with an asymmetric
+  lineshape (Pearson VII, skewed Voigt, Fano) or a genuine additional component — judge on
+  physical grounds; don't default to two symmetric peaks merely to absorb asymmetry or tails.
 
 **Domain Skill Rules (when provided):** If a "MANDATORY Domain Skill Rules" section appears \
 below, its rules are MANDATORY constraints on your analysis plan. These rules encode validated \
@@ -2110,6 +2351,19 @@ not style preferences.
   the user can refine before the plan is locked
 - This plan will be translated directly into code; any ambiguity forces the code generator to guess
 
+**Column selection (only when a "## Column Structure" section is present below):**
+The data file has more than two columns and NO assumption is made about their
+order. From the listed columns (names, ranges, monotonicity, preview), decide
+which column is the independent variable X and which is the dependent variable Y
+to fit. Note the role of any other columns (e.g. an uncertainty/error column, a
+second channel, an index, an irrelevant column) and how each should be treated.
+Refer to columns by name when names are given, otherwise by index.
+
+**Fit the full measured range.** Plan to fit the complete spectrum / full
+physically-relevant range; do not truncate the data or narrow the window to a
+sub-region to obtain a higher R² unless there is a clear physics reason or the
+user explicitly asked.
+
 **Output Format:**
 ```json
 {
@@ -2118,9 +2372,13 @@ not style preferences.
     "physical_model": "Mathematical form — be specific: state the exact profile/function type, exact number of components, and baseline treatment",
     "parameters_to_extract": ["param1", "param2"],
     "fitting_strategy": "How you will fit (initial guesses, constraints, method)",
-    "literature_query": "Question for literature search to help with fitting, or null if not needed"
+    "literature_query": "Question for literature search to help with fitting, or null if not needed",
+    "column_mapping": {"x": "<column name or index>", "y": "<column name or index>", "extras": [{"ref": "<name or index>", "role": "uncertainty|channel|index|ignore|...", "use": "free-text or 'none'"}]},
+    "column_mapping_note": "Brief rationale for the column-role decision"
 }
 ```
+Include `column_mapping`/`column_mapping_note` ONLY when a "## Column Structure"
+section is present; omit them entirely for ordinary two-column data.
 """
 
 
@@ -2141,7 +2399,7 @@ Add a `"series_analysis_plan"` field to your JSON response:
 {{
     "observations": "...",
     "analysis_approach": "...",
-    "physical_model": "primary model (for the first/majority regime)",
+    "physical_model": "the model for the first/majority regime as a concrete one-line summary — never null (the regimes list below is authoritative and drives the fit)",
     "parameters_to_extract": ["param1", "param2"],
     "fitting_strategy": "...",
     "literature_query": "...",
@@ -2168,6 +2426,12 @@ Add a `"series_analysis_plan"` field to your JSON response:
 ```
 
 **Rules:**
+- The `regimes` list is AUTHORITATIVE — it is what drives the fit. The top-level
+  `physical_model` / `fitting_strategy` are only a human-readable summary. If your
+  reasoning concludes N distinct regimes, emit exactly N entries in `regimes`, each
+  with its own `physical_model` / `fitting_strategy` / `parameters_to_extract`. Do NOT
+  describe a regime in the prose that you do not materialize as a structured entry, and
+  do not fold temperatures the prose treats differently into one regime.
 - Every spectrum index (0 through {num_spectra_minus_1}) must appear in exactly ONE regime.
 - Each regime must have at least one spectrum.
 - Only use multiple regimes when you can clearly see different spectral character.
@@ -2209,18 +2473,59 @@ plan as specified and let the retry pipeline handle actual runtime failures.
 **Context:** {context}
 
 **Data:**
-- Path: `{data_path}`
+- Path: `{data_path}` (a numpy array in the CURRENT WORKING DIRECTORY — `np.load` it)
 - Points: {n_points}
 - X: [{x_min:.6g}, {x_max:.6g}]
 - Y: [{y_min:.6g}, {y_max:.6g}]
+{auxiliary_block}
+{tool_inventory}
 
 **Available Libraries:** numpy, pandas, scipy, lmfit, matplotlib, json
+*(NumPy 2.x: aliases removed in NumPy 2.0 raise `AttributeError` — use `np.trapezoid` not `np.trapz`; prefer `scipy.integrate.trapezoid` for integration.)*
 
 **Requirements:**
-1. Load data (handle .npy, .csv, .txt)
-2. Implement your fitting approach
-3. Compute R² and RMSE
-4. Save `fit_visualization.png`: data + fit + residuals (show individual components if multiple peaks).
+1. Load the data array `data.npy` from the working directory (`np.load`). The data
+   you load is RAW — no preprocessing has been applied upstream.
+2. Preprocess in-script as appropriate — YOU own this; there is no separate
+   preprocessing step. Apply only what is clearly warranted for this data (or
+   nothing). HARD CONSTRAINTS:
+   - **Length-preserving:** do NOT crop, trim, bin, or select a sub-range. The
+     region to analyze is your FIT DOMAIN (restrict the fit's x-range per the
+     plan); never delete points from the array.
+   - **Non-distorting:** do not blur peak positions/widths, decay rates, or — for
+     first-derivative spectra (e.g. CW-EPR) — line shapes. For derivative spectra
+     do NOT smooth (it broadens lines and biases linewidths).
+   - **Background:** prefer fitting a background/baseline as a model parameter
+     over subtracting it.
+   WHEN preprocessing IS appropriate:
+   - **Clipping:** setting negative values to zero is appropriate ONLY for
+     intensity-type spectra (Raman, PL, fluorescence) where negatives are noise;
+     NEVER for differential/derivative/absorption data, where negatives are real.
+   - **Denoising:** modest smoothing is acceptable ONLY when the data is genuinely
+     noisy (noise large relative to signal); prefer none for clean data, and never
+     on derivative spectra (see above).
+   If you preprocess, keep both the raw and processed arrays so you can plot them.
+3. Implement your fitting approach over the plan's fit domain. Fit the FULL
+   measured range — do NOT truncate the data or narrow the fit window to raise R²
+   (e.g. fitting one peak while ignoring real signal elsewhere) unless there is a
+   clear physics reason or the user explicitly requested it; report R² over the
+   full domain you are modelling, not a hand-picked sub-region.
+4. Compute R² and RMSE
+5. Save `visualization.png` (in the current working directory): data + fit + residuals (show individual components if multiple peaks).
+   **Make the residual diagnosable** (the reviewer reads this plot): put residuals
+   in their own panel, and when the data has a large dynamic range (the tallest
+   peak dwarfs the baseline and any fine structure), do NOT let the residual be
+   crushed by the tallest peak. Either plot a NORMALIZED residual (residual ÷ noise
+   level) alongside the raw residual, use a log or sqrt y-scale on the main panel,
+   and/or add a zoomed sub-panel over each region where the residual is largest, so
+   localized/systematic misfit is actually visible.
+   A zoomed sub-panel must NOT shrink the main Data-and-Fit panel — the primary panel
+   always shows the FULL fitted domain. (With `plt.subplots(..., sharex=True)` a
+   `set_xlim` on the zoom axis silently truncates EVERY panel; give the zoom panel its
+   own non-shared x-axis, or reset the main panel's xlim to the full domain afterwards.)
+   If you applied any preprocessing, ALSO plot the raw data faintly (light grey,
+   low alpha) so the reviewer can confirm preprocessing did not distort the
+   fitted features.
    **Plot labels must be neutral** — this plot is passed to the interpretation stage, \
 so any text in it becomes part of that stage's input:
    - Title: use "Data and Fit" or "Fit" (NOT "Lorentzian fit at 1580 cm⁻¹", \
@@ -2230,7 +2535,27 @@ NOT any material/phase name, NOT any model name)
    - Annotations: parameter values are OK (e.g. "FWHM=12"); physical assignments are NOT \
 (e.g. "sp² carbon" — do not add)
    - Axis labels: use xlabel/ylabel from sample metadata if provided; else generic "X" / "Y"
-5. Print results as JSON:
+6. Also save `fit.npy` (current working directory): a 1-D NumPy array of the fitted
+   model evaluated at the SAME x-points as `data.npy` (length N). The reviewer uses
+   it to compute residual diagnostics (residual = data_y − fit). If you masked or
+   excluded any points, still evaluate the model at all N x-points so lengths match.
+
+**Absent components are measurements, not gaps.** When a planned component is
+not present at this unit (a band vanished on heating, a phase peak gone above
+a transition), do NOT drop it from `parameters` and do NOT report NaN for
+everything. Report by parameter type: its AMPLITUDE-LIKE parameters (area,
+amplitude, intensity, height, step) as a MEASUREMENT — refit with the
+component's shape parameters FROZEN at their planned/last-fitted values
+and only its amplitude free, and report that amplitude (a real near-zero
+number, valid for any component form: peak, step, decay, oscillation)
+with its covariance error in the matching `_err` key (for localized peaks
+the baseline-subtracted window integral is an acceptable fast path); its INTENSIVE parameters
+(center, width, eta) as null (a nonexistent peak has no position — a fake 0
+would poison position trends); and add `"<component>_absent": true`. This
+keeps trend/sigmoid fits over a series anchored by their lower plateau
+instead of losing exactly the points that prove the transition completed.
+
+7. Print results as JSON:
 ```python
 results = {{
     "model_type": "description",
@@ -2246,6 +2571,11 @@ print(f"FIT_RESULTS_JSON:{{json.dumps(results)}}")
 
 
 FITTING_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed script.
+The corrected script must keep the full results contract of the original
+instructions — including reporting ABSENT planned components as
+measurements (extensive parameters as windowed residual integrals with
+`_err`, intensive parameters null, plus `"<component>_absent": true`),
+never as missing keys.
 
 **Plan:** {analysis_approach} | **Model:** {physical_model}
 
@@ -2259,11 +2589,17 @@ FITTING_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed script.
 {error_message}
 ```
 
+{tool_inventory}
+
 **Available Libraries:** numpy, pandas, scipy, lmfit, matplotlib, json
+*(NumPy 2.x: aliases removed in NumPy 2.0 raise `AttributeError` — use `np.trapezoid` not `np.trapz`; prefer `scipy.integrate.trapezoid` for integration.)*
 
-**CRITICAL:** Fix only the execution error. Do NOT change the fitting model, its parameters, or the overall analysis approach. The model is locked for series consistency.
+**CRITICAL:** Fix only the execution error. Do NOT change the fitting model, its parameters, the fit domain/window, or the overall analysis approach — and never narrow the window or truncate the data to raise R². The model is locked for series consistency.
+**Narrow exception — timeout errors ONLY:** if the error says the script timed out, the script is too slow, not wrong. You may change the COMPUTATIONAL strategy — vectorize loops, reduce optimizer restarts/iterations, replace brute-force search with an efficient optimizer — but every rule above still holds: same model, same parameters, same fit domain/window, and ALL of the data.
 
-**Plot labels must be neutral** if your fix touches `fit_visualization.png`: \
+**I/O contract (do not deviate):** the data is `data.npy` in the current working directory — load it with `np.load` (do NOT look for .csv/.txt/.dat or glob for other files); save the plot to `visualization.png`; print one line `FIT_RESULTS_JSON:{{...}}` with the fit results. Missing any of these fails the run. Also keep saving `fit.npy` (1-D fitted curve at the `data.npy` x-points, length N) if the script you are fixing already did — it feeds the reviewer's residual diagnostics.
+
+**Plot labels must be neutral** if your fix touches `visualization.png`: \
 use "Data"/"Fit"/"Component N"/"Residuals" only — no material names, no peak assignments, no model names in titles/legends/annotations.
 
 **Response:** Return only `{{"diagnosis": "...", "script": "..."}}`
@@ -2271,6 +2607,10 @@ use "Data"/"Fit"/"Component N"/"Residuals" only — no material names, no peak a
 
 
 PLAN_CONFORMANCE_CHECK_INSTRUCTIONS = """You are verifying that a Python script correctly implements a scientific analysis plan.
+(Contract note: a script that reports a planned-but-absent component with
+near-zero extensive parameters, null intensive parameters, and an
+`_absent: true` flag is FOLLOWING the results contract — do not flag that
+as dropping a planned component.)
 
 **ANALYSIS PLAN (authoritative specification):**
 - Approach: {analysis_approach}
@@ -2284,8 +2624,8 @@ PLAN_CONFORMANCE_CHECK_INSTRUCTIONS = """You are verifying that a Python script 
 ```
 
 **EXECUTION CONTRACT (read before judging the script):**
-The script fits **exactly one spectrum at a time** — the data file already
-written to `temp_spectrum_<idx>.npy` for the current spectrum.  When the
+The script fits **exactly one spectrum at a time** — the data file is staged
+as `data.npy` in the current working directory.  When the
 plan is for a series, the agent invokes the same script per spectrum and
 aggregates results at a higher layer; scripts must NOT loop over multiple
 spectrum files, build cross-spectrum trends or comparisons, or
@@ -2354,8 +2694,21 @@ If you identify problems, return:
     "fitting_strategy": "revised strategy if needed",
     "series_analysis_plan": null
 }}}}
-Include series_analysis_plan only if this is a series with regimes that need revision.
+If your correction changes the technique or the physical model, the existing series
+regimes are invalid — return a re-derived series_analysis_plan rather than carrying
+them over; leave it null only when the regimes remain valid under your correction
+(or this is not a series). A re-derived plan uses exactly these regime fields:
+{{"regimes": [{{"name": str, "spectrum_indices": [int], "physical_model": str,
+"fitting_strategy": str, "parameters_to_extract": [str]}}]}}
 Only flag genuine problems — do not redesign a reasonable plan.
+
+An explicit requirement in the stated objective (e.g. a region to exclude, a parameter
+to report) is a constraint, not an assumption to second-guess. If the data make such a
+requirement look hard to satisfy — a feature you cannot clearly see, a region that looks
+ambiguous — flag it and propose a more robust way to meet it; do NOT remove the
+requirement from the model, parameters, or strategy. The user saw something you may not.
+Drop a requirement only if it is physically impossible on this data, and then say so
+explicitly in `issues`.
 """
 
 
@@ -2412,6 +2765,16 @@ baseline structure, noise level)?
 (systematic misfit, unmodeled shoulder, baseline drift, unexpected oscillation)?
 - Given parameter uncertainties, how well-constrained are the physical claims you could make?
 
+CLAIM-ANCHORED RESIDUAL CHECK: any structural claim that names a specific \
+feature (a doublet/splitting at X, a shoulder, a secondary phase peak) must be \
+checked against the residuals AT THAT LOCATION before you state it. A \
+multi-component fit whose residual shows a large systematic feature BETWEEN \
+its claimed components (e.g. a positive spike where the data actually peaks, \
+flanked by the model's two centers) is evidence the splitting is a fit \
+artifact, not a resolved structure — report "no resolved splitting; residual \
+lineshape excess" instead. Global R² cannot arbitrate this: a wrong \
+decomposition of one band barely moves R² when a strong baseline dominates.
+
 Frame your Stage 1 answer as if you had to recommend a model yourself from this evidence.
 """
 
@@ -2450,6 +2813,14 @@ Return a single JSON object with exactly these keys:
     "suggested_followup": "Next steps"
 }
 ```
+
+**Number of claims:** emit **exactly 1** `scientific_claims` entry for a \
+single spectrum — the single most important finding. Use 2 only when the \
+analysis genuinely surfaced two independent findings that cannot be \
+merged into one (e.g. a primary fitted quantity AND an unexpected \
+residual feature pointing to a different physical process). Never emit \
+more than 2. Do not pad the list with restatements of the same finding \
+in different words.
 """
 
 # Generic interpretation instruction used by feedback-refinement flows that do
@@ -2481,6 +2852,12 @@ If the residuals suggest the model is inadequate for part of the data, say so.
     "suggested_followup": "Next steps"
 }
 ```
+
+**Number of claims:** emit **exactly 1** `scientific_claims` entry — the \
+single most important finding from this spectrum. Use 2 only when the \
+analysis genuinely surfaced two independent findings that cannot be \
+merged. Never more than 2. Do not pad with restatements of the same \
+finding.
 """
 
 
@@ -2580,11 +2957,13 @@ the saved fit visualization, extracted parameters, and sample metadata.
             "description": "Specific measurement",
             "scientific_justification": "Why it matters",
             "expected_outcomes": "What you expect to learn",
-            "priority": 1-5
+            "priority": 1-5,
+            "target": {{"setting": "concrete instrument setting (e.g. an energy/wavenumber window with numbers)", "expected_signature": "the specific feature expected there"}}
         }}
     ]
 }}
 ```
+"target" makes a recommendation directly actionable by an instrument; set it to null when the recommendation is not a direct acquisition (e.g. sample preparation or a different technique).
 """
 
 KNOWLEDGE_SYNTHESIS_INSTRUCTIONS = """You are an expert scientific data analyst. You have been given the detailed results from multiple analyses of reference datasets. Your task is to synthesize actionable knowledge from these results, focused on a specific topic.
@@ -2704,7 +3083,8 @@ You MUST output a valid JSON object with exactly two keys:
 Ensure the final output is ONLY the JSON object and nothing else.
 """
 
-KNOWLEDGE_TO_SKILL_INSTRUCTIONS = """You are an expert scientific data analyst. You need to convert accumulated knowledge into a structured, reusable skill document.
+KNOWLEDGE_TO_SKILL_INSTRUCTIONS = """You are an expert scientific data analyst. \
+Convert accumulated analysis knowledge into a structured, reusable skill description for downstream agents.
 
 **Skill Name:** {skill_name}
 **Domain:** {domain}
@@ -2712,39 +3092,29 @@ KNOWLEDGE_TO_SKILL_INSTRUCTIONS = """You are an expert scientific data analyst. 
 **Source Knowledge:**
 {knowledge_text}
 
-**Source Analysis Details:**
-{analysis_details}
-
 **Instructions:**
-Begin the document with a YAML frontmatter block containing a single one-line `description:` field — a self-contained sentence that lets a downstream agent decide whether this skill is relevant. Do not end the description with a period. Then organize the knowledge into exactly five sections, each containing actionable, specific guidance. Use markdown formatting.
+Return a JSON object with exactly the following keys. Each value contains actionable, specific guidance \
+derived from the source knowledge. Use markdown formatting *within* section values when helpful (lists, \
+inline code, fenced code blocks), but do not include section headings (`##`) or YAML frontmatter — those \
+are added by the caller.
 
----
-description: <one-line, self-contained, no trailing period>
----
+{{
+  "description": "<one self-contained sentence (no trailing period) that lets a downstream agent decide if this skill is relevant>",
+  "overview": "<what domain/technique this skill covers, what data it applies to, and when to use it>",
+  "planning": "<strategy constraints, recommended parameter ranges, setup considerations, and any user-specified corrections or preferences>",
+  "analysis": "<code patterns, workflows, or processing steps that have proven effective; include specific parameter values that worked>",
+  "interpretation": "<reference values, peak assignments, expected ranges, and how to read results; include quantitative benchmarks from the findings>",
+  "validation": "<quality criteria, acceptable tolerances, failure indicators, sanity checks, and any corrections from user feedback>"
+}}
 
-## overview
-Describe what domain/technique this skill covers, what types of data it applies to, and when to use it.
+Output ONLY the JSON object. Do not wrap in code blocks. Do not include any prose outside the JSON."""
 
-## planning
-List strategy constraints, recommended parameter ranges, and setup considerations. Include any user-specified corrections or preferences.
-
-## analysis
-Describe code patterns, workflows, or processing steps that have proven effective. Include specific parameter values that worked.
-
-## interpretation
-Provide reference values, peak assignments, expected ranges, and how to interpret results. Include quantitative benchmarks from the key findings.
-
-## validation
-Define quality criteria, acceptable tolerance ranges, failure indicators, and sanity checks. Include any corrections from user feedback.
-
-Output ONLY the skill document content in markdown, starting with the `---` frontmatter block followed by `## overview`. Do not wrap in code blocks. Use level-2 headings (`##`) for the sections — level-1 (`#`) is not parsed by the loader.
-"""
-
-SKILL_UPDATE_INSTRUCTIONS = """You are an expert scientific data analyst. You need to update an existing skill document with new knowledge while preserving what is already correct.
+SKILL_UPDATE_INSTRUCTIONS = """You are an expert scientific data analyst. \
+Update an existing skill with new knowledge while preserving what is already correct.
 
 **Skill Name:** {skill_name}
 
-**Existing Skill Content:**
+**Existing Skill (as JSON):**
 {existing_skill}
 
 **New Knowledge to Incorporate:**
@@ -2752,18 +3122,194 @@ SKILL_UPDATE_INSTRUCTIONS = """You are an expert scientific data analyst. You ne
 
 **Instructions:**
 1. Review the existing skill content carefully.
-2. Integrate the new findings into the appropriate sections.
-3. Do NOT remove existing content unless the new knowledge explicitly contradicts it.
-4. When there is a conflict, prefer the newer knowledge but note the discrepancy.
-5. Maintain the five-section structure (overview, planning, analysis, interpretation, validation), each at level-2 (`##`) heading depth.
-6. Add new quantitative details, parameter ranges, or heuristics from the new knowledge.
-7. Preserve the YAML frontmatter at the top (the `---`-delimited block). If the new knowledge materially changes the skill's purpose, update the `description:` field; otherwise leave it intact. If the existing skill has no frontmatter, add one with a one-line `description:` synthesized from the overview.
+2. Integrate the new findings into the appropriate section. Consolidate related guidance — \
+   prefer merging into existing content over restating.
+3. The new knowledge may be a list of records, each with a `provenance`. Place each kind in \
+   the right section: `t2_solution` (working recipe, has `working_script_excerpt`) → \
+   overview/planning/analysis (generalize; never paste the script verbatim); `error_fix` \
+   (`error_lessons` error→fix pairs) → validation pitfalls/sanity-checks and analysis cautions; \
+   `user_correction` (`user_feedback`) → planning constraints/preferences and validation \
+   acceptance criteria (treat human corrections as high-priority ground truth).
+4. Be ADDITIVE: the existing skill already routes real analyses, and every existing rule, \
+   constraint, and section is in active use — removing or weakening one regresses working \
+   behavior. Remove or weaken existing guidance ONLY when the new knowledge explicitly \
+   contradicts it.
+5. When there is a conflict, prefer the newer knowledge but note the discrepancy briefly.
+6. If the new knowledge materially changes the skill's purpose, update the description; \
+   otherwise leave it intact.
+7. Keep prose tight. The skill is read into LLM context every time.
 
-Output ONLY the updated skill document content in markdown, starting with the `---` frontmatter block followed by `## overview`. Do not wrap in code blocks.
-"""
+Return a JSON object with the SAME keys as the existing skill — description plus EVERY section \
+key the existing skill has (any of: overview, planning, analysis, implementation, interpretation, \
+validation) — reflecting the merged skill content. Omitting a key the existing skill has would \
+DELETE that section.
+
+Output ONLY the JSON object. Do not wrap in code blocks. Do not include any prose outside the JSON."""
+
+BANK_EDIT_ADAPT_INSTRUCTIONS = """You are an expert scientific data analyst. A PROVEN {script_kind} script \
+from the script bank closely matches the current dataset. Adapt it with the SMALLEST possible set of \
+exact text edits — do NOT rewrite it. The proven structure is the value: a minimal-edit adaptation \
+keeps the script byte-recognizable, so its cross-session success record keeps accumulating.
+
+**Proven script (adapt THIS):**
+```python
+{banked_script}
+```
+
+**Current analysis plan (authoritative where it conflicts with the script):**
+{locked_config}
+
+**Current dataset / measurement context:**
+{data_context}
+
+**Rules:**
+1. Each edit is an exact-verbatim substring of the proven script (old_text), replaced by new_text. \
+old_text must appear EXACTLY ONCE in the script. Keep each edit small (a value, a line, a few lines).
+2. Re-derive dataset-specific values for THIS data: positions/counts, ranges, initial guesses, \
+thresholds, windows, scale factors. Keep the vetted algorithm, model family, and overall structure.
+3. NEVER touch the output contract: {output_contract}.
+4. If the script fits this dataset as-is, return an empty edits list.
+
+Return ONLY a JSON object: {{"edits": [{{"old_text": "...", "new_text": "..."}}, ...], \
+"rationale": "<one sentence on what was adapted and why>"}}
+Do not wrap in code blocks. No prose outside the JSON."""
+
+
+T2_DISTILL_INSTRUCTIONS = """You are an expert scientific data analyst. A curve-fitting run had to \
+abandon its planned model and the available domain skills, regenerate a fitting approach from scratch \
+(the "hot annealing" stage), and only then succeeded. Distill that successful, novel approach into a \
+*generalized*, reusable skill so a future run on a similar problem can apply it directly.
+
+**Skill Name:** {skill_name}
+**Domain:** {domain}
+
+**What happened (locked plan, final model, deviation, fit quality, and the working script):**
+{knowledge_text}
+
+**Instructions:**
+Generalize — describe the *method*, not this one dataset. Abstract away dataset-specific file paths, \
+hard-coded array sizes, and magic numbers; state the model form, the parameter initialization/bounds \
+strategy, and the fitting procedure in reusable terms. Explain WHY the original plan was insufficient \
+and what the successful approach changed.
+
+The exact working script will be appended verbatim to the implementation section by the system as a \
+reference example — do NOT paste the script back; write the generalized recipe instead.
+
+Return a JSON object with exactly the following keys. Use markdown formatting *within* values when \
+helpful (lists, inline code), but no section headings (`##`) or YAML frontmatter — those are added by \
+the caller.
+
+{{
+  "description": "<one self-contained sentence (no trailing period) naming the technique/model so a downstream agent can decide if this skill is relevant>",
+  "overview": "<what kind of data/problem this approach fits and when to reach for it>",
+  "planning": "<the model form and fitting strategy in general terms; parameter init/bounds heuristics; why the originally-planned model was insufficient>",
+  "analysis": "<the generalized, parameterized recipe: how to set up and run the fit, abstracted from this dataset's specifics>",
+  "interpretation": "<how to read the resulting parameters and judge physical plausibility>",
+  "validation": "<quality criteria, sanity checks, and failure indicators for this approach>"
+}}
+
+Output ONLY the JSON object. Do not wrap in code blocks. Do not include any prose outside the JSON."""
+
+
+T2_TECHNIQUE_LABEL_INSTRUCTIONS = """A hard analysis fit succeeded only after the agent \
+abandoned its plan and regenerated the approach from scratch (T=2 hot annealing). To file \
+this solution for later distillation, assign it a short normalized TECHNIQUE label.
+
+**Final model / approach:** {model}
+**How it deviated from the plan:** {deviation}
+
+**Existing technique labels in this domain (reuse one if it fits):**
+{existing}
+
+**Instructions:**
+Return a single snake_case label naming the *technique/model family* (not this dataset) — \
+e.g. `stretched_exponential`, `multi_edge_core_loss`, `asymmetric_voigt_doublet`. Reuse an \
+existing label verbatim if the solution belongs to that family; otherwise coin a new concise \
+one. Lowercase, words joined by underscores, no spaces or punctuation.
+
+Output ONLY the label, nothing else."""
+
+
+T2_CONSOLIDATION_INSTRUCTIONS = """You are an expert scientific data analyst. Several runs \
+independently solved the same kind of hard problem from scratch (T=2 hot annealing). Distill \
+these worked examples into ONE generalized, reusable skill so a future run can apply it directly.
+
+**Skill Name:** {skill_name}
+**Domain:** {domain}
+
+**The worked examples (N independent solutions of the same technique):**
+{knowledge_text}
+
+**Instructions:**
+Synthesize the COMMON, reusable recipe across the examples — the model form, parameter \
+initialization/bounds strategy, and procedure that worked repeatedly. Abstract away each \
+dataset's specific paths and magic numbers. Where the examples differ, note what varies and \
+when to choose each option (this is the value of having several examples). Explain why the \
+naive/default plan was insufficient.
+
+Each record carries a `provenance` field — incorporate each kind into the right section:
+- `t2_solution`: a from-scratch working recipe (has a `working_script_excerpt`). Distill the \
+  generalized method into **overview/planning/analysis**. Do NOT paste the script back verbatim.
+- `error_fix`: errors that were hit and how they were resolved (`error_lessons`: error→fix \
+  pairs). Turn these into concrete pitfalls and sanity checks in **validation**, and cautions \
+  in **analysis** ("avoid X; if you see Y, do Z").
+- `user_correction`: a human's domain correction/preference (`user_feedback`). Treat this as \
+  high-priority ground truth — fold it into **planning** (constraints/preferences) and \
+  **validation** (acceptance criteria).
+Keep the skill CONCISE (it is read into the prompt every run); no one-off dataset code.
+
+Return a JSON object with exactly the following keys. Use markdown within values when helpful \
+(lists, inline code), but no section headings (`##`) or YAML frontmatter — the caller adds those.
+
+{{
+  "description": "<one self-contained sentence (no trailing period) naming the technique/model so a downstream agent can decide if this skill is relevant>",
+  "overview": "<what kind of data/problem this approach fits and when to reach for it>",
+  "planning": "<the model form and strategy in general terms; parameter heuristics; what varies across the examples and how to choose; why the default plan was insufficient>",
+  "analysis": "<the generalized, parameterized recipe distilled from all examples>",
+  "interpretation": "<how to read the results and judge plausibility>",
+  "validation": "<quality criteria, sanity checks, and failure indicators>"
+}}
+
+Output ONLY the JSON object. Do not wrap in code blocks. Do not include any prose outside the JSON."""
 
 # Backwards compatibility
 FITTING_RESULTS_INTERPRETATION_INSTRUCTIONS = FITTING_INTERPRETATION_INSTRUCTIONS
+
+
+IMAGE_T2_DISTILL_INSTRUCTIONS = """You are an expert scientific image analyst. An image-analysis run had to \
+abandon its planned pipeline and the available domain skills, regenerate an analysis approach from scratch \
+(the "hot annealing" stage), and only then succeeded. Distill that successful, novel approach into a \
+*generalized*, reusable skill so a future run on a similar image/problem can apply it directly.
+
+**Skill Name:** {skill_name}
+**Domain:** {domain}
+
+**What happened (locked plan, final pipeline, deviation, quality, and the working script):**
+{knowledge_text}
+
+**Instructions:**
+Generalize — describe the *method*, not this one image. Abstract away dataset-specific file paths, \
+hard-coded sizes, and magic numbers; state the processing pipeline (preprocessing, detection/segmentation \
+strategy, feature extraction, parameter heuristics) in reusable terms. Explain WHY the original plan was \
+insufficient and what the successful approach changed.
+
+The exact working script will be appended verbatim to the implementation section by the system as a \
+reference example — do NOT paste the script back; write the generalized recipe instead.
+
+Return a JSON object with exactly the following keys. Use markdown formatting *within* values when \
+helpful (lists, inline code), but no section headings (`##`) or YAML frontmatter — those are added by \
+the caller.
+
+{{
+  "description": "<one self-contained sentence (no trailing period) naming the technique/imaging problem so a downstream agent can decide if this skill is relevant>",
+  "overview": "<what kind of image/problem this approach fits and when to reach for it>",
+  "planning": "<the pipeline shape and strategy in general terms; key parameter heuristics; why the originally-planned pipeline was insufficient>",
+  "analysis": "<the generalized, parameterized recipe: how to set up and run the analysis, abstracted from this image's specifics>",
+  "interpretation": "<how to read the extracted features / outputs and judge plausibility>",
+  "validation": "<quality criteria, sanity checks, and failure indicators for this approach>"
+}}
+
+Output ONLY the JSON object. Do not wrap in code blocks. Do not include any prose outside the JSON."""
 
 
 # ──────────────────────────────────────────────────────────────
@@ -2866,7 +3412,8 @@ that fails.
 When a registered tool already does the hard step (e.g. `run_fft_nmf_analysis`
 with a window size tuned to the spatial scale of the features of interest
 for disorder / defect / multi-phase analysis, or `run_sam_analysis` for
-instance segmentation), a single tool call followed by a simple post-
+instance segmentation of touching/overlapping objects that classical
+detection and splitting cannot separate), a single tool call followed by a simple post-
 processing step is already a complete pipeline. Do not pad it with
 additional processing steps for the sake of thoroughness — the tool
 output plus a focused interpretation is the deliverable.
@@ -3061,6 +3608,56 @@ Return JSON:
 """
 
 
+IMAGE_ANALYSIS_BEST_OF_N_SELECTION_PROMPT = """You are selecting the best result among {num_candidates} independent analysis runs of the SAME scientific image under the SAME analysis plan.
+
+The runs differ only by sampling randomness in code generation and refinement.
+Each completed its own verification loop. Select the run whose RESULT — the
+actual output visualization compared against the original image — is best.
+
+## Candidates
+{candidates_formatted}
+
+The original image is attached first, followed by each candidate's final
+visualization in order.
+
+## Selection Criteria
+Judge primarily from the visualizations against the original image:
+1. **Completeness**: what fraction of the visible target structures did the run
+   capture? Missed objects do not appear as errors — a clean overlay can still
+   be badly incomplete. Actively scan the original image for clearly-visible
+   targets a candidate failed to mark, and weight under-detection exactly as
+   seriously as over-detection. For DENSE atom-column detection, judge from the
+   zoom-in overlay panels and the reported NN/heatmap metrics (a spike of short
+   NN distances = duplicates; coverage gaps = misses) — NOT from a count-vs-
+   expected ratio, which is only order-of-magnitude for multi-sublattice
+   materials, so a moderate ratio (~1.3x) is not over-detection.
+2. **Correctness**: does the output correspond to real structures (not noise,
+   artifacts, or hallucinated features)? Do reported values match visual
+   estimates from the image?
+3. **Relevance**: does the headline output present the quantity the analysis
+   plan asks for, in a scientifically usable form?
+
+Each candidate's verification score was assigned by an LLM during its own run —
+these scores are NOISY and not calibrated across runs. Treat them as advisory
+only, and override them whenever the visual evidence disagrees.
+
+A candidate that declined or reported the target as absent/unresolvable while
+the target is visibly present in the original image is an INCOMPLETE
+deliverable — it must not win over a candidate that actually delivered,
+regardless of scores. Credit a null result only when the original image
+confirms the target is genuinely absent.
+
+Mild tiebreakers, in order: fewer verification iterations / lower annealing
+level (the result stayed closer to the planned approach); simpler output.
+
+Return JSON:
+{{
+    "selected_index": <0-based index of the best run>,
+    "reasoning": "Brief comparison: why this run's result is best and what the others missed or got wrong"
+}}
+"""
+
+
 IMAGE_ANALYSIS_PLAN_VALIDATION_PROMPT = """You are validating an image analysis plan BEFORE it is executed.
 
 **Proposed Plan:**
@@ -3105,6 +3702,14 @@ If you identify problems, return:
 Include `series_analysis_plan` only if the image is part of a series with regimes.
 Each regime must have its own pipeline and features. Every image index must appear in exactly one regime.
 Only flag genuine problems that would cause incorrect results — do not redesign a reasonable plan.
+
+An explicit requirement in the stated objective (e.g. a region to exclude, a quantity to
+report) is a constraint, not an assumption to second-guess. If the image makes such a
+requirement look hard to satisfy — a boundary that looks subtle or absent, a feature you
+cannot clearly see — flag it and propose a more robust way to meet it; do NOT remove the
+requirement from the pipeline, features, or quality criteria. The user saw something you
+may not (and your view here may be a downsampled thumbnail). Drop a requirement only if it
+is physically impossible on this data, and then say so explicitly in `issues`.
 """
 
 
@@ -3138,20 +3743,20 @@ code.
 **Context:** {context}
 
 **Data:**
-- Path: `{data_path}`
+- Path: `{data_path}` (a numpy array in the CURRENT WORKING DIRECTORY — `np.load` it)
 - Shape: {shape}
 - dtype: {dtype}
 - Intensity range: [{intensity_min}, {intensity_max}]
+{auxiliary_block}
 
 {tool_inventory}
 
 **Requirements:**
-1. Load image: use `np.load(path)` for .npy, or `cv2.imread(path, cv2.IMREAD_UNCHANGED)` \
-for standard formats (remember cv2 loads BGR — convert to RGB if 3-channel color). \
+1. Load the image array with `np.load("{data_path}")` from the current working directory. \
 Check the image shape — it may have 2 or more channels that are not RGB. Access channels \
 via `image[:,:,0]`, `image[:,:,1]`, etc. Do not assume grayscale or RGB.
 2. Implement the analysis pipeline
-3. Save visualization(s): `analysis_visualization.png` showing original image alongside \
+3. Save visualization(s): `visualization.png` showing original image alongside \
 key analysis results. Use subplots with clear labels. For basic/foundational analyses, \
 keep it concise (2-4 subplots). For complex analyses with multiple derived quantities, \
 up to 6 subplots is acceptable. For segmentation tasks, the first subplot MUST show the \
@@ -3159,6 +3764,17 @@ original image, and the second MUST show a segmentation overlay (original image 
 colored semi-transparent masks and contour boundaries for each detected object). For \
 multi-channel images, show each channel as a separate grayscale subplot (do not try to \
 display a 2-channel array directly with imshow). \
+**`visualization.png` MUST contain the actual headline result figure.** If a registered tool \
+returns a `figure_bytes` that IS the result (e.g. a polarization/defect/QC map), write those \
+bytes directly to `visualization.png` (or embed them as panels in it). NEVER save the result to \
+a separate file and leave a placeholder panel in its place (e.g. a subplot titled "see \
+other_file.png") — only `visualization.png` is embedded in the report and shown to the verifier; \
+a placeholder there means the result is lost. \
+**To give the verifier SEVERAL full-resolution views** (multiple candidate settings to compare, \
+several regions, or before/after panels), save each as its own `verifier_panel_<name>.png` in the \
+working directory — the verifier receives each `verifier_panel_*.png` as a SEPARATE full-resolution \
+image. Do NOT stitch many views into one figure for the verifier: a single multi-panel montage is \
+downsized by the model's per-image cap until each panel loses judgeable detail. \
 All visualizations must be saved to the current working directory. Use `dpi=100`.
 4. Save key output arrays to the current working directory as `.npy` files. \
 At minimum save the primary detection/segmentation result (label map, binary \
@@ -3175,7 +3791,7 @@ The standard fields are:
 ```python
 results = {{{{
     "analysis_type": "description of what was done",
-    "extracted_features": {{{{"feature_name": value, ...}}}},
+    "extracted_features": {{{{"feature_name": value, ...}}}},  # a value with a known uncertainty (tool std/err output, fit sigma) gets its OWN numeric "<feature_name>_err" entry — never bury an uncertainty in a prose note
     "quality_metrics": {{{{"metric_name": value, ...}}}},
     "summary": "Key finding in one sentence",
     "saved_arrays": {{{{...}}}}
@@ -3221,6 +3837,7 @@ code.
 - Shape: {shape}
 - dtype: {dtype}
 - Intensity range: [{intensity_min}, {intensity_max}]
+{auxiliary_block}
 
 {tool_inventory}
 
@@ -3241,13 +3858,24 @@ rewrite the analysis portion accordingly — but do not rewrite more than the \
 refined plan calls for.
 
 **Requirements:**
-1. Load image: use `np.load(path)` for .npy, or `cv2.imread(path, cv2.IMREAD_UNCHANGED)` \
-for standard formats (remember cv2 loads BGR — convert to RGB if 3-channel color). \
+1. Load the image array `data.npy` from the current working directory (`np.load`). \
 Check the image shape — it may have 2 or more channels that are not RGB. Access channels \
 via `image[:,:,0]`, `image[:,:,1]`, etc. Do not assume grayscale or RGB.
 2. Implement the refined analysis pipeline.
-3. Save visualization(s): `analysis_visualization.png` showing original image alongside \
-key analysis results. Use subplots with clear labels. All visualizations must be saved \
+3. Save visualization(s): `visualization.png` showing original image alongside \
+key analysis results. Use subplots with clear labels. \
+**`visualization.png` MUST contain the actual headline result figure.** If a registered tool \
+returns a `figure_bytes` that IS the result (e.g. a polarization/defect/QC map), write those \
+bytes directly to `visualization.png` (or embed them as panels in it). NEVER save the result to \
+a separate file and leave a placeholder panel in its place (e.g. a subplot titled "see \
+other_file.png") — only `visualization.png` is embedded in the report and shown to the verifier; \
+a placeholder there means the result is lost. \
+**To give the verifier SEVERAL full-resolution views** (multiple candidate settings to compare, \
+several regions, or before/after panels), save each as its own `verifier_panel_<name>.png` in the \
+working directory — the verifier receives each `verifier_panel_*.png` as a SEPARATE full-resolution \
+image. Do NOT stitch many views into one figure for the verifier: a single multi-panel montage is \
+downsized by the model's per-image cap until each panel loses judgeable detail. \
+All visualizations must be saved \
 to the current working directory. Use `dpi=100`.
 4. Save key output arrays to the current working directory as `.npy` files. \
 At minimum save the primary detection/segmentation result.
@@ -3261,7 +3889,7 @@ The standard fields are:
 ```python
 results = {{{{
     "analysis_type": "description of what was done",
-    "extracted_features": {{{{"feature_name": value, ...}}}},
+    "extracted_features": {{{{"feature_name": value, ...}}}},  # a value with a known uncertainty (tool std/err output, fit sigma) gets its OWN numeric "<feature_name>_err" entry — never bury an uncertainty in a prose note
     "quality_metrics": {{{{"metric_name": value, ...}}}},
     "summary": "Key finding in one sentence",
     "saved_arrays": {{{{...}}}}
@@ -3291,6 +3919,10 @@ IMAGE_ANALYSIS_SCRIPT_CORRECTION_INSTRUCTIONS = """Fix this failed image analysi
 
 **CRITICAL:** Fix only the execution error. Do NOT change the analysis pipeline, feature \
 extraction approach, or the overall analysis strategy. The approach is locked for series consistency.
+**Narrow exception — timeout errors ONLY:** if the error says the script timed out, the script is \
+too slow, not wrong. You may change the COMPUTATIONAL strategy — vectorize loops, reduce iteration \
+counts, use coarser internal search grids — but the pipeline, the extracted features, and the full \
+image extent must not change.
 
 **Response:** Return only `{{"diagnosis": "...", "script": "..."}}`
 """
@@ -3432,9 +4064,11 @@ You have: analysis visualization, extracted features, sample metadata.
             "description": "Specific measurement",
             "scientific_justification": "Why it matters",
             "expected_outcomes": "What you expect to learn",
-            "priority": 1-5
+            "priority": 1-5,
+            "target": {{"setting": "concrete instrument setting (e.g. region + resolution, or a spectral window with numbers)", "expected_signature": "the specific feature expected there"}}
         }}
     ]
 }}
 ```
+"target" makes a recommendation directly actionable by an instrument; set it to null when the recommendation is not a direct acquisition (e.g. sample preparation or a different technique).
 """

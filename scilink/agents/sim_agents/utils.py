@@ -1,5 +1,8 @@
 import os
+import re
+import shutil
 import logging
+import importlib.util
 from typing import Optional, List, Dict
 
 import numpy as np
@@ -363,6 +366,52 @@ class MaterialsProjectHelper:
             return None
 
 
+# Optional structure-building libraries the codegen LLM may reach for. Probed
+# at generation time so the prompt can tell the model what is actually
+# importable here instead of guessing — without an availability signal the model
+# defaults to dependency-free hand-rolled code even when a better purpose-built
+# tool is installed. This is a factual capability list; which tool to prefer for
+# a given task is the skill's domain guidance, stated there, not here.
+_OPTIONAL_BUILD_TOOLS = ("pymatgen", "rdkit", "openmm", "mbuild")
+
+
+def detect_structure_build_tools() -> Dict[str, bool]:
+    """Return {tool_name: importable} for optional structure-building libraries.
+
+    Fail-closed: a tool whose probe raises is reported unavailable. ``packmol``
+    requires both its pymatgen wrapper and the ``packmol`` executable on PATH —
+    the wrapper alone cannot pack a box.
+    """
+    available: Dict[str, bool] = {}
+    for name in _OPTIONAL_BUILD_TOOLS:
+        try:
+            available[name] = importlib.util.find_spec(name) is not None
+        except Exception:
+            available[name] = False
+    try:
+        wrapper = importlib.util.find_spec("pymatgen.io.packmol") is not None
+    except Exception:
+        wrapper = False
+    available["packmol"] = bool(wrapper and shutil.which("packmol"))
+    return available
+
+
+def format_available_tools_block(available: Dict[str, bool]) -> str:
+    """Render an availability dict into a prompt block, or '' if nothing is
+    available (in which case the prompt is left unchanged)."""
+    present = sorted(name for name, ok in available.items() if ok)
+    if not present:
+        return ""
+    return (
+        "\n\n## AVAILABLE LIBRARIES (importable in this environment):\n"
+        f"{', '.join(present)}\n"
+        "When one of these purpose-built libraries fits the task, prefer it "
+        "over a hand-rolled implementation — it handles edge cases that ad-hoc "
+        "code commonly gets wrong. Fall back to manual construction only when "
+        "no listed library covers the operation.\n"
+    )
+
+
 def save_generated_script(script_content: str, description: str, attempt: int, output_dir: str) -> str | None:
     """Saves the script content to a file and returns the path."""
     try:
@@ -370,8 +419,10 @@ def save_generated_script(script_content: str, description: str, attempt: int, o
         os.makedirs(output_dir, exist_ok=True)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # Sanitize description for use in filename
-        safe_desc = "".join(c if c.isalnum() else "_" for c in description[:30]).rstrip("_")
+        # Sanitize description for use in filename: collapse each run of
+        # non-alphanumeric chars into a single underscore (so "a, b" / "a. b"
+        # don't become "a__b"), strip edges, then cap the length.
+        safe_desc = re.sub(r"[^0-9A-Za-z]+", "_", description).strip("_")[:40]
         filename = f"script_{safe_desc}_attempt{attempt}_{timestamp}.py"
         saved_script_path = os.path.join(output_dir, filename)
 
@@ -386,29 +437,6 @@ def save_generated_script(script_content: str, description: str, attempt: int, o
         logging.error(f"Unexpected error saving script for attempt {attempt}: {e}")
         return None
     
-
-def ask_user_proceed_or_refine(validation_feedback, structure_file):
-    """Ask user whether to proceed with current structure or attempt refinement."""
-    import sys
-    
-    print(f"\n--- Validation Issues Found ---")
-    issues = validation_feedback.get('all_identified_issues', [])
-    for i, issue in enumerate(issues, 1):
-        print(f"  {i}. {issue}")
-    
-    print(f"\nOptions:")
-    print(f"  [p] PROCEED - Use current structure: {structure_file}")
-    print(f"  [r] REFINE   - Attempt to fix issues")
-    
-    while True:
-        try:
-            choice = input("Choice [p/r]: ").strip().lower()
-            if choice in ['p', 'proceed']: return 'proceed'
-            elif choice in ['r', 'refine']: return 'refine'
-            else: print("Please enter 'p' or 'r'")
-        except (KeyboardInterrupt, EOFError):
-            return 'refine'
-
 
 def generate_structure_views(structure_path: str, output_dir: str = None) -> Dict[str, str]:
     """Render PNG views of a structure for the validator and the user.

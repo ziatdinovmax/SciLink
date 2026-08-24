@@ -12,35 +12,14 @@ import atomai as aoi
 MAX_IMG_DIM = 1024
 
 def load_image(image_path):
-    """Load an image from file."""
-    try:
-        _, ext = os.path.splitext(image_path)
-        ext = ext.lower()
+    """Load an image from file (delegates to the shared, robust loader).
 
-        if ext == '.npy':
-            # Load .npy file, assuming it's always 2D grayscale based
-            img_array = np.load(image_path)
-            if img_array.dtype == np.uint8:
-                # If it's already uint8, return directly
-                return img_array
-            else:
-                float_array = img_array.astype(np.float64)
-                min_val, max_val = np.min(float_array), np.max(float_array)
-                normalized_array = (float_array - min_val) / (max_val - min_val)
-                # Scale 0-255 and convert to uint8
-                uint8_array = (normalized_array * 255).astype(np.uint8)
-                return uint8_array
-
-        else:
-            # Standard image loading (can be grayscale or color)
-            img = cv2.imread(image_path)
-            if img is None:
-                raise ValueError(f"Could not load image from {image_path}")
-            return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # Convert from BGR to RGB
-    
-    except Exception as e:
-        print(f"Error loading image: {e}")
-        raise
+    The shared loader routes scientific TIFFs through tifffile and applies
+    percentile normalization, so 32-bit-float STEM/TEM TIFFs load instead of
+    coming back as None/blank (plain ``cv2.imread`` cannot read 32-bit samples).
+    """
+    from ...skills._shared.image_processor import load_image as _load_image
+    return _load_image(image_path)
 
 def preprocess_image(image: np.ndarray, max_dim: int = MAX_IMG_DIM) -> tuple[np.ndarray, float]:
     """

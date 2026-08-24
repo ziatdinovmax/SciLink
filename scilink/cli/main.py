@@ -7,6 +7,13 @@ Routes to different agent types: plan, simulate, analyze
 import sys
 import os
 
+# Set on the re-exec'd child so a restart that fails to take UTF-8 mode warns
+# once instead of forking forever.
+_UTF8_REEXEC_FLAG = "SCILINK_UTF8_RESTARTED"
+# Carries the launcher's argv[0] across the restart so usage strings keep
+# saying "scilink" rather than the path to this module.
+_ARGV0_ENV = "SCILINK_ARGV0"
+
 
 def get_terminal_color_support():
     """
@@ -110,9 +117,72 @@ def print_gradient_logo():
     
     print()
 
+def ensure_utf8_mode() -> None:
+    """Restart under Python's UTF-8 mode when the locale encoding cannot hold
+    scientific text.
+
+    `open()` writes in the locale encoding unless told otherwise. On a
+    Western-European Windows install that is cp1252, which has no subscript,
+    no arrow and no superscript minus — so persisting a literature answer or
+    a technical document raises UnicodeEncodeError and loses the work. There
+    are ~190 text writes across the package; pinning each one is a treadmill,
+    and it would still leave third-party writers broken.
+
+    UTF-8 mode fixes all of them at once, but it can only be enabled before
+    the interpreter starts — hence the re-exec. This is a no-op wherever the
+    locale is already UTF-8 (every Linux and macOS install, and a Windows one
+    with the UTF-8 beta option enabled), so it cannot perturb a working
+    setup. Library and notebook users bypass this entry point; for them the
+    explicit `encoding=` at each write site is what carries the fix.
+    """
+    import locale
+    import subprocess
+
+    if sys.flags.utf8_mode:
+        return
+    encoding = (locale.getpreferredencoding(False) or "").lower().replace("-", "")
+    if encoding == "utf8":
+        return
+
+    # Warnings go to stderr, never stdout: under `scilink serve` stdout IS the
+    # MCP transport, and a stray line there corrupts the protocol.
+    def warn(message: str) -> None:
+        print(f"  ⚠️  {message} Non-ASCII output may fail to save — set "
+              f"PYTHONUTF8=1 before launching scilink.", file=sys.stderr)
+
+    # A failed re-exec must not spawn another one.
+    if os.environ.get(_UTF8_REEXEC_FLAG):
+        warn(f"Locale encoding is {encoding or 'unknown'}, not UTF-8, and the "
+             f"automatic restart did not take.")
+        return
+
+    # `-m` gives the child argv[0] = .../cli/main.py, which would surface as
+    # the program name in every usage string; carry the real one across.
+    env = dict(os.environ, PYTHONUTF8="1",
+               **{_UTF8_REEXEC_FLAG: "1", _ARGV0_ENV: sys.argv[0]})
+    cmd = [sys.executable, "-X", "utf8", "-m", "scilink.cli.main", *sys.argv[1:]]
+    try:
+        completed = subprocess.run(cmd, env=env)
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except Exception as e:  # noqa: BLE001 - never block startup on this
+        warn(f"Could not restart under UTF-8 ({e}).")
+        return
+    sys.exit(completed.returncode)
+
+
 def main():
     """Main CLI entry point with subcommands"""
-    
+
+    # Before anything else: a non-UTF-8 locale silently breaks every write of
+    # model-generated text, so correct it while a restart is still cheap.
+    ensure_utf8_mode()
+
+    # In a restarted process, present the launcher's name, not this module's
+    # path — every subcommand builds its argparse prog from sys.argv[0].
+    if os.environ.get(_ARGV0_ENV):
+        sys.argv[0] = os.environ[_ARGV0_ENV]
+
     # Skip logo for MCP server mode (stdout is the transport)
     if len(sys.argv) >= 2 and sys.argv[1] == 'serve':
         from scilink.cli.serve import main as serve_main
@@ -123,10 +193,13 @@ def main():
     print_gradient_logo()
 
     if len(sys.argv) < 2:
-        print()  # Spacing after logo
-        print_usage()
-        return 1
-    
+        # Bare `scilink` launches the meta-agent — the default entry point,
+        # which auto-routes work between the analyze and plan specialists.
+        # Explicit per-mode commands and `scilink help` still work below.
+        from scilink.cli.meta import main as meta_main
+        sys.argv = [sys.argv[0] + ' explore']
+        return meta_main()
+
     command = sys.argv[1]
     
     # Route to appropriate handler
@@ -149,6 +222,26 @@ def main():
         from scilink.cli.analyze import main as analyze_main
         sys.argv = [sys.argv[0] + ' analyze'] + sys.argv[2:]
         return analyze_main()
+
+    elif command in ('explore', 'meta'):  # 'meta' kept as a back-compat alias
+        from scilink.cli.meta import main as meta_main
+        sys.argv = [f"{sys.argv[0]} {command}"] + sys.argv[2:]
+        return meta_main()
+
+    elif command == 'memory':
+        from scilink.cli.memory import main as memory_main
+        sys.argv = [sys.argv[0] + ' memory'] + sys.argv[2:]
+        return memory_main()
+
+    elif command == 'kb':
+        from scilink.cli.kb import main as kb_main
+        sys.argv = [sys.argv[0] + ' kb'] + sys.argv[2:]
+        return kb_main()
+
+    elif command == 'fetch-xrd-library':
+        from scilink.cli.fetch_data import main as fetch_main
+        sys.argv = [sys.argv[0] + ' fetch-xrd-library'] + sys.argv[2:]
+        return fetch_main()
 
     elif command == 'ui':
         from scilink.cli.ui import main as ui_main
@@ -180,34 +273,53 @@ def print_usage():
 ║              AI-Powered Scientific Research Automation                   ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 
-Usage: scilink <command> [options]
+Usage: scilink [command] [options]
+
+Run `scilink` with no command to launch the meta-agent — a single
+conversational agent that auto-routes your request to the right specialist.
 
 Available Commands:
-  plan          Interactive planning orchestrator for experimental design
-                and Bayesian optimization workflows
-                
-  simulate      Simulation agents for MD, DFT, LAMMPS, VASP workflows
-                (Coming soon)
+  (none)        Launch the meta-agent orchestrator — coordinates the
+                analyze and plan specialists from one chat surface
 
-  prepare-ff    Force field agent for generating LAMMPS force field and 
-                data files with AMBER
+  explore       The meta-agent, explicit form (same as bare `scilink`).
+                Alias: `meta`
 
   analyze       Analysis agents for microscopy, spectroscopy, and
                 experimental data processing
-                (Coming soon)
+
+  plan          Interactive planning orchestrator for experimental design
+                and Bayesian optimization workflows
+
+  simulate      Simulation agents for MD, DFT, LAMMPS, VASP workflows
+
+  prepare-ff    Force field agent for generating LAMMPS force field and
+                data files with AMBER
+
+  memory        Manage persistent memory — list, review, promote, or prune
+                graduated and auto-distilled skills
+
+  kb            Manage named, reusable knowledge bases — build once from
+                your documents, ground planning in them from any directory
+                (scilink kb create/add/list/show/import/rebuild/delete)
+
+  fetch-xrd-library
+                One-time download of the prebuilt XRD fingerprint reference
+                library (COD-derived) enabling offline powder-pattern
+                identification via search_match_pattern
 
   ui            Launch the Streamlit web interface for interactive
-                analysis (requires: pip install scilink[ui])
+                analysis
 
   serve         Start SciLink as an MCP tool server so external clients
                 (Claude Desktop, Cursor) can use SciLink's tools
 
 Examples:
-  scilink plan                              # Start planning orchestrator
-  scilink plan --model gemini-2.0-flash-exp # Use different model
-  scilink simulate --help                   # See simulation options
+  scilink                                   # Launch the meta-agent
+  scilink explore --mode autopilot         # Meta-agent, autopilot autonomy
   scilink analyze --help                    # See analysis options
-  scilink prepare-ff --help                 # See force field options
+  scilink plan --model gemini-2.0-flash-exp # Use a different model
+  scilink simulate --help                   # See simulation options
 
 Get Help:
   scilink <command> --help                  # Command-specific help

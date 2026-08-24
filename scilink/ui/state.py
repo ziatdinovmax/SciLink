@@ -9,11 +9,20 @@ import streamlit as st
 
 @dataclass
 class FeedbackRequest:
-    """A pending input() call from the agent thread waiting for the user."""
+    """A pending human-feedback request from the agent thread.
+
+    ``kind``/``options``/``origin`` mirror the structured fields of
+    ``scilink.hitl.FeedbackRequest`` when the prompt arrives through the
+    chokepoint; a stray raw ``input()`` (third-party code) produces the
+    defaults, and the widget chooser falls back to prompt/context sniffing.
+    """
     prompt: str = ""
-    context: str = ""  # stdout captured before the input() call
+    context: str = ""  # stdout captured before the prompt
     response: Optional[str] = None
     event: threading.Event = field(default_factory=threading.Event)
+    kind: str = ""
+    options: Optional[list] = None
+    origin: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -47,10 +56,18 @@ def init_session_state() -> None:
         "pending_auto_load_metadata": None,
         "cfg_consent": False,
         "selected_preview_file": None,
-        # Mode selection (None until chosen on welcome screen)
-        "app_mode": None,
+        # Mode selection. Initialized to the real default ("meta" — mission
+        # control) rather than None: the sidebar renders BEFORE the main
+        # body's None->meta assignment, so a None here made the first page
+        # load hide the mode-gated sidebar sections (embedding model/API key
+        # for plan+meta, the meta's two-level autonomy list) and point
+        # resume-session discovery at the analyze fallback.
+        "app_mode": "meta",
         # Planning mode state
         "planning_objective": "",
+        # Meta mode state
+        "meta_objective": "",
+        "uploaded_meta_paths": [],
         "uploaded_knowledge_paths": [],
         "uploaded_code_paths": [],
         "uploaded_planning_data_paths": [],

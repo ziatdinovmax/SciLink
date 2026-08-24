@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scilink"
-version = "0.0.30"
+version = "0.0.66"
 authors = [
   { name="SciLink Team", email="maxim.ziatdinov@gmail.com" },
 ]
@@ -43,10 +43,22 @@ dependencies = [
     "tabulate>=0.9.0",
     "botorch>=0.16.1",
     "lmfit>=1.3.4",
-    "mcp>=1.0.0",
+    "mcp>=1.0.0,<2",
     "h5py>=3.10",
     "nexusformat>=2.0",
     "pyyaml>=6.0",
+    # 1.52.0 is the floor for st.html(unsafe_allow_javascript=True), which the
+    # theme injects on every rerun — an older Streamlit takes the app down on
+    # the first inject_theme() call.
+    "streamlit>=1.52.0",
+    # litellm's Bedrock path needs boto3 (credential/region resolution) and
+    # botocore (SigV4 signing); litellm itself declares neither outside its
+    # [proxy] extra. Bedrock is a first-class provider in scilink/providers.py
+    # and selectable from the UI, so this belongs in the base install.
+    "boto3>=1.34.0",
+    # Markdown -> PDF export (with pymupdf above). Arrives transitively via
+    # streamlit -> rich, but this is a direct import, so pin it directly.
+    "markdown-it-py>=2.2.0",
 ]
 
 [project.optional-dependencies]
@@ -57,12 +69,45 @@ sim = [
     "mdanalysis>=2.9.0",
     "paramiko>=3.0.0",
 ]
-ui = [
-    "streamlit>=1.37.0",
+# The web UI ships with the default install now (streamlit is a core
+# dependency). The empty extra is kept so existing `pip install scilink[ui]`
+# instructions keep working.
+ui = []
+structure-matching = [
+    # Cap <2026: pymatgen 2026.x makes pymatgen.analysis a namespace package and
+    # drops bundled pymatgen.analysis.phase_diagram, which breaks the emmet-core /
+    # mp-api import chain (MPRester) that the Materials Project backend needs.
+    "pymatgen>=2024.6.10,<2026",
+    "mp-api>=0.45.0",
+    "pulp>=2.7.0",
+    "pyarrow>=14.0",
 ]
+# Force-field parameterization (engine-neutral, OpenFF Interchange core). NOTE:
+# the OpenFF stack is CONDA-FORGE ONLY — openff-toolkit's PyPI releases are
+# yanked, so `pip install scilink[ff]` cannot provide it. Install with conda:
+#
+#   conda install -c conda-forge openff-toolkit openff-interchange \
+#       openff-nagl openff-nagl-models parmed rdkit
+#
+# Charges come from NAGL (OpenFF's ML AM1-BCC surrogate) so the OpenFF path needs
+# no AmberTools/OpenEye; AmberTools (conda too) is needed only for the secondary
+# AMBER backend. This extra lists only the pip-installable pieces; the openff-*
+# packages above must come from conda-forge.
+ff = [
+    "parmed>=4.0",
+    "rdkit>=2023.3",
+]
+# NOTE: GSAS-II (the optional 'gsas' backend of simulate_xrd_pattern) cannot be
+# an extra: it is not on PyPI, and PyPI rejects uploads whose metadata carries a
+# direct URL dependency ("Can't have direct dependency"). Install it manually —
+# it builds from source, so a Fortran compiler must be present (e.g.
+# `conda install -c conda-forge fortran-compiler meson ninja`):
+#   pip install "GSAS-II @ git+https://github.com/AdvancedPhotonSource/GSAS-II.git"
 all = [
     "scilink[sim]",
     "scilink[ui]",
+    "scilink[structure-matching]",
+    "scilink[ff]",
 ]
 
 [project.urls]
@@ -71,8 +116,6 @@ all = [
 
 [project.scripts]
 scilink = "scilink.cli.main:main"
-scilink-workflows = "scilink.cli.workflows:main"
-scilink-agent = "scilink.cli.run_agent:main"
 scilink-ui = "scilink.cli.ui:main"
 scilink-mcp = "scilink.cli.serve:main"
 
@@ -83,11 +126,22 @@ scilink-mcp = "scilink.cli.serve:main"
 #   my_xrd_agent = "my_package.agents:MyXRDAgent"
 [project.entry-points."scilink.agents"]
 
+# Third-party packages can advertise structure-database backends here.
+# Each entry maps a name (used as the `sources=` key in search_structures)
+# to a `StructureBackend` subclass. See
+# scilink/skills/structure_matching/_backends/__init__.py for the protocol.
+# Example entry in a third-party pyproject.toml:
+#   [project.entry-points."scilink.structure_backends"]
+#   icsd = "my_package.icsd_backend:ICSDBackend"
+#   oqmd = "my_package.oqmd_backend:OQMDBackend"
+[project.entry-points."scilink.structure_backends"]
+
 [tool.setuptools]
 include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["."]
+include = ["scilink*"]
 
 [tool.setuptools.package-data]
 "scilink" = ["agents/sim_agents/docs/*.txt", "agents/sim_agents/docs/*.md", "ui/.streamlit/*.toml", "ui/assets/*.svg"]

@@ -2,6 +2,7 @@
 
 import base64
 import builtins
+import logging
 import re
 import threading
 from pathlib import Path
@@ -14,10 +15,82 @@ from scilink.ui.components.chat_uploads import render_pre_chat_uploads
 from scilink.ui.components.file_viewer import render_file_preview
 from scilink.ui.components.tools_agents import render_tools_agents_tab
 from scilink.ui.components.skills import render_skills_tab
-from scilink.ui.components.simulations import render_simulations_tab
+from scilink.ui._features import simulate_enabled
 from scilink.ui.output_capture import AgentStoppedError, OutputCapture
 from scilink.ui.theme import inject_theme
 from scilink.ui.config import AVATAR_USER, AVATAR_AGENT, APP_MODES, SESSION_DIR_PREFIXES
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove terminal ANSI styling. The agent emits it for the console; in the
+    HTML log pane / st.code it would otherwise render as literal escape codes."""
+    return _ANSI_RE.sub("", text or "")
+
+
+# 💭 reasoning colors. Meta and specialist both print the SAME 💭 glyph; a
+# meta-delegated specialist tags its line with an invisible U+2063 marker so its
+# reasoning renders in a distinct (warm) color from the meta's own (cool) 💭,
+# without changing the visible glyph. The marker is stripped before display.
+_THOUGHT_MARK = "\u2063"           # INVISIBLE SEPARATOR — specialist source tag
+_META_THOUGHT_COLOR = "#6ec1e4"    # muted cyan — meta's own deliberation
+_SPECIALIST_THOUGHT_COLOR = "#c9a06a"  # muted amber — a delegated specialist
+_HANDOFF_COLOR = "#f0c674"         # bright gold — meta -> specialist handoff banner
+
+# Meta handoff announcements (printed by MetaOrchestratorTools): the meta
+# delegating to / fusing specialists. Matched on emoji+phrase so a generic
+# 🧪/📋 structural header elsewhere is not mistaken for a handoff.
+_HANDOFF_PREFIXES = ("🧪 Delegating to", "📋 Delegating to", "🧬 Fusing delegations")
+
+
+def _log_to_html(text: str) -> str:
+    """ANSI-strip a captured log and HTML-escape it. The agent's 💭 reasoning
+    lines render dim+italic (a muted aside) and the 🤖 answer header bold+bright
+    — cool cyan for the meta, warm amber for a meta-delegated specialist (both
+    tagged by an invisible U+2063 marker, so a specialist's reasoning AND answer
+    header match its color)."""
+    import html as _html
+
+    out, in_thought, thought_color = [], False, _META_THOUGHT_COLOR
+    for line in _strip_ansi(text).split("\n"):
+        stripped = line.lstrip()
+        if stripped.startswith("🤖"):
+            # Answer header — emphasized, and it ends any reasoning block. A
+            # delegated specialist's header carries the marker -> specialist
+            # color (matching its reasoning); the meta's own stays bright cyan.
+            in_thought = False
+            ans_color = (_SPECIALIST_THOUGHT_COLOR if _THOUGHT_MARK in line
+                         else "#7fdfff")
+            clean = _html.escape(line.replace(_THOUGHT_MARK, ""))
+            out.append(f'<span style="color:{ans_color};font-weight:bold">{clean}</span>')
+            continue
+        if stripped.startswith(_HANDOFF_PREFIXES):
+            # Meta -> specialist handoff — a pronounced section divider so the
+            # transition into (and back out of) a delegation is obvious. Rendered
+            # as a banded row (bold gold on a faint tint with a left rule), which
+            # the <pre> log pane supports. Ends any reasoning block.
+            in_thought = False
+            out.append(
+                f'<span style="display:inline-block;color:{_HANDOFF_COLOR};'
+                f"font-weight:bold;background:#2e2a1f;border-left:3px solid "
+                f'{_HANDOFF_COLOR};padding:1px 8px">{_html.escape(stripped)}</span>'
+            )
+            continue
+        if stripped.startswith("💭"):
+            in_thought = True
+            # A specialist's first thought line carries the invisible marker; pick
+            # the color from it and hold it across this block's continuation lines.
+            thought_color = (_SPECIALIST_THOUGHT_COLOR if _THOUGHT_MARK in line
+                             else _META_THOUGHT_COLOR)
+        elif in_thought and not line.startswith("     "):
+            in_thought = False
+        esc = _html.escape(line.replace(_THOUGHT_MARK, ""))  # drop the source tag
+        if in_thought:
+            esc = f'<span style="color:{thought_color};font-style:italic">{esc}</span>'
+        out.append(esc)
+    return "\n".join(out)
+
 
 def _escape_tildes(text: str) -> str:
     """Escape tildes outside LaTeX ($...$, $$...$$) to prevent Markdown strikethrough."""
@@ -28,6 +101,31 @@ def _escape_tildes(text: str) -> str:
         if i % 2 == 0:
             parts[i] = part.replace("~", "\\~")
     return "".join(parts)
+
+
+def _render_fanout_confirm(ctx: str) -> None:
+    """Clean confirmation panel for the meta fan-out launch — replaces the raw
+    monospace stdout dump with readable markdown (verdict, join axis, the
+    branch list; the long rationale tucked into an expander)."""
+    def _g(pat):
+        m = re.search(pat, ctx or "")
+        return re.sub(r"\s{2,}", " ", m.group(1).strip()) if m else None
+    verdict = _g(r"Complementarity verdict\s*:\s*(.+)")
+    join = _g(r"Join axis\s*:\s*(.+)")
+    rationale = _g(r"Rationale\s*:\s*(.+)")
+    branches = [re.sub(r"\s{2,}", " ", b.strip())
+                for b in re.findall(r"•\s*(.+)", ctx or "")]
+    st.markdown("#### 🔀 Launch parallel multi-dataset analysis?")
+    if verdict:
+        st.markdown(f"**Complementarity:** {verdict}")
+    if join:
+        st.markdown(f"**Join axis:** {join}")
+    if branches:
+        st.markdown("**Branches** — run concurrently, each seeing the others "
+                    "as auxiliary:\n" + "\n".join(f"- {b}" for b in branches))
+    if rationale:
+        st.markdown(f"**Why:** {rationale}")
+    st.caption("Branches run autonomously — no per-branch approval pauses.")
 
 
 _LOGO_DIR = Path(__file__).resolve().parent / "assets"
@@ -42,6 +140,15 @@ if st.query_params.get("reset"):
 
 inject_theme()
 init_session_state()
+
+# Keep the process-global session registry current while attached, so a
+# browser disconnect (new session_state on reconnect) can REATTACH to the
+# still-running agent thread instead of losing sight of it.
+from scilink.ui import registry as _session_registry  # noqa: E402
+
+if st.session_state.agent_initialized and st.session_state.session_dir:
+    _session_registry.sync_from(st.session_state)
+
 render_sidebar()
 
 
@@ -97,7 +204,7 @@ def _find_new_images(summary_only: bool = False) -> list[str]:
             st.session_state.known_images.add(s)
 
         # In co-pilot mode, show sample fits inline (first, middle, last)
-        # In supervised/autonomous, skip — user can find them in File Explorer
+        # In autopilot/autonomous, skip — user can find them in File Explorer
         agent = st.session_state.get("agent")
         is_copilot = (
             agent is not None
@@ -191,55 +298,286 @@ def _find_code_review_files() -> list[tuple[str, str]]:
 
 
 def _find_new_html_reports() -> list[str]:
-    """Return HTML report paths in the session dir not yet shown."""
+    """Return HTML report paths in the session dir not yet shown.
+
+    Best-of-N candidate reports (``plan_candidates/``) are deliberately
+    excluded from the chat message: they are side artifacts reviewed at the
+    selection prompt and browsable in the File Explorer, and stacking N of
+    them next to the winner's ``plan.html`` buries the actual deliverable.
+    They are still marked known so they never leak into a later message.
+    """
     session_dir = st.session_state.session_dir
     if session_dir is None:
         return []
     new = []
     for p in Path(session_dir).rglob("*.html"):
         s = str(p)
-        if s not in st.session_state.known_images:  # reuse the same set
-            st.session_state.known_images.add(s)
+        # Identity = path AND mtime. Under the meta each delegation writes
+        # its own directory so a path is unique per turn, but standalone
+        # plan mode rewrites base_dir/plan.html on every refine — a
+        # path-only key marked it "already shown" and the REFINED plan
+        # never reached the chat. Inlined rather than shared: these sweeps
+        # are exec'd standalone by the UI-contract tests.
+        try:
+            key = f"{p}:{p.stat().st_mtime_ns}"
+        except OSError:
+            key = str(p)
+        if key not in st.session_state.known_images:  # reuse the same set
+            st.session_state.known_images.add(key)
+            if p.parent.name == "plan_candidates":
+                continue
+            # plan_preview.html is the CLI reviewer's scratch render of the
+            # plan under review — in chat it duplicates the white paper /
+            # brief that follow it, so it is noise here.
+            if p.stem == "plan_preview":
+                continue
             new.append(s)
     return new
 
 
-def _run_agent_chat(task: ChatTask, agent, user_input: str) -> None:
-    """Target for the background thread."""
-    import logging
+def _demote_md_headings(text: str) -> str:
+    """Shift markdown headings down two levels (H1 -> H3, capped at H6) for
+    the in-chat preview: st.markdown renders a document H1 at page-title
+    size, which is overwhelming inside a chat bubble. The file on disk keeps
+    its proper heading levels. Fenced code blocks are left untouched."""
+    out, in_fence = [], False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+        if not in_fence:
+            m = re.match(r"^(#{1,6})(\s)", line)
+            if m:
+                line = "#" * min(len(m.group(1)) + 2, 6) + line[len(m.group(1)):]
+        out.append(line)
+    return "\n".join(out)
 
-    original_input = builtins.input
-    _metadata_cache: dict[str, str] = {}
 
-    def _streamlit_input(prompt: str = "") -> str:
-        if task.stopped:
-            raise AgentStoppedError("Agent stopped by user")
-        context = cap.getvalue()
-        # Auto-reply for repeated metadata prompts (same file asked twice)
-        if "Context" in prompt and "MISSING METADATA" in context:
+def _find_new_md_documents() -> list[str]:
+    """Return markdown DELIVERABLES in the session dir not yet shown.
+
+    Chosen by the AGENT, not by an allow-list of stems: the filename of the
+    thing a user asked for is invented at request time
+    ("top3_priority_brief.md"), so a stem whitelist silently drops exactly
+    the artifact they are looking for. save_file records a deliverables
+    manifest; anything marked there is embedded. Unmarked markdown is still
+    embedded when it is small enough to read in chat — a forgotten flag must
+    never hide a file — while bulk context (literature dumps) is left to the
+    File Explorer so it cannot bury the deliverables.
+    """
+    session_dir = st.session_state.session_dir
+    if session_dir is None:
+        return []
+
+    MAX_INLINE_BYTES = 60_000
+    BULK_STEMS = ("literature_search", "chat_history", "session_log")
+    try:
+        from scilink.agents.planning_agents.user_interface import (
+            load_deliverables)
+        marked = {e["path"] for e in load_deliverables(session_dir)
+                  if e.get("deliverable")}
+    except Exception:
+        marked = set()
+
+    new = []
+    for p in Path(session_dir).rglob("*.md"):
+        s = str(p)
+        # Identity = path AND mtime. Under the meta each delegation writes
+        # its own directory so a path is unique per turn, but standalone
+        # plan mode rewrites base_dir/plan.html on every refine — a
+        # path-only key marked it "already shown" and the REFINED plan
+        # never reached the chat. Inlined rather than shared: these sweeps
+        # are exec'd standalone by the UI-contract tests.
+        try:
+            key = f"{p}:{p.stat().st_mtime_ns}"
+        except OSError:
+            key = str(p)
+        if key in st.session_state.known_images:  # reuse the same set
+            continue
+        is_marked = str(p.resolve()) in marked
+        if not is_marked:
+            if any(p.stem.startswith(b) for b in BULK_STEMS):
+                continue
+            try:
+                if p.stat().st_size > MAX_INLINE_BYTES:
+                    continue
+            except OSError:
+                continue
+        st.session_state.known_images.add(key)
+        new.append(s)
+    return new
+
+
+def _deliverable_title(md_path, p) -> str:
+    """Heading for an embedded markdown doc: the agent's own label when it
+    gave one, else a readable form of the filename."""
+    try:
+        from scilink.agents.planning_agents.user_interface import (
+            load_deliverables)
+        for e in load_deliverables(st.session_state.session_dir or ""):
+            if e.get("path") == str(Path(md_path).resolve()) and e.get("title"):
+                return e["title"]
+    except Exception:
+        pass
+    if p.stem.startswith("white_paper"):
+        return "White Paper"
+    if p.stem.startswith("ideation_report"):
+        return "Ideation Report"
+    return p.stem.replace("_", " ").title()
+
+
+def _parse_bestofn_review(context: str, prompt: str):
+    """Parse the best-of-N candidate review from captured stdout.
+
+    Returns ``(candidates, default_idx)`` where ``candidates`` is a list of
+    ``{"idx": int, "label": str}`` for the MOST RECENT review block and
+    ``default_idx`` is the judge's pick. Returns ``None`` when the buffer is
+    not a best-of-N review — the modal then falls back to the generic text
+    box, so any parse miss degrades gracefully (no regression). Works for both
+    curve (``R²=``) and image (``score=``) reviews; the agent-side
+    ``_get_bestofn_join_approval`` contract is unchanged (the chosen index is
+    sent as the same bare digit it already parses).
+    """
+    # Gate on the CURRENT input() prompt — only the best-of-N choice prompt
+    # contains "accept candidate". This prevents a stale review block left in
+    # the accumulated session buffer from hijacking a later, unrelated feedback
+    # prompt (plan/code/scalarizer/etc.).
+    if not prompt or "accept candidate" not in prompt:
+        return None
+    if not context or "BEST-OF-N CANDIDATES" not in context:
+        return None
+    import re
+    # Only the latest review block (the buffer accumulates the whole session).
+    block = context[context.rfind("BEST-OF-N CANDIDATES"):]
+    cands: dict[int, str] = {}
+    pick = None
+    for m in re.finditer(
+        r"Candidate (\d+):\s*([^=]+)=([0-9.eE+\-]+),\s*approved=(\w+),"
+        r"\s*iterations=(\d+)(.*)", block):
+        idx = int(m.group(1))
+        metric, value = m.group(2).strip(), m.group(3)
+        approved = m.group(4).lower() == "true"
+        iters = m.group(5)
+        mark = "✓ approved" if approved else "✗ below gate"
+        cands[idx] = f"Candidate {idx} — {metric}={value} · {mark} · {iters} iter"
+        if "judge pick" in m.group(6).lower():
+            pick = idx
+    if not cands:
+        return None
+    if pick is None:
+        pm = re.search(r"accept candidate (\d+)", prompt or "")
+        pick = int(pm.group(1)) if pm else min(cands)
+    ordered = [{"idx": i, "label": cands[i]} for i in sorted(cands)]
+    return ordered, pick
+
+
+def _parse_plan_candidate_review(context: str, prompt: str):
+    """Parse the best-of-N PLAN candidate review from captured stdout.
+
+    Sibling of ``_parse_bestofn_review`` for plan mode: gated on its own
+    marker strings ("accept plan candidate" in the prompt, "PLAN CANDIDATES"
+    in the buffer) so neither parser can hijack the other's review, and with
+    its own card grammar — plan candidates carry judge scores, not the
+    ``metric=value`` scalar the analysis regex expects. Returns
+    ``(candidates, judge_pick)`` with ``candidates`` a list of
+    ``{"idx": int, "label": str}``, or ``None`` to fall back to the generic
+    text box (graceful degradation on any parse miss). The full summary cards
+    themselves render via the existing context box; this parser only powers
+    the radio selector. Reply contract matches ``get_candidate_selection``:
+    bare digit to override, "" to accept the judge's pick.
+    """
+    if not prompt or "accept plan candidate" not in prompt:
+        return None
+    if not context or "PLAN CANDIDATES" not in context:
+        return None
+    import re
+    block = context[context.rfind("PLAN CANDIDATES"):]
+    cands: dict[int, str] = {}
+    pick = None
+    for m in re.finditer(r"── Candidate (\d+): (.+?) ──(.*)", block):
+        idx = int(m.group(1))
+        name = m.group(2).strip()
+        # Generous cap: experiment names are the radio's primary signal and
+        # the row has the full content width — clip only pathological ones.
+        if len(name) > 120:
+            name = name[:117] + "…"
+        cands[idx] = f"Candidate {idx} — {name}"
+        if "judge pick" in m.group(3).lower():
+            pick = idx
+    if not cands:
+        return None
+    if pick is None:
+        pm = re.search(r"accept plan candidate (\d+)", prompt)
+        pick = int(pm.group(1)) if pm else min(cands)
+    ordered = [{"idx": i, "label": cands[i]} for i in sorted(cands)]
+    return ordered, pick
+
+
+class _UIChannel:
+    """hitl.FeedbackChannel that publishes prompts to the Streamlit UI.
+
+    Carries the structured kind/options/origin through to the widget
+    chooser; the metadata auto-reply cache keys on ``origin['filename']``
+    when the prompt came through the chokepoint, with the legacy
+    context-regex fallback for stray raw ``input()`` calls.
+    """
+
+    def __init__(self, task: ChatTask, cap) -> None:
+        self._task = task
+        self._cap = cap
+        self._metadata_cache: dict[str, str] = {}
+
+    def _metadata_key(self, hreq, context: str):
+        if hreq.kind == "dataset_description" and hreq.origin.get("filename"):
+            return str(hreq.origin["filename"])
+        if "Context" in hreq.prompt and "MISSING METADATA" in context:
             import re
             m = re.search(r"MISSING METADATA FOR:\s*(.+)", context)
             if m:
-                fname = m.group(1).strip()
-                if fname in _metadata_cache:
-                    return _metadata_cache[fname]
-        req = FeedbackRequest(prompt=prompt, context=context)
+                return m.group(1).strip()
+        return None
+
+    def ask(self, hreq) -> str:
+        task = self._task
+        if task.stopped:
+            raise AgentStoppedError("Agent stopped by user")
+        context = self._cap.getvalue()
+        # Auto-reply for repeated metadata prompts (same file asked twice)
+        key = self._metadata_key(hreq, context)
+        if key is not None and key in self._metadata_cache:
+            return self._metadata_cache[key]
+        req = FeedbackRequest(
+            prompt=hreq.prompt, context=context,
+            kind=hreq.kind, options=hreq.options, origin=dict(hreq.origin),
+        )
         task.feedback_request = req
         req.event.wait()
         task.feedback_request = None
         if task.stopped:
             raise AgentStoppedError("Agent stopped by user")
         response = req.response or ""
-        # Cache metadata descriptions so repeated prompts auto-reply
-        if "Context" in prompt and "MISSING METADATA" in context:
-            import re
-            m = re.search(r"MISSING METADATA FOR:\s*(.+)", context)
-            if m:
-                _metadata_cache[m.group(1).strip()] = response
+        if key is not None:
+            self._metadata_cache[key] = response
         return response
+
+
+def _run_agent_chat(task: ChatTask, agent, user_input: str) -> None:
+    """Target for the background thread."""
+    import logging
+
+    from scilink import hitl as _hitl
+
+    original_input = builtins.input
 
     cap = OutputCapture()
     task.live_capture = cap
+
+    channel = _UIChannel(task, cap)
+
+    def _streamlit_input(prompt: str = "") -> str:
+        # Raw-input fallback: covers third-party code and agent worker
+        # threads (fan-out branches, best-of-N workers) that bypass the
+        # thread-local channel. Same UI slot, generic free-text request.
+        return channel.ask(_hitl.FeedbackRequest(prompt=prompt))
 
     # Route logging output through the capture buffer so that
     # logging.info() messages (used by the verification-correction
@@ -250,7 +588,28 @@ def _run_agent_chat(task: ChatTask, agent, user_input: str) -> None:
     log_handler.setLevel(logging.INFO)
     log_handler.setFormatter(logging.Formatter("%(message)s"))
     _this_thread = threading.get_ident()
-    log_handler.addFilter(lambda record: record.thread == _this_thread)
+    # Best-of-N candidate attempts run in worker threads spawned by this
+    # chat thread; effective_thread maps them back so their narration stays
+    # in the verbose panel without admitting other sessions' threads. During
+    # a CONCURRENT fan-out, keep_in_fanout_panel trims each candidate's
+    # per-attempt detail to milestones (executing / verification / outcome) so
+    # the panel stays readable; a lone attempt and the CLI keep full detail.
+    from scilink.utils.log_context import effective_thread, keep_in_fanout_panel
+
+    def _panel_filter(record):
+        if effective_thread(record.thread) != _this_thread:
+            return False
+        # Stop propagation for logging-heavy phases: much of the agents'
+        # narration goes through logging (not print), so without this check
+        # a stopped run would only abort on its next print(). Filters run in
+        # the emitting thread, so the raise lands in the agent/worker thread.
+        if cap.stop_requested:
+            raise AgentStoppedError("Agent stopped by user")
+        return keep_in_fanout_panel(
+            record.thread, record.getMessage(), record.levelno
+        )
+
+    log_handler.addFilter(_panel_filter)
     root_logger = logging.getLogger()
     # Lower root to INFO so agent logger.info() messages (execution
     # details, verification steps, R² values) reach the handler.
@@ -265,6 +624,7 @@ def _run_agent_chat(task: ChatTask, agent, user_input: str) -> None:
 
     try:
         builtins.input = _streamlit_input
+        _hitl.set_thread_channel(channel)
         with cap:
             result = agent.chat(user_input)
         if not task.stopped:
@@ -279,6 +639,7 @@ def _run_agent_chat(task: ChatTask, agent, user_input: str) -> None:
             task.verbose_log = cap.getvalue()
     finally:
         builtins.input = original_input
+        _hitl.set_thread_channel(None)
         root_logger.removeHandler(log_handler)
         task.live_capture = None
         if not task.stopped:
@@ -345,41 +706,96 @@ if not st.session_state.agent_initialized:
             resume_session(**_pending_resume)
         else:
             start_session(**_pending)
-        # start_session / resume_session call st.rerun() on success,
-        # so we only reach here if initialization failed.
-        st.stop()
+        # start_session / resume_session call st.rerun() on success, so we
+        # only reach here if initialization failed. The failure message is
+        # stashed in _session_init_error; rerun so the welcome screen can
+        # show it — st.stop() here would freeze on the spinner screen with
+        # the error invisible behind the dimmed sidebar.
+        st.rerun()
+
+    # ── Reattach banner: live sessions in THIS server process ──
+    # A dropped connection gives the reconnected page a fresh session_state
+    # while the agent thread keeps running; offer to pick it back up. This is
+    # reference reattachment, not checkpoint resume — nothing is re-created.
+    _live = _session_registry.live_entries()
+    if _live:
+        _status_label = {
+            "running": "🟢 running",
+            "awaiting input": "🟠 awaiting your input",
+            "finished": "🔵 finished — result not yet shown",
+            "idle": "⚪ idle (in memory)",
+        }
+        _bl, _bc, _br = st.columns([1, 2, 1])
+        with _bc:
+            st.info("This server has live session(s) from a previous "
+                    "connection — reattach to continue where it left off.")
+            for _e in _live:
+                _name = Path(_e["session_dir"]).name
+                _cfg = _e["config"]
+                _desc = " · ".join(x for x in (
+                    _e.get("app_mode"), _cfg.get("model"),
+                    f"{_e['n_messages']} messages") if x)
+                _c1, _c2 = st.columns([3, 1])
+                with _c1:
+                    st.markdown(f"**{_name}**  \n"
+                                f"{_status_label.get(_e['status'], _e['status'])}"
+                                f"{' · ' + _desc if _desc else ''}")
+                with _c2:
+                    if st.button("Reattach", key=f"reattach_{_e['session_dir']}",
+                                 type="primary"):
+                        if _session_registry.attach_to(
+                                st.session_state, _e["session_dir"]):
+                            st.rerun()
+                        else:
+                            st.warning("That session is no longer in memory — "
+                                       "use Resume from checkpoint instead.")
+            st.divider()
 
     # ── Normal welcome screen ────────────────────────────────
     col_l, col_c, col_r = st.columns([1, 2, 1])
     with col_c:
         # Mode selector — centered above the logo
         if st.session_state.app_mode is None:
+            st.session_state.app_mode = "meta"
+        # Fall back if a stale session_state still says "simulate" but the
+        # [sim] extras are no longer installed.
+        if st.session_state.app_mode == "simulate" and not simulate_enabled():
             st.session_state.app_mode = "analyze"
         _mode_map = {m["key"]: m for m in APP_MODES}
+        # One button per mode; simulate is dropped when [sim] isn't installed.
+        _modes = [m for m in APP_MODES
+                  if m["key"] != "simulate" or simulate_enabled()]
         st.markdown('<div class="mode-selector-anchor"></div>', unsafe_allow_html=True)
-        _, _mc1, _mc2, _mc3, _ = st.columns([1.5, 1, 1, 1, 1.5])
-        with _mc1:
-            _atype = "primary" if st.session_state.app_mode == "analyze" else "secondary"
-            if st.button("Analyze", type=_atype, use_container_width=True, key="mode_analyze"):
-                st.session_state.app_mode = "analyze"
-                st.rerun()
-        with _mc2:
-            _ptype = "primary" if st.session_state.app_mode == "plan" else "secondary"
-            if st.button("Plan", type=_ptype, use_container_width=True, key="mode_plan"):
-                st.session_state.app_mode = "plan"
-                st.rerun()
-        with _mc3:
-            _stype = "primary" if st.session_state.app_mode == "simulate" else "secondary"
-            if st.button("Simulate", type=_stype, use_container_width=True, key="mode_simulate"):
-                st.session_state.app_mode = "simulate"
-                st.rerun()
-        _cur_desc = _mode_map[st.session_state.app_mode]["description"]
+        # One equal column per mode (no side padding). The buttons size to their
+        # labels and the row centers/wraps via CSS, so they never truncate or
+        # collide regardless of window width or OS display scaling.
+        _cols = st.columns(len(_modes))
+        for _m, _col in zip(_modes, _cols):
+            with _col:
+                _btype = ("primary" if st.session_state.app_mode == _m["key"]
+                          else "secondary")
+                if st.button(_m["label"], type=_btype, width="stretch",
+                             key=f"mode_{_m['key']}"):
+                    st.session_state.app_mode = _m["key"]
+                    st.rerun()
+        _cur_mode = _mode_map[st.session_state.app_mode]
+        _cur_desc = _cur_mode["description"]
+        if _cur_mode.get("beta"):
+            _cur_desc = f"Mission Control · {_cur_desc}"
         st.markdown(
             f'<p style="text-align:center;color:#6B7A8C;font-size:0.85em;'
             f'margin-top:-4px;margin-bottom:12px">'
             f'{_cur_desc}</p>',
             unsafe_allow_html=True,
         )
+
+        # Session start/resume failure from the previous run (stashed by
+        # start_session / resume_session). Below the mode selector because
+        # the mode-selector-anchor CSS pulls that row upward over anything
+        # rendered above it.
+        _init_err = st.session_state.pop("_session_init_error", None)
+        if _init_err:
+            st.error(_init_err)
 
         _is_dark = st.session_state.get("theme_mode", "dark") == "dark"
         _logo = _LOGO_DARK if _is_dark else _LOGO_LIGHT
@@ -451,8 +867,9 @@ if not st.session_state.agent_initialized:
 # Active session — Chat + File Explorer tabs
 # ══════════════════════════════════════════════════════════════════
 
-if st.session_state.app_mode == "simulate":
+if st.session_state.app_mode == "simulate" and simulate_enabled():
     # ── Simulate mode: no agent, just HPC UI ─────────────────
+    from scilink.ui.components.simulations import render_simulations_tab
     sim_tab, terminal_note = st.tabs(["Simulations", "About"])
     with sim_tab:
         render_simulations_tab()
@@ -465,10 +882,22 @@ if st.session_state.app_mode == "simulate":
             "the full agent framework alongside HPC simulations."
         )
 else:
-    # ── Analyze / Plan modes: full agent UI ──────────────────
-    chat_tab, files_tab, tools_tab, skills_tab, sim_tab = st.tabs(
-        ["Chat", "File Explorer", "Tools", "Skills", "Simulations"]
-    )
+    # ── Analyze / Plan / Explore modes: full agent UI ────────
+    # Tabs are built dynamically: Telemetry is appended only in Explore
+    # (meta) mode, Simulations only when the simulate extra is enabled.
+    _is_meta = st.session_state.app_mode == "meta"
+    _tab_labels = ["Chat", "File Explorer", "Tools", "Skills"]
+    if _is_meta:
+        _tab_labels.append("Telemetry")
+    if simulate_enabled():
+        _tab_labels.append("Simulations")
+    _tabs = st.tabs(_tab_labels)
+    chat_tab, files_tab, tools_tab, skills_tab = _tabs[:4]
+    _next = 4
+    telemetry_tab = None
+    if _is_meta:
+        telemetry_tab, _next = _tabs[_next], _next + 1
+    sim_tab = _tabs[_next] if simulate_enabled() else None
 
     # ── Chat tab ─────────────────────────────────────────────────────
     with chat_tab:
@@ -477,7 +906,13 @@ else:
             render_pre_chat_uploads(_start_task)
     
         _avatars = {"user": AVATAR_USER, "assistant": AVATAR_AGENT}
-        for msg in st.session_state.chat_messages:
+        # Enumerated because widget keys below must be unique per
+        # MESSAGE, not per path: a document revised in place is
+        # re-embedded in a later message under the SAME path, and a
+        # path-only key then collides and crashes the app with
+        # StreamlitDuplicateElementKey (live, after a white paper was
+        # revised via write_technical_document(revise_path=...)).
+        for _mi, msg in enumerate(st.session_state.chat_messages):
             with st.chat_message(msg["role"], avatar=_avatars.get(msg["role"])):
                 # Escape tildes outside LaTeX blocks to prevent Markdown strikethrough
                 _content = _escape_tildes(msg["content"]) if msg["role"] == "assistant" else msg["content"]
@@ -506,11 +941,34 @@ else:
                             data=p.read_bytes(),
                             file_name=p.name,
                             mime="text/html",
-                            key=f"dl_html_{html_path}",
+                            key=f"dl_html_{_mi}_{html_path}",
+                        )
+                for md_path in msg.get("md_reports", []):
+                    p = Path(md_path)
+                    if p.exists():
+                        _doc_title = _deliverable_title(md_path, p)
+                        with st.expander(f"{_doc_title}: {p.name}"):
+                            with st.container(height=600):
+                                # Figures saved beside the document (relative
+                                # refs, e.g. an embedded workflow diagram)
+                                # cannot be fetched by Streamlit's markdown
+                                # renderer — inline them as data URIs.
+                                from scilink.ui.md_images import (
+                                    inline_local_images)
+                                st.markdown(_demote_md_headings(
+                                    inline_local_images(
+                                        p.read_text(encoding="utf-8"),
+                                        p.parent)))
+                        st.download_button(
+                            f"Download {p.name}",
+                            data=p.read_bytes(),
+                            file_name=p.name,
+                            mime="text/markdown",
+                            key=f"dl_md_{_mi}_{md_path}",
                         )
                 if msg.get("verbose"):
                     with st.expander("Verbose output"):
-                        st.code(msg["verbose"], language="text")
+                        st.code(_strip_ansi(msg["verbose"]), language="text")
     
         # ── Agent monitoring fragment ─────────────────────────────────
         # Uses @st.fragment to rerun only this section (not the full page)
@@ -529,10 +987,19 @@ else:
                 content = task.result if task.result is not None else f"Error: {task.error}"
                 # Strip markdown image tags with local file paths — images are
                 # rendered separately via st.image() from _find_new_images()
-                import re
                 content = re.sub(r"!\[[^\]]*\]\([^)]+\)\n?", "", content).strip()
+                # If another attached view of this session already consumed
+                # this completion (reattach can briefly leave two observers),
+                # do not append the same turn twice — just clear the task.
+                _msgs = st.session_state.chat_messages
+                if (_msgs and _msgs[-1].get("role") == "assistant"
+                        and _msgs[-1].get("content") == content):
+                    st.session_state.chat_task = ChatTask()
+                    st.rerun(scope="app")
+                    return
                 new_images = _find_new_images()
                 new_reports = _find_new_html_reports()
+                new_docs = _find_new_md_documents()
                 # When an HTML report is present it already embeds the
                 # relevant figures — skip showing raw images separately
                 # to avoid duplicate clutter (matches curve fitting UX).
@@ -541,8 +1008,43 @@ else:
                     "content": content,
                     "images": [] if new_reports else new_images,
                     "html_reports": new_reports,
+                    "md_reports": new_docs,
                     "verbose": task.verbose_log or "",
                 })
+                # Persist session state now that the turn is complete. The
+                # orchestrators' periodic auto-save (every CHECKPOINT_INTERVAL
+                # messages) left short UI sessions with no checkpoint at all —
+                # unresumable. The CLI saves on quit; the UI has no quit
+                # moment, so save after every finished turn instead.
+                # save_checkpoint (meta) snapshots the children too.
+                _agent = st.session_state.get("agent")
+                try:
+                    if hasattr(_agent, "save_checkpoint"):
+                        _agent.save_checkpoint()
+                    elif hasattr(_agent, "_auto_checkpoint"):
+                        _agent._auto_checkpoint()
+                except Exception as _ckpt_exc:  # noqa: BLE001 - never break the turn
+                    logging.warning(f"Per-turn checkpoint failed: {_ckpt_exc}")
+                # Auto-title an unnamed session from its first exchange —
+                # one small LLM call, once per session; a user-set name is
+                # never overwritten and any failure falls back silently to
+                # the timestamp label.
+                try:
+                    from scilink.ui.session_meta import (
+                        load_session_name, save_session_name,
+                        generate_session_title)
+                    _sdir = st.session_state.session_dir
+                    if _sdir and not load_session_name(_sdir):
+                        _first_user = next(
+                            (m["content"] for m in st.session_state.chat_messages
+                             if m["role"] == "user"), "")
+                        _title = generate_session_title(
+                            getattr(st.session_state.agent, "model", None),
+                            _first_user, content)
+                        if _title:
+                            save_session_name(_sdir, _title, named_by="agent")
+                except Exception:  # noqa: BLE001 - naming must never break a turn
+                    pass
                 st.session_state.chat_task = ChatTask()
                 st.rerun(scope="app")
                 return
@@ -563,7 +1065,15 @@ else:
                     for img in previews:
                         st.session_state.known_images.add(img)
                 for img_path in st.session_state._feedback_preview_images:
-                    st.image(img_path)
+                    # Caption best-of-N candidate fits with their number so the
+                    # plot lines up with the radio selector below; other preview
+                    # images (single fit, hyperspectral grid) render as before.
+                    _bn = re.search(r"bestofn_candidate_(\d+)_review",
+                                    Path(img_path).name)
+                    if _bn:
+                        st.image(img_path, caption=f"Candidate {int(_bn.group(1))}")
+                    else:
+                        st.image(img_path)
     
                 # Show generated code files during code review
                 _ctx_tail_early = (req.context or "")[-1500:]
@@ -576,10 +1086,16 @@ else:
                             with st.expander(f"📄 {fname}", expanded=len(code_files) == 1):
                                 st.code(content, language="python")
     
-                if req.context:
+                _is_fanout_confirm = (
+                    req.origin.get("stage") == "fanout_confirm"
+                    or "parallel multi-dataset analysis"
+                    in (req.context or "").lower()
+                )
+                if _is_fanout_confirm:
+                    _render_fanout_confirm(req.context)
+                elif req.context:
                     import html as _html
-                    import re
-    
+
                     display_ctx = req.context
                     lines = display_ctx.split("\n")
                     # Find the last separator block (===…) followed by a
@@ -634,8 +1150,20 @@ else:
                 # the buffer accumulates all stdout from the session.
                 _ctx_tail = (req.context or "")[-1500:]
                 _prompt = req.prompt or ""
-                _is_keep_revert = "revert to original" in _ctx_tail.lower()
-                if "Context" in _prompt or "MISSING METADATA" in _ctx_tail:
+                _is_keep_revert = (
+                    (req.kind == "keep_or_revert"
+                     and (req.options or [""])[0] == "keep")
+                    or "revert to original" in _ctx_tail.lower()
+                )
+                # Best-of-N candidate review: parse the candidate list so we can
+                # render a radio selector (scales to any N, unlike one button
+                # per candidate). None -> falls through to the generic text box.
+                _bestofn_data = _parse_bestofn_review(req.context or "", _prompt)
+                # Plan-mode best-of-N: same radio UX, its own parser/markers.
+                _plan_cand_data = _parse_plan_candidate_review(req.context or "", _prompt)
+                # (_is_fanout_confirm computed above, before the context render)
+                if (req.kind == "dataset_description"
+                        or "Context" in _prompt or "MISSING METADATA" in _ctx_tail):
                     _input_label = "Describe your data (optional):"
                     _submit_label = "Submit description"
                     _accept_label = "Skip (let agent guess)"
@@ -647,7 +1175,7 @@ else:
                     _input_label = "Your plan feedback (optional):"
                     _submit_label = "Request changes"
                     _accept_label = "Approve plan"
-                elif "SCALARIZER REVIEW" in _ctx_tail:
+                elif req.kind == "review_metrics" or "SCALARIZER REVIEW" in _ctx_tail:
                     _input_label = "Your extraction feedback (optional):"
                     _submit_label = "Request changes"
                     _accept_label = "Approve extraction"
@@ -668,6 +1196,108 @@ else:
                             st.rerun(scope="app")
                     with col_revert:
                         if st.button("Revert to original fit", type="primary", width="stretch"):
+                            req.response = ""
+                            req.event.set()
+                            st.session_state.pop("_feedback_preview_images", None)
+                            st.session_state.pop("_code_review_files", None)
+                            st.rerun(scope="app")
+                # Fan-out launch confirmation: two clear buttons (Launch sends
+                # "y", Cancel sends "no" — matching _confirm_fanout's parsing),
+                # no text area (there is nothing to edit, only launch/abort).
+                elif _is_fanout_confirm:
+                    # Anchor so theme.py can force Cancel/Launch to identical
+                    # box size (equal columns fix width; this fixes height too).
+                    st.markdown(
+                        '<span class="fanout-actions-anchor"></span>',
+                        unsafe_allow_html=True,
+                    )
+                    col_cancel, col_go = st.columns(2)
+                    with col_cancel:
+                        if st.button("Cancel", type="secondary", width="stretch"):
+                            req.response = "no"
+                            req.event.set()
+                            st.session_state.pop("_feedback_preview_images", None)
+                            st.session_state.pop("_code_review_files", None)
+                            st.rerun(scope="app")
+                    with col_go:
+                        if st.button("🔀 Launch parallel analysis", type="primary",
+                                     width="stretch"):
+                            req.response = "y"
+                            req.event.set()
+                            st.session_state.pop("_feedback_preview_images", None)
+                            st.session_state.pop("_code_review_files", None)
+                            st.rerun(scope="app")
+                # Best-of-N review: a radio over the candidates (scales to any N)
+                # + "Use selected" / "Accept judge's pick". Sends the chosen
+                # index as the bare digit _get_bestofn_join_approval parses, or
+                # "" to accept the pick — identical to the text-box contract.
+                elif _bestofn_data:
+                    _cands, _pick = _bestofn_data
+                    _opts = [c["idx"] for c in _cands]
+                    _labels = {c["idx"]: c["label"] for c in _cands}
+                    _default = _opts.index(_pick) if _pick in _opts else 0
+                    _choice = st.radio(
+                        "Select the candidate to lock:",
+                        _opts, index=_default,
+                        format_func=lambda i: _labels.get(i, f"Candidate {i}"),
+                        key="bestofn_choice",
+                    )
+                    # Pin both action buttons to equal height/shape (theme.py);
+                    # the secondary "Accept" otherwise renders taller than the
+                    # primary "Use selected".
+                    st.markdown(
+                        '<span class="bestofn-actions-anchor"></span>',
+                        unsafe_allow_html=True,
+                    )
+                    col_use, col_pick = st.columns(2)
+                    with col_use:
+                        if st.button("Use selected", type="primary", width="stretch"):
+                            req.response = str(_choice)
+                            req.event.set()
+                            st.session_state.pop("_feedback_preview_images", None)
+                            st.session_state.pop("_code_review_files", None)
+                            st.rerun(scope="app")
+                    with col_pick:
+                        if st.button(f"Accept judge's pick (Candidate {_pick})",
+                                     type="secondary", width="stretch"):
+                            req.response = ""
+                            req.event.set()
+                            st.session_state.pop("_feedback_preview_images", None)
+                            st.session_state.pop("_code_review_files", None)
+                            st.rerun(scope="app")
+                # Plan best-of-N selection: radio over candidate plans. The
+                # summary cards are already visible in the context box above;
+                # full per-candidate HTML reports live in plan_candidates/.
+                # Sends a bare digit (override) or "" (accept judge's pick) —
+                # the get_candidate_selection contract.
+                elif _plan_cand_data:
+                    _pcands, _ppick = _plan_cand_data
+                    _popts = [c["idx"] for c in _pcands]
+                    _plabels = {c["idx"]: c["label"] for c in _pcands}
+                    _pdefault = _popts.index(_ppick) if _ppick in _popts else 0
+                    _pchoice = st.radio(
+                        "Select the plan candidate to proceed with:",
+                        _popts, index=_pdefault,
+                        format_func=lambda i: _plabels.get(i, f"Candidate {i}"),
+                        key="plan_cand_choice",
+                    )
+                    st.markdown(
+                        '<span class="bestofn-actions-anchor"></span>',
+                        unsafe_allow_html=True,
+                    )
+                    col_puse, col_ppick = st.columns(2)
+                    with col_puse:
+                        if st.button("Use selected plan", type="primary",
+                                     width="stretch"):
+                            req.response = str(_pchoice)
+                            req.event.set()
+                            st.session_state.pop("_feedback_preview_images", None)
+                            st.session_state.pop("_code_review_files", None)
+                            st.rerun(scope="app")
+                    with col_ppick:
+                        if st.button(f"Accept judge's pick (Candidate {_ppick})",
+                                     type="secondary", width="stretch",
+                                     key="plan_cand_accept"):
                             req.response = ""
                             req.event.set()
                             st.session_state.pop("_feedback_preview_images", None)
@@ -780,12 +1410,10 @@ else:
         new MutationObserver(fix).observe(doc.body,
             {childList:true, subtree:true, attributes:true, attributeFilter:['aria-checked','checked']});
     })();
-    </script>""", height=0)
+    </script>""", height=1)
                     if show:
-                        import html as _html
-    
                         tail = "\n".join(live.split("\n")[-200:])
-                        escaped = _html.escape(tail)
+                        escaped = _log_to_html(tail)
                         st.iframe( 
                             f'<pre style="height:280px;overflow-y:auto;margin:0;'
                             f"background:#1e1e1e;padding:8px;border-radius:4px;"
@@ -821,17 +1449,28 @@ else:
             )
 
     _has_conversation = bool(st.session_state.chat_messages)
-    if st.session_state.app_mode == "plan":
-        _chat_placeholder = "Message the planning agent..."
-    elif _has_conversation:
-        _chat_placeholder = "Message the analysis agent..."
-    else:
+    # Every mode has a dedicated start screen (goal field + a Start/Analyze
+    # button) in render_pre_chat_uploads, so the bottom chat input is for
+    # *continuing* a conversation and stays disabled until one exists.
+    # (Previously plan/meta left it enabled at the start, duplicating the start
+    # form and dropping any text typed into it.)
+    _chat_disabled = task.is_running or not _has_conversation
+    if _has_conversation:
+        if st.session_state.app_mode == "meta":
+            _chat_placeholder = "Message mission control..."
+        elif st.session_state.app_mode == "plan":
+            _chat_placeholder = "Message the planning agent..."
+        else:
+            _chat_placeholder = "Message the analysis agent..."
+    elif st.session_state.app_mode == "analyze":
         _chat_placeholder = "Upload data and click Analyze to start"
-
-    _chat_disabled = task.is_running or (
-        not _has_conversation and st.session_state.app_mode != "plan"
-    )
-    user_text = st.chat_input(_chat_placeholder, disabled=_chat_disabled)
+    else:
+        _chat_placeholder = "Enter your goal in the form above to start"
+    # Render the chat input inside the Chat tab container. A top-level
+    # st.chat_input is pinned to the bottom of the whole app and shows on
+    # every tab; scoping it to chat_tab keeps it on the Chat tab only.
+    with chat_tab:
+        user_text = st.chat_input(_chat_placeholder, disabled=_chat_disabled)
     _upload_preamble = st.session_state.pop("_upload_preamble", None)
 
     if _upload_preamble and user_text:
@@ -872,13 +1511,9 @@ else:
         )
         current = Path(current_session_dir)
         result: list[tuple[str, Path]] = []
+        from scilink.ui.session_meta import session_label
         for s in sessions:
-            # Parse timestamp from directory name like <prefix>_20260223_201729
-            parts = s.name.removeprefix(f"{prefix}_")
-            try:
-                label = f"{parts[:4]}-{parts[4:6]}-{parts[6:8]} {parts[9:11]}:{parts[11:13]}:{parts[13:15]}"
-            except (IndexError, ValueError):
-                label = s.name
+            label = session_label(s, prefix)
             if s.resolve() == current.resolve():
                 label += " (current)"
             result.append((label, s))
@@ -902,10 +1537,20 @@ else:
         else:
             labels = [s[0] for s in sessions]
             paths = [s[1] for s in sessions]
+            # Default to the CURRENT session, not the newest by name: a
+            # stray newer (possibly empty) session directory otherwise
+            # opens the tab on "No files found yet." while the session
+            # being worked on sits unselected below it.
+            current_idx = next(
+                (i for i, p in enumerate(paths)
+                 if p.resolve() == Path(st.session_state.session_dir).resolve()),
+                0,
+            )
             selected_idx = st.selectbox(
                 "Session",
                 range(len(labels)),
                 format_func=lambda i: labels[i],
+                index=current_idx,
                 key="session_selector",
             )
             session_path = paths[selected_idx]
@@ -917,7 +1562,19 @@ else:
                 st.session_state.selected_preview_file = None
     
             with tree_col:
-                st.subheader("Session Files")
+                header_col, refresh_col = st.columns([3, 1])
+                with header_col:
+                    st.subheader("Session Files")
+                with refresh_col:
+                    # Streamlit only re-runs on user interaction, so agent
+                    # output files written while the page is idle don't
+                    # appear until the next click. This button forces a
+                    # rerun, which re-evaluates the rglob below and shows
+                    # any newly-created files.
+                    if st.button("🔄 Refresh", key="files_refresh_btn",
+                                 width="stretch",
+                                 help="Re-scan the session directory for new files."):
+                        st.rerun()
     
                 all_files = list(session_path.rglob("*"))
                 has_files = any(f.is_file() for f in all_files)
@@ -955,7 +1612,7 @@ else:
                                 if st.button(
                                     f"{icon}  {display_name}  ({size})",
                                     key=f"fbtn_{f.relative_to(session_path)}",
-                                    use_container_width=True,
+                                    width="stretch",
                                     type=btn_type,
                                     help=f.name,
                                 ):
@@ -989,6 +1646,14 @@ else:
     with skills_tab:
         render_skills_tab()
     
+    # ── Telemetry tab (Explore mode only) ────────────────────────────
+    if telemetry_tab is not None:
+        from scilink.ui.components.telemetry import render_telemetry_tab
+        with telemetry_tab:
+            render_telemetry_tab()
+
     # ── Simulations tab ──────────────────────────────────────────────
-    with sim_tab:
-        render_simulations_tab()
+    if sim_tab is not None:
+        from scilink.ui.components.simulations import render_simulations_tab
+        with sim_tab:
+            render_simulations_tab()

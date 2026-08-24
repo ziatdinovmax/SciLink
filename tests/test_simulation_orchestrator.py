@@ -70,7 +70,7 @@ def _make_orch(model_name: str, base_dir: str, autonomy: str = "co-pilot"):
     )
     mode_map = {
         "co-pilot": SimulationMode.CO_PILOT,
-        "supervised": SimulationMode.SUPERVISED,
+        "autopilot": SimulationMode.AUTOPILOT,
         "autonomous": SimulationMode.AUTONOMOUS,
     }
     return SimulationOrchestratorAgent(
@@ -89,26 +89,37 @@ def _make_orch(model_name: str, base_dir: str, autonomy: str = "co-pilot"):
 EXPECTED_TOOLS = {
     "session_status",
     "generate_structure",
+    "plan_structure",
     "validate_structure",
-    "generate_vasp_inputs",
+    "generate_dft_inputs",
     "run_complete_dft_workflow",
+    "run_simulation",
+    "run_mlip_simulation",
+    "run_exafs_workflow",
     "refine_structure",
     "view_structure",
-    "validate_incar",
-    "apply_incar_improvements",
+    "validate_inputs",
+    "apply_input_adjustments",
+    "edit_file",
+    "rename_file",
+    "save_file",
+    "append_file",
+    "read_file",
+    "read_document",
     "list_generated_structures",
-    "analyze_vasp_output",
-    "suggest_incar_fixes",
+    "analyze_output",
+    "route_simulation",
+    "list_available_software",
     # HPC tools
-    "submit_vasp_job",
+    "submit_simulation_job",
     "get_job_status",
-    "download_vasp_results",
+    "download_job_results",
     "generate_final_report",
 }
 
 
 def test_1_orchestrator_constructs(model_name: str):
-    """Orchestrator builds without an LLM call; all 16 tools registered."""
+    """Orchestrator builds without an LLM call; the full tool set registers."""
     with tempfile.TemporaryDirectory() as td:
         orch = _make_orch(model_name, td + "/sim")
         assert set(orch.tools.functions_map.keys()) == EXPECTED_TOOLS
@@ -127,18 +138,29 @@ def test_2_tool_error_paths(model_name: str):
         # validate_structure on missing file
         r = json.loads(orch.tools.execute_tool(
             "validate_structure",
-            poscar_path="/nonexistent/POSCAR",
+            structure_path="/nonexistent/POSCAR",
             original_request="test",
         ))
         assert r["status"] == "error" and "not found" in r["message"]
 
-        # generate_vasp_inputs with bad method
         fake = Path(td) / "POSCAR"
         fake.write_text("Si\n1.0\n3 0 0\n0 3 0\n0 0 3\nSi\n1\nDirect\n0 0 0\n")
+
+        # generate_dft_inputs with no engine selected (no routing, no software)
         r = json.loads(orch.tools.execute_tool(
-            "generate_vasp_inputs",
-            poscar_path=str(fake),
+            "generate_dft_inputs",
+            structure_path=str(fake),
             request="test",
+        ))
+        assert r["status"] == "error" and "engine" in r["message"].lower()
+
+        # generate_dft_inputs with an explicit engine but an unknown method
+        # → the named-backend lookup misses in the skill bundle.
+        r = json.loads(orch.tools.execute_tool(
+            "generate_dft_inputs",
+            structure_path=str(fake),
+            request="test",
+            software="vasp",
             method="banana",
         ))
         assert r["status"] == "error" and "banana" in r["message"]
@@ -146,7 +168,7 @@ def test_2_tool_error_paths(model_name: str):
         # refine_structure on a path with no session record
         r = json.loads(orch.tools.execute_tool(
             "refine_structure",
-            poscar_path=str(fake),
+            structure_path=str(fake),
             original_request="test",
         ))
         assert r["status"] == "error" and "No record found" in r["message"]
@@ -154,35 +176,34 @@ def test_2_tool_error_paths(model_name: str):
         # view_structure on missing file
         r = json.loads(orch.tools.execute_tool(
             "view_structure",
-            poscar_path="/nope/POSCAR",
+            structure_path="/nope/POSCAR",
         ))
         assert r["status"] == "error"
 
-        # validate_incar without FH key returns 'skipped', not 'error'
-        fake_incar = Path(td) / "INCAR"
-        fake_incar.write_text("ENCUT = 400\n")
+        # validate_inputs with an engine but no generated inputs for the structure
         r = json.loads(orch.tools.execute_tool(
-            "validate_incar",
-            incar_path=str(fake_incar),
+            "validate_inputs",
+            structure_path=str(fake),
             system_description="test",
+            software="vasp",
         ))
-        assert r["status"] in ("skipped", "error")
+        assert r["status"] == "error" and "input files" in r["message"].lower()
 
-        # apply_incar_improvements with no adjustments
+        # apply_input_adjustments with no adjustments → no_changes (before engine work)
         r = json.loads(orch.tools.execute_tool(
-            "apply_incar_improvements",
-            incar_path=str(fake_incar),
-            poscar_path=str(fake),
+            "apply_input_adjustments",
+            structure_path=str(fake),
             original_request="test",
             suggested_adjustments=[],
         ))
         assert r["status"] == "no_changes"
 
-        # suggest_incar_fixes on missing log
+        # analyze_output on a nonexistent run directory
         r = json.loads(orch.tools.execute_tool(
-            "suggest_incar_fixes",
-            log_path="/nope/log",
-            original_request="test",
+            "analyze_output",
+            output_dir="/nope/run",
+            research_goal="test",
+            software="vasp",
         ))
         assert r["status"] == "error"
 
@@ -193,13 +214,317 @@ def test_2_tool_error_paths(model_name: str):
         print("   ✅ All error paths return structured JSON")
 
 
+def test_2b_edit_and_rename_file(model_name: str):
+    """edit_file / rename_file: surgical, sandboxed, extensionless-VASP aware."""
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        orch = _make_orch(model_name, td + "/sim")
+        sd = Path(orch.base_dir) / "structures" / "mp"
+        sd.mkdir(parents=True, exist_ok=True)
+        incar = sd / "INCAR"                       # extensionless VASP input
+        incar.write_text("ENCUT = 400\nISMEAR = 0\n")
+
+        # 1. the canonical case: change ENCUT in place, no regeneration
+        r = json.loads(orch.tools.execute_tool(
+            "edit_file", path=str(incar),
+            old_text="ENCUT = 400", new_text="ENCUT = 520"))
+        assert r["status"] == "success", r
+        assert incar.read_text().startswith("ENCUT = 520")
+        assert (sd / "INCAR.before_edit").exists()   # pre-edit backup kept
+
+        # 2. a non-text artifact is refused by the suffix gate
+        (sd / "view.png").write_bytes(b"x")
+        r = json.loads(orch.tools.execute_tool(
+            "edit_file", path=str(sd / "view.png"),
+            old_text="a", new_text="b"))
+        assert r["status"] == "error"
+
+        # 2b. an extensionless run OUTPUT is refused on CONTENT — the suffix
+        # gate cannot help here, because admitting "" for INCAR/POSCAR
+        # admits WAVECAR/CHGCAR/WAVEDER from the download path too.
+        out = sd / "outputs"
+        out.mkdir(exist_ok=True)
+        wavecar = out / "WAVECAR"
+        original = b"\x00\x01\x02ENCUT = 400\xff\xfe binary tail"
+        wavecar.write_bytes(original)
+        r = json.loads(orch.tools.execute_tool(
+            "edit_file", path=str(wavecar),
+            old_text="ENCUT = 400", new_text="ENCUT = 520"))
+        assert r["status"] == "error", r
+        assert "binary" in r["message"]
+        assert wavecar.read_bytes() == original          # bytes intact
+        assert not (out / "WAVECAR.before_edit").exists()  # no lossy backup
+
+        # 3. a path outside the session is refused (sandbox)
+        r = json.loads(orch.tools.execute_tool(
+            "edit_file", path="/etc/hosts",
+            old_text="localhost", new_text="x"))
+        assert r["status"] == "error"
+
+        # 4. byte-exact rename within the file's own directory
+        r = json.loads(orch.tools.execute_tool(
+            "rename_file", path=str(incar), new_name="INCAR.bak"))
+        assert r["status"] == "success", r
+        assert (sd / "INCAR.bak").exists()
+
+        print("   ✅ edit_file/rename_file: surgical, sandboxed, VASP-aware")
+
+
+def test_2c_generic_file_io(model_name: str):
+    """save_file / append_file / read_file / read_document — the generic
+    file surface shared with the analysis and planning orchestrators."""
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as td:
+        orch = _make_orch(model_name, td + "/sim")
+        base = Path(orch.base_dir)
+
+        # save_file writes into the session dir (subfolder created on demand)
+        r = json.loads(orch.tools.execute_tool(
+            "save_file", filename="run_notes.md",
+            content="# Notes\nline1\n", subfolder="reports"))
+        assert r["status"] == "success", r
+        dest = base / "reports" / "run_notes.md"
+        assert dest.read_text() == "# Notes\nline1\n"
+
+        # append_file grows it
+        r = json.loads(orch.tools.execute_tool(
+            "append_file", filename="run_notes.md",
+            content="line2\n", subfolder="reports"))
+        assert r["status"] == "success", r
+        assert dest.read_text().endswith("line2\n")
+
+        # read_file: whole-file read for a report-stemmed file
+        r = json.loads(orch.tools.execute_tool(
+            "read_file", file_path="reports/run_notes.md"))
+        assert r["status"] == "success" and r["truncated"] is False
+        assert "line2" in r["content"]
+
+        # read_file: regex search over an extensionless VASP input
+        sd = base / "structures" / "mp"
+        sd.mkdir(parents=True, exist_ok=True)
+        (sd / "INCAR").write_text("ENCUT = 400\nNELM = 60\nISMEAR = 0\n")
+        r = json.loads(orch.tools.execute_tool(
+            "read_file", file_path=str(sd / "INCAR"), search="ENCUT"))
+        assert r["status"] == "success" and r["matches"] == 1
+        assert r["match_lines"] == [1]
+
+        # read_file: tail of a long log
+        (base / "run.log").write_text(
+            "\n".join(f"L{i}" for i in range(500)))
+        r = json.loads(orch.tools.execute_tool(
+            "read_file", file_path="run.log", tail=True, max_lines=3))
+        assert r["status"] == "success" and r["mode"] == "tail"
+
+        # read_file: JSON is pretty-printed
+        (base / "meta.json").write_text(json.dumps({"a": 1, "b": [1, 2]}))
+        r = json.loads(orch.tools.execute_tool(
+            "read_file", file_path="meta.json"))
+        assert r["status"] == "success" and '"a": 1' in r["content"]
+
+        # read_file: missing file is a structured error, not a raise
+        r = json.loads(orch.tools.execute_tool(
+            "read_file", file_path="nope.txt"))
+        assert r["status"] == "error"
+
+        # read_document: plain-text extraction into context
+        (base / "protocol.txt").write_text("methods protocol body")
+        r = json.loads(orch.tools.execute_tool(
+            "read_document", paths=["protocol.txt"]))
+        assert r["status"] == "success" and r["n_documents"] == 1
+        assert "protocol body" in r["text"]
+
+        print("   ✅ save/append/read_file/read_document: generic file I/O")
+
+
+def test_2d_list_available_software(model_name: str):
+    """list_available_software: deterministic inventory, zero LLM calls.
+
+    'List available MLIPs' must resolve here, not misroute through
+    route_simulation's LLM call + JSON parse (which surfaced as a
+    'transient JSON-parsing error' when the model was used as an
+    inventory lookup).
+    """
+    with tempfile.TemporaryDirectory() as td:
+        orch = _make_orch(model_name, td + "/sim")
+        # orch.model is a live wrapper, but this tool must never touch it —
+        # replace it with a poison object so any LLM use raises loudly.
+        class _NoLLM:
+            def __getattr__(self, _):
+                raise AssertionError(
+                    "list_available_software must not call the LLM")
+        orch.model = _NoLLM()
+
+        # MLIP filter
+        r = json.loads(orch.tools.execute_tool(
+            "list_available_software",
+            domain="machine_learning_potentials"))
+        assert r["status"] == "ok", r
+        mlips = r["mlip_backends"]
+        assert isinstance(mlips["installed"], list)
+        assert "general" not in mlips["known"]      # strategy bundle excluded
+        # installed ⊆ known, and known partitions into installed + not_installed
+        assert set(mlips["installed"]) <= set(mlips["known"])
+        assert set(mlips["not_installed"]) == set(mlips["known"]) - set(mlips["installed"])
+
+        # No-domain call lists every populated domain
+        r = json.loads(orch.tools.execute_tool("list_available_software"))
+        assert r["status"] == "ok"
+        assert isinstance(r["installed_by_domain"], dict)
+        # only non-empty domains are reported
+        assert all(v for v in r["installed_by_domain"].values())
+
+        print("   ✅ list_available_software: deterministic, no LLM call")
+def test_2d_run_simulation_reuses_prebuilt_structure(model_name: str):
+    """run_simulation reuses an in-session structure instead of rebuilding (#4).
+
+    - an explicit structure_file (path or slug) is forwarded to the workflow;
+    - with none given, the session's most-recent built structure is reused and
+      the run happens in its dir — no double build, no divergent empty dir;
+    - a fresh build happens only when the session has no structure yet;
+    - a missing structure_file is a structured error.
+    """
+    import scilink.agents.sim_agents.simulation_pipeline as sp
+    with tempfile.TemporaryDirectory() as td:
+        orch = _make_orch(model_name, td + "/sim")
+        struct = Path(td) / "prebuilt.extxyz"
+        struct.write_text('1\nLattice="5 0 0 0 5 0 0 0 5" pbc="T T T"\nH 0 0 0\n')
+
+        captured = {}
+
+        def _fake_workflow(user_request, **kwargs):
+            captured.clear()
+            captured.update(kwargs)
+            return {"final_status": "completed", "scale": kwargs.get("scale"),
+                    "engine": kwargs.get("software"), "structure_generation": {},
+                    "output_directory": kwargs.get("output_dir")}
+
+        orig = sp.run_complete_workflow
+        sp.run_complete_workflow = _fake_workflow
+        try:
+            # (a) empty session + no structure_file -> a fresh build (None passed)
+            json.loads(orch.tools.execute_tool(
+                "run_simulation", description="MD of H",
+                scale="molecular_dynamics", software="lammps",
+                run_command="lmp -in {script}"))
+            assert captured.get("structure_file") is None
+
+            # (b) explicit path is forwarded as structure_file
+            json.loads(orch.tools.execute_tool(
+                "run_simulation", description="MD of H",
+                scale="molecular_dynamics", software="lammps",
+                run_command="lmp -in {script}", structure_file=str(struct)))
+            assert captured.get("structure_file") == str(struct)
+
+            # (c) a session slug resolves to the recorded structure_path
+            orch.generated_structures.append(
+                {"slug": "myslug", "structure_path": str(struct),
+                 "structure_dir": str(struct.parent)})
+            json.loads(orch.tools.execute_tool(
+                "run_simulation", description="MD of H",
+                scale="molecular_dynamics", software="lammps",
+                run_command="lmp -in {script}", structure_file="myslug"))
+            assert captured.get("structure_file") == str(struct)
+
+            # (d) THE #4 FIX: no structure_file, but the session already built one
+            #     -> auto-reuse it instead of rebuilding, and say so
+            captured.clear()
+            r = json.loads(orch.tools.execute_tool(
+                "run_simulation", description="reworded MD of the same H",
+                scale="molecular_dynamics", software="lammps",
+                run_command="lmp -in {script}"))
+            assert captured.get("structure_file") == str(struct)
+            assert r["reused_structure"] == "myslug"
+            # runs land in a per-call subdir of the structure dir, not the dir
+            # itself, so a same-structure sweep doesn't clobber prior outputs
+            run1 = Path(captured["output_dir"])
+            assert run1.parent == struct.parent / "runs"
+            assert run1.name.startswith("01_")
+
+            # a second reuse run gets its own subdir (02_...), no clobber
+            captured.clear()
+            json.loads(orch.tools.execute_tool(
+                "run_simulation", description="reworded MD of the same H",
+                scale="molecular_dynamics", software="lammps",
+                run_command="lmp -in {script}"))
+            assert Path(captured["output_dir"]).name.startswith("02_")
+
+            # (e) THE OPT-OUT: structure_file="new" forces a fresh build even
+            #     though the session holds a structure (a DIFFERENT system)
+            captured.clear()
+            r = json.loads(orch.tools.execute_tool(
+                "run_simulation", description="MD of a different system",
+                scale="molecular_dynamics", software="lammps",
+                run_command="lmp -in {script}", structure_file="new"))
+            assert captured.get("structure_file") is None      # fresh build
+            assert r["reused_structure"] is None
+        finally:
+            sp.run_complete_workflow = orig
+
+        # (f) a bogus structure_file is a structured error, not a rebuild
+        r = json.loads(orch.tools.execute_tool(
+            "run_simulation", description="MD of H",
+            scale="molecular_dynamics", software="lammps",
+            run_command="lmp -in {script}",
+            structure_file="/no/such/structure.extxyz"))
+        assert r["status"] == "error" and "not found" in r["message"]
+
+        print("   ✅ run_simulation reuses / per-run subdir / new-opt-out / errors")
+
+
+def test_2e_run_simulation_executes_in_allocation(model_name: str):
+    """In a SLURM allocation, run_simulation runs the deck locally even with an
+    hpc_connection attached — the compute is here, so don't defer to a submit."""
+    import scilink.agents.sim_agents.simulation_pipeline as sp
+    with tempfile.TemporaryDirectory() as td:
+        orch = _make_orch(model_name, td + "/sim")
+        orch.hpc_connection = object()          # a remote connection is attached
+
+        def _fake_workflow(user_request, **kwargs):
+            return {"final_status": "completed", "scale": kwargs.get("scale"),
+                    "engine": kwargs.get("software"), "structure_generation": {},
+                    "output_directory": kwargs.get("output_dir")}
+
+        orig = sp.run_complete_workflow
+        sp.run_complete_workflow = _fake_workflow
+        saved = os.environ.get("SLURM_JOB_ID")
+        try:
+            # not in an allocation + hpc_connection -> generate only, no executor
+            os.environ.pop("SLURM_JOB_ID", None)
+            r = json.loads(orch.tools.execute_tool(
+                "run_simulation", description="MD of H",
+                scale="molecular_dynamics", software="lammps",
+                run_command="lmp -in {script}"))
+            assert r["executed"] is False
+
+            # inside a SLURM allocation -> execute locally despite hpc_connection
+            os.environ["SLURM_JOB_ID"] = "999999"
+            r = json.loads(orch.tools.execute_tool(
+                "run_simulation", description="MD of H",
+                scale="molecular_dynamics", software="lammps",
+                run_command="lmp -in {script}"))
+            assert r["executed"] is True
+        finally:
+            sp.run_complete_workflow = orig
+            if saved is None:
+                os.environ.pop("SLURM_JOB_ID", None)
+            else:
+                os.environ["SLURM_JOB_ID"] = saved
+
+        print("   ✅ run_simulation executes in-allocation even with hpc_connection")
+
+
 def test_3_post_run_analysis_synthetic(model_name: str):
-    """post_run_analysis works on synthetic log dirs without pymatgen-parseable files."""
-    from scilink.agents.sim_agents.post_run_analysis import analyze_run_directory
+    """The live VASP snapshot tool (skill bundle) handles synthetic run dirs.
+
+    Tests the engine-neutral live path: the vasp skill bundle's snapshot_run
+    tool, resolved via the registry (what RunCritic dispatches to).
+    """
+    from scilink.skills._shared._registry import get_tool_function
+    snapshot_run = get_tool_function("snapshot_run", active_skills=["vasp"])
 
     # Empty dir → status=ok, convergence=unknown
     with tempfile.TemporaryDirectory() as td:
-        r = analyze_run_directory(td)
+        r = snapshot_run(td)
         assert r["status"] == "ok"
         assert r["convergence_status"] == "unknown"
 
@@ -208,15 +533,15 @@ def test_3_post_run_analysis_synthetic(model_name: str):
         Path(td, "stdout").write_text(
             "running on 32 cores\nVERY BAD NEWS! internal error in subroutine SGRCON\n"
         )
-        r = analyze_run_directory(td)
+        r = snapshot_run(td)
         assert r["convergence_status"] == "failed"
         assert any("VERY BAD NEWS" in h for h in r["log_error_hints"])
 
     # Nonexistent dir → status=error
-    r = analyze_run_directory("/path/does/not/exist")
+    r = snapshot_run("/path/does/not/exist")
     assert r["status"] == "error"
 
-    print("   ✅ Post-run analysis: empty / failed / nonexistent dirs all handled")
+    print("   ✅ Live snapshot tool: empty / failed / nonexistent dirs all handled")
 
 
 def test_4_mode_switching(model_name: str):
@@ -231,9 +556,9 @@ def test_4_mode_switching(model_name: str):
         # System prompt was rebuilt with the new directive
         assert "AUTONOMY: AUTONOMOUS" in orch._system_prompt
 
-        orch.set_simulation_mode(SimulationMode.SUPERVISED)
-        assert orch.get_human_feedback_setting() is True  # supervised still wants feedback
-        assert "AUTONOMY: SUPERVISED" in orch._system_prompt
+        orch.set_simulation_mode(SimulationMode.AUTOPILOT)
+        assert orch.get_human_feedback_setting() is True  # autopilot still wants feedback
+        assert "AUTONOMY: AUTOPILOT" in orch._system_prompt
 
     print("   ✅ Mode switching updates feedback flag + system prompt")
 
@@ -249,9 +574,8 @@ def test_5_run_task_without_llm(model_name: str):
             orch.generated_structures.append({
                 "slug": "fake_001",
                 "description": "test structure",
-                "poscar_path": "/tmp/POSCAR",
-                "incar_path": None,
-                "kpoints_path": None,
+                "structure_path": "/tmp/POSCAR",
+                "input_files": {},
                 "script_path": "/tmp/script.py",
                 "validation": {
                     "status": "needs_correction",
@@ -269,7 +593,7 @@ def test_5_run_task_without_llm(model_name: str):
         assert orch.simulation_mode == SimulationMode.CO_PILOT  # restored
         assert "/tmp/POSCAR" in result["files_produced"]
         assert any("Vacuum" in f for f in result["key_findings"])
-        assert any("VASP inputs" in f for f in result["suggested_followups"])
+        assert any("Generate inputs" in f for f in result["suggested_followups"])
         assert any("unresolved" in w for w in result["warnings"])
 
         # Error path: chat raises → mode still restored, status=error
@@ -291,7 +615,7 @@ def test_6_session_persistence(model_name: str):
         orch.generated_structures.append({
             "slug": "persist_001",
             "description": "survival test",
-            "poscar_path": "/tmp/POSCAR",
+            "structure_path": "/tmp/POSCAR",
         })
         orch.default_calc_params = {"ENCUT": 520, "kpoint_density": 30}
         # Force a checkpoint write
@@ -319,9 +643,10 @@ def test_7_hpc_tools_no_connection(model_name: str):
         orch = _make_orch(model_name, td + "/sim")
 
         for tool, kwargs in [
-            ("submit_vasp_job",       {"structure_slug": "x", "remote_dir": "/tmp"}),
+            ("submit_simulation_job", {"structure_slug": "x", "remote_dir": "/tmp",
+                                       "run_command": "srun vasp_std"}),
             ("get_job_status",        {"job_id": "12345"}),
-            ("download_vasp_results", {"job_id": "12345"}),
+            ("download_job_results",  {"job_id": "12345"}),
             ("generate_final_report", {"structure_slug": "x"}),
         ]:
             r = json.loads(orch.tools.execute_tool(tool, **kwargs))
@@ -378,23 +703,23 @@ def test_8_hpc_tools_mock_connection(model_name: str):
             "slug": slug,
             "description": "bulk silicon",
             "structure_dir": str(struct_dir),
-            "poscar_path": str(poscar),
-            "incar_path": str(incar),
-            "kpoints_path": str(kpoints),
+            "structure_path": str(poscar),
+            "input_files": {"INCAR": str(incar), "KPOINTS": str(kpoints)},
             "hpc_job_id": None,
             "hpc_remote_dir": None,
             "hpc_results_dir": None,
             "validation": {"status": "success", "overall_assessment": "Looks good.",
                            "all_identified_issues": []},
-            "vasp_summary": "Static SCF, ENCUT=400",
+            "summary": "Static SCF, ENCUT=400",
             "created_at": datetime.now().isoformat(),
         })
 
-        # 1. submit_vasp_job
+        # 1. submit_simulation_job
         r = json.loads(orch.tools.execute_tool(
-            "submit_vasp_job",
+            "submit_simulation_job",
             structure_slug=slug,
             remote_dir="/scratch/test",
+            run_command="srun vasp_std",
             job_name="si_test",
             n_nodes=1,
             n_tasks=8,
@@ -404,7 +729,7 @@ def test_8_hpc_tools_mock_connection(model_name: str):
         assert r["job_id"] == "99999"
         mock_conn.upload.assert_called()
         mock_sched.submit.assert_called_once()
-        print("   ✅ submit_vasp_job: uploaded files, submitted job, got job_id=99999")
+        print("   ✅ submit_simulation_job: uploaded files, submitted job, got job_id=99999")
 
         # 2. get_job_status
         r = json.loads(orch.tools.execute_tool("get_job_status", job_id="99999"))
@@ -421,10 +746,10 @@ def test_8_hpc_tools_mock_connection(model_name: str):
                 Path(local).write_text(f"fake {fname} content")
         mock_conn.download = MagicMock(side_effect=fake_download)
 
-        r = json.loads(orch.tools.execute_tool("download_vasp_results", job_id="99999"))
+        r = json.loads(orch.tools.execute_tool("download_job_results", job_id="99999"))
         assert r["status"] == "success", f"download failed: {r}"
         assert "OUTCAR" in r["downloaded"] or "vasp.stdout" in r["downloaded"]
-        print(f"   ✅ download_vasp_results: got {r['downloaded']}")
+        print(f"   ✅ download_job_results: got {r['downloaded']}")
 
         # 4. generate_final_report
         r = json.loads(orch.tools.execute_tool(
@@ -435,7 +760,7 @@ def test_8_hpc_tools_mock_connection(model_name: str):
         report = r["report"]
         assert "bulk silicon" in report
         assert "99999" in report  # job ID in report
-        assert "VASP DFT Simulation Report" in report
+        assert "Simulation Report" in report
         print(f"   ✅ generate_final_report: written to {r['report_path']}")
 
     print("   ✅ Full offline HPC flow: submit → status → download → report")
@@ -456,7 +781,7 @@ def stress_1_generate_then_inputs(model_name: str):
     response = orch.chat(
         "Build a 2x2x1 supercell of bulk silicon (mp-149) and then generate "
         "static VASP inputs for a single-point calculation. Use the granular "
-        "tools (generate_structure, then generate_vasp_inputs)."
+        "tools (generate_structure, then generate_dft_inputs)."
     )
     print("   --- agent response (last 400 chars) ---")
     print("   " + response[-400:].replace("\n", "\n   "))
@@ -464,12 +789,13 @@ def stress_1_generate_then_inputs(model_name: str):
     structures = orch.generated_structures
     assert structures, "Agent did not record any generated structures"
     s = structures[-1]
-    assert Path(s["poscar_path"]).exists(), f"POSCAR missing: {s['poscar_path']}"
-    print(f"   ✅ POSCAR produced: {s['poscar_path']}")
+    assert Path(s["structure_path"]).exists(), f"POSCAR missing: {s['structure_path']}"
+    print(f"   ✅ POSCAR produced: {s['structure_path']}")
 
-    if s.get("incar_path"):
-        assert Path(s["incar_path"]).exists()
-        print(f"   ✅ INCAR produced: {s['incar_path']}")
+    incar_path = (s.get("input_files") or {}).get("INCAR")
+    if incar_path:
+        assert Path(incar_path).exists()
+        print(f"   ✅ INCAR produced: {incar_path}")
     else:
         print("   ⚠️  Agent built the structure but didn't generate INCAR — "
               "may have stopped to ask. Acceptable for a stress test.")
@@ -495,7 +821,7 @@ def stress_2_post_run_analysis_failure(model_name: str):
     orch = _make_orch(model_name, str(workdir / "sim"), autonomy="autonomous")
     response = orch.chat(
         f"I ran VASP and the calculation failed. Output files are in "
-        f"{fake_run_dir}. Use analyze_vasp_output to read the run, summarize "
+        f"{fake_run_dir}. Use analyze_output to read the run, summarize "
         f"what happened, and recommend INCAR adjustments."
     )
     print("   --- agent response (last 600 chars) ---")
@@ -568,7 +894,7 @@ def stress_4_aimsgb_skill_loaded(model_name: str):
     assert "GrainBoundary" in script_text, "Script should use GrainBoundary"
     assert "build_gb" in script_text, "Script should call .build_gb()"
 
-    poscar = Path(s["poscar_path"])
+    poscar = Path(s["structure_path"])
     assert poscar.exists(), f"POSCAR missing: {poscar}"
 
     from ase.io import read as ase_read
@@ -631,13 +957,12 @@ def stress_5_hpc_workflow_mocked(model_name: str):
         "slug": "si_bulk_001",
         "description": "2x2x2 bulk silicon supercell",
         "structure_dir": str(struct_dir),
-        "poscar_path": str(poscar),
-        "incar_path": str(incar),
-        "kpoints_path": str(kpoints),
+        "structure_path": str(poscar),
+        "input_files": {"INCAR": str(incar), "KPOINTS": str(kpoints)},
         "hpc_job_id": None,
         "hpc_remote_dir": None,
         "hpc_results_dir": None,
-        "vasp_summary": "Static SCF, ENCUT=520",
+        "summary": "Static SCF, ENCUT=520",
         "validation": {"status": "success", "overall_assessment": "Structure looks correct.",
                        "all_identified_issues": []},
         "created_at": datetime.now().isoformat(),
@@ -682,7 +1007,7 @@ def e2e_1_run_task_minimal_structure(model_name: str):
     result = orch.run_task(
         "Build a 2x2x2 supercell of bulk silicon (mp-149, Fd-3m) and "
         "generate VASP inputs for a static SCF calculation. Use the "
-        "granular tools (generate_structure, then generate_vasp_inputs)."
+        "granular tools (generate_structure, then generate_dft_inputs)."
     )
 
     print(f"   status: {result['status']}")
@@ -693,8 +1018,8 @@ def e2e_1_run_task_minimal_structure(model_name: str):
     assert result["status"] == "success", f"run_task failed: {result.get('error')}"
     assert result["structures"], "No structures recorded"
     s = result["structures"][0]
-    assert Path(s["poscar_path"]).exists(), "POSCAR not on disk"
-    print(f"   ✅ run_task produced a structure at {s['poscar_path']}")
+    assert Path(s["structure_path"]).exists(), "POSCAR not on disk"
+    print(f"   ✅ run_task produced a structure at {s['structure_path']}")
 
 
 # ---------------------------------------------------------------------------
@@ -776,13 +1101,12 @@ def integration_1_hpc_slurm(model_name: str):
         "slug": slug,
         "description": "bulk silicon integration test",
         "structure_dir": str(struct_dir),
-        "poscar_path": str(poscar),
-        "incar_path": str(incar),
-        "kpoints_path": str(kpoints),
+        "structure_path": str(poscar),
+        "input_files": {"INCAR": str(incar), "KPOINTS": str(kpoints)},
         "hpc_job_id": None,
         "hpc_remote_dir": None,
         "hpc_results_dir": None,
-        "vasp_summary": "Static SCF, ENCUT=520",
+        "summary": "Static SCF, ENCUT=520",
         "validation": None,
         "created_at": datetime.now().isoformat(),
     })
@@ -797,14 +1121,14 @@ def integration_1_hpc_slurm(model_name: str):
         "echo '  1 F= -.100E+03 E0= -.100E+03 d E =0.000' > OSZICAR"
     )
     r = json.loads(orch.tools.execute_tool(
-        "submit_vasp_job",
+        "submit_simulation_job",
         structure_slug=slug,
         remote_dir=remote_dir,
+        run_command=fake_vasp,
         job_name="scilink_test",
         n_nodes=1,
         n_tasks=1,
         time_limit="00:05:00",
-        vasp_command=fake_vasp,
     ))
     assert r["status"] == "success", f"submit failed: {r}"
     job_id = r["job_id"]
@@ -826,7 +1150,7 @@ def integration_1_hpc_slurm(model_name: str):
     print(f"   ✅ Job {job_id} completed")
 
     # Download
-    r = json.loads(orch.tools.execute_tool("download_vasp_results", job_id=job_id))
+    r = json.loads(orch.tools.execute_tool("download_job_results", job_id=job_id))
     assert r["status"] == "success", f"download failed: {r}"
     assert r["downloaded"], "No files downloaded"
     print(f"   ✅ Downloaded: {r['downloaded']}")
@@ -848,6 +1172,11 @@ def integration_1_hpc_slurm(model_name: str):
 TARGETED_TESTS = [
     ("Orchestrator constructs",                test_1_orchestrator_constructs),
     ("Tool error paths",                       test_2_tool_error_paths),
+    ("edit_file / rename_file",                test_2b_edit_and_rename_file),
+    ("Generic file I/O",                       test_2c_generic_file_io),
+    ("List available software",                test_2d_list_available_software),
+    ("run_simulation reuses structure",        test_2d_run_simulation_reuses_prebuilt_structure),
+    ("run_simulation executes in-allocation",  test_2e_run_simulation_executes_in_allocation),
     ("Post-run analysis (synthetic)",          test_3_post_run_analysis_synthetic),
     ("Mode switching",                         test_4_mode_switching),
     ("run_task without LLM",                   test_5_run_task_without_llm),

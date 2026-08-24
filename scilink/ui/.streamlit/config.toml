@@ -4,3 +4,14 @@ backgroundColor = "#252D38"
 secondaryBackgroundColor = "#1E2530"
 textColor = "#E0E0E0"
 font = "sans serif"
+
+[global]
+# Streamlit reference-caches any ForwardMsg >= minCachedMessageSize (default
+# 10 KB) by hash and evicts it after maxCachedMessageAge reruns (default 2).
+# Our injected theme CSS is ~17 KB (dark) / ~23 KB (light), so toggling
+# light<->dark re-references a CSS message that has already aged out of the
+# cache, and the client raises "Cached ForwardMsg MISS". Raising the threshold
+# above the blob makes the theme stylesheet always send in full (never
+# reference-cached), so the toggle is robust; genuinely huge payloads (>50 KB)
+# still get cached.
+minCachedMessageSize = 51200

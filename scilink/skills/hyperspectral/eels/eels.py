@@ -127,6 +127,11 @@ def run_spectral_unmixing(
         elif method == 'pca':
             # Unexplained variance: 1 - cumulative explained variance ratio
             error = 1.0 - sum(unmixer.model.explained_variance_ratio_)
+        elif method == 'ica':
+            # FastICA has no built-in reconstruction error and no monotonic
+            # elbow trend in n_components — downstream controllers skip the
+            # elbow loop for ICA, so this is a placeholder.
+            error = 0.0
         else:
             error = 0.0
 
@@ -141,43 +146,70 @@ def run_spectral_unmixing(
 # ENERGY AXIS UTILITIES
 # =============================================================================
 
+def create_axis(
+    n_channels: int,
+    system_info: dict = None,
+    axis_index: int = 2,
+) -> tuple[np.ndarray, str, bool]:
+    """
+    Create a physical axis for a hyperspectral dataset axis.
+
+    Defaults to ``axis_index=2`` (the third / "signal" axis), which preserves
+    the historical (x, y, energy) layout. Reads through
+    ``metadata_converter.resolve_axis_spec`` so that callers see the same
+    behavior whether the metadata uses legacy ``energy_range`` or a generic
+    ``axis_spec``.
+
+    Returns ``(axis_values, xlabel, has_axis_info)``. Raises ``ValueError``
+    when the requested axis has no physical range (``start`` / ``end``)
+    available — same contract as the legacy ``create_energy_axis``.
+    """
+    # Local import to avoid an agents -> skills -> agents cycle at module load.
+    from ....agents.exp_agents.metadata_converter import resolve_axis_spec
+
+    spec = resolve_axis_spec(system_info)
+    key = f"axis_{axis_index}"
+    if key not in spec:
+        raise ValueError(f"axis_index {axis_index} is out of range for a 3D dataset.")
+
+    axis_info = spec[key]
+    name = axis_info.get("name", "axis")
+    units = axis_info.get("units", "a.u.")
+
+    if "start" not in axis_info or "end" not in axis_info:
+        # Preserve the legacy error message for the common energy case so that
+        # existing call sites and user-facing messaging are unchanged.
+        if name == "energy" and not (system_info and "axis_spec" in system_info):
+            raise ValueError(
+                "Energy axis information is required for hyperspectral analysis. "
+                "Metadata must include 'energy_range' with 'start' and 'end' values "
+                "(and optionally 'units')."
+            )
+        raise ValueError(
+            f"Axis {axis_index} ('{name}') is missing physical range. "
+            f"axis_spec.{key} must include 'start' and 'end' "
+            f"(or legacy energy_range for axis_2)."
+        )
+
+    start = axis_info["start"]
+    end = axis_info["end"]
+    axis_values = np.linspace(start, end, n_channels)
+    # Title-case the axis name for the label so "energy" -> "Energy (eV)"
+    # and "time" -> "Time (s)" without callers having to remember.
+    label_name = name[:1].upper() + name[1:] if name else "Axis"
+    xlabel = f"{label_name} ({units})"
+    return axis_values, xlabel, True
+
+
 def create_energy_axis(n_channels: int, system_info: dict = None) -> tuple[np.ndarray, str, bool]:
     """
-    Create energy axis from system_info.
+    Backwards-compatible shim for the legacy energy-axis API.
 
-    Raises ValueError when energy_range is missing, None, or incomplete
-    because a physical energy axis is required for meaningful hyperspectral
-    analysis.
+    Delegates to ``create_axis(n_channels, system_info, axis_index=2)`` so
+    existing call sites continue to work unchanged. New callers should use
+    ``create_axis`` directly when they need a non-default axis_index.
     """
-    if not system_info or "energy_range" not in system_info:
-        raise ValueError(
-            "Energy axis information is required for hyperspectral analysis. "
-            "Metadata must include 'energy_range' with 'start' and 'end' values "
-            "(and optionally 'units')."
-        )
-
-    energy_info = system_info["energy_range"]
-
-    if not energy_info or not isinstance(energy_info, dict):
-        raise ValueError(
-            "energy_range in metadata is empty or invalid. "
-            "It must be a dict with 'start' and 'end' keys "
-            "(e.g. {\"start\": 0, \"end\": 50, \"units\": \"eV\"})."
-        )
-
-    if "start" not in energy_info or "end" not in energy_info:
-        raise ValueError(
-            f"energy_range is incomplete: {energy_info}. "
-            "Both 'start' and 'end' are required."
-        )
-
-    start = energy_info["start"]
-    end = energy_info["end"]
-    units = energy_info.get("units", "eV")
-
-    energy_axis = np.linspace(start, end, n_channels)
-    xlabel = f"Energy ({units})"
-    return energy_axis, xlabel, True
+    return create_axis(n_channels, system_info, axis_index=2)
 
 
 def convert_energy_to_indices(
@@ -905,54 +937,113 @@ def create_annotated_heatmap(data_map: np.ndarray, title: str, units: str) -> by
     return resize_image_bytes(buf.getvalue())
 
 
-def create_feature_dashboard(data_map: np.ndarray, feature_name: str, units: str) -> bytes:
+def _robust_hist_window(valid_data: np.ndarray,
+                        p_low: float = 0.5,
+                        p_high: float = 99.5) -> tuple:
+    """(lo, hi, n_below, n_above) — the percentile window the histogram bins
+    over, plus the off-scale counts. A few extreme outliers otherwise stretch
+    the x-axis by orders of magnitude and collapse the real distribution into
+    a single bar (while the map panel, percentile-scaled, looks fine). Falls
+    back to the full range when the percentile window is degenerate."""
+    lo, hi = np.percentile(valid_data, [p_low, p_high])
+    if not (np.isfinite(lo) and np.isfinite(hi)) or hi <= lo:
+        lo, hi = float(np.min(valid_data)), float(np.max(valid_data))
+        return lo, hi, 0, 0
+    n_below = int((valid_data < lo).sum())
+    n_above = int((valid_data > hi).sum())
+    return float(lo), float(hi), n_below, n_above
+
+
+def create_feature_dashboard(
+    data_map: np.ndarray,
+    feature_name: str,
+    units: str,
+    axis_spec: dict | None = None,
+) -> bytes:
     """
-    Creates a combined dashboard: Spatial Heatmap (Left) + Statistical Histogram (Right).
+    Creates a combined dashboard: 2D Heatmap (Left) + Statistical Histogram (Right).
+
+    ``axis_spec`` (from ``resolve_axis_spec``) controls the heatmap-panel
+    title and histogram count label: legacy spatial layouts keep the
+    "Spatial Map" / "Pixel Count" wording, generic layouts switch to
+    axis-name-driven wording. ``axis_spec=None`` preserves legacy text.
     """
+
+    # Decide labels from axis_spec. Default to the legacy spatial wording.
+    map_title_prefix = "Spatial Map"
+    count_label = "Pixel Count"
+    if axis_spec is not None:
+        a0 = axis_spec.get("axis_0", {})
+        a1 = axis_spec.get("axis_1", {})
+        leading_axes_are_spatial = (
+            a0.get("kind") == "spatial" and a1.get("kind") == "spatial"
+        )
+        if not leading_axes_are_spatial:
+            n0 = a0.get("name", "axis 0")
+            n1 = a1.get("name", "axis 1")
+            map_title_prefix = f"{n0.capitalize()}-{n1.capitalize()} Map"
+            count_label = "Sample Count"
 
     # 1. Clean Data for Histogram
     flat_data = data_map.ravel()
     valid_data = flat_data[~np.isnan(flat_data)]
-    
+
     if len(valid_data) == 0:
         return None
 
     # 2. Setup Figure (2 Columns)
     fig = plt.figure(figsize=(12, 5))
     gs = gridspec.GridSpec(1, 2, width_ratios=[1.5, 1]) # Map is slightly wider
-    
-    # --- LEFT PANEL: Spatial Heatmap ---
+
+    # --- LEFT PANEL: 2D Heatmap ---
     ax_map = fig.add_subplot(gs[0])
-    
+
     # Robust scaling (2nd-98th percentile) to ignore hot pixels
     vmin = np.nanpercentile(data_map, 2)
     vmax = np.nanpercentile(data_map, 98)
-    
+
     im = ax_map.imshow(data_map, cmap='plasma', vmin=vmin, vmax=vmax, origin='upper')
-    ax_map.set_title(f"Spatial Map: {feature_name}", fontsize=12, fontweight='bold')
+    ax_map.set_title(f"{map_title_prefix}: {feature_name}", fontsize=12, fontweight='bold')
     ax_map.axis('off') # Clean look
-    
+
     # Colorbar attached to map
     cbar = fig.colorbar(im, ax=ax_map, fraction=0.046, pad=0.04)
     cbar.set_label(units, rotation=270, labelpad=15)
 
     # --- RIGHT PANEL: Histogram ---
     ax_hist = fig.add_subplot(gs[1])
-    
+
+    # Robust histogram window — mirrors the map's percentile color scaling.
+    # Outliers are EXCLUDED from the bins but COUNTED and annotated, so the
+    # distribution stays readable without silently hiding extreme pixels
+    # (the RESULT text the reviewer reads still carries the true full range).
+    h_lo, h_hi, n_below, n_above = _robust_hist_window(valid_data)
+    in_window = valid_data[(valid_data >= h_lo) & (valid_data <= h_hi)]
+    if in_window.size == 0:  # pathological; bin everything
+        in_window, n_below, n_above = valid_data, 0, 0
+
     # Dynamic binning
-    n_bins = min(50, max(15, int(len(valid_data)**0.4)))
-    ax_hist.hist(valid_data, bins=n_bins, color='#2c3e50', alpha=0.75, edgecolor='white', linewidth=0.5)
-    
-    # Statistics Box
+    n_bins = min(50, max(15, int(len(in_window)**0.4)))
+    ax_hist.hist(in_window, bins=n_bins, color='#2c3e50', alpha=0.75, edgecolor='white', linewidth=0.5)
+
+    # Statistics Box — median alongside mean/std: with heavy outliers the
+    # moment statistics are dominated by them (e.g. mean 1.6, std 319) and
+    # the median is the honest center of the visible distribution.
     mu = np.mean(valid_data)
     sigma = np.std(valid_data)
-    stats_text = f"Mean: {mu:.2f}\nStd Dev: {sigma:.2f}"
+    med = np.median(valid_data)
+    stats_text = f"Mean: {mu:.2f}\nStd Dev: {sigma:.2f}\nMedian: {med:.2f}"
+    n_out = n_below + n_above
+    if n_out:
+        pct = 100.0 * n_out / max(len(valid_data), 1)
+        stats_text += (f"\nOff-scale: {n_out} px ({pct:.2f}%)\n"
+                       f"[{n_below} < {h_lo:.3g}, {n_above} > {h_hi:.3g}]")
     props = dict(boxstyle='round', facecolor='wheat', alpha=0.3)
-    ax_hist.text(0.95, 0.95, stats_text, transform=ax_hist.transAxes, fontsize=10,
+    ax_hist.text(0.95, 0.95, stats_text, transform=ax_hist.transAxes, fontsize=9,
                  verticalalignment='top', horizontalalignment='right', bbox=props)
-    
+
     ax_hist.set_xlabel(f"{feature_name} ({units})")
-    ax_hist.set_ylabel("Pixel Count")
+    ax_hist.set_ylabel(count_label)
     ax_hist.set_title("Population Statistics")
     ax_hist.grid(True, linestyle=':', alpha=0.6)
     ax_hist.spines['top'].set_visible(False)
@@ -965,6 +1056,87 @@ def create_feature_dashboard(data_map: np.ndarray, feature_name: str, units: str
     fig.savefig(buf, format='jpeg', bbox_inches='tight', dpi=150)
     plt.close(fig)
     return resize_image_bytes(buf.getvalue())
+
+
+def create_fit_examples_panel(
+    hspy_data: np.ndarray,
+    axis: np.ndarray,
+    axis_label: str,
+    examples: list,
+    maps_dict: dict | None = None,
+    logger: logging.Logger = None,
+) -> bytes | None:
+    """Multi-panel figure of per-pixel fit examples: at each selected pixel,
+    the RAW spectrum (thin) with the code's fitted/model curve overlaid
+    (bold) when provided, plus that pixel's extracted map values in the
+    panel title. This is the per-pixel evidence a map + histogram cannot
+    show — for scientists inspecting individual fits AND for the result
+    reviewer, which otherwise must infer per-pixel pathologies (edge-pinned
+    peaks, bound-railing) from histogram shapes alone.
+
+    ``examples``: list of ``{"pixel": (y, x), "fitted": 1-D array | None,
+    "label": str}`` (pre-validated by the caller). Returns JPEG bytes, or
+    ``None`` when nothing renderable.
+    """
+    try:
+        examples = [e for e in (examples or []) if e.get("pixel") is not None]
+        if not examples:
+            return None
+        n = len(examples)
+        cols = min(3, n)
+        rows = (n + cols - 1) // cols
+        fig, axes = plt.subplots(rows, cols, figsize=(cols * 4.2, rows * 3.2),
+                                 squeeze=False)
+        axis = np.asarray(axis, dtype=float)
+        for k, ex in enumerate(examples):
+            ax = axes[k // cols][k % cols]
+            y, x = ex["pixel"]
+            spec = np.asarray(hspy_data[y, x, :], dtype=float)
+            ax.plot(axis, spec, lw=0.8, color="0.45", label="data")
+            fitted = ex.get("fitted")
+            if fitted is not None:
+                # Value-space overlay: the example's own axis (when the code
+                # evaluated its model on an internally re-sorted/sub-sliced
+                # axis) or the shared input axis. Index-plotting a re-sorted
+                # curve against a descending sweep mirror-flips a correct
+                # fit and manufactures a false contradiction for the review.
+                fx = ex.get("axis")
+                fx = axis if fx is None else np.asarray(fx, dtype=float)
+                ax.plot(fx, np.asarray(fitted, dtype=float), lw=1.8,
+                        color="crimson", label="fit")
+            vals = []
+            for name, m in (maps_dict or {}).items():
+                try:
+                    v = float(np.asarray(m)[y, x])
+                    if np.isfinite(v):
+                        vals.append(f"{name}={v:.4g}")
+                except Exception:  # noqa: BLE001 - annotation only
+                    continue
+            ax.set_title(f"{ex.get('label') or ''} ({y},{x})".strip(),
+                         fontsize=9)
+            if vals:
+                # In-axes box, not the title: long value strings in titles
+                # collide across panels and become unreadable.
+                ax.text(0.02, 0.97, "\n".join(vals[:4]),
+                        transform=ax.transAxes, fontsize=6.5,
+                        va="top", ha="left",
+                        bbox=dict(facecolor="white", alpha=0.75,
+                                  edgecolor="0.7", boxstyle="round,pad=0.25"))
+            ax.set_xlabel(axis_label, fontsize=8)
+            ax.tick_params(labelsize=7)
+            ax.legend(fontsize=7, frameon=False)
+        for k in range(n, rows * cols):
+            axes[k // cols][k % cols].axis("off")
+        fig.suptitle("Per-pixel fit examples (raw data vs model)", fontsize=10)
+        fig.tight_layout(rect=(0, 0, 1, 0.96))
+        buf = BytesIO()
+        fig.savefig(buf, format="jpeg", bbox_inches="tight", dpi=130)
+        plt.close(fig)
+        return resize_image_bytes(buf.getvalue())
+    except Exception as e:  # noqa: BLE001 - panel is additive, never fatal
+        if logger:
+            logger.warning(f"  (Tool Warning: fit-examples panel failed: {e})")
+        return None
 
 
 def create_image_grid(image_bytes_list: list, logger: logging.Logger = None) -> bytes:
@@ -1095,14 +1267,31 @@ def apply_spectral_slice(
         
     sliced_data = original_hspy_data[..., slice_indices]
     
-    # We must also update the system_info to reflect this slice
+    # We must also update the system_info to reflect this slice. Update
+    # both legacy energy_range (when present) and the generic axis_spec
+    # (when present) so downstream callers using either form see the slice.
+    new_start = float(energy_axis[slice_indices[0]])
+    new_end = float(energy_axis[slice_indices[-1]])
+
     new_system_info = system_info.copy()
+    legacy_units = system_info.get("energy_range", {}).get("units", "unknown")
     new_system_info["energy_range"] = {
-        "start": float(energy_axis[slice_indices[0]]),
-        "end": float(energy_axis[slice_indices[-1]]),
-        "units": system_info.get("energy_range", {}).get("units", "unknown")
+        "start": new_start,
+        "end": new_end,
+        "units": legacy_units,
     }
-    
+    if "axis_spec" in system_info and system_info["axis_spec"]:
+        # Deep-copy the axis_spec so we don't mutate the caller's dict.
+        new_axis_spec = {k: dict(v) if isinstance(v, dict) else v
+                         for k, v in system_info["axis_spec"].items()}
+        axis_2 = new_axis_spec.get("axis_2") or {}
+        if not isinstance(axis_2, dict):
+            axis_2 = {}
+        axis_2["start"] = new_start
+        axis_2["end"] = new_end
+        new_axis_spec["axis_2"] = axis_2
+        new_system_info["axis_spec"] = new_axis_spec
+
     return sliced_data, new_system_info
 
 
@@ -1186,3 +1375,24 @@ def get_optimal_analysis_data(hspy_data: np.ndarray) -> tuple[np.ndarray, str]:
         quality = "Very Low"
     note = f"Raw Data ({quality} quality, SNR≈{snr:.1f})"
     return hspy_data, note
+
+
+def reconstruct_cube(components: np.ndarray, abundance_maps: np.ndarray) -> np.ndarray:
+    """Rank-k reconstruction of the data cube from a decomposition.
+
+    Args:
+        components: ``(n_components, n_channels)`` spectral signatures.
+        abundance_maps: ``(H, W, n_components)`` spatial loadings.
+
+    Returns:
+        ``(H, W, n_channels)`` reconstructed cube = ``abundance_maps @ components``.
+
+    This is the decomposition's denoised, rank-k approximation of the data.
+    It lives in whatever intensity space the decomposition was fit in — which
+    may be normalized/clipped relative to the raw cube — so it is reliable for
+    *shape*-based features (peak position, width) but its absolute intensity
+    scale should not be trusted for quantification. Offered to the per-pixel
+    codegen as an *optional* fit target for noisy features (issue #219); the
+    raw cube remains the base input.
+    """
+    return abundance_maps @ components
