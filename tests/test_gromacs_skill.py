@@ -180,6 +180,23 @@ def test_sweep_request_degrades_loudly(caplog):
     assert any("no parameter-sweep expander" in r.message for r in caplog.records)
 
 
+def test_minimize_plan_with_none_timestep_does_not_crash(monkeypatch, tmp_path):
+    """A minimization plan sets timestep=None (GROMACS `integrator = steep` has
+    no dt); the step computation must not divide by None (crashed md_minimize in
+    the parity sweep)."""
+    from scilink.agents.sim_agents.md_simulation_agent import MDSimulationAgent
+    a = MDSimulationAgent(working_dir=str(tmp_path),
+                          api_key="dummy", base_url="http://localhost:0")
+    a._load_skill("gromacs")
+    monkeypatch.setattr(a, "_generate_text", lambda prompt: "integrator = steep\n")
+    struct = tmp_path / "s.xyz"
+    struct.write_text("1\n\nAr 0.0 0.0 0.0\n")
+    out = a._generate_md_input(
+        str(struct), "energy-minimize the system", "Ar system",
+        {"element_counts": {"Ar": 1}}, {"timestep": None})   # <- the crash trigger
+    assert isinstance(out, str) and "steep" in out
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))
