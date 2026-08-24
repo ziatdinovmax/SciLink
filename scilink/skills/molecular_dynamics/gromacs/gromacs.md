@@ -33,6 +33,13 @@ inputs GROMACS consumes alongside it; `gmx grompp` assembles all three into a
 force field is a biomolecular/soft-matter one (OPLS-AA, AMBER, CHARMM, GROMOS)
 and PME electrostatics with explicit solvent are expected.
 
+**Scope:** this bundle covers **single-shot** and **staged** (min → NVT → NPT →
+production) generation. **Fan-out parameter sweeps** (one independent run per
+value of a swept variable) are **not yet supported** — the bundle ships no
+`expand_parameter_sweep`, so a sweep request degrades to a single run (the agent
+logs a warning). Express a multi-value study as an explicit staged campaign for
+now; a sweep expander is the follow-up.
+
 ## Planning
 
 **Ensemble & phases:** a production run is staged — energy minimization

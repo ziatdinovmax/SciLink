@@ -817,6 +817,16 @@ class MDSimulationAgent(SimulationAgent):
             return None
         if not (self.tools_module
                 and hasattr(self.tools_module, "expand_parameter_sweep")):
+            # A sweep WAS requested (multiple sims + >=2 values) but the active
+            # engine has no expander — degrade to a single run LOUDLY, never
+            # silently. GROMACS is first-class for single + staged generation;
+            # fan-out sweeps are not in the bundle yet.
+            self.logger.warning(
+                "engine %r has no parameter-sweep expander; producing a single "
+                "run instead of the requested %d-point sweep over %r — express "
+                "it as a staged campaign for now",
+                self.skill_name, len(values),
+                plan.get("variable_parameter") or "parameter")
             return None
         return {"var_name": plan.get("variable_parameter") or "parameter",
                 "values": values}

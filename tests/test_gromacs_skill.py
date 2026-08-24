@@ -155,6 +155,31 @@ def test_entry_filename_is_engine_parameterized():
     assert a._entry_name("production") == "run_production.lammps"
 
 
+def test_gromacs_bundle_has_no_sweep_expander():
+    """Documents the scoped limitation: no fan-out parameter sweeps yet."""
+    from scilink.skills.molecular_dynamics.gromacs import gromacs as g
+    assert not hasattr(g, "expand_parameter_sweep")
+
+
+def test_sweep_request_degrades_loudly(caplog):
+    """A sweep requested on GROMACS (no expander) must warn, not silently
+    produce a single run (PR #499 review)."""
+    import logging
+    from scilink.agents.sim_agents.md_simulation_agent import (
+        MDSimulationAgent, _TOOL_REGISTRY,
+    )
+    a = MDSimulationAgent(working_dir=tempfile.mkdtemp(),
+                          api_key="dummy", base_url="http://localhost:0")
+    a.skill_name = "gromacs"
+    a.tools_module = _TOOL_REGISTRY["gromacs"]        # real module, no expander
+    plan = {"requires_multiple_simulations": True, "number_of_simulations": 3,
+            "variable_values": [300, 350, 400], "variable_parameter": "temperature"}
+    with caplog.at_level(logging.WARNING):
+        spec = a._sweep_spec(plan)
+    assert spec is None                                # degraded to a single run
+    assert any("no parameter-sweep expander" in r.message for r in caplog.records)
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))
