@@ -66,12 +66,37 @@ BROYDEN_MIXING`. Insulators and semiconductors take no smearing.
 
 **k-points:** periodic solids need a `&KPOINTS` block (`SCHEME MONKHORST-PACK k k
 k`); a metal needs a dense mesh, a semiconductor a moderate one. Molecules and
-very large cells run Gamma-only (omit `&KPOINTS`).
+very large cells run Gamma-only (omit `&KPOINTS`). **Critical CP2K limitation:**
+the k-point code does NOT support `DFT+U` or hybrid/exact-exchange functionals
+(both abort with `Method not implemented for k-points`). For a **DFT+U** or
+**hybrid** calculation, do NOT emit a `&KPOINTS` block — run **Gamma-point on a
+supercell** built large enough to sample the physics (CP2K's GPW cost is nearly
+linear in cell size, so a Gamma supercell is the intended route, not a k-mesh on
+the primitive cell).
+
+**SCF method — OT vs diagonalization:** `&DIAGONALIZATION` (with `&SMEAR` and
+`ADDED_MOS`) is right for **metals**. For **insulators, and mandatorily for
+hybrids/exact exchange**, use the orbital-transformation minimizer instead — a
+`&SCF` with an `&OT` block (`MINIMIZER DIIS`, `PRECONDITIONER FULL_SINGLE_INVERSE`)
+and an `&OUTER_SCF`. A hybrid run under `&DIAGONALIZATION` — or ADMM with its
+default MO-based purification without OT — aborts (`ADMM: MO-based purification
+requires OT`). Keep hybrids simple: **OT SCF, Gamma point, no ADMM** unless the
+system is large enough to need it.
 
 **Basis and pseudopotential:** each `&KIND` names a `BASIS_SET` (e.g.
 `DZVP-MOLOPT-SR-GTH`) and a `POTENTIAL` (e.g. `GTH-PBE-q4`) consistent with the
 functional; the `&DFT` block points at the library files via `BASIS_SET_FILE_NAME`
-and `POTENTIAL_FILE_NAME`.
+and `POTENTIAL_FILE_NAME`. The `q<N>` suffix is the valence electron count and
+**must match an entry that actually exists in `GTH_POTENTIALS` for that element**
+— a wrong `q` aborts the run (`atomic potential <GTH-PBE-qN> ... not found`), so
+do NOT guess it. Use the standard GTH-PBE valences:
+
+- main group, full valence: H q1, Li q3, B q3, C q4, N q5, O q6, F q7, Na q9,
+  Mg q10, Al q3, Si q4, P q5, S q6, Cl q7, K q9, Ca q10, Ga q13, Ge q4, As q5,
+  Se q6, Br q7;
+- transition metals, semi-core: Sc q11, Ti q12, V q13, Cr q14, Mn q15, Fe q16,
+  Co q17, Ni q18, Cu q11, Zn q12, Zr q12, Nb q13, Mo q14, Ru q16, Rh q17,
+  Pd q18, Ag q11, Cd q12, Pt q18, Au q11.
 
 ## implementation
 
@@ -79,7 +104,7 @@ A CP2K input is nested `&SECTION`/`&END` blocks. Skeleton for a single-point PBE
 energy of a semiconductor:
 
     &GLOBAL
-      PROJECT silicon
+      PROJECT germanium
       RUN_TYPE ENERGY
       PRINT_LEVEL MEDIUM
     &END GLOBAL
@@ -110,15 +135,15 @@ energy of a semiconductor:
       &END DFT
       &SUBSYS
         &CELL
-          A  5.43 0.00 0.00
-          B  0.00 5.43 0.00
-          C  0.00 0.00 5.43
+          A  5.658 0.000 0.000
+          B  0.000 5.658 0.000
+          C  0.000 0.000 5.658
         &END CELL
         &COORD
-          Si 0.0 0.0 0.0
-          Si 0.25 0.25 0.25
+          Ge 0.0 0.0 0.0
+          Ge 0.25 0.25 0.25
         &END COORD
-        &KIND Si
+        &KIND Ge
           BASIS_SET DZVP-MOLOPT-SR-GTH
           POTENTIAL GTH-PBE-q4
         &END KIND
@@ -142,36 +167,37 @@ energy of a semiconductor:
         &END MIXING
       &END SCF
       ...
-    &KIND Fe
+    &KIND Co
       BASIS_SET DZVP-MOLOPT-SR-GTH
-      POTENTIAL GTH-PBE-q8
-      MAGNETIZATION 2.2
+      POTENTIAL GTH-PBE-q17
+      MAGNETIZATION 1.6
     &END KIND
 
-**Antiferromagnet with Hubbard U** (e.g. NiO) --- split the correlated element and
-add DFT+U:
+**Antiferromagnet with Hubbard U** (e.g. MnO) --- split the correlated element and
+add DFT+U. Run this **Gamma-point on a supercell** (no `&KPOINTS`) — CP2K's DFT+U
+does not run with a k-mesh:
 
     &DFT
       LSD
       PLUS_U_METHOD MULLIKEN
       ...
-    &KIND Ni_up
-      ELEMENT Ni
+    &KIND Mn_up
+      ELEMENT Mn
       BASIS_SET DZVP-MOLOPT-SR-GTH
-      POTENTIAL GTH-PBE-q18
-      MAGNETIZATION 2.0
+      POTENTIAL GTH-PBE-q15
+      MAGNETIZATION 5.0
       &DFT_PLUS_U
         L 2
-        U_MINUS_J [eV] 6.4
+        U_MINUS_J [eV] 4.0
       &END DFT_PLUS_U
     &END KIND
-    &KIND Ni_down
-      ELEMENT Ni
+    &KIND Mn_down
+      ELEMENT Mn
       ...
-      MAGNETIZATION -2.0
+      MAGNETIZATION -5.0
       &DFT_PLUS_U
         L 2
-        U_MINUS_J [eV] 6.4
+        U_MINUS_J [eV] 4.0
       &END DFT_PLUS_U
     &END KIND
 
@@ -190,7 +216,25 @@ add DFT+U:
     &END MOTION
 
 **Hybrid functional (HSE06)** --- replace the `&XC_FUNCTIONAL` block with a hybrid
-and an `&HF` block:
+and an `&HF` block. Because it is a hybrid: use **OT SCF** (an `&OT` block, not
+`&DIAGONALIZATION`), run **Gamma-point** (no `&KPOINTS`), and do **not** add ADMM
+for a small cell — the `&SCF` becomes:
+
+    &SCF
+      SCF_GUESS ATOMIC
+      EPS_SCF 1.0E-6
+      MAX_SCF 30
+      &OT
+        MINIMIZER DIIS
+        PRECONDITIONER FULL_SINGLE_INVERSE
+      &END OT
+      &OUTER_SCF
+        MAX_SCF 10
+        EPS_SCF 1.0E-6
+      &END OUTER_SCF
+    &END SCF
+
+and the exchange block is:
 
     &XC
       &XC_FUNCTIONAL
@@ -248,9 +292,12 @@ Read a finished run against the request, not just whether CP2K exited.
   uses opposite-sign moments on split `&KIND`s.
 - A DFT+U request has `PLUS_U_METHOD` set and a `&DFT_PLUS_U` block (with `L` and
   `U_MINUS_J`) on the correlated element's `&KIND`.
-- A metal has a `&SCF/&SMEAR` block with `ADDED_MOS`; an insulator/semiconductor
-  has none.
-- A periodic solid has a `&KPOINTS` block (Gamma-only is acceptable only for a
-  molecule or a very large cell).
+- A metal has a `&SCF/&SMEAR` block with `ADDED_MOS` and uses `&DIAGONALIZATION`;
+  an insulator/semiconductor has no smearing and uses `&OT`.
+- A hybrid or DFT+U run uses `&OT` and is **Gamma-point (no `&KPOINTS`)**; a plain
+  GGA solid has a `&KPOINTS` mesh. (Gamma-only is otherwise reserved for molecules
+  or very large cells.)
+- Every `&KIND`'s `POTENTIAL GTH-PBE-q<N>` uses a valence that exists for that
+  element (see the table above) — a guessed `q` aborts the run.
 - Every opened `&SECTION` is closed by a matching `&END`, and `&MGRID CUTOFF` /
   `&SCF EPS_SCF` are present and sane.
