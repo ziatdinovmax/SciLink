@@ -147,3 +147,8 @@ include = ["scilink*"]
 
 [tool.setuptools.package-data]
 "scilink" = ["agents/sim_agents/docs/*.txt", "agents/sim_agents/docs/*.md", "ui/.streamlit/*.toml", "ui/assets/*.svg"]
+
+[tool.pytest.ini_options]
+markers = [
+    "live: requires a real LLM API key (skipped when no keys are set)",
+]
