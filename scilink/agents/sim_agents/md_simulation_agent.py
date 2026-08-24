@@ -19,6 +19,11 @@ try:
     _TOOL_REGISTRY["lammps"] = lammps_tools
 except ImportError:
     pass
+try:
+    from ...skills.molecular_dynamics.gromacs import gromacs as gromacs_tools
+    _TOOL_REGISTRY["gromacs"] = gromacs_tools
+except ImportError:
+    pass
 
 
 def _assemble_fanout_stage(
@@ -107,11 +112,30 @@ class MDSimulationAgent(SimulationAgent):
         "openmm":  [".pdb", ".cif"],
     }
     TOOL_REGISTRY = _TOOL_REGISTRY
+    # Each engine names its generated run-control artifact differently: LAMMPS a
+    # single input deck, GROMACS the .mdp, OpenMM a driver script. Keyed by
+    # skill name → (stem, extension); the entry filename is built from these so
+    # nothing downstream hardcodes ``run.lammps``.
+    _ENTRY_FILE = {
+        "lammps": ("run", "lammps"),
+        "gromacs": ("grompp", "mdp"),
+        "openmm": ("run_openmm", "py"),
+    }
+    _DEFAULT_ENTRY = ("run", "lammps")
 
     def __init__(self, working_dir: str, **kwargs):
         super().__init__(working_dir=working_dir, **kwargs)
         self._last_plan: Optional[Dict[str, Any]] = None
         self._last_system_info: Optional[Dict[str, Any]] = None
+
+    def _entry_name(self, stage: Optional[str] = None) -> str:
+        """Entry filename for the active engine, optionally per stage.
+
+        ``lammps`` → ``run.lammps`` / ``run_equilibration.lammps``;
+        ``gromacs`` → ``grompp.mdp`` / ``grompp_equilibration.mdp``.
+        """
+        stem, ext = self._ENTRY_FILE.get(self.skill_name, self._DEFAULT_ENTRY)
+        return f"{stem}_{stage}.{ext}" if stage else f"{stem}.{ext}"
 
     # ================================================================
     # SYSTEM ANALYSIS
@@ -387,7 +411,7 @@ class MDSimulationAgent(SimulationAgent):
                 research_goal, system_description, system_info, plan,
             )
 
-        script_path = self.working_dir / "run.lammps"
+        script_path = self.working_dir / self._entry_name()
         script_path.write_text(script, encoding="utf-8")
 
         validation = self._validate(str(script_path), system_info, plan)
@@ -793,6 +817,16 @@ class MDSimulationAgent(SimulationAgent):
             return None
         if not (self.tools_module
                 and hasattr(self.tools_module, "expand_parameter_sweep")):
+            # A sweep WAS requested (multiple sims + >=2 values) but the active
+            # engine has no expander — degrade to a single run LOUDLY, never
+            # silently. GROMACS is first-class for single + staged generation;
+            # fan-out sweeps are not in the bundle yet.
+            self.logger.warning(
+                "engine %r has no parameter-sweep expander; producing a single "
+                "run instead of the requested %d-point sweep over %r — express "
+                "it as a staged campaign for now",
+                self.skill_name, len(values),
+                plan.get("variable_parameter") or "parameter")
             return None
         return {"var_name": plan.get("variable_parameter") or "parameter",
                 "values": values}
@@ -807,7 +841,7 @@ class MDSimulationAgent(SimulationAgent):
         engine skill's (``expand_parameter_sweep``); this method only assembles
         the engine-neutral ``stages`` structure the refinement loop consumes.
         """
-        entry = "run.lammps"
+        entry = self._entry_name()
         shared = self._campaign_shared_files(structure_file, force_field_files)
         members = self.tools_module.expand_parameter_sweep(
             base_script, sweep["var_name"], sweep["values"])
@@ -921,7 +955,7 @@ class MDSimulationAgent(SimulationAgent):
             if not isinstance(content, str):
                 continue
             content = self._clean_and_fix(content, plan)
-            entry = f"run_{name}.lammps"
+            entry = self._entry_name(name)
             path = self.working_dir / entry
             path.write_text(content, encoding="utf-8")
             stage_scripts[name] = str(path)
