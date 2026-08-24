@@ -775,11 +775,62 @@ def _append_fit_domain_guidance(prompt: list, state: dict) -> None:
     )
 
 
+# Domain-skill strictness by annealing temperature (issue #498). ONE
+# temperature governs the whole skill at EVERY stage — planning, plan
+# validation, interpretation and the conformance framing here; codegen /
+# correction via the class-level ``_SKILL_STRICTNESS_SCHEDULE`` — so an
+# escalated (hot) re-run can re-PLAN with the skill already relaxed instead of
+# re-deriving a skill-bound plan it can only patch inside the fit loop:
+# mandatory (T=0) → guidance (T=1) → reference/overridable (T=2). Physics
+# grounding is the baseline's job (best-of-N plausibility rubric + deterministic
+# residual diagnostics), NOT a non-anneable skill rule — hot stays genuinely hot.
+# Each frame is (skill_header_label, intro_text, validation_header_label);
+# frame 0 is the original mandatory wording verbatim, so a first run (T=0) is
+# byte-identical to before.
+_SKILL_STRICTNESS_FRAMES = (
+    ("MANDATORY Domain Skill Rules",
+     "The following rules are MANDATORY. Your analysis plan and implementation "
+     "MUST conform to these domain-specific requirements. These rules encode "
+     "validated domain expertise and take precedence over general-purpose defaults. "
+     "Do NOT substitute your own preferences where these rules specify a method, "
+     "treatment, or constraint.",
+     "MANDATORY Domain Validation Rules"),
+    ("Domain Skill Guidance",
+     "Follow these domain rules unless the data clearly requires a different "
+     "approach. If you deviate from a rule, explain why.",
+     "Domain Validation Guidance"),
+    ("Domain Skill Reference",
+     "Use these domain rules as context. Override any rule where the data "
+     "warrants it, justifying the deviation from what you observe. Physical "
+     "soundness of the result — not rule-adherence — is the standard here.",
+     "Domain Validation Reference"),
+)
+
+
+def _skill_annealing_level(state: dict) -> int:
+    """Effective skill-strictness temperature for skill injection at any stage.
+
+    The QC engine seeds ``_annealing_level`` when the fit loop starts and
+    syncs it on every escalation; planning runs BEFORE that and best-of-N
+    candidates run in state copies, so fall back to the run's requested
+    starting level (``_starting_annealing_level``, set by a hot re-run) when
+    ``_annealing_level`` is unset. A re-run launched hot therefore re-plans
+    with the skill already relaxed; a first run resolves to 0 (unchanged).
+    """
+    level = state.get("_annealing_level")
+    if level is None:
+        level = state.get("_starting_annealing_level") or 0
+    return max(0, min(int(level), len(_SKILL_STRICTNESS_FRAMES) - 1))
+
+
 def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
     """Append domain skill knowledge to an LLM prompt for the given stage.
 
-    With multiple skills loaded, each skill's section is appended in order
-    (most-relevant first) so the LLM can attribute guidance to its source.
+    The skill's binding strength tracks the annealing temperature (see
+    ``_SKILL_STRICTNESS_FRAMES`` / ``_skill_annealing_level``): mandatory
+    when frozen (T=0), overridable when hot (T=2). With multiple skills
+    loaded, each skill's section is appended in order (most-relevant first)
+    so the LLM can attribute guidance to its source.
 
     Args:
         prompt: Mutable list of prompt parts to extend.
@@ -793,6 +844,9 @@ def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
     if not skills:
         return
 
+    skill_label, intro_text, validation_label = _SKILL_STRICTNESS_FRAMES[
+        _skill_annealing_level(state)
+    ]
     intro_appended = False
     for sections in skills:
         if not sections:
@@ -802,15 +856,9 @@ def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
             continue
         skill_name = sections.get("name", "domain skill")
 
-        prompt.append(f"\n## MANDATORY Domain Skill Rules: {skill_name} ({stage})")
+        prompt.append(f"\n## {skill_label}: {skill_name} ({stage})")
         if not intro_appended:
-            prompt.append(
-                "The following rules are MANDATORY. Your analysis plan and implementation "
-                "MUST conform to these domain-specific requirements. These rules encode "
-                "validated domain expertise and take precedence over general-purpose defaults. "
-                "Do NOT substitute your own preferences where these rules specify a method, "
-                "treatment, or constraint."
-            )
+            prompt.append(intro_text)
             intro_appended = True
         prompt.append(content)
 
@@ -819,7 +867,7 @@ def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
         if stage in ("planning", "interpretation"):
             validation = sections.get("validation", "")
             if validation:
-                prompt.append(f"\n## MANDATORY Domain Validation Rules ({skill_name})")
+                prompt.append(f"\n## {validation_label} ({skill_name})")
                 prompt.append(validation)
 
 
@@ -2974,7 +3022,7 @@ Your guidance: '''
         # skill's `implementation` section over its `analysis` synonym.
         recipes = _collect_codegen_recipe(state)
         if recipes:
-            level = state.get("_annealing_level", 0)
+            level = _skill_annealing_level(state)
             preamble = self._SKILL_STRICTNESS_SCHEDULE[
                 min(level, len(self._SKILL_STRICTNESS_SCHEDULE) - 1)
             ].format(name=", ".join(n for n, _ in recipes))
@@ -3198,7 +3246,7 @@ Your guidance: '''
         # Codegen recipe from ALL co-active skills (see _generate_fitting_script).
         recipes = _collect_codegen_recipe(state)
         if recipes:
-            level = state.get("_annealing_level", 0)
+            level = _skill_annealing_level(state)
             preamble = self._SKILL_STRICTNESS_SCHEDULE[
                 min(level, len(self._SKILL_STRICTNESS_SCHEDULE) - 1)
             ].format(name=", ".join(n for n, _ in recipes))
@@ -3229,10 +3277,15 @@ Your guidance: '''
         if not self.conformance_instructions:
             return None
 
-        # Build skill rules text for conformance checking
+        # Build skill rules text for conformance checking. At the hot level
+        # the skill is disregarded (issue #498): the checker's only job is
+        # plan fidelity, and skill rules offered as "reference" were still
+        # read as mandatory criteria (observed live), re-flagging a plan that
+        # deliberately left the skill's model behind.
         skill_rules_text = ""
         skill_sections = state.get("skill_sections")
-        if skill_sections:
+        _hot = len(self._SKILL_STRICTNESS_SCHEDULE) - 1
+        if skill_sections and _skill_annealing_level(state) < _hot:
             skill_name = state.get("skill_name", "domain skill")
             rules_parts = []
             for stage in ("planning", "analysis", "validation"):
@@ -3240,9 +3293,13 @@ Your guidance: '''
                 if content:
                     rules_parts.append(f"### {stage.title()} rules\n{content}")
             if rules_parts:
+                # Conformance checks the script against the (evolving) locked
+                # plan; only the skill FRAMING anneals here — same temperature
+                # as planning/codegen — so a justified hot deviation from the
+                # skill is not re-flagged as mandatory non-conformance.
                 skill_rules_text = (
                     "\n" + self._SKILL_STRICTNESS_SCHEDULE[
-                        min(state.get("_annealing_level", 0),
+                        min(_skill_annealing_level(state),
                             len(self._SKILL_STRICTNESS_SCHEDULE) - 1)
                     ].format(name=skill_name)
                     + "\n".join(rules_parts)
@@ -3860,21 +3917,29 @@ Remember: Rejecting a good fit ({metric_label} {accept_cmp} {accept_threshold:.2
         "of proposing further changes.\n",
     )
 
-    # Same annealing applied to domain skill strictness during fitting.
-    # Planning and interpretation stages always keep skills mandatory.
+    # Domain skill strictness during codegen / correction. Planning, plan
+    # validation, interpretation and conformance anneal at the SAME temperature
+    # via the module-level _SKILL_STRICTNESS_FRAMES / _skill_annealing_level —
+    # the whole skill relaxes uniformly (issue #498); physics grounding is the
+    # baseline's responsibility.
     _SKILL_STRICTNESS_SCHEDULE = (
         # T=0: mandatory
         "## MANDATORY Domain Skill Rules ({name})\n"
         "These rules encode validated domain expertise and take precedence "
         "over defaults.\n\n",
-        # T=1: preferred
+        # T=1: preferred. The locked plan was made at this same temperature
+        # (issue #498), so where a skill recipe conflicts with it the plan
+        # wins — otherwise an imperative recipe ("always follow this exact
+        # sequence") drags a deliberately different plan back to the skill.
         "## Domain Skill Guidance ({name})\n"
         "Follow these rules unless the data clearly requires a different "
-        "approach. If you deviate, explain why.\n\n",
+        "approach. If you deviate, explain why. Where these rules conflict "
+        "with the locked plan, follow the plan.\n\n",
         # T=2: reference
         "## Domain Skill Reference ({name})\n"
         "Use as context. Override any rule if the data warrants it — "
-        "explain the deviation.\n\n",
+        "explain the deviation. Where these rules conflict with the locked "
+        "plan, follow the plan.\n\n",
     )
 
     def _verify_fit_with_llm(self, state: dict, fit_result: dict, history: List[dict] = None, verification_iter: int = 0, annealing_level: int | None = None, best_result: dict | None = None, best_verification: dict | None = None) -> Optional[dict]:
@@ -5553,6 +5618,7 @@ Return JSON with:
         # Winner's (possibly QC-refined) config becomes the regime's config;
         # the caller's existing propagation distributes it.
         state["locked_fitting_config"] = winner["config_after"]
+        self._record_winner_annealing_level(state, winner)
 
         result = winner["result"]
         self._promote_candidate_artifacts(
@@ -5617,6 +5683,24 @@ Return JSON with:
         return max(
             (it.get("annealing_level", 0) for it in iters), default=0
         )
+
+    def _record_winner_annealing_level(self, state: dict, winner: dict) -> None:
+        """Propagate the winning candidate's reached temperature to ``state``.
+
+        Best-of-N candidates run in shallow state COPIES, so the QC engine's
+        ``_annealing_level`` sync never reaches the caller's state. Interpretation
+        must read the level the winning fit actually reached (issue #498) — a
+        fit that went hot reads the skill as reference at interpretation — so
+        stamp it here at winner lock. Monotone: never lowers a level already
+        resolved for this state (the run's starting level included).
+        """
+        result = winner.get("result") or {}
+        reached = max(
+            self._candidate_max_annealing_level(winner),
+            int(result.get("_produced_at_level") or 0),
+            _skill_annealing_level(state),
+        )
+        state["_annealing_level"] = reached
 
     def _candidate_climbed_to_hot(self, c: dict) -> bool:
         """True only if the loop ESCALATED into hot annealing under stall — it
