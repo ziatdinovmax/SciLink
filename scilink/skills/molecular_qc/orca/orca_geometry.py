@@ -61,6 +61,13 @@ def _parse_geometry_block(deck: str) -> Optional[Dict[str, Any]]:
     """
     in_block = False
     elements: List[str] = []
+    # A block carrying ghost/dummy centres is a counterpoise/BSSE fragment (one
+    # monomer in the dimer basis, the rest as ghosts): its physical-atom count is
+    # a SUBSET of the source complex by design, so an atom-count comparison would
+    # false-fail. Track it and skip the check rather than reject a correct deck.
+    _GHOST_NOTE = ("coordinate block carries ghost/dummy centres "
+                   "(counterpoise/BSSE fragment); atom-count check skipped")
+    ghost_seen = False
     for raw in deck.splitlines():
         line = raw.split("#", 1)[0].strip()
         if not line:
@@ -82,6 +89,8 @@ def _parse_geometry_block(deck: str) -> Optional[Dict[str, Any]]:
                         "note": f"unrecognized coordinate style `* {rest[:40]}`; "
                                 "check skipped"}
             # A bare `*` (or `* ...`) while in the block closes it.
+            if ghost_seen:
+                return {"elements": [], "reliable": False, "note": _GHOST_NOTE}
             return {"elements": elements, "reliable": True, "note": ""}
         if not in_block:
             continue
@@ -96,10 +105,12 @@ def _parse_geometry_block(deck: str) -> Optional[Dict[str, Any]]:
             continue
         tag = toks[0]
         if tag.endswith(":"):             # ORCA ghost atom (basis, no nucleus)
+            ghost_seen = True
             continue
         m = _ELEMENT_RE.match(tag)        # tag/fragment-tolerant: "O1"/"C(1)" -> "O"/"C"
         sym = m.group(1).capitalize() if m else None
         if sym is not None and sym.lower() in _GHOST_DUMMY:
+            ghost_seen = True
             continue                      # dummy / point charge: not a physical atom
         if sym is None or not _is_element(sym):
             return {"elements": [], "reliable": False,
@@ -107,8 +118,11 @@ def _parse_geometry_block(deck: str) -> Optional[Dict[str, Any]]:
                             f"{line[:60]!r}"}
         elements.append(sym)
     # Block opened but no explicit closing `*` — use what we parsed.
-    return ({"elements": elements, "reliable": True, "note": ""}
-            if in_block else None)
+    if not in_block:
+        return None
+    if ghost_seen:
+        return {"elements": [], "reliable": False, "note": _GHOST_NOTE}
+    return {"elements": elements, "reliable": True, "note": ""}
 
 
 def _source_elements(structure_file: str) -> Optional[List[str]]:
