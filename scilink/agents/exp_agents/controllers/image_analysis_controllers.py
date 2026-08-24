@@ -319,11 +319,55 @@ def _active_skill_names(state: dict) -> list[str]:
     return [legacy] if legacy else []
 
 
+# Domain-skill strictness by annealing temperature (issue #498). ONE
+# temperature governs the whole skill at EVERY stage — planning, plan
+# validation, interpretation and the conformance framing; codegen / correction
+# via the class-level ``_SKILL_STRICTNESS_SCHEDULE`` — so a hot re-run can
+# re-PLAN with the skill already relaxed. Image skills are advisory by design
+# (composable, not authoritative like curve fitting's), so even T=0 is
+# "expertise to inform", softening to "context" at T=2. Physics grounding is
+# the baseline's job, not a non-anneable skill rule. Each frame is
+# (skill_header_label, intro_text, validation_header_label); frame 0 is the
+# original wording verbatim, so a first run (T=0) is byte-identical to before.
+_SKILL_STRICTNESS_FRAMES = (
+    ("Domain Expertise",
+     "The following guidance is from validated domain expertise. "
+     "Use it to inform your approach.",
+     "Domain Validation Guidance"),
+    ("Domain Expertise (reference)",
+     "Use this validated domain expertise as reference. If the data clearly "
+     "requires a different approach, deviate and explain why.",
+     "Domain Validation Reference"),
+    ("Domain Expertise (context)",
+     "Use this domain expertise as background context. Override any guidance "
+     "where the data warrants it — explain the deviation.",
+     "Domain Validation Context"),
+)
+
+
+def _skill_annealing_level(state: dict) -> int:
+    """Effective skill-strictness temperature for skill injection at any stage.
+
+    The QC engine seeds ``_annealing_level`` when the analysis loop starts and
+    syncs it on every escalation; planning runs BEFORE that and best-of-N
+    candidates run in state copies, so fall back to the run's requested
+    starting level (``_starting_annealing_level``, set by a hot re-run) when
+    ``_annealing_level`` is unset. A re-run launched hot therefore re-plans
+    with the skill already relaxed; a first run resolves to 0 (unchanged).
+    """
+    level = state.get("_annealing_level")
+    if level is None:
+        level = state.get("_starting_annealing_level") or 0
+    return max(0, min(int(level), len(_SKILL_STRICTNESS_FRAMES) - 1))
+
+
 def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
     """Append domain skill knowledge to an LLM prompt for the given stage.
 
-    With multiple skills loaded, sections from each are appended in order
-    so the LLM can attribute guidance to its source.
+    The skill's binding strength tracks the annealing temperature (see
+    ``_SKILL_STRICTNESS_FRAMES`` / ``_skill_annealing_level``). With multiple
+    skills loaded, sections from each are appended in order so the LLM can
+    attribute guidance to its source.
 
     Args:
         prompt: Mutable list of prompt parts to extend.
@@ -339,6 +383,9 @@ def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
     if not skills:
         return
 
+    skill_label, intro_text, validation_label = _SKILL_STRICTNESS_FRAMES[
+        _skill_annealing_level(state)
+    ]
     intro_appended = False
     for sections in skills:
         if not sections:
@@ -347,12 +394,9 @@ def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
         if not content:
             continue
         skill_name = sections.get("name", "domain skill")
-        prompt.append(f"\n## Domain Expertise: {skill_name} ({stage})")
+        prompt.append(f"\n## {skill_label}: {skill_name} ({stage})")
         if not intro_appended:
-            prompt.append(
-                "The following guidance is from validated domain expertise. "
-                "Use it to inform your approach."
-            )
+            prompt.append(intro_text)
             intro_appended = True
         prompt.append(content)
 
@@ -360,7 +404,7 @@ def _append_skill_context(prompt: list, state: dict, stage: str) -> None:
         if stage in ("planning", "interpretation"):
             validation = sections.get("validation", "")
             if validation:
-                prompt.append(f"\n## Domain Validation Guidance: {skill_name}")
+                prompt.append(f"\n## {validation_label}: {skill_name}")
                 prompt.append(validation)
 
 
@@ -1894,21 +1938,28 @@ class UnifiedImageProcessingController:
         "",
     )
 
-    # Same annealing applied to domain skill strictness during analysis.
-    # Planning and interpretation stages always keep skills at T=0 (guidance).
+    # Domain skill strictness during codegen / correction. Planning, plan
+    # validation, interpretation and conformance anneal at the SAME temperature
+    # via the module-level _SKILL_STRICTNESS_FRAMES / _skill_annealing_level —
+    # the whole skill relaxes uniformly (issue #498); physics grounding is the
+    # baseline's responsibility.
     _SKILL_STRICTNESS_SCHEDULE = (
         # T=0: guidance (default for image analysis — softer than curve fitting's "mandatory")
         "## Domain Expertise Guidance ({name})\n"
         "The following guidance is from validated domain expertise. "
         "Use it to inform your implementation.\n\n",
-        # T=1: light reference
+        # T=1: light reference. The locked plan was made at this same
+        # temperature (issue #498): where a skill recipe conflicts with it the
+        # plan wins.
         "## Domain Expertise Reference ({name})\n"
         "Use as reference. If the data clearly requires a different approach, "
-        "deviate and explain why.\n\n",
+        "deviate and explain why. Where this guidance conflicts with the "
+        "locked plan, follow the plan.\n\n",
         # T=2: context only
         "## Domain Expertise Context ({name})\n"
         "Use as background context only. Override any guidance if the data "
-        "warrants it — explain the deviation.\n\n",
+        "warrants it — explain the deviation. Where this guidance conflicts "
+        "with the locked plan, follow the plan.\n\n",
     )
 
     JUDGE_PROMPT = '''You are a scientific image analysis expert acting as a judge.
@@ -2084,7 +2135,7 @@ Your guidance: '''
         # output is unchanged. Prefers `implementation` over `analysis`.
         recipes = _collect_codegen_recipe(state)
         if recipes:
-            level = state.get("_annealing_level", 0)
+            level = _skill_annealing_level(state)
             preamble = self._SKILL_STRICTNESS_SCHEDULE[
                 min(level, len(self._SKILL_STRICTNESS_SCHEDULE) - 1)
             ].format(name=", ".join(n for n, _ in recipes))
@@ -2348,7 +2399,7 @@ Your guidance: '''
         # Codegen recipe from ALL co-active skills (see the generate-script path).
         recipes = _collect_codegen_recipe(state)
         if recipes:
-            level = state.get("_annealing_level", 0)
+            level = _skill_annealing_level(state)
             preamble = self._SKILL_STRICTNESS_SCHEDULE[
                 min(level, len(self._SKILL_STRICTNESS_SCHEDULE) - 1)
             ].format(name=", ".join(n for n, _ in recipes))
@@ -2379,10 +2430,13 @@ Your guidance: '''
         if not self.conformance_instructions:
             return None
 
-        # Build skill rules text for conformance checking
+        # Build skill rules text for conformance checking. At the hot level
+        # the skill is disregarded (issue #498): the checker's only job is
+        # plan fidelity (mirrors the curve controller).
         skill_rules_text = ""
         skill_sections = state.get("skill_sections")
-        if skill_sections:
+        _hot = len(self._SKILL_STRICTNESS_SCHEDULE) - 1
+        if skill_sections and _skill_annealing_level(state) < _hot:
             skill_name = state.get("skill_name", "domain skill")
             rules_parts = []
             for stage in ("planning", "analysis", "validation"):
@@ -2390,8 +2444,15 @@ Your guidance: '''
                 if content:
                     rules_parts.append(f"### {stage.title()} rules\n{content}")
             if rules_parts:
+                # Conformance checks the script against the (evolving) locked
+                # plan; only the skill FRAMING anneals here — same temperature
+                # as planning/codegen (issue #498) — so a justified hot
+                # deviation is not re-flagged as non-conformance. Frame 0
+                # reproduces the original "Domain Expertise" label verbatim.
+                _skill_label = _SKILL_STRICTNESS_FRAMES[
+                    _skill_annealing_level(state)][0]
                 skill_rules_text = (
-                    f"\n**Domain Expertise ({skill_name}):**\n"
+                    f"\n**{_skill_label} ({skill_name}):**\n"
                     + "\n".join(rules_parts)
                     + "\n"
                 )
@@ -4451,6 +4512,7 @@ Return JSON with:
         # Winner's (possibly QC-refined) config becomes the regime's config;
         # the caller's existing propagation distributes it.
         state["locked_analysis_config"] = winner["config_after"]
+        self._record_winner_annealing_level(state, winner)
 
         result = winner["result"]
         self._promote_candidate_artifacts(result, image_idx, winner["attempt"])
@@ -4507,6 +4569,23 @@ Return JSON with:
         return max(
             (it.get("annealing_level", 0) for it in iters), default=0
         )
+
+    def _record_winner_annealing_level(self, state: dict, winner: dict) -> None:
+        """Propagate the winning candidate's reached temperature to ``state``.
+
+        Best-of-N candidates run in shallow state COPIES, so the QC engine's
+        ``_annealing_level`` sync never reaches the caller's state.
+        Interpretation must read the level the winning analysis actually
+        reached (issue #498), so stamp it here at winner lock. Monotone: never
+        lowers a level already resolved for this state (starting level included).
+        """
+        result = winner.get("result") or {}
+        reached = max(
+            self._candidate_max_annealing_level(winner),
+            int(result.get("_produced_at_level") or 0),
+            _skill_annealing_level(state),
+        )
+        state["_annealing_level"] = reached
 
     def _candidate_climbed_to_hot(self, c: dict) -> bool:
         """True only if the loop ESCALATED into hot annealing under stall —

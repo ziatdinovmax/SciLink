@@ -41,7 +41,50 @@ from .._qc_engine import CodegenQCEngine, QCEngineSpec, QCItemContext
 from ....utils.codegen_parse import parse_codegen_response
 
 
-def _render_skill_block(state: dict, stage: str) -> str:
+# Domain-skill strictness by annealing temperature (issue #498), same frames
+# as curve fitting: mandatory (T=0) → guidance (T=1) → reference/overridable
+# (T=2). Hyperspectral's temperature is its codegen retry ladder
+# (``_retry_annealing_level``): the ladder's hot rung says "abandon the method
+# family", so the skill block in the regenerated codegen prompt must relax in
+# lockstep instead of staying MANDATORY. Planning / interpretation read the
+# state-level temperature through ``_skill_annealing_level`` (this agent does
+# not seed one today, so they resolve to T=0). Each frame is
+# (skill_header_label, intro_text, validation_header_label); frame 0 is the
+# original mandatory wording verbatim, so a first attempt is byte-identical.
+_SKILL_STRICTNESS_FRAMES = (
+    ("MANDATORY Domain Skill Rules",
+     "The following rules are MANDATORY. Your analysis plan and implementation "
+     "MUST conform to these domain-specific requirements. These rules encode "
+     "validated domain expertise and take precedence over general-purpose defaults. "
+     "Do NOT substitute your own preferences where these rules specify a method, "
+     "treatment, or constraint.",
+     "MANDATORY Domain Validation Rules"),
+    ("Domain Skill Guidance",
+     "Follow these domain rules unless the data clearly requires a different "
+     "approach. If you deviate from a rule, explain why.",
+     "Domain Validation Guidance"),
+    ("Domain Skill Reference",
+     "Use these domain rules as context. Override any rule where the data "
+     "warrants it, justifying the deviation from what you observe. Physical "
+     "soundness of the result — not rule-adherence — is the standard here.",
+     "Domain Validation Reference"),
+)
+
+
+def _skill_annealing_level(state: dict) -> int:
+    """Effective skill-strictness temperature for skill injection.
+
+    Reads ``_annealing_level`` (the live loop temperature), falling back to
+    the run's requested starting level (``_starting_annealing_level``) and
+    then to 0. Same resolver shape as the curve / image controllers.
+    """
+    level = state.get("_annealing_level")
+    if level is None:
+        level = state.get("_starting_annealing_level") or 0
+    return max(0, min(int(level), len(_SKILL_STRICTNESS_FRAMES) - 1))
+
+
+def _render_skill_block(state: dict, stage: str, level: int | None = None) -> str:
     """Render the active domain skill(s) block for ``stage`` as a single string.
 
     With multiple skills loaded, each skill's block is rendered in order
@@ -51,6 +94,10 @@ def _render_skill_block(state: dict, stage: str) -> str:
     exists for the requested stage. Use this from prompt builders that
     assemble a single string (e.g. ``build_code_generation_prompt``); the
     list-mode wrapper ``_append_skill_context`` below uses this internally.
+
+    ``level`` pins the skill-strictness frame (``_SKILL_STRICTNESS_FRAMES``);
+    ``None`` resolves it from ``state`` via ``_skill_annealing_level``. The
+    codegen retry ladder passes its per-attempt rung explicitly.
     """
     skills = state.get("skills_loaded") or (
         [state["skill_sections"]] if state.get("skill_sections") else []
@@ -58,6 +105,11 @@ def _render_skill_block(state: dict, stage: str) -> str:
     if not skills:
         return ""
 
+    if level is None:
+        level = _skill_annealing_level(state)
+    skill_label, intro_text, validation_label = _SKILL_STRICTNESS_FRAMES[
+        max(0, min(int(level), len(_SKILL_STRICTNESS_FRAMES) - 1))
+    ]
     parts: list = []
     intro_appended = False
     for sections in skills:
@@ -68,15 +120,9 @@ def _render_skill_block(state: dict, stage: str) -> str:
             continue
         skill_name = sections.get("name", "domain skill")
 
-        parts.append(f"\n## MANDATORY Domain Skill Rules: {skill_name} ({stage})")
+        parts.append(f"\n## {skill_label}: {skill_name} ({stage})")
         if not intro_appended:
-            parts.append(
-                "The following rules are MANDATORY. Your analysis plan and implementation "
-                "MUST conform to these domain-specific requirements. These rules encode "
-                "validated domain expertise and take precedence over general-purpose defaults. "
-                "Do NOT substitute your own preferences where these rules specify a method, "
-                "treatment, or constraint."
-            )
+            parts.append(intro_text)
             intro_appended = True
         parts.append(content)
 
@@ -87,7 +133,7 @@ def _render_skill_block(state: dict, stage: str) -> str:
         if stage in ("planning", "interpretation", "implementation"):
             validation = sections.get("validation", "")
             if validation:
-                parts.append(f"\n## MANDATORY Domain Validation Rules ({skill_name})")
+                parts.append(f"\n## {validation_label} ({skill_name})")
                 parts.append(validation)
 
     return "\n".join(parts)
@@ -2875,52 +2921,57 @@ class RunDynamicAnalysisController:
                         "    fit_scope=component_mask requested but no usable "
                         "abundance mask — falling back to full_frame.")
 
-            # 1. Define Prompt for this specific task
-            base_prompt = build_code_generation_prompt(
-                target_desc=target_desc,
-                h=h, w=w, e=e,
-                axis_units=axis_units,
-                axis_start=state['energy_axis'][0],
-                axis_end=state['energy_axis'][-1],
-                processing_note=processing_note,
-                hints=state.get("analysis_hints"),
-                objective=state.get("analysis_objective"),
-                required_outputs=required_outputs,
-                # Inject the active skill's `implementation` section so the
-                # code-gen LLM gets domain-specific recipe guidance (lineshape,
-                # baseline, library choice). Empty string when no skill is
-                # active or no implementation section is defined.
-                skill_implementation=_render_skill_block(state, "implementation"),
-                reconstruction_available=reconstruction is not None,
-                auxiliary_operands={k: v.shape for k, v in auxiliary_operands.items()},
-                fit_mask_pixels=((int(fit_mask.sum()), int(fit_mask.size),
-                                  int(target.get("mask_component_index")))
-                                 if fit_mask is not None else None),
-            )
-
-            # Registered tools from the _shared registry (this agent + active
-            # skills). Pre-loaded into the sandbox globals below, so generated
-            # code MAY call them by name (no import) when one fits — the same
-            # optional-tool mechanism the image / curve agents use.
-            _tool_specs = _hyperspectral_tool_specs(state)
-            if _tool_specs:
-                base_prompt += (
-                    "\n\n### REGISTERED TOOLS (pre-loaded — call by name, no import)\n"
-                    "These functions are already in scope. Prefer one when it fits "
-                    "the task (e.g. deriving physical constants) over reimplementing it."
+            # 1. Define Prompt for this specific task. Built by a per-level
+            # function so the retry ladder (qc_refine) can re-render it with
+            # the skill block relaxed to the attempt's rung (issue #498);
+            # level 0 is the unchanged first-attempt prompt.
+            def _render_base_prompt(level: int = 0) -> str:
+                base_prompt = build_code_generation_prompt(
+                    target_desc=target_desc,
+                    h=h, w=w, e=e,
+                    axis_units=axis_units,
+                    axis_start=state['energy_axis'][0],
+                    axis_end=state['energy_axis'][-1],
+                    processing_note=processing_note,
+                    hints=state.get("analysis_hints"),
+                    objective=state.get("analysis_objective"),
+                    required_outputs=required_outputs,
+                    # Inject the active skill's `implementation` section so the
+                    # code-gen LLM gets domain-specific recipe guidance (lineshape,
+                    # baseline, library choice). Empty string when no skill is
+                    # active or no implementation section is defined.
+                    skill_implementation=_render_skill_block(
+                        state, "implementation", level=level),
+                    reconstruction_available=reconstruction is not None,
+                    auxiliary_operands={k: v.shape for k, v in auxiliary_operands.items()},
+                    fit_mask_pixels=((int(fit_mask.sum()), int(fit_mask.size),
+                                      int(target.get("mask_component_index")))
+                                     if fit_mask is not None else None),
                 )
-                for _spec in _tool_specs:
-                    base_prompt += "\n" + _spec.to_prompt()
 
-            # Append a preprocessing-mask hint when one exists and identifies
-            # excluded pixels. The mask is already applied to the data (zero-
-            # filled), so per-pixel fits will produce garbage values on
-            # excluded pixels; the LLM should be told to filter on the mask.
-            mask = state.get("preprocessing_mask")
-            if mask is not None and not bool(mask.all()):
-                n_kept = int(mask.sum())
-                n_total = int(mask.size)
-                base_prompt += f"""
+                # Registered tools from the _shared registry (this agent + active
+                # skills). Pre-loaded into the sandbox globals below, so generated
+                # code MAY call them by name (no import) when one fits — the same
+                # optional-tool mechanism the image / curve agents use.
+                _tool_specs = _hyperspectral_tool_specs(state)
+                if _tool_specs:
+                    base_prompt += (
+                        "\n\n### REGISTERED TOOLS (pre-loaded — call by name, no import)\n"
+                        "These functions are already in scope. Prefer one when it fits "
+                        "the task (e.g. deriving physical constants) over reimplementing it."
+                    )
+                    for _spec in _tool_specs:
+                        base_prompt += "\n" + _spec.to_prompt()
+
+                # Append a preprocessing-mask hint when one exists and identifies
+                # excluded pixels. The mask is already applied to the data (zero-
+                # filled), so per-pixel fits will produce garbage values on
+                # excluded pixels; the LLM should be told to filter on the mask.
+                mask = state.get("preprocessing_mask")
+                if mask is not None and not bool(mask.all()):
+                    n_kept = int(mask.sum())
+                    n_total = int(mask.size)
+                    base_prompt += f"""
 
 ### PREPROCESSING MASK
 A boolean preprocessing mask of shape ({mask.shape[0]}, {mask.shape[1]}) is
@@ -2929,6 +2980,9 @@ available indicating which (axis_0, axis_1) samples carry valid signal:
 into the analysis function — operate on the raw spectra and, if your output
 maps should mark excluded samples, set them to np.nan in your returned maps.
 """
+                return base_prompt
+
+            base_prompt = _render_base_prompt(0)
 
             # --- Run the per-target attempt ladder on the shared engine ---
             # (#327 phase 5). The engine drives the outer loop: initial
@@ -2946,6 +3000,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             ctx.target_index = i
             ctx.required_outputs = required_outputs
             ctx.base_prompt = base_prompt
+            ctx.base_prompt_builder = _render_base_prompt
             ctx.current_prompt = base_prompt
             # Script-bank exemplar (#346): appended to the FIRST attempt's
             # prompt only — retries rebuild from the clean base_prompt, so
@@ -3212,7 +3267,13 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                    if ctx.annealing_level < 2 else None)
         _history = _render_attempt_history(
             (getattr(ctx, "attempt_entries", None) or [])[:-1])
-        ctx.current_prompt = ctx.base_prompt + _codegen_retry_feedback(
+        # Skill strictness relaxes with the rung (issue #498): a hot retry
+        # that is told to abandon the method family must not also carry a
+        # MANDATORY skill block. Level 0 re-renders the identical base prompt.
+        _builder = getattr(ctx, "base_prompt_builder", None)
+        _base = (_builder(ctx.annealing_level)
+                 if _builder is not None else ctx.base_prompt)
+        ctx.current_prompt = _base + _codegen_retry_feedback(
             ctx.retries, verification.get("error_msg") or "",
             passed_names=getattr(ctx, "last_passed_names", None),
             prior_script=_anchor,
