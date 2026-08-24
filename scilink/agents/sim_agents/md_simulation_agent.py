@@ -576,12 +576,15 @@ class MDSimulationAgent(SimulationAgent):
                 f"{rows}\n"
             )
 
-        ts = plan.get("timestep", 2.0)
+        # `... or <default>`, not `.get(k, <default>)`: a plan may set these keys
+        # explicitly to None — e.g. a minimization has no timestep (GROMACS
+        # `integrator = steep`) — and a None default would divide-by-None below.
+        ts = plan.get("timestep") or 2.0
         equil_steps = int(
-            (plan.get("equilibration_time", 0.5) * 1e6) / ts
+            ((plan.get("equilibration_time") or 0.5) * 1e6) / ts
         )
         prod_steps = int(
-            (plan.get("production_time", 1.5) * 1e6) / ts
+            ((plan.get("production_time") or 1.5) * 1e6) / ts
         )
 
         elements_str = ", ".join(
