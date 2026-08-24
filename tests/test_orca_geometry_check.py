@@ -151,8 +151,9 @@ def test_internal_coordinates_skipped(co2_xyz):
     assert "int" in r["reason"]
 
 
-def test_ghost_atoms_excluded(co2_xyz):
-    """ORCA ghost atoms (`O:` trailing colon) are basis-only, not physical."""
+def test_ghost_atoms_skip_the_check(co2_xyz):
+    """A block with ghost atoms (`O:` trailing colon) is a counterpoise/BSSE
+    fragment — skip, don't atom-count against the full source."""
     deck = textwrap.dedent("""\
         ! B3LYP def2-SVP
         * xyz 0 1
@@ -164,12 +165,12 @@ def test_ghost_atoms_excluded(co2_xyz):
     """)
     r = check_geometry_consistency(input_files={"orca.inp": deck},
                                    structure_file=co2_xyz)
-    assert r["status"] == "ok"
-    assert r["composition"] == {"C": 1, "O": 2}
+    assert r["status"] == "skipped"
+    assert "ghost" in r["reason"] or "counterpoise" in r["reason"]
 
 
-def test_dummy_atom_excluded(co2_xyz):
-    """ORCA dummy centres (`DA`) are not physical atoms -> excluded, still ok."""
+def test_dummy_atom_skips_the_check(co2_xyz):
+    """ORCA dummy centres (`DA`) also make the atom count a non-comparison."""
     deck = textwrap.dedent("""\
         ! B3LYP def2-SVP
         * xyz 0 1
@@ -181,8 +182,26 @@ def test_dummy_atom_excluded(co2_xyz):
     """)
     r = check_geometry_consistency(input_files={"orca.inp": deck},
                                    structure_file=co2_xyz)
-    assert r["status"] == "ok"
-    assert r["composition"] == {"C": 1, "O": 2}
+    assert r["status"] == "skipped"
+
+
+def test_counterpoise_fragment_skips_not_mismatch(co2_xyz):
+    """The parity-sweep failure: a BSSE fragment deck (one monomer real, the
+    other as ghosts) has fewer physical atoms than the full source by design —
+    it must SKIP, not report a mismatch and fail generation."""
+    # Source is CO2 (C + 2 O). A counterpoise fragment: one O real, C + one O
+    # ghost — 1 physical atom vs 3 in the source.
+    deck = textwrap.dedent("""\
+        ! DLPNO-CCSD(T) def2-TZVP def2-TZVP/C
+        * xyz 0 1
+          O  0.0 0.0 0.0
+          C: 0.0 0.0 1.16
+          O: 0.0 0.0 2.32
+        *
+    """)
+    r = check_geometry_consistency(input_files={"orca.inp": deck},
+                                   structure_file=co2_xyz)
+    assert r["status"] == "skipped"          # NOT "mismatch"
 
 
 def test_lowercase_deck_ok(co2_xyz):
