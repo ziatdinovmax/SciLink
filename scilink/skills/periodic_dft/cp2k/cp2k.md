@@ -29,8 +29,9 @@ goal is input that is physically correct and consistent with standard CP2K
 practice. **Energies and `CUTOFF` are in Rydberg; `ELECTRONIC_TEMPERATURE` is in
 Kelvin.**
 
-## non-negotiable constraints (decide these FIRST)
+## planning
 
+**Non-negotiable constraints — decide these FIRST.**
 CP2K couples the SCF solver, the Brillouin-zone sampling, and the functional in
 ways that are hard errors, not preferences. A deck that violates any of these
 **aborts immediately** — resolve them before writing anything else, and do not let
@@ -58,8 +59,6 @@ the generic "a periodic solid takes a k-mesh" instinct override rules 2–3:
 | **DFT+U (any)** | **none — Gamma** | **`&OT`** | none |
 | **hybrid (any)** | **none — Gamma** | **`&OT`** | none |
 | molecule / large cell | none — Gamma | `&OT` | none |
-
-## planning
 
 **Method:** `METHOD Quickstep` with GPW is the default. Use GAPW (`&QS METHOD
 GAPW`) only when all-electron accuracy or hard pseudopotentials demand it. A CP2K
