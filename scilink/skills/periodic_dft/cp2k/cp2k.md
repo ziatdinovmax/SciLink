@@ -29,6 +29,36 @@ goal is input that is physically correct and consistent with standard CP2K
 practice. **Energies and `CUTOFF` are in Rydberg; `ELECTRONIC_TEMPERATURE` is in
 Kelvin.**
 
+## non-negotiable constraints (decide these FIRST)
+
+CP2K couples the SCF solver, the Brillouin-zone sampling, and the functional in
+ways that are hard errors, not preferences. A deck that violates any of these
+**aborts immediately** — resolve them before writing anything else, and do not let
+the generic "a periodic solid takes a k-mesh" instinct override rules 2–3:
+
+1. **`&OT` ⟺ Gamma; `&DIAGONALIZATION` ⟺ k-points.** Orbital transformation
+   **cannot** run with a `&KPOINTS` mesh (`OT not possible with kpoint
+   calculations`). Pick exactly one path per run.
+2. **DFT+U does NOT support k-points.** A `+U` run **must be Gamma-point** — omit
+   `&KPOINTS` entirely (build a supercell for sampling) and use `&OT`. A `&KPOINTS`
+   mesh on a `+U` deck aborts (`Method not implemented for k-points`).
+3. **Hybrid / exact-exchange functionals do NOT support k-points and require
+   `&OT`.** Run them **Gamma-point + `&OT`, no ADMM** for a small cell. A
+   `&DIAGONALIZATION` hybrid, or ADMM MO-purification without OT, aborts.
+4. **`POTENTIAL GTH-PBE-q<N>` must use a valence that exists for the element**
+   (table under *planning*) — a guessed `q` aborts (`atomic potential ... not
+   found`).
+
+**Method decision, once and for all:**
+
+| system | k-points | SCF solver | smearing |
+|---|---|---|---|
+| metal (plain GGA) | `&KPOINTS` mesh | `&DIAGONALIZATION` | `&SMEAR` + `ADDED_MOS` |
+| semiconductor/insulator (plain GGA) | `&KPOINTS` mesh | `&DIAGONALIZATION` | none |
+| **DFT+U (any)** | **none — Gamma** | **`&OT`** | none |
+| **hybrid (any)** | **none — Gamma** | **`&OT`** | none |
+| molecule / large cell | none — Gamma | `&OT` | none |
+
 ## planning
 
 **Method:** `METHOD Quickstep` with GPW is the default. Use GAPW (`&QS METHOD
