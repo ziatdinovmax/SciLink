@@ -260,10 +260,13 @@ does not run with a k-mesh:
 **Hybrid functional (HSE06)** --- replace the `&XC_FUNCTIONAL` block with a hybrid
 and an `&HF` block. Because it is a hybrid: use **OT SCF** (an `&OT` block, not
 `&DIAGONALIZATION`), run **Gamma-point** (no `&KPOINTS`), and do **not** add ADMM
-for a small cell. Set the exchange `CUTOFF_RADIUS` (in `&INTERACTION_POTENTIAL`)
-to **less than half the shortest cell vector** — on a small primitive cell,
-shrink it accordingly or use a supercell, or CP2K warns and the hybrid energy is
-unphysical. The `&SCF` becomes:
+for a small cell. Note that a periodic hybrid needs its exact-exchange range to
+fit within half the shortest cell vector, or the energy is unphysical (and the
+run is slow); for the screened HSE potential that range is set by the functional,
+**not** by `CUTOFF_RADIUS` (which only bounds a `TRUNCATED` potential), so a small
+primitive cell requires a **supercell**. Sizing that cell is a numerical,
+system-dependent choice — leave it to the run/refinement step, not a guessed
+value here. The `&SCF` becomes:
 
     &SCF
       SCF_GUESS ATOMIC
