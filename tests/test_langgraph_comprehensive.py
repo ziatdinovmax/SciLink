@@ -266,6 +266,75 @@ class TestPlanningOrchestratorSmoke:
 
 
 # ---------------------------------------------------------------------------
+# G13 — Meta orchestrator chat() smoke test (mocked LLM)
+# ---------------------------------------------------------------------------
+
+class TestMetaOrchestratorSmoke:
+    """Meta orchestrator chat() smoke test — mocked LLM.
+
+    MetaOrchestratorAgent was converted to the LangGraph backbone (chat() ->
+    _invoke_graph()) after analysis/planning/simulation; this is its
+    equivalent of TestPlanningOrchestratorSmoke.
+    """
+
+    def test_g13_meta_orch_chat_mock_llm(self):
+        """MetaOrchestratorAgent.chat() returns expected text with mocked LLM."""
+        from scilink.agents.meta_agent.meta_orchestrator import (
+            MetaOrchestratorAgent, MetaMode,
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            orch = MetaOrchestratorAgent(
+                base_dir=td,
+                api_key="dummy",
+                model_name="claude-opus-4-6",
+                meta_mode=MetaMode.AUTONOMOUS,
+            )
+            orch.use_openai = True
+            fake_response = _fake_openai_response("Meta complete.")
+
+            with patch("openai.OpenAI") as mock_cls:
+                mock_client = MagicMock()
+                mock_cls.return_value = mock_client
+                mock_client.chat.completions.create.return_value = fake_response
+
+                result = orch.chat("Route this to a specialist.")
+
+            assert "Meta complete." in result
+
+    def test_g13_meta_orch_delegates_via_graph(self):
+        """A tool-calling turn dispatches through scilink.graphs._react's
+        execute_tools exactly like the other three orchestrators — the
+        delegate_to_* tool runs synchronously inside the graph's tool node."""
+        from scilink.agents.meta_agent.meta_orchestrator import (
+            MetaOrchestratorAgent, MetaMode,
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            orch = MetaOrchestratorAgent(
+                base_dir=td,
+                api_key="dummy",
+                model_name="claude-opus-4-6",
+                meta_mode=MetaMode.AUTONOMOUS,
+            )
+            orch.use_openai = True
+
+            tc = _fake_tool_call(name="summarize_session_state", args="{}")
+            tool_response = _fake_openai_response("", tool_calls=[tc])
+            final_response = _fake_openai_response("Delegation summarized.")
+
+            with patch("openai.OpenAI") as mock_cls:
+                mock_client = MagicMock()
+                mock_cls.return_value = mock_client
+                mock_client.chat.completions.create.side_effect = [
+                    tool_response, final_response,
+                ]
+                result = orch.chat("What's the session state?")
+
+            assert "Delegation summarized." in result
+
+
+# ---------------------------------------------------------------------------
 # G3 — Checkpoint round-trip
 # ---------------------------------------------------------------------------
 
@@ -1110,8 +1179,11 @@ class TestBuildOpenaiMessages:
 class TestExecuteToolsJsonDecodeGuard:
     """
     If the model returns malformed JSON in a tool call argument string,
-    execute_tools must fall back to an empty dict rather than raising
-    and aborting the turn.
+    execute_tools must not raise or abort the turn — and must not silently
+    call the tool with an empty dict either (that hides the real cause: the
+    tool then raises about a MISSING argument, so the model "resubmits with
+    the full task" and loops — see _react._parse_tool_args). It skips the
+    tool call and returns a recovery-hint error message instead.
     """
 
     def _make_state_with_raw_tool_call(self, args_value):
@@ -1132,10 +1204,12 @@ class TestExecuteToolsJsonDecodeGuard:
         mock_msg.tool_calls = [{"name": "some_tool", "args": args_value, "id": "tc_x"}]
         return {"messages": [mock_msg], "step_count": 0}
 
-    def test_g15_malformed_tool_args_falls_back_to_empty_dict(self):
+    def test_g15_malformed_tool_args_skips_tool_and_returns_recovery_hint(self):
         """
-        execute_tools calls tools.execute_tool with {} when tc["args"] is
-        a string that is not valid JSON.
+        execute_tools must NOT call tools.execute_tool when tc["args"] is a
+        string that is not valid JSON — it returns a recovery-hint error
+        message instead, so the model sees a clear "not executed" signal
+        rather than a missing-argument TypeError from the tool itself.
         """
         from scilink.graphs._react import _make_react_nodes
 
@@ -1144,15 +1218,17 @@ class TestExecuteToolsJsonDecodeGuard:
         orch._system_prompt = "sys"
         orch.tools_for_model = []
         orch.tools.execute_tool.return_value = "ok"
+        del orch._tool_message  # not every orchestrator has this hook
 
         _, execute_tools = _make_react_nodes(orch)
 
         state = self._make_state_with_raw_tool_call("{not: valid json}")
         result = execute_tools(state)
 
-        # Should not raise — execute_tool called with empty kwargs
-        orch.tools.execute_tool.assert_called_once_with("some_tool")
+        # Should not raise, and must NOT call the tool with a guessed {}.
+        orch.tools.execute_tool.assert_not_called()
         assert len(result["messages"]) == 1
+        assert "NOT executed" in result["messages"][0].content
 
     def test_g15_valid_dict_args_pass_through(self):
         """

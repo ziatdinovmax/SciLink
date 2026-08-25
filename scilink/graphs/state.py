@@ -223,6 +223,33 @@ class SimulationOrchestratorState(OrchestratorState):
 
 
 # ---------------------------------------------------------------------------
+# Meta orchestrator
+# ---------------------------------------------------------------------------
+
+
+class MetaOrchestratorState(OrchestratorState):
+    """
+    State for ``MetaOrchestratorAgent``.
+
+    The meta agent holds no domain state of its own beyond the shared base:
+    its real state (the persistent per-mode children, the delegation ledger)
+    lives on live Python objects (``self._children``, ``self._delegations``)
+    that are not graph-native and are read/written entirely inside the
+    ``delegate_to_*`` / ``get_delegation_history`` tool calls, not by the
+    chat-loop nodes themselves — mirrors how ``analysis_results`` /
+    ``generated_structures`` on the other orchestrators are inert passthrough
+    fields as far as ``scilink.graphs._react`` is concerned.
+
+    Fields
+    ------
+    message_count
+        Running count of user turns (used for checkpoint-interval logic).
+    """
+
+    message_count: int
+
+
+# ---------------------------------------------------------------------------
 # Verification subgraph
 # ---------------------------------------------------------------------------
 

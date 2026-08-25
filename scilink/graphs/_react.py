@@ -69,7 +69,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
@@ -215,6 +215,43 @@ def _compress_messages_inplace(messages: list, threshold: int = _COMPRESS_THRESH
 # ---------------------------------------------------------------------------
 
 
+def _parse_tool_args(raw_args: Any, finish_reason: Optional[str]) -> tuple:
+    """Parse a tool call's JSON arguments, failing loud on bad input.
+
+    Returns ``(args, None)`` on success, or ``(None, error_json)`` when the
+    arguments are malformed or truncated. Ported from the planning
+    orchestrator's hand-rolled loop (#270): a silent ``args = {}`` fallback
+    hides the real cause — the tool then raises about a MISSING argument, so
+    the model "resubmits with the full task" (fixing the wrong thing) and
+    loops. Shared here so every backbone orchestrator gets the same recovery
+    hint instead of each hand-rolling (or losing) it independently.
+    """
+    if isinstance(raw_args, dict):
+        return raw_args, None
+    try:
+        return json.loads(raw_args), None
+    except (json.JSONDecodeError, TypeError):
+        raw = raw_args if isinstance(raw_args, str) else ""
+        if finish_reason == "length":
+            cause = ("the arguments JSON was truncated — the response hit "
+                      "the output-token limit")
+        else:
+            cause = ("the arguments string was not valid JSON — typically "
+                      "broken escaping of quotes or newlines inside a large "
+                      "string value")
+        return None, json.dumps({
+            "status": "error",
+            "message": (
+                f"Tool call discarded: {cause} ({len(raw)} characters "
+                "received). The tool was NOT executed, and the arguments "
+                "you sent were never seen — this is NOT a missing-argument "
+                "error, so re-sending the same call will fail the same way. "
+                "Send a SHORTER call, or split the work across several "
+                "smaller tool calls."
+            ),
+        })
+
+
 def _print_reasoning(orch: Any, content: Any) -> None:
     """Surface interim reasoning via the orchestrator's own printer, when it
     has one (analysis, planning). Simulation has no such hook yet — no-op."""
@@ -270,6 +307,8 @@ def _make_react_nodes(orch: Any):
             if getattr(message, "tool_calls", None):
                 _print_reasoning(orch, message.content)
             ai_msg = _openai_message_to_langchain(message)
+            _fr = getattr(response.choices[0], "finish_reason", None)
+            ai_msg.additional_kwargs["finish_reason"] = _fr if isinstance(_fr, str) else None
 
         else:
             from ..wrappers.litellm_wrapper import litellm_completion
@@ -301,6 +340,8 @@ def _make_react_nodes(orch: Any):
             if getattr(message, "tool_calls", None):
                 _print_reasoning(orch, getattr(message, "content", None))
             ai_msg = _litellm_message_to_langchain(message)
+            _fr = getattr(response.choices[0], "finish_reason", None)
+            ai_msg.additional_kwargs["finish_reason"] = _fr if isinstance(_fr, str) else None
 
         # Guard against empty responses — inject a nudge so the next step
         # is forced to produce a text summary via tool_choice="none".
@@ -317,18 +358,20 @@ def _make_react_nodes(orch: Any):
     def execute_tools(state: Dict[str, Any]) -> Dict[str, Any]:
         last = state["messages"][-1]
         tool_calls = getattr(last, "tool_calls", None) or []
+        finish_reason = last.additional_kwargs.get("finish_reason") \
+            if hasattr(last, "additional_kwargs") else None
 
         results = []
         for tc in tool_calls:
             func_name = tc["name"]
-            if isinstance(tc["args"], dict):
-                args = tc["args"]
-            else:
-                try:
-                    args = json.loads(tc["args"])
-                except (json.JSONDecodeError, TypeError):
-                    logger.warning("Could not parse tool args for %s — using empty dict", func_name)
-                    args = {}
+            args, arg_error = _parse_tool_args(tc["args"], finish_reason)
+            if arg_error is not None:
+                print(f"  ⚠️  {func_name}: arguments discarded (malformed/truncated)")
+                content = orch._tool_message(tc["id"], arg_error)["content"] \
+                    if hasattr(orch, "_tool_message") else arg_error
+                results.append(ToolMessage(content=content, tool_call_id=tc["id"], name=func_name))
+                continue
+
             print(f"  🔧 Calling tool: {func_name}")
             result = orch.tools.execute_tool(func_name, **args)
             # orch._tool_message() upgrades an image-bearing result to a

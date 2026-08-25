@@ -147,10 +147,28 @@ def test_truncation_and_bad_escaping_are_distinguished():
     assert "characters received" in truncated and "characters received" in malformed
 
 
-def test_both_meta_chat_loops_use_the_parser():
-    """There are two dispatch loops; fixing one leaves the other looping."""
+def test_meta_chat_is_graph_backed_with_a_single_dispatch_path():
+    """
+    The meta orchestrator used to have two hand-rolled dispatch loops
+    (openai + litellm) — fixing one left the other looping, which is what
+    this test used to guard against. It is now on the LangGraph backbone
+    (chat() -> _invoke_graph() -> a single scilink.graphs._react.execute_tools
+    path shared with analysis/planning/simulation), so there is exactly one
+    dispatch path left, and the malformed-args recovery lives in
+    scilink.graphs._react._parse_tool_args instead.
+    """
     import inspect
     from scilink.agents.meta_agent import meta_orchestrator as mo
+    from scilink.graphs import _react
+
     src = inspect.getsource(mo.MetaOrchestratorAgent)
-    assert src.count("self._parse_tool_args(") == 2
+    assert "_handle_openai_chat" not in src and "_handle_litellm_chat" not in src, (
+        "expected the hand-rolled dual chat loops to be gone"
+    )
+    assert hasattr(mo.MetaOrchestratorAgent, "_invoke_graph")
+
+    react_src = inspect.getsource(_react)
+    assert "_parse_tool_args(" in react_src, (
+        "expected the shared execute_tools to use the recovery-hint parser"
+    )
     assert "args = {}" not in src.replace("``args = {}``", "")

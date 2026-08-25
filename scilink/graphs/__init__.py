@@ -42,6 +42,10 @@ simulation.py
     ReAct graph for ``SimulationOrchestratorAgent``.
     Entry point: ``build_simulation_graph(orch)``
 
+meta.py
+    ReAct graph for ``MetaOrchestratorAgent``.
+    Entry point: ``build_meta_graph(orch)``
+
 verification.py
     Reusable verification-retry subgraph that replaces the duplicated
     ``while`` loops in ``image_analysis_controllers.py`` and
@@ -64,11 +68,13 @@ from scilink.graphs.state import (
     AnalysisOrchestratorState,
     PlanningOrchestratorState,
     SimulationOrchestratorState,
+    MetaOrchestratorState,
     VerificationState,
 )
 from scilink.graphs.analysis import build_analysis_graph
 from scilink.graphs.planning import build_planning_graph
 from scilink.graphs.simulation import build_simulation_graph
+from scilink.graphs.meta import build_meta_graph
 from scilink.graphs.verification import build_verification_subgraph, build_curve_fitting_verification_subgraph
 
 __all__ = [
@@ -77,11 +83,13 @@ __all__ = [
     "AnalysisOrchestratorState",
     "PlanningOrchestratorState",
     "SimulationOrchestratorState",
+    "MetaOrchestratorState",
     "VerificationState",
     # Graph builders
     "build_analysis_graph",
     "build_planning_graph",
     "build_simulation_graph",
+    "build_meta_graph",
     "build_verification_subgraph",
     "build_curve_fitting_verification_subgraph",
 ]

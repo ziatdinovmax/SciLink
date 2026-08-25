@@ -45,38 +45,21 @@ def test_healthy_histories_untouched(tail):
     assert close_interrupted_turn(list(tail)) == tail
 
 
-# Orchestrators still on the hand-rolled dual chat loop (openai + litellm):
-# every place a NEW user message enters self.messages must close an
-# interrupted turn first, in BOTH loops.
-LEGACY_ORCHESTRATORS = [
-    Path("scilink/agents/meta_agent/meta_orchestrator.py"),
-]
-
-_SEAM = re.compile(
-    r"close_interrupted_turn\(self\.messages\)\s*\n\s*"
-    r"self\.messages\.append\(\{\"role\": \"user\", \"content\": user_input\}\)")
-
-
-@pytest.mark.parametrize("src", LEGACY_ORCHESTRATORS, ids=lambda p: p.stem)
-def test_every_turn_start_closes_interrupted_turns(src):
-    text = src.read_text()
-    appends = len(re.findall(
-        r"self\.messages\.append\(\{\"role\": \"user\", "
-        r"\"content\": user_input\}\)", text))
-    assert appends == 2, f"{src.name}: expected both chat loops"
-    assert len(_SEAM.findall(text)) == appends
-
-
-# Orchestrators on the LangGraph backbone (single chat() -> _invoke_graph()
-# path): the equivalent protection is _repair_graph_state(), which heals a
-# dangling tool call / unclosed turn in the CHECKPOINTED graph state before
-# each invoke — see AnalysisOrchestratorAgent._repair_graph_state for the
-# rationale. There is no self.messages textual seam to check here; self.messages
-# is a lightweight parallel log, not what the LLM sees on the next turn.
+# All four chat-driven orchestrators (the three modes + the meta agent — see
+# CLAUDE.md "The mode universe is fixed at three" / "The meta agent") are now
+# on the LangGraph backbone: a single chat() -> _invoke_graph() path per
+# orchestrator, no more hand-rolled dual (openai + litellm) loops. The
+# equivalent protection against a mid-run-Stop dangling tool call is
+# _repair_graph_state(), which heals it in the CHECKPOINTED graph state
+# before each invoke — see AnalysisOrchestratorAgent._repair_graph_state for
+# the rationale. There is no self.messages textual seam to check any more;
+# self.messages is a lightweight parallel log, not what the LLM sees on the
+# next turn.
 GRAPH_BACKED_ORCHESTRATORS = [
     Path("scilink/agents/exp_agents/analysis_orchestrator.py"),
     Path("scilink/agents/planning_agents/planning_orchestrator.py"),
     Path("scilink/agents/sim_agents/simulation_orchestrator.py"),
+    Path("scilink/agents/meta_agent/meta_orchestrator.py"),
 ]
 
 _GRAPH_SEAM = re.compile(
