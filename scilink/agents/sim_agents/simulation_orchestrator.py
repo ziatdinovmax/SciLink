@@ -1,18 +1,26 @@
 """
-Simulation Orchestrator Agent for VASP DFT input preparation.
+Simulation Orchestrator Agent for computational simulation.
 
-Coordinates structure generation, VASP input creation, and post-run analysis
-through tools wrapping the existing sim_agents stack (StructureGenerator,
-StructureValidatorAgent, VaspInputAgent, VaspUpdater, IncarValidatorAgent,
-DFTOrchestrator).
+Coordinates structure generation, input creation, validation, and post-run
+analysis through an engine-neutral tool surface: structure generation
+(StructurePipeline), the scale-agnostic simulation pipeline, and the
+engine-neutral critics (InputValidator / RunCritic), with engine specifics
+supplied by skill bundles. The routing decision selects scale + engine.
 
-Mirrors the shape of AnalysisOrchestratorAgent for consistent UX. VASP DFT
-only for now; LAMMPS support and HPC submission tools are follow-up work
-(see CLAUDE.md for the full sequencing plan).
+Mirrors the shape of AnalysisOrchestratorAgent for consistent UX. Periodic
+DFT (VASP, QE) is fully dispatched; MD and MLIP scales route and run the
+one-shot pipeline, with granular per-step tools as follow-up work (see
+CLAUDE.md for the full sequencing plan).
 
 The duplication with AnalysisOrchestratorAgent is intentional and acceptable
 at this development stage — see CLAUDE.md "Why no BaseChatOrchestrator
 refactor".
+
+LangGraph backbone
+------------------
+The chat loop is driven by a LangGraph ``StateGraph`` (ReAct topology).
+``chat()`` delegates to ``_invoke_graph()`` which calls ``graph.invoke()``.
+``run_task()`` uses the same graph with ``autonomy_mode="autonomous"``.
 """
 
 import json
@@ -23,19 +31,35 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 from enum import Enum
 
-from ...auth import get_internal_proxy_key
+from ...auth import (
+    APIKeyNotFoundError, get_api_key, get_internal_proxy_key, infer_provider,
+    require_vendor_credentials,
+)
+from ...utils.prose_style import PROSE_STYLE_RULE
+from ...utils.tool_media import (repair_dangling_tool_calls,
+                                 close_interrupted_turn)
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .simulation_orchestrator_tools import SimulationOrchestratorTools
 from ._deprecation import normalize_params
+from ...graphs.simulation import build_simulation_graph
+
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 
 
 class SimulationMode(Enum):
     """Autonomy level for the simulation orchestrator. Mirrors AnalysisMode
     for consistent UX across modes."""
     CO_PILOT = "co-pilot"        # Human leads, AI assists (default)
-    SUPERVISED = "supervised"    # AI leads, human supervises
+    AUTOPILOT = "autopilot"      # AI leads, human monitors
     AUTONOMOUS = "autonomous"    # Full autonomy
+
+    @classmethod
+    def _missing_(cls, value):
+        # Back-compat: the AUTOPILOT level was named "supervised" before.
+        if isinstance(value, str) and value.strip().lower() == "supervised":
+            return cls.AUTOPILOT
+        return None
 
 
 _CO_PILOT_DIRECTIVE = """**AUTONOMY: CO-PILOT (default)** — The human is leading the work; you are
@@ -47,7 +71,7 @@ user a chance to redirect after each significant step.
 
 """
 
-_SUPERVISED_DIRECTIVE = """**AUTONOMY: SUPERVISED** — You are leading the work with reasonable defaults.
+_AUTOPILOT_DIRECTIVE = """**AUTONOMY: AUTOPILOT** — You are leading the work with reasonable defaults.
 Proceed with sensible choices for routine decisions, but surface significant
 decisions (polymorph selection when not specified, supercell size choices
 that drive cost, expensive operations) for a one-line confirmation before
@@ -66,36 +90,67 @@ matching strategy used) so the user can verify them.
 
 _SYSTEM_PROMPT_BODY = """
 
-You are SciLink's Simulation Orchestrator — a DFT input-preparation
-assistant focused on VASP. You help users build atomic structures and
-generate VASP input files (POSCAR, INCAR, KPOINTS) ready for calculation.
+You are SciLink's Simulation Orchestrator — a scale-aware simulation
+input-preparation assistant. You help users build atomic structures and
+prepare simulation inputs across multiple physical scales: periodic
+DFT (VASP, QE, ABINIT, CP2K, ...), classical MD (LAMMPS, GROMACS,
+OpenMM, ...), ML interatomic potentials (MACE, NequIP, DeePMD, ...).
+Which engines you can actually reach depends on what skill bundles
+are loaded AND what the user has installed locally.
 
-**Scope (for now):**
-- VASP DFT input preparation and HPC job submission (LAMMPS support is a
-  planned follow-up).
-- When an HPC connection is active (`submit_vasp_job` is available), you
-  can submit VASP jobs to the cluster, monitor their status, download
-  results, and generate a final report — all without leaving the session.
-- Without an HPC connection, prep is local only; the user runs VASP
-  elsewhere and brings back output files for analysis.
+**Routing first:**
+On any new simulation request, call `route_simulation` BEFORE
+generating structures or inputs. The router returns
+{{scale, engine, reasoning, candidates_considered}} based on the user's
+goal, the system, and what's actually available. Once a routing
+decision exists in the session, plan subsequent tool calls around
+that engine (don't re-route on every turn unless the user pivots).
 
-**Workflow shape:**
+**Engine-neutral tool surface:**
+The granular tools are engine-neutral and take the engine from the active
+routing decision (or an explicit `software` argument): generate_structure,
+generate_dft_inputs, validate_inputs, apply_input_adjustments,
+analyze_output, and (when an HPC connection is active)
+submit_simulation_job / get_job_status / download_job_results. The engine's
+specifics come from its skill bundle, so the same tools serve any engine
+within a scale.
+
+**Dispatch maturity (as of this build):**
+- `periodic_dft` (`vasp`, `qe`) -> fully dispatched via the tools above.
+- `molecular_dynamics` (`lammps` / …) -> structure + the one-shot pipeline
+  work; the granular per-step generate tool is the next-step follow-up.
+  The interatomic potential (classical force field vs MLIP) is chosen
+  downstream of routing, once the structure exists, so an inorganic-solid,
+  interface, or reactive MD task routes here too and is handed an MLIP
+  automatically — an MLIP is a potential source, not a separate scale
+  (issue #429). When the router picks this, you can still run the complete
+  workflow; point the user at `MDSimulationAgent` for granular control.
+
+**HPC integration:**
+When an HPC connection is active (`submit_simulation_job` is available), you
+can submit jobs to the cluster, monitor their status, download
+results, and generate a final report — all without leaving the
+session. Without an HPC connection, prep is local only; the user
+runs the simulation elsewhere and brings back output files.
+
+**Workflow shape (for the VASP-dispatched path):**
 The session is iterative and structure-centric. Typical flow:
 
-  1. Build a structure from a natural-language description.
-  2. (Optionally) validate it; refine if issues are found.
-  3. Generate VASP inputs tailored to the scientific objective.
-  4. (Optionally) validate INCAR against literature, apply improvements.
-  5. Submit the job to the HPC cluster (when connected), monitor status,
-     download results once complete.
-  6. Analyze the output, suggest INCAR fixes if the run failed.
-  7. Generate a final report summarizing the full workflow.
+  1. Route the goal (`route_simulation`) -> establishes scale & engine.
+  2. Build a structure from a natural-language description.
+  3. (Optionally) validate it; refine if issues are found.
+  4. Generate inputs tailored to the scientific objective.
+  5. (Optionally) validate inputs against literature, apply improvements.
+  6. Submit the job to the HPC cluster (when connected), monitor
+     status, download results once complete.
+  7. Analyze the output, suggest fixes if the run failed.
+  8. Generate a final report summarizing the full workflow.
 
 Users often iterate on one structure, then ask for variants (different
 defect concentrations, supercell sizes, polymorphs, terminations). Reuse
 calculation templates across structures within a session whenever the
-physics is comparable — don't re-derive INCAR settings from scratch when
-the prior choice still applies.
+physics is comparable — don't re-derive parameter settings from scratch
+when the prior choice still applies.
 
 **Materials Project integration:**
 When configured, the structure-generation tool can resolve named materials
@@ -116,6 +171,22 @@ inside `generate_structure` when MP_API_KEY is available.
 - When a user request contains parameters you had to infer (polymorph
   choice, default supercell, etc.), say so explicitly so they can confirm
   or override.
+- For a small, exact change to an existing input file — `ENCUT = 520` in an
+  INCAR, a timestep or temperature in a LAMMPS deck — use `edit_file` (a
+  byte-exact surgical edit that leaves everything else untouched), NOT
+  `apply_input_adjustments`. Reserve `apply_input_adjustments` for a larger or
+  physics-changing revision that retunes several coupled settings at once (it
+  regenerates the inputs and can perturb parameters you did not mean to change);
+  `edit_file`'s cap-exceeded hint points you there when a change is too big for a
+  surgical edit. Use `rename_file` to change a filename byte-exactly.
+- `run_simulation` automatically reuses a structure this session already built
+  (a prior `generate_structure` or `run_simulation`) and runs it, so a
+  `generate_structure` → `run_simulation` sequence does NOT rebuild — you need
+  not thread the path yourself. This assumes the run targets the session's
+  CURRENT system. To simulate a DIFFERENT system, do not merely reword the goal:
+  build it first with `generate_structure`, or pass `structure_file="new"` to
+  force a fresh build — otherwise the request runs against the previous system's
+  structure. Pass a specific path/slug to reuse a particular earlier structure.
 """
 
 
@@ -147,7 +218,7 @@ def get_system_prompt(
     """
     directives = {
         SimulationMode.CO_PILOT: _CO_PILOT_DIRECTIVE,
-        SimulationMode.SUPERVISED: _SUPERVISED_DIRECTIVE,
+        SimulationMode.AUTOPILOT: _AUTOPILOT_DIRECTIVE,
         SimulationMode.AUTONOMOUS: _AUTONOMOUS_DIRECTIVE,
     }
     # Tools section is filled dynamically by the orchestrator after tool
@@ -187,7 +258,7 @@ def get_system_prompt(
             f"  {names}\n"
             "Pass the skill name to the relevant tool when applicable.\n"
         )
-    return directives[simulation_mode] + body
+    return directives[simulation_mode] + body + "\n\n" + PROSE_STYLE_RULE
 
 
 class SimulationOrchestratorAgent:
@@ -230,6 +301,7 @@ class SimulationOrchestratorAgent:
         futurehouse_api_key: Optional[str] = None,
         hpc_connection=None,
         hpc_scheduler=None,
+        max_iterations: Optional[int] = None,
         # Deprecated
         google_api_key: Optional[str] = None,
         local_model: Optional[str] = None,
@@ -273,6 +345,11 @@ class SimulationOrchestratorAgent:
         self.hpc_connection = hpc_connection
         self.hpc_scheduler = hpc_scheduler
 
+        # Routing decision from route_simulation tool. Populated once
+        # per session by the first route_simulation call; subsequent
+        # tool calls / the chat loop can consult it without re-routing.
+        self.routing_decision = None
+
         logging.info(f"🎛️  Simulation Mode: {simulation_mode.value.upper()}")
 
         # Setup directories
@@ -285,7 +362,7 @@ class SimulationOrchestratorAgent:
         self.structures_dir.mkdir(parents=True, exist_ok=True)
 
         # Session state — structure-centric (vs analysis-centric in analyze mode)
-        # generated_structures: list of {slug, poscar_path, description,
+        # generated_structures: list of {slug, structure_path, description,
         #     created_at, vasp_inputs_path?, vasp_output_dir?}
         self.generated_structures: List[Dict[str, Any]] = []
 
@@ -304,6 +381,16 @@ class SimulationOrchestratorAgent:
 
         self.message_count = 0
         self.last_checkpoint_message_count = 0
+
+        # Per-call tool-iteration cap (handlers read self.max_iterations) and
+        # a flag they set when they hit the cap. chat() returns the warning
+        # string as before; run_task reads the flag to flip status from
+        # success → error so programmatic callers can detect exhaustion.
+        self.max_iterations = (
+            max_iterations if max_iterations is not None
+            else self.MAX_TOOL_ITERATIONS
+        )
+        self._last_chat_hit_iter_cap = False
 
         # Restore from checkpoint if requested
         if restore_checkpoint and self.checkpoint_path.exists():
@@ -330,6 +417,11 @@ class SimulationOrchestratorAgent:
             self.use_openai = True
             self.tools_for_model = self.tools.openai_schemas
         else:
+            # Public / LiteLLM — delegate model→provider→env-var resolution
+            # to LiteLLM (works for any model LiteLLM supports; raises a
+            # message naming the missing vendor env var if not).
+            if api_key is None:
+                require_vendor_credentials(model_name)
             logging.info(f"🌐 Simulation orchestrator using LiteLLM: {model_name}")
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
@@ -349,7 +441,43 @@ class SimulationOrchestratorAgent:
             recent_history = self._trim_history(history, max_messages=self.MAX_HISTORY_MESSAGES)
             self.messages.extend(recent_history)
 
+        # ── LangGraph backbone ─────────────────────────────────────────────
+        self._graph_thread_id = f"simulation-{self.base_dir.name}"
+        self._graph = build_simulation_graph(self)
+        self._graph_config = {"configurable": {"thread_id": self._graph_thread_id}}
+
+        if history:
+            self._seed_graph_history(history)
+        # ──────────────────────────────────────────────────────────────────
+
         logging.info(f"✅ SimulationOrchestratorAgent initialized. Session: {self.base_dir}")
+
+    # ------------------------------------------------------------------
+    # Routing helpers
+    # ------------------------------------------------------------------
+
+    def active_skill_and_domain(self) -> tuple[Optional[str], Optional[str]]:
+        """Return ``(skill, domain)`` derived from the current routing decision.
+
+        Maps the router's ``(engine, scale)`` vocabulary onto the skill
+        infrastructure's ``(skill, domain)`` vocabulary so downstream tools
+        — in particular the engine-neutral critic agents — can derive their
+        ``skill=`` and ``domain=`` parameters from session state instead of
+        requiring the LLM to pass them on every call.
+
+        Returns:
+            ``(engine, scale)`` from ``routing_decision`` when it has been
+            populated by a successful ``route_simulation`` call. Returns
+            ``(None, None)`` when the orchestrator has not routed yet or
+            the prior routing call failed (the LLM should call
+            ``route_simulation`` before invoking tools that need this).
+        """
+        decision = self.routing_decision or {}
+        scale = decision.get("scale")
+        engine = decision.get("engine")
+        if not scale or not engine:
+            return None, None
+        return engine, scale
 
     # ------------------------------------------------------------------
     # Public API
@@ -357,20 +485,181 @@ class SimulationOrchestratorAgent:
 
     def chat(self, user_input: str) -> str:
         """Interactive chat — used by the CLI and UI."""
-        if self.use_openai:
-            response = self._handle_openai_chat(user_input)
-        else:
-            response = self._handle_litellm_chat(user_input)
+        # Bind this turn's human-feedback prompts to the session's
+        # durable feedback log (nested child chats rebind to their own;
+        # run_task restores the caller's binding on exit).
+        from ...hitl import set_thread_feedback_log as _set_fblog
+        from pathlib import Path as _P
+        _set_fblog(str(_P(self.base_dir) / "feedback_log.jsonl"))
+        # ── Console display features not yet wired here (parity TODO) ──────────
+        # Analysis, meta, and planning distinguish three console output classes;
+        # this orchestrator currently emits only structural logs. To bring it to
+        # parity, mirror AnalysisOrchestratorAgent:
+        #   1. 💭 Reasoning — copy `_print_assistant_reasoning(self, content)` and
+        #      call it from the `call_model` node in scilink/graphs/simulation.py
+        #      (mirroring scilink/graphs/analysis.py) whenever the response
+        #      carries tool_calls. Shows the interim reasoning dim+italic so a
+        #      deliberate step doesn't read as a silent jump to "🔧 Calling
+        #      tool". Mirror the analysis/planning copy
+        #      exactly, including the invisible U+2063 specialist marker
+        #      (`mark = "\u2063" if _agent_label != "Agent" else ""`,
+        #      printed as `💭{mark} …`) so a meta-delegated sim run's reasoning
+        #      gets the specialist color in the UI; standalone keeps a plain 💭.
+        #   2. 🤖 Answer — copy `_print_agent_answer(self, text)` and call
+        #      `self._print_agent_answer(response)` just before `return response`
+        #      below. NB: unlike analysis/planning (which print "🤖 Agent:" in
+        #      chat()), this chat() returns the answer un-printed, so this is an
+        #      ADD, not a replace.
+        #   3. Meta attribution — when the deferred `delegate_to_simulation` seam
+        #      creates the sim child, set
+        #      `child._agent_label = "Simulation specialist"` (mirrors the
+        #      analysis/planning children in MetaOrchestratorAgent).
+        #   4. UI — no change needed; `ui/app.py::_log_to_html` already styles 💭
+        #      (dim italic, cool meta / warm specialist by the U+2063 marker) and
+        #      the 🤖 header (bold) regardless of source.
+        self._last_chat_hit_iter_cap = False
+        response = self._invoke_graph(user_input)
         self.message_count += 1
         self._auto_checkpoint()
         self._save_history()
         return response
 
-    def run_task(self, task: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Non-interactive entry point — used by the future meta agent.
+    def _invoke_graph(self, user_input: str) -> str:
+        """
+        Run one user turn through the LangGraph ReAct loop.
 
-        Runs the task in autonomous mode (regardless of the agent's current
-        configured mode) and returns a structured summary that's easy to
+        Used by both ``chat()`` (interactive) and ``run_task()``
+        (non-interactive autonomous mode).
+        """
+        self._repair_graph_state()
+
+        # Keep self.messages in sync for JSON persistence
+        self.messages.append({"role": "user", "content": user_input})
+
+        if len(self.messages) > 120:
+            print("  ⚠️  Context window getting full - trimming history...")
+            system_msg = self.messages[0]
+            recent_msgs = self._trim_history(
+                self.messages[1:], max_messages=self.MAX_HISTORY_MESSAGES
+            )
+            self.messages = [system_msg] + recent_msgs
+
+        result = self._graph.invoke(
+            {
+                "messages": [HumanMessage(content=user_input)],
+                "step_count": 0,
+                "autonomy_mode": self.simulation_mode.value,
+                "active_skill": None,
+                "session_dir": str(self.base_dir),
+                "checkpoint_data": {},
+                "mcp_connections": list(self._mcp_connections.keys()),
+                "generated_structures": self.generated_structures,
+                "default_calc_params": self.default_calc_params,
+                "message_count": self.message_count,
+            },
+            config=self._graph_config,
+        )
+
+        final_text = ""
+        for msg in reversed(result.get("messages", [])):
+            if isinstance(msg, AIMessage) and msg.content:
+                final_text = msg.content
+                break
+
+        if not final_text:
+            if result.get("step_count", 0) >= self.max_iterations:
+                self._last_chat_hit_iter_cap = True
+            final_text = "⚠️ Maximum tool iterations reached. Please simplify your request."
+
+        self.messages.append({"role": "assistant", "content": final_text})
+        return final_text
+
+    def _repair_graph_state(self) -> None:
+        """Heal a dangling tool call left by a mid-run interruption — the
+        LangGraph-state analogue of ``repair_dangling_tool_calls`` /
+        ``close_interrupted_turn``. See AnalysisOrchestratorAgent for the
+        full rationale; the checkpointer only ever appends, so the fix is
+        always additive.
+        """
+        try:
+            snapshot = self._graph.get_state(self._graph_config)
+        except Exception:
+            return
+        if not snapshot or not snapshot.values:
+            return
+        messages = snapshot.values.get("messages") or []
+        if not messages:
+            return
+
+        last = messages[-1]
+        patch = []
+        if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
+            for tc in last.tool_calls:
+                patch.append(ToolMessage(
+                    content=(
+                        "⚠️ Tool execution was interrupted before a result "
+                        "was produced (the run was stopped). Re-run this "
+                        "tool if its output is still needed."
+                    ),
+                    tool_call_id=tc["id"],
+                ))
+        elif isinstance(last, ToolMessage):
+            patch.append(AIMessage(
+                content="[Turn interrupted before a reply was produced.]"
+            ))
+
+        if patch:
+            self.logger.info(
+                "  🔧 Repaired %d dangling message(s) from an interrupted run",
+                len(patch),
+            )
+            self._graph.update_state(self._graph_config, {"messages": patch})
+
+    def _seed_graph_history(self, history: List[Dict]) -> None:
+        """Replay persisted history into the graph's MemorySaver at init."""
+        history = close_interrupted_turn(repair_dangling_tool_calls(list(history)))
+
+        lc_messages = []
+        for m in history:
+            role = m.get("role", "")
+            content = m.get("content") or ""
+            if role == "user":
+                lc_messages.append(HumanMessage(content=content))
+            elif role == "assistant":
+                tool_calls_raw = m.get("tool_calls", [])
+                lc_tc = [
+                    {
+                        "id": tc.get("id", ""),
+                        "name": tc.get("function", {}).get("name", ""),
+                        "args": json.loads(tc.get("function", {}).get("arguments", "{}"))
+                        if isinstance(tc.get("function", {}).get("arguments", "{}"), str)
+                        else tc.get("function", {}).get("arguments", {}),
+                        "type": "tool_call",
+                    }
+                    for tc in tool_calls_raw
+                ]
+                lc_messages.append(AIMessage(content=content, tool_calls=lc_tc))
+            elif role == "tool":
+                lc_messages.append(ToolMessage(content=content, tool_call_id=m.get("tool_call_id", "")))
+
+        if not lc_messages:
+            return
+
+        try:
+            self._graph.update_state(self._graph_config, {"messages": lc_messages})
+            self.logger.info(
+                "  🧠 Graph history seeded: %d messages loaded into MemorySaver",
+                len(lc_messages),
+            )
+        except Exception as e:
+            self.logger.warning("Failed to seed graph history: %s", e)
+
+    def run_task(self, task: str, context: Optional[Dict[str, Any]] = None,
+                 autonomy: Optional[SimulationMode] = None,
+                 max_iterations: Optional[int] = None) -> Dict[str, Any]:
+        """Non-interactive entry point — used by the meta agent.
+
+        Runs the task and returns a structured summary that's easy to
         consume programmatically:
 
             {
@@ -384,11 +673,13 @@ class SimulationOrchestratorAgent:
                 "task": str,                       # echoed input
             }
 
-        The implementation pins the agent into AUTONOMOUS mode for the
-        duration of the call, runs the chat loop once with the task as
-        user input, then derives the structured summary from the
-        post-call session state. The original autonomy mode is restored
-        on exit so an interactive session is unaffected.
+        ``autonomy`` selects the SimulationMode for this call. Defaults to
+        AUTONOMOUS — the safe choice for a headless/programmatic caller, so
+        the agent never pauses for a nonexistent user. A caller attached to a
+        human (the meta agent, driven via CLI/UI) passes AUTOPILOT so the
+        sub-agents' human-feedback prompts reach that human.
+        The structured summary is derived from the post-call session-state
+        delta; the original mode is restored on exit, even if chat() raises.
         """
         # Build a self-contained prompt that includes the optional context.
         prompt = task
@@ -409,15 +700,32 @@ class SimulationOrchestratorAgent:
         structures_before = list(self.generated_structures or [])
         n_before = len(structures_before)
 
-        # Pin autonomy to AUTONOMOUS for the duration of this call so the
-        # agent doesn't pause to ask the (nonexistent) user for confirmation.
+        # Run under the requested autonomy mode — AUTONOMOUS by default (the
+        # safe headless choice). The meta agent passes its own mode through,
+        # so a co-pilot / autopilot delegation still raises the sub-agents'
+        # human-feedback prompts to the user driving the session.
+        run_mode = autonomy if autonomy is not None else SimulationMode.AUTONOMOUS
         original_mode = self.simulation_mode
+        original_max_iter = self.max_iterations
+        from ...hitl import get_thread_feedback_log, set_thread_feedback_log
+        _prev_fblog = get_thread_feedback_log()
         try:
-            self.set_simulation_mode(SimulationMode.AUTONOMOUS)
+            self.set_simulation_mode(run_mode)
+            if max_iterations is not None:
+                self.max_iterations = max_iterations
             try:
                 summary_text = self.chat(prompt)
-                status = "success"
-                error_msg: Optional[str] = None
+                # chat() handles the iteration-cap case internally and returns
+                # the warning string (preserving CLI/UI behavior); a flag on
+                # self tells us whether that happened so we can surface it as
+                # an error to programmatic callers instead of silently
+                # reporting success.
+                if self._last_chat_hit_iter_cap:
+                    status = "error"
+                    error_msg: Optional[str] = summary_text
+                else:
+                    status = "success"
+                    error_msg = None
             except Exception as e:
                 self.logger.exception(f"run_task failed: {e}")
                 summary_text = ""
@@ -426,6 +734,16 @@ class SimulationOrchestratorAgent:
         finally:
             # Always restore the original mode, even if chat() raised.
             self.set_simulation_mode(original_mode)
+            self.max_iterations = original_max_iter
+            # chat() bound the feedback log to THIS session; restore the
+            # caller's binding (a delegating meta keeps logging to its own).
+            set_thread_feedback_log(_prev_fblog)
+            # A delegation-driven child may never reach the chat loop's
+            # auto-checkpoint cadence, and an interrupted delegation must
+            # leave current state behind for the restart/resume path
+            # (issue #469) — checkpoint after every run_task, like the
+            # planning orchestrator.
+            self._auto_checkpoint()
 
         # Derive the structured summary from session state.
         new_structures = (self.generated_structures or [])[n_before:]
@@ -433,8 +751,11 @@ class SimulationOrchestratorAgent:
         files_produced: List[str] = []
         key_findings: List[str] = []
         for s in new_structures:
-            for key in ("poscar_path", "incar_path", "kpoints_path", "script_path"):
+            for key in ("structure_path", "script_path"):
                 p = s.get(key)
+                if p:
+                    files_produced.append(p)
+            for p in (s.get("input_files") or {}).values():
                 if p:
                     files_produced.append(p)
             val = s.get("validation") or {}
@@ -452,15 +773,14 @@ class SimulationOrchestratorAgent:
                     f"Structure {s.get('slug')} has unresolved validation issues."
                 )
 
-        # Heuristic: a "follow-up" is a structure that has a POSCAR but no
-        # INCAR/KPOINTS yet — natural next step for the caller is to
-        # generate VASP inputs for it.
+        # Heuristic: a "follow-up" is a structure that has been built but has
+        # no generated inputs yet — natural next step is to generate inputs.
         suggested_followups: List[str] = []
         for s in new_structures:
-            if s.get("poscar_path") and not s.get("incar_path"):
+            if s.get("structure_path") and not s.get("input_files"):
                 suggested_followups.append(
-                    f"Generate VASP inputs for {s.get('slug')} "
-                    f"(POSCAR at {s.get('poscar_path')})."
+                    f"Generate inputs for {s.get('slug')} "
+                    f"(structure at {s.get('structure_path')})."
                 )
 
         result = {
@@ -474,9 +794,8 @@ class SimulationOrchestratorAgent:
                 {
                     "slug": s.get("slug"),
                     "description": s.get("description"),
-                    "poscar_path": s.get("poscar_path"),
-                    "incar_path": s.get("incar_path"),
-                    "kpoints_path": s.get("kpoints_path"),
+                    "structure_path": s.get("structure_path"),
+                    "input_files": s.get("input_files") or {},
                 } for s in new_structures
             ],
             "warnings": warnings,
@@ -607,7 +926,7 @@ class SimulationOrchestratorAgent:
         """Persist conversation history to disk."""
         try:
             history_data = [m for m in self.messages if m["role"] != "system"]
-            with open(self.history_path, "w") as f:
+            with open(self.history_path, "w", encoding="utf-8") as f:
                 json.dump(history_data, f, indent=2)
         except Exception as e:
             self.logger.warning(f"Failed to save history: {e}")
@@ -639,186 +958,12 @@ class SimulationOrchestratorAgent:
                 "message_count": self.message_count,
                 "saved_at": datetime.now().isoformat(),
             }
-            with open(self.checkpoint_path, "w") as f:
+            with open(self.checkpoint_path, "w", encoding="utf-8") as f:
                 json.dump(ck, f, indent=2, default=str)
             self.last_checkpoint_message_count = self.message_count
             print(f"    ✅ Auto-checkpoint saved")
         except Exception as e:
             self.logger.warning(f"Auto-checkpoint failed: {e}")
-
-    # ------------------------------------------------------------------
-    # Chat handlers — manual tool-call loops, mirrors analyze mode
-    # ------------------------------------------------------------------
-
-    def _handle_openai_chat(self, user_input: str) -> str:
-        """Chat with OpenAI-compatible models with manual function calling loop."""
-        from openai import OpenAI
-
-        client = OpenAI(
-            api_key=self.model.api_key,
-            base_url=self.model.base_url,
-            timeout=120.0,
-        )
-
-        self.messages.append({"role": "user", "content": user_input})
-
-        if len(self.messages) > 120:
-            print("  ⚠️  Context window getting full - trimming history...")
-            system_msg = self.messages[0]
-            recent_msgs = self._trim_history(self.messages[1:], max_messages=self.MAX_HISTORY_MESSAGES)
-            self.messages = [system_msg] + recent_msgs
-
-        iteration = 0
-        while iteration < self.MAX_TOOL_ITERATIONS:
-            iteration += 1
-            print(f"  ⏳ Waiting for orchestrator response ...")
-
-            try:
-                response = client.chat.completions.create(
-                    model=self.model.model,
-                    messages=self.messages,
-                    tools=self.tools_for_model,
-                    tool_choice="auto",
-                )
-            except Exception as e:
-                if "timeout" in str(e).lower() or "timed out" in str(e).lower():
-                    print(f"  ⚠️ API timeout on iteration {iteration}. Retrying...")
-                    if iteration < 3:
-                        continue
-                raise
-
-            message = response.choices[0].message
-
-            if not message.tool_calls:
-                text = message.content
-                if not text and iteration > 0:
-                    self.messages.append({
-                        "role": "user",
-                        "content": "Please briefly summarize what you just did and suggest next steps.",
-                    })
-                    followup = client.chat.completions.create(
-                        model=self.model.model,
-                        messages=self.messages,
-                        tools=self.tools_for_model,
-                        tool_choice="none",
-                    )
-                    text = followup.choices[0].message.content or ""
-                self.messages.append({"role": "assistant", "content": text})
-                return text
-
-            self.messages.append({
-                "role": "assistant",
-                "content": message.content,
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    } for tc in message.tool_calls
-                ],
-            })
-
-            for tool_call in message.tool_calls:
-                func_name = tool_call.function.name
-                args = json.loads(tool_call.function.arguments)
-                print(f"  🔧 Calling tool: {func_name}")
-                result = self.tools.execute_tool(func_name, **args)
-                self.messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result,
-                })
-
-        return "⚠️ Maximum tool iterations reached. Please simplify your request."
-
-    def _handle_litellm_chat(self, user_input: str) -> str:
-        """Chat with LiteLLM models with manual function calling loop."""
-        import litellm
-
-        self.messages.append({"role": "user", "content": user_input})
-
-        if len(self.messages) > 120:
-            print("  ⚠️  Context window getting full - trimming history...")
-            system_msg = self.messages[0]
-            recent_msgs = self._trim_history(self.messages[1:], max_messages=self.MAX_HISTORY_MESSAGES)
-            self.messages = [system_msg] + recent_msgs
-
-        iteration = 0
-        while iteration < self.MAX_TOOL_ITERATIONS:
-            iteration += 1
-            print(f"  ⏳ Waiting for orchestrator response ...")
-
-            try:
-                response = litellm.completion(
-                    model=self.model.model,
-                    messages=self.messages,
-                    tools=self.tools_for_model,
-                    tool_choice="auto",
-                    api_key=self.model.api_key,
-                    api_base=self.model.base_url,
-                    timeout=120,
-                    request_timeout=120,
-                )
-            except Exception as e:
-                if "timeout" in str(e).lower() or "timed out" in str(e).lower():
-                    print(f"  ⚠️ API timeout on iteration {iteration}. Retrying...")
-                    if iteration < 3:
-                        continue
-                raise
-
-            message = response.choices[0].message
-            tool_calls = getattr(message, "tool_calls", None)
-            content = getattr(message, "content", None)
-
-            if not tool_calls:
-                if not content and iteration > 0:
-                    self.messages.append({
-                        "role": "user",
-                        "content": "Please briefly summarize what you just did and suggest next steps.",
-                    })
-                    followup = litellm.completion(
-                        model=self.model.model,
-                        messages=self.messages,
-                        tools=self.tools_for_model,
-                        tool_choice="none",
-                    )
-                    content = getattr(followup.choices[0].message, "content", None) or ""
-                self.messages.append({"role": "assistant", "content": content or ""})
-                return content or ""
-
-            self.messages.append({
-                "role": "assistant",
-                "content": content,
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    } for tc in tool_calls
-                ],
-            })
-
-            for tool_call in tool_calls:
-                func_name = tool_call.function.name
-                try:
-                    args = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError:
-                    args = {}
-                print(f"  🔧 Calling tool: {func_name}")
-                result = self.tools.execute_tool(func_name, **args)
-                self.messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result,
-                })
-
-        return "⚠️ Maximum tool iterations reached. Please simplify your request."
 
     # ------------------------------------------------------------------
     # Restoration

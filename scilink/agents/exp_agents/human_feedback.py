@@ -4,6 +4,8 @@ import textwrap
 from typing import Dict, Any, Optional
 from datetime import datetime
 
+from ...hitl import request_human_feedback
+
 
 
 
@@ -45,7 +47,11 @@ class SimpleFeedbackCollector:
         
         try:
             # Single, clear prompt that accepts feedback directly
-            feedback_text = input("\n🤔 Your feedback (or press Enter to use analysis as-is): ").strip()
+            feedback_text = request_human_feedback(
+                "\n🤔 Your feedback (or press Enter to use analysis as-is): ",
+                kind="review_result",
+                origin={"stage": "analysis_review"},
+            ).strip()
             
             if not feedback_text:
                 print("✅ No feedback provided. Using analysis as-is.")
@@ -86,7 +92,7 @@ class SimpleFeedbackCollector:
             }
         }
         
-        with open(log_file, 'w') as f:
+        with open(log_file, 'w', encoding="utf-8") as f:
             json.dump(log_data, f, indent=2)
         
         self.logger.info(f"Feedback log saved: {log_file}")
@@ -239,7 +245,11 @@ class IterationFeedbackMixin:
         print("-" * 80)
         
         # Prompt for feedback
-        user_feedback = input("\n🤔 Your feedback to adjust the targets/refinement (or press Enter to continue as-is): ").strip()
+        user_feedback = request_human_feedback(
+            "\n🤔 Your feedback to adjust the targets/refinement (or press Enter to continue as-is): ",
+            kind="review_plan",
+            origin={"stage": "iteration_feedback"},
+        ).strip()
         
         if not user_feedback:
             print("✅ No feedback provided. Continuing with current targets.")

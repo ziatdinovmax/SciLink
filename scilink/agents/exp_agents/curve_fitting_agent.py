@@ -38,9 +38,13 @@ from ...executors import ScriptExecutor, require_sandbox_approval
 from ..lit_agents.literature_agent import FittingModelLiteratureAgent
 from .preprocess import CurvePreprocessingAgent
 from .pipelines.curve_fitting_pipelines import create_unified_curve_fitting_pipeline
-from ...skills._shared.curve_fitting_tools import load_curve_data, plot_curve_to_bytes
+from ...skills._shared.curve_fitting_tools import (
+    load_curve_data, plot_curve_to_bytes, select_xy_columns,
+    describe_columns, sniff_column_names,
+)
 from ._deprecation import normalize_params
 from ...skills.loader import load_skill
+from ...utils.text_io import read_text_utf8
 
 from .instruct import (
     FITTING_INTERPRETATION_INSTRUCTIONS,
@@ -49,6 +53,13 @@ from .instruct import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _empty_auxiliary_state() -> dict:
+    """Default auxiliary state — no companion datasets loaded. ``auxiliary_items``
+    is the list of per-dataset dicts (label / array / axis / plot_bytes /
+    summary / mime_type); labels become operand keys downstream. (#226)"""
+    return {"auxiliary_items": []}
 
 
 class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
@@ -170,13 +181,15 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         use_literature: bool = False,
         run_preprocessing: bool = True,
         enable_human_feedback: bool = True,
-        executor_timeout: int = 300,
+        executor_timeout: int = 600,
         max_wait_time: int = 1000,
         # Quality control settings
         r2_threshold: float = 0.95,
         max_model_retries: int = 1,
         outlier_sigma: float = 2.0,
         max_verification_iterations: int = 7,
+        parallel_workers: int | None = None,
+        quality_gate: "QualityGate | dict | None" = None,
         **kwargs,
     ):
         # ====================================================================
@@ -213,23 +226,29 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
         # Quality control settings
         self.r2_threshold = r2_threshold
+        # Optional non-R² gate override (skill or programmatic). When None,
+        # the framework falls back to the legacy R² gate built from
+        # r2_threshold — full backward compatibility.
+        from .quality_gate import _coerce as _coerce_gate
+        self.quality_gate = _coerce_gate(quality_gate)
         self.max_model_retries = max_model_retries
         self.outlier_sigma = outlier_sigma
         self.max_verification_iterations = max_verification_iterations
+        # Non-anchor parallel fan-out for series fitting. None → falls back to
+        # SCILINK_CURVE_FIT_WORKERS env var or 1 (serial, backward-compatible).
+        self.parallel_workers = parallel_workers
 
         self.executor = ScriptExecutor(timeout=executor_timeout)
 
         # Optional preprocessor
         self.run_preprocessing = run_preprocessing
+        # Preprocessing is now performed INSIDE the generated fit script — the
+        # model writes appropriate, length-preserving preprocessing as part of
+        # its own fitting code, verified in the same loop. The separate upstream
+        # 1D CurvePreprocessingAgent is retired, so self.preprocessor stays None
+        # and every site (analyze first-spectrum, series loop, adaptive refit)
+        # feeds RAW data to the fit script. See docs/preprocessing_in_fit_loop.md.
         self.preprocessor = None
-        if run_preprocessing:
-            self.preprocessor = CurvePreprocessingAgent(
-                api_key=self.api_key,
-                model_name=model_name,
-                base_url=self.base_url,
-                output_dir=os.path.join(self.output_dir, "preprocessing"),
-                executor_timeout=executor_timeout,
-            )
 
         # Optional literature agent
         self.literature_agent = None
@@ -263,16 +282,57 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         objective: str | None = None,
         hints: str | None = None,
         series_metadata: Optional[dict] = None,
-        auxiliary_data: Optional[str] = None,
-        auxiliary_label: Optional[str] = None,
+        auxiliary_data: Optional[Union[str, List[str]]] = None,
+        auxiliary_label: Optional[Union[str, List[str]]] = None,
         # Domain skill
         skill: Optional[str] = None,
+        # Non-binding skill suggestion from the orchestrator (the agent's
+        # auto-selector treats it as a prior; agent has final authority).
+        skill_hint: Optional[Union[str, List[str]]] = None,
+        # User-registered custom skills ({name: path}) — folded into the
+        # agent-side selector's catalog so an uploaded skill is auto-selectable.
+        custom_skills: Optional[Dict[str, str]] = None,
         # Prior knowledge from reference analyses
         prior_knowledge: Optional[List[Dict[str, Any]]] = None,
+        # Prior curve-fit runs whose saved artifacts (fitting script, fit
+        # summary) the new run may consume as reference. By default these are
+        # agent-judged reference material (reuse / adapt / rewrite is the
+        # agent's call). Set ``reuse_locked_script=True`` ONLY to force verbatim
+        # reuse of the prior locked script — for extending an ongoing campaign
+        # with a fixed model / feature-table schema (#172).
+        prior_analysis_paths: Optional[List[str]] = None,
+        reuse_locked_script: bool = False,
+        # Surgical single-knob follow-up on the locked-reuse path: exact
+        # old/new snippet pairs applied to the prior script BEFORE the
+        # verbatim run, so the rerun is byte-identical except the knob
+        # (requires prior_analysis_paths + reuse_locked_script). Validated
+        # up front; the sandbox run remains the verification.
+        script_edits: Optional[List[Dict[str, Any]]] = None,
+        literature_file: Optional[str] = None,
         # Quality control overrides (optional)
         r2_threshold: Optional[float] = None,
         max_model_retries: Optional[int] = None,
         outlier_sigma: Optional[float] = None,
+        max_verification_iterations: Optional[int] = None,
+        max_series_refits: Optional[int] = None,
+        # Annealing schedule start level for THIS run (None/0 = current
+        # behavior: start frozen at T=0 and escalate adaptively). A re-run may
+        # start higher (e.g. hot) so it does not re-obey early constraint stages
+        # a prior run already found inadequate.
+        starting_annealing_level: Optional[int] = None,
+        quality_gate: "QualityGate | dict | None" = None,
+        # Number of independent anchor-fit attempts run in parallel; an LLM
+        # judge compares finished fits (R² + fit plots) and locks the winner.
+        # Default 1 = no fan-out.
+        n_candidates: int = 1,
+        # Escalation mode: attempt 0 runs alone and is fast-accepted when
+        # strong; the remaining n_candidates-1 launch only when it is weak.
+        candidate_escalation: bool = False,
+        # Operating profile (#346): None/"thorough" = today's behavior;
+        # "realtime" = zero-LLM per-frame execution of a locked recipe
+        # (requires prior_analysis_paths + reuse_locked_script). Accepts a
+        # preset name or a QCProfile instance.
+        profile: Optional[Any] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -347,6 +407,10 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             r2_threshold: Override default R² threshold for this analysis
             max_model_retries: Override default max retries for this analysis
             outlier_sigma: Override default outlier sigma for this analysis
+            prior_analysis_paths: Optional list of folder/file paths from
+                previous curve-fit runs. Each run's saved fitting script and
+                fit summary are surfaced to the planning and script-generation
+                stages as reference context.
 
         Returns:
             Dict with status, detailed_analysis, scientific_claims,
@@ -405,12 +469,91 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         effective_r2_threshold = r2_threshold if r2_threshold is not None else self.r2_threshold
         effective_max_retries = max_model_retries if max_model_retries is not None else self.max_model_retries
         effective_outlier_sigma = outlier_sigma if outlier_sigma is not None else self.outlier_sigma
+        # Per-call thoroughness override (fast/in-situ vs thorough/post-experiment).
+        # 0 => bypass LLM verification entirely; 1 => single check, no refit loop;
+        # higher => more refinement passes. Falls back to the construction default.
+        effective_max_verification = (
+            max_verification_iterations if max_verification_iterations is not None
+            else self.max_verification_iterations)
+        if effective_max_verification < 0:
+            raise ValueError("max_verification_iterations must be >= 0")
+        try:
+            n_candidates = max(1, min(int(n_candidates or 1), 8))
+        except (TypeError, ValueError):
+            n_candidates = 1
+        candidate_escalation = bool(candidate_escalation) and n_candidates > 1
+
+        # Operating profile (#346 steps 3-4). "realtime" is the per-frame
+        # in-situ mode: a locked script executes with the arithmetic gate +
+        # fingerprint drift check and ZERO LLM calls on the happy path —
+        # every LLM stage around it is skipped. The locked recipe comes from
+        # an explicit prior run (prior_analysis_paths + reuse_locked_script)
+        # or, without one, from a verbatim COLD START: top bank candidates
+        # are auditioned against this frame after the data loads, and the
+        # first to clear the gate becomes the recipe. No candidate passing
+        # demotes the run to a thorough anchor (loudly).
+        from ._qc_profile import resolve_profile
+        qc_profile = resolve_profile(profile)
+        realtime = qc_profile.name == "realtime"
+        realtime_cold_start = False
+        if realtime and not (prior_analysis_paths and reuse_locked_script):
+            from scilink.skills._shared import _script_bank as _sb
+            if not _sb.bank_enabled():
+                raise ValueError(
+                    "profile='realtime' executes a locked recipe. Either pass "
+                    "prior_analysis_paths=[<anchor run dir>] with "
+                    "reuse_locked_script=True (run the anchor under the "
+                    "default thorough profile first), or enable the script "
+                    "bank (SCILINK_SCRIPT_BANK=1) so a matching banked script "
+                    "can be cold-started."
+                )
+            realtime_cold_start = True
+
+        # Surgical script edits — validated HERE, before any pipeline work:
+        # the edits must apply cleanly to the prior run's saved script or the
+        # run refuses with the per-edit report. Never a partial application,
+        # never a silent unedited run, zero LLM cost on refusal.
+        if script_edits:
+            def _edits_error(err: str, details: str, **extra):
+                return {"status": "error",
+                        "error": {"error": err, "details": details, **extra},
+                        "output_directory": str(self.output_dir)}
+            if not (prior_analysis_paths and reuse_locked_script):
+                return _edits_error(
+                    "script_edits requires locked reuse",
+                    "Pass prior_analysis_paths=[<prior run dir>] and "
+                    "reuse_locked_script=True — script_edits surgically "
+                    "modifies that prior script before the verbatim run.")
+            from .controllers.curve_fitting_controllers import (
+                _first_prior_curve_fit_script)
+            from scilink.utils.file_edit import apply_snippet_edits
+            _prior_script, _ = _first_prior_curve_fit_script(
+                {"prior_analysis_paths": prior_analysis_paths})
+            if not _prior_script:
+                return _edits_error(
+                    "no reusable prior script",
+                    "None of prior_analysis_paths carries a saved fitting "
+                    "script (series_fit_results.json + scripts/*.py).")
+            _res = apply_snippet_edits(_prior_script, script_edits)
+            if _res["status"] != "success":
+                return _edits_error(
+                    "script_edits do not apply", _res["message"],
+                    failed_edit=_res.get("failed_edit"))
 
         # Resolve task_mode — caller sets this explicitly (standalone user or
         # orchestrator). Defaults to "fitting" when unset.
         effective_task_mode = self._resolve_task_mode(task_mode)
         
-        # Convert DataFrame to numpy array (first two numeric columns)
+        # Column structure for the planner (only populated for >2-col inputs);
+        # the LLM decides X/Y at planning, the heuristic is the fallback. The raw
+        # full first spectrum is retained so the lock step can re-slice array/
+        # DataFrame inputs (file inputs re-load with the locked mapping lazily).
+        column_info = None
+        raw_first_spectrum_full = None
+
+        # Convert DataFrame to a 2-column (x, y) array. With >2 numeric columns,
+        # capture the column structure for the planner, then heuristic-reduce for
+        # the planning plot/stats (the LLM's choice is applied at lock).
         if isinstance(data, pd.DataFrame):
             numeric_cols = data.select_dtypes(include="number")
             if numeric_cols.shape[1] < 2:
@@ -420,7 +563,11 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                               "details": f"Expected at least 2 numeric columns, got {numeric_cols.shape[1]}"},
                     "output_directory": str(self.output_dir)
                 }
-            data = numeric_cols.iloc[:, :2].to_numpy()
+            _col_names = [str(c) for c in numeric_cols.columns]
+            raw_first_spectrum_full = numeric_cols.to_numpy()
+            column_info = describe_columns(raw_first_spectrum_full, names=_col_names)
+            data = select_xy_columns(raw_first_spectrum_full, system_info=system_info,
+                                     logger_=self.logger, column_names=_col_names)
 
         # Parse input
         data_path, data_paths, data_array, error = self._parse_data_input(data)
@@ -454,9 +601,21 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 if spectrum_stack.shape[0] == 2:
                     # Shape (2, n): single spectrum with x and y
                     spectrum_stack = spectrum_stack[np.newaxis, :, :]
-                else:
+                elif spectrum_stack.shape[1] == 2:
                     # Shape (n, 2): single spectrum, transpose
                     spectrum_stack = spectrum_stack.T[np.newaxis, :, :]
+                else:
+                    # >2 columns (e.g. x, y, error): capture structure for the
+                    # planner, retain the raw (oriented to n_points×n_cols), then
+                    # heuristic-reduce; the LLM's choice is applied at lock.
+                    raw_first_spectrum_full = (
+                        spectrum_stack.T if spectrum_stack.shape[0] < spectrum_stack.shape[1]
+                        else spectrum_stack
+                    )
+                    column_info = describe_columns(raw_first_spectrum_full)
+                    xy = select_xy_columns(spectrum_stack, system_info=system_info,
+                                           logger_=self.logger)
+                    spectrum_stack = xy.T[np.newaxis, :, :]
                 self.logger.info(f"2D array provided, converted to shape {spectrum_stack.shape}")
             elif spectrum_stack.ndim != 3:
                 return {
@@ -475,15 +634,9 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         
         self.logger.info("")
         self.logger.info(f"📈 CURVE FITTING ANALYSIS - {num_spectra} spectrum{'s' if num_spectra > 1 else ''}")
-        from .controllers.curve_fitting_controllers import UnifiedSeriesProcessingController as _USPC
-        _accept = float(effective_r2_threshold)
-        _floor = max(_accept - _USPC._r2_soft_margin(_accept), 0.0)
-        self.logger.info(
-            f"   Quality: R² ≥ {_accept:.3f} accepts (with clean residuals); "
-            f"R² < {_floor:.3f} hard-rejects; "
-            f"{_floor:.3f}–{_accept:.3f} is a soft band where the verifier "
-            f"can reject on physics grounds (systematic residuals, missing features)"
-        )
+        # The quality-gate-aware log line is emitted later, after the gate
+        # is resolved against skill metadata (skill frontmatter may declare
+        # a non-R² gate that overrides r2_threshold).
         if not is_single_spectrum:
             self.logger.info(f"   Outlier detection: {effective_outlier_sigma}σ")
         
@@ -493,48 +646,57 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             first_spectrum_name = "spectrum_0000"
         else:
             try:
-                first_spectrum = load_curve_data(spectrum_paths[0])
-                first_spectrum_name = Path(spectrum_paths[0]).stem
+                first_spectrum = load_curve_data(spectrum_paths[0], system_info=system_info)
             except Exception as e:
-                return {
-                    "status": "error",
-                    "error": {"error": "Failed to load spectrum", "details": str(e)},
-                    "output_directory": str(self.output_dir)
-                }
+                # Deterministic load failed — e.g. a metadata block above a plain
+                # (non-#) header that np.loadtxt's fixed skiprows attempts can't
+                # skip. Rather than grow the deterministic attempt-ladder for every
+                # format, let the LLM normalizer split metadata from the numeric
+                # table into a clean file, then retry. LLM proposes the parse, the
+                # round-trip check verifies it (lossless); on any failure we keep
+                # the original error.
+                clean = self._normalize_messy_file(spectrum_paths[0])
+                if not clean:
+                    return {
+                        "status": "error",
+                        "error": {"error": "Failed to load spectrum", "details": str(e)},
+                        "output_directory": str(self.output_dir)
+                    }
+                spectrum_paths[0] = clean  # downstream per-spectrum loads use the clean file
+                first_spectrum = load_curve_data(clean, system_info=system_info)
+            first_spectrum_name = Path(spectrum_paths[0]).stem
+            # Capture the raw column structure for the planner (best-effort);
+            # the per-spectrum fit re-loads lazily with the locked mapping.
+            try:
+                _raw0 = load_curve_data(spectrum_paths[0], auto_orient=False)
+                column_info = describe_columns(
+                    _raw0, names=sniff_column_names(spectrum_paths[0]))
+            except Exception:
+                column_info = None
         
-        # Optional preprocessing of first spectrum
+        # No separate preprocessing: the fit script owns preprocessing (see
+        # docs/preprocessing_in_fit_loop.md). The planner sees the raw first
+        # spectrum, consistent with what the fit script receives.
         processed_first_spectrum = first_spectrum
         first_spectrum_preprocess_quality = None
-        if self.preprocessor is not None:
-            try:
-                processed_first_spectrum, first_spectrum_preprocess_quality = (
-                    self.preprocessor.run_preprocessing(
-                        first_spectrum, self._handle_system_info(system_info)
-                    )
-                )
-            except Exception as e:
-                self.logger.warning(f"Preprocessing failed: {e}, using raw data")
-        
+
         # Generate initial plot
         original_plot_bytes = plot_curve_to_bytes(
-            processed_first_spectrum, 
+            processed_first_spectrum,
             self._handle_system_info(system_info)
         )
-        
+
         # Compute statistics for first spectrum
         data_statistics = self._compute_statistics(processed_first_spectrum)
         
-        # Load auxiliary data if provided
-        aux_state = {
-            "auxiliary_plot_bytes": None,
-            "auxiliary_label": None,
-            "auxiliary_summary": None,
-            "auxiliary_mime_type": None,
-        }
+        # Load auxiliary data if provided (one or several companion datasets)
+        aux_state = _empty_auxiliary_state()
         if auxiliary_data:
-            aux_state = self._load_auxiliary_data(auxiliary_data, auxiliary_label)
-            if aux_state.get("auxiliary_plot_bytes"):
-                self.logger.info(f"   Auxiliary data loaded: {aux_state['auxiliary_label']}")
+            aux_state = self._load_auxiliary_items(auxiliary_data, auxiliary_label)
+            n = len(aux_state.get("auxiliary_items", []))
+            if n:
+                names = ", ".join(it["label"] for it in aux_state["auxiliary_items"])
+                self.logger.info(f"   Auxiliary data loaded ({n}): {names}")
 
         # Load skill(s) if provided. ``skill`` accepts a single name/path or
         # a list — see PR 3 multi-skill support. Singular state fields
@@ -542,11 +704,119 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # backwards compat; ``skills_loaded`` carries the full list.
         skill_state = self._load_skills_to_state(skill, domain="curve_fitting")
 
+        # Resolve effective QualityGate. Priority: explicit analyze() arg →
+        # __init__ default → first-loaded skill's frontmatter `quality_gate`
+        # block → legacy r2_threshold shortcut → R²≥0.95 framework default.
+        # When the gate's metric is r_squared, the resolved accept_threshold
+        # IS the r2_threshold used by every downstream gate site — full
+        # backward compatibility for conventional curve fits.
+        from .quality_gate import resolve_gate
+        first_skill_meta = (
+            skill_state.get("skill_sections", {}).get("meta", {})
+            if skill_state.get("skill_sections") else {}
+        )
+        effective_gate = resolve_gate(
+            call_override=quality_gate,
+            agent_default=self.quality_gate,
+            skill_meta=first_skill_meta,
+            # An explicit analyze(r2_threshold=...) is an experienced-user
+            # override that wins over a skill gate (with the metric guard);
+            # the constructor default stays the low-priority legacy threshold.
+            user_threshold=r2_threshold,
+            legacy_threshold=self.r2_threshold,
+            logger=self.logger,
+        )
+        # When the resolved gate is r_squared, keep the legacy accept value
+        # exactly as today so every existing controller path runs unchanged.
+        # When the gate names a different metric, downstream sites still see
+        # the r2_threshold field but use the gate for the actual decision.
+        if effective_gate.metric == "r_squared":
+            effective_r2_threshold = effective_gate.accept_threshold
+            from .controllers.curve_fitting_controllers import (
+                UnifiedSeriesProcessingController as _USPC,
+            )
+            _accept = float(effective_r2_threshold)
+            _floor = max(_accept - _USPC._r2_soft_margin(_accept), 0.0)
+            self.logger.info(
+                f"   Quality: R² ≥ {_accept:.3f} accepts (with clean residuals); "
+                f"R² < {_floor:.3f} hard-rejects; "
+                f"{_floor:.3f}–{_accept:.3f} is a soft band where the verifier "
+                f"can reject on physics grounds (systematic residuals, missing features)"
+            )
+        else:
+            cmp = "≥" if effective_gate.direction == "higher_is_better" else "≤"
+            # The verifier bypass is governed by physical_review, NOT by whether
+            # the metric is R². Goodness-of-fit gates (peak_region_r2, BIC, …)
+            # keep physical_review=True and DO run the verifier, framed against
+            # the gate's metric; only workflow-scoring gates (physical_review=
+            # False, e.g. xrd's figure_of_merit) bypass it for their own scoring.
+            if effective_gate.physical_review:
+                verifier_note = (
+                    "curve-fit verifier runs, framed against this metric "
+                    "(not R²)"
+                )
+            else:
+                verifier_note = (
+                    "curve-fit verifier bypassed — skill workflow's own scoring "
+                    "is the verification"
+                )
+            self.logger.info(
+                f"   Quality: {effective_gate.metric} {cmp} "
+                f"{effective_gate.accept_threshold:.3f} accepts "
+                f"({effective_gate.direction}); {verifier_note}."
+            )
+
         # Extract series metadata from system_info if not provided explicitly
         handled_system_info = self._handle_system_info(system_info)
         handled_system_info, series_metadata = self._extract_series_metadata(
             handled_system_info, series_metadata
         )
+        # Canonicalize a filename-keyed `values` dict into a file-ordered list
+        # (sidecar/continuation paths can hand us the raw dict; consumers expect
+        # a list — see _normalize_series_values).
+        series_metadata = self._normalize_series_values(
+            series_metadata, spectrum_paths
+        )
+
+        # Verbatim cold start (#346 step 4): audition banked scripts against
+        # this frame — numerics only, zero LLM. No winner → demote to a
+        # thorough anchor run (which later frames can go realtime against).
+        cold_start_info = None
+        if realtime_cold_start:
+            from .controllers.curve_fitting_controllers import _degenerate_data_check
+            _degenerate = _degenerate_data_check(processed_first_spectrum)
+            if _degenerate:
+                # Glitch frame: do NOT demote to thorough (that would burn
+                # LLM calls on unfittable data) — stay realtime and let the
+                # per-item pre-flight gate fail the frame instantly.
+                self.logger.warning(
+                    f"🚫 REALTIME cold start skipped: {_degenerate} — the "
+                    f"frame will be flagged by the pre-flight gate, not "
+                    f"analyzed."
+                )
+            else:
+                cold_start_info = self._bank_cold_start_audition(
+                    processed_first_spectrum, handled_system_info,
+                    effective_r2_threshold,
+                )
+            if cold_start_info is None and not _degenerate:
+                self.logger.warning(
+                    "⚡→🐢 REALTIME cold start: no banked recipe fits this "
+                    "data — running a THOROUGH anchor instead; subsequent "
+                    "frames can run realtime against this run's directory."
+                )
+                realtime = False
+                from ._qc_profile import THOROUGH
+                qc_profile = THOROUGH
+        if realtime:
+            effective_max_verification = 0
+            n_candidates, candidate_escalation = 1, False
+            self.logger.info(
+                "⚡ REALTIME profile: skill suggestion, planning, literature, "
+                "verification, refit, trend and synthesis are skipped; the "
+                "locked script executes under the arithmetic gate with a "
+                "fingerprint drift check."
+            )
 
         # Build initial state
         state = {
@@ -563,15 +833,56 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "analysis_hints": hints,
             "analysis_objective": objective,
             "task_mode": effective_task_mode,
+            # Operating profile name ("thorough" | "realtime") — controllers
+            # gate realtime-only behavior (drift check, bank suppression) on it.
+            "_qc_profile": qc_profile.name,
+            # Wall-clock budget for per-unit re-analysis of flagged spectra
+            # in a series (None = unlimited). Worst fits go first; skipped
+            # units keep their locked-model result and are listed under
+            # refit_skipped_by_budget.
+            "max_series_refits": max_series_refits,
+            # Annealing schedule start level (None/0 = start frozen at T=0).
+            "_starting_annealing_level": starting_annealing_level,
 
             # Auxiliary reference data
             **aux_state,
 
             # Domain skill
             **skill_state,
+            # Non-binding skill suggestion from the orchestrator (agent's
+            # auto-selector uses it as a prior; agent has final authority).
+            "skill_hint": skill_hint,
+            # User-registered custom skills ({name: path}) for the selector.
+            "custom_skills": custom_skills or {},
 
             # Prior knowledge from reference analyses
             "prior_knowledge": prior_knowledge or [],
+
+            # Prior curve-fit runs — artifacts surfaced to planner / script-gen
+            "prior_analysis_paths": prior_analysis_paths or [],
+            # Opt-in: force verbatim reuse of the prior locked script (#172).
+            # Default False — prior runs are agent-judged reference material.
+            "reuse_locked_script": bool(reuse_locked_script),
+            # Surgical follow-up edits applied to the reused script (already
+            # validated above; the series controller applies them).
+            "script_edits": script_edits or [],
+            # Verbatim cold start (#346 step 4): the audition winner, threaded
+            # into the series controller's reuse path (None when not used).
+            "_cold_start_reuse": ({
+                "id": cold_start_info["id"],
+                "script": cold_start_info["script"],
+                "score": cold_start_info["score"],
+                "audition_r2": cold_start_info["r2"],
+                "n_auditioned": cold_start_info["n_auditioned"],
+            } if cold_start_info else None),
+            # Best-of-N: independent parallel anchor fits; LLM judge selects
+            # the winner (1 = no fan-out). Escalation runs attempt 0 alone
+            # and fans out only when it is weak.
+            "n_candidates": n_candidates,
+            "candidate_escalation": candidate_escalation,
+
+            # Effective quality gate (curve_fit_controllers reads via _gate()).
+            "quality_gate": effective_gate,
 
             # First spectrum (for planning)
             "data_path": spectrum_paths[0] if spectrum_paths else first_spectrum_name,
@@ -581,12 +892,80 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "first_spectrum_preprocessed": first_spectrum_preprocess_quality is not None,
             "first_spectrum_preprocess_quality": first_spectrum_preprocess_quality,
 
+            # Multi-column (>2) inputs: full column structure for the planner to
+            # choose X/Y from, and the retained raw first spectrum for array/
+            # DataFrame re-slice at lock. Both None for the common <=2-col case.
+            "column_info": column_info,
+            "raw_first_spectrum_full": raw_first_spectrum_full,
+
             # Pipeline state
             "analysis_images": [{"label": "First Spectrum", "data": original_plot_bytes}],
             "result_json": {},
             "error_dict": None,
         }
-        
+
+        # Pre-populate literature context if a search file was supplied via
+        # the orchestrator's `search_literature` tool. Skips the in-pipeline
+        # `LiteratureSearchController`. In identification mode the run is
+        # literature-free end to end (planner, script generation, and
+        # interpretation all gate it out — issue #323, D2); literature
+        # enters ID runs only post-fit via `refine_interpretation`.
+        if literature_file:
+            lit_p = Path(literature_file)
+            if lit_p.is_file():
+                state["literature_context"] = read_text_utf8(lit_p)
+                # Record provenance so the result reflects that literature
+                # was consulted — the in-pipeline LiteratureSearchController
+                # is skipped on this path and never populates literature_files.
+                state["literature_files"] = {"provided_file": str(lit_p)}
+                self.logger.info(f"📚 Loaded literature context from {lit_p.name}")
+            else:
+                self.logger.warning(f"literature_file not found: {literature_file}")
+
+        # REALTIME: planning is skipped, so seed the locked config (and the
+        # anchor fingerprint for the drift check) before the pipeline starts.
+        # Zero LLM calls. Two anchor sources: the explicit prior run's saved
+        # summary, or — cold start — the winning bank record (its fingerprint
+        # is the data the script originally solved, so the drift check reads
+        # "how far is this frame from the script's proven territory").
+        if realtime and cold_start_info is not None:
+            rec = cold_start_info["record"]
+            outcome = rec.get("outcome") or {}
+            state["locked_fitting_config"] = {
+                "physical_model": ((rec.get("technique_signals") or {}).get("model_type")
+                                   or outcome.get("model_type")),
+                "analysis_approach": outcome.get("plan_summary"),
+                "fitting_strategy": (
+                    f"Verbatim reuse of banked script {rec.get('id')} "
+                    f"(cold start, audition R²={cold_start_info['r2']})"
+                ),
+                "parameters_to_extract": outcome.get("parameters_extracted"),
+            }
+            state["_anchor_fingerprint"] = rec.get("data_fingerprint")
+        elif realtime:
+            from .controllers.curve_fitting_controllers import (
+                _load_anchor_fingerprint,
+                _load_prior_curve_fit_state,
+            )
+            anchor_dir, prior_summary, _ps, _pl = _load_prior_curve_fit_state(
+                prior_analysis_paths[0]
+            )
+            if anchor_dir is None:
+                raise ValueError(
+                    f"profile='realtime': no reusable prior run found at "
+                    f"{prior_analysis_paths[0]!r} (expected series_fit_results.json "
+                    f"from the anchor run)."
+                )
+            if (prior_summary or {}).get("locked_config"):
+                state["locked_fitting_config"] = prior_summary["locked_config"]
+            state["_anchor_fingerprint"] = _load_anchor_fingerprint(anchor_dir)
+            if state["_anchor_fingerprint"] is None:
+                self.logger.warning(
+                    "   Realtime drift check unavailable: the anchor run has no "
+                    "persisted data fingerprint and its data file could not be "
+                    "re-read."
+                )
+
         # Create unified pipeline with quality settings
         pipeline = create_unified_curve_fitting_pipeline(
             model=self.model,
@@ -598,13 +977,15 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             plot_fn=plot_curve_to_bytes,
             executor=self.executor,
             output_dir=str(self.output_dir),
-            preprocessor=self.preprocessor,
             literature_agent=self.literature_agent,
-            enable_human_feedback=self.enable_human_feedback,
+            enable_human_feedback=self.enable_human_feedback and not realtime,
             r2_threshold=effective_r2_threshold,
             max_model_retries=effective_max_retries,
             outlier_sigma=effective_outlier_sigma,
-            max_verification_iterations=self.max_verification_iterations,
+            max_verification_iterations=effective_max_verification,
+            parallel_workers=self.parallel_workers,
+            load_skills_fn=self._load_skills_to_state,
+            profile=qc_profile.name,
         )
         
         # Execute pipeline
@@ -635,15 +1016,40 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # Compile results
         final_results = self._compile_results(state)
 
-        # Save final results
-        results_path = self.output_dir / "analysis_results.json"
-        with open(results_path, 'w') as f:
-            # Make serializable
-            serializable = self._make_serializable(final_results)
-            json.dump(serializable, f, indent=2, default=str)
-
         # Save fitting scripts for reproducibility
         self._save_fitting_scripts(state)
+
+        # Bank every approved working script as episodic memory (script bank,
+        # #346) — deterministic, no LLM, failure-isolated. Runs BEFORE T=2
+        # staging so a hot win is nominated by PROMOTING its fresh bank
+        # record (one identity, linked lifecycles) instead of storing an
+        # unrelated second copy.
+        banked = self._maybe_bank_scripts(state)
+        if banked:
+            final_results["banked_scripts"] = banked
+
+        # Nominate novel T=2 (hot-annealing) successes for review-gated
+        # distillation (upgrade an existing skill, or consolidate N into a
+        # new one). Failure-isolated: never affects the returned fit.
+        staged = self._maybe_stage_t2_solutions(state)
+        if staged:
+            final_results["staged_solutions"] = staged
+
+        # Also stage human-feedback + resolved-error knowledge (the signals the
+        # old in-session distillation used), so they persist and flow through the
+        # same review/upgrade/consolidate path. Failure-isolated.
+        fb_staged = self._maybe_stage_feedback_errors(state, final_results)
+        if fb_staged:
+            final_results.setdefault("staged_solutions", []).extend(fb_staged)
+
+        # Save final results AFTER the memory hooks so the persisted JSON
+        # carries staged_solutions / banked_scripts, matching the returned
+        # dict (they were previously written before the hooks and silently
+        # missing from the file).
+        results_path = self.output_dir / "analysis_results.json"
+        with open(results_path, 'w', encoding="utf-8") as f:
+            serializable = self._make_serializable(final_results)
+            json.dump(serializable, f, indent=2, default=str)
 
         self.logger.info("")
         self.logger.info("✅ ANALYSIS COMPLETE")
@@ -712,6 +1118,69 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "has_nans": bool(np.any(np.isnan(curve_data))),
         }
 
+    def _normalize_messy_file(self, path) -> str | None:
+        """Split a combined data+metadata file the deterministic loader couldn't
+        read into a clean data file, returning that path (or None).
+
+        Reuses the meta agent's lossless, round-trip-verified split (LLM proposes
+        the parse from the raw file head, code verifies losslessness) — so the
+        long tail of instrument-export layouts is handled by the model instead of
+        an ever-growing deterministic attempt-ladder. The data file it writes is
+        a clean headed CSV, which the deterministic loader then reads normally.
+        """
+        try:
+            from ..meta_agent.meta_orchestrator_tools import _probe_file
+            from ...utils.file_prep import prepare_inputs
+            try:
+                probe = _probe_file(Path(path))
+            except Exception:  # noqa: BLE001 - probe is best-effort context
+                probe = None
+            out_dir = self.output_dir / "normalized"
+            res = prepare_inputs(Path(path), model=self.model, executor=self.executor,
+                                 output_dir=out_dir, probe=probe,
+                                 logger=self.logger, max_retries=2)
+            if res.get("status") == "success":
+                self.logger.info(
+                    f"  🔧 Normalized unreadable file via LLM split → {res['data_path']}"
+                )
+                return res["data_path"]
+            self.logger.warning(f"  File normalization did not verify: {res.get('message','')[:160]}")
+        except Exception as e:  # noqa: BLE001 - normalization is a fallback, never fatal
+            self.logger.warning(f"  File normalization failed: {e}")
+        return None
+
+    def _load_auxiliary_items(self, auxiliary_data, auxiliary_label) -> dict:
+        """Load one or several auxiliary datasets into the multi-aux state.
+
+        Accepts ``str | list[str]`` for both ``auxiliary_data`` and
+        ``auxiliary_label`` (parallel lists). Each file is loaded via
+        ``_load_auxiliary_data``; labels are made unique (auto-named ``aux_<i>``
+        when missing) and become the operand keys downstream. (#226)
+        """
+        paths = list(auxiliary_data) if isinstance(auxiliary_data, (list, tuple)) else [auxiliary_data]
+        labels = list(auxiliary_label) if isinstance(auxiliary_label, (list, tuple)) else [auxiliary_label]
+
+        items = []
+        used = set()
+        for i, p in enumerate(paths):
+            lbl = labels[i] if i < len(labels) else None
+            one = self._load_auxiliary_data(p, lbl)
+            name = one.get("auxiliary_label") or f"aux_{i}"
+            base, k = name, 1
+            while name in used:
+                name = f"{base}_{k}"; k += 1
+            used.add(name)
+            items.append({
+                "label": name,
+                "array": one.get("auxiliary_array"),
+                "axis": one.get("auxiliary_axis"),
+                "plot_bytes": one.get("auxiliary_plot_bytes"),
+                "summary": one.get("auxiliary_summary"),
+                "mime_type": one.get("auxiliary_mime_type"),
+            })
+
+        return {"auxiliary_items": items}
+
     def _load_auxiliary_data(
         self, auxiliary_data: str, auxiliary_label: Optional[str]
     ) -> dict:
@@ -730,6 +1199,12 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "auxiliary_label": auxiliary_label or Path(auxiliary_data).stem,
             "auxiliary_summary": None,
             "auxiliary_mime_type": None,
+            # Raw numbers retained so the generated fit script may use the
+            # auxiliary as an OPTIONAL operand (e.g. baseline subtraction), not
+            # only as a rendered picture. ``auxiliary_axis`` holds the x-axis of
+            # a 1D curve (for alignment); None for images. (#226)
+            "auxiliary_array": None,
+            "auxiliary_axis": None,
         }
 
         if not os.path.exists(auxiliary_data):
@@ -791,6 +1266,8 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     f"X range: [{float(np.nanmin(x)):.4g}, {float(np.nanmax(x)):.4g}]. "
                     f"Y range: [{float(np.nanmin(y)):.4g}, {float(np.nanmax(y)):.4g}]."
                 )
+                result["auxiliary_array"] = np.asarray(y, dtype=float)
+                result["auxiliary_axis"] = np.asarray(x, dtype=float)
 
                 plot_info = {"title": result["auxiliary_label"]}
                 plot_data = np.column_stack([x, y])
@@ -810,6 +1287,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     f"Image with shape {img.shape} "
                     f"(dtype: {img.dtype})."
                 )
+                result["auxiliary_array"] = img
                 if img.ndim == 3:
                     import cv2
                     img_gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
@@ -856,6 +1334,379 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         if saved:
             self.logger.info(f"   Scripts: {scripts_dir} ({len(saved)} file(s))")
 
+    def _maybe_stage_t2_solutions(self, state: dict) -> List[str]:
+        """Stage novel T=2 (hot-annealing) successes for later distillation.
+
+        Gate (all must hold): the fit succeeded; met the quality bar
+        (``approved``); verification reached the hottest annealing level (the
+        model was regenerated from scratch); and it is genuinely novel — it
+        deviated from the locked plan (``deviation_note``) or ran with no active
+        skill. On trigger the raw solution (planned vs final model, deviation,
+        R², verbatim script) is filed in the staging buffer under an LLM-assigned
+        technique label. Skills are produced later, review-gated: a single staged
+        solution can UPGRADE an existing skill, or N accumulated solutions for a
+        technique are CONSOLIDATED into a new skill (see ``scilink memory``).
+
+        Returns the list of staged solution ids (empty if none). Fully
+        failure-isolated: any error is logged and swallowed so staging never
+        affects the user's fit. ``SCILINK_T2_AUTODISTILL=0`` disables staging.
+        """
+        from scilink.skills.loader import memory_enabled
+        if not memory_enabled():
+            return []
+        flag = os.environ.get("SCILINK_T2_AUTODISTILL", "").strip().lower()
+        if flag in ("0", "false", "off", "no"):
+            return []
+
+        staged: List[str] = []
+        try:
+            from .controllers.curve_fitting_controllers import (
+                UnifiedSeriesProcessingController,
+                _active_skill_names,
+            )
+            from .instruct import T2_TECHNIQUE_LABEL_INSTRUCTIONS
+            from scilink.skills._shared import _staging
+
+            n_levels = len(UnifiedSeriesProcessingController._CONSTRAINT_ANNEALING_SCHEDULE)
+            hot_level = n_levels - 1
+            locked = state.get("locked_fitting_config") or {}
+            active_skills = _active_skill_names(state)
+            results = state.get("series_results", []) or []
+
+            def _llm_call(prompt: str) -> str:
+                response = self.model.generate_content(
+                    contents=[prompt],
+                    generation_config=self.generation_config,
+                    safety_settings=self.safety_settings,
+                )
+                return response.text if hasattr(response, "text") else str(response)
+
+            for r in results:
+                if not r.get("success"):
+                    continue
+                script = r.get("script")
+                if not script:
+                    continue
+
+                r2 = (r.get("fit_quality") or {}).get("r_squared") or 0
+                qh = r.get("quality_history") or {}
+                # Only stage fits that actually met the quality bar — a
+                # below-threshold "best available" fit is still success=True.
+                if not qh.get("approved"):
+                    continue
+                levels = [
+                    it.get("annealing_level", 0)
+                    for it in qh.get("verification_iterations", [])
+                ]
+                reached_hot = (max(levels) if levels else 0) >= hot_level
+
+                deviation = (r.get("deviation_note") or "").strip()
+                novel = bool(deviation) or not active_skills
+                if not (reached_hot and novel):
+                    continue
+
+                model = r.get("model_type") or locked.get("physical_model") or "model"
+                # Assign a normalized technique label (reuse-or-create).
+                technique = _staging.assign_technique_label(
+                    "curve_fitting", model, deviation, _llm_call,
+                    T2_TECHNIQUE_LABEL_INSTRUCTIONS,
+                )
+
+                record = {
+                    "planned_model": locked.get("physical_model"),
+                    "planned_analysis_approach": locked.get("analysis_approach"),
+                    "planned_fitting_strategy": locked.get("fitting_strategy"),
+                    "parameters_to_extract": locked.get("parameters_to_extract"),
+                    "final_model_type": r.get("model_type"),
+                    "deviation_from_plan": deviation or "(no explicit note; ran without an active skill)",
+                    "r_squared": round(float(r2), 4),
+                    "working_script": script,
+                    "session": self.output_dir.name,
+                }
+                # Unified path: a hot win is a bank record with a nomination —
+                # promote the record banked moments ago (provenance
+                # t2_hot_win, contrastive planned-vs-final fields attached)
+                # so identity, usage stats, and review status stay linked.
+                # Legacy direct staging remains the fallback when the bank
+                # is disabled (T=2 must survive SCILINK_SCRIPT_BANK=0).
+                from scilink.skills._shared import _script_bank
+                sid = None
+                bank_rec = (_script_bank.find_by_script("curve_fitting", script)
+                            if _script_bank.bank_enabled() else None)
+                if bank_rec is not None:
+                    out = _script_bank.promote_to_staging(
+                        "curve_fitting", bank_rec["id"], technique=technique,
+                        provenance="t2_hot_win",
+                        extra={k: v for k, v in record.items()
+                               if k not in ("working_script", "session")},
+                    )
+                    if out.get("status") == "success":
+                        sid = out["staged_id"]
+                if sid is None:
+                    sid = _staging.stage_solution("curve_fitting", technique, record)
+                staged.append(sid)
+                self.logger.info(
+                    f"   🧠 Staged T=2 solution [{technique}] id={sid} (R²={r2:.4f})"
+                )
+        except Exception as e:
+            self.logger.warning(f"T=2 staging skipped: {e}")
+            return staged
+
+        if staged:
+            self.logger.info(
+                f"   🧠 {len(staged)} T=2 solution(s) staged; review with "
+                f"`scilink memory staged` (upgrade an existing skill or consolidate)."
+            )
+        return staged
+
+    # Verbatim cold-start audition (#346 step 4): how many bank candidates to
+    # execute against the first frame, and the retrieval-score floor they must
+    # clear to be auditioned at all. The floor is HIGHER than adapt mode's
+    # (0.45): a verbatim script runs as-is with no verification loop and no
+    # adapt framing, so candidate selection stays conservative — the
+    # arithmetic gate is the final arbiter but not a physics-identity check.
+    VERBATIM_AUDITION_K = 3
+    VERBATIM_MIN_SCORE = 0.55
+
+    def _bank_cold_start_audition(
+        self, curve_data, system_info, gate_threshold: float
+    ) -> Optional[Dict[str, Any]]:
+        """Execute top bank candidates against the first frame; first past
+        the arithmetic gate becomes the locked recipe.
+
+        Numerics only — zero LLM calls: candidates are ranked by the
+        deterministic retrieval scorer, each script is staged and run
+        verbatim (same mechanics as #172 reuse), and the parsed R² is checked
+        against the gate. The winner's bank stats record the cross-session
+        success (once per campaign — the realtime frames themselves never
+        bank). Returns ``{"id", "script", "record", "score", "r2",
+        "n_auditioned"}`` or ``None`` when nothing matches or passes; the
+        caller then demotes the run to a thorough anchor. The gate check is
+        R²-based in v1 (custom gate metrics fall back to the legacy
+        threshold). Failure-isolated.
+        """
+        try:
+            from scilink.skills._shared import _script_bank
+            from .controllers.curve_fitting_controllers import _extract_xy
+            from ._locked_exec import stage_and_run
+
+            xy = _extract_xy(curve_data)
+            if xy is None:
+                return None
+            fingerprint = _script_bank.curve_fingerprint(
+                xy[0], xy[1], x_units=_script_bank.guess_x_units(system_info))
+            candidates = _script_bank.find_exemplar(
+                "curve_fitting", fingerprint,
+                _script_bank.measurement_context(system_info or {}),
+                k=self.VERBATIM_AUDITION_K, min_score=self.VERBATIM_MIN_SCORE,
+            )
+            if not candidates:
+                self.logger.info(
+                    f"   🏦 Cold start: no banked recipe scores ≥ "
+                    f"{self.VERBATIM_MIN_SCORE} against this data."
+                )
+                return None
+
+            for i, cand in enumerate(candidates):
+                rec = cand["record"]
+                work = self.output_dir / "_cold_start" / f"cand_{i:02d}_{rec['id']}"
+                self.logger.info(
+                    f"   🏦 Cold-start audition {i + 1}/{len(candidates)}: "
+                    f"bank record {rec['id']} (score {cand['score']})..."
+                )
+                try:
+                    run = stage_and_run(
+                        self.executor, rec["working_script"], curve_data, work)
+                except Exception as e:  # noqa: BLE001
+                    self.logger.info(f"      ✗ execution error: {e}")
+                    continue
+                if (run["status"] != "success"
+                        or run["visualization_path"] is None
+                        or "FIT_RESULTS_JSON:" not in run["stdout"]):
+                    self.logger.info("      ✗ script did not complete cleanly")
+                    continue
+                r2 = self._parse_audition_r2(run["stdout"])
+                if r2 is None or r2 < gate_threshold:
+                    self.logger.info(
+                        f"      ✗ gate failed (R²={r2} < {gate_threshold})")
+                    continue
+                _script_bank.mark_retrieved("curve_fitting", rec["id"])
+                _script_bank.record_success(
+                    "curve_fitting", rec["id"], session=self.output_dir.name)
+                self.logger.info(
+                    f"   🏦 ✅ Cold start locked: bank record {rec['id']} "
+                    f"passes the gate on this frame (R²={r2:.4f})."
+                )
+                return {"id": rec["id"], "script": rec["working_script"],
+                        "record": rec, "score": cand["score"],
+                        "r2": round(float(r2), 4),
+                        "n_auditioned": i + 1}
+            self.logger.info(
+                f"   🏦 Cold start: {len(candidates)} candidate(s) auditioned, "
+                f"none passed the gate."
+            )
+        except Exception as e:  # noqa: BLE001 - cold start never breaks analyze
+            self.logger.warning(f"Cold-start audition skipped: {e}")
+        return None
+
+    @staticmethod
+    def _parse_audition_r2(stdout: str) -> Optional[float]:
+        for line in stdout.splitlines():
+            if line.startswith("FIT_RESULTS_JSON:"):
+                try:
+                    d = json.loads(line.split(":", 1)[1].strip())
+                    r2 = ((d.get("fit_quality") or {}).get("r_squared")
+                          if isinstance(d.get("fit_quality"), dict)
+                          else None)
+                    if r2 is None:
+                        r2 = d.get("r_squared")
+                    return float(r2) if r2 is not None else None
+                except (ValueError, TypeError, json.JSONDecodeError):
+                    return None
+        return None
+
+    def _maybe_bank_scripts(self, state: dict) -> List[str]:
+        """Bank every approved working script in the script bank (#346).
+
+        Episodic complement to T=2 staging: no hot/novelty gate, no LLM —
+        each distinct approved script is stored once per run with the
+        measurement context, a fingerprint of the spectrum it solved, and
+        the outcome, so later runs can retrieve and adapt it. Re-banking an
+        identical script updates its usage stats instead of duplicating.
+        Fully failure-isolated; gated by ``SCILINK_SCRIPT_BANK`` /
+        persistent-memory setting.
+        """
+        # Realtime frames never bank: a verbatim re-execution learns nothing
+        # new, and per-frame updates would inflate the anchor record's
+        # cross-session success stats (a 500-frame campaign is one success,
+        # not 500 — the graduation signal must stay honest).
+        if state.get("_qc_profile") == "realtime":
+            return []
+        from scilink.skills._shared import _script_bank
+        if not _script_bank.bank_enabled():
+            return []
+
+        banked: List[str] = []
+        try:
+            from .controllers.curve_fitting_controllers import _active_skill_names
+
+            locked = state.get("locked_fitting_config") or {}
+            active_skills = _active_skill_names(state)
+            system_info = state.get("system_info") or {}
+            x_units = _script_bank.guess_x_units(system_info)
+            stack = state.get("spectrum_stack")
+            seen_hashes = set()
+
+            for r in state.get("series_results", []) or []:
+                if not r.get("success"):
+                    continue
+                script = r.get("script")
+                # Quality gate: QC approval, or the reuse fast path's own
+                # arithmetic gate — a reused script passing on NEW data is
+                # exactly the cross-session success signal the bank counts.
+                passed = ((r.get("quality_history") or {}).get("approved")
+                          or (r.get("reuse_validity") or {}).get("verdict") == "good")
+                if not script or not passed:
+                    continue
+                h = _script_bank.script_hash(script)
+                if h in seen_hashes:  # locked-recipe series: bank once per run
+                    continue
+                seen_hashes.add(h)
+
+                # Prefer the fingerprint stamped where the data was in scope
+                # (file inputs load per spectrum inside the controller); the
+                # stack fallback covers array inputs.
+                fingerprint = r.get("_bank_fingerprint")
+                if fingerprint is None:
+                    xy = None
+                    idx = r.get("index")
+                    if stack is not None and idx is not None and 0 <= idx < len(stack):
+                        xy = np.asarray(stack[idx])
+                    elif state.get("curve_data") is not None:
+                        xy = np.asarray(state["curve_data"])
+                    if xy is not None and xy.ndim == 2 and xy.shape[0] == 2:
+                        fingerprint = _script_bank.curve_fingerprint(
+                            xy[0], xy[1], x_units=x_units
+                        )
+
+                r2 = (r.get("fit_quality") or {}).get("r_squared")
+                res = _script_bank.add_record("curve_fitting", {
+                    "technique_signals": {
+                        "active_skills": active_skills,
+                        "model_type": r.get("model_type") or locked.get("physical_model"),
+                    },
+                    "measurement_context": _script_bank.measurement_context(system_info),
+                    "data_fingerprint": fingerprint,
+                    "outcome": {
+                        "model_type": r.get("model_type"),
+                        "metric": ({"name": "r_squared", "value": round(float(r2), 4)}
+                                   if r2 is not None else None),
+                        "plan_summary": locked.get("analysis_approach"),
+                        "parameters_extracted": locked.get("parameters_to_extract"),
+                    },
+                    "provenance": {"session": self.output_dir.name,
+                                   "item": r.get("name"),
+                                   "data_file": os.path.basename(str(state.get("data_path") or ""))
+                                   or None},
+                    "working_script": script,
+                })
+                if res.get("id"):
+                    banked.append(res["id"])
+                    self.logger.info(
+                        f"   🏦 Banked script [{res['action']}] id={res['id']}"
+                    )
+        except Exception as e:
+            self.logger.warning(f"Script banking skipped: {e}")
+        return banked
+
+    def _maybe_stage_feedback_errors(self, state: dict, final_results: dict) -> List[str]:
+        """Stage human-feedback + resolved-error knowledge for later distillation.
+
+        Complements the T=2 hook: captures the two signals the old in-session
+        distillation used (user feedback, recurring errors that were fixed) into
+        the same persistent staging buffer so they survive the session and flow
+        through the review-gated upgrade/consolidate path. Fully failure-isolated;
+        ``SCILINK_FEEDBACK_AUTODISTILL=0`` disables it.
+        """
+        from scilink.skills.loader import memory_enabled
+        if not memory_enabled():
+            return []
+        flag = os.environ.get("SCILINK_FEEDBACK_AUTODISTILL", "").strip().lower()
+        if flag in ("0", "false", "off", "no"):
+            return []
+        try:
+            from .instruct import T2_TECHNIQUE_LABEL_INSTRUCTIONS
+            from scilink.skills._shared import _staging
+
+            def _llm_call(prompt: str) -> str:
+                response = self.model.generate_content(
+                    contents=[prompt],
+                    generation_config=self.generation_config,
+                    safety_settings=self.safety_settings,
+                )
+                return response.text if hasattr(response, "text") else str(response)
+
+            # Curve-fit feedback is captured durably in state["human_feedback_log"]
+            # (the controller persists it as it is applied — see
+            # curve_fitting_controllers); the top-level result does not carry it.
+            staged = _staging.stage_feedback_and_errors(
+                "curve_fitting",
+                results=state.get("series_results", []) or [],
+                feedback_texts=state.get("human_feedback_log") or [],
+                session=self.output_dir.name,
+                llm_call=_llm_call,
+                label_template=T2_TECHNIQUE_LABEL_INSTRUCTIONS,
+            )
+            if staged:
+                self.logger.info(
+                    f"   🧠 {len(staged)} feedback/error solution(s) staged; review "
+                    f"with `scilink memory staged`."
+                )
+            return staged
+        except Exception as e:
+            self.logger.warning(f"Feedback/error staging skipped: {e}")
+            return []
+
     def _compile_results(self, state: dict) -> Dict[str, Any]:
         """Compile results into a consistent output structure."""
         is_single = state.get("is_single_spectrum", True)
@@ -870,6 +1721,55 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "output_directory": str(self.output_dir),
             "task_mode": state.get("task_mode", "fitting"),
         }
+
+        # Zero-success guard: if every spectrum failed every attempt (a
+        # per-item condition, so no controller set error_dict), the run must
+        # not report top-level success — a caller checking only `status`
+        # would be misled. Salvaged best-available fits carry success=True
+        # (with quality_warning) and are unaffected.
+        if series_results and all(
+                isinstance(r, dict) and r.get("success") is False
+                for r in series_results):
+            item_errors = [r.get("error") for r in series_results
+                           if r.get("error")]
+            results["status"] = "error"
+            results["error"] = {
+                "error": f"All {len(series_results)} spectrum fit(s) failed",
+                "details": item_errors[-1] if item_errors else "",
+            }
+
+        # Realtime provenance (#346 / plan §7.3): stamp the profile on the
+        # top-level result AND each per-item quality_history so a post-hoc
+        # sweep can select realtime frames for thorough re-analysis. Also
+        # synthesize a deterministic one-line summary — the synthesis stage
+        # (an LLM call) is skipped under this profile.
+        if state.get("_qc_profile") == "realtime":
+            results["profile"] = "realtime"
+            if state.get("_cold_start_reuse"):
+                cs = state["_cold_start_reuse"]
+                results["cold_start"] = {k: cs.get(k) for k in
+                                         ("id", "score", "audition_r2",
+                                          "n_auditioned")}
+            for r in series_results:
+                if isinstance(r, dict):
+                    r.setdefault("quality_history", {})[
+                        "produced_under_profile"] = "realtime"
+            if not synthesis.get("detailed_analysis") and series_results:
+                r0 = series_results[0]
+                rv = r0.get("reuse_validity") or {}
+                r2 = (r0.get("fit_quality") or {}).get("r_squared")
+                synthesis = dict(synthesis)
+                synthesis["detailed_analysis"] = (
+                    f"Realtime frame: locked script from "
+                    f"'{rv.get('source') or 'prior run'}' "
+                    f"{'reused' if rv.get('reused') else 'fallback-regenerated'}; "
+                    f"R² = {r2 if r2 is not None else 'n/a'}; "
+                    f"gate verdict: {rv.get('verdict', 'n/a')}; "
+                    f"drift: {rv.get('drift', 'n/a')} "
+                    f"(fingerprint similarity "
+                    f"{rv.get('fingerprint_similarity', 'n/a')}). "
+                    f"Interpretation is deferred to the post-experiment sweep."
+                )
 
         # In identification mode, surface the ranked candidate list if the
         # synthesis produced one. Additive/optional field — callers that don't
@@ -899,6 +1799,17 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
             if series_results and series_results[0].get("quality_history"):
                 results["quality_history"] = series_results[0]["quality_history"]
+
+            # #172: surface the locked-script reuse verdict for the orchestrator
+            if series_results and series_results[0].get("reuse_validity"):
+                results["reuse_validity"] = series_results[0]["reuse_validity"]
+
+            # Best-of-N: candidate table for the lone anchor (flattened)
+            anchor_tables = state.get("anchor_candidates") or {}
+            if anchor_tables:
+                table = next(iter(anchor_tables.values()))
+                results["anchor_candidates"] = table["candidates"]
+                results["anchor_judge"] = table["judge"]
 
         else:
             # Series: full structure with trends and flagged spectra
@@ -931,6 +1842,14 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "fit_quality": r.get("fit_quality", {}),
                     "visualization_path": r.get("visualization_path"),
                     "error": r.get("error"),
+                    # Structured failure-mode tag ("timeout" today); absent
+                    # on successes and untagged failures. script_errors is
+                    # the per-attempt audit trail ({error, diagnosis, kind}
+                    # entries — no scripts), surfaced so callers can filter
+                    # failure modes without string-matching messages.
+                    **({"kind": r["kind"]} if r.get("kind") else {}),
+                    **({"script_errors": r["script_errors"]}
+                       if r.get("script_errors") else {}),
                     "flagged": r.get("flagged", False),
                     "flag_reason": r.get("flag_reason"),
                     "flag_recommendation": r.get("flag_recommendation"),
@@ -938,20 +1857,32 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                     "original_r2": r.get("original_r2"),
                     "locked_model_type": r.get("locked_model_type"),
                     "quality_history": r.get("quality_history"),
+                    "reuse_validity": r.get("reuse_validity"),
                 }
                 for r in series_results
             ]
 
+            # #172: surface the anchor's locked-script reuse verdict at the
+            # top level for the orchestrator.
+            if series_results and series_results[0].get("reuse_validity"):
+                results["reuse_validity"] = series_results[0]["reuse_validity"]
+
             results["flagged_spectra"] = flagged_spectra
             results["flagged_spectra_analysis"] = synthesis.get("flagged_spectra_analysis", {})
             results["refit_summary"] = refit_summary
+            if state.get("refit_skipped_by_budget"):
+                results["refit_skipped_by_budget"] = state["refit_skipped_by_budget"]
             results["refit_analysis"] = synthesis.get("refit_analysis", {})
             results["trend_analysis"] = state.get("trend_analysis_results", {})
             results["parameter_trends"] = synthesis.get("parameter_trends", {})
             results["caveats"] = synthesis.get("caveats", "")
             results["literature_files"] = state.get("literature_files")
             results["locked_fitting_config"] = state.get("locked_fitting_config")
-        
+
+            # Best-of-N: per-anchor candidate tables ({spectrum_index: {candidates, judge}})
+            if state.get("anchor_candidates"):
+                results["anchor_candidates"] = state["anchor_candidates"]
+
         return results
 
     def _make_serializable(self, obj: Any) -> Any:

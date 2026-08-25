@@ -20,7 +20,7 @@ Run:
     ANTHROPIC_API_KEY=... MP_API_KEY=... python tests/test_mp_resolver.py --full
 
 The targeted tests (1–5) exercise just the resolver and are cheap. The
-optional full-workflow test (6) runs DFTOrchestrator end-to-end and writes a
+optional full-workflow test (6) runs the DFT pipeline end-to-end and writes a
 POSCAR — useful for confirming the LLM actually fetches via MPRester in the
 generated script.
 """
@@ -64,20 +64,21 @@ def _check_mp_api_installed():
 
 def test_0_orchestrator_plumbing(model_name: str):
     """Plumbing check: verify the resolver actually activates when reached
-    via DFTOrchestrator with `mp_api_key=None` — the call shape used by
-    AnalysisOrchestrator's `run_dft_workflow` tool. Catches regressions
-    where someone breaks the auto-discovery chain (DFTOrchestrator →
+    via StructurePipeline with `mp_api_key=None` — the call shape used by
+    the DFT pipeline (`run_complete_workflow`) that AnalysisOrchestrator's
+    `run_dft_workflow` tool drives. Catches regressions where someone
+    breaks the auto-discovery chain (StructurePipeline →
     get_api_key('materials_project') → StructureGenerator → mp_helper).
 
     Costs zero LLM calls — just constructs the agent stack and inspects
     `o.structure_generator.mp_helper.enabled`.
     """
-    from scilink.agents.sim_agents.dft_orchestrator import DFTOrchestrator
+    from scilink.agents.sim_agents.structure_pipeline import StructurePipeline
 
     # Positive: with MP_API_KEY in env, the resolver chain should be live.
-    o = DFTOrchestrator(
+    o = StructurePipeline(
         api_key="not-used-for-plumbing-check",  # no LLM call made in __init__
-        mp_api_key=None,                        # the analysis-orchestrator shape
+        mp_api_key=None,                        # the pipeline-dispatched shape
         generator_model=model_name,
         validator_model=model_name,
         output_dir="/tmp/scilink_plumbing_check",
@@ -85,18 +86,18 @@ def test_0_orchestrator_plumbing(model_name: str):
     )
     assert o.structure_generator.mp_helper.enabled, (
         "MP helper should be enabled when MP_API_KEY is in env and "
-        "DFTOrchestrator is constructed with mp_api_key=None. The chain "
-        "DFTOrchestrator → get_api_key('materials_project') → "
+        "StructurePipeline is constructed with mp_api_key=None. The chain "
+        "StructurePipeline → get_api_key('materials_project') → "
         "StructureGenerator → MaterialsProjectHelper is broken."
     )
-    print("   ✅ MP enabled in orchestrator-dispatched pipeline (MP_API_KEY in env).")
+    print("   ✅ MP enabled in pipeline-dispatched run (MP_API_KEY in env).")
 
     # Negative: no MP key anywhere → chain ends with disabled helper, no error.
     saved = {k: os.environ.pop(k, None) for k in ("MP_API_KEY", "MATERIALS_PROJECT_API_KEY")}
     try:
         from scilink.auth import clear_api_key
         clear_api_key("materials_project")
-        o2 = DFTOrchestrator(
+        o2 = StructurePipeline(
             api_key="not-used-for-plumbing-check",
             mp_api_key=None,
             generator_model=model_name,
@@ -250,30 +251,29 @@ def test_5_initial_prompt_injection(model_name: str):
 
 
 def test_6_full_workflow(model_name: str):
-    """End-to-end DFTOrchestrator run with a named material.
+    """End-to-end DFT pipeline run with a named material.
 
     Verifies that the generated ASE script actually references MPRester /
     `get_structure_by_material_id` (i.e., the LLM picked up on the resolved
     facts), not a hand-coded lattice guess.
     """
-    from scilink.agents.sim_agents import DFTOrchestrator
+    from scilink.agents.sim_agents.simulation_pipeline import run_complete_workflow
 
     if RUN_DIR.exists():
         shutil.rmtree(RUN_DIR)
     RUN_DIR.mkdir(parents=True, exist_ok=True)
 
-    orch = DFTOrchestrator(
+    result = run_complete_workflow(
+        "Build a 2x2x1 supercell of rutile TiO2 with 15 Å vacuum along c "
+        "for surface DFT calculations.",
+        scale="periodic_dft",
+        software="vasp",
+        method="llm",
         api_key=os.environ["ANTHROPIC_API_KEY"],
         mp_api_key=os.environ["MP_API_KEY"],
-        generator_model=model_name,
-        validator_model=model_name,
+        model_name=model_name,
         output_dir=str(RUN_DIR),
         max_refinement_cycles=1,        # keep cost low
-        vasp_generator_method="llm",
-    )
-    result = orch.run_complete_workflow(
-        "Build a 2x2x1 supercell of rutile TiO2 with 15 Å vacuum along c "
-        "for surface DFT calculations."
     )
     print(f"   final_status: {result['final_status']}")
     assert result["final_status"] == "success", \
@@ -289,9 +289,13 @@ def test_6_full_workflow(model_name: str):
         print("   ⚠️  Script did not use MPRester — model may have ignored the "
               "resolved block or rebuilt the structure from scratch. Inspect "
               f"{scripts[-1]}")
-    poscar = RUN_DIR / "POSCAR"
-    assert poscar.exists(), "POSCAR not produced"
-    print(f"   ✅ Workflow produced POSCAR at {poscar}")
+    # Structure generation emits engine-neutral coordinates (extended XYZ); the
+    # engine-native VASP inputs are written downstream. Assert a structure file
+    # was produced, format-agnostically, rather than a specific filename.
+    structs = (list(RUN_DIR.glob("*.extxyz")) + list(RUN_DIR.glob("*.xyz"))
+               + list(RUN_DIR.glob("*.cif")) + list(RUN_DIR.glob("POSCAR")))
+    assert structs, "no structure file produced"
+    print(f"   ✅ Workflow produced structure at {structs[0]}")
 
 
 # ---------------------------------------------------------------------------
@@ -596,7 +600,7 @@ def e2e_2_diamond_slab(model_name: str):
 # ---------------------------------------------------------------------------
 
 TARGETED_TESTS = [
-    ("Orchestrator plumbing (MP enabled via DFTOrchestrator chain)",
+    ("Pipeline plumbing (MP enabled via StructurePipeline chain)",
                                           test_0_orchestrator_plumbing),
     ("Disabled-MP short-circuit",         test_1_disabled_mp_short_circuit),
     ("Positive: single named material",   test_2_resolver_positive_single),

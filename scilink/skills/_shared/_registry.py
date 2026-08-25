@@ -19,6 +19,7 @@ import importlib
 import logging
 import pkgutil
 from functools import lru_cache
+from typing import Any, Callable
 
 from ._spec import ToolSpec
 
@@ -45,6 +46,43 @@ def format_library_inventory() -> str:
     return "\n".join(lines)
 
 
+# Shared across every tool-using prompt (planning AND code-gen, all agents) — the
+# single statement of "lean on the tool". Used by format_tool_inventory and by the
+# controllers' list-based _append_tool_inventory so both stages get it identically.
+TOOL_USE_PRINCIPLE = (
+    "USE WHAT A TOOL RETURNS — DO NOT RE-DERIVE IT. A tool returns its "
+    "computed results (see its **Returns**) and often a finished figure. "
+    "Read those fields and reuse the figure; do not recompute, re-render, "
+    "or otherwise reimplement a quantity a tool you called already returns — "
+    "re-deriving a tool's own output is a top source of units / scaling / "
+    "normalization bugs. Post-process only what no tool provides, on the "
+    "tool's returned values. When a tool already answers the objective, keep "
+    "the pipeline THIN (call → read → report) and base any accept/reject "
+    "check on the tool's OWN quality fields (coherence, flags, sanity "
+    "outputs), not on a numeric threshold you impose on its results — a "
+    "self-imposed threshold the real data exceeds causes false-fail loops."
+)
+
+
+# The verifier-facing counterpart of TOOL_USE_PRINCIPLE (shared across the image
+# and curve verifiers). Deliberately NOT "defer to the tool": it preserves the
+# verifier's independent-scrutiny role (a tool can be wrong) while forbidding the
+# specific failure mode — reimplementing a tool's computation to second-guess it,
+# or instructing the agent to re-derive what the tool already returns.
+VERIFIER_TOOL_SCRUTINY_PRINCIPLE = (
+    "SCRUTINIZE TOOL RESULTS — DON'T REIMPLEMENT THEM. When a registered tool "
+    "produced or anchored the result, judge it by the tool's OWN quality fields "
+    "(e.g. fit metrics, coherence, SNR, uncertainties, sanity flags), by domain "
+    "knowledge/physics, and by independent cross-checks (a second tool, a known "
+    "or physical bound) — NOT by reimplementing the tool's computation to "
+    "second-guess it, and do NOT instruct the agent to recompute or re-derive a "
+    "quantity the tool already returns (point it at the returned field instead). "
+    "Apply your own numeric thresholds only to quantities no tool vouches for. A "
+    "tool can still be wrong, so keep scrutinizing — just via its QC + domain "
+    "knowledge + cross-checks, not by re-deriving."
+)
+
+
 def format_tool_inventory(
     agent: str = "image_analysis",
     active_skills: list[str] | None = None,
@@ -69,6 +107,7 @@ def format_tool_inventory(
             "code for post-processing. A tool call anchoring the hard step followed "
             "by custom code is usually more reliable than an all-custom pipeline."
         )
+        parts.append(TOOL_USE_PRINCIPLE)
         for spec in specs:
             parts.append(spec.to_prompt())
 
@@ -176,3 +215,93 @@ def get_tools_for(agent: str, active_skills: list[str] | None = None) -> list[To
             if name in active_set:
                 visible.extend(specs)
     return visible
+
+
+@lru_cache(maxsize=None)
+def _per_skill_callables() -> dict[tuple[str, str], dict[str, Callable[..., Any]]]:
+    """Map ``(domain, skill_name)`` to ``{spec.name: callable}``.
+
+    Walks the same skill bundles as :func:`_per_skill_specs`. For each
+    discovered ``TOOL_SPEC``, looks up the matching callable in the
+    declaring module by name: a spec with ``name="snapshot_run"`` is
+    paired with a function named ``snapshot_run`` in the same module.
+    Specs whose corresponding function cannot be located are logged
+    and skipped.
+
+    Cached for the life of the process; the skill tree is static within
+    a run.
+    """
+    from scilink.skills.loader import list_all_skills, _SKILLS_DIR
+
+    result: dict[tuple[str, str], dict[str, Callable[..., Any]]] = {}
+    for domain, names in list_all_skills().items():
+        for name in names:
+            skill_dir = _SKILLS_DIR / domain / name
+            callables: dict[str, Callable[..., Any]] = {}
+            for py_file in sorted(skill_dir.glob("*.py")):
+                if py_file.stem.startswith("_"):
+                    continue
+                module_path = f"scilink.skills.{domain}.{name}.{py_file.stem}"
+                try:
+                    mod = importlib.import_module(module_path)
+                except Exception as exc:
+                    _logger.debug("Skipping %s: %s", module_path, exc)
+                    continue
+                for spec in _collect_specs_from_module(mod):
+                    fn = getattr(mod, spec.name, None)
+                    if callable(fn):
+                        callables[spec.name] = fn
+                    else:
+                        _logger.warning(
+                            "TOOL_SPEC '%s' declared in %s but no "
+                            "callable with that name found; skipping.",
+                            spec.name, module_path,
+                        )
+            if callables:
+                result[(domain, name)] = callables
+    return result
+
+
+def get_tool_function(
+    name: str,
+    active_skills: list[str] | None = None,
+) -> Callable[..., Any]:
+    """Resolve a tool name to its callable from the active skill bundles.
+
+    Looks up ``name`` in every skill bundle listed in ``active_skills``
+    and returns the first matching callable. Used by Python code that
+    needs to invoke a skill-registered tool directly (as opposed to
+    surfacing its spec to an LLM via :func:`get_tools_for`).
+
+    Args:
+        name: The ``TOOL_SPEC.name`` to resolve.
+        active_skills: Skill names whose bundles should be searched.
+            ``None`` or an empty list raises ``LookupError`` — at least
+            one skill must be specified.
+
+    Returns:
+        The callable registered for ``name`` in one of the active skill
+        bundles. The callable accepts whatever ``**kwargs`` its
+        ``TOOL_SPEC.parameters`` describe; callers may invoke it as
+        ``get_tool_function(name, active_skills=[...])(**kwargs)``.
+
+    Raises:
+        LookupError: If no matching callable is found in any active
+            skill bundle. The message names the searched skills so the
+            caller can verify the bundle declares the expected spec.
+    """
+    if not active_skills:
+        raise LookupError(
+            f"Cannot resolve tool {name!r}: no active skills supplied. "
+            "Pass active_skills=[<skill_name>, ...] to enable lookup."
+        )
+    active_set = set(active_skills)
+    for (_domain, skill_name), callables_map in _per_skill_callables().items():
+        if skill_name in active_set and name in callables_map:
+            return callables_map[name]
+    raise LookupError(
+        f"Tool {name!r} not found in any of the active skill bundles "
+        f"{sorted(active_set)!r}. Verify that the matching bundle "
+        f"declares a TOOL_SPEC with name={name!r} and that a callable "
+        "with the same name exists in the spec's declaring module."
+    )

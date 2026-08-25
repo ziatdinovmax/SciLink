@@ -7,8 +7,15 @@ Coordinates multi-modal experimental analysis using specialized sub-agents:
 - HyperspectralAnalysisAgent: For 3D spectroscopic datacubes
 
 Follows the same design patterns as PlanningOrchestratorAgent for consistent UX.
+
+LangGraph backbone
+------------------
+The chat loop is driven by a LangGraph ``StateGraph`` (ReAct topology).
+``chat()`` delegates to ``_invoke_graph()`` which calls ``graph.invoke()``.
+The graph is built lazily in ``__init__`` via ``build_analysis_graph()``.
 """
 
+import inspect
 import json
 import logging
 import os
@@ -17,11 +24,19 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 from enum import Enum
 
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+
 from ...auth import get_internal_proxy_key
+from ...utils.prose_style import PROSE_STYLE_RULE
+from ...utils.tool_media import (repair_dangling_tool_calls,
+                                 close_interrupted_turn,
+                                 build_tool_message, provider_supports_tool_image,
+                                 sanitize_history_images)
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .analysis_orchestrator_tools import AnalysisOrchestratorTools
 from ._deprecation import normalize_params
+from ...graphs.analysis import build_analysis_graph
 
 
 # Built-in agent registry seed — classes are lazy-loaded on first use.
@@ -35,7 +50,7 @@ _BUILTIN_AGENTS = {
     1: {
         "class_path": "scilink.agents.exp_agents.image_analysis_agent.ImageAnalysisAgent",
         "name": "ImageAnalysisAgent",
-        "description": "Images: general-purpose analysis (microscopy, SEM, TEM, AFM, optical). Handles atomic resolution, grains, particles, textures, defects, morphology. Single images or series.",
+        "description": "Scientific microscopy images (SEM, TEM, AFM, optical micrographs): atomic resolution, grains, particles, textures, defects, morphology. Single images or series. NOT for charts, plots, diagrams, or figures lifted from documents.",
         "short_name": "ImageAnalysis",
     },
     2: {
@@ -53,12 +68,19 @@ class AnalysisMode(Enum):
     Matches the autonomy levels in PlanningOrchestratorAgent for consistent UX.
     
     CO_PILOT: Human leads, AI assists (default). Human reviews every step.
-    SUPERVISED: AI leads, human supervises. AI proceeds with reasonable defaults.
+    AUTOPILOT: AI leads, human monitors. AI proceeds with reasonable defaults.
     AUTONOMOUS: Full autonomy. AI executes complete workflows without confirmation.
     """
     CO_PILOT = "co-pilot"        # Human leads, AI assists (default)
-    SUPERVISED = "supervised"    # AI leads, human supervises
+    AUTOPILOT = "autopilot"      # AI leads, human monitors
     AUTONOMOUS = "autonomous"    # Full autonomy
+
+    @classmethod
+    def _missing_(cls, value):
+        # Back-compat: the AUTOPILOT level was named "supervised" before.
+        if isinstance(value, str) and value.strip().lower() == "supervised":
+            return cls.AUTOPILOT
+        return None
 
 
 # Mode-specific directives (matching planning orchestrator patterns)
@@ -85,9 +107,9 @@ _CO_PILOT_DIRECTIVE = """
 - Instead say "Ready for your input." or "Let me know how to proceed."
 """
 
-_SUPERVISED_DIRECTIVE = """
-**CRITICAL OPERATING MODE: SUPERVISED (AI Leads, Human Supervises)**
-- You lead the analysis workflow. Human supervises and can intervene.
+_AUTOPILOT_DIRECTIVE = """
+**CRITICAL OPERATING MODE: AUTOPILOT (AI Leads, Human Monitors)**
+- You lead the analysis workflow. Human monitors and can intervene.
 - Suggest the most appropriate agent based on data type and metadata.
 - Proceed with reasonable defaults without asking for every detail.
 - Human will still review agent selection before execution.
@@ -156,11 +178,26 @@ You are the **Analysis Agent**. Your goal is to coordinate experimental data ana
 
 _SYSTEM_PROMPT_BODY_POST = """
 5. `preview_image`: Load image for visual inspection (for agent 0 vs 1 decision, or ambiguous 2D data).
-
+___LITERATURE_SECTION___
 **ANALYSIS EXECUTION:**
 6. `run_analysis`: Execute analysis. Handles single files AND series automatically.
    - Each analysis run creates a unique output directory for traceability.
    - Output directory format: results/analysis_{data_name}_{timestamp}/
+   - Companion/reference datasets: if the request (or caller context) names a
+     baseline/reference spectrum, an I0/incident reference, or a co-registered
+     channel, pass them via
+     `auxiliary_data`/`auxiliary_label` (string or parallel lists). They are
+     shown as context AND, when shape-aligned, usable by the generated code as
+     optional operands (subtract / divide-by / mask-with); the label is the
+     operand key. Keep the primary dataset as `data_path`.
+   - Ensemble / best-of-N (variance reduction): set `n_candidates=N` to run N
+     INDEPENDENT analysis trajectories over the SAME single dataset — each plans
+     and executes on its own and a judge locks the winner. Recognize this from
+     ANY ensemble / multiple-independent-attempts request ("run it a few ways",
+     "an ensemble of 3", "best-of-N"), not only the literal phrase "N
+     candidates". Opt-in (default 1; image auto-runs 3). This is variance
+     reduction over ONE dataset — distinct from analyzing several different
+     datasets.
 
 **LITERATURE & NOVELTY:**
 7. `assess_novelty`: Check if the scientific claims generated by an analysis are novel.
@@ -254,7 +291,20 @@ examine_data returns data_type:
 2. `load_metadata` (can pass directory path) or `convert_metadata`
 3. Decide agent (ask user if disambiguation_needed=true)
 4. `select_agent`
-5. `run_analysis`
+5. `run_analysis`. **Skill selection defaults to the agent.** Each analysis
+   agent inspects the actual data and auto-selects the relevant skill(s)
+   itself, from a richer signal than you have. Two ways to influence it:
+   - `skill` (AUTHORITATIVE) — use only when the user explicitly named a
+     skill/technique (now or earlier in the conversation) or a registered
+     custom skill applies. The agent honors it as-is and does not re-select.
+   - `skill_hint` (NON-BINDING) — use for your OWN guess that a skill may
+     apply when the user did not ask. The agent treats it as a prior and
+     decides from the data: it may confirm, add complementary skills, or
+     override. The agent has final authority.
+   Default to passing NEITHER and letting the agent select. When you pass
+   `skill`, technique-match it (`[technique: …]` tag), never the
+   nearest-sounding one; curve-fitting techniques are mutually exclusive, so
+   pass at most one.
 6. Present results
 7. For deeper follow-up analysis on images, call `run_analysis` again with
    `prior_analysis_paths` set to the prior `output_directory`; the agent will
@@ -271,10 +321,52 @@ examine_data returns data_type:
 - If disambiguation_needed=true in examine_data result, ASK the user before selecting agent
 - For directories, check if metadata_files was detected
 - If status="error", stop and report to user
+- If `run_analysis` fails because the data could not be loaded — "unsupported
+  file format", "failed to load spectrum / image", or similar — the file type
+  is not one the analysis agents handle. They take microscopy / spectroscopy
+  images, 1-D measurement curves, and hyperspectral datacubes — NOT generic
+  spreadsheets, results tables, or databases. Do NOT retry the same file with
+  a different agent and do NOT keep re-running. Report the failure once, and
+  note that this data may belong to a different mode (planning handles
+  tabular data and databases).
+- NEVER write an analysis report, summary, or findings from metadata alone.
+  A report requires successful `run_analysis` results. If no analysis
+  succeeded, say so plainly — do not fabricate quantitative findings from a
+  file's description or metadata.
 - Before launching a fresh `run_analysis`, consider whether a prior analysis from
-  `list_results()` already covers the new request's prerequisites (e.g. existing
-  segmentation, fits, abundance maps). If so, pass its `output_directory` via
-  `prior_analysis_paths` so the new run can build on it instead of recomputing.
+  `list_results()` is relevant to the new request (existing segmentation, fits,
+  abundance maps, or a result to verify / deepen). If so, pass its
+  `output_directory` via `prior_analysis_paths`: the prior run becomes REFERENCE
+  MATERIAL and the agent decides whether to reuse, adapt, or rewrite its script
+  for the new goal. For a verification or re-examination the agent re-derives the
+  result independently — do NOT expect or force a verbatim re-run, since
+  re-running the script that produced a result cannot verify it.
+
+**INCREMENTAL MEASUREMENT SERIES (locked extraction-script reuse):**
+- When the new data is the NEXT MEASUREMENT of an existing measurement series —
+  the same kind of unit as a prior run, only the control parameters differ
+  (e.g. a new point added to a Bayesian-optimization / closed-loop campaign) —
+  pass that prior run's `output_directory` via `prior_analysis_paths` AND set
+  `reuse_locked_script=true`. The agent then reuses the prior run's locked
+  extraction recipe (fitting script / image pipeline) verbatim, so the new
+  feature row has the SAME columns as the rest of the campaign — which a
+  downstream feature-table / BO append strictly requires.
+- `reuse_locked_script` is ONLY for this continuation case. Decide deliberately:
+  for a verification, a deeper analysis, or a different kind of measurement,
+  leave it false (the default) — the agent treats the prior run as reference and
+  derives the result itself; forcing the prior recipe would extract the wrong
+  things or merely reproduce the result you meant to check.
+- After such a run, READ the `reuse_validity` field in the `run_analysis`
+  result and act on its `verdict`:
+  - `good` — the reused recipe fits the new measurement well; proceed normally.
+  - `poor` — the row is still schema-consistent and safe to append, but the
+    reused recipe fits this measurement poorly. Surface the `reuse_warning` to
+    the user: the new measurement may not belong to this series, or conditions
+    shifted. If you judge it is genuinely a different measurement, re-run
+    `run_analysis` WITHOUT `reuse_locked_script` for a correct fresh analysis.
+  - `script_failed` — the reused recipe could not run and the model/pipeline was
+    re-derived from scratch, so the feature columns may differ from the
+    campaign. Flag this clearly to the user — a campaign append may break.
 """
 
 
@@ -287,11 +379,73 @@ def _build_agent_list_section(agent_registry: dict) -> str:
     return "\n".join(lines)
 
 
+# Literature section — injected into the prompt body only when a FutureHouse
+# API key is configured this session. Without a key the `search_literature`
+# tool errors at call time, so the orchestrator is not told to offer it.
+#
+# This is a workflow GATE, not a tool description: the LLM otherwise chains
+# straight to run_analysis and never reaches literature search. The gate is
+# mode-aware — CO-PILOT pauses to ask the user; AUTOPILOT/AUTONOMOUS decide
+# on their own, since those modes have no interactive user to wait on (and
+# `run_task` pins the orchestrator into AUTONOMOUS).
+_LIT_TOOL_BLURB = (
+    "`search_literature` queries the FutureHouse Edison API and returns a\n"
+    "`file_path`. Supplied via `literature_file`, the literature informs the\n"
+    "analysis plan, the generated code, and the interpretation. (In curve-fitting\n"
+    "`task_mode=\"identification\"` the planner withholds lit context to keep the\n"
+    "fit unbiased; it still informs Stage-2 candidate enumeration.)"
+)
+
+# CO-PILOT: pause and ask the user, wait for their answer.
+_LITERATURE_SECTION_COPILOT = f"""
+**LITERATURE SEARCH — REQUIRED OFFER BEFORE ANALYSIS:**
+A FutureHouse API key is configured this session. Before the FIRST
+`run_analysis` on a dataset you MUST first ask the user whether the analysis
+should be informed by a literature search of prior work, then wait for their
+answer — do NOT call `run_analysis` in the same turn as the question.
+- On yes: call `search_literature(query=...)`, then pass the returned
+  `file_path` to `run_analysis` as `literature_file`.
+- On no: call `run_analysis` normally.
+- Ask once per dataset; do not re-offer on follow-up `run_analysis` calls
+  for the same data.
+- EXCEPTION — identification-mode runs (`task_mode="identification"`): do NOT
+  offer or run a pre-fit search; the fit must stay literature-blind. An
+  unknown-identity sample belongs in identification mode even when its
+  elements are known. After the
+  fit completes, call `refine_interpretation` instead — it searches from the
+  fitted features.
+
+{_LIT_TOOL_BLURB}
+"""
+
+# AUTOPILOT / AUTONOMOUS: no interactive user — decide without asking.
+_LITERATURE_SECTION_AUTONOMOUS = f"""
+**LITERATURE SEARCH — CONSIDER BEFORE ANALYSIS:**
+A FutureHouse API key is configured this session. Before the FIRST
+`run_analysis` on a dataset, decide for yourself whether a literature search
+would materially shape the analysis (method choice, parameter ranges,
+interpretation). If so, call `search_literature(query=...)` and pass the
+returned `file_path` to `run_analysis` as `literature_file`; otherwise call
+`run_analysis` directly. Do NOT ask the user — decide from the data and
+objective. Decide once per dataset.
+EXCEPTION — identification-mode runs (`task_mode="identification"`): never
+pre-fit-search; the fit must stay literature-blind. An unknown-identity
+sample belongs in identification mode even when its elements are known. Call
+`refine_interpretation` after the fit instead — it searches from the fitted
+features, which is what finally identifies the material.
+
+{_LIT_TOOL_BLURB}
+"""
+
+_LITERATURE_SECTION_UNAVAILABLE = ""
+
+
 def get_system_prompt(
     analysis_mode: AnalysisMode,
     agent_registry: dict = None,
     external_tools: list = None,
     custom_skills: dict = None,
+    literature_available: bool = False,
 ) -> str:
     """Returns the appropriate system prompt for the given analysis mode.
 
@@ -307,10 +461,13 @@ def get_system_prompt(
         custom_skills: ``{name: path}`` dict of custom skills registered via
             register_skill(). When provided, a "Custom skills" section is
             appended so the LLM knows to pass them to ``run_analysis``.
+        literature_available: True iff a FutureHouse API key is configured.
+            When True, the prompt instructs the orchestrator to offer a
+            literature search before the first analysis of a dataset.
     """
     directives = {
         AnalysisMode.CO_PILOT: _CO_PILOT_DIRECTIVE,
-        AnalysisMode.SUPERVISED: _SUPERVISED_DIRECTIVE,
+        AnalysisMode.AUTOPILOT: _AUTOPILOT_DIRECTIVE,
         AnalysisMode.AUTONOMOUS: _AUTONOMOUS_DIRECTIVE,
     }
     if agent_registry:
@@ -318,10 +475,21 @@ def get_system_prompt(
     else:
         agent_list = "\n".join([
             "     * 0: CurveFittingAgent - 1D data: DSC, TGA, XRD, UV-Vis, Raman, PL, IV curves, kinetics",
-            "     * 1: ImageAnalysisAgent - Images: general-purpose analysis (microscopy, SEM, TEM, AFM, optical). Atomic resolution, grains, particles, textures, defects, morphology",
+            "     * 1: ImageAnalysisAgent - Scientific microscopy images (SEM, TEM, AFM, optical micrographs): grains, particles, defects, morphology. NOT charts/figures/diagrams",
             "     * 2: HyperspectralAnalysisAgent - 3D datacubes: EELS-SI, EDS, Raman imaging",
         ])
-    body = _SYSTEM_PROMPT_BODY_PRE + agent_list + _SYSTEM_PROMPT_BODY_POST
+    if not literature_available:
+        lit_section = _LITERATURE_SECTION_UNAVAILABLE
+    elif analysis_mode == AnalysisMode.CO_PILOT:
+        # Interactive — pause and ask the user.
+        lit_section = _LITERATURE_SECTION_COPILOT
+    else:
+        # AUTOPILOT / AUTONOMOUS — no user to wait on; decide autonomously.
+        lit_section = _LITERATURE_SECTION_AUTONOMOUS
+    body = (
+        _SYSTEM_PROMPT_BODY_PRE + agent_list
+        + _SYSTEM_PROMPT_BODY_POST.replace("___LITERATURE_SECTION___", lit_section)
+    )
     if external_tools:
         lines = ["\n**CUSTOM TOOLS (registered externally, call directly by name):**"]
         for t in external_tools:
@@ -335,7 +503,7 @@ def get_system_prompt(
             "When running analysis on data that matches a custom skill's domain, "
             "pass the skill name via the `skill` parameter in `run_analysis`.\n"
         )
-    return directives[analysis_mode] + body
+    return directives[analysis_mode] + body + "\n\n" + PROSE_STYLE_RULE
 
 
 class AnalysisOrchestratorAgent:
@@ -363,7 +531,7 @@ class AnalysisOrchestratorAgent:
         embedding_model: Embedding model name.
         embedding_api_key: API key for the embedding LLM provider.
         restore_checkpoint: Whether to restore from previous checkpoint.
-        analysis_mode: Level of autonomy (CO_PILOT, SUPERVISED, or AUTONOMOUS).
+        analysis_mode: Level of autonomy (CO_PILOT, AUTOPILOT, or AUTONOMOUS).
         image_analysis_depth: Default analysis depth passed to
             ImageAnalysisAgent ("basic", "auto", or "deep"). Defaults to
             "basic" so Tier 2 is handled at the orchestrator level via
@@ -391,6 +559,7 @@ class AnalysisOrchestratorAgent:
         analysis_mode: AnalysisMode = AnalysisMode.CO_PILOT,
         futurehouse_api_key: Optional[str] = None,
         image_analysis_depth: str = "basic",
+        max_iterations: Optional[int] = None,
         # Deprecated
         google_api_key: Optional[str] = None,
         local_model: Optional[str] = None,
@@ -456,6 +625,9 @@ class AnalysisOrchestratorAgent:
         else:
              logging.warning("⚠️ Literature Analysis disabled (No FutureHouse API key)")
 
+        # Gates the literature-search offer in the system prompt.
+        self._literature_available = bool(self.futurehouse_api_key)
+
         logging.info(f"🎛️  Analysis Mode: {analysis_mode.value.upper()}")
         
         # Setup directories
@@ -469,6 +641,11 @@ class AnalysisOrchestratorAgent:
         
         # Session state
         self.current_metadata: Optional[Dict[str, Any]] = None
+        # Dataset that current_metadata belongs to. None = unbound (freshly
+        # loaded, not yet consumed by run_analysis). Binds on first use; a
+        # run_analysis on a *different* dataset must re-resolve rather than
+        # silently reuse another dataset's metadata (issue #411).
+        self.current_metadata_owner: Optional[str] = None
         self.current_data_path: Optional[str] = None
         self.current_data_type: Optional[str] = None
         self.selected_agent_id: Optional[int] = None
@@ -497,7 +674,17 @@ class AnalysisOrchestratorAgent:
         
         self.message_count = 0
         self.last_checkpoint_message_count = 0
-        
+
+        # Per-call tool-iteration cap (handlers read self.max_iterations) and
+        # a flag they set when they hit the cap. chat() returns the warning
+        # string as before; run_task reads the flag to flip status from
+        # success → error so programmatic callers can detect exhaustion.
+        self.max_iterations = (
+            max_iterations if max_iterations is not None
+            else self.MAX_TOOL_ITERATIONS
+        )
+        self._last_chat_hit_iter_cap = False
+
         # Restore from checkpoint if requested
         if restore_checkpoint and self.checkpoint_path.exists():
             self._restore_checkpoint()
@@ -513,6 +700,7 @@ class AnalysisOrchestratorAgent:
         system_prompt = get_system_prompt(
             self.analysis_mode, self._agent_registry,
             custom_skills=self._custom_skills or None,
+            literature_available=self._literature_available,
         )
         
         # Initialize LLM
@@ -539,14 +727,29 @@ class AnalysisOrchestratorAgent:
         # Store system prompt
         self._system_prompt = system_prompt
         
-        # Initialize message history
+        # Initialize message history (kept for JSON persistence; graph uses its own state)
         history = self._load_history()
         
         self.messages = [{"role": "system", "content": system_prompt}]
         if history:
             recent_history = self._trim_history(history, max_messages=self.MAX_HISTORY_MESSAGES)
             self.messages.extend(recent_history)
-        
+
+        # ── LangGraph backbone ─────────────────────────────────────────────
+        # Build the ReAct graph.  A fixed thread_id per session lets MemorySaver
+        # accumulate message history across chat() calls so the graph is always
+        # up to date without replaying the full history on every turn.
+        self._graph_thread_id = f"analysis-{self.base_dir.name}"
+        self._graph = build_analysis_graph(self)
+        self._graph_config = {"configurable": {"thread_id": self._graph_thread_id}}
+
+        # Seed the graph with existing history so a restored session picks up
+        # where it left off (only non-system messages; graph handles system prompt
+        # internally via the node closure).
+        if history:
+            self._seed_graph_history(history)
+        # ──────────────────────────────────────────────────────────────────
+
         logging.info(f"✅ AnalysisOrchestratorAgent initialized. Session: {self.base_dir}")
 
     def _convert_tools_to_litellm_format(self) -> List[Dict]:
@@ -567,6 +770,7 @@ class AnalysisOrchestratorAgent:
         new_system_prompt = get_system_prompt(
             mode, self._agent_registry, self._external_tools or None,
             self._custom_skills or None,
+            literature_available=self._literature_available,
         )
         self._system_prompt = new_system_prompt
 
@@ -661,6 +865,7 @@ class AnalysisOrchestratorAgent:
         self._system_prompt = get_system_prompt(
             self.analysis_mode, self._agent_registry,
             self._external_tools or None, self._custom_skills or None,
+            literature_available=self._literature_available,
         )
         if self.messages and self.messages[0]["role"] == "system":
             self.messages[0]["content"] = self._system_prompt
@@ -770,6 +975,7 @@ class AnalysisOrchestratorAgent:
         self._system_prompt = get_system_prompt(
             self.analysis_mode, self._agent_registry,
             self._external_tools, self._custom_skills or None,
+            literature_available=self._literature_available,
         )
         if self.messages and self.messages[0]["role"] == "system":
             self.messages[0]["content"] = self._system_prompt
@@ -809,6 +1015,7 @@ class AnalysisOrchestratorAgent:
         self._system_prompt = get_system_prompt(
             self.analysis_mode, self._agent_registry,
             self._external_tools, self._custom_skills,
+            literature_available=self._literature_available,
         )
         if self.messages and self.messages[0]["role"] == "system":
             self.messages[0]["content"] = self._system_prompt
@@ -825,6 +1032,8 @@ class AnalysisOrchestratorAgent:
         command: list = None,
         url: str = None,
         env: dict = None,
+        transport: str = None,
+        headers: dict = None,
     ) -> int:
         """Connect to an MCP server and register its tools.
 
@@ -832,8 +1041,12 @@ class AnalysisOrchestratorAgent:
             server_name: Human-readable label for this server.
             command: Command + args for stdio transport,
                 e.g. ``["npx", "-y", "@mcp/server-filesystem", "/tmp"]``.
-            url: URL for SSE transport.
+            url: URL for a network transport (SSE or streamable HTTP).
             env: Optional environment variables for the subprocess.
+            transport: Transport for ``url`` — ``"sse"`` (default) or
+                ``"http"`` (streamable HTTP).
+            headers: Optional HTTP headers for the ``url`` transports,
+                e.g. ``{"Authorization": "Bearer <token>"}``.
 
         Returns:
             Number of tools registered from this server.
@@ -847,7 +1060,10 @@ class AnalysisOrchestratorAgent:
             )
             return 0
 
-        conn = MCPConnection(server_name, command=command, url=url, env=env)
+        conn = MCPConnection(
+            server_name, command=command, url=url, env=env,
+            transport=transport, headers=headers,
+        )
         schemas = conn.connect()
 
         existing_names = {t["name"] for t in self._external_tools}
@@ -895,6 +1111,7 @@ class AnalysisOrchestratorAgent:
         self._system_prompt = get_system_prompt(
             self.analysis_mode, self._agent_registry,
             self._external_tools, self._custom_skills or None,
+            literature_available=self._literature_available,
         )
         if self.messages and self.messages[0]["role"] == "system":
             self.messages[0]["content"] = self._system_prompt
@@ -936,6 +1153,7 @@ class AnalysisOrchestratorAgent:
         self._system_prompt = get_system_prompt(
             self.analysis_mode, self._agent_registry,
             self._external_tools, self._custom_skills or None,
+            literature_available=self._literature_available,
         )
         if self.messages and self.messages[0]["role"] == "system":
             self.messages[0]["content"] = self._system_prompt
@@ -975,20 +1193,25 @@ class AnalysisOrchestratorAgent:
             )
             return data_path
 
-    def create_agent_for_analysis(self, agent_id: int, output_dir: str) -> Any:
+    def create_agent_for_analysis(self, agent_id: int, output_dir: str,
+                                  executor_timeout: int = None) -> Any:
         """
         Create an agent instance configured for a specific analysis run.
-        
+
         Each analysis run gets a fresh agent instance with its own output
         directory, ensuring outputs from different analyses don't collide.
-        
+
         Args:
             agent_id: The agent type ID (0-2)
             output_dir: Unique output directory for this analysis run
-            
+            executor_timeout: Optional per-run script-execution timeout in
+                seconds (the adaptive-escalation ladder starts from this
+                value). None keeps the agent's default. Filtered out by the
+                signature check below for agents that don't accept it.
+
         Returns:
             Configured agent instance
-            
+
         Raises:
             ValueError: If agent_id is invalid
         """
@@ -1005,10 +1228,13 @@ class AnalysisOrchestratorAgent:
             "base_url": self.base_url,
             "output_dir": output_dir,
             "enable_human_feedback": self._enable_human_feedback,
-            # Consumed only by ImageAnalysisAgent; other agents accept
-            # **kwargs and silently ignore.
+            # Consumed only by ImageAnalysisAgent. Filtered out below for any
+            # agent whose __init__ neither declares it nor accepts **kwargs
+            # (hyperspectral, FFT, SAM, atomistic) — passing it would raise.
             "analysis_depth": self.image_analysis_depth,
         }
+        if executor_timeout is not None:
+            common_kwargs["executor_timeout"] = int(executor_timeout)
 
         # Lazy-load built-in agents; custom agents already carry their class.
         cls = entry.get("class")
@@ -1018,6 +1244,19 @@ class AnalysisOrchestratorAgent:
             module = importlib.import_module(module_path)
             cls = getattr(module, class_name)
             entry["class"] = cls  # cache for subsequent calls
+
+        # Keep only the kwargs this agent's __init__ actually accepts. An agent
+        # that declares **kwargs gets everything; one that does not gets only
+        # its explicitly-named parameters.
+        try:
+            params = inspect.signature(cls.__init__).parameters
+            if not any(p.kind is inspect.Parameter.VAR_KEYWORD
+                       for p in params.values()):
+                common_kwargs = {
+                    k: v for k, v in common_kwargs.items() if k in params
+                }
+        except (ValueError, TypeError):
+            pass  # unintrospectable __init__ — pass kwargs through unchanged
 
         agent = cls(**common_kwargs)
         logging.info(f"   Created agent {agent_id}: {type(agent).__name__}")
@@ -1076,6 +1315,13 @@ class AnalysisOrchestratorAgent:
                 state = json.load(f)
             
             self.current_metadata = state.get("current_metadata")
+            # Older checkpoints predate ownership: backfill from the last data
+            # path so restored metadata stays bound to the dataset it served,
+            # instead of silently binding to whatever runs next.
+            self.current_metadata_owner = state.get("current_metadata_owner") or (
+                state.get("current_data_path")
+                if state.get("current_metadata") is not None else None
+            )
             self.current_data_path = state.get("current_data_path")
             self.current_data_type = state.get("current_data_type")
             self.selected_agent_id = state.get("selected_agent_id")
@@ -1126,37 +1372,427 @@ class AnalysisOrchestratorAgent:
         return trimmed
 
     def chat(self, user_input: str) -> str:
-        """Main chat interface with robust function calling support."""
+        """Main chat interface — delegates to the LangGraph ReAct loop."""
+        # Bind this turn's human-feedback prompts to the session's
+        # durable feedback log (nested child chats rebind to their own;
+        # run_task restores the caller's binding on exit).
+        from ...hitl import set_thread_feedback_log as _set_fblog
+        from pathlib import Path as _P
+        _set_fblog(str(_P(self.base_dir) / "feedback_log.jsonl"))
         self.message_count += 1
-        
+        self._last_chat_hit_iter_cap = False
+
         # AUTO-CHECKPOINT: Every N messages
         if self.message_count - self.last_checkpoint_message_count >= self.CHECKPOINT_INTERVAL:
             print(f"  💾 Auto-checkpoint triggered (every {self.CHECKPOINT_INTERVAL} messages)...")
             self._auto_checkpoint()
             self.last_checkpoint_message_count = self.message_count
-        
+
         try:
-            if self.use_openai:
-                response_text = self._handle_openai_chat(user_input)
-            else:
-                response_text = self._handle_litellm_chat(user_input)
-            
-            print(f"🤖 Agent: {response_text}")
+            response_text = self._invoke_graph(user_input)
+
+            self._print_agent_answer(response_text)
             self._save_history()
-            
+
             if self.message_count > 80:
                 warning = "\n\n⚠️ Note: Conversation is getting long. Consider calling save_checkpoint and restarting."
                 response_text += warning
-            
+
             return response_text
-            
+
         except Exception as e:
             logging.error(f"Chat Error: {e}", exc_info=True)
-            
+
             print("  💾 Error detected - saving emergency checkpoint...")
             self._auto_checkpoint()
-            
+
             return f"❌ Error: {e}\n\n(Emergency checkpoint saved to {self.checkpoint_path})"
+
+    def run_task(self, task: str, context: Optional[Dict[str, Any]] = None,
+                 autonomy: Optional[AnalysisMode] = None,
+                 max_iterations: Optional[int] = None) -> Dict[str, Any]:
+        """Non-interactive entry point — used by the meta agent.
+
+        Runs the task and returns a structured summary that's easy to
+        consume programmatically:
+
+            {
+                "status": "success" | "error",
+                "task": str,                       # echoed input
+                "summary": str,                    # the agent's final reply
+                "files_produced": List[str],       # absolute paths
+                "feature_tables": List[str],       # per-analysis feature CSVs
+                "key_findings": List[str],         # extracted scientific claims
+                "suggested_followups": List[str],
+                "analyses": List[dict],            # session record snapshot
+                "warnings": List[str],
+            }
+
+        Mirrors SimulationOrchestratorAgent.run_task — see CLAUDE.md
+        "Two surfaces, one agent".
+
+        ``autonomy`` selects the AnalysisMode for this call. Defaults to
+        AUTONOMOUS — the safe choice for a headless/programmatic caller, so
+        the agent never pauses for a nonexistent user. A caller attached to a
+        human (the meta agent, driven via CLI/UI) passes AUTOPILOT so the
+        sub-agents' human-feedback prompts reach that human.
+        The original mode is restored on exit, even if chat() raises.
+        """
+        # Build a self-contained prompt that includes the optional context.
+        prompt = task
+        if context:
+            try:
+                ctx_str = json.dumps(context, indent=2, default=str)
+            except (TypeError, ValueError):
+                ctx_str = repr(context)
+            prompt = (
+                f"{task}\n\n"
+                f"Context provided by the caller (e.g., upstream agent's findings):\n"
+                f"```\n{ctx_str}\n```\n\n"
+                "Use this context together with your tools to complete the task."
+            )
+
+        # Snapshot prior state so we report "what was produced *during* this
+        # call" rather than "everything in the session."
+        n_before = len(self.analysis_results)
+
+        # Run under the requested autonomy mode — AUTONOMOUS by default (the
+        # safe headless choice). The meta agent passes its own mode through,
+        # so a co-pilot / autopilot delegation still raises the sub-agents'
+        # human-feedback prompts to the user driving the session.
+        run_mode = autonomy if autonomy is not None else AnalysisMode.AUTONOMOUS
+        original_mode = self.analysis_mode
+        original_max_iter = self.max_iterations
+        from ...hitl import get_thread_feedback_log, set_thread_feedback_log
+        _prev_fblog = get_thread_feedback_log()
+        try:
+            self.set_analysis_mode(run_mode)
+            if max_iterations is not None:
+                self.max_iterations = max_iterations
+            try:
+                summary_text = self.chat(prompt)
+                # chat() handles the iteration-cap case internally and returns
+                # the warning string (preserving CLI/UI behavior); a flag on
+                # self tells us whether that happened so we can surface it as
+                # an error to programmatic callers instead of silently
+                # reporting success.
+                if self._last_chat_hit_iter_cap:
+                    status = "error"
+                    error_msg: Optional[str] = summary_text
+                else:
+                    status = "success"
+                    error_msg = None
+            except Exception as e:
+                self.logger.exception(f"run_task failed: {e}")
+                summary_text = ""
+                status = "error"
+                error_msg = str(e)
+        finally:
+            # Always restore the original mode, even if chat() raised.
+            self.set_analysis_mode(original_mode)
+            self.max_iterations = original_max_iter
+            # chat() bound the feedback log to THIS session; restore the
+            # caller's binding (a delegating meta keeps logging to its own).
+            set_thread_feedback_log(_prev_fblog)
+            # A delegation-driven child may never reach the chat loop's
+            # auto-checkpoint cadence, and an interrupted delegation must
+            # leave current state behind for the restart/resume path
+            # (issue #469) — checkpoint after every run_task, like the
+            # planning orchestrator.
+            self._auto_checkpoint()
+
+        # Derive the structured summary from the session-state delta.
+        new_analyses = self.analysis_results[n_before:]
+
+        # files_produced: every file written under each new analysis's
+        # output directory (visualizations, reports, results JSON, ...).
+        files_produced: List[str] = []
+        for rec in new_analyses:
+            out_dir = rec.get("output_directory")
+            if out_dir and Path(out_dir).is_dir():
+                for p in sorted(Path(out_dir).rglob("*")):
+                    if p.is_file():
+                        files_produced.append(str(p.resolve()))
+
+        # key_findings: the scientific claims extracted by the sub-agents.
+        key_findings: List[str] = []
+        for rec in new_analyses:
+            full = rec.get("full_result") or {}
+            for claim in full.get("scientific_claims", []) or []:
+                text = claim.get("claim") if isinstance(claim, dict) else claim
+                if text:
+                    key_findings.append(f"[{rec.get('analysis_id')}] {text}")
+
+        # Heuristic: a successful analysis with no novelty assessment yet is
+        # a natural next step — claims can be checked against the literature.
+        suggested_followups: List[str] = []
+        for rec in new_analyses:
+            if rec.get("status") == "success" and not rec.get("novelty_assessment"):
+                suggested_followups.append(
+                    f"Assess novelty / get recommendations for analysis "
+                    f"{rec.get('analysis_id')}."
+                )
+        # A successful analysis whose interpretation has not been literature-
+        # refined yet is the other natural follow-up: `refine_interpretation`
+        # searches from the FITTED features (issue #323 Channel B). Strongest
+        # prior for identification-mode runs, which are literature-free in-run.
+        for rec in new_analyses:
+            if rec.get("status") == "success" and not rec.get("interpretation_revisions"):
+                suggested_followups.append(
+                    f"Refine interpretation of analysis {rec.get('analysis_id')} "
+                    f"against literature searched from its fitted features "
+                    f"(refine_interpretation)."
+                )
+
+        warnings: List[str] = []
+        for rec in new_analyses:
+            if rec.get("status") != "success":
+                warnings.append(
+                    f"Analysis {rec.get('analysis_id')} did not complete "
+                    f"successfully (status={rec.get('status')})."
+                )
+
+        # feature_tables: per-analysis flat CSVs (conditions + extracted scalar
+        # features) for downstream planning / BO — see feature_table.py.
+        feature_tables: List[str] = []
+        feature_tables_schema: List[Dict[str, Any]] = []
+        for rec in new_analyses:
+            out_dir = rec.get("output_directory")
+            if out_dir:
+                ft = Path(out_dir) / "features.csv"
+                if ft.is_file():
+                    feature_tables.append(str(ft.resolve()))
+                    # Column names / row count / holes travel with the path so
+                    # a caller (meta, remote MCP client) can pick BO inputs and
+                    # targets without opening the file.
+                    from .feature_table import describe_feature_table
+                    _d = describe_feature_table(ft)
+                    if _d:
+                        feature_tables_schema.append(
+                            {"path": str(ft.resolve()), **_d})
+
+        # staged_solutions: raw T=2 (hot-annealing) solutions filed in the
+        # staging buffer during this run. Surfaced so the meta agent can offer
+        # the user a review — upgrade an existing skill from one, or consolidate
+        # several into a new skill (see review_distilled_skills). Ids into the
+        # staging buffer (~/.scilink/distill_staging).
+        staged_solutions: List[str] = []
+        for rec in new_analyses:
+            full = rec.get("full_result") or {}
+            for sid in full.get("staged_solutions", []) or []:
+                if sid not in staged_solutions:
+                    staged_solutions.append(sid)
+
+        result = {
+            "status": status,
+            "task": task,
+            "summary": summary_text,
+            "files_produced": files_produced,
+            "feature_tables": feature_tables,
+            "feature_tables_schema": feature_tables_schema,
+            "staged_solutions": staged_solutions,
+            "key_findings": key_findings,
+            "suggested_followups": suggested_followups,
+            "analyses": [
+                {
+                    "analysis_id": rec.get("analysis_id"),
+                    "agent_name": rec.get("agent_name"),
+                    "status": rec.get("status"),
+                    "data_path": rec.get("data_path"),
+                    "output_directory": rec.get("output_directory"),
+                } for rec in new_analyses
+            ],
+            "warnings": warnings,
+        }
+        if error_msg:
+            result["error"] = error_msg
+        return result
+
+    def _invoke_graph(self, user_input: str) -> str:
+        """
+        Run one user turn through the LangGraph ReAct loop.
+
+        Appends the human message, runs the graph to completion, and returns
+        the final assistant text.  The MemorySaver checkpointer retains the
+        full thread history across calls so each invocation only sends the
+        new message.
+
+        History trimming — mirrors the old loop: if the accumulated thread
+        exceeds MAX_HISTORY_MESSAGES, trim it before the graph call so the
+        LLM context window stays manageable.
+        """
+        self._repair_graph_state()
+
+        # Keep self.messages in sync (used by _save_history / _auto_checkpoint)
+        self.messages.append({"role": "user", "content": user_input})
+
+        # Trim self.messages if needed (graph state trims itself via the
+        # MemorySaver accumulation, but we keep the JSON persistence in sync).
+        if len(self.messages) > 120:
+            print("  ⚠️  Context window getting full - trimming history...")
+            system_msg = self.messages[0]
+            recent_msgs = self._trim_history(
+                self.messages[1:], max_messages=self.MAX_HISTORY_MESSAGES
+            )
+            self.messages = [system_msg] + recent_msgs
+
+        # Invoke the graph with only the new user message.
+        # MemorySaver accumulates the rest.
+        result = self._graph.invoke(
+            {
+                "messages": [HumanMessage(content=user_input)],
+                "step_count": 0,
+                "autonomy_mode": self.analysis_mode.value,
+                "active_skill": None,
+                "session_dir": str(self.base_dir),
+                "checkpoint_data": {},
+                "mcp_connections": list(self._mcp_connections.keys()),
+                "current_data_path": self.current_data_path,
+                "current_data_type": self.current_data_type,
+                "current_metadata": self.current_metadata,
+                "selected_agent_id": self.selected_agent_id,
+                "analysis_results": self.analysis_results,
+                "active_knowledge": self.active_knowledge,
+                "message_count": self.message_count,
+                "analysis_run_counter": self._analysis_run_counter,
+            },
+            config=self._graph_config,
+        )
+
+        # Extract the final assistant response (last AIMessage in the thread)
+        final_text = ""
+        for msg in reversed(result.get("messages", [])):
+            if isinstance(msg, AIMessage) and msg.content:
+                final_text = msg.content
+                break
+
+        # Handle MAX_TOOL_ITERATIONS case (graph routed to END after step limit)
+        if not final_text:
+            if result.get("step_count", 0) >= self.max_iterations:
+                self._last_chat_hit_iter_cap = True
+            final_text = "⚠️ Maximum tool iterations reached. Please simplify your request."
+
+        # Sync the assistant response back into self.messages
+        self.messages.append({"role": "assistant", "content": final_text})
+
+        # Sync state fields that tools may have mutated on self back into the
+        # orchestrator instance (tools mutate self.* directly, so no sync needed —
+        # this comment is here as a reminder that state is currently orchestrator-owned).
+
+        return final_text
+
+    def _repair_graph_state(self) -> None:
+        """Heal a dangling tool call left by a mid-run interruption (process
+        stopped between ``execute_tools`` committing its result and the loop
+        continuing) — the LangGraph-state analogue of
+        ``repair_dangling_tool_calls`` / ``close_interrupted_turn``.
+
+        The checkpointer only ever appends, so the realistic failure mode is
+        purely additive: the persisted thread ends on an AIMessage whose
+        tool_calls have no matching ToolMessage, or ends on a ToolMessage with
+        no assistant reply. Both are healed by appending the missing
+        message(s) via ``update_state`` — never by rewriting history.
+        """
+        try:
+            snapshot = self._graph.get_state(self._graph_config)
+        except Exception:
+            return
+        if not snapshot or not snapshot.values:
+            return
+        messages = snapshot.values.get("messages") or []
+        if not messages:
+            return
+
+        last = messages[-1]
+        patch = []
+        if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
+            for tc in last.tool_calls:
+                patch.append(ToolMessage(
+                    content=(
+                        "⚠️ Tool execution was interrupted before a result "
+                        "was produced (the run was stopped). Re-run this "
+                        "tool if its output is still needed."
+                    ),
+                    tool_call_id=tc["id"],
+                ))
+        elif isinstance(last, ToolMessage):
+            patch.append(AIMessage(
+                content="[Turn interrupted before a reply was produced.]"
+            ))
+
+        if patch:
+            logging.info(
+                "  🔧 Repaired %d dangling message(s) from an interrupted run",
+                len(patch),
+            )
+            self._graph.update_state(self._graph_config, {"messages": patch})
+
+    def _seed_graph_history(self, history: List[Dict]) -> None:
+        """
+        Replay persisted history into the graph's MemorySaver so a restored
+        session has full context.
+
+        Only called once at init when history is non-empty.  Uses a bulk
+        invoke so the graph thread accumulates all prior messages without
+        making any LLM calls.
+        """
+        # Repair/close before converting: a session file saved mid-interruption
+        # can end on an unanswered tool_call or a dangling tool result, which
+        # `update_state` would otherwise seed verbatim into the checkpoint.
+        history = close_interrupted_turn(repair_dangling_tool_calls(list(history)))
+
+        lc_messages = []
+        for m in history:
+            role = m.get("role", "")
+            content = m.get("content") or ""
+            if role == "user":
+                lc_messages.append(HumanMessage(content=content))
+            elif role == "assistant":
+                tool_calls_raw = m.get("tool_calls", [])
+                lc_tc = [
+                    {
+                        "id": tc.get("id", ""),
+                        "name": tc.get("function", {}).get("name", ""),
+                        "args": json.loads(tc.get("function", {}).get("arguments", "{}"))
+                        if isinstance(tc.get("function", {}).get("arguments", "{}"), str)
+                        else tc.get("function", {}).get("arguments", {}),
+                        "type": "tool_call",
+                    }
+                    for tc in tool_calls_raw
+                ]
+                lc_messages.append(AIMessage(content=content, tool_calls=lc_tc))
+            elif role == "tool":
+                lc_messages.append(
+                    ToolMessage(
+                        content=content,
+                        tool_call_id=m.get("tool_call_id", ""),
+                    )
+                )
+            # system messages are skipped — the graph handles system prompt internally
+
+        if not lc_messages:
+            return
+
+        # Directly update the MemorySaver state rather than re-running the graph,
+        # to avoid making LLM calls during init.
+        try:
+            # Use the put() API to write the accumulated messages into the checkpoint.
+            checkpoint = self._graph.get_state(self._graph_config)
+            if not checkpoint or not checkpoint.values:
+                # No existing state — write an initial empty checkpoint then update.
+                pass
+            # The safest approach is to invoke with all prior messages in one shot
+            # using the graph's update_state API so no LLM call is made.
+            self._graph.update_state(
+                self._graph_config,
+                {"messages": lc_messages},
+            )
+            logging.info(
+                "  🧠 Graph history seeded: %d messages loaded into MemorySaver",
+                len(lc_messages),
+            )
+        except Exception as e:
+            logging.warning("Failed to seed graph history: %s", e)
 
     def _auto_checkpoint(self):
         """Internal auto-checkpoint without LLM interaction."""
@@ -1164,6 +1800,7 @@ class AnalysisOrchestratorAgent:
             checkpoint_data = {
                 "timestamp": datetime.now().isoformat(),
                 "current_metadata": self.current_metadata,
+                "current_metadata_owner": self.current_metadata_owner,
                 "current_data_path": self.current_data_path,
                 "current_data_type": self.current_data_type,
                 "selected_agent_id": self.selected_agent_id,
@@ -1175,7 +1812,7 @@ class AnalysisOrchestratorAgent:
                 "graduated_skill_sources": self._graduated_skill_sources,
             }
 
-            with open(self.checkpoint_path, 'w') as f:
+            with open(self.checkpoint_path, 'w', encoding="utf-8") as f:
                 json.dump(checkpoint_data, f, indent=2)
 
             print(f"    ✅ Auto-checkpoint saved")
@@ -1183,188 +1820,71 @@ class AnalysisOrchestratorAgent:
         except Exception as e:
             logging.warning(f"Auto-checkpoint failed: {e}")
 
-    def _handle_openai_chat(self, user_input: str) -> str:
-        """Handle chat with OpenAI-compatible models with manual function calling loop."""
-        from openai import OpenAI
-        
-        client = OpenAI(
-            api_key=self.model.api_key,
-            base_url=self.model.base_url,
-            timeout=120.0  # 2 minute timeout
-        )
-        
-        self.messages.append({"role": "user", "content": user_input})
-        
-        if len(self.messages) > 120:
-            print("  ⚠️  Context window getting full - trimming history...")
-            system_msg = self.messages[0]
-            recent_msgs = self._trim_history(self.messages[1:], max_messages=self.MAX_HISTORY_MESSAGES)
-            self.messages = [system_msg] + recent_msgs
-        
-        iteration = 0
-        
-        while iteration < self.MAX_TOOL_ITERATIONS:
-            iteration += 1
-            
-            print(f"  ⏳ Waiting for orchestrator response ...")
-            
-            try:
-                response = client.chat.completions.create(
-                    model=self.model.model,
-                    messages=self.messages,
-                    tools=self.tools_for_model,
-                    tool_choice="auto"
-                )
-            except Exception as e:
-                if "timeout" in str(e).lower() or "timed out" in str(e).lower():
-                    print(f"  ⚠️ API timeout on iteration {iteration}. Retrying...")
-                    if iteration < 3:  # Retry up to 3 times on timeout
-                        continue
-                raise
-            
-            message = response.choices[0].message
-            
-            if not message.tool_calls:
-                text = message.content
-                if not text and iteration > 0:
-                    # LLM returned empty text after tool calls — ask for a summary
-                    self.messages.append({"role": "user", "content": "Please briefly summarize what you just did and suggest next steps."})
-                    followup = self.client.chat.completions.create(
-                        model=self.model.model,
-                        messages=self.messages,
-                        tools=self.tools_for_model,
-                        tool_choice="none"
-                    )
-                    text = followup.choices[0].message.content or ""
-                self.messages.append({
-                    "role": "assistant",
-                    "content": text
-                })
-                return text
-            
-            self.messages.append({
-                "role": "assistant",
-                "content": message.content,
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments
-                        }
-                    } for tc in message.tool_calls
-                ]
-            })
-            
-            for tool_call in message.tool_calls:
-                func_name = tool_call.function.name
-                args = json.loads(tool_call.function.arguments)
-                
-                print(f"  🔧 Calling tool: {func_name}")
-                
-                result = self.tools.execute_tool(func_name, **args)
-                
-                self.messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result
-                })
-        
-        return "⚠️ Maximum tool iterations reached. Please simplify your request."
+    def _tool_message(self, tool_call_id: str, result: str) -> dict:
+        """Build the tool-result message. When the active provider renders
+        images in tool results (Claude/Bedrock, Gemini — not the OpenAI-
+        compatible path), an image-bearing result becomes a multimodal message
+        so the model can actually see it; every other result stays the exact
+        plain-string message as before."""
+        allow = (not self.use_openai) and provider_supports_tool_image(self.model.model)
+        return build_tool_message(tool_call_id, result, allow_image=allow)
 
-    def _handle_litellm_chat(self, user_input: str) -> str:
-        """Handle chat with LiteLLM models with manual function calling loop."""
-        import litellm
-        
-        self.messages.append({"role": "user", "content": user_input})
-        
-        if len(self.messages) > 120:
-            print("  ⚠️  Context window getting full - trimming history...")
-            system_msg = self.messages[0]
-            recent_msgs = self._trim_history(self.messages[1:], max_messages=self.MAX_HISTORY_MESSAGES)
-            self.messages = [system_msg] + recent_msgs
-        
-        iteration = 0
-        
-        while iteration < self.MAX_TOOL_ITERATIONS:
-            iteration += 1
-            
-            print(f"  ⏳ Waiting for orchestrator response ...")
-            
-            try:
-                response = litellm.completion(
-                    model=self.model.model,
-                    messages=self.messages,
-                    tools=self.tools_for_model,
-                    tool_choice="auto",
-                    api_key=self.model.api_key,
-                    api_base=self.model.base_url,
-                    timeout=120,  # Connection timeout in seconds
-                    request_timeout=120,  # Alternative timeout parameter
-                )
-            except Exception as e:
-                if "timeout" in str(e).lower() or "timed out" in str(e).lower():
-                    print(f"  ⚠️ API timeout on iteration {iteration}. Retrying...")
-                    if iteration < 3:  # Retry up to 3 times on timeout
-                        continue
-                raise
-            
-            message = response.choices[0].message
-            tool_calls = getattr(message, "tool_calls", None)
-            content = getattr(message, "content", None)
-            
-            if not tool_calls:
-                if not content and iteration > 0:
-                    # LLM returned empty text after tool calls — ask for a summary
-                    self.messages.append({"role": "user", "content": "Please briefly summarize what you just did and suggest next steps."})
-                    followup = litellm.completion(
-                        model=self.model.model,
-                        messages=self.messages,
-                        tools=self.tools_for_model,
-                        tool_choice="none",
-                    )
-                    content = getattr(followup.choices[0].message, "content", None) or ""
-                self.messages.append({
-                    "role": "assistant",
-                    "content": content or ""
-                })
-                return content or ""
-            
-            assistant_msg = {
-                "role": "assistant",
-                "content": content,
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments
-                        }
-                    } for tc in tool_calls
-                ]
-            }
-            self.messages.append(assistant_msg)
-            
-            for tool_call in tool_calls:
-                func_name = tool_call.function.name
-                try:
-                    args = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError:
-                    args = {}
-                
-                print(f"  🔧 Calling tool: {func_name}")
-                
-                result = self.tools.execute_tool(func_name, **args)
-                
-                self.messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result
-                })
-        
-        return "⚠️ Maximum tool iterations reached. Please simplify your request."
+    def _print_assistant_reasoning(self, content) -> None:
+        """Surface the LLM's interim reasoning that accompanies a tool call.
+
+        Without this the console jumps straight to "🔧 Calling tool: …", so a
+        deliberate step — e.g. re-running an analysis to verify a methodological
+        concern — reads like a silent loop. The text is already in history; this
+        just shows it so the user can see *why* the next tool is being called.
+        """
+        if not content:
+            return
+        text = content.strip() if isinstance(content, str) else str(content).strip()
+        if not text:
+            return
+        import sys
+        # Dim + italic (muted cyan) so the prose is visually distinct from the
+        # structural tool-call log — but only on a real terminal, else the raw
+        # escape codes would litter captured/redirected output. Blank lines
+        # before and after set the thought apart from the tool call it triggers.
+        # A meta-delegated run reasons in AMBER (33), the meta's own in CYAN (36),
+        # so the CLI distinguishes them the way the UI does (dim + italic either way).
+        specialist = getattr(self, "_agent_label", "Agent") != "Agent"
+        color = "33" if specialist else "36"
+        style, reset = ((f"\033[2;3;{color}m", "\033[0m")
+                        if sys.stdout.isatty() else ("", ""))
+        body = text.replace("\n", "\n     ")  # indent continuation lines
+        # Tag a meta-delegated run's reasoning with an INVISIBLE marker (U+2063)
+        # right after 💭 so the UI renders it a distinct color from the meta's
+        # own 💭 while the visible glyph stays identical. ANSI color can't carry
+        # this: the UI captures non-tty output (no ANSI emitted) and re-colors by
+        # the 💭 marker, so the source must ride in the text. Gated on
+        # `_agent_label` (the 🤖-answer attribution mechanism); a standalone
+        # session keeps a plain 💭, unchanged.
+        mark = "\u2063" if specialist else ""
+        print(f"\n  {style}💭{mark} {body}{reset}\n")
+
+    def _print_agent_answer(self, text) -> None:
+        """Print the agent's final answer — a *deliverable*, the third output
+        class alongside structural logs and `_print_assistant_reasoning`'s 💭
+        asides. Reasoning is de-emphasized (dim); an answer is the payload, so
+        its header is emphasized (bold + bright). `_agent_label` (default
+        "Agent") lets the meta name the delegated specialist, e.g. "Analysis
+        specialist", so a child's answer is not mistaken for the meta's own.
+        """
+        import sys
+        label = getattr(self, "_agent_label", "Agent")
+        # A delegated specialist's answer header takes the specialist color (bold
+        # AMBER, 33) so it matches that specialist's reasoning; the meta's own
+        # answer stays bold BRIGHT CYAN (96). The UI mirrors this by the invisible
+        # U+2063 marker after 🤖 (it captures non-tty output, so it can't read the
+        # ANSI and re-colors by the marker instead).
+        specialist = label != "Agent"
+        code = "1;33" if specialist else "1;96"
+        mark = "\u2063" if specialist else ""
+        bold, reset = (f"\033[{code}m", "\033[0m") if sys.stdout.isatty() else ("", "")
+        print(f"\n{bold}🤖{mark} {label}:{reset}")
+        print(text if text is not None else "")
 
     def _load_history(self) -> List[Dict]:
         """Load conversation history from disk."""
@@ -1383,7 +1903,10 @@ class AnalysisOrchestratorAgent:
         """Save conversation history to disk."""
         try:
             history_data = [m for m in self.messages if m["role"] != "system"]
-            with open(self.history_path, 'w') as f:
+            # Collapse any multimodal (image-bearing) tool messages back to plain
+            # strings so chat_history.json keeps its shape and carries no base64.
+            history_data = sanitize_history_images(history_data)
+            with open(self.history_path, 'w', encoding="utf-8") as f:
                 json.dump(history_data, f, indent=2)
         except Exception as e:
             logging.warning(f"Failed to save history: {e}")

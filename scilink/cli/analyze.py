@@ -26,8 +26,8 @@ Examples:
   # Start with data file
   scilink analyze --data ./sample.tif --metadata ./metadata.json
   
-  # Use supervised mode (AI leads, human approves)
-  scilink analyze --mode supervised --data ./data/
+  # Use autopilot mode (AI leads, human approves)
+  scilink analyze --mode autopilot --data ./data/
   
   # Full autonomous mode (runs entire pipeline automatically)
   scilink analyze --mode autonomous --data ./sample.npy --metadata ./description.txt
@@ -43,7 +43,7 @@ Examples:
 
 Analysis Modes (matching 'scilink plan' for consistent UX):
   co-pilot (default)   Human leads, AI assists. Reviews all agent selections.
-  supervised           AI leads, human approves. AI proceeds with reasonable defaults.
+  autopilot           AI leads, human approves. AI proceeds with reasonable defaults.
   autonomous           Full autonomy. AI selects agents and runs without confirmation.
 
 Environment Variables:
@@ -96,12 +96,20 @@ Metadata Options:
         help='Materials Project API key (or set MP_API_KEY env var). '
              'Enables the MP tool-resolver in structure generation.'
     )
-    
+
+    parser.add_argument(
+        '--futurehouse-api-key',
+        type=str,
+        dest='futurehouse_api_key',
+        help='FutureHouse API key for novelty assessment / literature search '
+             '(or set FUTUREHOUSE_API_KEY env var). Optional.'
+    )
+
     # Mode arguments
     parser.add_argument(
         '--mode',
         type=str,
-        choices=['co-pilot', 'supervised', 'autonomous'],
+        choices=['co-pilot', 'autopilot', 'autonomous'],
         default='co-pilot',
         help='Analysis mode (default: co-pilot)'
     )
@@ -178,9 +186,12 @@ Metadata Options:
         metavar='MCP_CONFIG',
         help=(
             'MCP server configurations. Each entry can be:\n'
-            '  - A JSON config file ({"name":"...", "command":["..."], "env":{}})\n'
+            '  - A JSON config file ({"name":"...", "command":["..."], "url":"...", '
+            '"transport":"sse|http", "headers":{...}, "env":{}}; ${VAR} in header '
+            'values is expanded from the environment)\n'
             '  - stdio shorthand:  stdio:name:command,arg1,arg2\n'
             '  - SSE shorthand:    sse:name:http://host:port/sse\n'
+            '  - Streamable HTTP shorthand: http:name:https://host/mcp\n'
             'Example: scilink analyze --mcp stdio:fs:npx,-y,@modelcontextprotocol/server-filesystem,/tmp'
         )
     )
@@ -240,7 +251,7 @@ Metadata Options:
             api_key = args.google_api_key
 
     # Register the MP key (if provided via flag) into the in-memory keystore so
-    # auto-discovery picks it up when run_dft_workflow constructs DFTOrchestrator.
+    # auto-discovery picks it up when run_dft_workflow runs the DFT pipeline.
     if args.mp_api_key:
         import scilink
         scilink.set_api_key('materials_project', args.mp_api_key)
@@ -282,6 +293,7 @@ Metadata Options:
         'model_name': args.model,
         'base_url': base_url,
         'api_key': api_key,
+        'futurehouse_api_key': args.futurehouse_api_key,
         'analysis_mode': args.mode,
         'data_path': args.data_path,
         'metadata_path': args.metadata_path,
@@ -383,7 +395,7 @@ class AnalysisPlayground:
         # Convert mode string to enum
         mode_map = {
             'co-pilot': AnalysisMode.CO_PILOT,
-            'supervised': AnalysisMode.SUPERVISED,
+            'autopilot': AnalysisMode.AUTOPILOT,
             'autonomous': AnalysisMode.AUTONOMOUS,
         }
         analysis_mode = mode_map.get(analysis_mode_str, AnalysisMode.CO_PILOT)
@@ -417,6 +429,21 @@ Supported data types:
                     if not api_key:
                         print("❌ Cannot proceed without API key for internal proxy.")
                         sys.exit(1)
+            elif model_name.lower().startswith("bedrock/"):
+                # Bedrock credentials ride env vars (bearer token or AWS
+                # keys); api_key stays None — LiteLLM reads the environment.
+                # Without this branch the model name matches 'claude' and the
+                # CLI wrongly prompts for an ANTHROPIC_API_KEY.
+                if not (os.getenv("AWS_BEARER_TOKEN_BEDROCK")
+                        or os.getenv("AWS_ACCESS_KEY_ID")):
+                    print("\n⚠️  No AWS Bedrock credentials found "
+                          "(AWS_BEARER_TOKEN_BEDROCK or AWS_ACCESS_KEY_ID).")
+                    token = input(
+                        "Enter your Bedrock bearer token (or Enter to "
+                        "proceed with default AWS credential discovery): "
+                    ).strip()
+                    if token:
+                        os.environ["AWS_BEARER_TOKEN_BEDROCK"] = token
             else:
                 provider_name, env_var_hint, env_vars = self._infer_provider(model_name)
                 api_key = self._get_api_key_from_env(env_vars)
@@ -428,7 +455,8 @@ Supported data types:
                         api_key = user_key
 
         # === FUTUREHOUSE API KEY (Optional) ===
-        futurehouse_key = os.getenv("FUTUREHOUSE_API_KEY")
+        # Flag takes priority, then env; only prompt when neither is set.
+        futurehouse_key = self.config.get('futurehouse_api_key') or os.getenv("FUTUREHOUSE_API_KEY")
         if not futurehouse_key:
             print("\n📚 FutureHouse API Key (Optional - for novelty assessment)")
             print("   Enables literature search to check if findings are novel.")
@@ -686,18 +714,40 @@ Supported data types:
                     count = self.agent.connect_mcp_server(name, url=url)
                     print(f"   ✅ Registered {count} tool(s) from '{name}'")
 
+                elif entry.startswith("http:"):
+                    # http:name:https://host/mcp  (streamable HTTP)
+                    parts = entry[len("http:"):].split(":", 1)
+                    name = parts[0]
+                    url = parts[1] if len(parts) > 1 else ""
+                    print(f"\n🔌 Connecting to MCP server '{name}' "
+                          "(streamable HTTP)...")
+                    count = self.agent.connect_mcp_server(
+                        name, url=url, transport="http"
+                    )
+                    print(f"   ✅ Registered {count} tool(s) from '{name}'")
+
                 else:
                     # JSON config file
                     path = Path(entry).resolve()
                     with open(path) as f:
                         cfg = _json.load(f)
                     name = cfg.get("name", path.stem)
+                    headers = cfg.get("headers")
+                    if headers:
+                        # ${VAR} in header values is expanded so tokens stay
+                        # in the environment, not in the JSON file.
+                        headers = {
+                            k: os.path.expandvars(v)
+                            for k, v in headers.items()
+                        }
                     print(f"\n🔌 Connecting to MCP server '{name}'...")
                     count = self.agent.connect_mcp_server(
                         name,
                         command=cfg.get("command"),
                         url=cfg.get("url"),
                         env=cfg.get("env"),
+                        transport=cfg.get("transport"),
+                        headers=headers,
                     )
                     print(f"   ✅ Registered {count} tool(s) from '{name}'")
 
@@ -764,11 +814,11 @@ Supported data types:
             if len(parts) == 1:
                 print(f"\n🎛️  Current Analysis Mode: {self.agent.analysis_mode.value}")
                 print(f"   Human Feedback: {'Enabled' if self.agent._enable_human_feedback else 'Disabled'}")
-                print("\n   To change: /mode <co-pilot|supervised|autonomous>")
+                print("\n   To change: /mode <co-pilot|autopilot|autonomous>")
             else:
                 mode_map = {
                     'co-pilot': AnalysisMode.CO_PILOT,
-                    'supervised': AnalysisMode.SUPERVISED,
+                    'autopilot': AnalysisMode.AUTOPILOT,
                     'autonomous': AnalysisMode.AUTONOMOUS,
                 }
                 new_mode = mode_map.get(parts[1].lower())
@@ -779,7 +829,7 @@ Supported data types:
                     print(f"   Human Feedback: {'Enabled' if self.agent._enable_human_feedback else 'Disabled'}")
                 else:
                     print(f"\n   ❌ Unknown mode: {parts[1]}")
-                    print("   Valid options: co-pilot, supervised, autonomous")
+                    print("   Valid options: co-pilot, autopilot, autonomous")
             return True
         
         elif cmd == "/checkpoint":
@@ -810,7 +860,7 @@ Supported data types:
         Process initial --data and --metadata inputs.
         Handles different modes appropriately:
         - co-pilot: Examine data, load metadata, then wait for user
-        - supervised: Examine, load metadata, suggest agent, wait for approval
+        - autopilot: Examine, load metadata, suggest agent, wait for approval
         - autonomous: Run the entire pipeline automatically
         """
         has_data = self._initial_data_path is not None
@@ -866,7 +916,7 @@ Supported data types:
                 print("   Falling back to loading metadata only...\n")
                 # Fall through to load metadata
         
-        # === CO-PILOT / SUPERVISED / Fallback: Step-by-step ===
+        # === CO-PILOT / AUTOPILOT / Fallback: Step-by-step ===
         
         # Step 1: Examine data (if provided)
         if has_data:
@@ -888,9 +938,9 @@ Supported data types:
                 self.agent.chat(f"Convert the text description to metadata from {meta_path}")
             print()
         
-        # Step 3: In supervised mode with both inputs, suggest next step
-        if mode == 'supervised' and has_data and has_metadata:
-            print("🔄 SUPERVISED MODE: Suggesting agent selection...")
+        # Step 3: In autopilot mode with both inputs, suggest next step
+        if mode == 'autopilot' and has_data and has_metadata:
+            print("🔄 AUTOPILOT MODE: Suggesting agent selection...")
             self.agent.chat(
                 "Based on the data type and metadata, recommend the appropriate "
                 "analysis agent and explain your reasoning."

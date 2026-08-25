@@ -45,10 +45,10 @@ def create_intensity_gmm_visualization(
     ax.grid(True, alpha=0.3)
     
     buf = BytesIO()
-    plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
+    fig.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
     buf.seek(0)
     visualizations.append({'label': 'Intensity GMM Histogram', 'bytes': buf.getvalue()})
-    plt.close()
+    plt.close(fig)
           
     # Atoms on original image colored by intensity component
     fig, ax = plt.subplots(figsize=(10, 10))
@@ -67,10 +67,10 @@ def create_intensity_gmm_visualization(
     ax.axis('off')
     
     buf = BytesIO()
-    plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
+    fig.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
     buf.seek(0)
     visualizations.append({'label': 'Intensity-Based Atomic Clustering', 'bytes': buf.getvalue()})
-    plt.close()
+    plt.close(fig)
     
     return visualizations
 
@@ -123,13 +123,13 @@ def create_local_env_visualization(
         axes[idx].axis('off')
     
     fig.suptitle("Local Environment GMM Centroids")
-    plt.tight_layout()
+    fig.tight_layout()
     
     buf = BytesIO()
-    plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
+    fig.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
     buf.seek(0)
     visualizations.append({'label': 'Local Environment Centroids', 'bytes': buf.getvalue()})
-    plt.close()
+    plt.close(fig)
     
     # 2. Classified atom map
     fig, ax = plt.subplots(figsize=(10, 10))
@@ -150,10 +150,10 @@ def create_local_env_visualization(
     ax.axis('off')
     
     buf = BytesIO()
-    plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
+    fig.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
     buf.seek(0)
     visualizations.append({'label': 'Local Environment Classification Map', 'bytes': buf.getvalue()})
-    plt.close()
+    plt.close(fig)
     
     return visualizations
 
@@ -183,10 +183,10 @@ def create_nn_distance_visualization(
     ax.axis('off')
     
     buf = BytesIO()
-    plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
+    fig.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
     buf.seek(0)
     visualizations.append({'label': 'NN Distance Map', 'bytes': buf.getvalue()})
-    plt.close()
+    plt.close(fig)
     
     # 2. Distance histogram
     fig, ax = plt.subplots(figsize=(6, 4))
@@ -196,10 +196,10 @@ def create_nn_distance_visualization(
     ax.set_title("Nearest-Neighbor Distance Distribution")
     
     buf = BytesIO()
-    plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
+    fig.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
     buf.seek(0)
     visualizations.append({'label': 'NN Distance Histogram', 'bytes': buf.getvalue()})
-    plt.close()
+    plt.close(fig)
     
     return visualizations
 
@@ -439,13 +439,13 @@ def create_intensity_histogram_plot(intensities: np.ndarray, n_bins: int = 50) -
     ax.axvline(np.median(intensities), color='orange', linestyle='--', label=f'Median: {np.median(intensities):.2f}')
     ax.legend()
     
-    plt.tight_layout()
+    fig.tight_layout()
     
     buf = BytesIO()
-    plt.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
+    fig.savefig(buf, format='jpeg', dpi=150, bbox_inches='tight')
     buf.seek(0)
     image_bytes = buf.getvalue()
-    plt.close()
+    plt.close(fig)
     
     return image_bytes
 

@@ -27,11 +27,15 @@ mapping, phase identification, and chemical-state analysis.
 **Component count estimation:**
 - Start with the number of distinct core-loss edges present in the energy
   range, plus one for the background/plural-scattering component.
-- For a dataset spanning Ti L2,3 and O K edges in a TiO2/SrTiO3 system:
-  expect ~3-5 components (Ti4+ phase, Ti3+ or reduced phase, O-K
-  environment, background, possible interface component).
-- Datasets with a single edge region: 2-4 components typically suffice.
-- If the energy range includes both low-loss and core-loss: add 1-2
+- Add one component per distinct chemical environment / oxidation state
+  you expect for each element (e.g. mixed-valence phases, interface
+  states). *Example:* a dataset spanning two adjacent edges in a
+  mixed-valence transition-metal oxide (such as Ti L2,3 + O K in a
+  TiO2/SrTiO3 system) typically calls for ~3–5 components — one per
+  oxidation state, one per ligand environment, plus a background. Other
+  systems scale by the same logic.
+- Datasets with a single edge region: 2–4 components typically suffice.
+- If the energy range includes both low-loss and core-loss: add 1–2
   components for plasmon/zero-loss tail contributions.
 
 **Energy range considerations:**
@@ -52,39 +56,46 @@ mapping, phase identification, and chemical-state analysis.
 - Negative values from background subtraction or deconvolution violate
   NMF constraints. Either clip to zero or switch to PCA.
 
-## analysis
+## implementation
 
-**NMF component interpretation for EELS:**
-- Each NMF component spectrum should resemble a physically plausible EELS
-  signal: non-negative, with recognizable edge shapes or smooth background.
-- The background component typically shows a monotonically decreasing
-  power-law shape (A * E^-r) without sharp edge onsets.
-- Physical components show characteristic edge shapes: delayed maxima for
-  L2,3 edges (white lines), sawtooth onset for K edges, sharp threshold
-  for M4,5 edges.
-- Artifact components may show: oscillatory negative-positive patterns,
-  noise-like random fluctuations, or derivative-like shapes. These
-  indicate over-decomposition.
+**Per-pixel fitting recipes for EELS features.**
 
-**Identifying edge features in components:**
-- White lines (sharp peaks at edge onset) indicate transitions to
-  unfilled d or f states. Their intensity ratio encodes oxidation state
-  (e.g., Ti L3/L2 ratio increases with Ti valence).
-- Near-edge fine structure (ELNES) in the first 30-50 eV above the edge
-  onset reflects local coordination and bonding environment.
-- Extended fine structure (EXELFS) beyond 50 eV provides interatomic
-  distance information but is rarely resolved in NMF components.
+Core-loss edges: subtract a power-law background (`A * E^-r`, r typically
+2.5–5) fit to a pre-edge window, then fit the edge step plus any ELNES
+peaks with `lmfit.models.StepModel` + `GaussianModel` / `LorentzianModel`.
 
-**Spatial abundance map quality:**
-- Maps should show spatially coherent regions (grains, layers, interfaces)
-  rather than random pixel-level noise patterns.
-- Sharp boundaries in maps typically indicate real phase boundaries;
-  gradual transitions suggest intermixing, beam damage, or specimen
-  thickness variations.
+Low-loss plasmons: a Drude-Lorentz oscillator in loss space is the most
+physically faithful model. A Lorentzian-on-linear-background is an
+acceptable approximation when the peak sits well inside the measurement
+window.
+
+A peak whose center lies outside the measurement window cannot be
+honestly measured from a tail-only fit — mathematically the lineshape
+admits a center value, but the uncertainty is large and the result is
+extrapolation, not measurement. The correct strategy is to **bound the
+center to the measurement window** and **NaN out pixels whose fit
+converges at the bound** (those pixels' peak is outside the window;
+the result is "no measurement available", not "peak at the bound").
+Do not widen bounds beyond the window to chase those pixels.
+
+Initialization and bounds:
+- Initialize peak center at the argmax of a lightly smoothed (Savitzky-
+  Golay, window 5–9, polyorder 2) spectrum, not a fixed value.
+- Bound the peak center to the measurement window (`[axis_start,
+  axis_end]`).
+- Mark per-pixel fits with R² < ~0.5 or parameters railed at a bound
+  as NaN. The dashboard histogram will then show the real interior
+  distribution; boundary pile-ups indicate fit failures or features
+  outside the measurement window — both honestly reported as NaN.
 
 ## interpretation
 
-**Reference edge energies (core-loss onset values):**
+**Reference edge energies (core-loss onset values).** The entries below
+are illustrative examples covering commonly encountered edges; the same
+chemical-shift / fine-structure principles apply to any core-loss edge.
+For elements / edges not listed, infer the initial edge energy from the
+data itself (the spectrum's rising-step or peak position) and keep fit
+bounds generous around that initial guess.
 
 Titanium Ti L2,3:
 - Ti L3 onset: ~456 eV (metal), ~458 eV (TiO2)
@@ -161,5 +172,6 @@ Nitrogen N K:
   within the energy resolution of the instrument (typically 0.5-1.5 eV
   for standard EELS, <0.1 eV for monochromated systems).
 - Spatial distributions should correlate with known sample morphology
-  (e.g., a Ti component should be concentrated in Ti-containing regions).
+  (e.g., a component associated with a given element should be
+  concentrated in regions of the sample that contain that element).
 - If HAADF-STEM or EDS data is available, verify spatial consistency.

@@ -1,6 +1,6 @@
 # tests/test_lammps_skill/test_lammps_tools.py
 """
-Unit tests for tools/lammps_tools.py.
+Unit tests for the LAMMPS skill's tools module.
 
 Tests every public function against the fixture data files and scripts.
 No LLM calls — these are fast, deterministic, and run in CI.
@@ -189,6 +189,39 @@ class TestParseDataFileBiomolecular:
         assert info["has_pair_coeffs"] is True
 
 
+class TestParseDataFileElectrolyte:
+    """Aqueous electrolyte: bonded, carbon-bearing, N-free — must NOT be
+    swept up as biomolecular the way a bare bonded-carbon rule would."""
+
+    def test_system_category(self, data_dir):
+        info = lammps_tools.parse_data_file(str(data_dir / "electrolyte.data"))
+        assert info["system_category"] == "electrolyte"
+
+    def test_flags(self, data_dir):
+        info = lammps_tools.parse_data_file(str(data_dir / "electrolyte.data"))
+        assert info["has_water"] is True
+        assert info["has_ions"] is True
+        assert info["has_organic"] is True
+
+
+class TestParseDataFileNBearingElectrolyteLimitation:
+    """KNOWN LIMITATION (#494): a small N-bearing electrolyte solvent —
+    acetonitrile here, and by extension imidazolium ionic liquids and amide
+    solvents — is mislabeled 'biomolecular' because the category heuristic keys
+    on nitrogen as a biomolecule proxy. This test PINS the current (wrong)
+    behavior so the limitation stays visible and tracked; when a size/topology
+    discriminator lands (#494), flip this assertion to the correct label."""
+
+    def test_mecn_electrolyte_currently_mislabeled_biomolecular(self, data_dir):
+        info = lammps_tools.parse_data_file(
+            str(data_dir / "mecn_electrolyte.data"))
+        # It IS a water + NaCl + acetonitrile electrolyte...
+        assert info["has_water"] is True
+        assert info["has_ions"] is True
+        # ...but the N in acetonitrile trips the nitrogen proxy. Wrong, tracked.
+        assert info["system_category"] == "biomolecular"   # FIXME(#494): -> electrolyte
+
+
 class TestParseDataFileSlab:
     """Cu slab with vacuum gap."""
 
@@ -270,6 +303,14 @@ class TestValidateScriptValid:
         assert r["valid"] is True, f"Unexpected errors: {r['errors']}"
         assert r["boundary"] == ["p", "p", "s"]
 
+    def test_valid_create_atoms(self, script_dir):
+        # A self-contained deck builds its system in-place with create_atoms
+        # (no read_data/read_restart) — a valid, common pattern that must pass.
+        r = lammps_tools.validate_script(str(script_dir / "valid_create_atoms.lammps"))
+        assert r["valid"] is True, f"Unexpected errors: {r['errors']}"
+        assert not any("read_data" in e or "system definition" in e
+                       for e in r["errors"])
+
 
 # =====================================================================
 # validate_script — error scripts caught
@@ -326,6 +367,23 @@ class TestValidateScriptErrors:
         r = lammps_tools.validate_script(str(script_dir / "err_metal_timestep.lammps"))
         assert r["valid"] is False
         assert any("timestep" in e.lower() for e in r["errors"])
+
+    # ── Regression: #409 false positives on correct sequential-ensemble decks ──
+    def test_sequential_nvt_npt_no_conflict(self, script_dir):
+        # NPT equilibrate -> unfix -> NVT produce on the same group is valid;
+        # the overlap check must model unfix, not just co-occurrence.
+        r = lammps_tools.validate_script(
+            str(script_dir / "valid_sequential_nvt_npt.lammps"))
+        assert not any("nvt" in e.lower() and "npt" in e.lower()
+                       for e in r["errors"]), r["errors"]
+
+    def test_defined_var_and_comment_not_flagged_as_template(self, script_dir):
+        # ${scale} only appears in a comment, and `variable scale` is defined and
+        # used as v_scale — neither is an unrendered template.
+        r = lammps_tools.validate_script(
+            str(script_dir / "valid_sequential_nvt_npt.lammps"))
+        assert not any("template" in e.lower() or "unresolved" in e.lower()
+                       for e in r["errors"]), r["errors"]
 
     def test_nonexistent_file(self):
         r = lammps_tools.validate_script("/no/such/file.lammps")
@@ -532,3 +590,171 @@ class TestCheckLammps:
         assert "packages" in result
         assert isinstance(result["available"], bool)
         assert isinstance(result["packages"], list)
+
+
+# =====================================================================
+# validate_script — fully-typed FF data file ordering (OpenFF Interchange)
+# =====================================================================
+
+class TestValidateTypedDataFileOrdering:
+    """A data file with inline coefficients needs *_style BEFORE read_data."""
+
+    _TYPED = {"has_pair_coeffs": True, "bond_types": 4,
+              "angle_types": 4, "dihedral_types": 1}
+
+    def _write(self, tmp_path, body):
+        p = tmp_path / "in.lammps"
+        p.write_text(body)
+        return str(p)
+
+    def test_read_data_before_styles_flagged(self, tmp_path):
+        bad = (
+            "units real\natom_style full\nboundary p p p\n"
+            "read_data system.data\n"
+            "pair_style lj/cut/coul/long 9.0\nbond_style harmonic\n"
+            "angle_style harmonic\ndihedral_style fourier\n"
+            "kspace_style pppm 1e-4\nrun 0\n"
+        )
+        r = lammps_tools.validate_script(self._write(tmp_path, bad), self._TYPED)
+        assert r["valid"] is False
+        assert any("before 'read_data'" in e.lower() for e in r["errors"])
+
+    def test_styles_before_read_data_passes(self, tmp_path):
+        good = (
+            "units real\natom_style full\nboundary p p p\n"
+            "pair_style lj/cut/coul/long 9.0\nbond_style harmonic\n"
+            "angle_style harmonic\ndihedral_style fourier\n"
+            "read_data system.data\nkspace_style pppm 1e-4\nrun 0\n"
+        )
+        r = lammps_tools.validate_script(self._write(tmp_path, good), self._TYPED)
+        assert not any("before 'read_data'" in e.lower() for e in r["errors"]), r["errors"]
+
+    _DATA = (
+        "4 atoms\n1 atom types\n1 bond types\n1 angle types\n1 dihedral types\n"
+        "0 10 xlo xhi\n0 10 ylo yhi\n0 10 zlo zhi\n\nMasses\n\n1 12.011\n\n"
+        "Pair Coeffs\n\n1 0.1 3.4\n\n"
+        "Bond Coeffs\n\n1 300.0 1.5\n\n"             # 2 args -> harmonic
+        "Angle Coeffs\n\n1 50.0 109.5\n\n"           # 2 args -> harmonic
+        "Dihedral Coeffs\n\n1 1 0.2 3 0\n\n"         # fourier (m=1)
+        "Atoms\n\n1 1 1 0.0 0 0 0\n"
+    )
+
+    def _data(self, tmp_path):
+        d = tmp_path / "system.data"
+        d.write_text(self._DATA)
+        return str(d)
+
+    def test_required_styles_inferred_from_coeffs(self, tmp_path):
+        info = lammps_tools.parse_data_file(self._data(tmp_path))
+        assert info["required_styles"] == {
+            "bond": "harmonic", "angle": "harmonic", "dihedral": "fourier"}
+
+    def test_dihedral_style_mismatch_flagged(self, tmp_path):
+        info = lammps_tools.parse_data_file(self._data(tmp_path))
+        bad = (
+            "units real\natom_style full\nboundary p p p\n"
+            "pair_style lj/cut/coul/long 9.0\nbond_style harmonic\n"
+            "angle_style harmonic\ndihedral_style harmonic\n"   # wrong: data is fourier
+            "read_data system.data\nkspace_style pppm 1e-4\nrun 0\n"
+        )
+        r = lammps_tools.validate_script(self._write(tmp_path, bad), info)
+        assert r["valid"] is False
+        assert any("dihedral" in e and "fourier" in e for e in r["errors"])
+
+    def test_matching_dihedral_style_passes(self, tmp_path):
+        info = lammps_tools.parse_data_file(self._data(tmp_path))
+        good = (
+            "units real\natom_style full\nboundary p p p\n"
+            "pair_style lj/cut/coul/long 9.0\nbond_style harmonic\n"
+            "angle_style harmonic\ndihedral_style fourier\n"
+            "read_data system.data\nkspace_style pppm 1e-4\nrun 0\n"
+        )
+        r = lammps_tools.validate_script(self._write(tmp_path, good), info)
+        assert not any("coefficients are in" in e for e in r["errors"]), r["errors"]
+
+    def test_pair_modify_before_pair_style_flagged(self, tmp_path):
+        bad = (
+            "units real\natom_style full\nboundary p p p\n"
+            "pair_modify mix arithmetic\npair_style lj/cut/coul/long 9.0\n"
+            "bond_style harmonic\nangle_style harmonic\ndihedral_style fourier\n"
+            "read_data system.data\nkspace_style pppm 1e-4\nrun 0\n"
+        )
+        r = lammps_tools.validate_script(self._write(tmp_path, bad), self._TYPED)
+        assert r["valid"] is False
+        assert any("pair_modify" in e and "pair_style" in e for e in r["errors"])
+
+    def test_kspace_before_read_data_flagged(self, tmp_path):
+        # kspace_style does not parse Coeffs; declaring it before read_data
+        # aborts on a triclinic data file ("Must redefine kspace_style ...").
+        bad = (
+            "units real\natom_style full\nboundary p p p\n"
+            "pair_style lj/cut/coul/long 9.0\nbond_style harmonic\n"
+            "angle_style harmonic\ndihedral_style fourier\n"
+            "kspace_style pppm 1e-4\nread_data system.data\nrun 0\n"
+        )
+        r = lammps_tools.validate_script(self._write(tmp_path, bad), self._TYPED)
+        assert r["valid"] is False
+        assert any("kspace_style" in e and "read_data" in e for e in r["errors"])
+
+    def test_kspace_after_read_data_passes(self, tmp_path):
+        good = (
+            "units real\natom_style full\nboundary p p p\n"
+            "pair_style lj/cut/coul/long 9.0\nbond_style harmonic\n"
+            "angle_style harmonic\ndihedral_style fourier\n"
+            "read_data system.data\nkspace_style pppm 1e-4\nrun 0\n"
+        )
+        r = lammps_tools.validate_script(self._write(tmp_path, good), self._TYPED)
+        assert not any("kspace_style" in e for e in r["errors"]), r["errors"]
+
+    def test_bare_data_file_unaffected(self, tmp_path):
+        # No inline coeffs -> the classic read_data-then-styles ordering is fine.
+        bare = (
+            "units metal\natom_style atomic\nboundary p p p\n"
+            "read_data system.data\npair_style eam/alloy\n"
+            "pair_coeff * * Cu.eam.alloy Cu\nrun 0\n"
+        )
+        r = lammps_tools.validate_script(self._write(tmp_path, bare),
+                                         {"has_pair_coeffs": False})
+        assert not any("before 'read_data'" in e.lower() for e in r["errors"]), r["errors"]
+
+
+# =====================================================================
+# prepare_dry_run — setup-only twin for the dry-run gate
+# =====================================================================
+
+class TestPrepareDryRun:
+    def test_run_becomes_run_zero(self):
+        out = lammps_tools.prepare_dry_run("units real\nrun 2000000\n")
+        assert "run 0" in out
+        assert "2000000" not in out
+
+    def test_minimize_becomes_setup_only(self):
+        out = lammps_tools.prepare_dry_run("minimize 1.0e-4 1.0e-6 5000 50000\n")
+        assert "minimize 0.0 0.0 0 0" in out
+        assert "50000" not in out
+
+    def test_output_commands_dropped(self):
+        deck = ("pair_style lj/cut/coul/long 9.0\n"
+                "dump 1 all custom 1000 t.dump id type x y z\n"
+                "restart 10000 a.restart b.restart\n"
+                "write_data final.data\nrun 100\n")
+        out = lammps_tools.prepare_dry_run(deck)
+        for token in ("dump", "restart", "write_data"):
+            assert token not in out
+        assert "pair_style lj/cut/coul/long 9.0" in out   # setup preserved
+
+    def test_setup_commands_preserved(self):
+        deck = ("units real\natom_style full\npair_style lj/cut/coul/long 9.0\n"
+                "bond_style harmonic\nread_data system.data\n"
+                "kspace_style pppm 1e-4\nfix SHAKE all shake 1e-5 100 0 m 1.008\n"
+                "run 5000\n")
+        out = lammps_tools.prepare_dry_run(deck)
+        for line in ("units real", "pair_style lj/cut/coul/long 9.0",
+                     "read_data system.data", "kspace_style pppm 1e-4",
+                     "fix SHAKE all shake 1e-5 100 0 m 1.008"):
+            assert line in out
+
+    def test_run_zero_appended_when_no_dynamics(self):
+        # A deck with no run/minimize still needs a run 0 so setup executes.
+        out = lammps_tools.prepare_dry_run("units real\nread_data system.data\n")
+        assert out.strip().endswith("run 0")

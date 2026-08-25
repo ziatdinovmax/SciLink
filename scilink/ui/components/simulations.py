@@ -285,7 +285,7 @@ def _render_dashboard() -> None:
             }
             for j in jobs
         ]
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     # ── Partitions ──
     with st.expander("Cluster partitions"):
@@ -294,7 +294,7 @@ def _render_dashboard() -> None:
             if parts:
                 import pandas as pd
                 st.dataframe(
-                    pd.DataFrame(parts), use_container_width=True, hide_index=True,
+                    pd.DataFrame(parts), width="stretch", hide_index=True,
                 )
             else:
                 st.caption("No partition info available.")
@@ -729,7 +729,7 @@ def _render_remote_files() -> None:
                 if st.button(
                     f"{icon} {name}/",
                     key=f"hpc_fd_{name}",
-                    use_container_width=True,
+                    width="stretch",
                 ):
                     st.session_state.hpc_remote_cwd = f"{cwd}/{name}"
                     st.rerun()

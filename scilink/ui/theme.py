@@ -1,6 +1,44 @@
 """Material Design theme — dark and light variants."""
 
+import sys
+
 import streamlit as st
+
+_JS_DEGRADED_NOTICE_SHOWN = False
+
+
+def _inject_js(html: str) -> None:
+    """Inject a ``<script>`` block, degrading instead of crashing.
+
+    ``st.html``'s ``unsafe_allow_javascript`` kwarg landed in Streamlit
+    1.52.0; older versions raise ``TypeError`` for it. Everything injected
+    through here is cosmetic (widget restyling, emoji collisions), while
+    ``inject_theme()`` runs before anything else on every rerun — so a
+    failure here must cost the effect, not the app.
+    """
+    global _JS_DEGRADED_NOTICE_SHOWN
+    try:
+        st.html(html, unsafe_allow_javascript=True)
+        return
+    except TypeError:
+        pass
+    except Exception:
+        return
+
+    if not _JS_DEGRADED_NOTICE_SHOWN:
+        _JS_DEGRADED_NOTICE_SHOWN = True
+        print(
+            f"SciLink: Streamlit {st.__version__} rejected the "
+            "unsafe_allow_javascript argument; cosmetic theme effects are "
+            "disabled. Fix: pip install -U 'streamlit>=1.52'",
+            file=sys.stderr,
+        )
+    # Pre-1.52 st.html strips <script>, so the effect is lost but the DOM
+    # slot the theme relies on for stable layout is still emitted.
+    try:
+        st.html(html)
+    except Exception:
+        pass
 
 _MATERIAL_CSS_DARK = """
 <style>
@@ -123,6 +161,26 @@ div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) {
 div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div {
     margin-top: -2rem !important;
 }
+/* Mode selector — full labels at EVERY width.
+   Each button sizes to its label (never narrower, so no "Analyze"->"Analy"
+   truncation or icon-cramming), and the row centers and wraps to a second
+   line only when the window is genuinely too narrow to fit them — rather than
+   forcing them onto one line and shrinking them into a mess. */
+div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div [data-testid="stHorizontalBlock"] {
+    flex-wrap: wrap !important;
+    justify-content: center !important;
+    gap: 8px !important;
+}
+div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+    flex: 0 0 auto !important;
+    width: auto !important;
+    min-width: max-content !important;
+}
+div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div .stButton > button {
+    white-space: nowrap !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
+}
 /* Sidebar buttons — original purple */
 section[data-testid="stSidebar"] .stButton > button {
     background-color: #6200EE;
@@ -159,8 +217,39 @@ div:has(> [data-testid="stMarkdown"] .theme-toggle-anchor) + div button:hover {
     color: #E0E0E0 !important;
     box-shadow: none !important;
 }
+/* Fan-out confirm — force Cancel/Launch to IDENTICAL box size and shape.
+   Equal st.columns fixes width; the secondary (Cancel) and primary (Launch)
+   otherwise differ in height/box-model, so pin both to one height + padding. */
+div:has(> [data-testid="stMarkdown"] .fanout-actions-anchor) + div .stButton > button,
+div:has(> [data-testid="stMarkdown"] .bestofn-actions-anchor) + div .stButton > button {
+    min-height: 2.75rem !important;
+    height: 2.75rem !important;
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+}
+/* Fan-out Cancel (secondary) gets a solid neutral fill so it reads as the SAME
+   box as the purple primary Launch — grey = abort, purple = go. */
+div:has(> [data-testid="stMarkdown"] .fanout-actions-anchor) + div .stButton > button[kind="secondary"] {
+    background-color: #3A4556 !important;
+    color: #C7D0DC !important;
+}
+/* Best-of-N "Accept judge's pick" (secondary) goes GREEN — trusting the AI's
+   recommendation is a positive/confirm action — vs the purple primary
+   "Use selected" (manual override). Equal box, color carries the meaning. */
+div:has(> [data-testid="stMarkdown"] .bestofn-actions-anchor) + div .stButton > button[kind="secondary"] {
+    background-color: #2E7D46 !important;
+    color: #E8F5E9 !important;
+}
+div:has(> [data-testid="stMarkdown"] .bestofn-actions-anchor) + div .stButton > button[kind="secondary"]:hover {
+    background-color: #388E4F !important;
+    box-shadow: 0 2px 8px rgba(46, 125, 70, 0.35) !important;
+}
 /* File explorer tree buttons — soft gray, blue on selection */
-[data-testid="stExpander"] .stButton > button {
+[data-testid="stExpander"] .stButton > button,
+[data-testid="stExpander"] .stButton button {
     background-color: #2A3340;
     color: #B0BEC5;
     border: 1px solid #3A4556;
@@ -170,13 +259,15 @@ div:has(> [data-testid="stMarkdown"] .theme-toggle-anchor) + div button:hover {
     font-size: 0.85em;
     padding: 0.25rem 0.5rem;
 }
-[data-testid="stExpander"] .stButton > button:hover {
+[data-testid="stExpander"] .stButton > button:hover,
+[data-testid="stExpander"] .stButton button:hover {
     background-color: #344155;
     border-color: #5B8DEF;
     color: #E0E0E0;
     box-shadow: none;
 }
-[data-testid="stExpander"] .stButton > button[kind="primary"] {
+[data-testid="stExpander"] .stButton > button[kind="primary"],
+[data-testid="stExpander"] .stButton button[kind="primary"] {
     background-color: #1A3A5C;
     border-color: #5B8DEF;
     color: #82B1FF;
@@ -371,6 +462,27 @@ h2, h3 {
     background-color: #D32F2F !important;
     border-color: #D32F2F !important;
     color: #FFFFFF !important;
+}
+/* The big 58px steel-blue rule above is for the chat-tab action buttons.
+   Inside expanders (Skills / Persistent Memory panels) secondary buttons
+   should stay compact like the file-explorer ones — higher specificity +
+   !important to beat the rule above (light mode has no such override, which
+   is why it already looked right). */
+.stTabs [data-testid="stExpander"] .stButton > button[kind="secondary"] {
+    width: auto !important;
+    height: auto !important;
+    min-height: 0 !important;
+    font-size: 0.85em !important;
+    padding: 0.25rem 0.5rem !important;
+    border-radius: 4px !important;
+    background-color: #2A3340 !important;
+    color: #B0BEC5 !important;
+    border: 1px solid #3A4556 !important;
+}
+.stTabs [data-testid="stExpander"] .stButton > button[kind="secondary"]:hover {
+    background-color: #344155 !important;
+    border-color: #5B8DEF !important;
+    color: #E0E0E0 !important;
 }
 
 /* ── Live log viewer ────────────────────────────────── */
@@ -621,6 +733,26 @@ div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) {
 div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div {
     margin-top: -2rem !important;
 }
+/* Mode selector — full labels at EVERY width.
+   Each button sizes to its label (never narrower, so no "Analyze"->"Analy"
+   truncation or icon-cramming), and the row centers and wraps to a second
+   line only when the window is genuinely too narrow to fit them — rather than
+   forcing them onto one line and shrinking them into a mess. */
+div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div [data-testid="stHorizontalBlock"] {
+    flex-wrap: wrap !important;
+    justify-content: center !important;
+    gap: 8px !important;
+}
+div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+    flex: 0 0 auto !important;
+    width: auto !important;
+    min-width: max-content !important;
+}
+div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div .stButton > button {
+    white-space: nowrap !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
+}
 /* Mode selector secondary buttons — outlined purple */
 div:has(> [data-testid="stMarkdown"] .mode-selector-anchor) + div .stButton > button[kind="secondary"] {
     background-color: #FFFFFF !important;
@@ -699,6 +831,66 @@ div:has(> [data-testid="stMarkdown"] .theme-toggle-anchor) + div button:hover {
     background-color: #E3F2FD;
     border-color: #5B8DEF;
     color: #1565C0;
+}
+/* Popover triggers (e.g. the staged-solution "View" button) are NOT .stButton,
+   so the rule above misses them and they fall through to the launch-time dark
+   native theme. Style them to match the compact light expander buttons. */
+[data-testid="stExpander"] [data-testid="stPopover"] button {
+    background-color: #EEEEEE !important;
+    color: #212121 !important;
+    border: 1px solid #E0E0E0 !important;
+    font-weight: 400;
+    letter-spacing: 0;
+    font-size: 0.85em;
+    padding: 0.25rem 0.5rem;
+}
+[data-testid="stExpander"] [data-testid="stPopover"] button:hover {
+    background-color: #E3F2FD !important;
+    border-color: #5B8DEF !important;
+    color: #212121 !important;
+    box-shadow: none !important;
+}
+/* Main-area secondary buttons (e.g. the Files tab's Refresh) — the sidebar
+   and mode-selector rules miss them, so they fall through to the
+   launch-time dark native theme: a dark box under a forced-dark label.
+   The mode-selector's outlined-purple rule is more specific and keeps
+   winning where it applies. */
+section[data-testid="stMain"] .stButton > button[kind="secondary"],
+section[data-testid="stMain"] button[data-testid="stBaseButton-secondary"] {
+    background-color: #EEEEEE !important;
+    color: #212121 !important;
+    border: 1px solid #E0E0E0 !important;
+}
+section[data-testid="stMain"] .stButton > button[kind="secondary"] *,
+section[data-testid="stMain"] button[data-testid="stBaseButton-secondary"] * {
+    color: #212121 !important;
+}
+section[data-testid="stMain"] .stButton > button[kind="secondary"]:hover,
+section[data-testid="stMain"] button[data-testid="stBaseButton-secondary"]:hover {
+    background-color: #E3F2FD !important;
+    border-color: #5B8DEF !important;
+    box-shadow: none !important;
+}
+/* Streamlit ≥1.49 drops the `kind` DOM attribute (it became a styled-prop
+   filtered before the DOM), so the [kind=…] halves above are for older
+   versions; the stBaseButton testid halves are what actually match. */
+/* The popover panel is portaled to the document root (not inside the expander),
+   so style it globally for light mode. baseweb gives the body (and a nested
+   content wrapper) a dark inline background, so whiten the body AND its block
+   containers — otherwise the dark markdown text below sits on a dark wrapper and
+   is barely visible. The code block keeps its own dark bg via its own !important. */
+[data-testid="stPopoverBody"],
+[data-testid="stPopoverBody"] [data-testid="stVerticalBlock"],
+[data-testid="stPopoverBody"] [data-testid="stVerticalBlockBorderWrapper"],
+[data-testid="stPopoverBody"] [data-testid="stElementContainer"] {
+    background-color: #FFFFFF !important;
+}
+[data-testid="stPopoverBody"] {
+    border: 1px solid #E0E0E0 !important;
+}
+[data-testid="stPopoverBody"] [data-testid="stMarkdown"],
+[data-testid="stPopoverBody"] [data-testid="stMarkdown"] * {
+    color: #212121 !important;
 }
 
 /* ── Success-style button ──────────────────────────── */
@@ -921,20 +1113,54 @@ section[data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stExpa
     border-radius: 4px;
     background-color: #1E1E1E !important;
 }
+/* Keep the dark code-block background, but DON'T force a single color on
+   every span — that would flatten Prism's syntax highlighting to one gray.
+   Set a base color only for un-tokenized text (code/pre); token spans keep
+   their own colors (the native theme is dark, so they suit #1E1E1E). */
 .stCodeBlock code,
 .stCodeBlock pre,
 [data-testid="stCode"] code,
-[data-testid="stCode"] pre,
+[data-testid="stCode"] pre {
+    color: #E0E0E0 !important;
+    background-color: #1E1E1E !important;
+}
+/* ...but the rule above only sets the INHERITED color, and inheritance loses
+   to any rule that matches directly. The blanket `.stApp span { #212121 }`
+   below matches every span inside the block, so in light mode un-tokenized
+   text and tokens Prism leaves unpainted (`builtin`, and anything else absent
+   from its palette) came out near-black on #1E1E1E — a contrast ratio of
+   1.04:1. Only syntax-highlighted tokens stayed legible, so `float` and
+   `np.max` were simply missing from a light-mode preview.
+
+   Fixed by SPECIFICITY, not !important: one attribute plus two type selectors
+   (0,1,2) outranks `.stApp span` (0,1,1) and restores the light-on-dark
+   default, while every `.token.x` rule (0,2,0 or more) still wins over it —
+   so Prism's highlighting is untouched and no token type has to be
+   enumerated. An !important here would flatten the palette to one gray. */
+.stCodeBlock code span,
+.stCodeBlock pre span,
+[data-testid="stCode"] code span,
+[data-testid="stCode"] pre span {
+    color: #E0E0E0;
+}
+/* Same story for the block's copy button: its icon inherits the body text
+   color, so in light mode it was #212121 on #1E1E1E — present, clickable,
+   and invisible. */
+.stCodeBlock button[kind="elementToolbar"],
+.stCodeBlock button[kind="elementToolbar"] svg,
+[data-testid="stCode"] button[kind="elementToolbar"],
+[data-testid="stCode"] button[kind="elementToolbar"] svg {
+    color: #E0E0E0;
+    fill: #E0E0E0;
+}
 .stCodeBlock *,
 [data-testid="stCode"] * {
-    color: #E0E0E0 !important;
     background-color: #1E1E1E !important;
 }
 .stCodeBlock:hover,
 .stCodeBlock:hover *,
 [data-testid="stCode"]:hover,
 [data-testid="stCode"]:hover * {
-    color: #E0E0E0 !important;
     background-color: #1E1E1E !important;
 }
 
@@ -1291,15 +1517,14 @@ _COLLISION_JS = """
 
 def inject_theme() -> None:
     """Inject the Material Design CSS into the current page."""
-    import streamlit.components.v1 as components
-
     theme_mode = st.session_state.get("theme_mode", "dark")
     css = _MATERIAL_CSS_DARK if theme_mode == "dark" else _MATERIAL_CSS_LIGHT
     st.markdown(css, unsafe_allow_html=True)
 
-    # Force-restyle widgets via JS injected through components.html()
-    # (st.markdown strips <script> tags; components.html() runs in an
-    # iframe so we reach the parent document via window.parent.document).
+    # Force-restyle widgets via JS injected through _inject_js -> st.html
+    # (st.markdown strips <script> tags). st.html runs inline in the main
+    # document — not an iframe — so window.parent resolves to the app window
+    # and window.parent.document is the app document itself.
     if theme_mode == "light":
         _LIGHT_WIDGET_JS = """<script>
 (function(){
@@ -1331,11 +1556,11 @@ def inject_theme() -> None:
         .observe(doc.body, {childList:true, subtree:true, attributes:true});
 })();
 </script>"""
-        components.html(_LIGHT_WIDGET_JS, height=1)
+        _inject_js(_LIGHT_WIDGET_JS)
     else:
         # Keep DOM slot count stable; also undo any inline styles
         # left by the light-mode observer on the stop button.
-        components.html("""<script>
+        _inject_js("""<script>
 (function(){
     var doc = window.parent.document;
     function cleanup(){
@@ -1351,7 +1576,7 @@ def inject_theme() -> None:
     new MutationObserver(cleanup)
         .observe(doc.body, {childList:true, subtree:true});
 })();
-</script>""", height=1)
+</script>""")
 
     vibe = st.session_state.get("vibe_theme", "Professional")
 
@@ -1378,7 +1603,6 @@ def inject_theme() -> None:
         unsafe_allow_html=True,
     )
     # Slot 2: collision JS (always present, no-op script when inactive)
-    components.html(
-        _COLLISION_JS if use_collision_js else "<script>/* noop */</script>",
-        height=1,
+    _inject_js(
+        _COLLISION_JS if use_collision_js else "<script>/* noop */</script>"
     )

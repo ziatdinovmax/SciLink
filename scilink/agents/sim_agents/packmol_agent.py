@@ -6,7 +6,10 @@ import subprocess
 import re
 from typing import Dict, Any, List, Optional
 
-from ...auth import get_internal_proxy_key
+from ...auth import (
+    APIKeyNotFoundError, get_api_key, get_internal_proxy_key, infer_provider,
+    require_vendor_credentials,
+)
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 
@@ -94,7 +97,11 @@ class PackmolGeneratorAgent:
                 base_url=base_url
             )
         else:
-            # Public / LiteLLM
+            # Public / LiteLLM — delegate model→provider→env-var resolution
+            # to LiteLLM (works for any model LiteLLM supports; raises a
+            # message naming the missing vendor env var if not).
+            if api_key is None:
+                require_vendor_credentials(model_name)
             self.logger.info(f"PackmolGeneratorAgent using LiteLLM: {model_name}")
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
@@ -438,7 +445,7 @@ class PackmolGeneratorAgent:
                 final_script = script_content.format(output_filename=output_filename)
                 
                 script_path = os.path.join(self.working_dir, "input.inp")
-                with open(script_path, "w") as f:
+                with open(script_path, "w", encoding="utf-8") as f:
                     f.write(final_script)
                 
                 self.logger.info(f"PACKMOL script written to: {script_path}")

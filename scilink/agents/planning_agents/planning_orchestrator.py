@@ -1,20 +1,29 @@
 import json
 import logging
 import os
+import re
 import pandas as pd
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from enum import Enum
 
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+
 from ...auth import get_internal_proxy_key
+from ...utils.prose_style import PROSE_STYLE_RULE
+from ...utils.tool_media import (repair_dangling_tool_calls,
+                                 close_interrupted_turn)
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
-from .planning_agent import PlanningAgent
+from .planning_agent import (
+    PlanningAgent, compact_planner_state, expand_planner_state)
+from .user_interface import format_caveats
 from .scalarizer_agent import ScalarizerAgent
 from .bo_agent import BOAgent
 from .orchestrator_tools import OrchestratorTools
 from ._deprecation import normalize_params
+from ...graphs.planning import build_planning_graph
 
 
 class AutonomyLevel(Enum):
@@ -22,12 +31,19 @@ class AutonomyLevel(Enum):
     Defines the level of autonomy for the orchestrator.
     
     CO_PILOT: AI assists human (default). Human reviews all plans/code.
-    SUPERVISED: Human assists AI. AI proceeds unless human intervenes.
+    AUTOPILOT: Human assists AI. AI proceeds unless human intervenes.
     AUTONOMOUS: Full autonomy. No human feedback requested.
     """
     CO_PILOT = "co_pilot"       # Human leads, AI assists (current default)
-    SUPERVISED = "supervised"   # AI leads, human can intervene
+    AUTOPILOT = "autopilot"     # AI leads, human can intervene
     AUTONOMOUS = "autonomous"   # Full autonomy, no human feedback
+
+    @classmethod
+    def _missing_(cls, value):
+        # Back-compat: the AUTOPILOT level was named "supervised" before.
+        if isinstance(value, str) and value.strip().lower() == "supervised":
+            return cls.AUTOPILOT
+        return None
 
 
 # Mode-specific directives (inserted at the top)
@@ -84,9 +100,9 @@ Only call `generate_implementation_code` when BOTH conditions are true:
 - Instead say "Ready for results." or "Let me know how to proceed."
 """
 
-_SUPERVISED_DIRECTIVE = """
-**CRITICAL OPERATING MODE: SUPERVISED (AI Leads, Human Supervises)**
-- You lead the research workflow. Human supervises and can intervene.
+_AUTOPILOT_DIRECTIVE = """
+**CRITICAL OPERATING MODE: AUTOPILOT (AI Leads, Human Monitors)**
+- You lead the research workflow. Human monitors and can intervene.
 - Proceed with reasonable next steps without asking for permission.
 - Human will still review generated plans and code through the standard review interface.
 - Do NOT ask clarifying questions unless truly ambiguous - make reasonable assumptions.
@@ -219,7 +235,32 @@ for each:
   search_literature(objective="...", search_type="hypothesis_context") → plan_lit_path
   generate_initial_plan(..., literature_context=plan_lit_path)
 
+Several search types can be requested at once (comma-separated) and run in
+parallel, costing roughly the wait of a single search. For IDEATION sessions
+— brainstorming, exploring approaches, "what are interesting directions" —
+pair grounding with cross-domain retrieval and author a PORTFOLIO, not an
+experimental plan:
+  search_literature(objective="...", search_type="hypothesis_context,cross_domain")
+  generate_ideation_portfolio(..., literature_context=...)
+generate_initial_plan designs ONE bench experiment; a portfolio forced
+through it comes back with its directions flattened into protocol steps. Use
+it for ideation only when the user has PICKED a direction and wants its
+runnable protocol.
+When the objective (or the design you are about to author) names the
+measurement techniques, materials or calibration references it will rely on,
+add the ADVERSARIAL leg in the same call as a per-type mapping — a question
+that names those techniques and their operating conditions under
+'technique_limitations' — so the plan is authored against, and the critic can
+cite, what is known to go wrong with them, not only what works.
+Literature of any type reduces constraint COVERAGE — plans stay on-topic but
+omit individual requirements. When the objective carries hard equipment or
+process constraints, pass them as additional_context (each is then mapped to a
+named step) rather than withholding the literature.
+
 For refinement, reuse existing literature or run a new search as needed.
+Omitting literature_context auto-loads ALL of the campaign's saved literature;
+when several searches have accumulated and only part is relevant, consult
+`list_literature_searches` and pass a selection instead.
 
 **MOLECULAR DESIGN WORKFLOW:**
 When the objective involves molecular design, molecular synthesis planning, or molecular discovery,
@@ -235,6 +276,14 @@ Do NOT run TEA for purely scientific exploration (e.g., "study phase transitions
 "characterize this sample", "explore structure-property relationships").
 
 1. `generate_initial_plan`: Use this when starting a NEW campaign or defining a new objective.
+   - Do NOT use for a Bayesian-optimization campaign over an existing dataset —
+     i.e. the objective is "recommend / design the next experiments (batch)" and
+     experimental data is available. That is the Math Loop: go `analyze_file` /
+     `analyze_batch` → `run_optimization`. `run_optimization`'s batch IS the
+     recommendation; a plan would hand-enumerate a different, non-optimal batch
+     that contradicts BO's acquisition output. Skip the planning step entirely
+     and report the BO batch (save it with `save_file` if a shareable file is
+     wanted).
    - Extract knowledge_paths when user mentions papers/PDFs/documents
    - Extract primary_data_set when user mentions experimental data or results folders or files
    - additional_context: Lab constraints, equipment, reagents, budget
@@ -285,7 +334,7 @@ Do NOT run TEA for purely scientific exploration (e.g., "study phase transitions
 7. `adjust_plan_for_constraints`: Adjusts the plan for implementation constraints.
    - In CO_PILOT mode: ONLY call when the user explicitly provides constraints.
      Do NOT call proactively after plan approval.
-   - In SUPERVISED/AUTONOMOUS mode: May be called proactively when you identify
+   - In AUTOPILOT/AUTONOMOUS mode: May be called proactively when you identify
      clear implementation incompatibilities.
 
 **DATA TOOLS:**
@@ -414,7 +463,7 @@ To inspect or query data files before deciding on a workflow, use `read_file` an
       → omit experimental_budget (default behavior)
       
 11. `save_checkpoint`: Save campaign state. Use after every 3-5 experiments.
-12. `read_file`: Read and preview any file (JSON, text, CSV, Excel, scripts, logs, protocols).
+12. `read_file`: Read and preview any file (JSON, text, CSV, Excel, PDF, Word, scripts, logs, protocols).
     Use to inspect data files BEFORE deciding which tool to use next.
     Renders Excel/CSV as formatted tables (max 50 rows × 40 columns).
     Do not re-read files whose contents were just returned by another tool.
@@ -443,6 +492,11 @@ Assume user runs agent from project directory. For example, when user says "file
 - You are optimizing a well-defined property for the current experimental setup.
 - The experiments are running successfully (no failures), and you just need to tune parameters.
 - **At least 3 data files have been successfully analyzed** (check by calling list_workspace_files).
+- **The objective itself is a Bayesian-optimization / "recommend the next
+  experiments" campaign.** Then `run_optimization` IS the deliverable — do NOT
+  also call `generate_initial_plan`. BO is a built-in capability: run it
+  directly. A separately generated plan would hand-design a batch that
+  contradicts (and is inferior to) BO's acquisition-function output.
 
 **Use `iterate_with_results` (The Cognitive Loop) IF:**
 - You need to propose a NEW strategy or experimental setup (e.g., "Change catalyst").
@@ -475,6 +529,8 @@ Assume user runs agent from project directory. For example, when user says "file
 **MCP OUTPUT PERSISTENCE:**
 - When an MCP tool returns generated code, protocols, or other text artifacts, call `save_file`
   to persist the output BEFORE calling any other tool.
+- Write large artifacts in chunks (`save_file` for the first chunk, `append_file` for the rest);
+  a single oversized tool argument can be truncated and lost.
 
 **BEHAVIOR:**
 - Extract ALL paths mentioned by user (papers, data, code, reports)
@@ -499,7 +555,7 @@ def get_system_prompt(
     """
     directives = {
         AutonomyLevel.CO_PILOT: _CO_PILOT_DIRECTIVE,
-        AutonomyLevel.SUPERVISED: _SUPERVISED_DIRECTIVE,
+        AutonomyLevel.AUTOPILOT: _AUTOPILOT_DIRECTIVE,
         AutonomyLevel.AUTONOMOUS: _AUTONOMOUS_DIRECTIVE,
     }
     prompt = directives[autonomy_level] + _SYSTEM_PROMPT_BODY
@@ -510,7 +566,7 @@ def get_system_prompt(
             lines.append(f"- **{t['name']}**: {t.get('description', '')}")
         prompt += "\n".join(lines)
 
-    return prompt
+    return prompt + "\n\n" + PROSE_STYLE_RULE
 
 
 
@@ -535,7 +591,7 @@ class PlanningOrchestratorAgent:
         embedding_api_key: API key for the embedding LLM provider.
         futurehouse_api_key: Optional FutureHouse API key for literature search.
         restore_checkpoint: Whether to restore from previous checkpoint.
-        autonomy_level: Level of autonomy (CO_PILOT, SUPERVISED, or AUTONOMOUS).
+        autonomy_level: Level of autonomy (CO_PILOT, AUTOPILOT, or AUTONOMOUS).
         
         google_api_key: DEPRECATED. Use 'api_key' instead.
         local_model: DEPRECATED. Use 'base_url' instead.
@@ -555,6 +611,7 @@ class PlanningOrchestratorAgent:
         data_dir: Optional[str] = None,
         knowledge_dir: Optional[str] = None,
         code_dir: Optional[str] = None,
+        max_iterations: int = 20,
         # Deprecated
         google_api_key: Optional[str] = None,
         local_model: Optional[str] = None,
@@ -596,7 +653,7 @@ class PlanningOrchestratorAgent:
         logging.info(f"🎛️  Autonomy Level: {autonomy_level.value.upper()}")
 
         # Validate and store workspace directories
-        if autonomy_level in (AutonomyLevel.SUPERVISED, AutonomyLevel.AUTONOMOUS):
+        if autonomy_level in (AutonomyLevel.AUTOPILOT, AutonomyLevel.AUTONOMOUS):
             if data_dir is None:
                 raise ValueError(
                     f"data_dir is required for {autonomy_level.value} mode.\n"
@@ -606,7 +663,24 @@ class PlanningOrchestratorAgent:
                 raise ValueError(f"data_dir does not exist: {data_dir}")
 
         self.data_dir = Path(data_dir) if data_dir else None
-        self.knowledge_dir = Path(knowledge_dir) if knowledge_dir else None
+        # knowledge_dir accepts a directory path OR a named KB from the
+        # persistent store (scilink kb create/list) — an existing path wins
+        # over a name. A store manifest also gives us the KB's build-time
+        # embedding model, so provider mismatch warns HERE instead of
+        # failing opaquely at query time.
+        self.knowledge_dir = None
+        self._kb_store_manifest = None
+        if knowledge_dir:
+            from ...knowledge.kb_store import (
+                resolve_knowledge_source, embedding_compat_warning,
+            )
+            self.knowledge_dir, self._kb_store_manifest = resolve_knowledge_source(
+                str(knowledge_dir), strict=False
+            )
+            _compat = embedding_compat_warning(self._kb_store_manifest,
+                                               embedding_model)
+            if _compat:
+                logging.warning(f"⚠️ {_compat}")
         self.code_dir = Path(code_dir) if code_dir else None
 
         if self.data_dir:
@@ -637,7 +711,26 @@ class PlanningOrchestratorAgent:
         self.target_directions = {}  # e.g. {"Yield": "maximize", "Defect_Density": "minimize"}
         self.expected_input_types = None  # {col: "continuous" | "categorical"} from scalarizer
         self.expected_input_levels = None  # {col: [level0, level1, ...]} for categorical inputs
+        self.input_bounds_override = None  # {col: (min, max)} caller-stated search box (run_optimization input_bounds)
+        self.fidelity_spec = None  # {column, target_fidelity?, costs?} when the data has a fidelity axis
         self.latest_tea_results = None
+
+        # Per-delegation output isolation. Used only by run_task: the meta
+        # agent reuses one planning child across delegations, and the plan
+        # tools write fixed filenames (plan.json, tea_analysis.json, ...).
+        # Without a per-delegation sub-directory, each delegation would
+        # overwrite the previous one's artifacts. Direct `scilink plan` use
+        # never calls run_task, so _active_output_subdir stays None and
+        # writes land in base_dir exactly as before.
+        self._delegation_counter = 0
+        self._active_output_subdir = None
+
+        # Per-call tool-iteration cap (handlers read self.max_iterations) and
+        # a flag the handlers raise when they hit the cap. chat() returns the
+        # warning string as before; run_task reads the flag to flip the
+        # delegation result's status from success → error.
+        self.max_iterations = max_iterations
+        self._last_chat_hit_iter_cap = False
 
         # Custom tools / MCP state
         self._tool_data_cache: Dict[tuple, Any] = {}
@@ -654,6 +747,14 @@ class PlanningOrchestratorAgent:
         
         if restore_checkpoint and self.checkpoint_path.exists():
             self._restore_checkpoint()
+        elif not restore_checkpoint and not self.checkpoint_path.exists():
+            # A session dir with campaign data from an earlier process but
+            # nothing to restore from: without this, the on-disk dedup
+            # ledger says every file is "already analyzed" while the
+            # in-memory schema is empty and run_optimization fails with
+            # "Schema not established". Archive the stale files and start
+            # clean; nothing is deleted.
+            self._archive_stale_campaign_files()
         
         # --- Init Sub-Agents ---
         print("🤖 Agent: Hiring sub-agents...")
@@ -667,8 +768,28 @@ class PlanningOrchestratorAgent:
             output_dir=str(self.base_dir),
         )
         if self.knowledge_dir:
-            planner_kwargs["kb_base_path"] = str(self.knowledge_dir / "default_kb")
+            if self._kb_store_manifest is not None:
+                # Named store KB: sessions load it but must never write back
+                # (a session's in-run appends would silently mutate a shared
+                # artifact — mutate the store only via 'scilink kb'). Seed a
+                # session-local copy of the persisted index; loading stays
+                # instant and any session appends stay session-local.
+                import shutil as _shutil
+                cache = self.base_dir / "kb_cache"
+                cache.mkdir(parents=True, exist_ok=True)
+                for f in self.knowledge_dir.glob("default_kb_*"):
+                    if not (cache / f.name).exists():
+                        _shutil.copy2(f, cache / f.name)
+                planner_kwargs["kb_base_path"] = str(cache / "default_kb")
+            else:
+                planner_kwargs["kb_base_path"] = str(self.knowledge_dir / "default_kb")
         self.planner = PlanningAgent(**planner_kwargs)
+        if getattr(self, "_pending_planner_state", None):
+            self.planner.state = self._pending_planner_state
+            n_hist = len(self._pending_planner_state.get("plan_history", []))
+            print(f"    ✅ Planner campaign state restored "
+                  f"({n_hist} plan iteration(s))")
+            self._pending_planner_state = None
 
         # Literature & Molecules agents (orchestrator-level tools)
         self.lit_agent = None
@@ -679,7 +800,7 @@ class PlanningOrchestratorAgent:
             from ..lit_agents.optimize_query import optimize_search_query
             fh_key = futurehouse_api_key or os.getenv("FUTUREHOUSE_API_KEY")
             try:
-                self.lit_agent = LiteratureSearchAgent(fh_key, max_wait_time=3000)
+                self.lit_agent = LiteratureSearchAgent(fh_key, max_wait_time=1500)
                 logging.info("✅ Orchestrator: Literature Search Agent initialized.")
             except Exception as e:
                 logging.warning(f"⚠️ Failed to initialize Literature Agent: {e}")
@@ -751,6 +872,15 @@ class PlanningOrchestratorAgent:
                 recent_history = self._trim_history(history, max_messages=100)
                 self.messages.extend(recent_history)
 
+        # ── LangGraph backbone ─────────────────────────────────────────────
+        self._graph_thread_id = f"planning-{self.base_dir.name}"
+        self._graph = build_planning_graph(self)
+        self._graph_config = {"configurable": {"thread_id": self._graph_thread_id}}
+
+        if history:
+            self._seed_graph_history(history)
+        # ──────────────────────────────────────────────────────────────────
+
     def _convert_tools_to_litellm_format(self) -> List[Dict]:
         """
         Convert OpenAI tool schemas to LiteLLM format.
@@ -779,9 +909,10 @@ class PlanningOrchestratorAgent:
     
     def _should_enable_human_feedback(self) -> bool:
         """Determines if human feedback should be enabled based on autonomy level."""
-        # Only CO_PILOT pauses for human review
-        # SUPERVISED and AUTONOMOUS proceed without asking
-        return self.autonomy_level == AutonomyLevel.CO_PILOT
+        # CO_PILOT and AUTOPILOT surface generated plans/code for human
+        # review (accept or request changes) — the AUTOPILOT directive
+        # promises this review interface. Only AUTONOMOUS runs without it.
+        return self.autonomy_level != AutonomyLevel.AUTONOMOUS
 
     def set_autonomy_level(self, level: AutonomyLevel) -> None:
         """
@@ -831,6 +962,9 @@ class PlanningOrchestratorAgent:
 
         # Make it the active skill for subsequent generate_initial_plan calls
         self._active_skill = str(path)
+
+        # Surface the new skill to the orchestrator LLM's generate_initial_plan tool
+        self.tools._update_skill_description(self._custom_skills)
 
         logging.info(f"📖 Registered planning skill: {name} → {path}")
         return name
@@ -983,14 +1117,20 @@ class PlanningOrchestratorAgent:
         command: list = None,
         url: str = None,
         env: dict = None,
+        transport: str = None,
+        headers: dict = None,
     ) -> int:
         """Connect to an MCP server and register its tools.
 
         Args:
             server_name: Human-readable label for this server.
             command: Command + args for stdio transport.
-            url: URL for SSE transport.
+            url: URL for a network transport (SSE or streamable HTTP).
             env: Optional environment variables for the subprocess.
+            transport: Transport for ``url`` — ``"sse"`` (default) or
+                ``"http"`` (streamable HTTP).
+            headers: Optional HTTP headers for the ``url`` transports,
+                e.g. ``{"Authorization": "Bearer <token>"}``.
 
         Returns:
             Number of tools registered from this server.
@@ -1004,7 +1144,10 @@ class PlanningOrchestratorAgent:
             )
             return 0
 
-        conn = MCPConnection(server_name, command=command, url=url, env=env)
+        conn = MCPConnection(
+            server_name, command=command, url=url, env=env,
+            transport=transport, headers=headers,
+        )
         schemas = conn.connect()
 
         existing_names = {t["name"] for t in self._external_tools}
@@ -1079,6 +1222,33 @@ class PlanningOrchestratorAgent:
         logging.info(f"🔌 Disconnected MCP server '{server_name}'")
         self._rebuild_system_prompt()
 
+    def _archive_stale_campaign_files(self) -> Optional[Path]:
+        """Move campaign data files left by an earlier process (no checkpoint
+        to restore them with) into ``stale_campaign_<ts>/`` and reset the
+        dedup ledger, so this process starts a consistent, empty campaign.
+        Returns the archive dir, or None when there was nothing to move."""
+        candidates = [self.bo_data_path, self.analyzed_files_path,
+                      self.bo_data_path.with_suffix(".csv.backup")]
+        present = [c for c in candidates if c.exists()]
+        if not present:
+            self.analyzed_files = {}
+            return None
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        archive = self.base_dir / f"stale_campaign_{stamp}"
+        archive.mkdir(parents=True, exist_ok=True)
+        for c in present:
+            try:
+                c.rename(archive / c.name)
+            except OSError as e:  # noqa: PERF203 - best effort, never fatal
+                logging.warning(f"Could not archive {c.name}: {e}")
+        self.analyzed_files = {}
+        print(f"  📦 Session dir held campaign data from an earlier run with no "
+              f"checkpoint to restore; moved {[c.name for c in present]} to "
+              f"{archive.name}/ and started a fresh campaign. Re-ingest your "
+              f"data with analyze_file (or construct with restore_checkpoint=True "
+              f"when a checkpoint exists).")
+        return archive
+
     def _restore_checkpoint(self):
         """Restore campaign state from checkpoint."""
         print(f"  📂 Restoring checkpoint from: {self.checkpoint_path}")
@@ -1086,7 +1256,17 @@ class PlanningOrchestratorAgent:
         try:
             with open(self.checkpoint_path, 'r') as f:
                 state = json.load(f)
-            
+
+            # Stash the PLANNER's campaign state (current_plan,
+            # plan_history, candidates, literature provenance) — the planner
+            # is constructed AFTER this restore runs, so it is applied right
+            # after construction. The save side always recorded it; without
+            # the reload a restored child answered 'no campaign plan exists'
+            # to every follow-up.
+            _ps = state.get("planner_state") or None
+            self._pending_planner_state = (
+                expand_planner_state(_ps) if _ps else None)
+
             self.active_scalarizer_script = state.get("active_scalarizer_script")
             self.expected_input_columns = state.get("expected_input_columns")
 
@@ -1098,8 +1278,13 @@ class PlanningOrchestratorAgent:
             self.target_directions = state.get("target_directions", {})
             self.expected_input_types = state.get("expected_input_types")
             self.expected_input_levels = state.get("expected_input_levels")
+            _ib = state.get("input_bounds_override")
+            self.input_bounds_override = (
+                {k: tuple(v) for k, v in _ib.items()} if isinstance(_ib, dict) else None)
+            self.fidelity_spec = state.get("fidelity_spec")
             self.latest_tea_results = state.get("latest_tea_results")
-            
+            self._delegation_counter = state.get("delegation_counter", 0)
+
             # Restore autonomy level if saved
             if "autonomy_level" in state:
                 try:
@@ -1153,38 +1338,369 @@ class PlanningOrchestratorAgent:
         return trimmed
 
     def chat(self, user_input: str) -> str:
-        """Main chat interface with robust function calling support."""
+        """Main chat interface — delegates to the LangGraph ReAct loop."""
+        # Bind this turn's human-feedback prompts to the session's
+        # durable feedback log (nested child chats rebind to their own;
+        # run_task restores the caller's binding on exit).
+        from ...hitl import set_thread_feedback_log as _set_fblog
+        from pathlib import Path as _P
+        _set_fblog(str(_P(self.base_dir) / "feedback_log.jsonl"))
         self.message_count += 1
-        
+        self._last_chat_hit_iter_cap = False
+
         # AUTO-CHECKPOINT: Every 10 messages
         if self.message_count - self.last_checkpoint_message_count >= 10:
             print("  💾 Auto-checkpoint triggered (every 10 messages)...")
             self._auto_checkpoint()
             self.last_checkpoint_message_count = self.message_count
-        
+
         try:
-            if self.use_openai:
-                response_text = self._handle_openai_chat(user_input)
-            else:
-                # Use the same manual tool handling approach for LiteLLM
-                response_text = self._handle_litellm_chat(user_input)
-            
-            print(f"🤖 Agent: {response_text}")
+            response_text = self._invoke_graph(user_input)
+
+            self._print_agent_answer(response_text)
             self._save_history()
-            
+
             if self.message_count > 80:
                 warning = "\n\n⚠️ Note: Conversation is getting long. Consider calling save_checkpoint and restarting."
                 response_text += warning
-            
+
             return response_text
-            
+
         except Exception as e:
             logging.error(f"Chat Error: {e}", exc_info=True)
-            
+
             print("  💾 Error detected - saving emergency checkpoint...")
             self._auto_checkpoint()
-            
+
             return f"❌ Error: {e}\n\n(Emergency checkpoint saved to {self.checkpoint_path})"
+
+    def run_task(self, task: str, context: Optional[Dict[str, Any]] = None,
+                 autonomy: Optional[AutonomyLevel] = None,
+                 max_iterations: Optional[int] = None) -> Dict[str, Any]:
+        """Non-interactive entry point — used by the meta agent.
+
+        Runs the task and returns a structured summary that's easy to
+        consume programmatically:
+
+            {
+                "status": "success" | "error",
+                "task": str,                       # echoed input
+                "summary": str,                    # the agent's final reply
+                "files_produced": List[str],       # absolute paths
+                "key_findings": List[str],         # campaign configuration
+                "suggested_followups": List[str],
+                "campaign_state": dict,            # objective / targets / data
+                "warnings": List[str],
+            }
+
+        Mirrors SimulationOrchestratorAgent.run_task — see CLAUDE.md
+        "Two surfaces, one agent".
+
+        ``autonomy`` selects the AutonomyLevel for this call. Defaults to
+        AUTONOMOUS — the safe choice for a headless/programmatic caller, so
+        the agent never pauses for a nonexistent user. A caller attached to a
+        human (the meta agent, driven via CLI/UI) passes AUTOPILOT so the
+        sub-agents' human-feedback prompts reach that human.
+        The original autonomy level is restored on exit, even if chat()
+        raises.
+
+        Planning has no analysis-style record list, so files_produced is a
+        before/after diff of the campaign directory (session-churn files
+        like chat_history.json are excluded).
+        """
+        # Build a self-contained prompt that includes the optional context.
+        prompt = task
+        if context:
+            try:
+                ctx_str = json.dumps(context, indent=2, default=str)
+            except (TypeError, ValueError):
+                ctx_str = repr(context)
+            prompt = (
+                f"{task}\n\n"
+                f"Context provided by the caller (e.g., upstream agent's findings):\n"
+                f"```\n{ctx_str}\n```\n\n"
+                "Use this context together with your tools to complete the task."
+            )
+
+        def _snapshot_files() -> set:
+            """Resolved paths of campaign artifacts, minus session churn."""
+            skip_names = {
+                "chat_history.json", "checkpoint.json",
+                "analyzed_files.json", "session_log.txt",
+            }
+            snap = set()
+            if self.base_dir.is_dir():
+                for p in self.base_dir.rglob("*"):
+                    if (p.is_file() and p.name not in skip_names
+                            and p.suffix not in (".log", ".pyc")):
+                        snap.add(str(p.resolve()))
+            return snap
+
+        # Snapshot prior state so we report "what was produced *during* this
+        # call" rather than "everything in the session."
+        files_before = _snapshot_files()
+
+        # Isolate this delegation's plan artifacts in their own sub-directory
+        # so a persistent planning child (reused by the meta agent) does not
+        # overwrite an earlier delegation's plan.json / tea_analysis /
+        # output_scripts. The plan tools read self._active_output_subdir.
+        self._delegation_counter += 1
+        slug = re.sub(r"[^a-z0-9]+", "_", task.lower()).strip("_")[:40] or "task"
+        self._active_output_subdir = (
+            self.base_dir / "delegations" / f"{self._delegation_counter:02d}_{slug}"
+        )
+        self._active_output_subdir.mkdir(parents=True, exist_ok=True)
+
+        # Run under the requested autonomy level — AUTONOMOUS by default (the
+        # safe headless choice). The meta agent passes its own mode through,
+        # so a co-pilot / autopilot delegation still raises the sub-agents'
+        # human-feedback prompts to the user driving the session.
+        run_level = autonomy if autonomy is not None else AutonomyLevel.AUTONOMOUS
+        original_level = self.autonomy_level
+        original_max_iter = self.max_iterations
+        from ...hitl import get_thread_feedback_log, set_thread_feedback_log
+        _prev_fblog = get_thread_feedback_log()
+        try:
+            self.set_autonomy_level(run_level)
+            if max_iterations is not None:
+                self.max_iterations = max_iterations
+            try:
+                summary_text = self.chat(prompt)
+                # chat() handles the iteration-cap case internally and returns
+                # the warning string (preserving CLI/UI behavior); a flag on
+                # self tells us whether that happened so we can surface it as
+                # an error to programmatic callers instead of silently
+                # reporting success.
+                if self._last_chat_hit_iter_cap:
+                    status = "error"
+                    error_msg: Optional[str] = summary_text
+                else:
+                    status = "success"
+                    error_msg = None
+            except Exception as e:
+                logging.exception(f"run_task failed: {e}")
+                summary_text = ""
+                status = "error"
+                error_msg = str(e)
+        finally:
+            # Always restore the original level, even if chat() raised.
+            self.set_autonomy_level(original_level)
+            self.max_iterations = original_max_iter
+            # chat() bound the feedback log to THIS session; restore the
+            # caller's binding (a delegating meta keeps logging to its own).
+            set_thread_feedback_log(_prev_fblog)
+            # _active_output_subdir is scoped to this call; clear it so a
+            # later direct chat() on the same instance writes to base_dir.
+            self._active_output_subdir = None
+            # A delegation-driven child sees ~1 message per delegation and
+            # never reaches the 10-message auto-checkpoint cadence — so a
+            # meta restore found no checkpoint and rebuilt the child FRESH,
+            # losing the campaign. Checkpoint after every delegation.
+            self._auto_checkpoint()
+
+        files_produced = sorted(_snapshot_files() - files_before)
+        # Deterministic, clickable list of what this turn wrote. The model's
+        # prose cites short relative paths ("planning/top3_priority_brief.md")
+        # and the reader is left to `find` the file; this cannot drift from
+        # what was actually produced.
+        try:
+            from .user_interface import display_files_produced
+            display_files_produced(files_produced, self.base_dir)
+        except Exception:  # noqa: BLE001 - reporting must never fail a task
+            pass
+
+        # data_points_collected: rows in the BO optimization table, if any.
+        data_points = 0
+        try:
+            if self.bo_data_path.exists():
+                data_points = len(pd.read_csv(self.bo_data_path))
+        except Exception:
+            data_points = 0
+
+        # key_findings: the campaign configuration the orchestrator settled
+        # on. Planning's substantive output is the plan text itself, which
+        # the caller reads from `summary`.
+        key_findings: List[str] = []
+        for col in self.expected_target_columns or []:
+            direction = self.target_directions.get(col, "optimize")
+            key_findings.append(f"Optimization target: {col} ({direction}).")
+        if self.latest_tea_results:
+            key_findings.append("Techno-economic analysis results are available.")
+
+        # Heuristic: collected BO data with no further direction is a natural
+        # cue to propose the next experiment batch.
+        suggested_followups: List[str] = []
+        if data_points > 0:
+            suggested_followups.append(
+                f"Run the next BO iteration ({data_points} data point(s) "
+                f"collected so far)."
+            )
+
+        warnings: List[str] = []
+        if status == "success" and not files_produced:
+            warnings.append("Task completed but produced no campaign artifacts.")
+
+        # Surface the advisory critic's caveats so a headless / meta consumer
+        # sees them even though no human reviewed them in-session. The plan is
+        # not modified — these are limitations for the caller to weigh.
+        _plan = (self.planner.state or {}).get("current_plan") or {}
+        for _c in format_caveats(_plan.get("critic_findings")):
+            warnings.append(f"Plan caveat — {_c}")
+
+        result = {
+            "status": status,
+            "task": task,
+            "summary": summary_text,
+            "files_produced": files_produced,
+            "key_findings": key_findings,
+            "suggested_followups": suggested_followups,
+            "campaign_state": {
+                "objective": self.objective,
+                "expected_input_columns": self.expected_input_columns,
+                "expected_target_columns": self.expected_target_columns,
+                "target_directions": self.target_directions,
+                "data_points_collected": data_points,
+            },
+            "warnings": warnings,
+        }
+        if error_msg:
+            result["error"] = error_msg
+        return result
+
+    def _invoke_graph(self, user_input: str) -> str:
+        """
+        Run one user turn through the LangGraph ReAct loop.
+
+        Delegates to the compiled planning graph.  The MemorySaver checkpointer
+        retains the full thread history across calls.
+        """
+        self._repair_graph_state()
+
+        # Keep self.messages in sync for JSON persistence
+        self.messages.append({"role": "user", "content": user_input})
+
+        if len(self.messages) > 120:
+            print("  ⚠️  Context window getting full - trimming history...")
+            system_msg = self.messages[0]
+            recent_msgs = self._trim_history(self.messages[1:], max_messages=100)
+            self.messages = [system_msg] + recent_msgs
+
+        result = self._graph.invoke(
+            {
+                "messages": [HumanMessage(content=user_input)],
+                "step_count": 0,
+                "autonomy_mode": self.autonomy_level.value,
+                "active_skill": None,
+                "session_dir": str(self.base_dir),
+                "checkpoint_data": {},
+                "mcp_connections": list(self._mcp_connections.keys()),
+                "objective": self.objective,
+                "active_scalarizer_script": self.active_scalarizer_script,
+                "expected_input_columns": self.expected_input_columns,
+                "expected_target_columns": self.expected_target_columns,
+                "target_directions": self.target_directions,
+                "expected_input_types": self.expected_input_types,
+                "expected_input_levels": self.expected_input_levels,
+                "latest_tea_results": self.latest_tea_results,
+                "active_knowledge": self.active_knowledge,
+                "message_count": self.message_count,
+            },
+            config=self._graph_config,
+        )
+
+        final_text = ""
+        for msg in reversed(result.get("messages", [])):
+            if isinstance(msg, AIMessage) and msg.content:
+                final_text = msg.content
+                break
+
+        if not final_text:
+            if result.get("step_count", 0) >= self.max_iterations:
+                self._last_chat_hit_iter_cap = True
+            final_text = "⚠️ Maximum tool iterations reached. Please simplify your request."
+
+        self.messages.append({"role": "assistant", "content": final_text})
+        return final_text
+
+    def _repair_graph_state(self) -> None:
+        """Heal a dangling tool call left by a mid-run interruption — the
+        LangGraph-state analogue of ``repair_dangling_tool_calls`` /
+        ``close_interrupted_turn``. See AnalysisOrchestratorAgent for the
+        full rationale; the checkpointer only ever appends, so the fix is
+        always additive.
+        """
+        try:
+            snapshot = self._graph.get_state(self._graph_config)
+        except Exception:
+            return
+        if not snapshot or not snapshot.values:
+            return
+        messages = snapshot.values.get("messages") or []
+        if not messages:
+            return
+
+        last = messages[-1]
+        patch = []
+        if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
+            for tc in last.tool_calls:
+                patch.append(ToolMessage(
+                    content=(
+                        "⚠️ Tool execution was interrupted before a result "
+                        "was produced (the run was stopped). Re-run this "
+                        "tool if its output is still needed."
+                    ),
+                    tool_call_id=tc["id"],
+                ))
+        elif isinstance(last, ToolMessage):
+            patch.append(AIMessage(
+                content="[Turn interrupted before a reply was produced.]"
+            ))
+
+        if patch:
+            logging.info(
+                "  🔧 Repaired %d dangling message(s) from an interrupted run",
+                len(patch),
+            )
+            self._graph.update_state(self._graph_config, {"messages": patch})
+
+    def _seed_graph_history(self, history: List[Dict]) -> None:
+        """Replay persisted history into the graph's MemorySaver at init."""
+        history = close_interrupted_turn(repair_dangling_tool_calls(list(history)))
+
+        lc_messages = []
+        for m in history:
+            role = m.get("role", "")
+            content = m.get("content") or ""
+            if role == "user":
+                lc_messages.append(HumanMessage(content=content))
+            elif role == "assistant":
+                tool_calls_raw = m.get("tool_calls", [])
+                lc_tc = [
+                    {
+                        "id": tc.get("id", ""),
+                        "name": tc.get("function", {}).get("name", ""),
+                        "args": json.loads(tc.get("function", {}).get("arguments", "{}"))
+                        if isinstance(tc.get("function", {}).get("arguments", "{}"), str)
+                        else tc.get("function", {}).get("arguments", {}),
+                        "type": "tool_call",
+                    }
+                    for tc in tool_calls_raw
+                ]
+                lc_messages.append(AIMessage(content=content, tool_calls=lc_tc))
+            elif role == "tool":
+                lc_messages.append(ToolMessage(content=content, tool_call_id=m.get("tool_call_id", "")))
+
+        if not lc_messages:
+            return
+
+        try:
+            self._graph.update_state(self._graph_config, {"messages": lc_messages})
+            logging.info(
+                "  🧠 Graph history seeded: %d messages loaded into MemorySaver",
+                len(lc_messages),
+            )
+        except Exception as e:
+            logging.warning("Failed to seed graph history: %s", e)
 
     def _compress_large_tool_results(self):
         """Compress large tool results in chat history to prevent context overflow.
@@ -1224,10 +1740,15 @@ class PlanningOrchestratorAgent:
                 "target_directions": self.target_directions,
                 "expected_input_types": self.expected_input_types,
                 "expected_input_levels": self.expected_input_levels,
+                "input_bounds_override": (
+                    {k: list(v) for k, v in self.input_bounds_override.items()}
+                    if self.input_bounds_override else None),
+                "fidelity_spec": self.fidelity_spec,
                 "data_points_collected": len(pd.read_csv(self.bo_data_path)) if self.bo_data_path.exists() else 0,
-                "planner_state": self.planner.state,
+                "planner_state": compact_planner_state(self.planner.state),
                 "message_count": self.message_count,
                 "latest_tea_results": self.latest_tea_results,
+                "delegation_counter": self._delegation_counter,
                 "autonomy_level": self.autonomy_level.value,
                 "data_dir": str(self.data_dir) if self.data_dir else None,
                 "knowledge_dir": str(self.knowledge_dir) if self.knowledge_dir else None,
@@ -1237,7 +1758,7 @@ class PlanningOrchestratorAgent:
                 "custom_skills": self._custom_skills,
             }
             
-            with open(self.checkpoint_path, 'w') as f:
+            with open(self.checkpoint_path, 'w', encoding="utf-8") as f:
                 json.dump(checkpoint_data, f, indent=2)
             
             print(f"    ✅ Auto-checkpoint saved")
@@ -1245,167 +1766,87 @@ class PlanningOrchestratorAgent:
         except Exception as e:
             logging.warning(f"Auto-checkpoint failed: {e}")
 
-    def _handle_openai_chat(self, user_input: str) -> str:
-        """Handle chat with OpenAI-compatible models with manual function calling loop."""
-        from openai import OpenAI
-        
-        client = OpenAI(
-            api_key=self.model.api_key,
-            base_url=self.model.base_url
-        )
-        
-        self.messages.append({"role": "user", "content": user_input})
-        
-        if len(self.messages) > 120:
-            print("  ⚠️  Context window getting full - trimming history...")
-            system_msg = self.messages[0]
-            recent_msgs = self._trim_history(self.messages[1:], max_messages=100)
-            self.messages = [system_msg] + recent_msgs
+    @staticmethod
+    def _parse_tool_args(tool_call, finish_reason=None):
+        """Parse a tool call's JSON arguments, failing loud on bad input.
 
-        self._compress_large_tool_results()
-
-        max_iterations = 20
-        iteration = 0
-
-        while iteration < max_iterations:
-            iteration += 1
-
-            # Also compress within the loop — tool calls can grow history mid-conversation
-            if iteration > 1:
-                self._compress_large_tool_results()
-
-            print(f"  ⏳ Waiting for orchestrator response ...")
-
-            response = client.chat.completions.create(
-                model=self.model.model,
-                messages=self.messages,
-                tools=self.tools_for_model,
-                tool_choice="auto"
-            )
-            
-            message = response.choices[0].message
-            
-            if not message.tool_calls:
-                self.messages.append({
-                    "role": "assistant",
-                    "content": message.content
-                })
-                return message.content
-            
-            self.messages.append({
-                "role": "assistant",
-                "content": message.content,
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments
-                        }
-                    } for tc in message.tool_calls
-                ]
+        Returns (args, None) on success, or (None, error_json) when the
+        arguments string is malformed or truncated. The error_json is handed
+        back to the model as the tool result so it can recover (#270) —
+        silently substituting ``args = {}`` surfaces as a raw TypeError from
+        the tool itself, which hides the real cause and sends the model into
+        an unrecoverable retry loop.
+        """
+        try:
+            return json.loads(tool_call.function.arguments), None
+        except json.JSONDecodeError:
+            if finish_reason == "length":
+                cause = ("the arguments JSON was truncated — the response "
+                         "hit the output-token limit")
+            else:
+                cause = ("the arguments string was not valid JSON — "
+                         "typically broken escaping of quotes/newlines "
+                         "inside a large string value")
+            return None, json.dumps({
+                "status": "error",
+                "message": (
+                    f"Tool call discarded: {cause}. The tool was NOT "
+                    "executed. Do not retry with one large argument. For "
+                    "large text content, write the file in chunks: "
+                    "save_file with the first chunk, then append_file for "
+                    "each remaining chunk."
+                ),
             })
-            
-            for tool_call in message.tool_calls:
-                func_name = tool_call.function.name
-                args = json.loads(tool_call.function.arguments)
-                
-                print(f"  🔧 Calling tool: {func_name}")
-                
-                result = self.tools.execute_tool(func_name, **args)
-                
-                self.messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result
-                })
-        
-        return "⚠️ Maximum tool iterations reached. Please simplify your request."
 
-    def _handle_litellm_chat(self, user_input: str) -> str:
-        """Handle chat with LiteLLM models with manual function calling loop."""
-        import litellm
-        
-        self.messages.append({"role": "user", "content": user_input})
-        
-        if len(self.messages) > 120:
-            print("  ⚠️  Context window getting full - trimming history...")
-            system_msg = self.messages[0]
-            recent_msgs = self._trim_history(self.messages[1:], max_messages=100)
-            self.messages = [system_msg] + recent_msgs
+    def _print_assistant_reasoning(self, content) -> None:
+        """Surface the LLM's interim reasoning that accompanies a tool call.
 
-        self._compress_large_tool_results()
+        Without this the console jumps straight to "🔧 Calling tool: …", so a
+        deliberate step reads like a silent loop. The text is already in
+        history; this just shows it so the user can see *why* the next tool is
+        being called. Rendered dim+italic and set off by blank lines so the
+        prose is visually distinct from the structural tool-call log.
+        """
+        if not content:
+            return
+        text = content.strip() if isinstance(content, str) else str(content).strip()
+        if not text:
+            return
+        import sys
+        # A meta-delegated run reasons in AMBER (33), the meta's own in CYAN (36),
+        # so the CLI distinguishes them the way the UI does (dim + italic either way).
+        specialist = getattr(self, "_agent_label", "Agent") != "Agent"
+        color = "33" if specialist else "36"
+        style, reset = ((f"\033[2;3;{color}m", "\033[0m")
+                        if sys.stdout.isatty() else ("", ""))
+        body = text.replace("\n", "\n     ")  # indent continuation lines
+        # Tag a meta-delegated run's reasoning with an INVISIBLE marker (U+2063)
+        # right after 💭 so the UI renders it a distinct color from the meta's
+        # own 💭 while the visible glyph stays identical. ANSI color can't carry
+        # this: the UI captures non-tty output (no ANSI emitted) and re-colors by
+        # the 💭 marker, so the source must ride in the text. Gated on
+        # `_agent_label` (the 🤖-answer attribution mechanism); a standalone
+        # session keeps a plain 💭, unchanged.
+        mark = "\u2063" if specialist else ""
+        print(f"\n  {style}💭{mark} {body}{reset}\n")
 
-        max_iterations = 20
-        iteration = 0
-
-        while iteration < max_iterations:
-            iteration += 1
-
-            # Also compress within the loop — tool calls can grow history mid-conversation
-            if iteration > 1:
-                self._compress_large_tool_results()
-
-            print(f"  ⏳ Waiting for orchestrator response ...")
-
-            response = litellm.completion(
-                model=self.model.model,
-                messages=self.messages,
-                tools=self.tools_for_model,
-                tool_choice="auto",
-                api_key=self.model.api_key,
-                api_base=self.model.base_url
-            )
-            
-            message = response.choices[0].message
-            tool_calls = getattr(message, "tool_calls", None)
-            content = getattr(message, "content", None)
-            
-            if not tool_calls:
-                # No tool calls - return the text response
-                self.messages.append({
-                    "role": "assistant",
-                    "content": content or ""
-                })
-                return content or ""
-            
-            # Has tool calls - add assistant message with tool calls
-            assistant_msg = {
-                "role": "assistant",
-                "content": content,
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments
-                        }
-                    } for tc in tool_calls
-                ]
-            }
-            self.messages.append(assistant_msg)
-            
-            # Execute each tool call
-            for tool_call in tool_calls:
-                func_name = tool_call.function.name
-                try:
-                    args = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError:
-                    args = {}
-                
-                print(f"  🔧 Calling tool: {func_name}")
-                
-                result = self.tools.execute_tool(func_name, **args)
-                
-                self.messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result
-                })
-        
-        return "⚠️ Maximum tool iterations reached. Please simplify your request."
+    def _print_agent_answer(self, text) -> None:
+        """Print the agent's final answer — a deliverable, emphasized (bold +
+        bright) to stand apart from 💭 reasoning (a dim aside) and structural
+        logs. `_agent_label` (default "Agent") lets the meta name the delegated
+        specialist (e.g. "Planning specialist") so a child's answer is not
+        mistaken for the meta's own user-facing response."""
+        import sys
+        label = getattr(self, "_agent_label", "Agent")
+        # A delegated specialist's answer header takes the specialist color (bold
+        # AMBER, 33) to match its reasoning; the meta's own stays bold BRIGHT CYAN
+        # (96). The UI mirrors this via the invisible U+2063 marker after 🤖.
+        specialist = label != "Agent"
+        code = "1;33" if specialist else "1;96"
+        mark = "\u2063" if specialist else ""
+        bold, reset = (f"\033[{code}m", "\033[0m") if sys.stdout.isatty() else ("", "")
+        print(f"\n{bold}🤖{mark} {label}:{reset}")
+        print(text if text is not None else "")
 
     def _extract_response_text(self, response) -> str:
         """Robustly extract text from different response formats."""
@@ -1441,7 +1882,7 @@ class PlanningOrchestratorAgent:
             # Filter out system messages for saved history
             history_data = [m for m in self.messages if m["role"] != "system"]
             
-            with open(self.history_path, 'w') as f: 
+            with open(self.history_path, 'w', encoding="utf-8") as f: 
                 json.dump(history_data, f, indent=2)
                 
         except Exception as e:

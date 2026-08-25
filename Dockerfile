@@ -69,6 +69,15 @@ ENV GOOGLE_API_KEY=""
 ENV FUTUREHOUSE_API_KEY=""
 ENV MP_API_KEY=""
 
+# Persistent memory: graduated + auto-distilled skills live here. Declared as a
+# VOLUME so it is easy to persist across container restarts. WITHOUT a mounted
+# volume this dir is ephemeral and learned skills are lost when the container
+# exits — mount it to keep them, e.g.:
+#   docker run -v ~/.scilink:/home/scilinkuser/.scilink scilink ...
+# (or set SCILINK_HOME to a mounted path).
+RUN mkdir -p /home/scilinkuser/.scilink
+VOLUME ["/home/scilinkuser/.scilink"]
+
 # Ensure the non-root user owns all the files in its home directory.
 RUN chown -R scilinkuser:scilinkgroup /home/scilinkuser
 

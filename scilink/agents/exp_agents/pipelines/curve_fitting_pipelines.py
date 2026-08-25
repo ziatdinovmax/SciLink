@@ -21,11 +21,12 @@ from typing import Callable, List, Any
 from ..controllers.curve_fitting_controllers import (
     # Original controllers
     AnalyzeDataController,
+    CurveFittingSkillSuggestionController,
     SeriesScoutController,
     LiteratureSearchController,
     GenerateCurveFittingReportController,
     # Unified controllers for series support
-    HumanFeedbackRefinementController,
+    CurveFittingPlanningController,
     UnifiedSeriesProcessingController,
     AdaptiveRefitController,
     ConditionalTrendAnalysisController,
@@ -55,13 +56,15 @@ def create_unified_curve_fitting_pipeline(
     plot_fn: Callable,
     executor: Any,
     output_dir: str,
-    preprocessor: Any | None = None,
     literature_agent: Any | None = None,
     enable_human_feedback: bool = False,
     r2_threshold: float = 0.95,
     max_model_retries: int = 1,
     outlier_sigma: float = 2.0,
     max_verification_iterations: int = 7,
+    parallel_workers: int | None = None,
+    load_skills_fn: Callable | None = None,
+    profile: str | None = None,
 ) -> List:
     """
     Factory function to create the unified curve fitting pipeline.
@@ -119,7 +122,6 @@ def create_unified_curve_fitting_pipeline(
         plot_fn: Function to plot curve data
         executor: Script executor instance
         output_dir: Output directory path
-        preprocessor: Optional preprocessor agent
         literature_agent: Optional literature search agent
         enable_human_feedback: Enable human-in-the-loop refinement
         r2_threshold: Minimum acceptable R² value (default: 0.95)
@@ -132,6 +134,49 @@ def create_unified_curve_fitting_pipeline(
     Returns:
         List of controller instances to execute in sequence
     """
+    # REALTIME profile (#346 step 3): the per-frame in-situ pipeline. Every
+    # LLM stage is omitted — no skill suggestion, planning, plan validation,
+    # literature, adaptive refit, trend, or synthesis. The locked config is
+    # seeded from the anchor run by the agent before the pipeline starts, and
+    # the series controller's reuse path executes the locked script under the
+    # arithmetic gate (verification is bypassed via
+    # max_verification_iterations=0). Zero LLM calls on the happy path; the
+    # fallback (prior script cannot execute) costs a single generation.
+    if profile == "realtime":
+        realtime_pipeline = [
+            AnalyzeDataController(logger, plot_fn),
+            UnifiedSeriesProcessingController(
+                model=model,
+                logger=logger,
+                generation_config=generation_config,
+                safety_settings=safety_settings,
+                parse_fn=parse_fn,
+                executor=executor,
+                script_instructions=FITTING_SCRIPT_INSTRUCTIONS,
+                correction_instructions=FITTING_SCRIPT_CORRECTION_INSTRUCTIONS,
+                quality_instructions=FIT_QUALITY_ASSESSMENT_INSTRUCTIONS,
+                output_dir=output_dir,
+                plot_fn=plot_fn,
+                r2_threshold=r2_threshold,
+                max_model_retries=max_model_retries,
+                enable_human_feedback=False,
+                outlier_sigma=outlier_sigma,
+                max_verification_iterations=0,
+                conformance_instructions=None,
+                parallel_workers=parallel_workers,
+                replanner=None,
+            ),
+            StoreAnalysisResultsController(logger, store_fn),
+            GenerateCurveFittingReportController(
+                logger, output_dir, r2_threshold=r2_threshold),
+            UnifiedCurveReportController(logger, output_dir),
+        ]
+        logger.info(
+            f"Realtime curve pipeline created: {len(realtime_pipeline)} steps "
+            f"(zero-LLM happy path)"
+        )
+        return realtime_pipeline
+
     pipeline = []
 
     # Step 1: Analyze first spectrum data (compute stats, initial plot)
@@ -145,20 +190,35 @@ def create_unified_curve_fitting_pipeline(
         )
     )
 
-    # Step 2: Human feedback refinement on fitting approach
-    pipeline.append(
-        HumanFeedbackRefinementController(
-            model=model,
-            logger=logger,
-            generation_config=generation_config,
-            safety_settings=safety_settings,
-            parse_fn=parse_fn,
-            instructions=CURVE_ANALYSIS_INSTRUCTIONS,
-            output_dir=output_dir,
-            enable_human_feedback=enable_human_feedback,
-            max_iterations=5
+    # Step 1.7: Auto-suggest domain skill(s) if none were provided.
+    # Only wired when the agent supplies its skill loader (keeps the legacy
+    # backward-compat factory, which omits it, at the prior no-auto-select
+    # behavior).
+    if load_skills_fn is not None:
+        pipeline.append(
+            CurveFittingSkillSuggestionController(
+                model=model,
+                logger=logger,
+                generation_config=generation_config,
+                safety_settings=safety_settings,
+                parse_fn=parse_fn,
+                load_skills_fn=load_skills_fn,
+            )
         )
+
+    # Step 2: Human feedback refinement on fitting approach
+    planning_controller = CurveFittingPlanningController(
+        model=model,
+        logger=logger,
+        generation_config=generation_config,
+        safety_settings=safety_settings,
+        parse_fn=parse_fn,
+        instructions=CURVE_ANALYSIS_INSTRUCTIONS,
+        output_dir=output_dir,
+        enable_human_feedback=enable_human_feedback,
+        max_iterations=5
     )
+    pipeline.append(planning_controller)
 
     # Step 3: Literature search (runs once, uses first spectrum context)
     pipeline.append(
@@ -188,8 +248,11 @@ def create_unified_curve_fitting_pipeline(
             enable_human_feedback=enable_human_feedback,
             outlier_sigma=outlier_sigma,
             max_verification_iterations=max_verification_iterations,
-            preprocessor=preprocessor,
             conformance_instructions=PLAN_CONFORMANCE_CHECK_INSTRUCTIONS,
+            parallel_workers=parallel_workers,
+            # Lets each best-of-N fan-out candidate (>=1) plan its own
+            # independent fitting approach instead of sharing the locked plan.
+            replanner=planning_controller,
         )
     )
 
@@ -210,7 +273,6 @@ def create_unified_curve_fitting_pipeline(
             r2_threshold=r2_threshold,
             max_model_retries=max_model_retries,
             max_verification_iterations=max_verification_iterations,
-            preprocessor=preprocessor,
             enable_human_feedback=enable_human_feedback,
             conformance_instructions=PLAN_CONFORMANCE_CHECK_INSTRUCTIONS,
         )
@@ -279,7 +341,6 @@ def create_curve_fitting_pipeline(
     plot_fn: Callable,
     executor: Any,
     output_dir: str,
-    preprocessor: Any | None = None,
     literature_agent: Any | None = None,
     enable_human_feedback: bool = False,
     settings: dict | None = None,  # Deprecated
@@ -313,7 +374,6 @@ def create_curve_fitting_pipeline(
         plot_fn=plot_fn,
         executor=executor,
         output_dir=output_dir,
-        preprocessor=preprocessor,
         literature_agent=literature_agent,
         enable_human_feedback=enable_human_feedback,
         r2_threshold=r2_threshold,
