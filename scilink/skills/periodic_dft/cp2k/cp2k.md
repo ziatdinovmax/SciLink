@@ -74,14 +74,24 @@ supercell** built large enough to sample the physics (CP2K's GPW cost is nearly
 linear in cell size, so a Gamma supercell is the intended route, not a k-mesh on
 the primitive cell).
 
-**SCF method — OT vs diagonalization:** `&DIAGONALIZATION` (with `&SMEAR` and
-`ADDED_MOS`) is right for **metals**. For **insulators, and mandatorily for
-hybrids/exact exchange**, use the orbital-transformation minimizer instead — a
-`&SCF` with an `&OT` block (`MINIMIZER DIIS`, `PRECONDITIONER FULL_SINGLE_INVERSE`)
-and an `&OUTER_SCF`. A hybrid run under `&DIAGONALIZATION` — or ADMM with its
-default MO-based purification without OT — aborts (`ADMM: MO-based purification
-requires OT`). Keep hybrids simple: **OT SCF, Gamma point, no ADMM** unless the
-system is large enough to need it.
+**SCF method — OT and k-points are mutually exclusive; pick one path.** This is
+the single most common CP2K setup error. `&OT` (orbital transformation) **cannot**
+run with a `&KPOINTS` mesh (`OT not possible with kpoint calculations`), and
+hybrids/exact exchange **require** `&OT`. So the SCF method is decided by whether
+the run is k-sampled or Gamma-point:
+
+- **k-sampled run** (any `&KPOINTS` mesh — a plain-GGA metal or semiconductor):
+  use **`&DIAGONALIZATION`**, never `&OT`. Metals add `&SMEAR` + `ADDED_MOS`;
+  semiconductors/insulators do not.
+- **Gamma-point run** (no `&KPOINTS` — a hybrid, a DFT+U system, a molecule, or a
+  large cell): use **`&OT`** (`MINIMIZER DIIS`, `PRECONDITIONER
+  FULL_SINGLE_INVERSE`, with an `&OUTER_SCF`), never `&DIAGONALIZATION` with
+  smearing.
+
+A **hybrid** therefore must be **Gamma-point + OT** (a `&DIAGONALIZATION` hybrid,
+or ADMM with default MO-based purification without OT, aborts: `ADMM: MO-based
+purification requires OT`); keep it **OT, Gamma, no ADMM** unless the cell is
+large. A **DFT+U** run is likewise Gamma-point + OT.
 
 **Basis and pseudopotential:** each `&KIND` names a `BASIS_SET` (e.g.
 `DZVP-MOLOPT-SR-GTH`) and a `POTENTIAL` (e.g. `GTH-PBE-q4`) consistent with the
@@ -124,6 +134,9 @@ energy of a semiconductor:
           SCF_GUESS ATOMIC
           EPS_SCF 1.0E-6
           MAX_SCF 50
+          &DIAGONALIZATION      # k-sampled run -> diagonalization, NOT &OT
+            ALGORITHM STANDARD
+          &END DIAGONALIZATION
         &END SCF
         &XC
           &XC_FUNCTIONAL PBE
