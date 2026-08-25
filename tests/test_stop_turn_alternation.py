@@ -45,21 +45,19 @@ def test_healthy_histories_untouched(tail):
     assert close_interrupted_turn(list(tail)) == tail
 
 
-ORCHESTRATORS = [
-    Path("scilink/agents/exp_agents/analysis_orchestrator.py"),
-    Path("scilink/agents/planning_agents/planning_orchestrator.py"),
-    Path("scilink/agents/sim_agents/simulation_orchestrator.py"),
+# Orchestrators still on the hand-rolled dual chat loop (openai + litellm):
+# every place a NEW user message enters self.messages must close an
+# interrupted turn first, in BOTH loops.
+LEGACY_ORCHESTRATORS = [
     Path("scilink/agents/meta_agent/meta_orchestrator.py"),
 ]
 
-# The seam: every place a NEW user message enters the history must close
-# an interrupted turn first (both litellm and openai chat loops).
 _SEAM = re.compile(
     r"close_interrupted_turn\(self\.messages\)\s*\n\s*"
     r"self\.messages\.append\(\{\"role\": \"user\", \"content\": user_input\}\)")
 
 
-@pytest.mark.parametrize("src", ORCHESTRATORS, ids=lambda p: p.stem)
+@pytest.mark.parametrize("src", LEGACY_ORCHESTRATORS, ids=lambda p: p.stem)
 def test_every_turn_start_closes_interrupted_turns(src):
     text = src.read_text()
     appends = len(re.findall(
@@ -67,6 +65,33 @@ def test_every_turn_start_closes_interrupted_turns(src):
         r"\"content\": user_input\}\)", text))
     assert appends == 2, f"{src.name}: expected both chat loops"
     assert len(_SEAM.findall(text)) == appends
+
+
+# Orchestrators on the LangGraph backbone (single chat() -> _invoke_graph()
+# path): the equivalent protection is _repair_graph_state(), which heals a
+# dangling tool call / unclosed turn in the CHECKPOINTED graph state before
+# each invoke — see AnalysisOrchestratorAgent._repair_graph_state for the
+# rationale. There is no self.messages textual seam to check here; self.messages
+# is a lightweight parallel log, not what the LLM sees on the next turn.
+GRAPH_BACKED_ORCHESTRATORS = [
+    Path("scilink/agents/exp_agents/analysis_orchestrator.py"),
+    Path("scilink/agents/planning_agents/planning_orchestrator.py"),
+    Path("scilink/agents/sim_agents/simulation_orchestrator.py"),
+]
+
+_GRAPH_SEAM = re.compile(
+    r"def _invoke_graph\(self, user_input: str\) -> str:.*?"
+    r"self\._repair_graph_state\(\)", re.DOTALL)
+
+
+@pytest.mark.parametrize("src", GRAPH_BACKED_ORCHESTRATORS, ids=lambda p: p.stem)
+def test_every_graph_turn_repairs_state_first(src):
+    text = src.read_text()
+    assert "def _repair_graph_state(self) -> None:" in text, (
+        f"{src.name}: expected _repair_graph_state to be defined")
+    assert _GRAPH_SEAM.search(text), (
+        f"{src.name}: expected _invoke_graph to call self._repair_graph_state() "
+        "before appending the new turn")
 
 
 def test_litellm_bedrock_warning_is_actually_silenced(caplog):
