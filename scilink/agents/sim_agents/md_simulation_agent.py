@@ -937,32 +937,55 @@ class MDSimulationAgent(SimulationAgent):
         plan = result["simulation_parameters"]
         impl = self._get_skill_context(section="implementation")
 
-        prompt = (
+        info = result.get("system_info", {})
+        base_prompt = (
             "Split this simulation into 2-4 checkpointed stages.\n\n"
             "SCRIPT:\n"
             f"{full_script}\n\n"
             f"{impl}\n\n"
             "Each stage: complete, standalone, runnable. First reads data file,\n"
             "later stages read restart. All include force field commands.\n"
+            "Each stage uses exactly ONE time integrator (e.g. NPT to equilibrate,\n"
+            "NVT to produce) — never two on a group in the same stage.\n"
             "Use literal values. Write restart at end of each stage.\n\n"
             'Return JSON: {"equilibration": "script...", "production": "script..."}'
         )
-        try:
-            stages = self._generate_json(prompt)
-        except Exception:
-            stages = {"production": full_script}
 
-        stage_scripts = {}
-        steps = []
-        for name, content in stages.items():
-            if not isinstance(content, str):
-                continue
-            content = self._clean_and_fix(content, plan)
-            entry = self._entry_name(name)
-            path = self.working_dir / entry
-            path.write_text(content, encoding="utf-8")
-            stage_scripts[name] = str(path)
-            steps.append({"name": name, "entry_file": entry, "script": content})
+        # Split into per-phase stages, retrying until each stage validates. The
+        # split is what resolves the monolithic deck into single-integrator
+        # phases; the transient monolithic deck is never run, so validity is
+        # based on the STAGES here, not on that deck. Retrying with the concrete
+        # validation errors makes a categorical slip (e.g. a stage that kept two
+        # integrators) self-correct engine-neutrally instead of being papered
+        # over per engine.
+        stage_scripts: Dict[str, str] = {}
+        steps: List[Dict[str, str]] = []
+        stage_errors: List[str] = []
+        prompt = base_prompt
+        for _ in range(3):
+            try:
+                stages = self._generate_json(prompt)
+            except Exception:
+                stages = {"production": full_script}
+            stage_scripts, steps, stage_errors = {}, [], []
+            for name, content in stages.items():
+                if not isinstance(content, str):
+                    continue
+                content = self._clean_and_fix(content, plan)
+                entry = self._entry_name(name)
+                path = self.working_dir / entry
+                path.write_text(content, encoding="utf-8")
+                v = self._validate(str(path), info, plan)
+                if not v.get("valid", True) and v.get("errors"):
+                    stage_errors.extend(f"[{name}] {e}" for e in v["errors"])
+                stage_scripts[name] = str(path)
+                steps.append({"name": name, "entry_file": entry, "script": content})
+            if not stage_errors:
+                break
+            prompt = base_prompt + (
+                "\n\nThe previous split still failed validation — fix these, "
+                "keeping ONE integrator per stage:\n- " + "\n- ".join(stage_errors)
+            )
 
         shared = self._campaign_shared_files(
             structure_file, kw.get("force_field_files"))
@@ -974,7 +997,16 @@ class MDSimulationAgent(SimulationAgent):
             is_staged=True,
             is_campaign=True,
             campaign_kind="staged",
+            # Validity reflects the stages that actually run (each single-
+            # integrator), superseding the transient monolithic deck's checks.
+            validation={
+                "valid": not stage_errors,
+                "errors": stage_errors,
+                "warnings": result.get("validation", {}).get("warnings", []),
+            },
         )
+        if stage_errors:
+            result["status"] = "error"
         # Representative phase for back-compat consumers that read a single
         # input set (the pipeline's input_files normalization, etc.).
         if stage_specs:
