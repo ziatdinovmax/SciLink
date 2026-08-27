@@ -374,6 +374,62 @@ def test_2d_list_available_software(model_name: str):
         assert all(v for v in r["installed_by_domain"].values())
 
         print("   ✅ list_available_software: deterministic, no LLM call")
+
+
+def test_2e_refine_preserves_structure_format(model_name: str):
+    """refine_structure must NOT assume POSCAR.
+
+    Regression: refine_structure unconditionally appended 'Save the structure
+    in POSCAR format.' to the request, while generate_structure writes extxyz
+    for crystals — so the validator flagged a phantom 'requested POSCAR vs
+    wrote extxyz' discrepancy even when no one asked for POSCAR. The refined
+    request must round-trip the ORIGINAL format, and honor an explicit
+    user-named format when there is one.
+    """
+    from scilink.agents.sim_agents.simulation_orchestrator_tools import (
+        SimulationOrchestratorTools as S,
+    )
+
+    # _requested_format: fires only on an EXPLICIT format request ...
+    assert S._requested_format("build Si and save as POSCAR") == "POSCAR"
+    assert S._requested_format("a water molecule in xyz") == "xyz"
+    assert S._requested_format("save in lammps-data format") == "lammps-data"
+    assert S._requested_format("please use extxyz") == "extxyz"   # unambiguous
+    # ... and NOT on incidental engine / database / axis mentions, which are
+    # frequent real inputs (this is the case the review flagged).
+    assert S._requested_format("build rutile TiO2 for a VASP calculation") is None
+    assert S._requested_format("relax the Si slab then run a LAMMPS MD") is None
+    assert S._requested_format("a protein from the PDB database") is None
+    assert S._requested_format("the CIF from Materials Project") is None
+    assert S._requested_format("optimize the xyz positions of the adatom") is None
+    assert S._requested_format("rutile TiO2 with an O vacancy") is None
+    # 'xyz' must not fire inside 'extxyz' regardless of table order
+    assert S._requested_format("save in extxyz format") == "extxyz"
+
+    # _existing_structure_format: inferred from the generated file's name
+    assert S._existing_structure_format("/s/structure.extxyz") == "extxyz"
+    assert S._existing_structure_format("/s/POSCAR") == "POSCAR"
+    assert S._existing_structure_format("/s/mol.xyz") == "xyz"
+    assert S._existing_structure_format("/s/unknown.foo") is None
+
+    # Exercise the REAL request-builder refine_structure calls (no copy).
+    refined = S.__new__(S)._refined_request
+
+    # crystal (extxyz) + plain request → round-trips extxyz, NEVER POSCAR
+    out = refined("rutile TiO2 with an O vacancy", "/s/structure.extxyz")
+    assert "extxyz" in out and "POSCAR" not in out
+    # crystal (extxyz) + incidental "VASP" mention → still round-trips extxyz,
+    # not suppressed by the engine name (the regression the review guarded)
+    out = refined("build rutile TiO2 for a VASP calculation", "/s/structure.extxyz")
+    assert "extxyz" in out and "POSCAR" not in out
+    # explicit user request for POSCAR is honored, not overridden
+    assert refined("build Si, save as POSCAR", "/s/POSCAR") == "build Si, save as POSCAR"
+    # molecule (xyz) round-trips xyz
+    assert "xyz" in refined("a benzene molecule", "/s/mol.xyz")
+
+    print("   ✅ refine_structure: preserves original format, no POSCAR default")
+
+
 def test_2d_run_simulation_reuses_prebuilt_structure(model_name: str):
     """run_simulation reuses an in-session structure instead of rebuilding (#4).
 
@@ -1175,6 +1231,7 @@ TARGETED_TESTS = [
     ("edit_file / rename_file",                test_2b_edit_and_rename_file),
     ("Generic file I/O",                       test_2c_generic_file_io),
     ("List available software",                test_2d_list_available_software),
+    ("refine preserves structure format",      test_2e_refine_preserves_structure_format),
     ("run_simulation reuses structure",        test_2d_run_simulation_reuses_prebuilt_structure),
     ("run_simulation executes in-allocation",  test_2e_run_simulation_executes_in_allocation),
     ("Post-run analysis (synthetic)",          test_3_post_run_analysis_synthetic),

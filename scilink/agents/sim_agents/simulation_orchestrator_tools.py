@@ -501,9 +501,11 @@ class SimulationOrchestratorTools:
             # so crystal is the sensible default *class* (it supplies the
             # class-specific validation rubric). A user-supplied `skill` (rendered
             # into skill_content above) overrides the crystal *generation* skill;
-            # the crystal validation rubric still applies. The orchestrator
-            # appends the POSCAR-format instruction. (When the StructurePlanner
-            # lands it will set structure_class per request.)
+            # the crystal validation rubric still applies. The pipeline appends
+            # the output-format instruction derived from the structure_class
+            # skill's `output_format` frontmatter (extxyz for crystals), NOT a
+            # hardcoded POSCAR. (When the StructurePlanner lands it will set
+            # structure_class per request.)
             result = so.generate_and_validate(
                 description,
                 structure_class=structure_class,
@@ -1292,9 +1294,12 @@ class SimulationOrchestratorTools:
                     "message": f"Failed to construct StructureGenerator: {e}",
                 })
 
-            request = original_request
-            if "poscar" not in request.lower():
-                request = request + ". Save the structure in POSCAR format."
+            # Do NOT assume POSCAR. Honor a user-named format, else round-trip
+            # the format the structure was ORIGINALLY generated in (crystals
+            # default to extxyz). Shared with the regression test via
+            # _refined_request so the real code path is the one under test.
+            request = self._refined_request(
+                original_request, record["structure_path"])
 
             # Re-apply the same skill (if any) the original generation used,
             # so the refinement prompt has the same library guidance available.
@@ -3482,6 +3487,91 @@ class SimulationOrchestratorTools:
             return len(atoms)
         except Exception:
             return None
+
+    # Format tokens, mapped to the canonical name the generation script writes.
+    # Split by ambiguity, because a bare substring scan mis-fires on incidental
+    # engine / database / axis mentions ("a VASP calculation", "run a LAMMPS
+    # MD", "the PDB database", "CIF from Materials Project", "the xyz positions
+    # of the adatom") — none of which are format requests. Matching skips such
+    # mentions would suppress the beneficial round-trip AND leave an engine name
+    # in the request that the validator may itself read as "wants POSCAR",
+    # re-inviting the very discrepancy this avoids.
+    #
+    #   UNAMBIGUOUS — a format name with essentially no other meaning; counts
+    #   wherever it appears (word-boundary matched).
+    #   AMBIGUOUS   — doubles as an engine / database / axis name; counts ONLY
+    #   inside an explicit format cue ("in <fmt>", "as <fmt>", "<fmt> format",
+    #   "<fmt> file").
+    # Deliberately assumes NO default — see _existing_structure_format for how
+    # refinement preserves whatever the structure was originally written in.
+    _UNAMBIGUOUS_FORMAT_TOKENS = {
+        "poscar": "POSCAR", "contcar": "POSCAR",
+        "extxyz": "extxyz", "lammps-data": "lammps-data",
+    }
+    _AMBIGUOUS_FORMAT_TOKENS = {
+        "vasp": "POSCAR", "xyz": "xyz", "pdb": "pdb", "cif": "cif",
+        "lammps": "lammps-data",
+    }
+
+    @classmethod
+    def _requested_format(cls, request: str) -> Optional[str]:
+        """Return the file format the user EXPLICITLY named in a request, or
+        None if they named none (the common case). Never guesses a default.
+
+        Unambiguous format names (poscar, contcar, extxyz, lammps-data) count
+        anywhere they appear; ambiguous ones (vasp, xyz, pdb, cif, lammps),
+        which double as engine / database / axis names, count only inside an
+        explicit format cue — 'in <fmt>', 'as <fmt>', '<fmt> format/file'.
+        All matching is word-boundary anchored, so 'xyz' does not fire inside
+        'extxyz' regardless of table order.
+        """
+        import re as _re
+        low = (request or "").lower()
+
+        # Longest-first so 'lammps-data' wins over 'lammps' when both are cued.
+        for tok in sorted(cls._UNAMBIGUOUS_FORMAT_TOKENS, key=len, reverse=True):
+            if _re.search(rf"(?<![\w-]){_re.escape(tok)}(?![\w-])", low):
+                return cls._UNAMBIGUOUS_FORMAT_TOKENS[tok]
+
+        for tok in sorted(cls._AMBIGUOUS_FORMAT_TOKENS, key=len, reverse=True):
+            t = _re.escape(tok)
+            cued = rf"(?:\bin\s+{t}\b|\bas\s+{t}\b|\b{t}\s+(?:format|file)\b)"
+            if _re.search(cued, low):
+                return cls._AMBIGUOUS_FORMAT_TOKENS[tok]
+        return None
+
+    def _refined_request(self, original_request: str,
+                         structure_path: str) -> str:
+        """Build the refinement request WITHOUT assuming any output format.
+
+        If the user explicitly named a format, honor it (return unchanged).
+        Otherwise round-trip whatever format the structure was ORIGINALLY
+        generated in (inferred from its filename), so the refinement request
+        matches the prior script and the validator does not flag a phantom
+        'requested X vs wrote Y' discrepancy that no one actually asked for.
+        Shared by refine_structure and its regression test — one code path,
+        no drift.
+        """
+        if self._requested_format(original_request) is not None:
+            return original_request
+        fmt = self._existing_structure_format(structure_path)
+        if fmt:
+            return f"{original_request}. Save the structure in {fmt} format."
+        return original_request
+
+    @staticmethod
+    def _existing_structure_format(structure_path: str) -> Optional[str]:
+        """Infer the format an already-generated structure was written in,
+        from its filename — so a refinement round-trips the SAME format the
+        generation used instead of assuming one."""
+        p = Path(structure_path)
+        name, suffix = p.name.lower(), p.suffix.lower().lstrip(".")
+        if name in ("poscar", "contcar") or suffix in ("vasp", "poscar"):
+            return "POSCAR"
+        return {
+            "extxyz": "extxyz", "xyz": "xyz", "pdb": "pdb", "cif": "cif",
+            "data": "lammps-data", "lmp": "lammps-data",
+        }.get(suffix)
 
     def _find_script_content(self, structure_path: str) -> Optional[str]:
         """Find the generating script for a POSCAR.
