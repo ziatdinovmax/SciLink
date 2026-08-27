@@ -937,32 +937,82 @@ class MDSimulationAgent(SimulationAgent):
         plan = result["simulation_parameters"]
         impl = self._get_skill_context(section="implementation")
 
-        prompt = (
+        info = result.get("system_info", {})
+        base_prompt = (
             "Split this simulation into 2-4 checkpointed stages.\n\n"
             "SCRIPT:\n"
             f"{full_script}\n\n"
             f"{impl}\n\n"
             "Each stage: complete, standalone, runnable. First reads data file,\n"
             "later stages read restart. All include force field commands.\n"
+            "Each stage uses exactly ONE time integrator (e.g. NPT to equilibrate,\n"
+            "NVT to produce) — never two on a group in the same stage.\n"
             "Use literal values. Write restart at end of each stage.\n\n"
             'Return JSON: {"equilibration": "script...", "production": "script..."}'
         )
-        try:
-            stages = self._generate_json(prompt)
-        except Exception:
-            stages = {"production": full_script}
 
-        stage_scripts = {}
-        steps = []
-        for name, content in stages.items():
-            if not isinstance(content, str):
-                continue
-            content = self._clean_and_fix(content, plan)
-            entry = self._entry_name(name)
-            path = self.working_dir / entry
-            path.write_text(content, encoding="utf-8")
-            stage_scripts[name] = str(path)
-            steps.append({"name": name, "entry_file": entry, "script": content})
+        # The per-stage decks are what actually run. Nothing downstream reads the
+        # monolithic deck's own validation: `_generate_classical_md_inputs`
+        # setdefaults status="success", and the pre-run InputValidator sees only
+        # stage 0 — so before this change a bad split (a stage that kept both
+        # integrators, or an unresolved template variable) reached the engine,
+        # where the refinement loop could not repair it and the campaign failed
+        # (``refinement_failed``). This method's contribution is to validate each
+        # produced stage HERE and re-split with the concrete errors as feedback,
+        # catching a bad split at generation before it is ever run.
+        written: List[Path] = []
+        stage_scripts: Dict[str, str] = {}
+        steps: List[Dict[str, str]] = []
+        stage_errors: List[str] = []
+        prompt = base_prompt
+        for _ in range(3):
+            for p in written:                     # a retry may rename stages
+                p.unlink(missing_ok=True)         # (minimize -> equilibration),
+            written = []                          # so drop the prior attempt's files
+            try:
+                stages = self._generate_json(prompt)
+            except Exception:
+                stages = {"production": full_script}
+            stage_scripts, steps, stage_errors = {}, [], []
+            for name, content in stages.items():
+                if not isinstance(content, str):
+                    continue
+                content = self._clean_and_fix(content, plan)
+                entry = self._entry_name(name)
+                path = self.working_dir / entry
+                path.write_text(content, encoding="utf-8")
+                written.append(path)
+                v = self._validate(str(path), info, plan)
+                if not v.get("valid", True) and v.get("errors"):
+                    stage_errors.extend(f"[{name}] {e}" for e in v["errors"])
+                stage_scripts[name] = str(path)
+                steps.append({"name": name, "entry_file": entry, "script": content})
+            if not stage_errors:
+                break
+            prompt = base_prompt + (
+                "\n\nThe previous split still failed validation — fix these, "
+                "keeping ONE integrator per stage:\n- " + "\n- ".join(stage_errors)
+            )
+
+        # Last resort before failing generation: run the engine-neutral per-deck
+        # fixer (the same ``_attempt_fix`` used on the monolithic deck) on any
+        # stage still invalid after re-splitting, then re-validate. This keeps a
+        # recoverable stage on the path the refinement loop's dry-run gate would
+        # otherwise have taken, rather than hard-failing outright.
+        if stage_errors:
+            stage_errors = []
+            for step in steps:
+                path = self.working_dir / step["entry_file"]
+                v = self._validate(str(path), info, plan)
+                if not v.get("valid", True) and v.get("errors"):
+                    fixed = self._clean_and_fix(
+                        self._attempt_fix(step["script"], v["errors"], plan), plan)
+                    path.write_text(fixed, encoding="utf-8")
+                    step["script"] = fixed
+                    stage_scripts[step["name"]] = str(path)
+                    v = self._validate(str(path), info, plan)
+                    if not v.get("valid", True) and v.get("errors"):
+                        stage_errors.extend(f"[{step['name']}] {e}" for e in v["errors"])
 
         shared = self._campaign_shared_files(
             structure_file, kw.get("force_field_files"))
@@ -974,7 +1024,18 @@ class MDSimulationAgent(SimulationAgent):
             is_staged=True,
             is_campaign=True,
             campaign_kind="staged",
+            # Report validity of the STAGES that actually run. The monolithic
+            # deck's own validation (from generate_simulation) is computed but
+            # discarded by the pipeline, so it is not a gate — do not treat it
+            # as one.
+            validation={
+                "valid": not stage_errors,
+                "errors": stage_errors,
+                "warnings": result.get("validation", {}).get("warnings", []),
+            },
         )
+        if stage_errors:
+            result["status"] = "error"
         # Representative phase for back-compat consumers that read a single
         # input set (the pipeline's input_files normalization, etc.).
         if stage_specs:

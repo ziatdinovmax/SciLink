@@ -84,7 +84,44 @@ Liquids and solutions:
 2. NPT at target T,P for 0.5-2 ns → density convergence
 3. Production: NPT or NVT
 
+### Staging integrators (multi-phase runs)
+
+Each stage uses exactly ONE time integrator on a group. To move between phases —
+e.g. NPT density equilibration → NVT production — `unfix` the previous integrator
+BEFORE defining the next, and give them distinct fix IDs:
+
+```
+fix   eq all npt temp {temperature} {temperature} {Tdamp} iso {pressure} {pressure} {Pdamp}
+run   {equil_steps}
+unfix eq
+fix   prod all nvt temp {temperature} {temperature} {Tdamp}
+# … production output (e.g. the stress log a viscosity goal needs) …
+run   {prod_steps}
+```
+
+A single script legitimately contains both an npt and an nvt fix, but only ONE
+may be active on a group at a time — leaving both active is the fix nvt/npt
+conflict in Forbidden patterns.
+
 ### Technique-specific requirements
+
+Transport coefficients (viscosity, self-diffusion) — equilibrium Green-Kubo/Einstein:
+- The deck's job is to EMIT the raw time series; the coefficient is computed AFTER
+  the run by the matching `simulation_analysis` skill (e.g. `viscosity_greenkubo`).
+  Do NOT compute the transport coefficient in the input — no in-deck stress-
+  autocorrelation integral, no `variable visc`/`${visc}`, no `fix ave/correlate`
+  for the coefficient itself.
+- **Shear viscosity:** on the production run, log the full pressure tensor densely
+  — add `pxy pxz pyz vol` to `thermo_style custom` with a tight `thermo` interval
+  (every few fs), or define `variable pxy equal pxy` (and `pxz`, `pyz`) and write
+  them with `fix ave/time {N} 1 {N} v_pxy v_pxz v_pyz file stress.dat` (`fix
+  ave/time` averages variables/computes, not bare thermo keywords, so the
+  `variable` lines are required). The `viscosity_greenkubo` skill reads that log
+  (it also needs T and
+  vol) and does the Green-Kubo integral. It converges slowly for viscous liquids →
+  the production run must be long (tens of ns) with stress sampled every few fs.
+- **Self-diffusion:** dump the unwrapped coordinate trajectory at a regular
+  interval; the diffusion analysis skill computes the MSD/Einstein slope.
 
 Tensile deformation:
 - `fix deform x erate R` + thermostat on transverse dims
