@@ -951,18 +951,24 @@ class MDSimulationAgent(SimulationAgent):
             'Return JSON: {"equilibration": "script...", "production": "script..."}'
         )
 
-        # Split into per-phase stages, retrying until each stage validates. The
-        # split is what resolves the monolithic deck into single-integrator
-        # phases; the transient monolithic deck is never run, so validity is
-        # based on the STAGES here, not on that deck. Retrying with the concrete
-        # validation errors makes a categorical slip (e.g. a stage that kept two
-        # integrators) self-correct engine-neutrally instead of being papered
-        # over per engine.
+        # The per-stage decks are what actually run. Nothing downstream reads the
+        # monolithic deck's own validation: `_generate_classical_md_inputs`
+        # setdefaults status="success", and the pre-run InputValidator sees only
+        # stage 0 — so before this change a bad split (a stage that kept both
+        # integrators, or an unresolved template variable) reached the engine,
+        # where the refinement loop could not repair it and the campaign failed
+        # (``refinement_failed``). This method's contribution is to validate each
+        # produced stage HERE and re-split with the concrete errors as feedback,
+        # catching a bad split at generation before it is ever run.
+        written: List[Path] = []
         stage_scripts: Dict[str, str] = {}
         steps: List[Dict[str, str]] = []
         stage_errors: List[str] = []
         prompt = base_prompt
         for _ in range(3):
+            for p in written:                     # a retry may rename stages
+                p.unlink(missing_ok=True)         # (minimize -> equilibration),
+            written = []                          # so drop the prior attempt's files
             try:
                 stages = self._generate_json(prompt)
             except Exception:
@@ -975,6 +981,7 @@ class MDSimulationAgent(SimulationAgent):
                 entry = self._entry_name(name)
                 path = self.working_dir / entry
                 path.write_text(content, encoding="utf-8")
+                written.append(path)
                 v = self._validate(str(path), info, plan)
                 if not v.get("valid", True) and v.get("errors"):
                     stage_errors.extend(f"[{name}] {e}" for e in v["errors"])
@@ -987,6 +994,26 @@ class MDSimulationAgent(SimulationAgent):
                 "keeping ONE integrator per stage:\n- " + "\n- ".join(stage_errors)
             )
 
+        # Last resort before failing generation: run the engine-neutral per-deck
+        # fixer (the same ``_attempt_fix`` used on the monolithic deck) on any
+        # stage still invalid after re-splitting, then re-validate. This keeps a
+        # recoverable stage on the path the refinement loop's dry-run gate would
+        # otherwise have taken, rather than hard-failing outright.
+        if stage_errors:
+            stage_errors = []
+            for step in steps:
+                path = self.working_dir / step["entry_file"]
+                v = self._validate(str(path), info, plan)
+                if not v.get("valid", True) and v.get("errors"):
+                    fixed = self._clean_and_fix(
+                        self._attempt_fix(step["script"], v["errors"], plan), plan)
+                    path.write_text(fixed, encoding="utf-8")
+                    step["script"] = fixed
+                    stage_scripts[step["name"]] = str(path)
+                    v = self._validate(str(path), info, plan)
+                    if not v.get("valid", True) and v.get("errors"):
+                        stage_errors.extend(f"[{step['name']}] {e}" for e in v["errors"])
+
         shared = self._campaign_shared_files(
             structure_file, kw.get("force_field_files"))
         stage_specs = _assemble_sequential_stages(steps, shared)
@@ -997,8 +1024,10 @@ class MDSimulationAgent(SimulationAgent):
             is_staged=True,
             is_campaign=True,
             campaign_kind="staged",
-            # Validity reflects the stages that actually run (each single-
-            # integrator), superseding the transient monolithic deck's checks.
+            # Report validity of the STAGES that actually run. The monolithic
+            # deck's own validation (from generate_simulation) is computed but
+            # discarded by the pipeline, so it is not a gate — do not treat it
+            # as one.
             validation={
                 "valid": not stage_errors,
                 "errors": stage_errors,
