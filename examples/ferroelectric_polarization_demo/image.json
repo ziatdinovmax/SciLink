@@ -1,0 +1,11 @@
+{
+    "material_type": "Ferroelectric perovskite oxide (ABO3)",
+    "microscopy_type": "HAADF-STEM",
+    "experimental_details": {
+        "spatial_info": {
+            "field_of_view_x": 16.0,
+            "field_of_view_y": 16.0,
+            "field_of_view_units": "nm"
+        }
+    }
+}
