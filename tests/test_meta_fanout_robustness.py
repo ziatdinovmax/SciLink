@@ -143,6 +143,31 @@ def main():
     check("fusion recorded as ledger entry mode=fusion",
           any(e.get("mode") == "fusion" for e in ag._delegation_ledger))
 
+    # 3b) Fusion persistence + dir-collision guard (found live on a
+    #     restore_checkpoint=True second fan-out): the fusion ledger entry
+    #     must reach the checkpoint, and a session whose restored ledger
+    #     lacks fusion entries must NOT re-allocate (and overwrite) an
+    #     existing fusion output dir.
+    print("3b) fusion checkpoint + dir-collision guard:")
+    with open(ag.checkpoint_path) as fh:
+        ckpt = json.load(fh)
+    check("fusion entry persisted to checkpoint",
+          any(e.get("mode") == "fusion"
+              for e in ckpt.get("delegation_ledger", [])))
+    rpt1 = f3["report_path"]
+    with open(rpt1, "rb") as fh:
+        rpt1_bytes = fh.read()
+    # Simulate the pre-fix stale restore: a ledger missing the fusion entry.
+    ag._delegation_ledger = [e for e in ag._delegation_ledger
+                             if e.get("mode") != "fusion"]
+    f3b = json.loads(ag._fuse_delegations(good_idxs))
+    check("second fuse (stale ledger) still succeeds",
+          f3b["status"] == "success")
+    check("second fuse allocated a NEW dir (no collision)",
+          os.path.dirname(f3b["report_path"]) != os.path.dirname(rpt1))
+    with open(rpt1, "rb") as fh:
+        check("first fusion report not overwritten", fh.read() == rpt1_bytes)
+
     # 4) Concurrency + ledger integrity at N=4 (slow children must overlap).
     ag, A, B, C = _agent()
     Dp = os.path.join(os.path.dirname(A), "D.npy"); np.save(Dp, np.full((8, 8), 3.0))

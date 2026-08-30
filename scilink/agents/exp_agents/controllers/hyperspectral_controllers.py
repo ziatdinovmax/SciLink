@@ -15,7 +15,8 @@ import traceback
 from ....skills.hyperspectral.eels import eels as tools
 from ....skills._shared.image_processor import load_image
 from ..preprocess import HyperspectralPreprocessingAgent
-from ..metadata_converter import resolve_axis_spec, describe_axes_for_prompt
+from ..metadata_converter import (resolve_axis_spec, describe_axes_for_prompt,
+                                  signal_axis_values)
 from ..instruct import (
     COMPONENT_INITIAL_ESTIMATION_INSTRUCTIONS,
     COMPONENT_SELECTION_WITH_ELBOW_INSTRUCTIONS,
@@ -2782,7 +2783,10 @@ class RunDynamicAnalysisController:
         axis_units = axis_2.get("units", "arbitrary units")
 
         if "energy_axis" not in state:
-            if "start" in axis_2 and "end" in axis_2:
+            _samples = signal_axis_values(axis_2, e, logger=self.logger)
+            if _samples is not None:
+                state["energy_axis"] = _samples
+            elif "start" in axis_2 and "end" in axis_2:
                 state["energy_axis"] = np.linspace(axis_2["start"], axis_2["end"], e)
             else:
                 state["energy_axis"] = np.arange(e)

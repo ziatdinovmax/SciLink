@@ -176,6 +176,16 @@ def create_axis(
     name = axis_info.get("name", "axis")
     units = axis_info.get("units", "a.u.")
 
+    # Exact per-channel samples (instrument-preserved, generally nonuniform)
+    # beat a linspace reconstruction, which can be several nm/eV off
+    # mid-spectrum. Falls through on absence or a length mismatch.
+    from ....agents.exp_agents.metadata_converter import signal_axis_values
+    _samples = signal_axis_values(axis_info, n_channels,
+                                  logger=logging.getLogger(__name__))
+    if _samples is not None:
+        label_name = name[:1].upper() + name[1:] if name else "Axis"
+        return _samples, f"{label_name} ({units})", True
+
     if "start" not in axis_info or "end" not in axis_info:
         # Preserve the legacy error message for the common energy case so that
         # existing call sites and user-facing messaging are unchanged.
