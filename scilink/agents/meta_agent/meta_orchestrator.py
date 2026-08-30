@@ -376,6 +376,12 @@ class MetaOrchestratorAgent:
     # Configuration constants (match the child orchestrators).
     MAX_TOOL_ITERATIONS = 20
     MAX_HISTORY_MESSAGES = 100
+    # The in-loop trim fires only past cap + hysteresis, so a
+    # session isn't re-trimmed on every turn once it reaches the
+    # cap. cap+20 == the 120 literal this replaces, so default
+    # behavior is unchanged — but a configured cap now actually
+    # moves the trigger.
+    TRIM_HYSTERESIS = 20
     CHECKPOINT_INTERVAL = 10
 
     def __init__(
@@ -1637,7 +1643,10 @@ class MetaOrchestratorAgent:
 
         print(f"  ⚠️  Trimming history: {len(history)} → {max_messages} messages")
 
-        context_window = 10
+        # A cap at or below the head window would make recent_window 0 and
+        # history[-0:] the WHOLE list (the trim would grow the history);
+        # shrink the head so a small configured cap still trims.
+        context_window = min(10, max(1, max_messages // 2))
         recent_window = max_messages - context_window
 
         trimmed = history[:context_window] + history[-recent_window:]
@@ -1758,7 +1767,7 @@ class MetaOrchestratorAgent:
         self.messages = close_interrupted_turn(self.messages)
         self.messages.append({"role": "user", "content": user_input})
 
-        if len(self.messages) > 120:
+        if len(self.messages) > (self.MAX_HISTORY_MESSAGES + self.TRIM_HYSTERESIS):
             print("  ⚠️  Context window getting full - trimming history...")
             system_msg = self.messages[0]
             recent_msgs = self._trim_history(self.messages[1:], max_messages=self.MAX_HISTORY_MESSAGES)
@@ -1919,7 +1928,7 @@ class MetaOrchestratorAgent:
         self.messages = close_interrupted_turn(self.messages)
         self.messages.append({"role": "user", "content": user_input})
 
-        if len(self.messages) > 120:
+        if len(self.messages) > (self.MAX_HISTORY_MESSAGES + self.TRIM_HYSTERESIS):
             print("  ⚠️  Context window getting full - trimming history...")
             system_msg = self.messages[0]
             recent_msgs = self._trim_history(self.messages[1:], max_messages=self.MAX_HISTORY_MESSAGES)
