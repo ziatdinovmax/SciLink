@@ -2,7 +2,12 @@
 
 **Issue:** https://github.com/ziatdinovmax/SciLink/issues/462
 **Branch (when work starts):** `feature-session-event-log` off `main`
-**Status:** PLANNED — no code written yet.
+**Status:** IMPLEMENTED on `feature-session-event-log` (2026-08-30) —
+phases 0–3 with offline suites + Bedrock live tests per phase; Phase 4
+stays measure-first. Two implementation-time notes: the trim TRIGGER in
+the chat loops is a hardcoded `len(messages) > 120` (independent of
+`MAX_HISTORY_MESSAGES`), and file paths in event lines are tail-clipped
+so filenames stay searchable.
 
 Inspired by the PRO-LONG result (arXiv:2607.20064): one append-only
 structured log of every action/outcome, queried *programmatically*
