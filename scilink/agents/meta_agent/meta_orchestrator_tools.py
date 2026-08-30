@@ -598,9 +598,13 @@ class MetaOrchestratorTools:
 
         # -- delegate_to_analyses (parallel fan-out, full-mesh aux) ----------
         def delegate_to_analyses(branches: list,
-                                 figure_style: str = None) -> str:
-            print(f"  🔀 Parallel analysis over {len(branches or [])} dataset(s)...")
-            return self.orch._run_fanout(branches, figure_style=figure_style)
+                                 figure_style: str = None,
+                                 harmonize: bool = False) -> str:
+            print(f"  🔀 Parallel analysis over {len(branches or [])} dataset(s)"
+                  + (" (harmonized pipeline replay)" if harmonize else "")
+                  + "...")
+            return self.orch._run_fanout(branches, figure_style=figure_style,
+                                         harmonize=harmonize)
 
         self._register_tool(
             func=delegate_to_analyses,
@@ -690,6 +694,32 @@ class MetaOrchestratorTools:
                         "data', 'use colorblind-safe colors'). Set it when "
                         "the user expresses any preference about how plots "
                         "should look; leave unset otherwise."
+                    ),
+                },
+                "harmonize": {
+                    "type": "boolean",
+                    "description": (
+                        "Opt-in (default false): harmonized pipeline replay "
+                        "for SAME-TECHNIQUE sibling datasets (e.g. one "
+                        "hyperspectral cube per experimental condition). The "
+                        "FIRST branch runs as the pipeline DONOR; every other "
+                        "branch then REPLAYS the donor's approved analysis "
+                        "script verbatim, so extracted magnitudes are "
+                        "measured by ONE frozen pipeline and are directly "
+                        "comparable across datasets (fusion is told). Use it "
+                        "when the goal is a cross-condition comparison of "
+                        "the same observable — and put the most "
+                        "representative dataset FIRST as the donor. In this "
+                        "mode the complementarity gate only checks that the "
+                        "datasets measure the SAME system (unrelated ones "
+                        "are pruned); its redundancy criterion is waived — "
+                        "a same-technique series is the intended input, so "
+                        "do NOT avoid this tool because the cubes 'look "
+                        "redundant'. Leave "
+                        "false for cross-modality sets (different techniques "
+                        "cannot share a script). Falls back loudly to "
+                        "independent branches if the donor yields no "
+                        "approved script."
                     ),
                 },
             },
