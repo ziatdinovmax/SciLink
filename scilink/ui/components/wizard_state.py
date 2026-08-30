@@ -75,7 +75,8 @@ def _load() -> Dict[str, Dict[str, Any]]:
 def _save(data: Dict[str, Dict[str, Any]]) -> None:
     try:
         _STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _STATE_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        from ...utils.text_io import atomic_write_text
+        atomic_write_text(_STATE_PATH, json.dumps(data, indent=2))
     except Exception as exc:
         logging.warning("Could not write %s: %s", _STATE_PATH, exc)
 

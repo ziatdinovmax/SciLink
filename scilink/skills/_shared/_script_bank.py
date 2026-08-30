@@ -43,6 +43,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
+from ...utils.text_io import atomic_write_text
 from ..loader import scilink_home, memory_enabled, _TRUTHY, _FALSY
 from ._graduation import safe_path_component, warn_if_ephemeral_store
 
@@ -127,7 +128,7 @@ def add_record(domain: str, record: Dict[str, Any], *, root: Optional[Path] = No
             ):
                 rec["outcome"]["best_metric"] = metric
         rec["updated_at"] = now
-        path.write_text(json.dumps(rec, indent=2, default=str), encoding="utf-8")
+        atomic_write_text(path, json.dumps(rec, indent=2, default=str))
         return {"id": rec["id"], "action": "updated"}
 
     warn_if_ephemeral_store()
@@ -143,7 +144,7 @@ def add_record(domain: str, record: Dict[str, Any], *, root: Optional[Path] = No
         "stats": {"n_successes": 1, "n_retrievals": 0},
         **record,
     }
-    (d / f"{rid}.json").write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    atomic_write_text(d / f"{rid}.json", json.dumps(payload, indent=2, default=str))
     return {"id": rid, "action": "created"}
 
 
@@ -636,7 +637,7 @@ def mark_retrieved(domain: str, rid: str, *, root: Optional[Path] = None) -> Non
         rec = json.loads(f.read_text())
         stats = rec.setdefault("stats", {})
         stats["n_retrievals"] = int(stats.get("n_retrievals", 0)) + 1
-        f.write_text(json.dumps(rec, indent=2, default=str), encoding="utf-8")
+        atomic_write_text(f, json.dumps(rec, indent=2, default=str))
     except Exception:
         pass
 
@@ -662,7 +663,7 @@ def record_success(domain: str, rid: str, session: Optional[str] = None,
                 sessions.append(session)
                 del sessions[:-_MAX_SESSIONS]
         rec["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        f.write_text(json.dumps(rec, indent=2, default=str), encoding="utf-8")
+        atomic_write_text(f, json.dumps(rec, indent=2, default=str))
     except Exception:
         pass
 
@@ -830,8 +831,8 @@ def promote_to_staging(domain: str, rid: str, technique: Optional[str] = None,
     rec["promoted_to_staging"] = sid
     rec["promoted_reason"] = provenance
     rec["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    (_domain_dir(domain, root=root) / f"{rid}.json").write_text(
-        json.dumps(rec, indent=2, default=str), encoding="utf-8")
+    atomic_write_text(_domain_dir(domain, root=root) / f"{rid}.json",
+                      json.dumps(rec, indent=2, default=str))
     return {"status": "success", "staged_id": sid, "technique": label,
             "domain": domain, "bank_id": rid}
 

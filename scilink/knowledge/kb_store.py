@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..skills.loader import scilink_home
+from ..utils.text_io import atomic_write_text
 
 _logger = logging.getLogger(__name__)
 
@@ -221,7 +222,7 @@ def _write_manifest(kb_dir: Path, **fields) -> Dict[str, Any]:
     manifest = read_manifest(kb_dir) or {}
     manifest.update(fields)
     manifest["updated_at"] = datetime.now().isoformat(timespec="seconds")
-    (kb_dir / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    atomic_write_text(kb_dir / MANIFEST_NAME, json.dumps(manifest, indent=2))
     return manifest
 
 

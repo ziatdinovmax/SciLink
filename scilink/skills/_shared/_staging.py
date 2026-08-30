@@ -22,6 +22,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from ...utils.text_io import atomic_write_text
 from ..loader import scilink_home, load_skill, list_skills, graduated_skills_dir
 from ._graduation import graduate_to_skill_file, safe_path_component, warn_if_ephemeral_store
 
@@ -99,7 +100,7 @@ def stage_solution(
     d.mkdir(parents=True, exist_ok=True)
     sid = uuid.uuid4().hex[:8]
     payload = {"id": sid, "domain": domain, "technique": technique, **record}
-    (d / f"{sid}.json").write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    atomic_write_text(d / f"{sid}.json", json.dumps(payload, indent=2, default=str))
     return sid
 
 
@@ -161,8 +162,8 @@ def relabel_staged(domain: str, sid: str, technique: str, *,
     if not label:
         return {"status": "error", "message": "Empty technique label."}
     rec["technique"] = label
-    (_domain_dir(domain, root=root) / f"{sid}.json").write_text(
-        json.dumps(rec, indent=2, default=str), encoding="utf-8")
+    atomic_write_text(_domain_dir(domain, root=root) / f"{sid}.json",
+                      json.dumps(rec, indent=2, default=str))
     return {"status": "success", "technique": label, "id": sid}
 
 
@@ -541,9 +542,9 @@ def apply_skill_upgrade(
     # Back up the current version (single last-version undo; .bak is ignored by
     # the loader, which only discovers <name>.md).
     backup = target_md.with_name(target_md.name + ".bak")
-    backup.write_text(target_md.read_text(), encoding="utf-8")
+    atomic_write_text(backup, target_md.read_text())
     (target_md.parent / "__init__.py").touch()
-    target_md.write_text(proposed_content, encoding="utf-8")
+    atomic_write_text(target_md, proposed_content)
     removed = remove_staged(domain, staged_ids, root=root)
     return {
         "status": "success",
