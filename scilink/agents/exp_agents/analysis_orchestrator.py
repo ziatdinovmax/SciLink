@@ -1341,7 +1341,7 @@ class AnalysisOrchestratorAgent:
         
         summary_marker = {
             "role": "system",
-            "content": f"[{len(history) - max_messages} messages omitted for context management]"
+            "content": f"[{len(history) - max_messages} messages omitted for context management. Their details are recoverable: use search_session_history instead of redoing work or asking the user to repeat information]"
         }
         trimmed.insert(context_window, summary_marker)
         
@@ -1353,8 +1353,10 @@ class AnalysisOrchestratorAgent:
         # durable feedback log (nested child chats rebind to their own;
         # run_task restores the caller's binding on exit).
         from ...hitl import set_thread_feedback_log as _set_fblog
+        from ...session_events import set_thread_event_log as _set_evlog
         from pathlib import Path as _P
         _set_fblog(str(_P(self.base_dir) / "feedback_log.jsonl"))
+        _set_evlog(str(_P(self.base_dir) / "events.jsonl"))
         self.message_count += 1
         self._last_chat_hit_iter_cap = False
 
@@ -1443,7 +1445,9 @@ class AnalysisOrchestratorAgent:
         original_mode = self.analysis_mode
         original_max_iter = self.max_iterations
         from ...hitl import get_thread_feedback_log, set_thread_feedback_log
+        from ...session_events import get_thread_event_log, set_thread_event_log
         _prev_fblog = get_thread_feedback_log()
+        _prev_evlog = get_thread_event_log()
         try:
             self.set_analysis_mode(run_mode)
             if max_iterations is not None:
@@ -1473,6 +1477,7 @@ class AnalysisOrchestratorAgent:
             # chat() bound the feedback log to THIS session; restore the
             # caller's binding (a delegating meta keeps logging to its own).
             set_thread_feedback_log(_prev_fblog)
+            set_thread_event_log(_prev_evlog)
             # A delegation-driven child may never reach the chat loop's
             # auto-checkpoint cadence, and an interrupted delegation must
             # leave current state behind for the restart/resume path

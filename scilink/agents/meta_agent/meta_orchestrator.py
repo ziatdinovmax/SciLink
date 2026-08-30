@@ -1644,7 +1644,7 @@ class MetaOrchestratorAgent:
 
         summary_marker = {
             "role": "system",
-            "content": f"[{len(history) - max_messages} messages omitted for context management]",
+            "content": f"[{len(history) - max_messages} messages omitted for context management. Their details are recoverable: use search_session_history instead of redoing work or asking the user to repeat information]",
         }
         trimmed.insert(context_window, summary_marker)
 
@@ -1696,8 +1696,10 @@ class MetaOrchestratorAgent:
         # durable feedback log (nested child chats rebind to their own;
         # run_task restores the caller's binding on exit).
         from ...hitl import set_thread_feedback_log as _set_fblog
+        from ...session_events import set_thread_event_log as _set_evlog
         from pathlib import Path as _P
         _set_fblog(str(_P(self.base_dir) / "feedback_log.jsonl"))
+        _set_evlog(str(_P(self.base_dir) / "events.jsonl"))
         self.message_count += 1
         self._last_chat_hit_iter_cap = False
 
