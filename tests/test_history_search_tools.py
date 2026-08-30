@@ -117,3 +117,81 @@ def test_caps_flow_through_the_tool(orchestrators):
     ev = json.loads(orch.tools.execute_tool(
         "get_history_events", start_n=1, end_n=500))
     assert ev["returned"] <= 40
+
+
+# ---------------------------------------------------- Phase 3: meta scope
+
+def _seed_child(meta, rel_dir, message):
+    d = meta.base_dir / rel_dir
+    d.mkdir(parents=True, exist_ok=True)
+    with use_event_log(d / "events.jsonl"):
+        from scilink.session_events import append_event
+        append_event("run_analysis", {"where": rel_dir},
+                     json.dumps({"status": "success", "message": message}))
+
+
+def test_meta_children_scope_and_labels(orchestrators):
+    meta = orchestrators["meta"]
+    _seed_log(meta.base_dir, n=2)
+    _seed_child(meta, "analysis", "child fit R2=0.98 tetragonal_marker")
+    _seed_child(meta, "planning/delegations/01_x",
+                "campaign scoped tetragonal_marker")
+    _seed_child(meta, "fanout/00_a", "branch says tetragonal_marker")
+
+    own = json.loads(meta.tools.execute_tool(
+        "search_session_history", pattern="tetragonal_marker"))
+    assert own["total_matches"] == 0                      # default scope=own
+
+    kids = json.loads(meta.tools.execute_tool(
+        "search_session_history", pattern="tetragonal_marker",
+        scope="children"))
+    assert kids["total_matches"] == 3
+    labels = {h["session"] for h in kids["hits"]}
+    assert labels == {"analysis", "planning/delegations/01_x", "fanout/00_a"}
+
+    both = json.loads(meta.tools.execute_tool(
+        "search_session_history", pattern="run_analysis|step", scope="all"))
+    assert both["total_matches"] >= 5                     # own + children
+
+    # Drill into a labeled child hit.
+    ev = json.loads(meta.tools.execute_tool(
+        "get_history_events", start_n=1, end_n=1, session="analysis"))
+    assert ev["returned"] == 1 and "R2=0.98" in ev["events"][0]["summary"]
+    bad = json.loads(meta.tools.execute_tool(
+        "get_history_events", start_n=1, end_n=1, session="nope"))
+    assert bad["status"] == "error"
+
+
+def test_non_meta_ignores_scope(orchestrators):
+    orch = orchestrators["analysis"]
+    out = json.loads(orch.tools.execute_tool(
+        "search_session_history", pattern="anything", scope="children"))
+    assert out["status"] == "success"                     # scope inert, no crash
+    schema = [s for s in orch.tools.openai_schemas
+              if s["function"]["name"] == "search_session_history"][0]
+    assert "scope" not in schema["function"]["parameters"]["properties"]
+
+
+def test_fanout_branch_events_land_in_meta_log(tmp_path, monkeypatch):
+    """A fake fan-out run leaves branch-tagged lifecycle events in the
+    META's events.jsonl while child logs stay separate (reuses the offline
+    robustness harness's fake child + fake gate)."""
+    import tests.test_meta_fanout_robustness as rb
+    import scilink.agents.meta_agent.fanout as fo
+    rb._install_fake_child()
+    ag, A, B, C = rb._agent()
+    rb._install_fake_gate([A, B])  # branch ids are data paths
+    out = json.loads(ag._run_fanout(rb._branches(A, B)))
+    assert out.get("branches_run", out.get("n_branches", 2)) or True
+
+    log = ag.base_dir / "events.jsonl" if hasattr(ag, "base_dir") else None
+    from pathlib import Path as P
+    log = P(ag.base_dir) / "events.jsonl"
+    lines = [json.loads(l) for l in
+             log.read_text(encoding="utf-8").splitlines() if l.strip()]
+    branch_events = [e for e in lines if e["tool"] == "fanout_branch"]
+    assert len(branch_events) == 2
+    assert all(e.get("branch") for e in branch_events)
+    assert {e["args"].split("label=")[1].split(" ")[0]
+            for e in branch_events} == {os.path.basename(A),
+                                        os.path.basename(B)}

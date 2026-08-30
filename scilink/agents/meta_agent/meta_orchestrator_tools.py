@@ -254,11 +254,51 @@ class MetaOrchestratorTools:
         self._register_all_tools()
         # Bounded access to this session's own action history (#462) —
         # registered after the mode's own tools so schemas append cleanly.
+        # The meta also reaches through to its child sessions' logs
+        # (persistent children, per-delegation dirs, fan-out branches), so
+        # a long investigation can recover specialist-level actions, not
+        # just the delegation ledger's summaries.
         from ...session_events import register_history_tools
+
+        def _child_logs():
+            base = Path(self.orch.base_dir)
+            logs = []
+            for sub in ("analysis", "planning", "simulation", "fanout"):
+                root = base / sub
+                if root.is_dir():
+                    for p in sorted(root.rglob("events.jsonl")):
+                        logs.append((str(p.parent.relative_to(base)), p))
+            return logs
+
         register_history_tools(
             self._register_tool,
             lambda: Path(self.orch.base_dir) / "events.jsonl",
+            child_logs_fn=_child_logs,
         )
+        # Name the scope surface in the schema (the shared registrar keeps
+        # the parameter undeclared for single-session orchestrators).
+        for schema in self.openai_schemas:
+            fn = schema.get("function", {})
+            if fn.get("name") == "search_session_history":
+                fn["parameters"]["properties"]["scope"] = {
+                    "type": "string",
+                    "enum": ["own", "children", "all"],
+                    "description": (
+                        "own (default): this meta session's log. children: "
+                        "the specialist child sessions' logs (delegations "
+                        "and fan-out branches), hits labeled with their "
+                        "session. all: both."
+                    ),
+                }
+            if fn.get("name") == "get_history_events":
+                fn["parameters"]["properties"]["session"] = {
+                    "type": "string",
+                    "description": (
+                        "Optional `session` label from a children/all "
+                        "search hit, to drill into that child's log "
+                        "(default: this session's own log)."
+                    ),
+                }
 
     def _register_tool(
         self,

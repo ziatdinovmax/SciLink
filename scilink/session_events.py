@@ -285,12 +285,52 @@ def read_events(path, start_n: int, end_n: int) -> Dict[str, Any]:
             "events": events}
 
 
+def search_events_multi(logs, pattern: str, max_hits: int = 10,
+                        exclude_tools: frozenset = frozenset()) -> Dict[str, Any]:
+    """Union grep over several labeled logs (the meta's reach-through).
+
+    ``logs`` is a list of ``(label, path)``; each hit from a labeled log
+    gains a ``session: label`` field (the own log passes ``""`` and stays
+    unlabeled). The caps are global across the union; when matches exceed
+    them the most recent (by timestamp, then index) are returned.
+    """
+    max_hits = max(1, min(int(max_hits), SEARCH_MAX_HITS))
+    try:
+        rx = re.compile(pattern, re.IGNORECASE)
+    except re.error:
+        rx = re.compile(re.escape(pattern), re.IGNORECASE)
+
+    matches: List[Dict[str, Any]] = []
+    for label, path in logs:
+        for rec in _iter_events(path):
+            if rec.get("tool") in exclude_tools:
+                continue
+            if rx.search(json.dumps(rec, ensure_ascii=False, default=str)):
+                if label:
+                    rec = {**rec, "session": str(label)}
+                matches.append(rec)
+    matches.sort(key=lambda r: (str(r.get("ts", "")),
+                                r.get("n") if isinstance(r.get("n"), int)
+                                else 0))
+    hits, used = [], 0
+    for rec in reversed(matches):
+        line = json.dumps(rec, ensure_ascii=False, default=str)
+        if len(hits) >= max_hits or used + len(line) > SEARCH_MAX_CHARS:
+            break
+        hits.append(rec)
+        used += len(line)
+    hits.reverse()
+    return {"total_matches": len(matches), "returned": len(hits),
+            "hits": hits}
+
+
 # ------------------------------------------------------- tool registration
 
 HISTORY_TOOL_NAMES = ("search_session_history", "get_history_events")
 
 
-def register_history_tools(register_tool, events_path_fn) -> None:
+def register_history_tools(register_tool, events_path_fn,
+                           child_logs_fn=None) -> None:
     """Register the two bounded history-access tools on an orchestrator.
 
     ``register_tool`` is the tools class's ``_register_tool`` bound method
@@ -298,12 +338,29 @@ def register_history_tools(register_tool, events_path_fn) -> None:
     the session's ``events.jsonl`` path at call time (base_dir can change
     on restore). Shared engine, thin per-mode registration — the
     ``utils/file_edit.py`` pattern.
-    """
 
-    def search_session_history(pattern: str, max_hits: int = 10) -> str:
-        print(f"  ⚡ Tool: Searching session history for '{pattern}'...")
-        out = search_events(events_path_fn(), pattern, max_hits,
-                            exclude_tools=frozenset(HISTORY_TOOL_NAMES))
+    ``child_logs_fn`` (meta only) returns ``[(label, path), ...]`` for the
+    child sessions' logs; when given, the search tool gains a ``scope``
+    parameter (own | children | all) and the drill-down gains ``session``
+    so a labeled hit can be followed into its child log.
+    """
+    _exclude = frozenset(HISTORY_TOOL_NAMES)
+
+    def _resolve_logs(scope: str):
+        own = [("", events_path_fn())]
+        if child_logs_fn is None or scope == "own":
+            return own
+        children = list(child_logs_fn())
+        if scope == "children":
+            return children
+        return own + children
+
+    def search_session_history(pattern: str, max_hits: int = 10,
+                               scope: str = "own") -> str:
+        print(f"  ⚡ Tool: Searching session history for '{pattern}'"
+              + (f" (scope={scope})" if scope != "own" else "") + "...")
+        out = search_events_multi(_resolve_logs(scope), pattern, max_hits,
+                                  exclude_tools=_exclude)
         if out["total_matches"] == 0:
             return json.dumps({
                 "status": "success", "total_matches": 0,
@@ -312,9 +369,21 @@ def register_history_tools(register_tool, events_path_fn) -> None:
         return json.dumps({"status": "success", **out}, ensure_ascii=False,
                           default=str)
 
-    def get_history_events(start_n: int, end_n: int) -> str:
-        print(f"  ⚡ Tool: Reading history events {start_n}-{end_n}...")
-        out = read_events(events_path_fn(), start_n, end_n)
+    def get_history_events(start_n: int, end_n: int,
+                           session: str = "") -> str:
+        print(f"  ⚡ Tool: Reading history events {start_n}-{end_n}"
+              + (f" of '{session}'" if session else "") + "...")
+        path = events_path_fn()
+        if session and child_logs_fn is not None:
+            match = [p for lbl, p in child_logs_fn() if lbl == session]
+            if not match:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"Unknown session label '{session}'. Use the "
+                               "`session` value from a search hit.",
+                })
+            path = match[0]
+        out = read_events(path, start_n, end_n)
         if out["returned"] == 0:
             return json.dumps({
                 "status": "success", "returned": 0,
