@@ -2045,6 +2045,14 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
     # synthesis call runs.
     with orch._fanout_lock:
         fusion_n = sum(1 for e in ledger if e.get("mode") == "fusion") + 1
+        # Collision guard: the ledger count alone is not a safe allocator —
+        # a restored session whose checkpoint predates a fusion entry (or any
+        # counter drift) would re-allocate an existing dir and silently
+        # OVERWRITE the earlier fusion_report.html/json (found live on a
+        # restore_checkpoint=True second fan-out). Advance past whatever
+        # already exists on disk.
+        while (orch.fusion_dir / f"{fusion_n:02d}").exists():
+            fusion_n += 1
     out_dir = orch.fusion_dir / f"{fusion_n:02d}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2270,6 +2278,15 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
             "warnings": ([ungated_warning] if ungated_warning else []),
             "error": None,
         })
+    # Persist the fusion entry the way _close_delegation persists analysis
+    # entries: without this, a resumed session restores a ledger with no
+    # mode="fusion" entries — losing fusion history and resetting the
+    # fusion-dir counter (the overwrite the collision guard above defends
+    # against).
+    try:
+        orch._auto_checkpoint()
+    except Exception as e:  # noqa: BLE001 - checkpointing must not fail the fusion
+        logger.warning(f"could not checkpoint after fusion: {e}")
 
     return json.dumps({
         "status": "success",
