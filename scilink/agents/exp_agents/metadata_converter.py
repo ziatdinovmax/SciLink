@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import os
 
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
@@ -267,17 +268,23 @@ def _describes_spectral_imaging(metadata: dict) -> bool:
 
 
 def _has_resolvable_energy_axis(metadata: dict) -> bool:
-    """True when an energy/signal axis with both endpoints can be resolved —
-    either legacy ``energy_range`` or ``axis_spec.axis_2`` carries start+end."""
+    """True when an energy/signal axis can be resolved — legacy
+    ``energy_range`` or ``axis_spec.axis_2`` with start+end, or an explicit
+    per-channel sample vector (``axis_spec.axis_2.samples`` or a recognized
+    top-level vector such as ``wavelengths_nm``)."""
     er = metadata.get("energy_range")
     if isinstance(er, dict) and er.get("start") is not None and er.get("end") is not None:
         return True
     ax = metadata.get("axis_spec")
     if isinstance(ax, dict):
         a2 = ax.get("axis_2")
-        if isinstance(a2, dict) and a2.get("start") is not None and a2.get("end") is not None:
-            return True
-    return False
+        if isinstance(a2, dict):
+            if a2.get("start") is not None and a2.get("end") is not None:
+                return True
+            if _coerce_samples(a2.get("samples")) is not None:
+                return True
+    return any(_coerce_samples(metadata.get(k)) is not None
+               for k in _SIGNAL_SAMPLE_KEYS)
 
 
 def check_schema_conformance(metadata: dict) -> tuple[bool, list[str]]:
@@ -459,6 +466,50 @@ _AXIS_SPATIAL_DEFAULTS = [
 _AXIS_SIGNAL_DEFAULT = {"name": "energy", "units": "eV", "kind": "signal"}
 
 
+# Recognized top-level metadata keys carrying the exact per-channel sample
+# positions of the signal axis (instrument-preserved, generally NON-uniform —
+# e.g. a spectrometer's true wavelength table). When present they beat a
+# linspace(start, end, n) reconstruction, which can be several nm off
+# mid-spectrum for a nonuniformly sampled axis.
+_SIGNAL_SAMPLE_KEYS = ("wavelengths_nm", "wavelengths", "energies")
+
+
+def _coerce_samples(value) -> list | None:
+    """Interpret *value* as an explicit per-channel axis vector.
+
+    Returns a list of floats (len >= 2, all finite) or None when the value is
+    not a usable numeric sequence."""
+    if value is None or isinstance(value, (str, bytes, dict)):
+        return None
+    try:
+        seq = [float(v) for v in value]
+    except (TypeError, ValueError):
+        return None
+    if len(seq) < 2 or not all(math.isfinite(v) for v in seq):
+        return None
+    return seq
+
+
+def signal_axis_values(axis_info: dict | None, n_channels: int, logger=None):
+    """Exact per-channel axis vector from ``axis_info['samples']``, or None.
+
+    Returns a float ndarray when the resolved axis carries explicit samples
+    matching *n_channels*; None otherwise (callers keep their existing
+    linspace(start, end) / channel-index fallbacks). A length mismatch is
+    warned about and ignored — never fatal."""
+    import numpy as _np
+    samples = _coerce_samples((axis_info or {}).get("samples"))
+    if samples is None:
+        return None
+    if len(samples) != int(n_channels):
+        if logger is not None:
+            logger.warning(
+                f"axis samples length {len(samples)} != data channels "
+                f"{n_channels}; falling back to start/end axis construction")
+        return None
+    return _np.asarray(samples, dtype=float)
+
+
 def resolve_axis_spec(system_info: dict | None) -> dict:
     """Return a fully-populated axis_spec for a 3D hyperspectral dataset.
 
@@ -472,6 +523,10 @@ def resolve_axis_spec(system_info: dict | None) -> dict:
     ``signal_is_nonnegative`` (bool). The signal-like axis additionally
     carries ``start`` and ``end`` when known; downstream callers raise if
     they need those values and they are absent — same behavior as today.
+    ``axis_2`` also carries ``samples`` (the exact per-channel positions)
+    when the metadata provides them — via ``axis_spec.axis_2.samples`` or a
+    recognized top-level vector (``wavelengths_nm``, ...); ``start``/``end``
+    default to the first/last sample so range-only consumers keep working.
     """
     system_info = system_info or {}
     provided = system_info.get("axis_spec") or {}
@@ -502,8 +557,22 @@ def resolve_axis_spec(system_info: dict | None) -> dict:
         "units": user_axis_2.get("units", energy_range.get("units") or _AXIS_SIGNAL_DEFAULT["units"]),
         "kind": user_axis_2.get("kind", _AXIS_SIGNAL_DEFAULT["kind"]),
     }
+    # Exact per-channel samples: axis_spec.axis_2.samples wins; else adopt a
+    # recognized top-level vector (the instrument's preserved axis table).
+    samples = _coerce_samples(user_axis_2.get("samples"))
+    if samples is None:
+        for _k in _SIGNAL_SAMPLE_KEYS:
+            samples = _coerce_samples(system_info.get(_k))
+            if samples is not None:
+                break
+    if samples is not None:
+        axis_2["samples"] = samples
     start = user_axis_2.get("start", energy_range.get("start"))
     end = user_axis_2.get("end", energy_range.get("end"))
+    if start is None and samples is not None:
+        start = samples[0]
+    if end is None and samples is not None:
+        end = samples[-1]
     if start is not None:
         axis_2["start"] = start
     if end is not None:

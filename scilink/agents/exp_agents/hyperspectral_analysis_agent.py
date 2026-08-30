@@ -708,7 +708,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             if not bankable:
                 return []
 
-            from .metadata_converter import resolve_axis_spec
+            from .metadata_converter import resolve_axis_spec, signal_axis_values
 
             si = self._handle_system_info(system_info)
             active_skills = [
@@ -721,7 +721,10 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 cube = self._load_hyperspectral_data(data_path)
                 axis_2 = resolve_axis_spec(si)["axis_2"]
                 e = cube.shape[-1]
-                if "start" in axis_2 and "end" in axis_2:
+                axis = signal_axis_values(axis_2, e, logger=self.logger)
+                if axis is not None:
+                    axis_units = axis_2.get("units", "arbitrary units")
+                elif "start" in axis_2 and "end" in axis_2:
                     axis = np.linspace(axis_2["start"], axis_2["end"], e)
                     axis_units = axis_2.get("units", "arbitrary units")
                 else:
