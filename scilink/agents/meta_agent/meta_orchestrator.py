@@ -1569,7 +1569,7 @@ class MetaOrchestratorAgent:
         except Exception as e:
             logging.warning(f"Failed to restore checkpoint: {e}")
 
-    def _auto_checkpoint(self):
+    def _auto_checkpoint(self, verbose: bool = True):
         """Internal auto-checkpoint without LLM interaction.
 
         Atomic (temp file + replace) and serialized: concurrent fan-out
@@ -1590,7 +1590,8 @@ class MetaOrchestratorAgent:
                 with open(tmp_path, 'w', encoding="utf-8") as f:
                     json.dump(checkpoint_data, f, indent=2, default=str)
                 os.replace(tmp_path, self.checkpoint_path)
-            print(f"    ✅ Auto-checkpoint saved")
+            if verbose:
+                print(f"    ✅ Auto-checkpoint saved")
             return True
         except Exception as e:
             logging.warning(f"Auto-checkpoint failed: {e}")
@@ -1723,6 +1724,14 @@ class MetaOrchestratorAgent:
             # The response is returned to the caller (CLI / UI), which is
             # responsible for displaying it — chat() does not print it.
             self._save_history()
+
+            # Checkpoint on turn completion, not only on interval/error: a
+            # programmatic session (one chat() per process) never crosses the
+            # interval check, so without this its non-delegation state (mode,
+            # message count) — and, before _close_delegation checkpointed,
+            # the whole delegation ledger — was lost on restore.
+            self._auto_checkpoint(verbose=False)
+            self.last_checkpoint_message_count = self.message_count
 
             if self.message_count > 80:
                 response_text += (
