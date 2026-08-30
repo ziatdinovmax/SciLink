@@ -138,7 +138,8 @@ def set_memory_enabled(enabled: bool) -> Path:
     cfg = _read_config()
     cfg["memory_enabled"] = bool(enabled)
     p = _config_path()
-    p.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    from ..utils.text_io import atomic_write_text
+    atomic_write_text(p, json.dumps(cfg, indent=2))
     return p
 
 

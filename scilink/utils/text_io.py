@@ -28,9 +28,50 @@ persists or reloads model-generated prose should move here too.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
+
+
+def atomic_write_text(path: Any, text: str) -> Path:
+    """Write ``text`` to ``path`` as UTF-8 via a same-directory temp file
+    published with ``os.replace``.
+
+    A reader can never observe a torn/half-written file: it sees either the
+    old content or the new content, whole. Concurrent writers are
+    last-writer-wins. This is NOT a lock — read-modify-write races between
+    sessions remain (#398 part 2); it only removes the silent-corruption
+    window that a plain ``write_text`` leaves open for every reader of the
+    shared ``~/.scilink`` store.
+
+    The temp file lives in the destination directory so the ``os.replace``
+    is a same-filesystem rename (atomic on POSIX and Windows).
+    """
+    p = Path(path)
+    fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=f".{p.name}.",
+                               suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        # mkstemp creates 0600 and os.replace carries that mode onto the
+        # destination; match what a plain write_text would have produced —
+        # keep an existing file's mode, honor the umask for a new one.
+        try:
+            mode = os.stat(p).st_mode & 0o777
+        except OSError:
+            umask = os.umask(0)
+            os.umask(umask)
+            mode = 0o666 & ~umask
+        os.chmod(tmp, mode)
+        os.replace(tmp, p)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+    return p
 
 
 def write_text_utf8(path: Any, text: str, *, append: bool = False) -> Path:

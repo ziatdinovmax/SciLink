@@ -35,6 +35,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from ...utils.text_io import atomic_write_text
 from ..loader import graduated_skills_dir
 
 
@@ -386,7 +387,7 @@ def graduate_to_skill_file(
     # Loader-style bundles include __init__.py; harmless for path-loaded
     # skills, but keeps the layout consistent with built-ins.
     (skill_dir / "__init__.py").touch()
-    skill_path.write_text(skill_content, encoding="utf-8")
+    atomic_write_text(skill_path, skill_content)
 
     word_count = len(skill_content.split())
     warning = None
