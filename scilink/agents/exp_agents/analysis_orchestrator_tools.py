@@ -3299,7 +3299,10 @@ class AnalysisOrchestratorTools:
                         "catalog). Consumed by the image-analysis agent and "
                         "the curve-fitting agent — for a prior curve-fit run "
                         "the saved fitting script and fit summary are surfaced "
-                        "to its planning and script-generation stages.\n"
+                        "to its planning and script-generation stages. The "
+                        "hyperspectral agent consumes it ONLY together with "
+                        "`reuse_locked_script=true` (locked replay of the "
+                        "prior run's approved per-pixel script).\n"
                         "By default the prior run is REFERENCE MATERIAL: the "
                         "agent decides for itself whether to reuse, adapt, or "
                         "rewrite the prior script given the goal. Pass this for "
@@ -3329,7 +3332,14 @@ class AnalysisOrchestratorTools:
                         "and act on a non-`good` verdict. Do NOT set it for "
                         "verification or deeper-analysis follow-ups, or for a "
                         "different kind of measurement — leave it false so the "
-                        "agent decides how to use the prior run as reference."
+                        "agent decides how to use the prior run as reference. "
+                        "ALSO valid for hyperspectral: with a prior "
+                        "hyperspectral run dir it replays that run's approved "
+                        "dynamic-analysis script(s) VERBATIM on the new cube "
+                        "(harmonized re-run across sibling datasets — same "
+                        "technique, e.g. one cube per experimental condition) "
+                        "so extracted magnitudes are method-comparable; "
+                        "decomposition and fresh planning are skipped."
                     )
                 },
                 "script_edits": {
