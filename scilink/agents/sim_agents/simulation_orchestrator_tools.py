@@ -79,6 +79,13 @@ class SimulationOrchestratorTools:
         self._so = None
 
         self._register_all_tools()
+        # Bounded access to this session's own action history (#462) —
+        # registered after the mode's own tools so schemas append cleanly.
+        from ...session_events import register_history_tools
+        register_history_tools(
+            self._register_tool,
+            lambda: Path(self.orch.base_dir) / "events.jsonl",
+        )
 
     def _get_structure_pipeline(self, workdir: str):
         """Return a session-shared StructurePipeline, lazy-initialized on
@@ -3708,6 +3715,14 @@ class SimulationOrchestratorTools:
     def execute_tool(self, tool_name: str, **kwargs) -> str:
         """Execute a tool by name with given arguments. Always returns a
         JSON string the chat loop can hand back to the LLM."""
+        result = self._dispatch_tool(tool_name, **kwargs)
+        # One bounded line per tool call into the session's events.jsonl
+        # (no-op when the thread has no bound log). See session_events.
+        from ...session_events import append_event
+        append_event(tool_name, kwargs, result)
+        return result
+
+    def _dispatch_tool(self, tool_name: str, **kwargs) -> str:
         if tool_name not in self.functions_map:
             return json.dumps({
                 "status": "error",

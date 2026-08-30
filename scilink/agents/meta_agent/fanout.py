@@ -790,6 +790,13 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
         from ...hitl import set_thread_channel
         set_thread_channel(_BranchChannel(
             queue_channel, branch.get("label") or slug))
+    # Bind this worker thread to the META's event log, branch-tagged: the
+    # child's own chat() rebinds to the child session's log for the
+    # duration of run_task (and restores), so the meta log records the
+    # branch lifecycle while child-level tool calls stay in the child log.
+    from ...session_events import append_event, set_thread_event_log
+    _branch_label = branch.get("branch_id") or branch.get("label") or slug
+    set_thread_event_log(Path(orch.base_dir) / "events.jsonl")
     try:
         try:
             from ..exp_agents.analysis_orchestrator import AnalysisMode
@@ -806,6 +813,13 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
                       "key_findings": [], "files_produced": [],
                       "suggested_followups": [], "warnings": []}
     finally:
+        append_event(
+            "fanout_branch",
+            {"label": branch.get("label") or slug,
+             "data_path": branch.get("data_path"),
+             "session_dir": str(base_dir)},
+            json.dumps(result, default=str), branch=_branch_label)
+        set_thread_event_log(None)
         if queue_channel is not None:
             from ...hitl import set_thread_channel
             set_thread_channel(None)

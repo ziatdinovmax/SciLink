@@ -207,6 +207,13 @@ class OrchestratorTools:
         self.gemini_functions: list = []
 
         self._register_all_tools()
+        # Bounded access to this session's own action history (#462) —
+        # registered after the mode's own tools so schemas append cleanly.
+        from ...session_events import register_history_tools
+        register_history_tools(
+            self._register_tool,
+            lambda: Path(self.orch.base_dir) / "events.jsonl",
+        )
 
     def _get_human_feedback_enabled(self) -> bool:
         """
@@ -8549,6 +8556,14 @@ class OrchestratorTools:
         Returns:
             JSON string with result
         """
+        result = self._dispatch_tool(tool_name, **kwargs)
+        # One bounded line per tool call into the session's events.jsonl
+        # (no-op when the thread has no bound log). See session_events.
+        from ...session_events import append_event
+        append_event(tool_name, kwargs, result)
+        return result
+
+    def _dispatch_tool(self, tool_name: str, **kwargs) -> str:
         if tool_name not in self.functions_map:
             return json.dumps({
                 "status": "error",
