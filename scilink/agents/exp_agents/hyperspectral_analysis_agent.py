@@ -213,6 +213,14 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # accepted when the task succeeds; higher => more retries. None
         # falls back to the construction default.
         max_verification_iterations: int | None = None,
+        # Locked-script replay (harmonized re-run across sibling datasets):
+        # prior_analysis_paths + reuse_locked_script=True replays the prior
+        # run's APPROVED dynamic-analysis script(s) verbatim on THIS cube —
+        # no fresh analysis plan, no codegen, decomposition skipped; the
+        # per-map QC still verifies every output on this dataset. Mirrors
+        # the curve/image locked-reuse surface (#172).
+        prior_analysis_paths: list | None = None,
+        reuse_locked_script: bool = False,
         # Operating profile (#346): plumbed for parity with the curve agent;
         # realtime toggles are wired for curve only in v1 (hyperspectral
         # per-frame cost is numerics-dominated). Thorough is unaffected.
@@ -294,6 +302,50 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             else self.max_verification_iterations)
         if effective_max_verification is not None and effective_max_verification < 0:
             raise ValueError("max_verification_iterations must be >= 0")
+
+        # --- Locked-script replay (harmonized re-run) -----------------------
+        reuse_records = None
+        if reuse_locked_script:
+            if not prior_analysis_paths:
+                return {
+                    "status": "error",
+                    "error": {
+                        "error": "reuse_locked_script requires prior_analysis_paths",
+                        "details": ("Pass prior_analysis_paths=[<prior "
+                                    "hyperspectral run dir>] whose "
+                                    "dynamic_analysis_records.json holds the "
+                                    "approved script(s) to replay."),
+                    },
+                    "output_directory": str(self.output_dir),
+                }
+            reuse_records = self._load_prior_dynamic_records(prior_analysis_paths)
+            if not reuse_records:
+                return {
+                    "status": "error",
+                    "error": {
+                        "error": "No approved prior script to replay",
+                        "details": (
+                            f"None of {list(prior_analysis_paths)!r} carries a "
+                            "dynamic_analysis_records.json with an approved "
+                            "(task_success) script. Run the donor analysis "
+                            "first, then point prior_analysis_paths at its "
+                            "result directory."),
+                    },
+                    "output_directory": str(self.output_dir),
+                }
+            # Verbatim replay is a single-attempt contract: a failure must be
+            # reported (or salvaged), never regenerated into a different
+            # method — that would silently break cross-dataset comparability.
+            effective_max_verification = 0
+            self.logger.info(
+                f"🔒 Locked-script replay: {len(reuse_records)} approved "
+                f"prior script(s) will be executed verbatim (no fresh plan, "
+                f"no codegen; retry budget forced to 0).")
+        elif prior_analysis_paths:
+            self.logger.warning(
+                "prior_analysis_paths without reuse_locked_script is not "
+                "used by the hyperspectral agent yet — ignoring. Pass "
+                "reuse_locked_script=True for a locked replay.")
 
         from ._qc_profile import resolve_profile
         if resolve_profile(profile).name == "realtime":
@@ -400,6 +452,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             auxiliary_state=auxiliary_state,
             literature_context=literature_context,
             max_verification_iterations=effective_max_verification,
+            reuse_records=reuse_records,
         )
         
         # Handle Errors
@@ -443,6 +496,17 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # counterpart of curve/image quality_history.
         if result_json.get("dynamic_analysis_records"):
             response["dynamic_analysis_records"] = result_json["dynamic_analysis_records"]
+        if reuse_records:
+            _new_recs = result_json.get("dynamic_analysis_records") or []
+            _supplied = {r.get("script") for r in reuse_records}
+            response["script_reuse"] = {
+                "prior_analysis_paths": [str(p) for p in prior_analysis_paths],
+                "n_replayed": len(reuse_records),
+                # False when a mechanical execution repair had to modify a
+                # script — the run then is NOT byte-comparable to the donor.
+                "verbatim": bool(_new_recs) and all(
+                    (nr or {}).get("script") in _supplied for nr in _new_recs),
+            }
         if literature_files:
             response["literature_files"] = literature_files
 
@@ -683,6 +747,37 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 f"`scilink memory staged`."
             )
         return staged
+
+    def _load_prior_dynamic_records(self, prior_analysis_paths: list) -> list:
+        """Collect the APPROVED dynamic-analysis records of prior runs.
+
+        Each path may be a result directory, a directory of result
+        directories, or a direct path to ``dynamic_analysis_records.json``.
+        Returns the records with ``task_success`` and a saved ``script`` —
+        the replayable pipeline of the donor run.
+        """
+        records: list = []
+        for p in (prior_analysis_paths or []):
+            base = Path(p)
+            candidates: list = []
+            if base.is_file() and base.name == "dynamic_analysis_records.json":
+                candidates = [base]
+            elif base.is_dir():
+                direct = base / "dynamic_analysis_records.json"
+                candidates = ([direct] if direct.is_file() else
+                              sorted(base.glob("*/dynamic_analysis_records.json"))
+                              + sorted(base.glob("results/*/dynamic_analysis_records.json")))
+            for cand in candidates:
+                try:
+                    recs = json.loads(read_text_utf8(cand))
+                except Exception as e:  # noqa: BLE001 - skip unreadable, keep looking
+                    self.logger.warning(f"Could not read {cand}: {e}")
+                    continue
+                for rec in (recs if isinstance(recs, list) else []):
+                    if (isinstance(rec, dict) and rec.get("script")
+                            and rec.get("task_success")):
+                        records.append(rec)
+        return records
 
     def _maybe_bank_scripts(self, records: list, skill_state: dict,
                             data_path: str, system_info) -> list:
@@ -1155,6 +1250,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         auxiliary_state: Dict[str, Any] | None = None,
         literature_context: str | None = None,
         max_verification_iterations: int | None = None,
+        reuse_records: list | None = None,
     ) -> tuple[Dict[str, Any] | None, Dict[str, Any] | None]:
         """
         Main execution engine using Queue-Based Branching architecture.
@@ -1229,6 +1325,11 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "analysis_objective": objective,
                 "prior_knowledge": prior_knowledge or [],
                 "literature_context": literature_context,
+                # Locked-script replay: SelectRefinementTarget builds the plan
+                # deterministically from these records, and decomposition is
+                # skipped — the replayed per-pixel scripts use the raw cube.
+                **({"reuse_records": reuse_records,
+                    "skip_decomposition": True} if reuse_records else {}),
                 "analysis_images": [],
                 "error_dict": None,
                 # Per-run retry-budget override (#271) — read by

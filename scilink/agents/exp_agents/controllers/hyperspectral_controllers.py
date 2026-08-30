@@ -1949,6 +1949,21 @@ class DecompositionController:
     def execute(self, state: dict) -> dict:
         if state.get("error_dict"):
             return state
+        if state.get("reuse_records"):
+            # Locked-script replay: bypass the whole decomposition composite —
+            # including its skip-decision LLM call, which would otherwise
+            # overwrite the pre-seeded skip_decomposition flag. The replayed
+            # per-pixel scripts consume the raw cube; seed the minimal
+            # contract that downstream prompts read.
+            self.logger.info(
+                "🔒 Locked-script replay → decomposition bypassed entirely.")
+            state["skip_decomposition"] = True
+            if "preprocessing_mask" not in state:
+                state["preprocessing_mask"] = np.ones(
+                    state["hspy_data"].shape[:2], dtype=bool)
+            state.setdefault("data_quality", {
+                "reasoning": "Decomposition bypassed (locked-script replay)."})
+            return state
         self.logger.info("\n\n🧩 --- SPECTRAL DECOMPOSITION --- 🧩\n")
         for stage in self.stages:
             state = stage.execute(state)
@@ -2121,6 +2136,33 @@ class SelectRefinementTargetController:
 
     def execute(self, state: dict) -> dict:
         if state.get("error_dict"): return state
+        # Locked-script replay (harmonized re-run): the plan is DETERMINED by
+        # the prior run's approved records — no planning LLM call. Each record
+        # becomes one custom_code target carrying its script verbatim.
+        if state.get("reuse_records"):
+            targets = [{
+                "type": "custom_code",
+                "description": (str(rec.get("target"))
+                                if rec.get("target")
+                                else "replay of a prior approved analysis script"),
+                "required_outputs": list(rec.get("required_outputs") or []),
+                "supplied_script": rec["script"],
+            } for rec in state["reuse_records"]]
+            state["refinement_decision"] = {
+                "refinement_needed": True,
+                "reasoning": ("Locked-script replay: executing the prior "
+                              "run's approved script(s) verbatim on this "
+                              "dataset (harmonized re-run)."),
+                "targets": targets,
+                "requires_custom_code": True,
+            }
+            _log_structured_block(
+                self.logger,
+                f"🔒 Locked-script replay plan: {len(targets)} prior "
+                f"approved target(s), no planning LLM call",
+                [(f"Target {i}", t["description"]) for i, t in
+                 enumerate(targets, 1)], level=logging.INFO)
+            return state
         # Log header reflects whether this is "select a plan from scratch"
         # (skip-decomposition mode — no prior analysis to refine) vs.
         # "refine the existing decomposition results".
@@ -3003,6 +3045,16 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             )
             ctx.target_index = i
             ctx.required_outputs = required_outputs
+            # Locked-script replay: the target carries a prior run's approved
+            # script — execute it instead of generating (retry budget is 0 in
+            # this mode, so no regeneration can replace the frozen method).
+            if target.get("supplied_script"):
+                ctx.supplied_script = target["supplied_script"]
+                ctx.locked_script = target["supplied_script"]
+                self.logger.info(
+                    "    🔒 Locked-script replay for this target: executing "
+                    "the prior approved script (generation skipped; per-map "
+                    "QC still verifies).")
             ctx.base_prompt = base_prompt
             ctx.base_prompt_builder = _render_base_prompt
             ctx.current_prompt = base_prompt
@@ -3010,7 +3062,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
             # prompt only — retries rebuild from the clean base_prompt, so
             # the escalation ladder (up to "abandon the method family")
             # stays exemplar-free. Failure-isolated.
-            if _bank_cube_fp is not None:
+            if _bank_cube_fp is not None and not target.get("supplied_script"):
                 try:
                     from scilink.skills._shared import _script_bank
                     matches = _script_bank.find_exemplar(
@@ -3438,6 +3490,13 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 "task_success": bool(task_success),
                 "salvaged": (not task_success) and ctx.best_attempt["valid_count"] > 0,
                 "script": ctx.last_code or None,
+                # Locked-replay provenance: replay_verbatim=False means a
+                # mechanical execution repair modified the frozen script, so
+                # this run is NOT byte-comparable to the donor.
+                **({"locked_replay": True,
+                    "replay_verbatim": (ctx.last_code
+                                        == getattr(ctx, "locked_script", None))}
+                   if getattr(ctx, "locked_script", None) else {}),
                 # Adapt provenance survives ONLY when the accepted result
                 # IS the adapted attempt (a ladder refit replaces it and
                 # the provenance rightly drops with it).
@@ -3510,7 +3569,7 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     # same as any generated script.
                     self.logger.info(
                         f"    (Attempt {retries+1}) Executing supplied "
-                        f"script (bank edit-adapt)...")
+                        f"script (bank edit-adapt / locked replay)...")
                     code_str, response = ctx.supplied_script, "(supplied)"
                 else:
                     if _exec_try == 0:

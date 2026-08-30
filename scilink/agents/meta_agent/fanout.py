@@ -475,7 +475,8 @@ def _operand_mesh(verdict: dict) -> bool:
 
 
 def _confirm_fanout(orch, verdict: dict, fanout_set: List[str],
-                    branches_by_id: Dict[str, dict]) -> tuple:
+                    branches_by_id: Dict[str, dict],
+                    harmonize: bool = False) -> tuple:
     """Decide whether to fire the fan-out. Returns (proceed: bool, reason: str).
 
     AUTOPILOT (human attached): show the verdict + the exact plan and ask the
@@ -498,6 +499,17 @@ def _confirm_fanout(orch, verdict: dict, fanout_set: List[str],
         # mutually-complementary subset it vouches for — refusing it would
         # make partition-then-prune impossible without a human (found live
         # on a 4-modality study pruned to a coherent pair).
+        if harmonize:
+            # Harmonized replay is an explicit caller declaration of a
+            # same-technique series comparison; the same-subject prune has
+            # already run, so a "redundant" verdict is the EXPECTED reading
+            # of the set, not a reason to decline. Caps still apply.
+            if n > FANOUT_SOFT_CAP:
+                return False, (f"Autonomous mode declines a {n}-way "
+                               f"harmonized run (> soft cap "
+                               f"{FANOUT_SOFT_CAP}); too expensive to fire "
+                               "unattended.")
+            return True, "autonomous: harmonized series declared by caller"
         v = (verdict.get("verdict") or "").lower()
         conf = float(verdict.get("confidence") or 0.0)
         if (v not in ("complementary", "partially_complementary")
@@ -813,7 +825,8 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
 
 def run_fanout(orch, branches: List[dict],
                branch_time_budget_s: Optional[float] = None,
-               figure_style: Optional[str] = None) -> str:
+               figure_style: Optional[str] = None,
+               harmonize: bool = False) -> str:
     """Gate → confirm → run branches concurrently. Returns JSON.
 
     `branches` is a list of ``{"data_path", "task", "label", "metadata"?,
@@ -828,6 +841,18 @@ def run_fanout(orch, branches: List[dict],
     ``FANOUT_BRANCH_TIME_BUDGET_S``, <= 0 disables): an overdue branch is
     recorded degraded and abandoned so the fan-out completes and fusion runs
     over the productive branches.
+
+    ``harmonize=True`` (same-technique sibling datasets): the FIRST branch
+    runs alone as the pipeline DONOR; the rest then replay its approved
+    analysis script verbatim (locked reuse), so cross-branch magnitudes come
+    from ONE frozen pipeline. Followers' ledger entries are stamped
+    ``harmonized_with`` and fusion is told the magnitudes are
+    method-comparable. Falls back loudly to independent branches when the
+    donor yields no approved script. The complementarity gate changes role
+    in this mode: a same-technique series is by construction "redundant"
+    under the gate's rubric — which is the point — so only the same-subject
+    criterion is enforced (datasets the gate calls unrelated are pruned);
+    the non-redundancy criterion is waived by the caller's declaration.
     """
     # --- normalize input ---
     norm: List[dict] = []
@@ -902,12 +927,27 @@ def run_fanout(orch, branches: List[dict],
                  "files": b.get("files")}
                 for b in norm]
     verdict = assess_complementarity(orch, datasets)
-    fanout_set = [i for i in (verdict.get("fanout_set") or []) if i in by_id]
+    if harmonize:
+        # Harmonized replay deliberately INVERTS the gate's non-redundancy
+        # criterion: a same-technique per-condition/series set — which the
+        # gate rightly calls "redundant ... a per-condition series to be
+        # compared" — is exactly this mode's use case. Keep criterion 1
+        # (same subject): prune only what the gate calls unrelated; a
+        # redundant cluster IS the series.
+        _unrelated = set(verdict.get("unrelated") or [])
+        fanout_set = [i for i in by_id if i not in _unrelated]
+        if _unrelated:
+            print(f"  🚪 Harmonized gate: pruned {len(_unrelated)} "
+                  f"unrelated dataset(s); keeping the same-subject series.")
+    else:
+        fanout_set = [i for i in (verdict.get("fanout_set") or [])
+                      if i in by_id]
 
     if len(fanout_set) < 2:
         return json.dumps({
             "status": "declined",
-            "reason": "not_complementary",
+            "reason": ("not_same_subject" if harmonize
+                       else "not_complementary"),
             "verdict": verdict,
             "message": (
                 "The datasets are not genuinely complementary (no 2+ that share "
@@ -919,7 +959,8 @@ def run_fanout(orch, branches: List[dict],
         }, indent=2, default=str)
 
     # --- confirmation ---
-    proceed, reason = _confirm_fanout(orch, verdict, fanout_set, by_id)
+    proceed, reason = _confirm_fanout(orch, verdict, fanout_set, by_id,
+                                      harmonize=harmonize)
     if not proceed:
         return json.dumps({"status": "declined", "reason": reason,
                            "verdict": verdict,
@@ -1022,8 +1063,74 @@ def run_fanout(orch, branches: List[dict],
             entry["join_axis"] = verdict.get("join_axis")
             entries.append(entry)
 
+    # --- harmonized pipeline replay (donor-first) ---
+    # The FIRST branch is the pipeline donor: it runs alone under the normal
+    # analysis path; its approved dynamic-analysis script(s) are then
+    # replayed VERBATIM by every follower (via the hyperspectral agent's
+    # locked-reuse surface), so cross-branch magnitudes are measured by ONE
+    # frozen pipeline instead of N independently generated ones — the
+    # methodological confound fusion otherwise has to discount. A donor that
+    # yields no approved replayable script falls back loudly to today's
+    # independent branches (never worse).
+    follower_start = 0
+    harmonized_info = None
+    if harmonize and len(run_branches) >= 2:
+        donor = run_branches[0]
+        donor_label = donor.get("label") or "donor"
+        print(f"  🧬 Harmonized mode: running pipeline donor '{donor_label}' "
+              "first (followers will replay its approved script)...")
+        _run_one_branch(orch, donor, branch_companions[0], entries[0],
+                        None, None)
+        follower_start = 1
+        reuse_dir = None
+        if entries[0].get("status") == "success":
+            _donor_dir = (orch.fanout_dir
+                          / f"{entries[0]['index']:02d}_{_slug(donor_label)}")
+            _cands = sorted(_donor_dir.rglob("dynamic_analysis_records.json"),
+                            key=lambda p: p.stat().st_mtime)
+            for _c in reversed(_cands):
+                try:
+                    _recs = json.loads(_c.read_text(encoding="utf-8"))
+                except Exception:  # noqa: BLE001 - keep looking
+                    continue
+                if any(isinstance(r, dict) and r.get("script")
+                       and r.get("task_success") for r in _recs):
+                    reuse_dir = _c.parent
+                    break
+        if reuse_dir is None:
+            msg = (f"harmonize requested but donor '{donor_label}' produced "
+                   "no approved replayable script — followers run "
+                   "independently (unharmonized fallback).")
+            print(f"  ⚠️  {msg}")
+            logger.warning(f"fan-out: {msg}")
+            harmonized_info = {"donor": donor_label, "status": "fallback",
+                               "reason": "no approved donor script"}
+        else:
+            print(f"  🧬 Donor script approved — followers will replay "
+                  f"{reuse_dir.name} verbatim.")
+            harm_block = (
+                "\n\nHARMONIZED PIPELINE REPLAY (mandatory): a sibling "
+                f"dataset (donor '{donor_label}') was already analyzed and "
+                "its approved analysis script must be REPLAYED VERBATIM on "
+                "this dataset so the results are method-comparable. When "
+                "calling run_analysis, pass EXACTLY: prior_analysis_paths="
+                f"[\"{reuse_dir}\"] and reuse_locked_script=true. Do NOT "
+                "run a fresh analysis plan or alter the script.")
+            for _i in range(1, len(run_branches)):
+                run_branches[_i]["task"] = run_branches[_i]["task"] + harm_block
+                entries[_i]["task"] = _mesh_task(run_branches[_i],
+                                                 branch_companions[_i])
+                entries[_i]["harmonized_with"] = donor_label
+                entries[_i]["harmonized_donor_index"] = entries[0]["index"]
+            harmonized_info = {
+                "donor": donor_label, "status": "harmonized",
+                "reuse_dir": str(reuse_dir),
+                "followers": [b.get("label") for b in run_branches[1:]],
+            }
+
     # --- run concurrently; wiring per the mesh policy ---
-    print(f"  🔀 Launching {len(run_branches)} parallel analysis branches "
+    print(f"  🔀 Launching {len(run_branches) - follower_start} parallel "
+          f"analysis branches "
           f"(group {group_id}, "
           f"{'operand mesh — co-registered set' if mesh else 'independent branches'})...")
 
@@ -1047,7 +1154,7 @@ def run_fanout(orch, branches: List[dict],
     pool = ThreadPoolExecutor(max_workers=max_workers)
     try:
         fut_label, fut_entry = {}, {}
-        for i in range(n_total):
+        for i in range(follower_start, n_total):
             fut = pool.submit(_run_one_branch, orch, run_branches[i],
                               branch_companions[i], entries[i],
                               queue_channel, branch_autonomy)
@@ -1151,6 +1258,7 @@ def run_fanout(orch, branches: List[dict],
         "join_axis": verdict.get("join_axis"),
         "join_type": verdict.get("join_type"),
         "mesh": "operand" if mesh else "independent",
+        **({"harmonized": harmonized_info} if harmonized_info else {}),
         "branches_run": len(results),
         "branches_with_output": len(productive),
         "results": results,
@@ -2022,6 +2130,29 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
                 "construction and must not be counted as independent "
                 "corroboration.")
 
+    # Harmonized replay — METHOD coupling, the opposite of an independence
+    # spend: branches that replayed the donor's approved script verbatim are
+    # measured by ONE frozen pipeline, so their magnitudes are comparable
+    # across datasets and differences reflect the data, not pipeline
+    # variance. No branch saw another's results, so observational
+    # independence is intact.
+    harmonized = {(e.get("label") or f"delegation {e['index']}"):
+                  e.get("harmonized_with")
+                  for e in ok if e.get("harmonized_with")}
+    harmonized_note = ""
+    if harmonized:
+        _pairs = "; ".join(f"'{lbl}' ← donor '{d}'"
+                           for lbl, d in harmonized.items())
+        harmonized_note = (
+            "\n\nHARMONIZED BRANCHES (single frozen pipeline): " + _pairs
+            + ". These branches REPLAYED the donor branch's approved "
+            "analysis script verbatim, so their extracted magnitudes ARE "
+            "method-comparable across datasets — treat differences between "
+            "them as properties of the data, never as analysis-pipeline "
+            "variance. This couples METHOD only, not findings: no branch "
+            "saw another's results, so cross-branch agreement still counts "
+            "as independent observation.\n")
+
     blocks = []
     branch_numerics: Dict[str, Any] = {}   # label -> numerics dict (audit trail)
     for e in ok:
@@ -2120,6 +2251,7 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
            if ungated_warning else "")
         + (f"\n\nFUSION FOCUS (weight your synthesis toward this): {focus}\n"
            if focus else "")
+        + harmonized_note
         + ("\n\nFIGURES: one representative figure per dataset is attached after "
            "this text, labeled by dataset. Use them to verify spatial/visual "
            "correlations DIRECTLY rather than relying on the text descriptions "
@@ -2231,6 +2363,7 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
         "branch_numerics": branch_numerics or None,
         "computed_reconciliation": computed,
         "independence": informed or None,
+        "harmonized_branches": harmonized or None,
         "branch_reanalysis": reanalysis or None,
         "detailed_analysis": (
             (f"⚠️ UNGATED FUSION — {ungated_warning}\n\n" if ungated_warning else "")
@@ -2297,6 +2430,7 @@ def fuse_delegations(orch, indices: List[int], focus: Optional[str] = None) -> s
         "numerics_branches": len(branch_numerics),
         "computed_reconciliation": computed,
         "independence": informed or None,
+        "harmonized_branches": harmonized or None,
         "branch_reanalysis": reanalysis or None,
         "suggested_followups": reanalysis_followups,
         "figures_used": len(figures),

@@ -391,6 +391,113 @@ def main():
     print("13) pattern-aware dedup:")
     check("distinct patterns kept as 2 branches", out.get("branches_run") == 2)
 
+    # 14) Harmonized pipeline replay (donor-first): the first branch runs
+    #     alone; followers are instructed to replay its approved script via
+    #     the locked-reuse surface, and their ledger entries are stamped.
+    ag, A, B, C = _agent()
+    order = []
+
+    def _harm_child(orch, base_dir):
+        class H:
+            def run_task(self, task, context=None, autonomy=None):
+                CAPTURED_TASKS.append(task)
+                import re as _re
+                m = _re.search(r"PRIMARY dataset for THIS analysis: (\S+)", task)
+                order.append(os.path.basename(m.group(1)) if m else "?")
+                rdir = os.path.join(base_dir, "results", "analysis_fake")
+                os.makedirs(rdir, exist_ok=True)
+                with open(os.path.join(rdir, "dynamic_analysis_records.json"),
+                          "w") as fh:
+                    json.dump([{"target": "t", "task_success": True,
+                                "required_outputs": [],
+                                "script": "print(1)"}], fh)
+                return {"status": "success", "summary": "ok",
+                        "key_findings": ["finding"],
+                        "files_produced": ["/x/v.png"]}
+        return H()
+
+    fo._make_ephemeral_analysis_child = _harm_child
+    _install_fake_gate([A, B, C]); ag._complementarity_cache.clear()
+    CAPTURED_TASKS.clear()
+    out = json.loads(ag._run_fanout(_branches(A, B, C), harmonize=True))
+    print("14) harmonized replay (donor-first):")
+    check("harmonized run success + 3 branches",
+          out.get("status") == "success" and out.get("branches_run") == 3)
+    check("harmonized info on the result",
+          (out.get("harmonized") or {}).get("status") == "harmonized")
+    check("donor ran first", bool(order) and order[0] == os.path.basename(A))
+    follower_tasks = CAPTURED_TASKS[1:]
+    check("followers told to replay (locked reuse)",
+          len(follower_tasks) == 2
+          and all("reuse_locked_script=true" in t
+                  and "prior_analysis_paths" in t for t in follower_tasks))
+    reuse_dir = (out.get("harmonized") or {}).get("reuse_dir") or ""
+    check("followers point at the donor's result dir",
+          bool(reuse_dir) and all(reuse_dir in t for t in follower_tasks))
+    fan_entries = [e for e in ag._delegation_ledger if e.get("fanout")]
+    stamped = [e for e in fan_entries if e.get("harmonized_with")]
+    check("2 follower entries stamped harmonized_with",
+          len(stamped) == 2
+          and all(e["harmonized_with"] == fan_entries[0]["label"]
+                  for e in stamped))
+    check("ledger task carries the replay instruction",
+          all("reuse_locked_script=true" in e["task"] for e in stamped))
+    idxs14 = [r["delegation_index"] for r in out["results"]
+              if r["produced_output"]]
+    f14 = json.loads(ag._fuse_delegations(idxs14))
+    with open(f14["report_path"]) as fh:
+        _rep14 = json.load(fh)
+    check("fusion records harmonized_branches",
+          f14.get("status") == "success"
+          and bool(_rep14.get("harmonized_branches")))
+
+    # 14c) A REDUNDANT gate verdict must NOT block harmonized mode (found
+    #      live: a same-technique condition series is by construction
+    #      "redundant" — which is the point). Unrelated datasets are still
+    #      pruned (same-subject criterion survives).
+    ag, A, B, C = _agent()
+    fo._make_ephemeral_analysis_child = _harm_child
+
+    def _redundant_gate(orch, prompt, extra_parts=None):
+        GATE_PROMPTS.append(prompt)
+        if "complementary measurements of ONE system" in prompt:
+            return {"detailed_analysis": "fused narrative",
+                    "scientific_claims": [{"claim": "c", "keywords": ["k"]}]}
+        return {"verdict": "redundant", "confidence": 0.9, "rationale": "r",
+                "join_axis": "condition_index", "join_type": None,
+                "fanout_set": [], "redundant_clusters": [[A, B]],
+                "unrelated": [C], "excluded_notes": ""}
+    fo._llm_json = _redundant_gate
+    ag._complementarity_cache.clear()
+    CAPTURED_TASKS.clear(); order.clear()
+    out = json.loads(ag._run_fanout(_branches(A, B, C), harmonize=True))
+    print("14c) harmonize proceeds on a redundant verdict:")
+    check("redundant series still runs harmonized",
+          out.get("status") == "success"
+          and (out.get("harmonized") or {}).get("status") == "harmonized")
+    check("unrelated dataset pruned (same-subject criterion kept)",
+          out.get("branches_run") == 2)
+    check("non-harmonize path still declines redundant sets",
+          json.loads(ag._run_fanout(_branches(A, B)))
+          .get("status") == "declined")
+
+    # 14b) Donor yields no replayable script -> loud fallback: followers run
+    #      unharmonized, nothing stamped, the result says so.
+    ag, A, B, C = _agent()
+    _install_fake_child()   # standard fake child: writes no records
+    _install_fake_gate([A, B]); ag._complementarity_cache.clear()
+    CAPTURED_TASKS.clear()
+    out = json.loads(ag._run_fanout(_branches(A, B), harmonize=True))
+    print("14b) harmonize fallback (no donor script):")
+    check("fallback still succeeds",
+          out.get("status") == "success" and out.get("branches_run") == 2)
+    check("fallback recorded on the result",
+          (out.get("harmonized") or {}).get("status") == "fallback")
+    check("follower NOT told to replay",
+          all("reuse_locked_script" not in t for t in CAPTURED_TASKS[1:]))
+    check("no harmonized_with stamps",
+          not any(e.get("harmonized_with") for e in ag._delegation_ledger))
+
     print("\n" + "=" * 50)
     npass = sum(results.values())
     print(f"ROBUSTNESS: {npass}/{len(results)} checks passed")
