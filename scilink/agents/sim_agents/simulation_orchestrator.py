@@ -278,6 +278,12 @@ class SimulationOrchestratorAgent:
     # Configuration constants — mirror AnalysisOrchestratorAgent
     MAX_TOOL_ITERATIONS = 20
     MAX_HISTORY_MESSAGES = 100
+    # The in-loop trim fires only past cap + hysteresis, so a
+    # session isn't re-trimmed on every turn once it reaches the
+    # cap. cap+20 == the 120 literal this replaces, so default
+    # behavior is unchanged — but a configured cap now actually
+    # moves the trigger.
+    TRIM_HYSTERESIS = 20
     CHECKPOINT_INTERVAL = 10
 
     def __init__(
@@ -860,7 +866,7 @@ class SimulationOrchestratorAgent:
         self.messages = close_interrupted_turn(self.messages)
         self.messages.append({"role": "user", "content": user_input})
 
-        if len(self.messages) > 120:
+        if len(self.messages) > (self.MAX_HISTORY_MESSAGES + self.TRIM_HYSTERESIS):
             print("  ⚠️  Context window getting full - trimming history...")
             system_msg = self.messages[0]
             recent_msgs = self._trim_history(self.messages[1:], max_messages=self.MAX_HISTORY_MESSAGES)
@@ -955,7 +961,7 @@ class SimulationOrchestratorAgent:
         self.messages = close_interrupted_turn(self.messages)
         self.messages.append({"role": "user", "content": user_input})
 
-        if len(self.messages) > 120:
+        if len(self.messages) > (self.MAX_HISTORY_MESSAGES + self.TRIM_HYSTERESIS):
             print("  ⚠️  Context window getting full - trimming history...")
             system_msg = self.messages[0]
             recent_msgs = self._trim_history(self.messages[1:], max_messages=self.MAX_HISTORY_MESSAGES)
