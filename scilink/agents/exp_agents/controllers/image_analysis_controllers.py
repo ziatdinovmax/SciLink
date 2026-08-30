@@ -6749,7 +6749,9 @@ Return JSON with:
                 generation_config=self.generation_config,
                 safety_settings=self.safety_settings,
             )
-            result_json, error_dict = self._parse(response)
+            result_json, error_dict = parse_codegen_response(
+                response, field="script", logger=self.logger
+            )
             if error_dict and not (result_json and 'script' in result_json):
                 return None
             return result_json
@@ -6816,7 +6818,9 @@ Return JSON with: {{"diagnosis": "...", "script": "corrected script"}}
                 generation_config=self.generation_config,
                 safety_settings=self.safety_settings,
             )
-            result_json, _ = self._parse(response)
+            result_json, _ = parse_codegen_response(
+                response, field="script", logger=self.logger
+            )
             if result_json:
                 self.logger.info(
                     f"   Diagnosis: {result_json.get('diagnosis', 'N/A')}"
