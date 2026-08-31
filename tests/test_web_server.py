@@ -367,6 +367,36 @@ def test_feedback_flow_and_409(client, tmp_path):
     # orchestrator — FakeAgent doesn't bind one, so no assertion here)
 
 
+def test_reset_session(client, tmp_path):
+    from scilink.server.session_manager import WebSession
+
+    class HangingAgent:
+        def chat(self, text):
+            from scilink import hitl
+            hitl.request_human_feedback("waiting")
+            print("post-stop print")  # raises AgentStoppedError after reset
+            return "done"
+
+    sdir = tmp_path / "analysis_session_20260101_080808"
+    sdir.mkdir()
+    mgr = client.app.state.manager
+    session = WebSession(id=sdir.name, session_dir=str(sdir), mode="analyze",
+                         model="gpt-5.4", autonomy="co-pilot",
+                         agent=HangingAgent())
+    mgr._sessions[sdir.name] = session
+    client.post(f"/api/v1/sessions/{sdir.name}/messages", json={"content": "go"})
+    for _ in range(100):
+        if session.turn and session.turn.pending_question:
+            break
+        time.sleep(0.02)
+    # reset while a question is parked: stops the turn and drops the session
+    assert client.delete(f"/api/v1/sessions/{sdir.name}").json()["ok"] is True
+    assert client.get(f"/api/v1/sessions/{sdir.name}").status_code == 404
+    assert client.delete(f"/api/v1/sessions/{sdir.name}").status_code == 404
+    session.turn.done.wait(5)
+    assert not session.turn.thread.is_alive()
+
+
 def test_stop_unblocks_pending_question(client, tmp_path):
     from scilink.server.session_manager import WebSession
 

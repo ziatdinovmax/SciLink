@@ -132,6 +132,24 @@ def create_app(session_root: Path, serve_frontend: bool = True) -> FastAPI:
     def get_session(session_id: str):
         return manager.snapshot(_session_or_404(session_id))
 
+    @app.delete("/api/v1/sessions/{session_id}")
+    def reset_session(session_id: str):
+        """Reset: stop and drop the live session (its dir stays resumable)."""
+        if not manager.remove(session_id):
+            raise HTTPException(404, f"No live session {session_id!r}.")
+        return {"ok": True}
+
+    @app.post("/api/v1/quit")
+    def quit_server():
+        """Port of the Streamlit Quit App button (sidebar.py:550): reply
+        first, then terminate the server process."""
+        import os
+        import signal
+        import threading
+
+        threading.Timer(0.5, lambda: os.kill(os.getpid(), signal.SIGTERM)).start()
+        return {"ok": True}
+
     @app.patch("/api/v1/sessions/{session_id}")
     def rename_session(session_id: str, body: RenameSessionRequest):
         session = _session_or_404(session_id)

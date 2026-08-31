@@ -192,6 +192,24 @@ class SessionManager:
     def get(self, session_id: str) -> Optional[WebSession]:
         return self._sessions.get(session_id)
 
+    def remove(self, session_id: str) -> bool:
+        """Tear down a live session (port of the Streamlit Reset Session,
+        sidebar.py:1244): stop any running turn (which also kills the
+        agent's subprocesses), wake all SSE streams so they terminate, and
+        drop the registry entry. The on-disk session dir is untouched —
+        it stays resumable."""
+        with self._lock:
+            session = self._sessions.pop(session_id, None)
+        if session is None:
+            return False
+        try:
+            from . import runner
+            runner.request_stop(session)
+        except Exception:
+            pass
+        session.events.close()
+        return True
+
     def list_live(self) -> List[Dict[str, Any]]:
         return [{
             "id": s.id, "mode": s.mode, "model": s.model,

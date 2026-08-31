@@ -32,6 +32,8 @@ export function Sidebar({
   onStart,
   onResume,
   onRename,
+  onReset,
+  onQuit,
   theme,
   onToggleTheme,
 }: {
@@ -44,6 +46,8 @@ export function Sidebar({
   onStart: (cfg: SidebarConfig) => void;
   onResume: (cfg: SidebarConfig, dir: string) => void;
   onRename: (name: string) => Promise<void>;
+  onReset: () => void;
+  onQuit: () => void;
   theme: "dark" | "light";
   onToggleTheme: () => void;
 }) {
@@ -361,8 +365,27 @@ export function Sidebar({
           <p className="caption" style={{ wordBreak: "break-all" }}>
             {session.id} · {session.model} · {session.autonomy}
           </p>
+          <button
+            className="danger-hover"
+            style={{ width: "100%", marginTop: 8 }}
+            title="Stop the run, close this session, and return to the start screen (the session stays resumable)"
+            onClick={onReset}
+          >
+            Reset Session
+          </button>
         </div>
       )}
+
+      <div className="sidebar-section" style={{ marginTop: "auto" }}>
+        <button
+          className="danger-hover"
+          style={{ width: "100%" }}
+          title="Shut down the scilink-web server"
+          onClick={onQuit}
+        >
+          Quit App
+        </button>
+      </div>
     </div>
   );
 }

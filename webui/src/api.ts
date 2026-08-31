@@ -174,6 +174,11 @@ export const api = {
 
   stop: (id: string) => req<{ stopped: boolean }>(`/sessions/${id}/stop`, { method: "POST" }),
 
+  resetSession: (id: string) =>
+    req<{ ok: boolean }>(`/sessions/${id}`, { method: "DELETE" }),
+
+  quit: () => req<{ ok: boolean }>(`/quit`, { method: "POST" }),
+
   sendFeedback: (id: string, requestId: string, response: string) =>
     req<{ ok: boolean }>(
       `/sessions/${id}/feedback`,

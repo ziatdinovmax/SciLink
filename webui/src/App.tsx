@@ -34,6 +34,7 @@ const emptyState: SessionState = {
 
 type Action =
   | { type: "session_loaded"; snapshot: SessionSnapshot }
+  | { type: "session_closed" }
   | { type: "user_message"; content: string }
   | { type: "clear_error" }
   | { type: "event"; event: SessionEvent };
@@ -50,6 +51,8 @@ function reducer(state: SessionState, action: Action): SessionState {
         liveLog: action.snapshot.live_log ?? "",
         name: action.snapshot.name,
       };
+    case "session_closed":
+      return emptyState;
     case "user_message":
       return {
         ...state,
@@ -101,6 +104,7 @@ export default function App() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [busy, setBusy] = useState<string | null>(null); // init overlay text
   const [startError, setStartError] = useState<string | null>(null);
+  const [serverStopped, setServerStopped] = useState(false);
   const [state, dispatch] = useReducer(reducer, emptyState);
 
   useEffect(() => {
@@ -175,7 +179,36 @@ export default function App() {
     }
   };
 
+  const resetSession = async () => {
+    const id = state.snapshot?.id;
+    if (!id) return;
+    try {
+      await api.resetSession(id);
+    } catch {
+      /* already gone server-side */
+    }
+    dispatch({ type: "session_closed" });
+  };
+
+  const quitApp = async () => {
+    try {
+      await api.quit();
+    } catch {
+      /* connection may drop as the server exits */
+    }
+    setServerStopped(true);
+  };
+
   const session = state.snapshot;
+
+  if (serverStopped) {
+    return (
+      <div className="welcome">
+        <h2>Server stopped.</h2>
+        <p className="tagline">You can close this window.</p>
+      </div>
+    );
+  }
 
   return (
     <div className="layout">
@@ -191,6 +224,8 @@ export default function App() {
         onRename={async (name) => {
           if (session) await api.renameSession(session.id, name);
         }}
+        onReset={resetSession}
+        onQuit={quitApp}
         theme={theme}
         onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
       />
