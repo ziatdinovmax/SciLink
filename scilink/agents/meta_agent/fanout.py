@@ -684,12 +684,15 @@ class _BranchChannel:
         return self._qch.ask(req)
 
 
-def _make_ephemeral_analysis_child(orch, base_dir: Path):
+def _make_ephemeral_analysis_child(orch, base_dir: Path, restore: bool = False):
     """Build an isolated, one-shot analysis orchestrator for one branch.
 
     NOT registered in ``orch._children`` — these are ephemeral fan-out workers,
     not the persistent singleton, so they share no mutable state across threads
-    and are never restored. Resting mode AUTONOMOUS; run_task pins it per call.
+    and are never restored by the meta's child-restore path. Resting mode
+    AUTONOMOUS; run_task pins it per call. ``restore=True`` (the resume path)
+    rebuilds the worker IN its original session dir with its own checkpoint,
+    so it comes back holding its per-tool-checkpointed partial progress.
     """
     from ..exp_agents.analysis_orchestrator import (
         AnalysisOrchestratorAgent, AnalysisMode,
@@ -703,7 +706,7 @@ def _make_ephemeral_analysis_child(orch, base_dir: Path):
         embedding_model=orch.embedding_model,
         embedding_api_key=orch.embedding_api_key,
         futurehouse_api_key=orch.futurehouse_api_key,
-        restore_checkpoint=False,
+        restore_checkpoint=restore,
         analysis_mode=AnalysisMode.AUTONOMOUS,
     )
     child._agent_label = "Analysis branch"
@@ -832,6 +835,49 @@ def _mesh_task(branch: dict, companions: List[dict]) -> str:
     return task + "\n".join(block)
 
 
+def _cancel_overdue_branches(orch, pending, fut_entry, fut_stop, fut_label,
+                             budget: float) -> None:
+    """Cancel every pending branch that has outrun the wall-clock budget.
+
+    Shared by ``run_fanout`` and ``resume_fanout``: records the entry
+    degraded (excluded from fusion), fires the branch's stop event FIRST so
+    its thread aborts on its next print (releasing its memory-admission
+    slot), then kills any subprocess it is currently waiting on, and stops
+    waiting for its future. Mutates ``pending`` in place.
+    """
+    overdue = [f for f in pending
+               if fut_entry[f].get("_started_at") is not None
+               and fut_entry[f].get("status") == "running"
+               and (time.monotonic() - fut_entry[f]["_started_at"] > budget)]
+    for f in overdue:
+        e = fut_entry[f]
+        e["timed_out"] = True
+        print(f"  ⏱️  analysis branch '{fut_label[f]}' exceeded "
+              f"its wall-clock budget ({int(budget)}s) — "
+              "cancelling it (degraded, excluded from fusion).")
+        logger.warning(
+            f"fan-out branch {e['index']} ('{fut_label[f]}') "
+            f"cancelled after {int(budget)}s wall-clock budget")
+        fut_stop[f].set()
+        tid = e.get("_branch_tid")
+        if tid:
+            try:
+                from ...executors import kill_subprocesses_for_thread
+                kill_subprocesses_for_thread(tid)
+            except Exception:  # noqa: BLE001 - best-effort cleanup
+                pass
+        orch._close_delegation(e, {
+            "status": "error",
+            "error": (f"branch wall-clock budget exceeded "
+                      f"({int(budget)}s); branch abandoned"),
+            "summary": "", "key_findings": [],
+            "files_produced": [], "suggested_followups": [],
+            "warnings": [f"abandoned after {int(budget)}s "
+                         "wall-clock budget (#358)"],
+        })
+        pending.discard(f)
+
+
 def _run_one_branch(orch, branch: dict, companions: List[dict],
                     entry: dict, queue_channel=None,
                     branch_autonomy=None, stop_event=None) -> None:
@@ -879,9 +925,19 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
     try:
         try:
             from ..exp_agents.analysis_orchestrator import AnalysisMode
-            child = _make_ephemeral_analysis_child(orch, base_dir)
+            # Positional call on the fresh path keeps the factory's widely
+            # monkeypatched two-arg signature working; only the resume path
+            # opts into restore.
+            child = (_make_ephemeral_analysis_child(orch, base_dir,
+                                                    restore=True)
+                     if branch.get("_resume")
+                     else _make_ephemeral_analysis_child(orch, base_dir))
+            # A resumed branch re-runs its RECORDED (already meshed) task
+            # verbatim — re-composing it would duplicate the mesh blocks.
+            task_text = (branch["task"] if branch.get("_premeshed")
+                         else _mesh_task(branch, companions))
             result = child.run_task(
-                _mesh_task(branch, companions),
+                task_text,
                 context=branch.get("context"),
                 autonomy=(branch_autonomy if branch_autonomy is not None
                           else AnalysisMode.AUTONOMOUS),
@@ -932,6 +988,108 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
             "n_files": len(result.get("files_produced") or [])}
         return
     orch._close_delegation(entry, result)
+
+
+_RESUME_NOTE = (
+    "\n\nRESUME NOTE: this branch was interrupted mid-run and is being "
+    "resumed in its original session, which already holds its partial "
+    "progress. Continue from the recorded results — do not redo completed "
+    "steps.")
+
+
+def resume_fanout(orch) -> str:
+    """Re-run fan-out branches left unfinished by a dead or stopped session.
+
+    A coordinator death (or user stop) leaves a fan-out's provisional ledger
+    entries 'running' — swept to 'interrupted' at the next turn start. Each
+    such branch is re-created IN its original ``fanout/<NN>_<slug>/`` session
+    dir with ``restore_checkpoint=True``, so it comes back holding its
+    per-tool-checkpointed partial progress plus the interrupted-turn note,
+    and re-runs its RECORDED task verbatim (pre-meshed — never re-composed).
+    Completed branches keep their results and budget-degraded (timed_out)
+    branches keep their verdicts; only interrupted work is redone.
+    """
+    with orch._fanout_lock:
+        stale = [e for e in orch._delegation_ledger
+                 if e.get("fanout")
+                 and e.get("status") in ("running", "interrupted")
+                 and not e.get("timed_out")]
+        for e in stale:
+            # Reopen the provisional entry; keep the interruption on record.
+            e["resumed_from_interruption"] = True
+            e["status"] = "running"
+            e.pop("completed_at", None)
+    if not stale:
+        return json.dumps({
+            "status": "no_op",
+            "message": "No interrupted fan-out branches to resume."})
+
+    # Persist the reopened entries (and their audit stamps) NOW, so a crash
+    # DURING the resume leaves them recoverable again — resume must converge
+    # under repeated interruption, mirroring the launch-time persistence.
+    orch._auto_checkpoint(verbose=False)
+
+    print(f"  🔁 Resuming {len(stale)} interrupted fan-out branch(es) in "
+          "their original sessions...")
+    _ensure_stop_guard_installed()
+    budget = FANOUT_BRANCH_TIME_BUDGET_S
+    pool = ThreadPoolExecutor(max_workers=min(len(stale), FANOUT_MAX_WORKERS))
+    try:
+        fut_entry, fut_stop, fut_label = {}, {}, {}
+        for e in stale:
+            branch = {
+                "task": (e.get("task") or "") + _RESUME_NOTE,
+                "label": e.get("label"),
+                "data_path": e.get("data_path"),
+                "pattern": e.get("pattern"),
+                "metadata": e.get("metadata"),
+                "_premeshed": True,
+                "_resume": True,
+            }
+            stop_ev = _threading.Event()
+            fut = pool.submit(_run_one_branch, orch, branch, [], e,
+                              None, None, stop_ev)
+            fut_entry[fut] = e
+            fut_stop[fut] = stop_ev
+            fut_label[fut] = e.get("label") or f"branch {e['index']}"
+        pending = set(fut_entry)
+        since_tick = 0.0
+        while pending:
+            t0 = time.monotonic()
+            done, pending = wait(pending, timeout=_FANOUT_POLL_S)
+            since_tick += time.monotonic() - t0
+            for f in done:
+                f.result()
+                print(f"  ✅ resumed branch finished: {fut_label[f]} "
+                      f"(status: {fut_entry[f].get('status')})")
+                since_tick = 0.0
+            if budget > 0:
+                _cancel_overdue_branches(orch, pending, fut_entry, fut_stop,
+                                         fut_label, budget)
+            if pending and since_tick >= _FANOUT_HEARTBEAT_S:
+                since_tick = 0.0
+                print(f"  ⏳ {len(pending)} resumed branch(es) still "
+                      "running ...")
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+    results = [{"delegation_index": e["index"], "label": e.get("label"),
+                "status": e.get("status"),
+                "key_findings": (e.get("key_findings") or [])[:6],
+                "files_produced": (e.get("files_produced") or [])[:20]}
+               for e in stale]
+    ok = [r["delegation_index"] for r in results if r["status"] == "success"]
+    return json.dumps({
+        "status": "success" if ok else "error",
+        "branches_resumed": len(stale),
+        "results": results,
+        "message": ("Resumed branches finished. Combine them with the "
+                    "fan-out's already-completed branches and pass the "
+                    "successful delegation_index values to fuse_delegations."
+                    if ok else
+                    "No resumed branch succeeded — inspect the per-branch "
+                    "errors before retrying."),
+    }, default=str)
 
 
 def run_fanout(orch, branches: List[dict],
@@ -1174,6 +1332,13 @@ def run_fanout(orch, branches: List[dict],
             entry["join_axis"] = verdict.get("join_axis")
             entries.append(entry)
 
+    # Persist the provisional 'running' entries BEFORE any branch runs: a
+    # coordinator crash before the first branch completes would otherwise
+    # leave no on-disk trace of the fan-out (_close_delegation writes the
+    # first checkpoint), making the interrupted branches invisible to
+    # resume_fanout on restore.
+    orch._auto_checkpoint(verbose=False)
+
     # --- harmonized pipeline replay (donor-first) ---
     # The FIRST branch is the pipeline donor: it runs alone under the normal
     # analysis path; its approved dynamic-analysis script(s) are then
@@ -1264,6 +1429,13 @@ def run_fanout(orch, branches: List[dict],
                     "donor_status": entries[0].get("status")}
                    if donor_partial else {}),
             }
+        # Persist the follower entries' re-stamped replay tasks and
+        # harmonized_with stamps NOW: a coordinator crash during the replay
+        # phase must leave resumable followers that still carry the
+        # verbatim-replay instruction — otherwise a later resume_fanout
+        # would re-run them from the pre-harmonize task, silently
+        # unharmonized.
+        orch._auto_checkpoint(verbose=False)
 
     # --- run concurrently; wiring per the mesh policy ---
     print(f"  🔀 Launching {len(run_branches) - follower_start} parallel "
@@ -1326,46 +1498,13 @@ def run_fanout(orch, branches: List[dict],
                 print(f"  ✅ analysis branch finished: {fut_label[f]}  "
                       f"({n_total - len(pending)}/{n_total} done)")
                 since_tick = 0.0  # a completion already shows the run is alive
-            # Branch wall-clock budget (#358): abandon a branch that has run
+            # Branch wall-clock budget (#358): cancel a branch that has run
             # past its deadline — record it degraded (the existing
-            # degraded-branch machinery excludes it from fusion), kill its
-            # registered subprocesses, and stop waiting for its thread.
+            # degraded-branch machinery excludes it from fusion), fire its
+            # stop event, kill its registered subprocesses, and stop waiting.
             if budget > 0:
-                overdue = [f for f in pending
-                           if fut_entry[f].get("_started_at") is not None
-                           and fut_entry[f].get("status") == "running"
-                           and (time.monotonic() - fut_entry[f]["_started_at"]
-                                > budget)]
-                for f in overdue:
-                    e = fut_entry[f]
-                    e["timed_out"] = True
-                    print(f"  ⏱️  analysis branch '{fut_label[f]}' exceeded "
-                          f"its wall-clock budget ({int(budget)}s) — "
-                          "cancelling it (degraded, excluded from fusion).")
-                    logger.warning(
-                        f"fan-out branch {e['index']} ('{fut_label[f]}') "
-                        f"cancelled after {int(budget)}s wall-clock budget")
-                    # Fire the branch's stop event FIRST so its thread aborts
-                    # on its next print (releasing its memory-admission slot),
-                    # then kill any subprocess it is currently waiting on.
-                    fut_stop[f].set()
-                    tid = e.get("_branch_tid")
-                    if tid:
-                        try:
-                            from ...executors import kill_subprocesses_for_thread
-                            kill_subprocesses_for_thread(tid)
-                        except Exception:  # noqa: BLE001 - best-effort cleanup
-                            pass
-                    orch._close_delegation(e, {
-                        "status": "error",
-                        "error": (f"branch wall-clock budget exceeded "
-                                  f"({int(budget)}s); branch abandoned"),
-                        "summary": "", "key_findings": [],
-                        "files_produced": [], "suggested_followups": [],
-                        "warnings": [f"abandoned after {int(budget)}s "
-                                     "wall-clock budget (#358)"],
-                    })
-                    pending.discard(f)
+                _cancel_overdue_branches(orch, pending, fut_entry, fut_stop,
+                                         fut_label, budget)
             if pending and since_tick >= _FANOUT_HEARTBEAT_S:
                 since_tick = 0.0
                 elapsed = int(time.monotonic() - start)

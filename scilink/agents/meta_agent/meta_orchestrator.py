@@ -1550,6 +1550,11 @@ class MetaOrchestratorAgent:
                           figure_style=figure_style,
                           harmonize=harmonize)
 
+    def _resume_fanout(self) -> str:
+        """Re-run fan-out branches left unfinished by a dead/stopped session."""
+        from .fanout import resume_fanout
+        return resume_fanout(self)
+
     def _fuse_delegations(self, indices: list, focus: Optional[str] = None) -> str:
         """Reconcile finished complementary branch findings into one narrative."""
         from .fanout import fuse_delegations
@@ -1588,6 +1593,18 @@ class MetaOrchestratorAgent:
             print(f"    ✅ Restored state:")
             print(f"       - Meta mode: {self.meta_mode.value}")
             print(f"       - Delegations: {len(self._delegation_ledger)}")
+
+            # Surface interrupted fan-out branches so the user (and the LLM,
+            # which sees the resume_fanout tool) knows unfinished parallel
+            # work is recoverable rather than silently lost.
+            n_stale = sum(1 for e in self._delegation_ledger
+                          if e.get("fanout")
+                          and e.get("status") in ("running", "interrupted")
+                          and not e.get("timed_out"))
+            if n_stale:
+                print(f"       - ⚠️ {n_stale} fan-out branch(es) were "
+                      "interrupted mid-run — ask to resume the fan-out to "
+                      "finish them (resume_fanout).")
 
         except Exception as e:
             logging.warning(f"Failed to restore checkpoint: {e}")

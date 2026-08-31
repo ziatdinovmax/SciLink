@@ -781,6 +781,32 @@ class MetaOrchestratorTools:
             required=["branches"],
         )
 
+        # -- resume_fanout (finish an interrupted parallel run) --------------
+        def resume_fanout() -> str:
+            print("  🔁 Resuming interrupted fan-out branches...")
+            return self.orch._resume_fanout()
+
+        self._register_tool(
+            func=resume_fanout,
+            name="resume_fanout",
+            description=(
+                "Resume the fan-out branches of a RESTORED session that were "
+                "left unfinished when the session died or was stopped "
+                "mid-fan-out (delegation ledger status 'interrupted' or "
+                "'running'). Each branch re-runs its recorded task inside "
+                "its ORIGINAL branch session, which still holds its partial "
+                "progress, so completed steps are not redone. Branches that "
+                "already completed — and branches degraded on the wall-clock "
+                "budget — are untouched. Use when the restore notice reports "
+                "interrupted fan-out branches or the user asks to resume/"
+                "finish an interrupted parallel analysis; afterwards fuse "
+                "the successful branches with `fuse_delegations` as usual. "
+                "No-op (with a message) when nothing is interrupted."
+            ),
+            parameters={},
+            required=[],
+        )
+
         # -- fuse_delegations -----------------------------------------------
         def fuse_delegations(delegation_indices: list, focus: str = None) -> str:
             print("  " + _handoff(f"🧬 Fusing delegations {delegation_indices}..."))
