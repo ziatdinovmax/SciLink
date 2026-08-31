@@ -1226,6 +1226,89 @@ def _build_fit_mask(abundance_maps, comp_idx, shape, logger,
         return None
 
 
+def _fit_mask_recipe(components, comp_idx, fit_mask, logger):
+    """Persist the cube-independent recipe behind a component fit-mask (#518).
+
+    The mask itself is donor geometry, but its RULE — "the half-max footprint
+    of the component carrying this signal" — transfers to a sibling cube if
+    the record keeps the component's endmember spectrum. Stored on the
+    dynamic-analysis record so a harmonized locked replay (which bypasses
+    decomposition) can re-derive the same scoping on the follower's own data.
+    """
+    try:
+        comps = np.asarray(components, float)
+        if comps.ndim != 2:
+            return None
+        idx = int(comp_idx)
+        # Same 1-based "Component N" contract (0 tolerated) as _build_fit_mask.
+        if 1 <= idx <= comps.shape[0]:
+            k = idx - 1
+        elif idx == 0:
+            k = 0
+        else:
+            return None
+        return {
+            "fit_scope": "component_mask",
+            "mask_component_index": idx,
+            "component_spectrum": [float(v) for v in comps[k]],
+            "mask_fraction": round(float(fit_mask.mean()), 4),
+        }
+    except Exception as e:  # noqa: BLE001 - recipe is provenance, never fatal
+        logger.warning(f"    Fit-mask recipe not persisted: {e}")
+        return None
+
+
+def _rebuild_fit_mask_from_recipe(data, recipe, shape, logger):
+    """Re-derive a donor's component-mask scoping on a follower cube (#518).
+
+    Locked replay bypasses decomposition, so the abundance map the donor's
+    mask came from does not exist here. Rebuild an abundance-like map by
+    projecting each pixel spectrum onto the donor's persisted endmember
+    (non-negative least-squares coefficient for a single component), then
+    apply the identical half-max + dilation rule via ``_build_fit_mask``.
+    Returns a bool (h, w) array, or None when the recipe is unusable —
+    the caller must then flag the replay's scoping as degraded, never
+    silently run full-frame.
+    """
+    try:
+        spec = np.asarray((recipe or {}).get("component_spectrum"), float)
+        h, w, e = data.shape
+        if spec.ndim != 1 or spec.size != e:
+            logger.warning(
+                f"    Replay mask recipe unusable: donor endmember has "
+                f"{getattr(spec, 'size', 0)} channels, this cube has {e}.")
+            return None
+        denom = float(spec @ spec)
+        if not np.isfinite(denom) or denom <= 0:
+            logger.warning("    Replay mask recipe unusable: degenerate "
+                           "donor endmember spectrum.")
+            return None
+        amap = np.clip(
+            data.reshape(-1, e) @ spec / denom, 0.0, None).reshape(h, w)
+        mask = _build_fit_mask(amap[..., None], 1, shape, logger)
+        if mask is not None:
+            logger.info(
+                "    🔒 Replay scoping reproduced: donor component mask "
+                "re-derived on this cube from the persisted endmember "
+                f"(donor coverage {recipe.get('mask_fraction')}, "
+                f"this cube {mask.mean():.1%}).")
+        return mask
+    except Exception as e:  # noqa: BLE001 - degraded flag handled by caller
+        logger.warning(f"    Replay mask re-derivation failed: {e}")
+        return None
+
+
+def _script_declares_fit_mask(script: str) -> bool:
+    """True when a supplied script's ``analyze_feature`` accepts ``fit_mask``
+    — the replay-time detector for a mask-scoped donor whose record predates
+    the persisted recipe (#518)."""
+    try:
+        m = re.search(r"def\s+analyze_feature\s*\(([^)]*)\)", script or "")
+        return bool(m and "fit_mask" in m.group(1))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _invoke_analyze_feature(func, data, axis, reconstruction=None, *,
                             auxiliary=None, fit_mask=None):
     """Call the generated ``analyze_feature``, passing the optional operands
@@ -2147,6 +2230,14 @@ class SelectRefinementTargetController:
                                 else "replay of a prior approved analysis script"),
                 "required_outputs": list(rec.get("required_outputs") or []),
                 "supplied_script": rec["script"],
+                # #518: the donor's fit-scoping travels with the script — a
+                # replay must reproduce the donor's SCOPING, not only its
+                # arithmetic (the mask is re-derived on this cube downstream).
+                **({"fit_mask_recipe": rec["fit_mask_recipe"],
+                    "fit_scope": "component_mask",
+                    "mask_component_index":
+                        rec["fit_mask_recipe"].get("mask_component_index")}
+                   if isinstance(rec.get("fit_mask_recipe"), dict) else {}),
             } for rec in state["reuse_records"]]
             state["refinement_decision"] = {
                 "refinement_needed": True,
@@ -2957,8 +3048,40 @@ class RunDynamicAnalysisController:
             # dilated high-abundance region of a decomposition component.
             # A failed mask construction falls back to full-frame (logged) —
             # the mask is an optimization, never a gate on correctness.
+            # Locked replay (#518): decomposition is bypassed, so a mask-
+            # scoped donor's mask is RE-DERIVED on this cube from the record's
+            # persisted recipe; failing that, the replay's scoping is flagged
+            # degraded — never silently full-frame.
             fit_mask = None
-            if str(target.get("fit_scope") or "full_frame") == "component_mask":
+            fit_mask_recipe = None
+            replay_scope_degraded = None
+            if target.get("supplied_script"):
+                _recipe = target.get("fit_mask_recipe")
+                if _recipe:
+                    fit_mask = _rebuild_fit_mask_from_recipe(
+                        optimal_data, _recipe, (h, w), self.logger)
+                    if fit_mask is not None:
+                        # Carry the donor's recipe forward (coverage restated
+                        # for THIS cube) so a chained replay keeps the scoping.
+                        fit_mask_recipe = {
+                            **_recipe,
+                            "mask_fraction": round(float(fit_mask.mean()), 4)}
+                    else:
+                        replay_scope_degraded = (
+                            "the donor scoped its fit to a component mask but "
+                            "the mask could not be re-derived on this cube — "
+                            "replayed FULL-FRAME: the donor's scoping is NOT "
+                            "reproduced and region signals may be diluted.")
+                elif _script_declares_fit_mask(target["supplied_script"]):
+                    replay_scope_degraded = (
+                        "the donor script declares a fit_mask parameter but "
+                        "the donor record carries no mask recipe (pre-#518 "
+                        "donor) — replayed FULL-FRAME: the donor's scoping "
+                        "is NOT reproduced and region signals may be diluted.")
+                if replay_scope_degraded:
+                    self.logger.warning(
+                        f"    ⚠️ DEGRADED HARMONIZATION: {replay_scope_degraded}")
+            elif str(target.get("fit_scope") or "full_frame") == "component_mask":
                 fit_mask = _build_fit_mask(
                     state.get("final_abundance_maps"),
                     target.get("mask_component_index"), (h, w), self.logger)
@@ -2966,6 +3089,11 @@ class RunDynamicAnalysisController:
                     self.logger.warning(
                         "    fit_scope=component_mask requested but no usable "
                         "abundance mask — falling back to full_frame.")
+                else:
+                    fit_mask_recipe = _fit_mask_recipe(
+                        state.get("final_components"),
+                        target.get("mask_component_index"), fit_mask,
+                        self.logger)
 
             # 1. Define Prompt for this specific task. Built by a per-level
             # function so the retry ladder (qc_refine) can re-render it with
@@ -2991,7 +3119,8 @@ class RunDynamicAnalysisController:
                     reconstruction_available=reconstruction is not None,
                     auxiliary_operands={k: v.shape for k, v in auxiliary_operands.items()},
                     fit_mask_pixels=((int(fit_mask.sum()), int(fit_mask.size),
-                                      int(target.get("mask_component_index")))
+                                      int(target.get("mask_component_index")
+                                          or 0))
                                      if fit_mask is not None else None),
                 )
 
@@ -3108,6 +3237,8 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                 "reconstruction": reconstruction,
                 "auxiliary_operands": auxiliary_operands,
                 "fit_mask": fit_mask,
+                "fit_mask_recipe": fit_mask_recipe,
+                "replay_scope_degraded": replay_scope_degraded,
                 "processing_note": processing_note,
                 "all_valid_maps": all_valid_maps,
                 "all_valid_meta": all_valid_meta,
@@ -3497,6 +3628,15 @@ maps should mark excluded samples, set them to np.nan in your returned maps.
                     "replay_verbatim": (ctx.last_code
                                         == getattr(ctx, "locked_script", None))}
                    if getattr(ctx, "locked_script", None) else {}),
+                # #518: the mask recipe makes a component-scoped fit
+                # replayable (the mask is re-derived on the follower cube);
+                # replay_scope_degraded marks a replay that could NOT
+                # reproduce the donor's scoping and ran full-frame.
+                **({"fit_mask_recipe": ctx.session.get("fit_mask_recipe")}
+                   if ctx.session.get("fit_mask_recipe") else {}),
+                **({"replay_scope_degraded":
+                        ctx.session.get("replay_scope_degraded")}
+                   if ctx.session.get("replay_scope_degraded") else {}),
                 # Adapt provenance survives ONLY when the accepted result
                 # IS the adapted attempt (a ladder refit replaces it and
                 # the provenance rightly drops with it).

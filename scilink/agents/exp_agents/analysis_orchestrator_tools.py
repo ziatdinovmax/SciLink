@@ -3091,6 +3091,18 @@ class AnalysisOrchestratorTools:
                             response["reuse_warning"] = reuse_validity.get(
                                 "message", ""
                             )
+                    # Hyperspectral locked-replay summary (#509/#518): carries
+                    # verbatim-ness and any degraded-harmonization scoping
+                    # warnings — a harmonized fan-out follower must narrate a
+                    # scoping it could not reproduce, so fusion can discount.
+                    if result.get("script_reuse"):
+                        response["script_reuse"] = result["script_reuse"]
+                        if result["script_reuse"].get("scope_degraded"):
+                            response["reuse_warning"] = (
+                                (response.get("reuse_warning", "") + " ").lstrip()
+                                + "DEGRADED HARMONIZATION: "
+                                + " | ".join(result["script_reuse"].get(
+                                    "scope_warnings") or []))
                     # Best-of-N: compact candidate table + judge reasoning so
                     # the orchestrator can narrate the comparison.
                     if result.get("anchor_candidates"):
