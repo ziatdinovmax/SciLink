@@ -400,6 +400,16 @@ class SessionManager:
         turn = session.turn
         if turn is not None and turn.pending_question is not None:
             pending = turn.pending_question.presented
+        # Cursor BEFORE the log read: a chunk emitted in between shows up in
+        # both the snapshot log and the post-cursor stream (harmless brief
+        # duplication) instead of being lost from a reattaching client.
+        cursor = session.events.cursor
+        live_log = ""
+        if turn is not None and turn.is_running and turn.live_capture is not None:
+            try:
+                live_log = turn.live_capture.getvalue()
+            except Exception:
+                pass
         return {
             "id": session.id,
             "mode": session.mode,
@@ -412,7 +422,10 @@ class SessionManager:
             # FastAPI serializes the snapshot outside the session lock.
             "chat_messages": list(session.chat_messages),
             "pending_question": pending,
+            # The narration captured so far this turn, so a reattaching
+            # client can show the verbose panel mid-run.
+            "live_log": live_log,
             # Start the SSE stream with ?after=<event_cursor> so events
             # already reflected in this snapshot are not replayed.
-            "event_cursor": session.events.cursor,
+            "event_cursor": cursor,
         }

@@ -47,6 +47,7 @@ function reducer(state: SessionState, action: Action): SessionState {
         status: action.snapshot.status,
         messages: action.snapshot.chat_messages,
         pendingQuestion: action.snapshot.pending_question,
+        liveLog: action.snapshot.live_log ?? "",
         name: action.snapshot.name,
       };
     case "user_message":

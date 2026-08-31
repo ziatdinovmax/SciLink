@@ -84,6 +84,7 @@ export interface SessionSnapshot {
   session_dir: string;
   chat_messages: ChatMessage[];
   pending_question: PresentedQuestion | null;
+  live_log: string;
   event_cursor: number;
 }
 

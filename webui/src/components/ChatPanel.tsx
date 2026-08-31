@@ -36,6 +36,16 @@ export function ChatPanel({
   const [draft, setDraft] = useState("");
   const [showVerbose, setShowVerbose] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // Auto-grow the input with the draft (44px single-line up to max-height),
+  // so the send button stays vertically centered beside it.
+  const autosize = () => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "44px";
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+  };
 
   const running = status !== "idle";
 
@@ -56,6 +66,7 @@ export function ChatPanel({
     const content = draft.trim();
     if (!content || running) return;
     setDraft("");
+    if (inputRef.current) inputRef.current.style.height = "44px";
     onSend(content);
   };
 
@@ -116,10 +127,15 @@ export function ChatPanel({
 
       <div className="chat-input-row">
         <textarea
+          ref={inputRef}
+          rows={1}
           value={draft}
           placeholder={placeholder}
           disabled={running}
-          onChange={(e) => setDraft(e.target.value)}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            autosize();
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
