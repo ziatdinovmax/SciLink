@@ -363,6 +363,13 @@ class MetaOrchestratorAgent:
         restore_checkpoint: Whether to restore from a previous checkpoint.
         meta_mode: Autonomy level (AUTOPILOT or AUTONOMOUS). The meta has
             only these two — see MetaMode.
+        max_iterations: Per-turn tool-iteration cap for the META's OWN chat
+            loop only (default 20). It is NOT forwarded to delegations: a
+            child orchestrator runs each delegated task under its own cap
+            (default 20), so raising this does not give a specialist more
+            steps. Delegation depth and per-delegation tool budget are
+            separate dimensions; a child that exhausts its cap reports the
+            delegation as status="error" with the cap warning.
         knowledge_dir: Optional stable knowledge/KB directory for the
             planning child (documents plus its persisted embedding index,
             e.g. the ``./kb_storage`` a standalone plan session built).
