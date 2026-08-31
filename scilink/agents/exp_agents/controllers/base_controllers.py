@@ -7,6 +7,46 @@ import json
 from ....hitl import request_human_feedback
 
 
+def run_plan_refinement_gate(controller, state: dict, *,
+                             refine_banner: str, max_banner: str) -> dict:
+    """Human-in-the-loop plan approval/refinement loop, shared across
+    modality planning controllers (curve fitting, image analysis).
+
+    Repeatedly shows the plan for approval (``controller._get_human_feedback``
+    sets ``_refine_requested`` / ``_refine_feedback`` on the state) and applies
+    ``controller._refine_plan`` until the user approves or
+    ``controller.max_iterations`` refinements have run. Skipped entirely when
+    human feedback is disabled or on a verbatim locked-script reuse turn
+    (#172), where the plan is foreordained and re-approving it is pointless
+    interruption.
+
+    The banner strings are passed in so each modality keeps its historical
+    console output byte-identical.
+    """
+    if not controller.enable_human_feedback or state.get("reuse_locked_script"):
+        return state
+
+    iteration = 0
+    while iteration < controller.max_iterations:
+        state = controller._get_human_feedback(state)
+        if state.pop("_refine_requested", False):
+            feedback = state.pop("_refine_feedback", "")
+            if feedback:
+                state.setdefault("human_feedback_log", []).append(str(feedback))
+            controller.logger.info(f"  Refining with feedback: {feedback}")
+            print(refine_banner)
+            state = controller._refine_plan(state, feedback)
+            iteration += 1
+        else:
+            break
+
+    if iteration >= controller.max_iterations:
+        controller.logger.warning("  Max iterations reached.")
+        print(max_banner)
+
+    return state
+
+
 # Generic Tier-A synthesis re-entry instructions (issue #322). Deliberately
 # modality-neutral: the payload critique + surfaced features carry the
 # specifics. Revision only — the original analysis is never overwritten.

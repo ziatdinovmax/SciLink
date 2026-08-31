@@ -1383,8 +1383,17 @@ class MetaOrchestratorAgent:
 
     def _close_delegation(self, entry: Dict[str, Any], result: dict) -> None:
         """Finalize a provisional ledger entry with the child's result."""
+        # Derive status from the actual outcome rather than trusting the
+        # child's self-report: a result carrying an error is a failure even
+        # if labeled "success", and a missing status is not a success. Other
+        # explicit statuses ("interrupted", "cancelled") legitimately carry
+        # an error field and pass through unchanged. Keeps telemetry,
+        # summarize_session_state and fuse_delegations honest.
+        status = result.get("status")
+        if status is None or (status == "success" and result.get("error")):
+            status = "error"
         entry.update({
-            "status": result.get("status"),
+            "status": status,
             "summary": result.get("summary", ""),
             "key_findings": result.get("key_findings", []),
             "files_produced": result.get("files_produced", []),

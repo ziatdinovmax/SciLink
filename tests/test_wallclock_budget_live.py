@@ -113,6 +113,20 @@ def main():
               and "wall-clock budget" in (noisy[0].get("error") or ""))
         check("timed-out counted in the result",
               out.get("branches_timed_out") == 1)
+        # Cooperative cancellation (#358 follow-up): the over-budget
+        # branch is now STOPPED, not just abandoned — its thread aborts on
+        # its next print and records a 'cancelled' late result, instead of
+        # churning to completion on the API bill. Grace period covers a
+        # long in-flight LLM call it cannot notice the stop during.
+        deadline = time.monotonic() + 240
+        while (noisy[0].get("late_result") is None
+               and time.monotonic() < deadline):
+            time.sleep(5)
+        late = noisy[0].get("late_result")
+        check("cancelled branch thread wound down shortly after expiry",
+              late is not None)
+        check("late result records the cancellation",
+              (late or {}).get("status") == "cancelled")
     else:
         # The branch may instead FINISH honestly (QC refusing + salvage) —
         # also a valid bounded outcome; the budget just wasn't needed.

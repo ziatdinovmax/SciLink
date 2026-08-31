@@ -38,6 +38,7 @@ from .._locked_exec import (
     DATA_NAME, CANDIDATES_DIR_NAME, atomic_np_save,
 )
 from .._qc_engine import CodegenQCEngine, QCEngineSpec, QCItemContext
+from .base_controllers import run_plan_refinement_gate
 from ....utils.codegen_parse import parse_codegen_response
 from ....utils.synthesis_parse import salvage_synthesis_from_response
 from ....hitl import request_human_feedback
@@ -2568,28 +2569,13 @@ class CurveFittingPlanningController:
             self.logger.info(f"  Approach: {state['analysis_approach']}")
             self.logger.info(f"  Model: {state['physical_model']}")
 
-            # On a verbatim locked-script reuse turn (#172) the plan is
-            # foreordained to re-run the prior script unchanged, so re-approving
-            # it is pointless interruption. Planning still ran above (downstream
-            # stages need its fields); we only skip the display/approval gate.
-            if self.enable_human_feedback and not state.get("reuse_locked_script"):
-                iteration = 0
-                while iteration < self.max_iterations:
-                    state = self._get_human_feedback(state)
-                    if state.pop("_refine_requested", False):
-                        feedback = state.pop("_refine_feedback", "")
-                        if feedback:
-                            state.setdefault("human_feedback_log", []).append(str(feedback))
-                        self.logger.info(f"  Refining with feedback: {feedback}")
-                        print("\n🔄 Refining plan...\n")
-                        state = self._refine_plan(state, feedback)
-                        iteration += 1
-                    else:
-                        break
-
-                if iteration >= self.max_iterations:
-                    self.logger.warning("  Max iterations reached.")
-                    print("⚠️  Max refinements reached. Proceeding with current plan.")
+            # Human plan approval/refinement gate — shared implementation
+            # (the locked-script reuse skip, #172, lives inside the helper).
+            state = run_plan_refinement_gate(
+                self, state,
+                refine_banner="\n🔄 Refining plan...\n",
+                max_banner="⚠️  Max refinements reached. Proceeding with current plan.",
+            )
 
             # Resolve + lock the column mapping (>2-col inputs only). It applies to
             # every spectrum (column roles are a file-structure property), so store
