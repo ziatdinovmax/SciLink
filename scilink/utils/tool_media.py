@@ -214,18 +214,34 @@ def sanitize_history_images(messages: list) -> list:
 def close_interrupted_turn(messages: list) -> list:
     """Restore user/assistant alternation after an interrupted turn.
 
-    A mid-run Stop ends a turn on a tool result with no assistant reply.
+    A mid-run Stop (or a mid-turn crash, now that the chat loops checkpoint
+    per tool call) ends a turn on a tool result with no assistant reply.
     The next user message would then directly follow a tool block — on
     Bedrock's converse API both are user-role blocks, and litellm papers
     over the pair with a noisy "Potential consecutive user/tool blocks.
     Trying to merge." warning on every subsequent call in the session.
     Closing the turn with a one-line assistant note keeps alternation
-    intact instead. A normally completed turn (assistant last) — and
-    anything else — passes through unchanged.
+    intact instead. The note names the last completed tool call(s) so the
+    model continues from the recorded results rather than restarting the
+    turn's work. A normally completed turn (assistant last) — and anything
+    else — passes through unchanged.
     """
     if messages and messages[-1].get("role") == "tool":
-        messages.append({
-            "role": "assistant",
-            "content": "[Turn interrupted before a reply was produced.]",
-        })
+        note = "[Turn interrupted before a reply was produced.]"
+        try:
+            last_names = None
+            for m in reversed(messages):
+                if m.get("role") == "assistant" and m.get("tool_calls"):
+                    last_names = [tc["function"]["name"]
+                                  for tc in m["tool_calls"]]
+                    break
+            if last_names:
+                note = (
+                    "[Turn interrupted before a reply was produced. The last "
+                    f"completed tool call was {', '.join(last_names)}; its "
+                    "result is recorded above. Continue from the recorded "
+                    "results — do not redo completed work unless asked.]")
+        except Exception:  # noqa: BLE001 - the generic note is always safe
+            pass
+        messages.append({"role": "assistant", "content": note})
     return messages

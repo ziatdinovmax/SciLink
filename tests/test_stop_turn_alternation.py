@@ -45,6 +45,46 @@ def test_healthy_histories_untouched(tail):
     assert close_interrupted_turn(list(tail)) == tail
 
 
+def test_note_names_the_last_completed_tool_call():
+    """Phase B of the resume plan: the closure note tells the model WHERE the
+    turn stopped, so a restored session continues from the recorded results
+    instead of restarting the turn's work."""
+    msgs = [{"role": "user", "content": "go"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "c9", "type": "function",
+                             "function": {"name": "run_analysis",
+                                          "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c9", "content": "big result"}]
+    out = close_interrupted_turn(list(msgs))
+    note = out[-1]["content"]
+    assert "run_analysis" in note
+    assert "do not redo completed work" in note
+
+
+def test_note_names_all_calls_of_the_last_batch():
+    msgs = [{"role": "user", "content": "go"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [
+                 {"id": "a", "type": "function",
+                  "function": {"name": "load_metadata", "arguments": "{}"}},
+                 {"id": "b", "type": "function",
+                  "function": {"name": "run_analysis", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "a", "content": "r1"},
+            {"role": "tool", "tool_call_id": "b", "content": "r2"}]
+    note = close_interrupted_turn(list(msgs))[-1]["content"]
+    assert "load_metadata" in note and "run_analysis" in note
+
+
+def test_malformed_tool_calls_fall_back_to_generic_note():
+    msgs = [{"role": "user", "content": "go"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"bad": "shape"}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "r"}]
+    out = close_interrupted_turn(list(msgs))
+    assert out[-1]["role"] == "assistant"
+    assert "interrupted" in out[-1]["content"]
+
+
 ORCHESTRATORS = [
     Path("scilink/agents/exp_agents/analysis_orchestrator.py"),
     Path("scilink/agents/planning_agents/planning_orchestrator.py"),
