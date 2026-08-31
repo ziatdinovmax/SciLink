@@ -736,6 +736,7 @@ class PlanningOrchestratorAgent:
         # delegation result's status from success → error.
         self.max_iterations = max_iterations
         self._last_chat_hit_iter_cap = False
+        self._last_chat_error = None
 
         # Custom tools / MCP state
         self._tool_data_cache: Dict[tuple, Any] = {}
@@ -1349,7 +1350,8 @@ class PlanningOrchestratorAgent:
         _set_evlog(str(_P(self.base_dir) / "events.jsonl"))
         self.message_count += 1
         self._last_chat_hit_iter_cap = False
-        
+        self._last_chat_error = None
+
         # AUTO-CHECKPOINT: Every 10 messages
         if self.message_count - self.last_checkpoint_message_count >= 10:
             print("  💾 Auto-checkpoint triggered (every 10 messages)...")
@@ -1374,10 +1376,14 @@ class PlanningOrchestratorAgent:
             
         except Exception as e:
             logging.error(f"Chat Error: {e}", exc_info=True)
-            
+
             print("  💾 Error detected - saving emergency checkpoint...")
             self._auto_checkpoint()
-            
+
+            # Flag the failure for run_task: the ❌ string preserves CLI/UI
+            # behavior, but a programmatic caller must see status="error",
+            # not a success whose summary happens to start with ❌.
+            self._last_chat_error = str(e)
             return f"❌ Error: {e}\n\n(Emergency checkpoint saved to {self.checkpoint_path})"
 
     def run_task(self, task: str, context: Optional[Dict[str, Any]] = None,
@@ -1482,6 +1488,12 @@ class PlanningOrchestratorAgent:
                 if self._last_chat_hit_iter_cap:
                     status = "error"
                     error_msg: Optional[str] = summary_text
+                elif self._last_chat_error:
+                    # chat()'s emergency catch-all returned the "❌ Error: ..."
+                    # string as a normal reply; surface it as a failure instead
+                    # of a success whose summary starts with ❌.
+                    status = "error"
+                    error_msg = self._last_chat_error
                 else:
                     status = "success"
                     error_msg = None
