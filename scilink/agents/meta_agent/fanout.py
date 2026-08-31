@@ -130,15 +130,86 @@ def _release_branch(key: str) -> None:
     with _mem_cv:
         _mem_running.pop(key, None)
         _mem_cv.notify_all()
+
+
+# --- Cooperative branch cancellation ---------------------------------------
+# An over-budget branch used to be merely ABANDONED: its subprocesses were
+# killed and its ledger entry closed, but the thread itself kept burning API
+# quota, could still write into its session dir, and held its
+# memory-admission slot (released only when run_task returned). Cancellation
+# borrows the UI stop-button mechanism (``AgentStoppedError`` raised from a
+# stream write): while a fan-out runs, sys.stdout/stderr are wrapped by a
+# thread-aware guard that raises inside a branch thread once that branch's
+# stop event is set. Cooperative, not preemptive — a branch inside a single
+# long LLM call notices only on its next print; the ledger's timeout verdict
+# (#358) stands either way, so cancellation only shortens the waste.
+_branch_stop_events: Dict[int, "_threading.Event"] = {}
+_branch_stop_lock = _threading.Lock()
+
+
+def _register_branch_stop(event) -> None:
+    with _branch_stop_lock:
+        _branch_stop_events[_threading.get_ident()] = event
+
+
+def _unregister_branch_stop() -> None:
+    with _branch_stop_lock:
+        _branch_stop_events.pop(_threading.get_ident(), None)
+
+
+class _ThreadStopStream:
+    """Chained stdout/stderr wrapper: raises in cancelled branch threads.
+
+    Wraps whatever stream is current (the terminal, or the UI's TeeStream)
+    and delegates everything; the only added behavior is the per-thread stop
+    check, so coordinator output and healthy branches are unaffected.
+    """
+
+    def __init__(self, original):
+        self._original = original
+
+    def write(self, data: str) -> int:
+        ev = _branch_stop_events.get(_threading.get_ident())
+        if ev is not None and ev.is_set():
+            from ...ui.output_capture import AgentStoppedError
+            raise AgentStoppedError(
+                "fan-out branch cancelled (wall-clock budget exceeded)")
+        return self._original.write(data)
+
+    def flush(self) -> None:
+        self._original.flush()
+
+    def __getattr__(self, name: str):
+        return getattr(self._original, name)
+
+
+def _ensure_stop_guard_installed() -> None:
+    """Install the thread-aware stop guard on stdout/stderr (idempotent).
+
+    Deliberately never uninstalled: a cancelled-but-still-running branch
+    thread must keep hitting the guard AFTER the fan-out that abandoned it
+    returns — restoring the streams at fan-out end would disarm cancellation
+    for exactly the threads it exists to stop. The wrapper is transparent
+    for every non-cancelled thread, and the idempotence check prevents
+    stacking a second guard on re-entry.
+    """
+    if not isinstance(sys.stdout, _ThreadStopStream):
+        sys.stdout = _ThreadStopStream(sys.stdout)
+    if not isinstance(sys.stderr, _ThreadStopStream):
+        sys.stderr = _ThreadStopStream(sys.stderr)
+
+
 _FANOUT_POLL_S = 5              # how often to check for finished branches
 _FANOUT_HEARTBEAT_S = 60        # min gap between "still running" ticks
 FANOUT_SOFT_CAP = 5             # warn / confirm beyond this many fused branches
 FANOUT_HARD_CAP = 8             # refuse beyond this — cost/quality cliff
 # Per-branch wall-clock budget (#358). A stuck branch (e.g. an analysis
 # retry loop that keeps failing QC) must not hold the whole fan-out: on
-# expiry the branch is recorded degraded and ABANDONED (its subprocesses are
-# killed; the thread itself cannot be killed safely and may finish late,
-# which is recorded for audit without changing the verdict). <= 0 disables.
+# expiry the branch is recorded degraded and CANCELLED — its subprocesses
+# are killed and its stop event fires, so the thread aborts cooperatively on
+# its next print (a thread cannot be killed preemptively and may still
+# finish a long in-flight LLM call late, which is recorded for audit
+# without changing the verdict). <= 0 disables.
 FANOUT_BRANCH_TIME_BUDGET_S = 3600.0
 # In AUTONOMOUS mode there is no human to confirm, so the verdict IS the gate:
 # proceed only on a confident 'complementary' read.
@@ -763,7 +834,7 @@ def _mesh_task(branch: dict, companions: List[dict]) -> str:
 
 def _run_one_branch(orch, branch: dict, companions: List[dict],
                     entry: dict, queue_channel=None,
-                    branch_autonomy=None) -> None:
+                    branch_autonomy=None, stop_event=None) -> None:
     """Execute a single fan-out branch into its preallocated ledger slot.
 
     Each worker touches ONLY its own ``entry`` dict, so there is no shared
@@ -786,6 +857,8 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
                   branch.get("label") or slug)
     entry["_started_at"] = time.monotonic()
     entry["_branch_tid"] = threading.get_ident()
+    if stop_event is not None:
+        _register_branch_stop(stop_event)
     if queue_channel is not None:
         from ...hitl import set_thread_channel
         set_thread_channel(_BranchChannel(
@@ -797,6 +870,12 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
     from ...session_events import append_event, set_thread_event_log
     _branch_label = branch.get("branch_id") or branch.get("label") or slug
     set_thread_event_log(Path(orch.base_dir) / "events.jsonl")
+    # Pre-assigned so the finally block can log even on the one path that
+    # propagates (a user-initiated AgentStoppedError re-raised below).
+    result: dict = {"status": "error",
+                    "error": "branch aborted before completion", "summary": "",
+                    "key_findings": [], "files_produced": [],
+                    "suggested_followups": [], "warnings": []}
     try:
         try:
             from ..exp_agents.analysis_orchestrator import AnalysisMode
@@ -812,7 +891,25 @@ def _run_one_branch(orch, branch: dict, companions: List[dict],
             result = {"status": "error", "error": str(e), "summary": "",
                       "key_findings": [], "files_produced": [],
                       "suggested_followups": [], "warnings": []}
+        except BaseException as e:
+            # A budget cancellation arrives as AgentStoppedError (raised from
+            # a stream write by _ThreadStopStream). Convert it to a clean
+            # cancelled result ONLY when it is THIS branch's own stop event —
+            # a user-initiated stop (the UI's global stop event) must stay
+            # unrecoverable and propagate.
+            from ...ui.output_capture import AgentStoppedError
+            if not (isinstance(e, AgentStoppedError)
+                    and stop_event is not None and stop_event.is_set()):
+                raise
+            logger.warning(f"fan-out branch {index} cancelled "
+                           "(wall-clock budget exceeded)")
+            result = {"status": "cancelled",
+                      "error": "branch cancelled after wall-clock budget",
+                      "summary": "", "key_findings": [], "files_produced": [],
+                      "suggested_followups": [], "warnings": []}
     finally:
+        if stop_event is not None:
+            _unregister_branch_stop()
         append_event(
             "fanout_branch",
             {"label": branch.get("label") or slug,
@@ -1166,14 +1263,17 @@ def run_fanout(orch, branches: List[dict],
         branch_autonomy = AnalysisMode[orch.meta_mode.name]
 
     pool = ThreadPoolExecutor(max_workers=max_workers)
+    _ensure_stop_guard_installed()
     try:
-        fut_label, fut_entry = {}, {}
+        fut_label, fut_entry, fut_stop = {}, {}, {}
         for i in range(follower_start, n_total):
+            stop_ev = _threading.Event()
             fut = pool.submit(_run_one_branch, orch, run_branches[i],
                               branch_companions[i], entries[i],
-                              queue_channel, branch_autonomy)
+                              queue_channel, branch_autonomy, stop_ev)
             fut_label[fut] = run_branches[i]["label"]
             fut_entry[fut] = entries[i]
+            fut_stop[fut] = stop_ev
         # Wait with a periodic heartbeat so the user can see the parallel run is
         # alive (a slow branch can otherwise look like a hang). Each branch is
         # announced as it finishes; the rest get a "still running" tick.
@@ -1215,10 +1315,14 @@ def run_fanout(orch, branches: List[dict],
                     e["timed_out"] = True
                     print(f"  ⏱️  analysis branch '{fut_label[f]}' exceeded "
                           f"its wall-clock budget ({int(budget)}s) — "
-                          "abandoning it (degraded, excluded from fusion).")
+                          "cancelling it (degraded, excluded from fusion).")
                     logger.warning(
                         f"fan-out branch {e['index']} ('{fut_label[f]}') "
-                        f"abandoned after {int(budget)}s wall-clock budget")
+                        f"cancelled after {int(budget)}s wall-clock budget")
+                    # Fire the branch's stop event FIRST so its thread aborts
+                    # on its next print (releasing its memory-admission slot),
+                    # then kill any subprocess it is currently waiting on.
+                    fut_stop[f].set()
                     tid = e.get("_branch_tid")
                     if tid:
                         try:
