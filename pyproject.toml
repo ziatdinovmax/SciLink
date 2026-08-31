@@ -73,6 +73,14 @@ sim = [
 # dependency). The empty extra is kept so existing `pip install scilink[ui]`
 # instructions keep working.
 ui = []
+# React web frontend's backend server (scilink-web). uvicorn/starlette were
+# previously only implied by the MCP SSE transport; the web server declares
+# them explicitly.
+web = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "python-multipart>=0.0.9",
+]
 structure-matching = [
     # Cap <2026: pymatgen 2026.x makes pymatgen.analysis a namespace package and
     # drops bundled pymatgen.analysis.phase_diagram, which breaks the emmet-core /
@@ -106,6 +114,7 @@ ff = [
 all = [
     "scilink[sim]",
     "scilink[ui]",
+    "scilink[web]",
     "scilink[structure-matching]",
     "scilink[ff]",
 ]
@@ -118,6 +127,7 @@ all = [
 scilink = "scilink.cli.main:main"
 scilink-ui = "scilink.cli.ui:main"
 scilink-mcp = "scilink.cli.serve:main"
+scilink-web = "scilink.server.cli:main"
 
 # Third-party packages can advertise custom analysis agents here.
 # SciLink discovers these automatically on startup via importlib.metadata.
