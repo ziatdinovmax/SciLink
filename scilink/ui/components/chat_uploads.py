@@ -13,7 +13,58 @@ from ..config import (
     SUPPORTED_PLANNING_DATA_EXTENSIONS,
     extra_data_extensions_for,
 )
-from .sidebar import save_metadata_to_series, save_upload, save_upload_batch
+from .sidebar import (save_metadata_to_series, save_upload,
+                      save_upload_batch, split_upload_arrivals)
+
+
+def build_analyze_prompt(data_path, meta_path=None, has_sidecars=False,
+                         batch=False, first_path=None,
+                         late_paths=None) -> str:
+    """Compose the Analyze dispatch prompt from the upload state.
+
+    The prompt carries the one signal only the UI has — which files
+    arrived together and which were added later — and leaves the
+    series-vs-independent decision to the orchestrator (#114).
+    """
+    if late_paths:
+        lines = [f"- uploaded first: `{first_path or data_path}`"]
+        lines += [f"- added later: `{p}`" for p in late_paths]
+        prompt = (
+            "I uploaded these data files at different times:\n"
+            + "\n".join(lines) + "\n"
+            "Files uploaded at different times are likely independent "
+            "datasets rather than one series. Examine them and decide what "
+            "actually belongs together before analyzing — ask me if it is "
+            "genuinely ambiguous — and analyze independent files "
+            "separately."
+        )
+        if meta_path:
+            prompt += (f"\nA metadata file is at `{meta_path}`; "
+                       "load it and judge which data it describes.")
+        return prompt
+
+    confirm = (
+        " The files were uploaded together as one batch; confirm they "
+        "actually form one series before running a series analysis — if "
+        "they look unrelated, analyze them separately."
+    ) if batch else ""
+
+    if data_path and meta_path:
+        return (
+            f"I uploaded a data file at `{data_path}` "
+            f"and a metadata file at `{meta_path}`. "
+            f"Please examine the data and load the metadata." + confirm
+        )
+    if data_path and has_sidecars:
+        return (
+            f"I uploaded data files at `{data_path}` along with "
+            f"per-file JSON sidecar metadata in the same directory. "
+            f"Please examine the data and load the metadata "
+            f"(pass the directory path `{data_path}` to load_metadata)."
+            + confirm
+        )
+    return (f"I uploaded a data file at `{data_path}`. Please examine it."
+            + confirm)
 
 
 def render_pre_chat_uploads(start_task_fn) -> None:
@@ -56,11 +107,28 @@ def _render_analyze_uploads(start_task_fn) -> None:
         )
         if extra_exts:
             st.caption("Vendor formats enabled via SciFiReaders MCP")
-        if main_data:
-            if len(main_data) == 1:
-                save_upload(main_data[0], "data", auto_dispatch=False)
+        first_data, late_data = split_upload_arrivals(
+            main_data or [], "chat_data")
+        if not main_data:
+            st.session_state.pop("_late_data_paths", None)
+            st.session_state.pop("_first_data_path", None)
+        else:
+            # Late additions (files the accumulating widget gained AFTER
+            # its first batch) are saved as independent uploads, never
+            # merged into a series with the earlier files — the
+            # orchestrator judges what belongs together (#114).
+            if late_data:
+                seen = st.session_state.setdefault("_late_data_paths", [])
+                for f in late_data:
+                    p = save_upload(f, "data", auto_dispatch=False)
+                    if p not in seen:
+                        seen.append(p)
+            elif len(first_data) == 1:
+                st.session_state["_first_data_path"] = save_upload(
+                    first_data[0], "data", auto_dispatch=False)
             else:
-                save_upload_batch(main_data, "data", auto_dispatch=False)
+                st.session_state["_first_data_path"] = save_upload_batch(
+                    first_data, "data", auto_dispatch=False)
     with up_meta:
         main_meta = st.file_uploader(
             "Metadata (optional)",
@@ -77,27 +145,16 @@ def _render_analyze_uploads(start_task_fn) -> None:
     # Show "Analyze" button once data is uploaded
     if st.session_state.uploaded_data_path:
         if st.button("Analyze", type="primary", width="stretch"):
-            data_path = st.session_state.uploaded_data_path
-            meta_path = st.session_state.uploaded_metadata_path
-            has_sidecars = st.session_state.get("uploaded_sidecar_metadata", False)
-            if data_path and meta_path:
-                prompt = (
-                    f"I uploaded a data file at `{data_path}` "
-                    f"and a metadata file at `{meta_path}`. "
-                    f"Please examine the data and load the metadata."
-                )
-            elif data_path and has_sidecars:
-                prompt = (
-                    f"I uploaded data files at `{data_path}` along with "
-                    f"per-file JSON sidecar metadata in the same directory. "
-                    f"Please examine the data and load the metadata "
-                    f"(pass the directory path `{data_path}` to load_metadata)."
-                )
-            else:
-                prompt = (
-                    f"I uploaded a data file at `{data_path}`. "
-                    f"Please examine it."
-                )
+            prompt = build_analyze_prompt(
+                st.session_state.uploaded_data_path,
+                meta_path=st.session_state.uploaded_metadata_path,
+                has_sidecars=st.session_state.get(
+                    "uploaded_sidecar_metadata", False),
+                batch=len(st.session_state.get("_upload_first_batch_chat_data")
+                          or []) > 1,
+                first_path=st.session_state.get("_first_data_path"),
+                late_paths=st.session_state.get("_late_data_paths"),
+            )
             st.session_state.chat_messages.append({"role": "user", "content": prompt})
             start_task_fn(prompt)
 
