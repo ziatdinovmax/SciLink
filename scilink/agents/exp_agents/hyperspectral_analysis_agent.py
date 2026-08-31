@@ -499,6 +499,12 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         if reuse_records:
             _new_recs = result_json.get("dynamic_analysis_records") or []
             _supplied = {r.get("script") for r in reuse_records}
+            # #518: a replay that could not reproduce a mask-scoped donor's
+            # scoping ran full-frame — a degraded harmonization the caller
+            # (and fusion) must see, not a silent methodological drift.
+            _scope_warnings = [
+                (nr or {}).get("replay_scope_degraded") for nr in _new_recs
+                if (nr or {}).get("replay_scope_degraded")]
             response["script_reuse"] = {
                 "prior_analysis_paths": [str(p) for p in prior_analysis_paths],
                 "n_replayed": len(reuse_records),
@@ -506,6 +512,9 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 # script — the run then is NOT byte-comparable to the donor.
                 "verbatim": bool(_new_recs) and all(
                     (nr or {}).get("script") in _supplied for nr in _new_recs),
+                **({"scope_degraded": True,
+                    "scope_warnings": _scope_warnings}
+                   if _scope_warnings else {}),
             }
         if literature_files:
             response["literature_files"] = literature_files
@@ -543,6 +552,13 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 f"outputs and the descriptive analysis (if any) are "
                 f"unaffected.")
 
+        # #518: degraded-harmonization warnings land AFTER the status blocks
+        # above (the partial branch ASSIGNS response["warnings"], which would
+        # drop an earlier append).
+        for _sw in (response.get("script_reuse") or {}).get(
+                "scope_warnings", []):
+            response.setdefault("warnings", []).append(
+                f"DEGRADED HARMONIZATION: {_sw}")
 
         # Stage novel hot-annealing successes (method-family abandoned and a
         # later attempt approved) for review-gated skill distillation —
