@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 import re
 import pandas as pd
 from pathlib import Path
@@ -1614,7 +1615,7 @@ class PlanningOrchestratorAgent:
                 print(f"  📦 Compressed {compressed} large tool result(s) in history "
                       f"({total_chars:,} → {new_total:,} chars)")
 
-    def _auto_checkpoint(self):
+    def _auto_checkpoint(self, quiet: bool = False):
         """Internal auto-checkpoint without LLM interaction."""
         try:
             checkpoint_data = {
@@ -1646,11 +1647,38 @@ class PlanningOrchestratorAgent:
             
             with open(self.checkpoint_path, 'w', encoding="utf-8") as f:
                 json.dump(checkpoint_data, f, indent=2)
-            
-            print(f"    ✅ Auto-checkpoint saved")
-            
+
+            if not quiet:
+                print(f"    ✅ Auto-checkpoint saved")
+
         except Exception as e:
             logging.warning(f"Auto-checkpoint failed: {e}")
+
+    # Wall-clock throttle for the per-tool-call checkpoint: a burst of cheap
+    # tool calls must not thrash the disk, while an expensive call (a whole
+    # generate_plan) always lands one because it outlasts the window.
+    TOOL_CHECKPOINT_MIN_INTERVAL_S = 15.0
+
+    def _checkpoint_after_tool(self) -> None:
+        """Persist history + state after a completed tool iteration.
+
+        The chat loop used to persist only at turn end, so a crash mid-turn
+        lost every completed tool call since the last turn boundary — and one
+        turn can contain a whole plan generation. Mirrors the MCP server's
+        checkpoint-after-tool. Quiet and throttled; a mid-turn history ends
+        in a dangling tool_use pair at worst, which the loop's
+        repair_dangling_tool_calls heals on the next load.
+        """
+        now = time.monotonic()
+        if (now - getattr(self, "_last_tool_checkpoint_ts", 0.0)
+                < self.TOOL_CHECKPOINT_MIN_INTERVAL_S):
+            return
+        self._last_tool_checkpoint_ts = now
+        try:
+            self._save_history()
+            self._auto_checkpoint(quiet=True)
+        except Exception as e:  # noqa: BLE001 - persistence must not kill the turn
+            logging.warning(f"Per-tool checkpoint failed: {e}")
 
     @staticmethod
     def _parse_tool_args(tool_call, finish_reason=None):
@@ -1783,6 +1811,8 @@ class PlanningOrchestratorAgent:
                     "tool_call_id": tool_call.id,
                     "content": result
                 })
+
+            self._checkpoint_after_tool()
 
         self._last_chat_hit_iter_cap = True
         return "⚠️ Maximum tool iterations reached. Please simplify your request."
@@ -1940,6 +1970,8 @@ class PlanningOrchestratorAgent:
                     "tool_call_id": tool_call.id,
                     "content": result
                 })
+
+            self._checkpoint_after_tool()
 
         self._last_chat_hit_iter_cap = True
         return "⚠️ Maximum tool iterations reached. Please simplify your request."
