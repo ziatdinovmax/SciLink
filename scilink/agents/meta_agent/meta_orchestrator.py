@@ -1282,6 +1282,12 @@ class MetaOrchestratorAgent:
                 "disagreement with the fused picture plainly — it is a "
                 "valid, valuable outcome.")
             entry["task"] = task
+        # Persist the provisional 'running' entry BEFORE the child runs
+        # (mirrors the fan-out launch checkpoint): a crash mid-delegation
+        # would otherwise leave no on-disk trace of it — the restored ledger
+        # would show the delegation as never having existed instead of
+        # interrupted.
+        self._auto_checkpoint(verbose=False)
         try:
             child = get_child()
             result = child.run_task(

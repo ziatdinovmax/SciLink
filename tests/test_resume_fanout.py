@@ -261,6 +261,32 @@ def test_harmonize_stamps_persisted_before_followers_run(tmp_path,
         "follower ran while its on-disk entry lacked the replay task/stamp")
 
 
+def test_single_delegation_provisional_entry_persisted(tmp_path, monkeypatch):
+    """A crash mid-delegation must leave the provisional 'running' entry on
+    disk (mirrors the fan-out launch checkpoint) so the restored ledger
+    shows the delegation as interrupted, not as never having existed.
+    Asserted from inside the running child."""
+    meta = MetaOrchestratorAgent(api_key="sk-dummy", base_dir=str(tmp_path))
+    seen = []
+
+    class FakeChild:
+        def run_task(self, task, context=None, autonomy=None):
+            led = json.loads(meta.checkpoint_path.read_text()).get(
+                "delegation_ledger", [])
+            seen.append([(e.get("mode"), e.get("status")) for e in led])
+            return {"status": "success", "summary": "ok",
+                    "key_findings": ["f"], "files_produced": []}
+
+    monkeypatch.setattr(meta, "_get_analysis_child", lambda: FakeChild())
+    meta._delegate("analysis", "analyze the thing", label="one-off")
+
+    assert seen and seen[0] == [("analysis", "running")], (
+        "child ran while its provisional entry was not yet on disk")
+    # After completion the persisted entry is finalized as usual.
+    led = json.loads(meta.checkpoint_path.read_text())["delegation_ledger"]
+    assert led[0]["status"] == "success"
+
+
 
 if __name__ == "__main__":
     import sys
