@@ -114,17 +114,48 @@ def _extract_images(result_str: str):
     return images, json.dumps(data)
 
 
+# Bound on a single tool result's footprint in the message history. Far above
+# any legitimate result (large metadata echoes run ~60KB) and far below the
+# poison observed live: one tool result echoing a 7.7MB JSON put ~5.3M tokens
+# into EVERY subsequent LLM call of the session — and per-tool checkpointing
+# makes such a result durable, so it must be bounded before it enters the
+# history at all.
+TOOL_RESULT_MAX_CHARS = 200_000
+
+
+def clip_tool_result(result_str: str) -> str:
+    """Bound one tool result before it enters the message history.
+
+    Results at or under ``TOOL_RESULT_MAX_CHARS`` pass through byte-identical
+    (the overwhelmingly common case). An oversized result is truncated with a
+    marker telling the model how to recover (re-run narrower), instead of
+    poisoning every later call in the session — and, with per-tool
+    checkpointing, every restored session too.
+    """
+    if not isinstance(result_str, str) or len(result_str) <= TOOL_RESULT_MAX_CHARS:
+        return result_str
+    return (result_str[:TOOL_RESULT_MAX_CHARS]
+            + f"\n\n[... TOOL RESULT TRUNCATED: {len(result_str)} chars total, "
+              f"first {TOOL_RESULT_MAX_CHARS} kept. The full output was too "
+              "large to keep in conversation context; the tool's side effects "
+              "(saved files, stored state) are intact — re-run the tool with "
+              "a narrower request if specifics beyond this point are needed.]")
+
+
 def build_tool_message(tool_call_id: str, result_str: str, *,
                        allow_image: bool) -> dict[str, Any]:
     """Build the ``tool`` message for the loop. Multimodal (text + image parts)
     when ``allow_image`` and the result carries an image; otherwise the exact
-    plain-string message the loop used before."""
+    plain-string message the loop used before. Either way the text part is
+    bounded by ``clip_tool_result`` (a no-op at normal sizes)."""
     if not allow_image:
-        return {"role": "tool", "tool_call_id": tool_call_id, "content": result_str}
+        return {"role": "tool", "tool_call_id": tool_call_id,
+                "content": clip_tool_result(result_str)}
     images, text = _extract_images(result_str)
     if not images:
-        return {"role": "tool", "tool_call_id": tool_call_id, "content": result_str}
-    content: list[dict] = [{"type": "text", "text": text}]
+        return {"role": "tool", "tool_call_id": tool_call_id,
+                "content": clip_tool_result(result_str)}
+    content: list[dict] = [{"type": "text", "text": clip_tool_result(text)}]
     for mime, b64 in images:
         content.append({"type": "image_url",
                         "image_url": {"url": f"data:{mime};base64,{b64}"}})

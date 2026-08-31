@@ -11,7 +11,8 @@ from enum import Enum
 
 from ...auth import get_internal_proxy_key
 from ...utils.prose_style import PROSE_STYLE_RULE
-from ...utils.tool_media import (repair_dangling_tool_calls,
+from ...utils.tool_media import (clip_tool_result,
+                                 repair_dangling_tool_calls,
                                  close_interrupted_turn)
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
@@ -1809,7 +1810,7 @@ class PlanningOrchestratorAgent:
                 self.messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
-                    "content": result
+                    "content": clip_tool_result(result)
                 })
 
             self._checkpoint_after_tool()
@@ -1968,7 +1969,7 @@ class PlanningOrchestratorAgent:
                 self.messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
-                    "content": result
+                    "content": clip_tool_result(result)
                 })
 
             self._checkpoint_after_tool()
