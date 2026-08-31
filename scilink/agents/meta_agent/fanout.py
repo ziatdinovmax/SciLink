@@ -1188,26 +1188,41 @@ def run_fanout(orch, branches: List[dict],
     if harmonize and len(run_branches) >= 2:
         donor = run_branches[0]
         donor_label = donor.get("label") or "donor"
+        # #519 hardening: steer the donor toward one self-contained
+        # run_analysis call — its approved script becomes the frozen
+        # pipeline, and a long multi-call workflow risks exhausting the
+        # turn budget before any record is approved. A nudge, not a gate.
+        donor["task"] = donor["task"] + (
+            "\n\nPIPELINE-DONOR NOTE: your approved analysis script will be "
+            "replayed verbatim on sibling datasets. Prefer completing this "
+            "analysis in ONE self-contained run_analysis call over a long "
+            "multi-step workflow.")
+        entries[0]["task"] = _mesh_task(donor, branch_companions[0])
         print(f"  🧬 Harmonized mode: running pipeline donor '{donor_label}' "
               "first (followers will replay its approved script)...")
         _run_one_branch(orch, donor, branch_companions[0], entries[0],
                         None, None)
         follower_start = 1
+        # #519: search for approved records REGARDLESS of the donor
+        # delegation's top-level status. A donor can exhaust its iteration
+        # budget — or die after approval — and honestly report "error" while
+        # an approved, replayable script sits on disk; the records are the
+        # authority here (each is task_success-gated with the script
+        # attached). Only a donor with NO approved record falls back.
         reuse_dir = None
-        if entries[0].get("status") == "success":
-            _donor_dir = (orch.fanout_dir
-                          / f"{entries[0]['index']:02d}_{_slug(donor_label)}")
-            _cands = sorted(_donor_dir.rglob("dynamic_analysis_records.json"),
-                            key=lambda p: p.stat().st_mtime)
-            for _c in reversed(_cands):
-                try:
-                    _recs = json.loads(_c.read_text(encoding="utf-8"))
-                except Exception:  # noqa: BLE001 - keep looking
-                    continue
-                if any(isinstance(r, dict) and r.get("script")
-                       and r.get("task_success") for r in _recs):
-                    reuse_dir = _c.parent
-                    break
+        _donor_dir = (orch.fanout_dir
+                      / f"{entries[0]['index']:02d}_{_slug(donor_label)}")
+        _cands = sorted(_donor_dir.rglob("dynamic_analysis_records.json"),
+                        key=lambda p: p.stat().st_mtime)
+        for _c in reversed(_cands):
+            try:
+                _recs = json.loads(_c.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001 - keep looking
+                continue
+            if any(isinstance(r, dict) and r.get("script")
+                   and r.get("task_success") for r in _recs):
+                reuse_dir = _c.parent
+                break
         if reuse_dir is None:
             msg = (f"harmonize requested but donor '{donor_label}' produced "
                    "no approved replayable script — followers run "
@@ -1217,6 +1232,12 @@ def run_fanout(orch, branches: List[dict],
             harmonized_info = {"donor": donor_label, "status": "fallback",
                                "reason": "no approved donor script"}
         else:
+            donor_partial = entries[0].get("status") != "success"
+            if donor_partial:
+                print(f"  🧬 Donor delegation degraded overall "
+                      f"(status: {entries[0].get('status')}) but produced an "
+                      "approved script — harmonizing on the approved record "
+                      "(partial donor, #519).")
             print(f"  🧬 Donor script approved — followers will replay "
                   f"{reuse_dir.name} verbatim.")
             harm_block = (
@@ -1237,6 +1258,11 @@ def run_fanout(orch, branches: List[dict],
                 "donor": donor_label, "status": "harmonized",
                 "reuse_dir": str(reuse_dir),
                 "followers": [b.get("label") for b in run_branches[1:]],
+                # Surfaced so fusion/readers can weigh a pipeline donated by
+                # a delegation that did not itself finish cleanly (#519).
+                **({"donor_partial": True,
+                    "donor_status": entries[0].get("status")}
+                   if donor_partial else {}),
             }
 
     # --- run concurrently; wiring per the mesh policy ---
