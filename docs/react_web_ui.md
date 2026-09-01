@@ -53,9 +53,26 @@ authenticating reverse proxy.
 - **Uploads**: per-mode pre-chat heroes (analyze data+metadata, plan
   knowledge/code/data, meta combined dropzone) writing to the same session
   subdirectories as Streamlit, composing the same dispatch prompts.
+- **File Explorer** (Files tab) — beyond Streamlit parity:
+  - live tree: no Refresh button — the server emits `files_changed` while a
+    turn runs, so artifacts appear as the agent writes them;
+  - "new" badges on files produced since the current turn started, a
+    filename filter, and a recent-first flat view;
+  - previews: images with zoom, NPY/TIFF heatmaps with a colormap selector
+    (server-rendered), sortable/filterable CSV/TSV/XLSX tables, markdown
+    with a Rendered|Source toggle, JSON pretty-print, sandboxed HTML,
+    browser-native PDF, code/VASP text;
+  - chat ↔ explorer cross-links: artifact cards jump to the file in the
+    explorer; any file's "Attach to chat" drops its path into the draft;
+  - gallery view (thumbnail grid) and per-folder / whole-session zip
+    download;
+  - provenance: a timeline view of the session event log
+    (`events.jsonl`) and a "produced by <tool>" line on previews;
+  - deep links: the tab and selected file live in the URL hash, so a
+    refresh (or shared link) lands on the same file.
 
-Not yet ported: simulate mode, the File Explorer / Tools / Skills /
-Telemetry tabs, vibes, pasted-folder-path inputs on the plan/meta heroes.
+Not yet ported: simulate mode, the Tools / Skills / Telemetry tabs, vibes,
+pasted-folder-path inputs on the plan/meta heroes.
 
 ## Architecture
 
@@ -92,11 +109,18 @@ webui/ (Vite + React + TS)  ──REST + SSE──►  scilink/server/ (FastAPI)
 | POST | `/sessions` | create, or resume with `resume_dir` |
 | GET/PATCH | `/sessions/{id}` | snapshot / rename |
 | POST | `/sessions/{id}/messages` | start a turn (409 while one runs) |
-| GET | `/sessions/{id}/events` | SSE: `log`, `status`, `question`, `question_cleared`, `assistant_message`, `session_named`, `error` |
+| GET | `/sessions/{id}/events` | SSE: `log`, `status`, `question`, `question_cleared`, `assistant_message`, `session_named`, `files_changed`, `error` |
 | POST | `/sessions/{id}/feedback` | answer the parked HITL question |
 | POST | `/sessions/{id}/stop` | stop the running turn |
 | POST | `/sessions/{id}/uploads` | multipart, `category` = data/metadata/knowledge/code/planning_data/meta |
 | GET | `/sessions/{id}/files?path=` | serve a session file (traversal-fenced) |
+| GET | `/sessions/{id}/tree` | recursive listing with sizes/mtimes and per-file "new" flags |
+| GET | `/sessions/{id}/thumb?path=&size=&cmap=` | PNG thumbnail; NPY/TIFF rendered as normalized heatmaps |
+| GET | `/sessions/{id}/table?path=&limit=` | CSV/TSV/XLSX head as JSON columns+rows |
+| GET | `/sessions/{id}/zip?path=` | zip a session subdirectory (or the whole session) |
+| GET | `/sessions/{id}/provenance` | tool-call timeline from every `events.jsonl` under the session |
+| DELETE | `/sessions/{id}` | reset: stop and drop the live session (dir stays resumable) |
+| POST | `/quit` | shut the server down |
 
 ## Development
 

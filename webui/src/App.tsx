@@ -7,9 +7,11 @@ import {
   type SessionSnapshot,
 } from "./api";
 import { useSessionEvents, type SessionEvent } from "./useSessionEvents";
+import { UIContext } from "./UIContext";
 import { Sidebar, type SidebarConfig } from "./components/Sidebar";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { ChatPanel } from "./components/ChatPanel";
+import { FilesPanel } from "./components/FilesPanel";
 import { PreChatHero } from "./components/PreChatHero";
 
 interface SessionState {
@@ -20,6 +22,7 @@ interface SessionState {
   pendingQuestion: PresentedQuestion | null;
   name: string | null;
   lastError: string | null;
+  filesVersion: number; // bumped on files_changed → the Files tab refetches
 }
 
 const emptyState: SessionState = {
@@ -30,6 +33,7 @@ const emptyState: SessionState = {
   pendingQuestion: null,
   name: null,
   lastError: null,
+  filesVersion: 0,
 };
 
 type Action =
@@ -87,6 +91,8 @@ function reducer(state: SessionState, action: Action): SessionState {
         }
         case "session_named":
           return { ...state, name: ev.name };
+        case "files_changed":
+          return { ...state, filesVersion: state.filesVersion + 1 };
         case "error":
           return { ...state, lastError: ev.message };
         default:
@@ -105,6 +111,9 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>(null); // init overlay text
   const [startError, setStartError] = useState<string | null>(null);
   const [serverStopped, setServerStopped] = useState(false);
+  const [tab, setTab] = useState<"chat" | "files">("chat");
+  const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [attachRequest, setAttachRequest] = useState<string | null>(null);
   const [state, dispatch] = useReducer(reducer, emptyState);
 
   useEffect(() => {
@@ -123,9 +132,26 @@ export default function App() {
         const snapshot = await api.getSession(live.id);
         setMode(snapshot.mode);
         dispatch({ type: "session_loaded", snapshot });
+        // Deep link: restore #files[:path] from before the refresh.
+        const m = /^#files(?::(.+))?$/.exec(window.location.hash);
+        if (m) {
+          setTab("files");
+          if (m[1]) setSelectedFile(decodeURIComponent(m[1]));
+        }
       })
       .catch(() => {});
   }, []);
+
+  // Keep the URL hash in sync so a refresh (or a shared link) lands on the
+  // same tab and file.
+  useEffect(() => {
+    if (!state.snapshot) return;
+    const hash =
+      tab === "files"
+        ? `#files${selectedFile ? ":" + encodeURIComponent(selectedFile) : ""}`
+        : "#chat";
+    window.history.replaceState(null, "", hash);
+  }, [tab, selectedFile, state.snapshot]);
 
   const onEvent = useCallback(
     (ev: SessionEvent) => dispatch({ type: "event", event: ev }),
@@ -188,6 +214,9 @@ export default function App() {
       /* already gone server-side */
     }
     dispatch({ type: "session_closed" });
+    setTab("chat");
+    setSelectedFile(null);
+    window.history.replaceState(null, "", "#");
   };
 
   const quitApp = async () => {
@@ -200,6 +229,20 @@ export default function App() {
   };
 
   const session = state.snapshot;
+
+  const uiActions = {
+    openInFiles: (path: string) => {
+      setSelectedFile(path);
+      setTab("files");
+    },
+    // The agents take absolute paths in prompts (matching the upload
+    // dispatch convention), so attach the full path.
+    attachToChat: (path: string) => {
+      const base = state.snapshot?.session_dir;
+      setAttachRequest(base ? `${base}/${path}` : path);
+      setTab("chat");
+    },
+  };
 
   if (serverStopped) {
     return (
@@ -239,28 +282,55 @@ export default function App() {
             error={startError}
             theme={theme}
           />
-        ) : state.messages.length === 0 && state.status === "idle" ? (
-          <PreChatHero
-            mode={mode}
-            sessionId={session.id}
-            onStart={sendMessage}
-          />
         ) : (
-          <ChatPanel
-            session={session}
-            mode={mode}
-            status={state.status}
-            messages={state.messages}
-            liveLog={state.liveLog}
-            pendingQuestion={state.pendingQuestion}
-            lastError={state.lastError}
-            onSend={sendMessage}
-            onStop={() => api.stop(session.id)}
-            onFeedback={(requestId, response) =>
-              api.sendFeedback(session.id, requestId, response)
-            }
-            onDismissError={() => dispatch({ type: "clear_error" })}
-          />
+          <UIContext.Provider value={uiActions}>
+            <div className="tab-bar">
+              <button
+                className={tab === "chat" ? "active" : ""}
+                onClick={() => setTab("chat")}
+              >
+                Chat
+              </button>
+              <button
+                className={tab === "files" ? "active" : ""}
+                onClick={() => setTab("files")}
+              >
+                Files
+              </button>
+            </div>
+            {tab === "files" ? (
+              <FilesPanel
+                sessionId={session.id}
+                filesVersion={state.filesVersion}
+                selectedPath={selectedFile}
+                onSelect={setSelectedFile}
+              />
+            ) : state.messages.length === 0 && state.status === "idle" ? (
+              <PreChatHero
+                mode={mode}
+                sessionId={session.id}
+                onStart={sendMessage}
+              />
+            ) : (
+              <ChatPanel
+                session={session}
+                mode={mode}
+                status={state.status}
+                messages={state.messages}
+                liveLog={state.liveLog}
+                pendingQuestion={state.pendingQuestion}
+                lastError={state.lastError}
+                attachRequest={attachRequest}
+                onAttachConsumed={() => setAttachRequest(null)}
+                onSend={sendMessage}
+                onStop={() => api.stop(session.id)}
+                onFeedback={(requestId, response) =>
+                  api.sendFeedback(session.id, requestId, response)
+                }
+                onDismissError={() => dispatch({ type: "clear_error" })}
+              />
+            )}
+          </UIContext.Provider>
         )}
       </div>
     </div>

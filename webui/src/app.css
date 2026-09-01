@@ -302,6 +302,125 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 .chat-input-row button.send > svg { display: block; margin-left: 2px; }
 .chat-input-row button.send:hover:not(:disabled) { background: var(--primary-hover); }
 
+/* ── tabs ───────────────────────────────────────────────────── */
+
+.tab-bar {
+  display: flex; gap: 4px; padding: 8px 8% 0;
+  border-bottom: 1px solid var(--border);
+}
+.tab-bar button {
+  border: none; background: none; color: var(--text-muted);
+  border-radius: 8px 8px 0 0; padding: 8px 18px;
+  border-bottom: 2px solid transparent;
+}
+.tab-bar button.active {
+  color: var(--accent); border-bottom-color: var(--accent);
+}
+
+/* ── file explorer ──────────────────────────────────────────── */
+
+.files-panel { flex: 1; display: flex; min-height: 0; }
+
+.files-tree {
+  width: 380px; min-width: 300px; display: flex; flex-direction: column;
+  border-right: 1px solid var(--border); padding: 12px;
+  gap: 8px;
+}
+.files-toolbar { display: flex; gap: 10px; align-items: center; }
+.files-viewmodes { display: flex; gap: 6px; }
+.files-viewmodes button { padding: 4px 12px; font-size: 13px; }
+.files-scroll { flex: 1; overflow-y: auto; min-height: 0; }
+
+.tree-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 4px 8px; border-radius: 6px; cursor: pointer;
+  font-size: 13.5px; white-space: nowrap; overflow: hidden;
+}
+.tree-row > span { overflow: hidden; text-overflow: ellipsis; }
+.tree-row:hover { background: var(--bg-card); }
+.tree-row.selected { background: var(--bg-card); color: var(--accent); }
+.tree-row .zip-link {
+  visibility: hidden; text-decoration: none; color: var(--text-dim);
+  padding: 0 4px;
+}
+.tree-row:hover .zip-link { visibility: visible; }
+
+.new-badge {
+  margin-left: 6px; font-size: 10px; font-weight: 700;
+  color: var(--teal); border: 1px solid var(--teal);
+  border-radius: 8px; padding: 0 5px; vertical-align: middle;
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+
+.files-preview { flex: 1; overflow-y: auto; min-width: 0; }
+.preview-pane { padding: 14px 18px; }
+.preview-header {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  gap: 12px; margin-bottom: 10px;
+}
+.preview-title { min-width: 0; }
+.provenance-line { margin-top: 2px; }
+.preview-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.preview-toolbar {
+  display: flex; gap: 8px; align-items: center; margin-bottom: 8px;
+}
+.preview-toolbar button { padding: 4px 12px; font-size: 13px; }
+.image-scroll { overflow: auto; max-height: calc(100vh - 220px); }
+.preview-frame { width: 100%; height: 600px; border: 1px solid var(--border); border-radius: 6px; background: #fff; }
+.preview-frame.tall { height: calc(100vh - 220px); }
+.text-preview {
+  background: var(--code-bg); color: var(--code-text);
+  border: 1px solid var(--code-border); border-radius: 6px;
+  padding: 10px 12px; overflow: auto; font-size: 13px;
+  max-height: calc(100vh - 220px); white-space: pre-wrap;
+}
+
+.table-scroll { overflow: auto; max-height: calc(100vh - 260px); }
+.data-table { border-collapse: collapse; font-size: 13px; }
+.data-table th {
+  position: sticky; top: 0; background: var(--bg-card);
+  cursor: pointer; user-select: none; text-align: left;
+}
+.data-table th, .data-table td {
+  border: 1px solid var(--border); padding: 3px 10px; white-space: nowrap;
+}
+
+.gallery-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  gap: 8px;
+}
+.gallery-grid figure {
+  margin: 0; cursor: pointer; border: 1px solid var(--border);
+  border-radius: 6px; padding: 4px; text-align: center;
+}
+.gallery-grid figure.selected { border-color: var(--accent); }
+.gallery-grid img { width: 100%; height: 90px; object-fit: cover; border-radius: 4px; }
+.gallery-grid figcaption {
+  font-size: 11px; color: var(--text-dim); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+
+.timeline { display: flex; flex-direction: column; gap: 10px; }
+.timeline-item {
+  border-left: 3px solid var(--border-strong); padding: 2px 0 2px 10px;
+  font-size: 13px;
+}
+.timeline-item .status-ok { color: var(--teal); }
+.timeline-item .status-error { color: var(--danger); }
+.timeline-files { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.file-chip-btn {
+  font-size: 11.5px; padding: 1px 8px; border-radius: 10px;
+  background: var(--bg-card); border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+.file-chip-btn:hover { color: var(--accent); border-color: var(--accent); }
+
+.link-btn {
+  border: none; background: none; padding: 0; font-size: 12px;
+  color: var(--text-dim);
+}
+.link-btn:hover { color: var(--accent); border: none; }
+
 /* ── misc ───────────────────────────────────────────────────── */
 
 .status-badge {

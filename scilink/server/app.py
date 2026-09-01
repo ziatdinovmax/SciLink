@@ -221,6 +221,73 @@ def create_app(session_root: Path, serve_frontend: bool = True) -> FastAPI:
         except files_mod.UploadError as exc:
             raise HTTPException(400, str(exc))
 
+    @app.get("/api/v1/sessions/{session_id}/tree")
+    def get_tree(session_id: str):
+        session = _session_or_404(session_id)
+        from .tree import build_tree
+        return build_tree(session.session_dir,
+                          new_since=session.turn_started_at)
+
+    @app.get("/api/v1/sessions/{session_id}/provenance")
+    def get_provenance(session_id: str):
+        session = _session_or_404(session_id)
+        from .tree import load_provenance
+        return {"events": load_provenance(session.session_dir)}
+
+    @app.get("/api/v1/sessions/{session_id}/thumb")
+    def get_thumb(session_id: str, path: str, size: int = 256,
+                  cmap: str = "viridis"):
+        session = _session_or_404(session_id)
+        from fastapi.responses import Response
+
+        from . import previews
+        try:
+            target = files_mod.resolve_safe(session.session_dir, path)
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc))
+        if not target.is_file():
+            raise HTTPException(404, f"No such file: {path}")
+        try:
+            png = previews.render_thumbnail(target, size=size, cmap=cmap)
+        except Exception as exc:
+            raise HTTPException(422, f"Could not render {path}: {exc}")
+        return Response(png, media_type="image/png",
+                        headers={"Cache-Control": "no-cache"})
+
+    @app.get("/api/v1/sessions/{session_id}/table")
+    def get_table(session_id: str, path: str, limit: int = 500):
+        session = _session_or_404(session_id)
+        from . import previews
+        try:
+            target = files_mod.resolve_safe(session.session_dir, path)
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc))
+        if not target.is_file():
+            raise HTTPException(404, f"No such file: {path}")
+        try:
+            return previews.extract_table(target, limit=limit)
+        except Exception as exc:
+            raise HTTPException(422, f"Could not read table {path}: {exc}")
+
+    @app.get("/api/v1/sessions/{session_id}/zip")
+    def get_zip(session_id: str, path: str = ""):
+        session = _session_or_404(session_id)
+        from fastapi.responses import Response
+
+        from .tree import zip_directory
+        try:
+            blob = zip_directory(session.session_dir, path)
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc))
+        except FileNotFoundError:
+            raise HTTPException(404, f"No such directory: {path}")
+        except ValueError as exc:
+            raise HTTPException(413, str(exc))
+        name = (Path(path).name or session.id) + ".zip"
+        return Response(
+            blob, media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
     @app.get("/api/v1/sessions/{session_id}/files")
     def get_file(session_id: str, path: str):
         session = _session_or_404(session_id)

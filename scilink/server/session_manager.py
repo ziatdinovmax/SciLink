@@ -48,6 +48,9 @@ class WebSession:
     tracker: ArtifactTracker = None  # type: ignore[assignment]
     chat_messages: List[Dict[str, Any]] = field(default_factory=list)
     turn: Optional[TurnState] = None
+    # When the current (or most recent) turn started — files modified at or
+    # after this get the explorer's "new" badge.
+    turn_started_at: Optional[float] = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def __post_init__(self) -> None:

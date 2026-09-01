@@ -109,6 +109,33 @@ export interface ResumableSession {
   };
 }
 
+export interface TreeEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  size: number;
+  mtime: number;
+  new: boolean;
+  children?: TreeEntry[];
+}
+
+export interface ProvenanceEvent {
+  n: number | null;
+  ts: string | null;
+  tool: string | null;
+  status: string | null;
+  summary: string;
+  files: string[];
+  log: string;
+}
+
+export interface TableData {
+  columns: string[];
+  rows: (string | number | null)[][];
+  total_rows: number;
+  truncated: boolean;
+}
+
 export interface CreateSessionBody {
   mode: string;
   model: string;
@@ -204,6 +231,23 @@ export const api = {
 
   fileUrl: (id: string, relPath: string) =>
     `${BASE}/sessions/${id}/files?path=${encodeURIComponent(relPath)}`,
+
+  tree: (id: string) =>
+    req<{ entries: TreeEntry[]; truncated: boolean }>(`/sessions/${id}/tree`),
+
+  provenance: (id: string) =>
+    req<{ events: ProvenanceEvent[] }>(`/sessions/${id}/provenance`),
+
+  table: (id: string, relPath: string, limit = 500) =>
+    req<TableData>(
+      `/sessions/${id}/table?path=${encodeURIComponent(relPath)}&limit=${limit}`,
+    ),
+
+  thumbUrl: (id: string, relPath: string, size = 256, cmap = "viridis") =>
+    `${BASE}/sessions/${id}/thumb?path=${encodeURIComponent(relPath)}&size=${size}&cmap=${cmap}`,
+
+  zipUrl: (id: string, relPath = "") =>
+    `${BASE}/sessions/${id}/zip?path=${encodeURIComponent(relPath)}`,
 
   fetchFileText: async (id: string, relPath: string) => {
     const r = await fetch(api.fileUrl(id, relPath));

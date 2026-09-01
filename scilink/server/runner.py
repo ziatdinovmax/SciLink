@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import builtins
 import logging
+import os
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -49,6 +51,7 @@ def start_turn(session, user_input: str) -> TurnState:
     """Create a TurnState and launch the agent thread (daemon, like Streamlit)."""
     turn = TurnState(is_running=True)
     session.turn = turn
+    session.turn_started_at = time.time()
     session.chat_messages.append({"role": "user", "content": user_input})
     session.events.emit("status", {"status": "running"})
     t = threading.Thread(target=_run_turn, args=(session, turn, user_input),
@@ -84,9 +87,33 @@ def request_stop(session) -> bool:
     return True
 
 
+def _fs_signature(session_dir: str) -> tuple:
+    """Cheap change signature of the session tree: (file count, max mtime).
+    A few thousand entries scan in milliseconds; good enough to notice the
+    agent writing artifacts."""
+    count, newest = 0, 0.0
+    skip = {"__pycache__", ".git", "node_modules"}
+    for root, dirs, files in os.walk(session_dir):
+        dirs[:] = [d for d in dirs if d not in skip and not d.startswith(".")]
+        for f in files:
+            if f.startswith("."):
+                continue
+            count += 1
+            try:
+                m = os.stat(os.path.join(root, f)).st_mtime
+            except OSError:
+                continue
+            if m > newest:
+                newest = m
+    return count, newest
+
+
 def _watch_log(session, turn, cap) -> None:
-    """Emit incremental ``log`` events while the turn runs."""
+    """Emit incremental ``log`` events — and ``files_changed`` pings when
+    the session tree changes — while the turn runs."""
     sent = 0
+    last_sig = None
+    last_fs_check = 0.0
     while turn.is_running and turn.live_capture is cap:
         try:
             buf = cap.getvalue()
@@ -95,6 +122,16 @@ def _watch_log(session, turn, cap) -> None:
         if len(buf) > sent:
             session.events.emit("log", {"chunk": buf[sent:]})
             sent = len(buf)
+        now = time.time()
+        if now - last_fs_check >= 2.0:
+            last_fs_check = now
+            try:
+                sig = _fs_signature(session.session_dir)
+                if last_sig is not None and sig != last_sig:
+                    session.events.emit("files_changed", {})
+                last_sig = sig
+            except Exception:
+                pass
         turn.done.wait(_LOG_POLL_S)
     try:
         buf = cap.getvalue()
@@ -102,6 +139,7 @@ def _watch_log(session, turn, cap) -> None:
             session.events.emit("log", {"chunk": buf[sent:]})
     except Exception:
         pass
+    session.events.emit("files_changed", {})
 
 
 def _run_turn(session, turn: TurnState, user_input: str) -> None:

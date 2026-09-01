@@ -1,6 +1,7 @@
 import { api, type ChatMessage as Msg } from "../api";
 import avatarAgent from "../assets/avatar_agent.svg";
 import avatarUser from "../assets/avatar_user.svg";
+import { useUIActions } from "../UIContext";
 import { LogView } from "./LogView";
 import { MarkdownBody } from "./MarkdownBody";
 import { HtmlReportCard, MdReportCard } from "./ReportCards";
@@ -13,6 +14,7 @@ export function ChatMessage({
   message: Msg;
 }) {
   const isUser = message.role === "user";
+  const { openInFiles } = useUIActions();
   return (
     <div className="chat-message">
       <img
@@ -23,17 +25,24 @@ export function ChatMessage({
       <div className="bubble">
         <MarkdownBody text={message.content} escapeTilde={!isUser} />
         {(message.images ?? []).map((img) => (
-          <img
-            key={img}
-            className="attachment"
-            src={api.fileUrl(sessionId, img)}
-            alt={img}
-            title={
-              img.split("/").pop()?.startsWith("debug_")
-                ? `Sample fit: ${img.split("/").pop()}`
-                : img
-            }
-          />
+          <figure key={img} style={{ margin: "8px 0 0" }}>
+            <img
+              className="attachment"
+              src={api.fileUrl(sessionId, img)}
+              alt={img}
+              style={{ marginTop: 0 }}
+              title={
+                img.split("/").pop()?.startsWith("debug_")
+                  ? `Sample fit: ${img.split("/").pop()}`
+                  : img
+              }
+            />
+            <figcaption>
+              <button className="link-btn" onClick={() => openInFiles(img)}>
+                📁 open in Files
+              </button>
+            </figcaption>
+          </figure>
         ))}
         {(message.html_reports ?? []).map((r) => (
           <HtmlReportCard key={r.path} sessionId={sessionId} report={r} />

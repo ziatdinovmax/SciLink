@@ -16,6 +16,8 @@ export function ChatPanel({
   liveLog,
   pendingQuestion,
   lastError,
+  attachRequest,
+  onAttachConsumed,
   onSend,
   onStop,
   onFeedback,
@@ -28,6 +30,8 @@ export function ChatPanel({
   liveLog: string;
   pendingQuestion: PresentedQuestion | null;
   lastError: string | null;
+  attachRequest: string | null;
+  onAttachConsumed: () => void;
   onSend: (content: string) => void;
   onStop: () => void;
   onFeedback: (requestId: string, response: string) => Promise<unknown>;
@@ -48,6 +52,17 @@ export function ChatPanel({
   };
 
   const running = status !== "idle";
+
+  // "Attach to chat" from the Files tab: drop a backtick-quoted path into
+  // the draft (the agents take paths in prompts).
+  useEffect(() => {
+    if (!attachRequest) return;
+    setDraft((d) => (d ? `${d.trimEnd()} \`${attachRequest}\` ` : `\`${attachRequest}\` `));
+    onAttachConsumed();
+    inputRef.current?.focus();
+    setTimeout(autosize, 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attachRequest]);
 
   useEffect(() => {
     const el = scrollRef.current;

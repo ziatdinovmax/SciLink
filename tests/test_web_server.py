@@ -307,6 +307,98 @@ def test_file_endpoint_guard(client, tmp_path):
     assert missing.status_code == 404
 
 
+def _fake_session(client, tmp_path, name="analysis_session_20260101_090909"):
+    from scilink.server.session_manager import WebSession
+    sdir = tmp_path / name
+    sdir.mkdir(exist_ok=True)
+    session = WebSession(id=sdir.name, session_dir=str(sdir), mode="analyze",
+                         model="gpt-5.4", autonomy="autonomous",
+                         agent=SimpleNamespace())
+    client.app.state.manager._sessions[sdir.name] = session
+    return session, sdir
+
+
+def test_tree_endpoint(client, tmp_path):
+    session, sdir = _fake_session(client, tmp_path)
+    (sdir / "results").mkdir()
+    (sdir / "results" / "plot.png").write_bytes(b"x")
+    (sdir / "notes.md").write_text("# hi")
+    (sdir / ".hidden").write_text("no")
+    session.turn_started_at = time.time() - 10  # both files are "new"
+    d = client.get(f"/api/v1/sessions/{sdir.name}/tree").json()
+    names = [e["name"] for e in d["entries"]]
+    assert names == ["results", "notes.md"]  # dirs first, hidden skipped
+    assert d["entries"][0]["children"][0]["name"] == "plot.png"
+    assert d["entries"][1]["new"] is True
+    session.turn_started_at = time.time() + 10
+    d = client.get(f"/api/v1/sessions/{sdir.name}/tree").json()
+    assert d["entries"][1]["new"] is False
+
+
+def test_table_endpoint(client, tmp_path):
+    _, sdir = _fake_session(client, tmp_path)
+    (sdir / "data.csv").write_text("a,b\n1,2\n3,4\n")
+    d = client.get(f"/api/v1/sessions/{sdir.name}/table",
+                   params={"path": "data.csv"}).json()
+    assert d["columns"] == ["a", "b"] and d["rows"] == [[1, 2], [3, 4]]
+    assert d["total_rows"] == 2 and d["truncated"] is False
+    r = client.get(f"/api/v1/sessions/{sdir.name}/table",
+                   params={"path": "../x.csv"})
+    assert r.status_code == 403
+
+
+def test_thumb_endpoint(client, tmp_path):
+    np = pytest.importorskip("numpy")
+    _, sdir = _fake_session(client, tmp_path)
+    np.save(sdir / "img.npy", np.random.rand(64, 64))
+    r = client.get(f"/api/v1/sessions/{sdir.name}/thumb",
+                   params={"path": "img.npy", "size": 64, "cmap": "gray"})
+    assert r.status_code == 200 and r.content[:4] == b"\x89PNG"
+    r = client.get(f"/api/v1/sessions/{sdir.name}/thumb",
+                   params={"path": "img.npy", "cmap": "not-a-cmap"})
+    assert r.status_code == 200  # invalid cmap falls back, not 500
+    (sdir / "notes.txt").write_text("x")
+    r = client.get(f"/api/v1/sessions/{sdir.name}/thumb",
+                   params={"path": "notes.txt"})
+    assert r.status_code == 422
+
+
+def test_zip_endpoint(client, tmp_path):
+    import io
+    import zipfile
+    _, sdir = _fake_session(client, tmp_path)
+    (sdir / "results").mkdir()
+    (sdir / "results" / "a.txt").write_text("A")
+    (sdir / "results" / "b.txt").write_text("B")
+    r = client.get(f"/api/v1/sessions/{sdir.name}/zip",
+                   params={"path": "results"})
+    assert r.status_code == 200
+    zf = zipfile.ZipFile(io.BytesIO(r.content))
+    assert sorted(zf.namelist()) == ["a.txt", "b.txt"]
+    assert client.get(f"/api/v1/sessions/{sdir.name}/zip",
+                      params={"path": "../.."}).status_code == 403
+    assert client.get(f"/api/v1/sessions/{sdir.name}/zip",
+                      params={"path": "gone"}).status_code == 404
+
+
+def test_provenance_endpoint(client, tmp_path):
+    _, sdir = _fake_session(client, tmp_path)
+    abs_file = sdir / "results" / "fit.png"
+    (sdir / "results").mkdir()
+    abs_file.write_bytes(b"x")
+    clipped = "…lipped/prefix/" + sdir.name + "/results/other.png"
+    rec = {"n": 1, "ts": "2026-08-30T18:19:00", "tool": "run_analysis",
+           "args": "{}", "status": "ok", "summary": "fit done",
+           "files": [str(abs_file), "/elsewhere/out.txt", clipped]}
+    (sdir / "events.jsonl").write_text(json.dumps(rec) + "\n")
+    d = client.get(f"/api/v1/sessions/{sdir.name}/provenance").json()
+    ev = d["events"][0]
+    assert ev["tool"] == "run_analysis" and ev["log"] == ""
+    assert "results/fit.png" in ev["files"]
+    assert "/elsewhere/out.txt" in ev["files"]  # outside paths kept verbatim
+    assert "results/other.png" in ev["files"]   # clipped path recovered
+
+
 def test_feedback_flow_and_409(client, tmp_path):
     """A fake blocking agent exercises the full turn/feedback/stop plumbing."""
     from scilink.server import runner as runner_mod

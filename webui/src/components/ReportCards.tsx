@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type ReportRef } from "../api";
+import { useUIActions } from "../UIContext";
 import { demoteHeadings, MarkdownBody } from "./MarkdownBody";
 
 export function HtmlReportCard({
@@ -10,6 +11,7 @@ export function HtmlReportCard({
   report: ReportRef;
 }) {
   const url = api.fileUrl(sessionId, report.path);
+  const { openInFiles } = useUIActions();
   return (
     <details className="card">
       <summary>Report: {report.name}</summary>
@@ -19,6 +21,7 @@ export function HtmlReportCard({
           <a href={url} download={report.name}>
             <button>Download</button>
           </a>
+          <button onClick={() => openInFiles(report.path)}>📁 Open in Files</button>
         </div>
       </div>
     </details>
@@ -34,6 +37,7 @@ export function MdReportCard({
 }) {
   const [text, setText] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
+  const { openInFiles } = useUIActions();
 
   useEffect(() => {
     if (open && text === null)
@@ -71,6 +75,7 @@ export function MdReportCard({
           <a href={api.fileUrl(sessionId, report.path)} download={report.name}>
             <button>Download</button>
           </a>
+          <button onClick={() => openInFiles(report.path)}>📁 Open in Files</button>
         </div>
       </div>
     </details>

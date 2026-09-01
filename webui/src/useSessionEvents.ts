@@ -12,6 +12,7 @@ export type SessionEvent =
   | { type: "question_cleared"; request_id: string }
   | { type: "assistant_message"; message: ChatMessage }
   | { type: "session_named"; name: string }
+  | { type: "files_changed" }
   | { type: "error"; message: string };
 
 export function useSessionEvents(
@@ -43,6 +44,9 @@ export function useSessionEvents(
     );
     src.addEventListener("session_named", (e) =>
       onEvent({ type: "session_named", name: parse(e).name }),
+    );
+    src.addEventListener("files_changed", () =>
+      onEvent({ type: "files_changed" }),
     );
     src.addEventListener("error", (e) => {
       // Only our payload-carrying errors; EventSource transport errors have
