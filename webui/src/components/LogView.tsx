@@ -96,6 +96,24 @@ export function currentActivity(log: string): string | null {
     if (m) return clip(`Analyzing ${m[1]}`);
     m = /^(?:[^\w\s]\s*)?Delegating to\s+(.+)$/.exec(line);
     if (m) return clip(`Delegating to ${m[1]}`);
+    // ── inside the analysis agents (shared codegen/QC loop narration) ──
+    m = /\(Attempt\s+(\d+)\)\s+Asking LLM to write code/.exec(line);
+    if (m) return `Writing analysis code (attempt ${m[1]})…`;
+    if (/Asking LLM to write code/.test(line)) return "Writing analysis code…";
+    if (/Executing generated code/.test(line)) return "Executing analysis code…";
+    m = /Execution attempt\s+(\d+)/.exec(line);
+    if (m) return `Executing analysis code (attempt ${m[1]})…`;
+    m = /Performing Visual QC on\s+(.+?)\.*$/.exec(line);
+    if (m) return clip(`Visual QC · ${m[1]}`);
+    m = /Combined review on\s+(.+?)\.*$/.exec(line);
+    if (m) return clip(`Reviewing ${m[1]}`);
+    m = /Attempting script correction \(attempt\s+(\d+)\)/.exec(line);
+    if (m) return `Correcting the script (attempt ${m[1]})…`;
+    if (/Applying user feedback to existing script/.test(line))
+      return "Applying your feedback to the script…";
+    if (/^Best-of-\d+/.test(line)) return clip(line);
+    // Outcome/warning milestones read well as transient status too.
+    if (line.startsWith("✅") || line.startsWith("⚠️")) return clip(line);
   }
   return null;
 }
