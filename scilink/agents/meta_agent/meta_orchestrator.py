@@ -17,6 +17,7 @@ this development stage — see CLAUDE.md "Why no BaseChatOrchestrator refactor".
 import json
 import logging
 import os
+import time
 import threading
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -1281,6 +1282,12 @@ class MetaOrchestratorAgent:
                 "disagreement with the fused picture plainly — it is a "
                 "valid, valuable outcome.")
             entry["task"] = task
+        # Persist the provisional 'running' entry BEFORE the child runs
+        # (mirrors the fan-out launch checkpoint): a crash mid-delegation
+        # would otherwise leave no on-disk trace of it — the restored ledger
+        # would show the delegation as never having existed instead of
+        # interrupted.
+        self._auto_checkpoint(verbose=False)
         try:
             child = get_child()
             result = child.run_task(
@@ -1549,6 +1556,11 @@ class MetaOrchestratorAgent:
                           figure_style=figure_style,
                           harmonize=harmonize)
 
+    def _resume_fanout(self) -> str:
+        """Re-run fan-out branches left unfinished by a dead/stopped session."""
+        from .fanout import resume_fanout
+        return resume_fanout(self)
+
     def _fuse_delegations(self, indices: list, focus: Optional[str] = None) -> str:
         """Reconcile finished complementary branch findings into one narrative."""
         from .fanout import fuse_delegations
@@ -1588,6 +1600,18 @@ class MetaOrchestratorAgent:
             print(f"       - Meta mode: {self.meta_mode.value}")
             print(f"       - Delegations: {len(self._delegation_ledger)}")
 
+            # Surface interrupted fan-out branches so the user (and the LLM,
+            # which sees the resume_fanout tool) knows unfinished parallel
+            # work is recoverable rather than silently lost.
+            n_stale = sum(1 for e in self._delegation_ledger
+                          if e.get("fanout")
+                          and e.get("status") in ("running", "interrupted")
+                          and not e.get("timed_out"))
+            if n_stale:
+                print(f"       - ⚠️ {n_stale} fan-out branch(es) were "
+                      "interrupted mid-run — ask to resume the fan-out to "
+                      "finish them (resume_fanout).")
+
         except Exception as e:
             logging.warning(f"Failed to restore checkpoint: {e}")
 
@@ -1618,6 +1642,33 @@ class MetaOrchestratorAgent:
         except Exception as e:
             logging.warning(f"Auto-checkpoint failed: {e}")
             return False
+
+    # Wall-clock throttle for the per-tool-call checkpoint: a burst of cheap
+    # tool calls must not thrash the disk, while an expensive call (a whole
+    # delegation or fan-out) always lands one because it outlasts the window.
+    TOOL_CHECKPOINT_MIN_INTERVAL_S = 15.0
+
+    def _checkpoint_after_tool(self) -> None:
+        """Persist history + state after a completed tool iteration.
+
+        The chat loop used to persist only at turn end, so a crash mid-turn
+        lost every completed tool call since the last turn boundary — and one
+        meta turn can contain a whole delegation or fan-out. Mirrors the MCP
+        server's checkpoint-after-tool. Quiet and throttled; a mid-turn
+        history ends in a dangling tool_use pair at worst, which the loop's
+        repair_dangling_tool_calls heals on the next load. The checkpoint
+        write itself is atomic and lock-serialized (see _auto_checkpoint).
+        """
+        now = time.monotonic()
+        if (now - getattr(self, "_last_tool_checkpoint_ts", 0.0)
+                < self.TOOL_CHECKPOINT_MIN_INTERVAL_S):
+            return
+        self._last_tool_checkpoint_ts = now
+        try:
+            self._save_history()
+            self._auto_checkpoint(verbose=False)
+        except Exception as e:  # noqa: BLE001 - persistence must not kill the turn
+            logging.warning(f"Per-tool checkpoint failed: {e}")
 
     def save_checkpoint(self) -> str:
         """Save the meta checkpoint on demand and reset the auto-save timer.
@@ -1877,6 +1928,8 @@ class MetaOrchestratorAgent:
 
                 self.messages.append(self._tool_message(tool_call.id, result))
 
+            self._checkpoint_after_tool()
+
         self._last_chat_hit_iter_cap = True
         return "⚠️ Maximum tool iterations reached. Please simplify your request."
 
@@ -2042,6 +2095,8 @@ class MetaOrchestratorAgent:
                 result = self.tools.execute_tool(func_name, **args)
 
                 self.messages.append(self._tool_message(tool_call.id, result))
+
+            self._checkpoint_after_tool()
 
         self._last_chat_hit_iter_cap = True
         return "⚠️ Maximum tool iterations reached. Please simplify your request."

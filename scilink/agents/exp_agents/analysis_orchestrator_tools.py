@@ -28,6 +28,29 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Callable, List, Optional
 
+
+# Bound on the metadata echoed back into a tool result. The FULL metadata is
+# always stored on the session (self._replace_metadata) and on disk — only
+# the conversational echo is bounded. Observed live: load_metadata pointed at
+# a large results JSON echoed 7.7MB into the history, overflowing the model's
+# context on every later call of the session.
+_METADATA_ECHO_MAX_CHARS = 20_000
+
+
+def _bounded_metadata_echo(metadata):
+    """The metadata object itself when small; a summary stub when huge."""
+    try:
+        s = json.dumps(metadata, default=str)
+    except Exception:  # noqa: BLE001 - echo must never break the tool
+        return metadata
+    if len(s) <= _METADATA_ECHO_MAX_CHARS:
+        return metadata
+    keys = (", ".join(list(metadata)[:40]) if isinstance(metadata, dict)
+            else type(metadata).__name__)
+    return {"_truncated_echo": (
+        f"metadata too large to echo in conversation ({len(s)} chars); it is "
+        f"stored IN FULL for the analysis. Top-level keys: {keys}")}
+
 from .metadata_converter import (
     generate_metadata_json_from_text,
     METADATA_SCHEMA_DICT,
@@ -1677,7 +1700,7 @@ class AnalysisOrchestratorTools:
 
                         result = {
                             "status": "success",
-                            "metadata": metadata,
+                            "metadata": _bounded_metadata_echo(metadata),
                             "saved_to": str(output_path)
                         }
                         if cpi_warning:
@@ -1721,7 +1744,7 @@ class AnalysisOrchestratorTools:
 
                         result = {
                             "status": "success",
-                            "metadata": metadata,
+                            "metadata": _bounded_metadata_echo(metadata),
                             "saved_to": str(output_path)
                         }
                         if cpi_warning:
@@ -1987,7 +2010,7 @@ class AnalysisOrchestratorTools:
                         "status": "warning",
                         "message": f"Metadata loaded but missing recommended fields: {missing}",
                         "metadata_file": path.name,
-                        "metadata": metadata,
+                        "metadata": _bounded_metadata_echo(metadata),
                         "experiment_type": metadata.get("experiment_type"),
                         "technique": metadata.get("experiment", {}).get("technique") if isinstance(metadata.get("experiment"), dict) else metadata.get("technique"),
                         "material": metadata.get("sample", {}).get("material") if isinstance(metadata.get("sample"), dict) else metadata.get("material")
@@ -1999,7 +2022,7 @@ class AnalysisOrchestratorTools:
                 result = {
                     "status": "success",
                     "metadata_file": path.name,
-                    "metadata": metadata,
+                    "metadata": _bounded_metadata_echo(metadata),
                     "experiment_type": metadata.get("experiment_type"),
                     "technique": metadata.get("experiment", {}).get("technique"),
                     "material": metadata.get("sample", {}).get("material")

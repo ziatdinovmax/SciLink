@@ -20,6 +20,7 @@ refactor".
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -30,7 +31,8 @@ from ...auth import (
     require_vendor_credentials,
 )
 from ...utils.prose_style import PROSE_STYLE_RULE
-from ...utils.tool_media import (repair_dangling_tool_calls,
+from ...utils.tool_media import (clip_tool_result,
+                                 repair_dangling_tool_calls,
                                  close_interrupted_turn)
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
@@ -824,9 +826,14 @@ class SimulationOrchestratorAgent:
         except Exception as e:
             self.logger.warning(f"Failed to restore checkpoint: {e}")
 
-    def _auto_checkpoint(self) -> None:
-        """Save checkpoint periodically (every CHECKPOINT_INTERVAL messages)."""
-        if self.message_count - self.last_checkpoint_message_count < self.CHECKPOINT_INTERVAL:
+    def _auto_checkpoint(self, force: bool = False, quiet: bool = False) -> None:
+        """Save checkpoint periodically (every CHECKPOINT_INTERVAL messages).
+
+        ``force`` bypasses the message-interval gate (used by the per-tool
+        checkpoint, which throttles by wall clock instead).
+        """
+        if (not force and self.message_count - self.last_checkpoint_message_count
+                < self.CHECKPOINT_INTERVAL):
             return
         try:
             ck = {
@@ -838,9 +845,36 @@ class SimulationOrchestratorAgent:
             with open(self.checkpoint_path, "w", encoding="utf-8") as f:
                 json.dump(ck, f, indent=2, default=str)
             self.last_checkpoint_message_count = self.message_count
-            print(f"    ✅ Auto-checkpoint saved")
+            if not quiet:
+                print(f"    ✅ Auto-checkpoint saved")
         except Exception as e:
             self.logger.warning(f"Auto-checkpoint failed: {e}")
+
+    # Wall-clock throttle for the per-tool-call checkpoint: a burst of cheap
+    # tool calls must not thrash the disk, while an expensive call (a whole
+    # DFT workflow) always lands one because it outlasts the window.
+    TOOL_CHECKPOINT_MIN_INTERVAL_S = 15.0
+
+    def _checkpoint_after_tool(self) -> None:
+        """Persist history + state after a completed tool iteration.
+
+        The chat loop used to persist only at turn end, so a crash mid-turn
+        lost every completed tool call since the last turn boundary — and one
+        turn can contain a whole structure-generation workflow. Mirrors the
+        MCP server's checkpoint-after-tool. Quiet and throttled; a mid-turn
+        history ends in a dangling tool_use pair at worst, which the loop's
+        repair_dangling_tool_calls heals on the next load.
+        """
+        now = time.monotonic()
+        if (now - getattr(self, "_last_tool_checkpoint_ts", 0.0)
+                < self.TOOL_CHECKPOINT_MIN_INTERVAL_S):
+            return
+        self._last_tool_checkpoint_ts = now
+        try:
+            self._save_history()
+            self._auto_checkpoint(force=True, quiet=True)
+        except Exception as e:  # noqa: BLE001 - persistence must not kill the turn
+            self.logger.warning(f"Per-tool checkpoint failed: {e}")
 
     # ------------------------------------------------------------------
     # Chat handlers — manual tool-call loops, mirrors analyze mode
@@ -940,8 +974,10 @@ class SimulationOrchestratorAgent:
                 self.messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
-                    "content": result,
+                    "content": clip_tool_result(result),
                 })
+
+            self._checkpoint_after_tool()
 
         self._last_chat_hit_iter_cap = True
         return "⚠️ Maximum tool iterations reached. Please simplify your request."
@@ -1043,8 +1079,10 @@ class SimulationOrchestratorAgent:
                 self.messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
-                    "content": result,
+                    "content": clip_tool_result(result),
                 })
+
+            self._checkpoint_after_tool()
 
         self._last_chat_hit_iter_cap = True
         return "⚠️ Maximum tool iterations reached. Please simplify your request."
