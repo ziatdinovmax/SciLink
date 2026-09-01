@@ -354,6 +354,7 @@ def test_thumb_endpoint(client, tmp_path):
     r = client.get(f"/api/v1/sessions/{sdir.name}/thumb",
                    params={"path": "img.npy", "size": 64, "cmap": "gray"})
     assert r.status_code == 200 and r.content[:4] == b"\x89PNG"
+    assert r.headers["X-Preview-Kind"] == "heatmap"
     r = client.get(f"/api/v1/sessions/{sdir.name}/thumb",
                    params={"path": "img.npy", "cmap": "not-a-cmap"})
     assert r.status_code == 200  # invalid cmap falls back, not 500
@@ -361,6 +362,34 @@ def test_thumb_endpoint(client, tmp_path):
     r = client.get(f"/api/v1/sessions/{sdir.name}/thumb",
                    params={"path": "notes.txt"})
     assert r.status_code == 422
+
+
+def test_thumb_array_kinds(client, tmp_path):
+    """1D data plots as a line; unrenderable arrays fail with an explanation."""
+    np = pytest.importorskip("numpy")
+    _, sdir = _fake_session(client, tmp_path,
+                            name="analysis_session_20260101_101010")
+    base = f"/api/v1/sessions/{sdir.name}/thumb"
+
+    np.save(sdir / "spectrum.npy", np.sin(np.linspace(0, 6, 300)))
+    r = client.get(base, params={"path": "spectrum.npy"})
+    assert r.status_code == 200 and r.headers["X-Preview-Kind"] == "line"
+
+    np.save(sdir / "xy.npy", np.column_stack(
+        [np.arange(50.0), np.arange(50.0) ** 2]))
+    r = client.get(base, params={"path": "xy.npy"})
+    assert r.status_code == 200 and r.headers["X-Preview-Kind"] == "line"
+
+    np.save(sdir / "scalar.npy", np.array(3.14))
+    r = client.get(base, params={"path": "scalar.npy"})
+    assert r.status_code == 422 and "scalar" in r.json()["detail"]
+
+    np.save(sdir / "obj.npy", np.array([{"a": 1}], dtype=object),
+            allow_pickle=True)
+    r = client.get(base, params={"path": "obj.npy"})
+    assert r.status_code == 422
+    assert "download to inspect" in r.json()["detail"]
+    assert "object" in r.json()["detail"]  # dtype named from the header
 
 
 def test_zip_endpoint(client, tmp_path):

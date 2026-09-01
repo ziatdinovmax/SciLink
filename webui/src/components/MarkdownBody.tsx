@@ -29,30 +29,55 @@ export function demoteHeadings(text: string): string {
   return out.join("\n");
 }
 
+import { isFileToken } from "../filelink";
+
 export function MarkdownBody({
   text,
   escapeTilde = false,
   transformImageUri,
+  onFileClick,
 }: {
   text: string;
   escapeTilde?: boolean;
   transformImageUri?: (src: string) => string;
+  /** When set, inline-code tokens that look like file paths become
+   * clickable (chat messages: open the file in the explorer). */
+  onFileClick?: (token: string) => void;
 }) {
   const content = escapeTilde ? escapeTildes(text) : text;
+  const components: Record<string, unknown> = {};
+  if (transformImageUri) {
+    components.img = ({ src, alt }: { src?: string; alt?: string }) => (
+      <img src={src ? transformImageUri(src) : undefined} alt={alt ?? ""} />
+    );
+  }
+  if (onFileClick) {
+    components.code = (props: {
+      className?: string;
+      children?: React.ReactNode;
+    }) => {
+      const raw = String(props.children ?? "");
+      // Inline code only (fenced blocks carry a language class / newlines).
+      if (!props.className && !raw.includes("\n") && isFileToken(raw)) {
+        return (
+          <code
+            className="file-link"
+            title="Open in Files"
+            onClick={() => onFileClick(raw)}
+          >
+            {props.children}
+          </code>
+        );
+      }
+      return <code className={props.className}>{props.children}</code>;
+    };
+  }
   return (
     <div className="md-body">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[rehypeKatex]}
-        components={
-          transformImageUri
-            ? {
-                img: ({ src, alt }) => (
-                  <img src={src ? transformImageUri(src) : undefined} alt={alt ?? ""} />
-                ),
-              }
-            : undefined
-        }
+        components={Object.keys(components).length ? components : undefined}
       >
         {content}
       </ReactMarkdown>

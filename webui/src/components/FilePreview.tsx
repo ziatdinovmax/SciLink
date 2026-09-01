@@ -136,18 +136,70 @@ function ImagePreview({ url }: { url: string }) {
 
 function ArrayPreview({ sessionId, path }: { sessionId: string; path: string }) {
   const [cmap, setCmap] = useState("viridis");
+  const [url, setUrl] = useState<string | null>(null);
+  // "heatmap" shows the colormap selector; "line"/"image" renders don't use
+  // one; null = unrenderable (message in `error`).
+  const [kind, setKind] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let revoked: string | null = null;
+    let cancelled = false;
+    fetch(api.thumbUrl(sessionId, path, 1024, cmap))
+      .then(async (r) => {
+        if (!r.ok) {
+          let detail = r.statusText;
+          try {
+            detail = (await r.json()).detail ?? detail;
+          } catch {
+            /* not json */
+          }
+          throw new Error(detail);
+        }
+        const blob = await r.blob();
+        if (cancelled) return;
+        revoked = URL.createObjectURL(blob);
+        setUrl(revoked);
+        setKind(r.headers.get("X-Preview-Kind") ?? "heatmap");
+        setError(null);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : String(e));
+          setUrl(null);
+          setKind(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+      if (revoked) URL.revokeObjectURL(revoked);
+    };
+  }, [sessionId, path, cmap]);
+
+  if (error)
+    return (
+      <p className="caption" style={{ padding: "8px 0" }}>
+        {error}
+      </p>
+    );
   return (
     <div>
-      <div className="preview-toolbar">
-        <span className="caption">colormap</span>
-        <select value={cmap} onChange={(ev) => setCmap(ev.target.value)} style={{ width: "auto" }}>
-          {CMAPS.map((c) => (
-            <option key={c}>{c}</option>
-          ))}
-        </select>
-      </div>
+      {kind === "heatmap" && (
+        <div className="preview-toolbar">
+          <span className="caption">colormap</span>
+          <select value={cmap} onChange={(ev) => setCmap(ev.target.value)} style={{ width: "auto" }}>
+            {CMAPS.map((c) => (
+              <option key={c}>{c}</option>
+            ))}
+          </select>
+        </div>
+      )}
       <div className="image-scroll">
-        <img src={api.thumbUrl(sessionId, path, 1024, cmap)} alt="" style={{ maxWidth: "100%" }} />
+        {url ? (
+          <img src={url} alt="" style={{ maxWidth: "100%" }} />
+        ) : (
+          <p className="caption">Loading…</p>
+        )}
       </div>
     </div>
   );

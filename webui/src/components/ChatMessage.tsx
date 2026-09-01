@@ -1,6 +1,7 @@
 import { api, type ChatMessage as Msg } from "../api";
 import avatarAgent from "../assets/avatar_agent.svg";
 import avatarUser from "../assets/avatar_user.svg";
+import { resolveSessionPath } from "../filelink";
 import { useUIActions } from "../UIContext";
 import { LogView } from "./LogView";
 import { MarkdownBody } from "./MarkdownBody";
@@ -15,6 +16,11 @@ export function ChatMessage({
 }) {
   const isUser = message.role === "user";
   const { openInFiles } = useUIActions();
+  const onFileClick = async (token: string) => {
+    const resolved = await resolveSessionPath(sessionId, token);
+    // No tree match: still switch to Files so the user can look around.
+    openInFiles(resolved ?? "");
+  };
   return (
     <div className="chat-message">
       <img
@@ -23,7 +29,11 @@ export function ChatMessage({
         alt={message.role}
       />
       <div className="bubble">
-        <MarkdownBody text={message.content} escapeTilde={!isUser} />
+        <MarkdownBody
+          text={message.content}
+          escapeTilde={!isUser}
+          onFileClick={onFileClick}
+        />
         {(message.images ?? []).map((img) => (
           <figure key={img} style={{ margin: "8px 0 0" }}>
             <img

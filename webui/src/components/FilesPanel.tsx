@@ -256,7 +256,15 @@ function Gallery({
           onClick={() => onSelect(f.path)}
           title={f.path}
         >
-          <img src={api.thumbUrl(sessionId, f.path, 160)} alt={f.name} loading="lazy" />
+          <img
+            src={api.thumbUrl(sessionId, f.path, 160)}
+            alt={f.name}
+            loading="lazy"
+            onError={(e) => {
+              // Unrenderable array: show the name-only card, not a broken icon.
+              (e.currentTarget as HTMLImageElement).style.display = "none";
+            }}
+          />
           <figcaption>
             {f.name}
             {f.new && <span className="new-badge">new</span>}

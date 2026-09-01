@@ -145,6 +145,12 @@ label.field > span { display: block; margin-bottom: 4px; }
 }
 .md-body code { background: var(--code-bg); color: var(--code-text); padding: 1px 5px; border-radius: 4px; font-size: 0.9em; }
 .md-body pre code { padding: 0; background: none; }
+.md-body code.file-link {
+  cursor: pointer;
+  text-decoration: underline dotted var(--text-dim);
+  text-underline-offset: 3px;
+}
+.md-body code.file-link:hover { color: var(--accent); text-decoration-color: var(--accent); }
 .md-body table { border-collapse: collapse; }
 .md-body th, .md-body td { border: 1px solid var(--border-strong); padding: 4px 10px; }
 .md-body h1, .md-body h2, .md-body h3 { color: var(--accent); }

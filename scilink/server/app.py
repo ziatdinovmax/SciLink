@@ -47,6 +47,7 @@ def create_app(session_root: Path, serve_frontend: bool = True) -> FastAPI:
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
         allow_methods=["*"], allow_headers=["*"],
+        expose_headers=["X-Preview-Kind"],
     )
     manager = SessionManager(session_root)
     app.state.manager = manager
@@ -248,11 +249,12 @@ def create_app(session_root: Path, serve_frontend: bool = True) -> FastAPI:
         if not target.is_file():
             raise HTTPException(404, f"No such file: {path}")
         try:
-            png = previews.render_thumbnail(target, size=size, cmap=cmap)
+            png, kind = previews.render_thumbnail(target, size=size, cmap=cmap)
         except Exception as exc:
             raise HTTPException(422, f"Could not render {path}: {exc}")
         return Response(png, media_type="image/png",
-                        headers={"Cache-Control": "no-cache"})
+                        headers={"Cache-Control": "no-cache",
+                                 "X-Preview-Kind": kind})
 
     @app.get("/api/v1/sessions/{session_id}/table")
     def get_table(session_id: str, path: str, limit: int = 500):
