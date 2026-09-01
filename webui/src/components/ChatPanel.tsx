@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   ChatMessage as Msg,
   PresentedQuestion,
@@ -6,7 +6,7 @@ import type {
 } from "../api";
 import { ChatMessage } from "./ChatMessage";
 import { FeedbackPanel } from "./FeedbackPanel";
-import { LogView } from "./LogView";
+import { currentActivity, LogView } from "./LogView";
 
 export function ChatPanel({
   session,
@@ -52,6 +52,9 @@ export function ChatPanel({
   };
 
   const running = status !== "idle";
+  // Short "what is it doing" line for the spinner pill, derived from the
+  // streaming narration — between the bare spinner and full verbose output.
+  const activity = useMemo(() => currentActivity(liveLog), [liveLog]);
 
   // "Attach to chat" from the Files tab: drop a backtick-quoted path into
   // the draft (the agents take paths in prompts).
@@ -116,7 +119,12 @@ export function ChatPanel({
                 <span className="agent-spinner-dot">•</span>
                 <span className="agent-spinner-dot">•</span>
                 <span className="agent-spinner-dot">•</span>
-                <span className="agent-spinner-label">Agent is working...</span>
+                <span
+                  className="agent-spinner-label"
+                  title={activity ?? undefined}
+                >
+                  {activity ?? "Agent is working..."}
+                </span>
               </div>
               <button className="stop-btn danger-hover" title="Stop agent" onClick={onStop}>
                 ■

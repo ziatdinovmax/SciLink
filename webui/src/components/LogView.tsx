@@ -69,6 +69,35 @@ export function colorizeLog(text: string): ReactNode[] {
   return out;
 }
 
+/** Derive a one-line "what the agent is doing now" from the narration tail —
+ * the middle ground between the bare spinner and the full verbose log.
+ * Backward scan: the most recent milestone line wins. Returns null when the
+ * log has no recognizable signal yet (caller falls back to the static text). */
+export function currentActivity(log: string): string | null {
+  const clip = (s: string, n = 110) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+  // "ImagePlanningController" -> "Image Planning"
+  const pretty = (s: string) =>
+    s.replace(/Controller$/, "").replace(/([a-z0-9])([A-Z])/g, "$1 $2").trim();
+
+  const lines = stripAnsi(log.slice(-6000)).split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].replaceAll(THOUGHT_MARK, "").trim();
+    if (!line) continue;
+    if (line.startsWith("🤖")) return "Writing response…";
+    if (line.startsWith("💭")) return clip(line);
+    if (HANDOFF_PREFIXES.some((p) => line.startsWith(p))) return clip(line);
+    let m = /STEP\s+(\d+):\s*(\S.*)$/.exec(line);
+    if (m) return `Step ${m[1]} · ${pretty(m[2])}`;
+    m = /^-{2,}\s*(.+?)\s*-{2,}$/.exec(line);
+    if (m) return clip(m[1]);
+    m = /^(?:[^\w\s]\s*)?Analyzing:\s*(.+)$/.exec(line);
+    if (m) return clip(`Analyzing ${m[1]}`);
+    m = /^(?:[^\w\s]\s*)?Delegating to\s+(.+)$/.exec(line);
+    if (m) return clip(`Delegating to ${m[1]}`);
+  }
+  return null;
+}
+
 export function LogView({ text, maxLines = 200 }: { text: string; maxLines?: number }) {
   const ref = useRef<HTMLPreElement>(null);
   const tail = text.split("\n").slice(-maxLines).join("\n");
