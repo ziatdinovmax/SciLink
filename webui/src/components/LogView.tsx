@@ -86,8 +86,10 @@ export function currentActivity(log: string): string | null {
     if (line.startsWith("🤖")) return "Writing response…";
     if (line.startsWith("💭")) return clip(line);
     if (HANDOFF_PREFIXES.some((p) => line.startsWith(p))) return clip(line);
-    let m = /STEP\s+(\d+):\s*(\S.*)$/.exec(line);
-    if (m) return `Step ${m[1]} · ${pretty(m[2])}`;
+    // The step index is an internal pipeline position — show only the
+    // stage name.
+    let m = /STEP\s+\d+:\s*(\S.*)$/.exec(line);
+    if (m) return pretty(m[1]);
     m = /^-{2,}\s*(.+?)\s*-{2,}$/.exec(line);
     if (m) return clip(m[1]);
     m = /^(?:[^\w\s]\s*)?Analyzing:\s*(.+)$/.exec(line);
