@@ -101,12 +101,20 @@ export function currentActivity(log: string): string | null {
     if (m) return `Writing analysis code (attempt ${m[1]})…`;
     if (/Asking LLM to write code/.test(line)) return "Writing analysis code…";
     if (/Executing generated code/.test(line)) return "Executing analysis code…";
+    m = /Executing (?:Python )?script\s*\(attempt\s+(\d+)\)/.exec(line);
+    if (m) return `Executing analysis script (attempt ${m[1]})…`;
+    if (/Executing (?:Python )?script/.test(line)) return "Executing analysis script…";
     m = /Execution attempt\s+(\d+)/.exec(line);
     if (m) return `Executing analysis code (attempt ${m[1]})…`;
     m = /Performing Visual QC on\s+(.+?)\.*$/.exec(line);
     if (m) return clip(`Visual QC · ${m[1]}`);
     m = /Combined review on\s+(.+?)\.*$/.exec(line);
     if (m) return clip(`Reviewing ${m[1]}`);
+    m = /^Verification\s+(\d+)\/(\d+)(?:\s*\(annealing level\s+(\d+)\))?/.exec(line);
+    if (m)
+      return m[3] && m[3] !== "0"
+        ? `Verification ${m[1]}/${m[2]} · annealing level ${m[3]}…`
+        : `Verification ${m[1]}/${m[2]}…`;
     m = /Attempting script correction \(attempt\s+(\d+)\)/.exec(line);
     if (m) return `Correcting the script (attempt ${m[1]})…`;
     if (/Applying user feedback to existing script/.test(line))
@@ -114,6 +122,16 @@ export function currentActivity(log: string): string | null {
     if (/^Best-of-\d+/.test(line)) return clip(line);
     // Outcome/warning milestones read well as transient status too.
     if (line.startsWith("✅") || line.startsWith("⚠️")) return clip(line);
+    // Generic fallbacks — catch the many phrasing variants of action lines
+    // without a bespoke pattern per print statement. `bare` drops a leading
+    // emoji/symbol ("🧠 LLM Step: …", "📄 Generating …").
+    const bare = line.replace(/^[^\p{L}\p{N}]+\s*/u, "");
+    m = /^-{2,}\s*(.+?)\s*-{2,}$/.exec(bare);
+    if (m) return clip(m[1]);
+    m = /^Attempt\s+(\d+(?:\/\d+)?):\s*(.+)$/.exec(bare);
+    if (m) return clip(`Attempt ${m[1]} · ${m[2]}`);
+    m = /^(?:LLM Step:\s*)?((?:Executing|Generating|Running|Loading|Refitting|Preparing|Searching)\b.+)$/.exec(bare);
+    if (m) return clip(m[1]);
   }
   return null;
 }
