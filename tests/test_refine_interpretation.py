@@ -66,7 +66,7 @@ class TestRefineInterpretationPlumbing:
         # through the helper: recommendations, DFT recommendations, and the
         # multi-source context builder. (The post-run summary preview reads
         # the fresh analyze() return, where no revision can exist yet.)
-        for func in ("def get_recommendations", "def recommend_dft_structures"):
+        for func in ("def get_recommendations", "def recommend_simulations"):
             idx = TOOLS_SRC.index(func)
             assert "_effective_full_result" in TOOLS_SRC[idx: idx + 4000], func
         assert TOOLS_SRC.count("_effective_full_result(record)") >= 3

@@ -4821,13 +4821,14 @@ class AnalysisOrchestratorTools:
         # =====================================================================
         # 11b. RECOMMEND DFT STRUCTURES
         # =====================================================================
-        def recommend_dft_structures(analysis_id: str = None,
-                                     analysis_index: int = -1) -> str:
+        def recommend_simulations(analysis_id: str = None,
+                                  analysis_index: int = -1) -> str:
             """
-            Generate DFT structure recommendations from a completed analysis,
-            optionally informed by a prior novelty assessment.
+            Generate scale-neutral simulation-study recommendations from a
+            completed analysis, optionally informed by a prior novelty
+            assessment.
             """
-            print(f"  ⚡ Tool: Generating DFT structure recommendations...")
+            print(f"  ⚡ Tool: Generating simulation recommendations...")
 
             # 1. Locate the analysis record
             record = None
@@ -4875,13 +4876,13 @@ class AnalysisOrchestratorTools:
                 context = "Focus on these potentially novel findings:\n"
                 for i, claim in enumerate(novel_claims, 1):
                     context += f"{i}. {claim}\n"
-                context += "\nPrioritize DFT structures that can investigate these novel aspects."
+                context += "\nPrioritize simulation studies that can investigate these novel aspects."
             else:
                 context = "No specific novel claims identified. Focus on most interesting aspects."
 
             # 5. Output dir nested under the analysis record's directory
             base_dir = Path(record.get("output_directory", self.orch.results_dir))
-            out_dir = base_dir / "dft_recommendations"
+            out_dir = base_dir / "simulation_recommendations"
             out_dir.mkdir(parents=True, exist_ok=True)
 
             # 6. Run RecommendationAgent directly (no need for the DFTRecommender wrapper)
@@ -4891,7 +4892,7 @@ class AnalysisOrchestratorTools:
                     base_url=self.orch.base_url,
                     model_name=self.orch.model_name,
                 )
-                result = agent.generate_dft_recommendations_from_text(
+                result = agent.generate_simulation_recommendations_from_text(
                     cached_detailed_analysis=analysis_text,
                     additional_prompt_context=context,
                     system_info=self.orch.current_metadata,
@@ -4906,7 +4907,7 @@ class AnalysisOrchestratorTools:
             reasoning = result.get("analysis_summary_or_reasoning", "")
 
             # 7. Persist sidecar JSON for parity with the standalone runner
-            output_file = out_dir / "dft_recommendations.json"
+            output_file = out_dir / "simulation_recommendations.json"
             try:
                 with open(output_file, 'w', encoding="utf-8") as f:
                     json.dump({
@@ -4915,12 +4916,17 @@ class AnalysisOrchestratorTools:
                         "novel_claims": novel_claims,
                     }, f, indent=2)
             except Exception as e:
-                self.logger.warning(f"Failed to write DFT recommendations sidecar: {e}")
+                self.logger.warning(f"Failed to write simulation recommendations sidecar: {e}")
 
-            # 8. Persist on the analysis record for downstream tools
+            # 8. Persist on the analysis record for downstream tools.
+            # Both keys carry the same list: "simulation_recommendations" is
+            # the current name; "dft_recommendations" keeps pre-#45 readers
+            # (run_dft_workflow's recommendation_index, external scripts)
+            # working unchanged.
+            self.orch.analysis_results[record_index]["simulation_recommendations"] = recommendations
             self.orch.analysis_results[record_index]["dft_recommendations"] = recommendations
 
-            print(f"    Generated {len(recommendations)} DFT recommendations → {output_file}")
+            print(f"    Generated {len(recommendations)} simulation recommendations → {output_file}")
 
             return json.dumps({
                 "status": "success",
@@ -4929,6 +4935,8 @@ class AnalysisOrchestratorTools:
                     {
                         "priority": r.get("priority"),
                         "description": r.get("description"),
+                        "research_goal": r.get("research_goal"),
+                        "suggested_scale": r.get("suggested_scale"),
                         "scientific_interest": r.get("scientific_interest"),
                     }
                     for r in recommendations
@@ -4937,13 +4945,20 @@ class AnalysisOrchestratorTools:
             })
 
         self._register_tool(
-            func=recommend_dft_structures,
-            name="recommend_dft_structures",
+            func=recommend_simulations,
+            name="recommend_simulations",
             description=(
-                "Generate DFT structure recommendations from a completed analysis. "
-                "Specify by analysis_id or use analysis_index (-1 for most recent). "
-                "If assess_novelty was run first, recommendations focus on novel claims. "
-                "Stores recommendations on the analysis record for use by run_dft_workflow."
+                "Generate simulation-study recommendations from a completed "
+                "analysis: a structure to model plus a research goal per "
+                "recommendation, with a non-binding scale hint (periodic_dft "
+                "/ molecular_qc / molecular_dynamics) — the "
+                "simulation router makes the final engine/scale call. "
+                "Specify by analysis_id or use analysis_index (-1 for most "
+                "recent). If assess_novelty was run first, recommendations "
+                "focus on novel claims. Stores recommendations on the "
+                "analysis record; DFT-scale ones can feed run_dft_workflow "
+                "by recommendation_index, and any of them can seed a "
+                "simulation delegation."
             ),
             parameters={
                 "analysis_id": {
@@ -4957,6 +4972,9 @@ class AnalysisOrchestratorTools:
             },
             required=[]
         )
+        # Back-compat alias: pre-#45 programmatic callers dispatch the old
+        # name; only recommend_simulations appears in the LLM tool schema.
+        self.functions_map["recommend_dft_structures"] = recommend_simulations
 
         # =====================================================================
         # 11c. RUN DFT WORKFLOW (run_complete_workflow, scale="periodic_dft")
@@ -4995,11 +5013,31 @@ class AnalysisOrchestratorTools:
                 if record is None:
                     return json.dumps({"status": "error",
                                        "message": "recommendation_index requires an analysis_id or available analysis history."})
-                recs = record.get("dft_recommendations") or []
+                recs = (record.get("simulation_recommendations")
+                        or record.get("dft_recommendations") or [])
                 if not (0 <= recommendation_index < len(recs)):
                     return json.dumps({"status": "error",
                                        "message": f"recommendation_index {recommendation_index} out of range (have {len(recs)})."})
-                structure_description = recs[recommendation_index].get("description") or structure_description
+                rec = recs[recommendation_index]
+                # An MD-scale recommendation describes a system (large supercell,
+                # finite temperature) that is intractable as a DFT calculation —
+                # refuse loudly instead of generating unusable VASP inputs.
+                # molecular_qc and unscored (None) recommendations pass through.
+                if rec.get("suggested_scale") == "molecular_dynamics":
+                    return json.dumps({
+                        "status": "error",
+                        "message": (
+                            f"Recommendation {recommendation_index} is suggested for "
+                            "molecular_dynamics, not periodic DFT — its system size / "
+                            "finite-temperature goal is intractable as a DFT calculation. "
+                            "Route it to simulate mode instead."),
+                        "recommendation": {
+                            "description": rec.get("description"),
+                            "research_goal": rec.get("research_goal"),
+                            "suggested_scale": rec.get("suggested_scale"),
+                        },
+                    })
+                structure_description = rec.get("description") or structure_description
             if not structure_description:
                 return json.dumps({"status": "error",
                                    "message": "structure_description is required (or pass recommendation_index with an analysis that has stored recommendations)."})
@@ -5085,7 +5123,9 @@ class AnalysisOrchestratorTools:
                 "Run the DFT orchestrator to produce VASP-ready inputs (POSCAR, INCAR, "
                 "KPOINTS) for a structure. Provide either an explicit structure_description, "
                 "or an analysis_id + recommendation_index to pick a structure from prior "
-                "recommend_dft_structures output. Does not run VASP itself; only generates inputs."
+                "recommend_simulations output (choose a DFT-scale recommendation; one "
+                "suggested for molecular_dynamics is refused — route it to simulate mode). "
+                "Does not run VASP itself; only generates inputs."
             ),
             parameters={
                 "structure_description": {

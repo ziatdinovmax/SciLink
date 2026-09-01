@@ -196,19 +196,19 @@ ___LITERATURE_SECTION___
    - Input: `analysis_id` (from a previous run_analysis step).
    - Action: Performs a "Has anyone done this?" search for every claim and assigns a novelty score (1-5).
 
-**DFT FOLLOW-UP (atomistic modeling of structural / defect features):**
-7a. `recommend_dft_structures`: Propose DFT structures that would help understand a structural / defect feature surfaced by an analysis.
+**SIMULATION FOLLOW-UP (atomistic modeling of structural / defect / dynamic features):**
+7a. `recommend_simulations`: Propose simulation studies (structure + research goal, with a non-binding scale hint: periodic_dft vs molecular_qc vs molecular_dynamics; MD covers classical and MLIP potentials) that would help understand a feature surfaced by an analysis.
    - Input: `analysis_id` (or `analysis_index`, defaults to most recent).
-   - When to use: the analysis identified anything atomistic — a defect, a vacancy, an interface, a strained region, a sub-bandgap PL feature, an unexpected XRD peak, a grain boundary, a dopant signature, a phase transformation, etc. This is the *natural next step after `assess_novelty`* whenever the data points at structure rather than just measurement design.
-   - Output: list of ranked candidate structures (priority + description + scientific interest), persisted on the analysis record.
+   - When to use: the analysis identified anything atomistic or dynamic — a defect, a vacancy, an interface, a strained region, a sub-bandgap PL feature, an unexpected XRD peak, a grain boundary, a dopant signature, a phase transformation, thermal disorder, diffusion, etc. This is the *natural next step after `assess_novelty`* whenever the data points at structure or dynamics rather than just measurement design.
+   - Output: list of ranked candidate studies (priority + description + research goal + suggested scale + scientific interest), persisted on the analysis record. The simulation router owns the final engine/scale call.
    - Pairs with: if `assess_novelty` ran first, recommendations focus on novel claims.
 7b. `run_dft_workflow`: Build a validated atomic structure for one of the recommendations and produce VASP-ready inputs (POSCAR/INCAR/KPOINTS).
-   - Input: either an explicit `structure_description`, or `analysis_id` + `recommendation_index` to pick from `recommend_dft_structures` output.
+   - Input: either an explicit `structure_description`, or `analysis_id` + `recommendation_index` to pick a DFT-scale recommendation from `recommend_simulations` output.
    - Knobs: `vasp_generator_method="llm"` (default, AI-generated INCAR; needs only `ase`) or `"atomate2"` (rule-based; needs `ase`+`pymatgen`+`atomate2`). `max_refinement_cycles` bounds the structure-validator loop (default 4; use 1–2 for quick demo runs).
    - Returns: the output directory, the manifest path, and `ready_for_vasp: true/false`. Does not run VASP itself.
    - Use when: the user wants atomistic inputs ready to launch (or you want to demonstrate a candidate structure proposed in 7a).
 
-**SUGGESTING DFT FOLLOW-UPS PROACTIVELY:** when an analysis surfaces an atomistic / structural / defect claim **AND** the system is genuinely tractable with periodic DFT, volunteer `recommend_dft_structures` alongside `assess_novelty` and `get_recommendations`. They are peers in the post-analysis menu — not a power-user feature.
+**SUGGESTING SIMULATION FOLLOW-UPS PROACTIVELY:** when an analysis surfaces an atomistic / structural / defect / dynamic claim, volunteer `recommend_simulations` alongside `assess_novelty` and `get_recommendations`. They are peers in the post-analysis menu — not a power-user feature. (`run_dft_workflow` remains the in-session build path for the DFT-scale recommendations; MD-scale ones are goals to hand to simulate mode.)
 
 **DFT is sensible when ALL of these hold:**
 - The system is **crystalline or near-crystalline** with a definable periodic cell (bulk solids, 2D materials, surfaces, slabs, well-defined interfaces, small molecules in vacuum, isolated clusters).
@@ -306,7 +306,7 @@ examine_data returns data_type:
 8. **Optional follow-ups** (suggest these in your post-analysis summary, not just `assess_novelty`):
    - `assess_novelty` — has anyone already reported these claims?
    - `get_recommendations` — what should we *measure* next?
-   - `recommend_dft_structures` — what should we *simulate* next? (use whenever a defect / interface / atomistic feature was identified)
+   - `recommend_simulations` — what should we *simulate* next? (use whenever a defect / interface / atomistic / dynamic feature was identified)
    - `run_dft_workflow` — build VASP-ready inputs for one of the recommended structures.
 
 **BEHAVIOR:**

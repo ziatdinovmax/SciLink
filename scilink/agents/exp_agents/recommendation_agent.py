@@ -2,7 +2,7 @@ import json
 import logging
 from typing import Dict, Any, List, Optional, Tuple
 
-from .instruct import TEXT_ONLY_DFT_RECOMMENDATION_INSTRUCTIONS
+from .instruct import TEXT_ONLY_SIMULATION_RECOMMENDATION_INSTRUCTIONS
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from ._deprecation import normalize_params
@@ -11,13 +11,23 @@ from ...auth import get_internal_proxy_key
 
 class RecommendationAgent:
     """
-    An agent specialized in synthesizing textual analysis from various sources 
-    (e.g., experimental data analysis, literature novelty reviews) to generate 
-    targeted Density Functional Theory structure recommendations.
-    
+    An agent specialized in synthesizing textual analysis from various sources
+    (e.g., experimental data analysis, literature novelty reviews) to generate
+    targeted simulation-study recommendations: a structure to model plus a
+    research goal, with an optional non-binding scale hint (periodic_dft /
+    molecular_qc / molecular_dynamics). The simulation router owns the final
+    engine and scale choice — this agent recommends the *what*, not the *how*.
+
     This agent does not analyze raw experimental data directly. Instead, it operates
     on the textual output of other agents to provide the final recommendations.
     """
+
+    # Mirror of the simulate router's scale vocabulary
+    # (sim_agents.simulation_router.DEFAULT_SCALE_DESCRIPTIONS keys) —
+    # duplicated here because exp_agents must stay importable without the
+    # optional sim stack; a test asserts the two stay in sync. Note an MLIP
+    # is a potential SOURCE, not a scale (#429).
+    VALID_SCALES = ("periodic_dft", "molecular_qc", "molecular_dynamics")
 
     def __init__(self, 
                  api_key: str | None = None, 
@@ -119,15 +129,16 @@ class RecommendationAgent:
             self.logger.exception(f"An unexpected error occurred during text-based LLM call: {e}")
             return None, {"error": "An unexpected error occurred during text-based LLM call", "details": str(e)}
 
-    def generate_dft_recommendations_from_text(
+    def generate_simulation_recommendations_from_text(
         self,
         cached_detailed_analysis: str,
         additional_prompt_context: str,
         system_info: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        Generates DFT structure recommendations by synthesizing a prior analysis
-        with novelty context from a literature review.
+        Generates simulation-study recommendations (structure + research goal,
+        optional scale hint) by synthesizing a prior analysis with novelty
+        context from a literature review.
 
         Args:
             cached_detailed_analysis (str): The detailed textual analysis from a prior step (e.g., from an image agent).
@@ -137,10 +148,10 @@ class RecommendationAgent:
         Returns:
             A dictionary containing the reasoning and a sorted list of recommendations.
         """
-        self.logger.info("Generating DFT recommendations from cached analysis and novelty context.")
-        
+        self.logger.info("Generating simulation recommendations from cached analysis and novelty context.")
+
         # Build the prompt for the LLM
-        prompt_list = [TEXT_ONLY_DFT_RECOMMENDATION_INSTRUCTIONS]
+        prompt_list = [TEXT_ONLY_SIMULATION_RECOMMENDATION_INSTRUCTIONS]
         prompt_list.append("\n\n--- Start of Cached Initial Experimental Data Analysis ---\n")
         prompt_list.append(cached_detailed_analysis)
         prompt_list.append("\n--- End of Cached Initial Experimental Data Analysis ---\n")
@@ -158,7 +169,7 @@ class RecommendationAgent:
                 system_info_text += str(system_info)
             prompt_list.append(system_info_text)
 
-        prompt_list.append("\n\nProvide your DFT structure recommendations strictly in the requested JSON format.")
+        prompt_list.append("\n\nProvide your simulation-study recommendations strictly in the requested JSON format.")
         
         # Get and parse the LLM response
         result_json, error_dict = self._generate_json_from_text_parts(prompt_list)
@@ -180,6 +191,20 @@ class RecommendationAgent:
         for rec in recommendations:
             if isinstance(rec, dict) and all(k in rec for k in ["description", "scientific_interest", "priority"]):
                 if isinstance(rec.get("priority"), int):
+                    # suggested_scale is a non-binding hint; drop an invalid
+                    # value rather than passing garbage to the router.
+                    scale = rec.get("suggested_scale")
+                    if scale is not None and scale not in self.VALID_SCALES:
+                        self.logger.warning(
+                            f"Dropping invalid suggested_scale {scale!r} "
+                            f"(valid: {self.VALID_SCALES})")
+                        rec = {k: v for k, v in rec.items()
+                               if k != "suggested_scale"}
+                    # research_goal is what simulate mode receives; a rec
+                    # without one falls back to its description so the
+                    # handoff never carries an empty goal.
+                    if not rec.get("research_goal"):
+                        rec = dict(rec, research_goal=rec["description"])
                     valid_recommendations.append(rec)
                 else:
                     self.logger.warning(f"Recommendation skipped due to invalid priority type (expected int): {rec}")
@@ -196,3 +221,11 @@ class RecommendationAgent:
             "analysis_summary_or_reasoning": reasoning,
             "recommendations": sorted_recommendations
         }
+
+    def generate_dft_recommendations_from_text(self, *args, **kwargs) -> Dict[str, Any]:
+        """Back-compat alias for :meth:`generate_simulation_recommendations_from_text`.
+
+        Kept so pre-#45 callers keep working; recommendations are now
+        scale-neutral (a DFT-appropriate study still comes back with
+        ``suggested_scale="periodic_dft"``)."""
+        return self.generate_simulation_recommendations_from_text(*args, **kwargs)
