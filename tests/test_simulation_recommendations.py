@@ -64,7 +64,10 @@ def test_validation_scale_and_priority():
     assert recs[1]["suggested_scale"] == "molecular_dynamics"
     assert recs[2]["suggested_scale"] == "molecular_qc"
     assert "suggested_scale" not in recs[4]   # MLIP is not a scale -> dropped
-    assert "research_goal" in recs[0] and "research_goal" not in recs[3]
+    assert "research_goal" in recs[0]
+    # A rec without a research_goal falls back to its description, so the
+    # simulate-mode handoff never carries an empty goal.
+    assert recs[3]["research_goal"] == recs[3]["description"]
 
 
 def test_backcompat_method_aliases_new_path():
@@ -130,6 +133,53 @@ def test_tool_runs_and_stores_under_both_keys(orch, tmp_path, monkeypatch):
     res2 = json.loads(orch.tools.execute_tool("recommend_dft_structures",
                                               analysis_index=-1))
     assert res2["status"] == "success"
+
+
+def test_run_dft_workflow_refuses_md_scale_recommendation(orch, tmp_path):
+    out_dir = tmp_path / "res2"
+    out_dir.mkdir()
+    orch.analysis_results.append({
+        "analysis_id": "demo_002",
+        "output_directory": str(out_dir),
+        "simulation_recommendations": RECS[:3],
+    })
+    res = json.loads(orch.tools.execute_tool(
+        "run_dft_workflow", analysis_id="demo_002", recommendation_index=1))
+    assert res["status"] == "error"
+    assert "molecular_dynamics" in res["message"]
+    assert "simulate mode" in res["message"]
+    assert res["recommendation"]["suggested_scale"] == "molecular_dynamics"
+    assert res["recommendation"]["research_goal"].startswith("MD from")
+
+
+def test_run_dft_workflow_passes_qc_and_unscored_scales(orch, tmp_path,
+                                                        monkeypatch):
+    import sys
+    stub = types.ModuleType("scilink.agents.sim_agents.simulation_pipeline")
+    calls = []
+
+    def run_complete_workflow(description, **kw):
+        calls.append(description)
+        return {"final_status": "success"}
+
+    stub.run_complete_workflow = run_complete_workflow
+    monkeypatch.setitem(
+        sys.modules, "scilink.agents.sim_agents.simulation_pipeline", stub)
+
+    out_dir = tmp_path / "res3"
+    out_dir.mkdir()
+    orch.analysis_results.append({
+        "analysis_id": "demo_003",
+        "output_directory": str(out_dir),
+        "simulation_recommendations": [RECS[0], RECS[2], RECS[4]],
+    })
+    # periodic_dft, molecular_qc and a rec with no suggested_scale all pass.
+    for idx in (0, 1, 2):
+        res = json.loads(orch.tools.execute_tool(
+            "run_dft_workflow", analysis_id="demo_003",
+            recommendation_index=idx))
+        assert res["status"] == "success", res
+    assert len(calls) == 3
 
 
 def test_system_prompt_mentions_new_tool(orch):

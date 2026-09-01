@@ -200,6 +200,11 @@ class RecommendationAgent:
                             f"(valid: {self.VALID_SCALES})")
                         rec = {k: v for k, v in rec.items()
                                if k != "suggested_scale"}
+                    # research_goal is what simulate mode receives; a rec
+                    # without one falls back to its description so the
+                    # handoff never carries an empty goal.
+                    if not rec.get("research_goal"):
+                        rec = dict(rec, research_goal=rec["description"])
                     valid_recommendations.append(rec)
                 else:
                     self.logger.warning(f"Recommendation skipped due to invalid priority type (expected int): {rec}")

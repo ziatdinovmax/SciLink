@@ -4983,7 +4983,26 @@ class AnalysisOrchestratorTools:
                 if not (0 <= recommendation_index < len(recs)):
                     return json.dumps({"status": "error",
                                        "message": f"recommendation_index {recommendation_index} out of range (have {len(recs)})."})
-                structure_description = recs[recommendation_index].get("description") or structure_description
+                rec = recs[recommendation_index]
+                # An MD-scale recommendation describes a system (large supercell,
+                # finite temperature) that is intractable as a DFT calculation —
+                # refuse loudly instead of generating unusable VASP inputs.
+                # molecular_qc and unscored (None) recommendations pass through.
+                if rec.get("suggested_scale") == "molecular_dynamics":
+                    return json.dumps({
+                        "status": "error",
+                        "message": (
+                            f"Recommendation {recommendation_index} is suggested for "
+                            "molecular_dynamics, not periodic DFT — its system size / "
+                            "finite-temperature goal is intractable as a DFT calculation. "
+                            "Route it to simulate mode instead."),
+                        "recommendation": {
+                            "description": rec.get("description"),
+                            "research_goal": rec.get("research_goal"),
+                            "suggested_scale": rec.get("suggested_scale"),
+                        },
+                    })
+                structure_description = rec.get("description") or structure_description
             if not structure_description:
                 return json.dumps({"status": "error",
                                    "message": "structure_description is required (or pass recommendation_index with an analysis that has stored recommendations)."})
@@ -5069,7 +5088,8 @@ class AnalysisOrchestratorTools:
                 "Run the DFT orchestrator to produce VASP-ready inputs (POSCAR, INCAR, "
                 "KPOINTS) for a structure. Provide either an explicit structure_description, "
                 "or an analysis_id + recommendation_index to pick a structure from prior "
-                "recommend_simulations output (choose a DFT-scale recommendation). "
+                "recommend_simulations output (choose a DFT-scale recommendation; one "
+                "suggested for molecular_dynamics is refused — route it to simulate mode). "
                 "Does not run VASP itself; only generates inputs."
             ),
             parameters={
