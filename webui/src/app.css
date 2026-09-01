@@ -230,9 +230,11 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
   animation: pulse 1.2s ease-in-out infinite;
 }
 
-/* The welcome screen's initializing pill: no cyan left rule — it reads as a
-   stray bracket on a free-floating centered pill. */
-.welcome .agent-spinner-container { border-left: none; }
+/* Welcome-screen initializing state: bare centered dots + text, no pill box. */
+.init-status { display: flex; align-items: center; justify-content: center; gap: 9px; }
+.init-status .agent-spinner-dot { font-size: 30px; }
+.init-label { font-size: 23px; color: var(--text); margin-left: 10px; }
+.init-sub { font-size: 17px; color: var(--text-dim); margin: 0; }
 .agent-spinner-dot:nth-child(2) { animation-delay: 0.2s; }
 .agent-spinner-dot:nth-child(3) { animation-delay: 0.4s; }
 @keyframes pulse { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }

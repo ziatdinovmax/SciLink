@@ -24,16 +24,13 @@ export function WelcomeScreen({
     <div className="welcome">
       {busy ? (
         <>
-          <div
-            className="agent-spinner-container"
-            style={{ flex: "none", width: 320 }}
-          >
+          <div className="init-status">
             <span className="agent-spinner-dot">•</span>
             <span className="agent-spinner-dot">•</span>
             <span className="agent-spinner-dot">•</span>
-            <span className="agent-spinner-label">{busy}</span>
+            <span className="init-label">{busy}</span>
           </div>
-          <p className="caption">
+          <p className="init-sub">
             {busy.startsWith("Restoring")
               ? "Loading checkpoint and chat history"
               : "Setting up models and tools"}
