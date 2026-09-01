@@ -5,6 +5,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { useUIActions } from "../UIContext";
 import type { LiveImage } from "../App";
 
 export function AnalysisInset({
@@ -16,6 +17,7 @@ export function AnalysisInset({
   images: LiveImage[];
   running: boolean;
 }) {
+  const { openInFiles } = useUIActions();
   const [idx, setIdx] = useState(0); // offset from newest: 0 = latest
   const [dismissed, setDismissed] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
@@ -80,6 +82,13 @@ export function AnalysisInset({
         <div className="inset-actions">
           <button
             className="inset-btn"
+            onClick={() => openInFiles(img.path)}
+            title="Open in Files"
+          >
+            📁
+          </button>
+          <button
+            className="inset-btn"
             onClick={() => setCollapsed((c) => !c)}
             title={collapsed ? "Expand" : "Collapse"}
           >
@@ -93,7 +102,11 @@ export function AnalysisInset({
 
       {!collapsed && (
         <>
-          <div className="inset-figure">
+          <div
+            className="inset-figure"
+            onClick={() => openInFiles(img.path)}
+            title="Open in Files"
+          >
             <img src={api.fileUrl(sessionId, img.path)} alt={img.label} />
           </div>
           <div className="inset-foot">

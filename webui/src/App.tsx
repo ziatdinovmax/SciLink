@@ -88,7 +88,9 @@ function reducer(state: SessionState, action: Action): SessionState {
           return {
             ...state,
             status: ev.status,
-            ...(ev.status === "idle" ? { liveLog: "" } : {}),
+            // Turn over: the completion message carries the figures/report,
+            // so the live log and the figure inset both stand down.
+            ...(ev.status === "idle" ? { liveLog: "", liveImages: [] } : {}),
           };
         case "question":
           return { ...state, pendingQuestion: ev.question };
