@@ -444,3 +444,53 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 .session-item .caption { display: block; }
 
 .theme-toggle { align-self: flex-end; border: none; background: none; font-size: 16px; padding: 2px 6px; }
+
+/* ── Live analysis inset (picture-in-picture figure viewer) ─────────── */
+.analysis-inset {
+  position: fixed; right: 20px; bottom: 20px; z-index: 40;
+  width: 320px; max-width: calc(100vw - 40px);
+  background: var(--bg-card); border: 1px solid var(--border-strong);
+  border-radius: 10px; box-shadow: 0 10px 34px -10px rgba(0,0,0,0.55);
+  display: flex; flex-direction: column; overflow: hidden;
+  animation: inset-in 0.18s ease-out;
+}
+@keyframes inset-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .analysis-inset { animation: none; } }
+
+.analysis-inset .inset-bar {
+  display: flex; align-items: center; gap: 8px; padding: 7px 8px 7px 11px;
+  border-bottom: 1px solid var(--border); cursor: grab; touch-action: none;
+  background: var(--bg-panel);
+}
+.analysis-inset .inset-bar:active { cursor: grabbing; }
+.inset-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); flex: none; }
+.inset-dot.live { background: var(--primary); box-shadow: 0 0 0 0 var(--primary); animation: inset-pulse 1.6s infinite; }
+@keyframes inset-pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--primary) 55%, transparent); } 70% { box-shadow: 0 0 0 7px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+@media (prefers-reduced-motion: reduce) { .inset-dot.live { animation: none; } }
+
+.inset-title {
+  flex: 1; min-width: 0; font-size: 12.5px; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.inset-title em { color: var(--text-muted); font-style: normal; font-size: 11px;
+  margin-right: 6px; padding: 1px 5px; border: 1px solid var(--border);
+  border-radius: 4px; }
+.inset-actions { display: flex; gap: 2px; flex: none; }
+.inset-btn {
+  padding: 2px 7px; font-size: 12px; line-height: 1.4; min-width: 0;
+  background: transparent; border: 1px solid transparent; color: var(--text-muted);
+  border-radius: 5px;
+}
+.inset-btn:hover:not(:disabled) { color: var(--text); border-color: var(--border); }
+
+.inset-figure {
+  background: #fff; display: grid; place-items: center;
+  max-height: 46vh; overflow: hidden;
+}
+.inset-figure img { display: block; width: 100%; height: auto; max-height: 46vh; object-fit: contain; }
+
+.inset-foot {
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+  padding: 5px; border-top: 1px solid var(--border); background: var(--bg-panel);
+}
+.inset-count { font-size: 11.5px; color: var(--text-dim); font-variant-numeric: tabular-nums; min-width: 76px; text-align: center; }

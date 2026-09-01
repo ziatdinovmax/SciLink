@@ -31,6 +31,69 @@ from .hitl_channel import HTTPChannel, PendingQuestion
 
 _LOG_POLL_S = 0.5
 
+# Live-figure inset (analysis_image events): which artifacts are worth
+# surfacing to the "watch the analysis" inset, and which are noise. We show
+# the meaningful result figures (fit overlays, dashboards, trend plots, the
+# fusion figure) and skip the many intermediates a run also writes.
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg"}
+_IMAGE_SKIP = ("testloop", "elbow_plot", "summary_grid", "_candidates",
+               "/previews/", "/.")
+_TS_SUFFIX = re.compile(r"_\d{8}_\d{6}$")
+_IMAGE_EMIT_CAP = 4          # newest N per fs tick — avoid a flood on a dir dump
+
+
+def _image_label(rel_path: str) -> str:
+    """A short human label from an artifact filename."""
+    stem = os.path.splitext(os.path.basename(rel_path))[0]
+    stem = _TS_SUFFIX.sub("", stem)
+    stem = re.sub(r"^Global_Analysis_", "", stem)
+    stem = re.sub(r"^T\d+_", "", stem)
+    stem = stem.replace("_", " ").strip()
+    return stem[:60] or os.path.basename(rel_path)
+
+
+def _image_branch(rel_path: str) -> Optional[str]:
+    """Fan-out branch (or analysis id) an image belongs to, for context when
+    several datasets are analyzed at once."""
+    parts = rel_path.replace(os.sep, "/").split("/")
+    for i, p in enumerate(parts):
+        if p in ("fanout", "fusion") and i + 1 < len(parts):
+            return parts[i + 1][:40]
+    return None
+
+
+def _scan_new_images(session_dir: str, seen: dict) -> list:
+    """Return [(rel_path, label, branch)] for image artifacts new (or freshly
+    rewritten) since the last scan, newest first, capped. Updates ``seen``
+    (abs path -> mtime) in place."""
+    found = []
+    skip_dirs = {"__pycache__", ".git", "node_modules"}
+    for root, dirs, files in os.walk(session_dir):
+        dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
+        for f in files:
+            if os.path.splitext(f)[1].lower() not in _IMAGE_EXTS:
+                continue
+            ap = os.path.join(root, f)
+            rel = os.path.relpath(ap, session_dir)
+            # Match the skip list against the RELATIVE path (leading "/" so
+            # "/previews/" hits a top-level previews/ too): a session root
+            # whose absolute path contains a skip token must not silently
+            # filter every figure.
+            low = "/" + rel.replace(os.sep, "/").lower()
+            if any(s in low for s in _IMAGE_SKIP):
+                continue
+            try:
+                m = os.stat(ap).st_mtime
+            except OSError:
+                continue
+            if ap in seen and m <= seen[ap]:
+                continue
+            seen[ap] = m
+            found.append((m, rel))
+    found.sort(reverse=True)  # newest first
+    return [(rel, _image_label(rel), _image_branch(rel))
+            for _m, rel in found[:_IMAGE_EMIT_CAP]]
+
 
 @dataclass
 class TurnState:
@@ -114,6 +177,13 @@ def _watch_log(session, turn, cap) -> None:
     sent = 0
     last_sig = None
     last_fs_check = 0.0
+    seen_images: dict = {}
+    # Seed with the images already on disk so the inset only streams figures
+    # THIS turn produces, not the whole prior session.
+    try:
+        _scan_new_images(session.session_dir, seen_images)
+    except Exception:
+        pass
     while turn.is_running and turn.live_capture is cap:
         try:
             buf = cap.getvalue()
@@ -129,6 +199,12 @@ def _watch_log(session, turn, cap) -> None:
                 sig = _fs_signature(session.session_dir)
                 if last_sig is not None and sig != last_sig:
                     session.events.emit("files_changed", {})
+                    # Push newly-written figures to the live inset (oldest of
+                    # this batch first, so the newest ends up "latest").
+                    for rel, label, branch in reversed(
+                            _scan_new_images(session.session_dir, seen_images)):
+                        session.events.emit("analysis_image", {
+                            "path": rel, "label": label, "branch": branch})
                 last_sig = sig
             except Exception:
                 pass
@@ -140,6 +216,16 @@ def _watch_log(session, turn, cap) -> None:
     except Exception:
         pass
     session.events.emit("files_changed", {})
+    # Final figure sweep: catch anything written after the last in-loop tick
+    # (and the first-window case where nothing else changed the signature) —
+    # otherwise the LAST figure of a turn is exactly the one the inset misses.
+    try:
+        for rel, label, branch in reversed(
+                _scan_new_images(session.session_dir, seen_images)):
+            session.events.emit("analysis_image", {
+                "path": rel, "label": label, "branch": branch})
+    except Exception:
+        pass
 
 
 def _run_turn(session, turn: TurnState, user_input: str) -> None:

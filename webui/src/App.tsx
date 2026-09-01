@@ -13,6 +13,7 @@ import { WelcomeScreen } from "./components/WelcomeScreen";
 import { ChatPanel } from "./components/ChatPanel";
 import { FilesPanel } from "./components/FilesPanel";
 import { PreChatHero } from "./components/PreChatHero";
+import { AnalysisInset } from "./components/AnalysisInset";
 
 interface SessionState {
   snapshot: SessionSnapshot | null;
@@ -23,7 +24,16 @@ interface SessionState {
   name: string | null;
   lastError: string | null;
   filesVersion: number; // bumped on files_changed → the Files tab refetches
+  liveImages: LiveImage[]; // figures streamed during the turn (newest last)
 }
+
+export interface LiveImage {
+  path: string;
+  label: string;
+  branch: string | null;
+}
+
+const LIVE_IMAGE_CAP = 30; // keep a bounded filmstrip of recent figures
 
 const emptyState: SessionState = {
   snapshot: null,
@@ -34,6 +44,7 @@ const emptyState: SessionState = {
   name: null,
   lastError: null,
   filesVersion: 0,
+  liveImages: [],
 };
 
 type Action =
@@ -63,6 +74,7 @@ function reducer(state: SessionState, action: Action): SessionState {
         status: "running",
         liveLog: "",
         lastError: null,
+        liveImages: [], // fresh turn → fresh filmstrip
         messages: [...state.messages, { role: "user", content: action.content }],
       };
     case "clear_error":
@@ -93,6 +105,19 @@ function reducer(state: SessionState, action: Action): SessionState {
           return { ...state, name: ev.name };
         case "files_changed":
           return { ...state, filesVersion: state.filesVersion + 1 };
+        case "analysis_image": {
+          // De-dup a repeat of the current latest (reconnect replay / rewrite).
+          const prev = state.liveImages[state.liveImages.length - 1];
+          if (prev && prev.path === ev.path) return state;
+          const next = [
+            ...state.liveImages,
+            { path: ev.path, label: ev.label, branch: ev.branch },
+          ];
+          return {
+            ...state,
+            liveImages: next.slice(-LIVE_IMAGE_CAP),
+          };
+        }
         case "error":
           return { ...state, lastError: ev.message };
         default:
@@ -330,6 +355,11 @@ export default function App() {
                 onDismissError={() => dispatch({ type: "clear_error" })}
               />
             )}
+            <AnalysisInset
+              sessionId={session.id}
+              images={state.liveImages}
+              running={state.status === "running"}
+            />
           </UIContext.Provider>
         )}
       </div>

@@ -13,6 +13,12 @@ export type SessionEvent =
   | { type: "assistant_message"; message: ChatMessage }
   | { type: "session_named"; name: string }
   | { type: "files_changed" }
+  | {
+      type: "analysis_image";
+      path: string;
+      label: string;
+      branch: string | null;
+    }
   | { type: "error"; message: string };
 
 export function useSessionEvents(
@@ -48,6 +54,15 @@ export function useSessionEvents(
     src.addEventListener("files_changed", () =>
       onEvent({ type: "files_changed" }),
     );
+    src.addEventListener("analysis_image", (e) => {
+      const d = parse(e);
+      onEvent({
+        type: "analysis_image",
+        path: d.path,
+        label: d.label ?? "",
+        branch: d.branch ?? null,
+      });
+    });
     src.addEventListener("error", (e) => {
       // Only our payload-carrying errors; EventSource transport errors have
       // no data and are handled by its auto-reconnect.

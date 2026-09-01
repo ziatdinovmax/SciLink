@@ -399,6 +399,28 @@ def test_provenance_endpoint(client, tmp_path):
     assert "results/other.png" in ev["files"]   # clipped path recovered
 
 
+def test_scan_new_images(tmp_path):
+    from scilink.server.runner import _scan_new_images
+
+    # Session root deliberately containing a skip token: must NOT filter
+    # everything (the skip list matches relative paths only).
+    root = tmp_path / "testloop_session"
+    root.mkdir()
+    (root / "old.png").write_bytes(b"x")
+    seen: dict = {}
+    _scan_new_images(str(root), seen)  # seed pass sees old.png
+
+    (root / "fit_overlay.png").write_bytes(b"x")
+    (root / "notes.txt").write_text("x")               # not an image
+    (root / "elbow_plot_k.png").write_bytes(b"x")      # skip token in name
+    (root / "previews").mkdir()
+    (root / "previews" / "p.png").write_bytes(b"x")    # skip dir, top-level
+    out = _scan_new_images(str(root), seen)
+    assert [rel for rel, _label, _branch in out] == ["fit_overlay.png"]
+    # already-seen files are not re-emitted
+    assert _scan_new_images(str(root), seen) == []
+
+
 def test_feedback_flow_and_409(client, tmp_path):
     """A fake blocking agent exercises the full turn/feedback/stop plumbing."""
     from scilink.server import runner as runner_mod

@@ -53,6 +53,12 @@ authenticating reverse proxy.
 - **Uploads**: per-mode pre-chat heroes (analyze data+metadata, plan
   knowledge/code/data, meta combined dropzone) writing to the same session
   subdirectories as Streamlit, composing the same dispatch prompts.
+- **Live analysis inset**: a draggable, dismissible picture-in-picture
+  panel that shows result figures (fit overlays, dashboards, trend plots)
+  as the agent writes them mid-turn, with a filmstrip to page back and a
+  branch label during fan-outs. Driven by `analysis_image` SSE events from
+  the same filesystem watcher as the explorer; intermediates (candidate
+  attempts, elbow plots, preview grids) are filtered server-side.
 - **File Explorer** (Files tab) — beyond Streamlit parity:
   - live tree: no Refresh button — the server emits `files_changed` while a
     turn runs, so artifacts appear as the agent writes them;
@@ -109,7 +115,7 @@ webui/ (Vite + React + TS)  ──REST + SSE──►  scilink/server/ (FastAPI)
 | POST | `/sessions` | create, or resume with `resume_dir` |
 | GET/PATCH | `/sessions/{id}` | snapshot / rename |
 | POST | `/sessions/{id}/messages` | start a turn (409 while one runs) |
-| GET | `/sessions/{id}/events` | SSE: `log`, `status`, `question`, `question_cleared`, `assistant_message`, `session_named`, `files_changed`, `error` |
+| GET | `/sessions/{id}/events` | SSE: `log`, `status`, `question`, `question_cleared`, `assistant_message`, `session_named`, `files_changed`, `analysis_image`, `error` |
 | POST | `/sessions/{id}/feedback` | answer the parked HITL question |
 | POST | `/sessions/{id}/stop` | stop the running turn |
 | POST | `/sessions/{id}/uploads` | multipart, `category` = data/metadata/knowledge/code/planning_data/meta |
