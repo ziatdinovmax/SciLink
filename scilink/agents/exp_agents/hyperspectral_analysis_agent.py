@@ -795,6 +795,28 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                         records.append(rec)
         return records
 
+    def _handle_system_info(self, system_info):
+        """Base handling plus the Tier-1 deterministic alias normalizer.
+
+        Hyperspectral analysis hard-requires a resolvable signal axis, and
+        externally-authored metadata often spells the range as
+        ``spectral_axis: {min, max}`` rather than the canonical
+        ``energy_range: {start, end}``. Folding aliases here — the single
+        entry point for metadata on this agent — means the axis
+        precondition and every downstream reader see the canonical shape.
+        A no-op for already-conformant dicts.
+        """
+        si = super()._handle_system_info(system_info)
+        if si:
+            from .metadata_converter import normalize_metadata_dict
+            si, was_modified = normalize_metadata_dict(si)
+            if was_modified:
+                self.logger.info(
+                    "Metadata aliases folded to the canonical schema "
+                    "(Tier-1 deterministic normalizer)."
+                )
+        return si
+
     def _maybe_bank_scripts(self, records: list, skill_state: dict,
                             data_path: str, system_info) -> list:
         """Bank every approved working script in the script bank (#346).
