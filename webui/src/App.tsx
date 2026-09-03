@@ -325,38 +325,45 @@ export default function App() {
                 Files
               </button>
             </div>
-            {tab === "files" ? (
+            {/* Both tab bodies stay MOUNTED and toggle visibility: switching
+                tabs must not destroy the hero's upload/objective state, a
+                chat draft, or the explorer's tree state. */}
+            <div className="tab-body" hidden={tab !== "files"}>
               <FilesPanel
                 sessionId={session.id}
                 filesVersion={state.filesVersion}
+                active={tab === "files"}
                 selectedPath={selectedFile}
                 onSelect={setSelectedFile}
               />
-            ) : state.messages.length === 0 && state.status === "idle" ? (
-              <PreChatHero
-                mode={mode}
-                sessionId={session.id}
-                onStart={sendMessage}
-              />
-            ) : (
-              <ChatPanel
-                session={session}
-                mode={mode}
-                status={state.status}
-                messages={state.messages}
-                liveLog={state.liveLog}
-                pendingQuestion={state.pendingQuestion}
-                lastError={state.lastError}
-                attachRequest={attachRequest}
-                onAttachConsumed={() => setAttachRequest(null)}
-                onSend={sendMessage}
-                onStop={() => api.stop(session.id)}
-                onFeedback={(requestId, response) =>
-                  api.sendFeedback(session.id, requestId, response)
-                }
-                onDismissError={() => dispatch({ type: "clear_error" })}
-              />
-            )}
+            </div>
+            <div className="tab-body" hidden={tab !== "chat"}>
+              {state.messages.length === 0 && state.status === "idle" ? (
+                <PreChatHero
+                  mode={mode}
+                  sessionId={session.id}
+                  onStart={sendMessage}
+                />
+              ) : (
+                <ChatPanel
+                  session={session}
+                  mode={mode}
+                  status={state.status}
+                  messages={state.messages}
+                  liveLog={state.liveLog}
+                  pendingQuestion={state.pendingQuestion}
+                  lastError={state.lastError}
+                  attachRequest={attachRequest}
+                  onAttachConsumed={() => setAttachRequest(null)}
+                  onSend={sendMessage}
+                  onStop={() => api.stop(session.id)}
+                  onFeedback={(requestId, response) =>
+                    api.sendFeedback(session.id, requestId, response)
+                  }
+                  onDismissError={() => dispatch({ type: "clear_error" })}
+                />
+              )}
+            </div>
             <AnalysisInset
               sessionId={session.id}
               images={state.liveImages}

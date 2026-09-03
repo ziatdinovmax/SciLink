@@ -3,7 +3,9 @@ import { api } from "../api";
 import { Dropzone } from "./Dropzone";
 
 /** Pre-chat start forms — ports of chat_uploads.py's three hero zones,
- * composing the same dispatch prompts from the server-side saved paths. */
+ * composing the same dispatch prompts from the server-side saved paths.
+ * Design: plain centered headline (dashed borders belong to drop targets
+ * only), minimal copy. */
 
 const DATA_ACCEPT = ".tif,.tiff,.png,.jpg,.npy,.csv,.txt,.tsv,.xlsx,.h5,.hdf5,.nxs";
 const METADATA_ACCEPT = ".json,.txt";
@@ -11,6 +13,9 @@ const KNOWLEDGE_ACCEPT =
   ".pdf,.txt,.md,.docx,.png,.jpg,.jpeg,.tif,.tiff,.csv,.xlsx,.tsv,.json";
 const CODE_ACCEPT = ".py,.txt,.md,.json,.yaml,.yml";
 const PLANNING_DATA_ACCEPT = ".csv,.xlsx,.tsv,.txt,.npy,.json";
+
+
+
 
 export function PreChatHero({
   mode,
@@ -61,13 +66,11 @@ function AnalyzeHero({
 
   return (
     <div className="hero-wrap">
-      <div className="upload-hero-box">
-        <p className="upload-hero-title">Upload your data to get started</p>
-        <p className="upload-hero-subtitle">Images, CSV, NumPy arrays, and more</p>
-      </div>
+      <h2 className="hero-title">Upload your data to get started</h2>
+      <p className="hero-sub">Images, CSV, NumPy arrays, and more</p>
       <div className="uploader-row">
         <Dropzone
-          label="Data file(s) — click or drop"
+          label="Data file(s) — drop here or click to browse"
           accept={DATA_ACCEPT}
           onFiles={async (files) => {
             const r = await api.upload(sessionId, "data", files);
@@ -168,36 +171,35 @@ function PlanHero({
 
   return (
     <div className="hero-wrap">
-      <label className="field">
-        <span>Research objective</span>
-        <textarea
-          value={objective}
-          placeholder="e.g., Optimize reaction yield for polymer synthesis"
-          onChange={(e) => setObjective(e.target.value)}
-        />
-      </label>
-      <div className="upload-hero-box">
-        <p className="upload-hero-title">Upload resources for the planning agent</p>
-        <p className="upload-hero-subtitle">Papers, images, code, and experimental data</p>
-      </div>
+      <h2 className="hero-title">Plan your next experiment</h2>
+      <p className="hero-sub">
+        Describe a research objective — add papers, code, and data to ground
+        the plan
+      </p>
+      <textarea
+        aria-label="Research objective"
+        value={objective}
+        placeholder="e.g., Optimize reaction yield for polymer synthesis"
+        onChange={(e) => setObjective(e.target.value)}
+      />
       <details className="card hero-accordion" open>
         <summary>Knowledge (papers, images)</summary>
         <div className="card-body">
-          <Dropzone label="Upload knowledge files" accept={KNOWLEDGE_ACCEPT}
+          <Dropzone label="Drop files here or click to browse" accept={KNOWLEDGE_ACCEPT}
             onFiles={uploader("knowledge", setKnowledge)} />
         </div>
       </details>
       <details className="card hero-accordion">
         <summary>Code (scripts, API docs)</summary>
         <div className="card-body">
-          <Dropzone label="Upload code files" accept={CODE_ACCEPT}
+          <Dropzone label="Drop files here or click to browse" accept={CODE_ACCEPT}
             onFiles={uploader("code", setCode)} />
         </div>
       </details>
       <details className="card hero-accordion">
         <summary>Data (experimental results)</summary>
         <div className="card-body">
-          <Dropzone label="Upload data files" accept={PLANNING_DATA_ACCEPT}
+          <Dropzone label="Drop files here or click to browse" accept={PLANNING_DATA_ACCEPT}
             onFiles={uploader("planning_data", setData)} />
         </div>
       </details>
@@ -246,29 +248,25 @@ function MetaHero({
 
   return (
     <div className="hero-wrap">
-      <div className="upload-hero-box">
-        <p className="upload-hero-title">
-          What would you like to do? <span className="beta-pill">BETA</span>
-        </p>
-        <p className="upload-hero-subtitle">
-          Describe your research goal — mission control agent will route it to
-          the specialist agents
-        </p>
-      </div>
-      <label className="field">
-        <span>Research goal</span>
-        <textarea
-          value={goal}
-          style={{ minHeight: 110 }}
-          placeholder="e.g., Analyze the STEM image I uploaded, then plan a follow-up experiment campaign based on what you find"
-          onChange={(e) => setGoal(e.target.value)}
-        />
-      </label>
+      <h2 className="hero-title">
+        What would you like to do? <span className="beta-pill">BETA</span>
+      </h2>
+      <p className="hero-sub">
+        Mission control routes your goal — and any files — to the analysis
+        and planning specialists
+      </p>
+      <textarea
+        aria-label="Research goal"
+        value={goal}
+        style={{ minHeight: 110 }}
+        placeholder="e.g., Analyze the STEM image I uploaded, then plan a follow-up experiment campaign based on what you find"
+        onChange={(e) => setGoal(e.target.value)}
+      />
       <details className="card hero-accordion" open>
         <summary>Add files (optional) — papers, code, data, metadata</summary>
         <div className="card-body">
           <Dropzone
-            label="One drop zone for everything — the meta-agent routes each file"
+            label="Drop files here or click to browse"
             onFiles={async (files) => {
               const r = await api.upload(sessionId, "meta", files);
               setUploads((prev) => [...prev, ...r.paths]);

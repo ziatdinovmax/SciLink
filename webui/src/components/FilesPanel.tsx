@@ -42,11 +42,13 @@ type ViewMode = "tree" | "gallery" | "timeline";
 export function FilesPanel({
   sessionId,
   filesVersion,
+  active,
   selectedPath,
   onSelect,
 }: {
   sessionId: string;
   filesVersion: number; // bumped on files_changed / turn completion
+  active: boolean; // the panel stays mounted; refetch when it becomes visible
   selectedPath: string | null;
   onSelect: (path: string | null) => void;
 }) {
@@ -59,6 +61,10 @@ export function FilesPanel({
   const [view, setView] = useState<ViewMode>("tree");
 
   useEffect(() => {
+    // Fetch on every switch INTO the tab (uploads land outside turns, so
+    // files_changed events alone would miss them) and on files_changed
+    // while the tab is open. Hidden panel: skip — the next open refetches.
+    if (!active) return;
     api
       .tree(sessionId)
       .then((d) => {
@@ -70,7 +76,7 @@ export function FilesPanel({
       .provenance(sessionId)
       .then((d) => setProvenance(d.events))
       .catch(() => setProvenance([]));
-  }, [sessionId, filesVersion]);
+  }, [sessionId, filesVersion, active]);
 
   // Auto-expand ancestors of an externally selected file ("Open in Files").
   useEffect(() => {
