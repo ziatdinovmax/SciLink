@@ -288,6 +288,66 @@ Respond in valid JSON with EXACTLY these keys:
 """
 
 
+# Replayable-donor probe ------------------------------------------------------
+# Each foundation agent persists its approved analysis script differently;
+# the follower side (``prior_analysis_paths`` + ``reuse_locked_script``) is
+# agent-agnostic, so the donor probe must recognise every producer:
+#   hyperspectral — ``dynamic_analysis_records.json`` (per-record
+#                   ``task_success`` gate, script attached);
+#   image         — ``scripts/analysis_script.py`` (or per-image
+#                   ``scripts/<image>.py`` for a series) beside a successful
+#                   ``analysis_results.json``;
+#   curve         — ``scripts/fitting_script.py`` (or per-spectrum
+#                   ``scripts/<spectrum>.py``) beside a successful
+#                   ``analysis_results.json``.
+_SCRIPT_RECORD_NAME = "dynamic_analysis_records.json"
+_REPLAY_SCRIPT_NAMES = ("analysis_script.py", "fitting_script.py")
+
+
+def find_donor_reuse_dir(donor_dir) -> tuple:
+    """Locate the donor run directory a follower can replay verbatim.
+
+    Returns ``(reuse_dir, kind)`` — ``kind`` is ``"records"`` (hyperspectral
+    dynamic-analysis records), ``"script"`` (image/curve locked script) —
+    or ``(None, None)`` when the donor left nothing approved and replayable.
+    Newest candidate wins within each kind; the records kind is preferred
+    because it carries an explicit per-record ``task_success`` gate.
+    """
+    donor_dir = Path(donor_dir)
+    if not donor_dir.is_dir():
+        return None, None
+    cands = sorted(donor_dir.rglob(_SCRIPT_RECORD_NAME),
+                   key=lambda p: p.stat().st_mtime)
+    for c in reversed(cands):
+        try:
+            recs = json.loads(c.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - keep looking
+            continue
+        if any(isinstance(r, dict) and r.get("script") and r.get("task_success")
+               for r in recs):
+            return c.parent, "records"
+    results = sorted(donor_dir.rglob("analysis_results.json"),
+                     key=lambda p: p.stat().st_mtime)
+    for res in reversed(results):
+        if "_candidates" in res.parts:      # best-of-N losers, never approved
+            continue
+        if (res.parent / _SCRIPT_RECORD_NAME).exists():
+            continue    # hyperspectral run: its records (judged above) are authoritative
+        try:
+            status = json.loads(res.read_text(encoding="utf-8")).get("status")
+        except Exception:  # noqa: BLE001 - keep looking
+            continue
+        if status not in ("success", "partial"):
+            continue
+        scripts = res.parent / "scripts"
+        if not scripts.is_dir():
+            continue
+        if any((scripts / n).is_file() for n in _REPLAY_SCRIPT_NAMES) \
+                or any(scripts.glob("*.py")):
+            return res.parent, "script"
+    return None, None
+
+
 def _slug(text: str, maxlen: int = 32) -> str:
     """Filesystem-safe short slug from a label."""
     s = re.sub(r"[^a-zA-Z0-9]+", "_", (text or "").strip().lower()).strip("_")
@@ -1342,8 +1402,8 @@ def run_fanout(orch, branches: List[dict],
     # --- harmonized pipeline replay (donor-first) ---
     # The FIRST branch is the pipeline donor: it runs alone under the normal
     # analysis path; its approved dynamic-analysis script(s) are then
-    # replayed VERBATIM by every follower (via the hyperspectral agent's
-    # locked-reuse surface), so cross-branch magnitudes are measured by ONE
+    # replayed VERBATIM by every follower (via each agent's locked-reuse
+    # surface: prior_analysis_paths + reuse_locked_script), so cross-branch magnitudes are measured by ONE
     # frozen pipeline instead of N independently generated ones — the
     # methodological confound fusion otherwise has to discount. A donor that
     # yields no approved replayable script falls back loudly to today's
@@ -1374,20 +1434,9 @@ def run_fanout(orch, branches: List[dict],
         # an approved, replayable script sits on disk; the records are the
         # authority here (each is task_success-gated with the script
         # attached). Only a donor with NO approved record falls back.
-        reuse_dir = None
         _donor_dir = (orch.fanout_dir
                       / f"{entries[0]['index']:02d}_{_slug(donor_label)}")
-        _cands = sorted(_donor_dir.rglob("dynamic_analysis_records.json"),
-                        key=lambda p: p.stat().st_mtime)
-        for _c in reversed(_cands):
-            try:
-                _recs = json.loads(_c.read_text(encoding="utf-8"))
-            except Exception:  # noqa: BLE001 - keep looking
-                continue
-            if any(isinstance(r, dict) and r.get("script")
-                   and r.get("task_success") for r in _recs):
-                reuse_dir = _c.parent
-                break
+        reuse_dir, reuse_kind = find_donor_reuse_dir(_donor_dir)
         if reuse_dir is None:
             msg = (f"harmonize requested but donor '{donor_label}' produced "
                    "no approved replayable script — followers run "
@@ -1403,8 +1452,8 @@ def run_fanout(orch, branches: List[dict],
                       f"(status: {entries[0].get('status')}) but produced an "
                       "approved script — harmonizing on the approved record "
                       "(partial donor, #519).")
-            print(f"  🧬 Donor script approved — followers will replay "
-                  f"{reuse_dir.name} verbatim.")
+            print(f"  🧬 Donor script approved ({reuse_kind}) — followers "
+                  f"will replay {reuse_dir.name} verbatim.")
             harm_block = (
                 "\n\nHARMONIZED PIPELINE REPLAY (mandatory): a sibling "
                 f"dataset (donor '{donor_label}') was already analyzed and "
@@ -1421,7 +1470,7 @@ def run_fanout(orch, branches: List[dict],
                 entries[_i]["harmonized_donor_index"] = entries[0]["index"]
             harmonized_info = {
                 "donor": donor_label, "status": "harmonized",
-                "reuse_dir": str(reuse_dir),
+                "reuse_dir": str(reuse_dir), "reuse_kind": reuse_kind,
                 "followers": [b.get("label") for b in run_branches[1:]],
                 # Surfaced so fusion/readers can weigh a pipeline donated by
                 # a delegation that did not itself finish cleanly (#519).
