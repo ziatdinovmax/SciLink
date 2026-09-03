@@ -1324,6 +1324,7 @@ def _assign_missing_indices(regimes: list, missing: set, reduction) -> str:
 
 _MEMBERSHIP_MARGIN_FRACTION = 0.25            # incoherent axis: a "clear misfit"
 _MEMBERSHIP_MARGIN_FRACTION_COHERENT = 0.4    # coherent axis: only an UNAMBIGUOUS misfit
+_MEMBERSHIP_RANGE_PAD_FRACTION = 0.1          # coherent axis: padding of the target regime's score range
 
 
 def _correct_regime_membership(regimes: list, reduction) -> list:
@@ -1377,7 +1378,8 @@ def _correct_regime_membership(regimes: list, reduction) -> list:
                     others = [i for i in members[id(best)] if i != idx]
                     if not others:
                         continue
-                    lo, hi = float(scores[others].min()), float(scores[others].max())
+                    pad = _MEMBERSHIP_RANGE_PAD_FRACTION * rng     # tight regimes (near-identical members) still count
+                    lo, hi = float(scores[others].min()) - pad, float(scores[others].max()) + pad
                     if not (lo <= scores[idx] <= hi):
                         continue
                 moves.append((idx, r.get("name", "unnamed"), best.get("name", "unnamed")))

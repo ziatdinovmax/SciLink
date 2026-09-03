@@ -71,6 +71,12 @@ def test_membership_correction_moves_clear_misfit_only_when_incoherent():
     regimes2 = [{"name": "a", "spectrum_indices": [0, 1, 2, 3, 4, 5, 6]}, {"name": "b", "spectrum_indices": [7, 8, 9, 10, 11]}]
     assert _correct_regime_membership(regimes2, red2) == [(6, "a", "b")]
     assert regimes2[0]["spectrum_indices"] == [0, 1, 2, 3, 4, 5] and regimes2[1]["spectrum_indices"] == [6, 7, 8, 9, 10, 11]
+    # coherent axis, a control filed into a sharp-step regime: moved even though the
+    # control regime's two members have (near-)identical scores
+    curves = [_curve(s) for s in (0, 0, 0, 25, 25, 25, -25, -25, -25)]
+    red4 = reduce_curves(curves, controls=[0, 0, 0, 1, 1, 1, 2, 2, 2], control_source="magnet_action")
+    regimes5 = [{"name": "ctl", "spectrum_indices": [0, 1]}, {"name": "ins", "spectrum_indices": [2, 3, 4, 5]}, {"name": "ret", "spectrum_indices": [6, 7, 8]}]
+    assert _correct_regime_membership(regimes5, red4) == [(2, "ins", "ctl")]
     # coherent axis, GRADUAL transition: nothing is moved (a ramp spectrum is never inside the other regime's range by a wide margin)
     ramp = [_curve(20.0 * i / 11) for i in range(12)]
     red3 = reduce_curves(ramp, controls=temps, control_source="temperature")
