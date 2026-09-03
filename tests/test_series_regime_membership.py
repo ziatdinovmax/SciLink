@@ -64,11 +64,21 @@ def test_membership_correction_moves_clear_misfit_only_when_incoherent():
     moves = _correct_regime_membership(regimes, red)
     assert moves == [(1, "control", "insertion")]
     assert regimes[0]["spectrum_indices"] == [0, 3, 8] and regimes[1]["spectrum_indices"] == [1, 4, 6]
-    # a coherent axis is never touched, even with a deliberately wrong plan
+    # coherent axis, sharp two-level series: a boundary spectrum the planner put on
+    # the wrong side is an UNAMBIGUOUS misfit (score inside the other regime's range)
     curves, temps = _monotone()
     red2 = reduce_curves(curves, controls=temps, control_source="temperature")
     regimes2 = [{"name": "a", "spectrum_indices": [0, 1, 2, 3, 4, 5, 6]}, {"name": "b", "spectrum_indices": [7, 8, 9, 10, 11]}]
-    assert _correct_regime_membership(regimes2, red2) == [] and regimes2[0]["spectrum_indices"] == [0, 1, 2, 3, 4, 5, 6]
+    assert _correct_regime_membership(regimes2, red2) == [(6, "a", "b")]
+    assert regimes2[0]["spectrum_indices"] == [0, 1, 2, 3, 4, 5] and regimes2[1]["spectrum_indices"] == [6, 7, 8, 9, 10, 11]
+    # coherent axis, GRADUAL transition: nothing is moved (a ramp spectrum is never inside the other regime's range by a wide margin)
+    ramp = [_curve(20.0 * i / 11) for i in range(12)]
+    red3 = reduce_curves(ramp, controls=temps, control_source="temperature")
+    assert red3["axis_coherence"]["coherent"] is True
+    regimes3 = [{"name": "a", "spectrum_indices": [0, 1, 2, 3, 4, 5]}, {"name": "b", "spectrum_indices": [6, 7, 8, 9, 10, 11]}]
+    assert _correct_regime_membership(regimes3, red3) == []
+    regimes4 = [{"name": "a", "spectrum_indices": [0, 1, 2, 3, 4, 5, 6, 7]}, {"name": "b", "spectrum_indices": [8, 9, 10, 11]}]
+    assert _correct_regime_membership(regimes4, red3) == []
     assert _correct_regime_membership(regimes, None) == []
 
 

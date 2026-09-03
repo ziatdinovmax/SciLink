@@ -1322,28 +1322,37 @@ def _assign_missing_indices(regimes: list, missing: set, reduction) -> str:
     return "nearest assigned neighbour along the series axis"
 
 
-_MEMBERSHIP_MARGIN_FRACTION = 0.25   # of the PC1 score range: a "clear misfit" only
+_MEMBERSHIP_MARGIN_FRACTION = 0.25            # incoherent axis: a "clear misfit"
+_MEMBERSHIP_MARGIN_FRACTION_COHERENT = 0.4    # coherent axis: only an UNAMBIGUOUS misfit
 
 
 def _correct_regime_membership(regimes: list, reduction) -> list:
-    """Move a spectrum to the regime whose PC1 scores it matches, when the
-    series axis is INCOHERENT (interleaved regimes) and the misfit is clear:
-    farther than ``_MEMBERSHIP_MARGIN_FRACTION`` of the score range from its
-    own regime's median than from another regime's. Returns
-    ``[(index, from_name, to_name), ...]`` and mutates ``spectrum_indices``.
-    No-op for a coherent axis, a single regime, or missing scores."""
+    """Move a spectrum to the regime whose PC1 scores it matches.
+
+    Incoherent axis (interleaved regimes): a clear misfit — farther than
+    ``_MEMBERSHIP_MARGIN_FRACTION`` of the score range from its own regime's
+    median than from another regime's — is moved.
+    Coherent axis: the planner's positional assignment stands unless a
+    spectrum is an UNAMBIGUOUS misfit — the stricter margin AND its score
+    lies inside the other regime's observed score range (a boundary spectrum
+    between two scouts that the planner guessed onto the wrong side). A
+    gradual transition never satisfies both, so a conventional monotone
+    series is left as planned.
+    Returns ``[(index, from_name, to_name), ...]``; mutates ``spectrum_indices``.
+    No-op for a single regime or missing scores."""
     if not isinstance(reduction, dict):
         return []
     ac = reduction.get("axis_coherence") or {}
     scores = reduction.get("scores_by_index")
-    if ac.get("coherent", True) or not scores or len(regimes) < 2:
+    if not ac or not scores or len(regimes) < 2:
         return []
+    coherent = bool(ac.get("coherent", True))
     import numpy as _np
     scores = _np.asarray(scores, dtype=float)
     rng = float(scores.max() - scores.min())
     if rng <= 0:
         return []
-    margin = _MEMBERSHIP_MARGIN_FRACTION * rng
+    margin = (_MEMBERSHIP_MARGIN_FRACTION_COHERENT if coherent else _MEMBERSHIP_MARGIN_FRACTION) * rng
     members = {id(r): [i for i in r.get("spectrum_indices", []) if 0 <= i < scores.size] for r in regimes}
     medians = {}
     for r in regimes:
@@ -1364,6 +1373,13 @@ def _correct_regime_membership(regimes: list, reduction) -> list:
                 if best_d is None or d < best_d:
                     best, best_d = o, d
             if best is not None and best_d + margin < own:
+                if coherent:
+                    others = [i for i in members[id(best)] if i != idx]
+                    if not others:
+                        continue
+                    lo, hi = float(scores[others].min()), float(scores[others].max())
+                    if not (lo <= scores[idx] <= hi):
+                        continue
                 moves.append((idx, r.get("name", "unnamed"), best.get("name", "unnamed")))
                 r["spectrum_indices"] = [i for i in r.get("spectrum_indices", []) if i != idx]
                 best["spectrum_indices"] = sorted(set(best.get("spectrum_indices", [])) | {idx})
