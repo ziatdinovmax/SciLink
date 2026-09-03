@@ -107,7 +107,11 @@ export function AnalysisInset({
             onClick={() => openInFiles(img.path)}
             title="Open in Files"
           >
-            <img src={api.fileUrl(sessionId, img.path)} alt={img.label} />
+            <img
+              key={`${img.path}:${img.v ?? ""}`}
+              src={api.fileUrl(sessionId, img.path, img.v)}
+              alt={img.label}
+            />
           </div>
           <div className="inset-foot">
             <button

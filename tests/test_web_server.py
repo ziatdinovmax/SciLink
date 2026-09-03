@@ -7,6 +7,7 @@ are exercised by the live smoke flow, not here.
 """
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -445,9 +446,22 @@ def test_scan_new_images(tmp_path):
     (root / "previews").mkdir()
     (root / "previews" / "p.png").write_bytes(b"x")    # skip dir, top-level
     out = _scan_new_images(str(root), seen)
-    assert [rel for rel, _label, _branch in out] == ["fit_overlay.png"]
+    assert [rel for rel, _label, _branch, _v in out] == ["fit_overlay.png"]
+    # the version token is the file mtime (nanoseconds), carried to the client
+    assert out[0][3] == (root / "fit_overlay.png").stat().st_mtime_ns
     # already-seen files are not re-emitted
     assert _scan_new_images(str(root), seen) == []
+
+    # An in-place rewrite with a newer mtime IS re-emitted (the inset-refresh
+    # contract): same path, new version token.
+    fit = root / "fit_overlay.png"
+    st = fit.stat()
+    fit.write_bytes(b"y")
+    os.utime(fit, ns=(st.st_atime_ns + 5_000_000_000,
+                      st.st_mtime_ns + 5_000_000_000))
+    rewritten = _scan_new_images(str(root), seen)
+    assert [rel for rel, _l, _b, _v in rewritten] == ["fit_overlay.png"]
+    assert rewritten[0][3] == fit.stat().st_mtime_ns
 
 
 def test_feedback_flow_and_409(client, tmp_path):

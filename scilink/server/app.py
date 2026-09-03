@@ -300,7 +300,12 @@ def create_app(session_root: Path, serve_frontend: bool = True) -> FastAPI:
         if not target.is_file():
             raise HTTPException(404, f"No such file: {path}")
         media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-        return FileResponse(target, media_type=media_type)
+        # no-cache = revalidate, not "never store": a figure rewritten in place
+        # (a refined visualization.png at the same path) must not be served
+        # stale from the browser cache. FileResponse still emits ETag/
+        # Last-Modified, so an unchanged file is a cheap 304.
+        return FileResponse(target, media_type=media_type,
+                            headers={"Cache-Control": "no-cache"})
 
     # ── static frontend (production) ─────────────────────────────
 

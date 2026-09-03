@@ -18,6 +18,7 @@ export type SessionEvent =
       path: string;
       label: string;
       branch: string | null;
+      v?: number;
     }
   | { type: "error"; message: string };
 
@@ -61,6 +62,7 @@ export function useSessionEvents(
         path: d.path,
         label: d.label ?? "",
         branch: d.branch ?? null,
+        v: d.v,
       });
     });
     src.addEventListener("error", (e) => {

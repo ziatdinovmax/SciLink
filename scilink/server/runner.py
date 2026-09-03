@@ -63,9 +63,11 @@ def _image_branch(rel_path: str) -> Optional[str]:
 
 
 def _scan_new_images(session_dir: str, seen: dict) -> list:
-    """Return [(rel_path, label, branch)] for image artifacts new (or freshly
-    rewritten) since the last scan, newest first, capped. Updates ``seen``
-    (abs path -> mtime) in place."""
+    """Return [(rel_path, label, branch, mtime_ns)] for image artifacts new
+    (or freshly rewritten) since the last scan, newest first, capped. Updates
+    ``seen`` (abs path -> mtime_ns) in place. ``mtime_ns`` rides through to the
+    client as a URL version token, so a figure rewritten in place produces a
+    distinct <img> URL and re-fetches instead of showing cached stale bytes."""
     found = []
     skip_dirs = {"__pycache__", ".git", "node_modules"}
     for root, dirs, files in os.walk(session_dir):
@@ -83,7 +85,7 @@ def _scan_new_images(session_dir: str, seen: dict) -> list:
             if any(s in low for s in _IMAGE_SKIP):
                 continue
             try:
-                m = os.stat(ap).st_mtime
+                m = os.stat(ap).st_mtime_ns
             except OSError:
                 continue
             if ap in seen and m <= seen[ap]:
@@ -91,8 +93,8 @@ def _scan_new_images(session_dir: str, seen: dict) -> list:
             seen[ap] = m
             found.append((m, rel))
     found.sort(reverse=True)  # newest first
-    return [(rel, _image_label(rel), _image_branch(rel))
-            for _m, rel in found[:_IMAGE_EMIT_CAP]]
+    return [(rel, _image_label(rel), _image_branch(rel), m)
+            for m, rel in found[:_IMAGE_EMIT_CAP]]
 
 
 @dataclass
@@ -206,10 +208,10 @@ def _watch_log(session, turn, cap) -> None:
                     session.events.emit("files_changed", {})
                     # Push newly-written figures to the live inset (oldest of
                     # this batch first, so the newest ends up "latest").
-                    for rel, label, branch in reversed(
+                    for rel, label, branch, v in reversed(
                             _scan_new_images(session.session_dir, seen_images)):
                         img = {"path": rel, "label": label,
-                               "branch": branch}
+                               "branch": branch, "v": v}
                         turn.live_images.append(img)
                         session.events.emit("analysis_image", img)
                 last_sig = sig
@@ -227,9 +229,9 @@ def _watch_log(session, turn, cap) -> None:
     # (and the first-window case where nothing else changed the signature) —
     # otherwise the LAST figure of a turn is exactly the one the inset misses.
     try:
-        for rel, label, branch in reversed(
+        for rel, label, branch, v in reversed(
                 _scan_new_images(session.session_dir, seen_images)):
-            img = {"path": rel, "label": label, "branch": branch}
+            img = {"path": rel, "label": label, "branch": branch, "v": v}
             turn.live_images.append(img)
             session.events.emit("analysis_image", img)
     except Exception:

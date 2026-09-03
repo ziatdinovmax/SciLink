@@ -22,6 +22,17 @@ def _natural_sort_key(s: str):
     return [int(c) if c.isdigit() else c.lower() for c in re.split(r"(\d+)", s)]
 
 
+def _img_key(p: Path) -> str:
+    """Identity for an image artifact: path + mtime, so a figure rewritten
+    in place (a refined ``visualization.png`` at the same path) is seen as
+    new and re-surfaced — matching the report/doc sweeps, which have always
+    keyed on ``path + mtime_ns``. Falls back to bare path when unstattable."""
+    try:
+        return f"{p}:{p.stat().st_mtime_ns}"
+    except OSError:
+        return str(p)
+
+
 def load_deliverable_titles(session_dir: str) -> Dict[str, str]:
     """{resolved md/html path -> title} from the deliverables manifests."""
     try:
@@ -46,7 +57,7 @@ class ArtifactTracker:
         root = Path(self.session_dir)
         for ext in IMAGE_EXTENSIONS:
             for p in root.rglob(f"*{ext}"):
-                self.known.add(str(p))
+                self.known.add(_img_key(p))
         for ext in (".html", ".md"):
             for p in root.rglob(f"*{ext}"):
                 try:
@@ -55,7 +66,7 @@ class ArtifactTracker:
                     self.known.add(str(p))
 
     def mark_known(self, path: str) -> None:
-        self.known.add(path)
+        self.known.add(_img_key(Path(path)))
 
     # -- per-turn sweeps ----------------------------------------------
     def find_new_images(self, autonomy: Optional[str] = None) -> List[str]:
@@ -75,22 +86,24 @@ class ArtifactTracker:
                 if _UPLOAD_DIRS & {part for part in p.relative_to(root).parts[:-1]}:
                     continue
                 s = str(p)
-                if s not in self.known:
+                key = _img_key(p)
+                if key not in self.known:
                     if p.stem.startswith("debug_"):
-                        debug_plots.append(s)
+                        debug_plots.append((key, s))
                     else:
-                        self.known.add(s)
+                        self.known.add(key)
                         new.append(s)
         if debug_plots:
-            for s in debug_plots:
-                self.known.add(s)
+            for key, s in debug_plots:
+                self.known.add(key)
             if autonomy == "co-pilot":
-                debug_plots.sort(key=_natural_sort_key)
-                selected = [debug_plots[0]]
-                if len(debug_plots) > 2:
-                    selected.append(debug_plots[len(debug_plots) // 2])
-                if len(debug_plots) > 1:
-                    selected.append(debug_plots[-1])
+                paths = [s for _key, s in debug_plots]
+                paths.sort(key=_natural_sort_key)
+                selected = [paths[0]]
+                if len(paths) > 2:
+                    selected.append(paths[len(paths) // 2])
+                if len(paths) > 1:
+                    selected.append(paths[-1])
                 new[0:0] = selected
         return new
 

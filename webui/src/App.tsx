@@ -31,6 +31,7 @@ export interface LiveImage {
   path: string;
   label: string;
   branch: string | null;
+  v?: number; // file mtime — cache-busting version so a rewrite re-fetches
 }
 
 const LIVE_IMAGE_CAP = 30; // keep a bounded filmstrip of recent figures
@@ -109,12 +110,14 @@ function reducer(state: SessionState, action: Action): SessionState {
         case "files_changed":
           return { ...state, filesVersion: state.filesVersion + 1 };
         case "analysis_image": {
-          // De-dup a repeat of the current latest (reconnect replay / rewrite).
+          // De-dup an identical replay (same path AND version) from a
+          // reconnect — but let a genuine in-place rewrite (same path, newer
+          // version) through, so a refined figure updates the inset.
           const prev = state.liveImages[state.liveImages.length - 1];
-          if (prev && prev.path === ev.path) return state;
+          if (prev && prev.path === ev.path && prev.v === ev.v) return state;
           const next = [
             ...state.liveImages,
-            { path: ev.path, label: ev.label, branch: ev.branch },
+            { path: ev.path, label: ev.label, branch: ev.branch, v: ev.v },
           ];
           return {
             ...state,

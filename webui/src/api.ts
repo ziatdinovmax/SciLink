@@ -85,7 +85,12 @@ export interface SessionSnapshot {
   chat_messages: ChatMessage[];
   pending_question: PresentedQuestion | null;
   live_log: string;
-  live_images: { path: string; label: string; branch: string | null }[];
+  live_images: {
+    path: string;
+    label: string;
+    branch: string | null;
+    v?: number;
+  }[];
   event_cursor: number;
 }
 
@@ -230,8 +235,12 @@ export const api = {
     }>;
   },
 
-  fileUrl: (id: string, relPath: string) =>
-    `${BASE}/sessions/${id}/files?path=${encodeURIComponent(relPath)}`,
+  // `v` (a file mtime) is a cache-busting version token: a figure rewritten
+  // in place gets a distinct URL, so the browser re-fetches instead of
+  // serving stale bytes for an unchanged path. The backend ignores it.
+  fileUrl: (id: string, relPath: string, v?: number) =>
+    `${BASE}/sessions/${id}/files?path=${encodeURIComponent(relPath)}` +
+    (v ? `&v=${v}` : ""),
 
   tree: (id: string) =>
     req<{ entries: TreeEntry[]; truncated: boolean }>(`/sessions/${id}/tree`),
