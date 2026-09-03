@@ -127,3 +127,15 @@ def test_missing_indices_join_nearest_neighbour_or_nearest_score():
     # nothing assigned at all: first regime, as before
     regimes = [{"name": "a", "spectrum_indices": []}, {"name": "b", "spectrum_indices": []}]
     assert "first regime" in _assign_missing_indices(regimes, {0, 1}, None) and regimes[0]["spectrum_indices"] == [0, 1]
+
+
+def test_membership_correction_converges_over_passes():
+    # planner put one control and two retractions into a 3-member 'insertion' bin;
+    # pass 1 moves the two stepped spectra, pass 2 then sees the control as a misfit
+    curves = [_curve(s) for s in (0, 0, 0, 25, 25, 25, -25, -25, -25)]
+    red = reduce_curves(curves, controls=[0, 0, 0, 1, 1, 1, 2, 2, 2], control_source="magnet_action")
+    regimes = [{"name": "ctl", "spectrum_indices": [0, 1]}, {"name": "ins", "spectrum_indices": [2, 4]},
+               {"name": "ret", "spectrum_indices": [3, 5, 6, 7, 8]}]
+    moves = _correct_regime_membership(regimes, red)
+    assert set(m[0] for m in moves) == {2, 3, 5}
+    assert regimes[0]["spectrum_indices"] == [0, 1, 2] and regimes[1]["spectrum_indices"] == [3, 4, 5] and regimes[2]["spectrum_indices"] == [6, 7, 8]

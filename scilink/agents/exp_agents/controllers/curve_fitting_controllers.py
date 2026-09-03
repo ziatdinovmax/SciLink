@@ -1326,6 +1326,7 @@ _MEMBERSHIP_MARGIN_FRACTION = 0.25            # incoherent axis: a "clear misfit
 _MEMBERSHIP_MARGIN_FRACTION_COHERENT = 0.4    # coherent axis: only an UNAMBIGUOUS misfit
 _MEMBERSHIP_RANGE_PAD_FRACTION = 0.1          # coherent axis: padding of the target regime's score range
 _MEMBERSHIP_MIN_SOURCE_COHERENT = 3           # coherent axis: a source regime needs this many members
+_MEMBERSHIP_MAX_PASSES = 3                    # correction passes (each pass re-evaluates medians)
 
 
 def _correct_regime_membership(regimes: list, reduction) -> list:
@@ -1355,6 +1356,19 @@ def _correct_regime_membership(regimes: list, reduction) -> list:
     if rng <= 0:
         return []
     margin = (_MEMBERSHIP_MARGIN_FRACTION_COHERENT if coherent else _MEMBERSHIP_MARGIN_FRACTION) * rng
+    moves = []
+    # Iterate to convergence (bounded): moving a spectrum changes its old and new
+    # regime's medians, which can expose a misfit that a single pass would miss.
+    for _pass in range(_MEMBERSHIP_MAX_PASSES):
+        n_before = len(moves)
+        moves.extend(_membership_pass(regimes, scores, rng, margin, coherent))
+        if len(moves) == n_before:
+            break
+    return moves
+
+
+def _membership_pass(regimes, scores, rng, margin, coherent):
+    import numpy as _np
     members = {id(r): [i for i in r.get("spectrum_indices", []) if 0 <= i < scores.size] for r in regimes}
     medians = {}
     for r in regimes:
