@@ -22,6 +22,8 @@ def main(argv=None) -> int:
     parser.add_argument("--port", type=int, default=8422)
     parser.add_argument("--session-root", default=".",
                         help="Directory holding session dirs (default: cwd).")
+    parser.add_argument("--no-open", action="store_true",
+                        help="Do not open the browser automatically.")
     args = parser.parse_args(argv)
 
     try:
@@ -47,8 +49,16 @@ def main(argv=None) -> int:
 
     from .app import create_app
     app = create_app(session_root)
+    url = f"http://127.0.0.1:{args.port}"
     print(f"SciLink web backend on http://{args.host}:{args.port} "
           f"(sessions in {session_root})")
+    if not args.no_open:
+        # Open the UI once the server is up (matches scilink-ui/Streamlit).
+        # Loopback URL regardless of --host: the browser is on this machine.
+        import threading
+        import webbrowser
+
+        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
 
