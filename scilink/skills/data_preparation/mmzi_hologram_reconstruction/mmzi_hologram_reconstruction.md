@@ -185,9 +185,11 @@ reference at cycle start) — do not "fix" it.
   defect (the tool refuses exclusions leaving fewer than half the columns).
 - After that, `steady_map_discontinuity_fraction` should be < 0.005 (must be < 0.02);
   larger values mean remaining 2π residues — lower `bin_factor` or widen the exclusion.
-- Trace and map must agree: the band-trace step and the map ROI difference
-  for the same ROI pair should match within ~15 %; the sidecar's
-  `cross_checks` carries both.
+- Trace and map must agree: for the same ROI pair, |band-trace step − map ROI
+  difference| must be within 15 % of the larger magnitude OR within an absolute
+  floor of 1 rad (whichever is larger). A ratio is meaningless when both values
+  are near zero (control runs), so never fail a run on a percentage of a
+  near-zero number; the sidecar's `cross_checks` carries both values.
 - Products must live outside the input bundle and each `.npy`/`.csv` must have
   its same-stem JSON sidecar stating units (radians), semantics and limits.
 - The script must not fit models, classify, or interpret; preparation ends at
