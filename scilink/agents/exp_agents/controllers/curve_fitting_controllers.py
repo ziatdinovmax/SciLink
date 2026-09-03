@@ -1364,9 +1364,14 @@ def _correct_regime_membership(regimes: list, reduction) -> list:
     # (each regime keeps its name/model, matched to the cluster it overlaps most).
     # This repairs a scrambled plan that per-spectrum medians cannot. A gradual
     # series has no separated clusters and is never touched here.
+    # On an incoherent axis a regime must not straddle well-separated clusters
+    # (e.g. opposite-signed steps lumped as one "step" regime): split such a
+    # regime into per-cluster sub-regimes that inherit its model, then let the
+    # consensus below place strays. Never applied on a coherent axis.
+    split_moves = _split_regimes_by_clusters(regimes, scores, rng) if not coherent else []
     consensus = _cluster_consensus(regimes, scores, rng)
-    if consensus:
-        return consensus
+    if consensus or split_moves:
+        return split_moves + consensus
     # Iterate to convergence (bounded): moving a spectrum changes its old and new
     # regime's medians, which can expose a misfit that a single pass would miss.
     for _pass in range(_MEMBERSHIP_MAX_PASSES):
@@ -1389,6 +1394,58 @@ def _cluster_scores_1d(scores, rng: float, gap_fraction: float):
             k += 1
         lab[idx] = k
     return lab
+
+
+def _split_regimes_by_clusters(regimes: list, scores, rng: float) -> list:
+    """Incoherent axis only: when the scores form more well-separated clusters
+    than there are regimes, split every regime whose members span several
+    clusters into one sub-regime per cluster (same model, name suffixed).
+    Mutates ``regimes`` in place; returns pseudo-moves for the log."""
+    import copy as _copy
+    import numpy as _np
+    labels = _cluster_scores_1d(scores, rng, _CLUSTER_GAP_FRACTION)
+    k = int(labels.max()) + 1
+    live = [r for r in regimes if r.get("spectrum_indices")]
+    if k <= len(live):
+        return []
+    moves = []
+    new_list = []
+    for r in regimes:
+        idxs = [i for i in r.get("spectrum_indices", []) if 0 <= i < scores.size]
+        cl = sorted({int(labels[i]) for i in idxs})
+        if len(cl) <= 1:
+            new_list.append(r)
+            continue
+        for j, c in enumerate(cl):
+            sub = _copy.deepcopy(r)
+            sub["name"] = f"{r.get('name', 'unnamed')} [cluster {j + 1}]"
+            sub["spectrum_indices"] = sorted(i for i in idxs if labels[i] == c)
+            sub["split_from"] = r.get("name", "unnamed")
+            new_list.append(sub)
+            if j:
+                for i in sub["spectrum_indices"]:
+                    moves.append((i, r.get("name", "unnamed"), sub["name"]))
+    # one cluster -> one regime: merge regimes that now share a single cluster
+    # into the largest of them (an original regime wins over a split piece)
+    by_cluster = {}
+    for r in new_list:
+        idxs = [i for i in r.get("spectrum_indices", []) if 0 <= i < scores.size]
+        cl = {int(labels[i]) for i in idxs}
+        if len(cl) == 1:
+            by_cluster.setdefault(cl.pop(), []).append(r)
+    merged = set()
+    for c, rs in by_cluster.items():
+        if len(rs) < 2:
+            continue
+        rs.sort(key=lambda r: (r.get("split_from") is not None, -len(r.get("spectrum_indices", []))))
+        keep = rs[0]
+        for r in rs[1:]:
+            for i in r.get("spectrum_indices", []):
+                moves.append((i, r.get("name", "unnamed"), keep.get("name", "unnamed")))
+            keep["spectrum_indices"] = sorted(set(keep["spectrum_indices"]) | set(r.get("spectrum_indices", [])))
+            merged.add(id(r))
+    regimes[:] = [r for r in new_list if id(r) not in merged]
+    return moves
 
 
 def _cluster_consensus(regimes: list, scores, rng: float) -> list:

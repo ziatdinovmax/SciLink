@@ -160,3 +160,24 @@ def test_cluster_consensus_repairs_a_scrambled_plan_and_leaves_gradual_and_misma
     red3 = reduce_curves(ramp, controls=temps, control_source="temperature")
     regimes3 = [{"name": "a", "spectrum_indices": [0, 1, 2, 3, 4, 5]}, {"name": "b", "spectrum_indices": [6, 7, 8, 9, 10, 11]}]
     assert _correct_regime_membership(regimes3, red3) == []
+
+
+def test_incoherent_axis_splits_a_regime_that_straddles_clusters():
+    # file-order axis: controls at 0,3,8; insertions (+) and retractions (-) interleaved;
+    # the planner lumped all stepped runs into ONE regime and misfiled control 0 into it
+    curves, steps = _interleaved()
+    red = reduce_curves(curves, controls=list(range(9)), control_source="workflow")
+    assert red["axis_coherence"]["coherent"] is False
+    regimes = [{"name": "flat", "spectrum_indices": [3, 8]},
+               {"name": "step", "spectrum_indices": [0, 1, 2, 4, 5, 6, 7], "physical_model": "two-level step"}]
+    moves = _correct_regime_membership(regimes, red)
+    names = {r["name"]: sorted(r["spectrum_indices"]) for r in regimes}
+    assert len(regimes) == 3 and any(m[0] == 0 for m in moves)
+    groups = sorted(sorted(v) for v in names.values())
+    assert groups == [[0, 3, 8], [1, 4, 6], [2, 5, 7]]
+    assert all(r.get("physical_model") == "two-level step" for r in regimes if "step" in r["name"])
+    # coherent axis: never split
+    curves2, temps = _monotone()
+    red2 = reduce_curves(curves2, controls=temps, control_source="temperature")
+    regimes2 = [{"name": "all", "spectrum_indices": list(range(12))}]
+    assert _correct_regime_membership(regimes2, red2) == [] and len(regimes2) == 1
