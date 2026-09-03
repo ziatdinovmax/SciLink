@@ -1325,6 +1325,7 @@ def _assign_missing_indices(regimes: list, missing: set, reduction) -> str:
 _MEMBERSHIP_MARGIN_FRACTION = 0.25            # incoherent axis: a "clear misfit"
 _MEMBERSHIP_MARGIN_FRACTION_COHERENT = 0.4    # coherent axis: only an UNAMBIGUOUS misfit
 _MEMBERSHIP_RANGE_PAD_FRACTION = 0.1          # coherent axis: padding of the target regime's score range
+_MEMBERSHIP_MIN_SOURCE_COHERENT = 3           # coherent axis: a source regime needs this many members
 
 
 def _correct_regime_membership(regimes: list, reduction) -> list:
@@ -1364,6 +1365,8 @@ def _correct_regime_membership(regimes: list, reduction) -> list:
     for r in regimes:
         if id(r) not in medians:
             continue
+        if coherent and len(members[id(r)]) < _MEMBERSHIP_MIN_SOURCE_COHERENT:
+            continue      # a 1-2 member regime (a planner's "transition" bin) has no reliable median; leave it
         for idx in list(members[id(r)]):
             own = abs(scores[idx] - medians[id(r)])
             best, best_d = None, None
@@ -1374,6 +1377,8 @@ def _correct_regime_membership(regimes: list, reduction) -> list:
                 if best_d is None or d < best_d:
                     best, best_d = o, d
             if best is not None and best_d + margin < own:
+                if len(r.get("spectrum_indices", [])) <= 1:
+                    continue      # never empty a regime
                 if coherent:
                     others = [i for i in members[id(best)] if i != idx]
                     if not others:

@@ -77,6 +77,13 @@ def test_membership_correction_moves_clear_misfit_only_when_incoherent():
     red4 = reduce_curves(curves, controls=[0, 0, 0, 1, 1, 1, 2, 2, 2], control_source="magnet_action")
     regimes5 = [{"name": "ctl", "spectrum_indices": [0, 1]}, {"name": "ins", "spectrum_indices": [2, 3, 4, 5]}, {"name": "ret", "spectrum_indices": [6, 7, 8]}]
     assert _correct_regime_membership(regimes5, red4) == [(2, "ins", "ctl")]
+    # coherent axis, a planner's 2-member "transition" bin of pure-phase spectra: left alone
+    # (a 1-2 member regime has no reliable median; conventional plans are not restructured)
+    curves, temps = _monotone()
+    red5 = reduce_curves(curves, controls=temps, control_source="temperature")
+    regimes6 = [{"name": "low", "spectrum_indices": [0, 1, 2, 3, 4]}, {"name": "coex", "spectrum_indices": [5, 6]},
+                {"name": "high", "spectrum_indices": [7, 8, 9, 10, 11]}]
+    assert _correct_regime_membership(regimes6, red5) == [] and regimes6[1]["spectrum_indices"] == [5, 6]
     # coherent axis, GRADUAL transition: nothing is moved (a ramp spectrum is never inside the other regime's range by a wide margin)
     ramp = [_curve(20.0 * i / 11) for i in range(12)]
     red3 = reduce_curves(ramp, controls=temps, control_source="temperature")
