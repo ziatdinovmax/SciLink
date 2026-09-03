@@ -32,6 +32,7 @@ from ...utils.tool_media import (repair_dangling_tool_calls,
 from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .meta_orchestrator_tools import MetaOrchestratorTools
+from scilink.utils.announce import announce_litellm
 
 
 class MetaMode(Enum):
@@ -533,7 +534,7 @@ class MetaOrchestratorAgent:
             self.use_openai = True
             self.tools_for_model = self.tools.openai_schemas
         else:
-            logging.info(f"🌐 Meta orchestrator using LiteLLM: {model_name}")
+            announce_litellm("Meta orchestrator", model_name)
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
                 api_key=api_key,
@@ -1125,7 +1126,79 @@ class MetaOrchestratorAgent:
     # Specialist capability inventory
     # =========================================================================
 
+    # Capability-inventory disk cache: the inventory is identical across
+    # sessions of the same build + extension set, but building it live
+    # constructs all three child orchestrators up-front — seconds of latency
+    # and a wall of init narration before the meta's first response. Cache
+    # hits keep child creation truly lazy (first delegation).
+    _CAPABILITIES_CACHE = Path.home() / ".scilink" / "capabilities_cache.json"
+    _CAPABILITIES_CACHE_MAX = 8
+
+    def _capabilities_cache_key(self) -> str:
+        """Fingerprint of everything the inventory can depend on: package
+        version, third-party agent entry points, sim-extra availability, and
+        the registered extensions (skills / tools / MCP servers)."""
+        import hashlib
+
+        try:
+            from importlib.metadata import version
+            ver = version("scilink")
+        except Exception:
+            ver = "unknown"
+        try:
+            from importlib.metadata import entry_points
+            eps = sorted(ep.name for ep in entry_points(group="scilink.agents"))
+        except Exception:
+            eps = []
+        try:
+            import ase  # noqa: F401 - probe only
+            has_sim = True
+        except ImportError:
+            has_sim = False
+        ext = sorted(
+            str((e.get("kind"), str(e.get("skill_path", "")),
+                 e.get("server_name", ""),
+                 tuple(s.get("function", {}).get("name")
+                       for s in (e.get("schemas") or []))))
+            for e in self._shared_extensions
+        )
+        payload = json.dumps([ver, eps, has_sim, ext])
+        return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
     def _build_capabilities_block(self) -> str:
+        """Routing inventory, served from the disk cache when this build +
+        extension set has produced it before; otherwise built live (which
+        constructs the children) and cached."""
+        key = None
+        try:
+            key = self._capabilities_cache_key()
+            cached = json.loads(self._CAPABILITIES_CACHE.read_text())
+            if key in cached:
+                self.logger.info(
+                    "📇 Specialist capability inventory loaded from cache "
+                    "(children start on first delegation).")
+                return cached[key]
+        except Exception:  # noqa: BLE001 - cache is best-effort
+            pass
+        block = self._build_capabilities_block_live()
+        if key is not None:
+            try:
+                try:
+                    cached = json.loads(self._CAPABILITIES_CACHE.read_text())
+                except Exception:
+                    cached = {}
+                cached[key] = block
+                # Keep the newest few entries (insertion order).
+                for stale in list(cached)[:-self._CAPABILITIES_CACHE_MAX]:
+                    del cached[stale]
+                self._CAPABILITIES_CACHE.parent.mkdir(parents=True,
+                                                      exist_ok=True)
+                self._CAPABILITIES_CACHE.write_text(json.dumps(cached))
+            except Exception:  # noqa: BLE001
+                pass
+        return block
+
+    def _build_capabilities_block_live(self) -> str:
         """Build the routing inventory by reading each specialist's LIVE tool
         registry — so a new tool / sub-agent in any mode appears here with no
         meta-agent edit. Constructs the child orchestrators to read them."""

@@ -185,7 +185,7 @@ user / validator can verify):
    reasonable distances apart — if the cell is too thin along the GB normal,
    neighboring boundaries interact through the periodic image.
 
-## Common pitfalls
+### Common pitfalls
 
 - **Even sigma**: passing `sigma=4` triggers a warning and aimsgb divides by 2
   to get the largest odd factor (`sigma=1`). Always pass odd values.

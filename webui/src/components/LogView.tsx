@@ -130,7 +130,7 @@ export function currentActivity(log: string): string | null {
     if (m) return clip(m[1]);
     m = /^Attempt\s+(\d+(?:\/\d+)?):\s*(.+)$/.exec(bare);
     if (m) return clip(`Attempt ${m[1]} · ${m[2]}`);
-    m = /^(?:LLM Step:\s*)?((?:Executing|Generating|Running|Loading|Refitting|Preparing|Searching)\b.+)$/.exec(bare);
+    m = /^(?:LLM Step:\s*)?((?:Executing|Generating|Running|Loading|Refitting|Preparing|Searching|Creating|Initializing|Hiring|Connecting)\b.+)$/.exec(bare);
     if (m) return clip(m[1]);
   }
   return null;

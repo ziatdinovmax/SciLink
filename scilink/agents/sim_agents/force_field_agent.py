@@ -20,6 +20,7 @@ from ._deprecation import normalize_params
 
 # ── SKILL INTEGRATION ── skill loader
 from ...skills.loader import load_skill, list_skills
+from scilink.utils.announce import announce_litellm
 
 # ── SKILL INTEGRATION ── amber tools (conditional import)
 try:
@@ -111,7 +112,7 @@ class ForceFieldAgent:
             # message naming the missing vendor env var if not).
             if api_key is None:
                 require_vendor_credentials(model_name)
-            self.logger.info(f"ForceFieldAgent using LiteLLM: {model_name}")
+            announce_litellm("ForceFieldAgent", model_name, logger=self.logger)
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
                 api_key=api_key

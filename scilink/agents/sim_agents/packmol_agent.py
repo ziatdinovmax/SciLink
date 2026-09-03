@@ -24,6 +24,7 @@ from ase.build import molecule
 from ase.collections import g2
 from ase.io import write
 from ase.data.pubchem import pubchem_atoms_search
+from scilink.utils.announce import announce_litellm
 
 try:
     from rdkit import Chem
@@ -102,7 +103,7 @@ class PackmolGeneratorAgent:
             # message naming the missing vendor env var if not).
             if api_key is None:
                 require_vendor_credentials(model_name)
-            self.logger.info(f"PackmolGeneratorAgent using LiteLLM: {model_name}")
+            announce_litellm("PackmolGeneratorAgent", model_name, logger=self.logger)
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
                 api_key=api_key

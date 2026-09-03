@@ -19,6 +19,7 @@ from .instruct import SCALARIZER_PROMPT, SCALARIZER_REFLECTION_PROMPT
 from ._deprecation import normalize_params
 
 from .base_agent import BaseAgent
+from scilink.utils.announce import announce_litellm
 
 
 def _np_is_numeric(series) -> bool:
@@ -109,7 +110,7 @@ class ScalarizerAgent(BaseAgent):
             )
         else:
             # PUBLIC LITELLM
-            logging.info(f"🌐 ScalarizerAgent using LiteLLM: {model_name}")
+            announce_litellm("ScalarizerAgent", model_name)
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
                 api_key=api_key

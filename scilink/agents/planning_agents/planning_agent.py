@@ -65,6 +65,7 @@ from .user_interface import (
 from .html_generator import HTMLReportGenerator
 
 from .base_agent import BaseAgent
+from scilink.utils.announce import announce_litellm
 
 
 # Generic research verbiage that says nothing about WHICH campaign an
@@ -328,7 +329,7 @@ class PlanningAgent(BaseAgent):
             
         else:
             # PUBLIC LITELLM - can use different keys per provider
-            logging.info(f"🌐 PlanningAgent using LiteLLM: {model_name}")
+            announce_litellm("PlanningAgent", model_name)
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
                 api_key=api_key  # Can be None - LiteLLM reads env vars
@@ -375,7 +376,6 @@ class PlanningAgent(BaseAgent):
         self.kb_code_map_path = str(self.kb_code_prefix.with_suffix(".maps.json"))
         self.kb_code_sources_path = str(self.kb_code_prefix.with_suffix(".sources.json"))
 
-        print("--- Initializing Agent (Dual-KB System) ---")
         self._load_knowledge_bases()
 
     def _get_initial_state_fields(self) -> Dict[str, Any]:
@@ -769,24 +769,29 @@ class PlanningAgent(BaseAgent):
         return self._kb_is_built
 
     def _load_knowledge_bases(self):
-        """Attempts to load both KBs from disk."""
-        print(f"  - Docs KB: Loading from {self.kb_docs_prefix}...")
+        """Attempts to load both KBs from disk.
+
+        A fresh session (no KB files yet) is the normal cold start, so it
+        narrates as one neutral line — not a stack of warnings."""
+        import logging as _logging
+        _logging.debug(f"Docs KB prefix: {self.kb_docs_prefix}; "
+                       f"Code KB prefix: {self.kb_code_prefix}")
         docs_loaded = self.kb_docs.load(
             self.kb_docs_index, self.kb_docs_chunks,
             sources_path=self.kb_docs_sources_path
         )
-        
-        print(f"  - Code KB: Loading from {self.kb_code_prefix}...")
         code_loaded = self.kb_code.load(
             self.kb_code_index, self.kb_code_chunks, self.kb_code_map_path,
             sources_path=self.kb_code_sources_path
         )
 
         self._kb_is_built = docs_loaded or code_loaded
-        
-        if docs_loaded: print("    - ✅ Docs KB loaded.")
-        if code_loaded: print("    - ✅ Code KB loaded.")
-        if not self._kb_is_built: print("    - ⚠️  No pre-built KBs found.")
+
+        if docs_loaded: print("📚 Docs KB loaded.")
+        if code_loaded: print("📚 Code KB loaded.")
+        if not self._kb_is_built:
+            print("📚 No knowledge base yet — one will be built from "
+                  "uploaded documents.")
 
     def _initialize_state(self, objective: str, **kwargs) -> Dict[str, Any]:
         """Creates the foundational state dictionary for a new research task."""

@@ -29,6 +29,7 @@ from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from ._deprecation import normalize_params
 
 from .base_agent import BaseAgent
+from scilink.utils.announce import announce_litellm
 
 
 def _compute_budget_context(experimental_budget: Optional[int], history: List[Dict]) -> Dict[str, Any]:
@@ -208,7 +209,7 @@ class OptimizationAgent(BaseAgent):
             )
         else:
             # PUBLIC LITELLM
-            logging.info(f"🌐 BOAgent using LiteLLM: {model_name}")
+            announce_litellm("BOAgent", model_name)
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
                 api_key=api_key

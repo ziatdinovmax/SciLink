@@ -36,6 +36,7 @@ from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .simulation_orchestrator_tools import SimulationOrchestratorTools
 from ._deprecation import normalize_params
+from scilink.utils.announce import announce_litellm
 
 
 class SimulationMode(Enum):
@@ -419,7 +420,7 @@ class SimulationOrchestratorAgent:
             # message naming the missing vendor env var if not).
             if api_key is None:
                 require_vendor_credentials(model_name)
-            logging.info(f"🌐 Simulation orchestrator using LiteLLM: {model_name}")
+            announce_litellm("Simulation orchestrator", model_name)
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
                 api_key=api_key,
