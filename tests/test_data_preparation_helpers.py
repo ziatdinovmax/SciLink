@@ -183,3 +183,15 @@ def test_auto_dense_fringe_exclusion_and_guard(tmp_path):
     with pytest.raises(ValueError):
         derive_phase_products(str(tmp_path / "smooth_wrapped_phase.npy"), str(tmp_path / "bad"),
                               steady_window_frames=10, bin_factor=1, smoothing_sigma=0, exclude_columns=[[0, 150]])
+
+
+def test_state_codes_override_is_shared_across_runs(tmp_path):
+    n, h, w = 30, 40, 60
+    stack = np.zeros((n, h, w), dtype=np.float32); np.save(tmp_path / "ctl_wrapped_phase.npy", stack)
+    with (tmp_path / "tl.csv").open("w", newline="") as f:
+        wr = csv.writer(f); wr.writerow(["frame_index", "capture_elapsed_s", "magnet_state"])
+        for t in range(n): wr.writerow([t, t, "retracted"])
+    res = derive_phase_products(str(tmp_path / "ctl_wrapped_phase.npy"), str(tmp_path / "o"), timeline_csv=str(tmp_path / "tl.csv"),
+                                steady_window_frames=10, bin_factor=1, smoothing_sigma=0, state_codes={"retracted": 0, "at_cuvette": 1})
+    side = json.loads(Path(res["roi_curve_sidecar"]).read_text())
+    assert side["first_state_code"] == 0.0 and side["state_code_map"]["1.0"] == "at_cuvette"

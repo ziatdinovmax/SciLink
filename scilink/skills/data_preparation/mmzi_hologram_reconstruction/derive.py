@@ -108,6 +108,7 @@ def derive_phase_products(
     frame_index_map: Optional[list] = None,
     stem: Optional[str] = None,
     label: Optional[str] = None,
+    state_codes: Optional[dict] = None,
 ) -> dict:
     """See ``TOOL_SPEC``. Returns a dict of product paths and summary scalars."""
     t0 = time.time()
@@ -219,6 +220,9 @@ def derive_phase_products(
     # Codes are assigned by SORTED state name, not order of appearance, so runs of
     # one experiment that start in different states share one encoding.
     code = {s: float(i) for i, s in enumerate(sorted(u for u in uniq if u not in trans))}
+    if state_codes:                      # caller-supplied encoding shared across a series of runs
+        code = {k: float(v) for k, v in state_codes.items()}
+        code.update({s: code.get(s, 0.5) for s in uniq if s not in trans})
     for t, row in enumerate(rows):
         row["state_code"] = code.get(states[t], 0.5)
     csv_path = out / f"{stem}_roi_phase_vs_time.csv"
@@ -323,7 +327,7 @@ TOOL_SPEC = ToolSpec(
                "smoothing_sigma: float = 1.0, coherence_min: float = 0.6, exclude_columns: list[[x0, x1]] | None = None, "
                "band_rows: [y0, y1] | None = None, roi_x_ranges: dict[str, [x0, x1]] | None = None, "
                "reference_roi: str | None = None, template_amplitude_grid: list[float] | None = None, "
-               "frame_index_map: list[int] | None = None, stem: str | None = None, label: str | None = None) -> dict"),
+               "frame_index_map: list[int] | None = None, stem: str | None = None, label: str | None = None, state_codes: dict | None = None) -> dict"),
     parameters={
         "wrapped_phase_npy": {"type": "str", "description": "Output of reconstruct_offaxis_hologram_stack (float32 (n, y, x) wrapped phase, radians)."},
         "output_dir": {"type": "str", "description": "Directory for the products (outside the source bundle)."},
@@ -345,6 +349,7 @@ TOOL_SPEC = ToolSpec(
         "frame_index_map": {"type": "list[int]", "description": "Source frame index per stack frame when the stack is a subset."},
         "stem": {"type": "str", "description": "Output file stem (default derived from the input name)."},
         "label": {"type": "str", "description": "Label in the difference-map file name (default '<last>_minus_<first>')."},
+        "state_codes": {"type": "dict", "description": "Numeric code per state label, e.g. {'retracted': 0, 'at_cuvette': 1}. Build it ONCE from the states of ALL runs of a series and pass it to every call so first/last_state_code mean the same thing in every sidecar (default: codes by sorted name within the run, which differ when runs have different state sets)."},
     },
     required=["wrapped_phase_npy", "output_dir"],
     returns=("dict: diff_map (.npy) + diff_map_sidecar, roi_curve (.csv) + roi_curve_sidecar, valid_mask, "

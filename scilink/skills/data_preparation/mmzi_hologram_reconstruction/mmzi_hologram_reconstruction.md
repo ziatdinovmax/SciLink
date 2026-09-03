@@ -78,6 +78,12 @@ bundle = manifest_path.parent.parent if manifest_path else root   # manifest liv
 thr = float(manifest.get("qc_gate", {}).get("producer_phase_circular_coherence_minimum", 0.95))
 
 products, receipts, metrics, notes, all_ok = [], [], {}, [], True
+# one state encoding for the whole series (so sidecar codes agree across runs)
+import csv as _csv
+_states = set()
+for rec in manifest.get("records", []):
+    _states |= {r["magnet_state"] for r in _csv.DictReader(open(bundle / rec["frame_condition_timeline"]))}
+STATE_CODES = {s: i for i, s in enumerate(sorted(_states - {"moving_to_cuvette", "retracting"}))}
 for rec in manifest.get("records", []):
     wf = rec["workflow"].lower(); run_dir = out / wf
     r = reconstruct_offaxis_hologram_stack(
@@ -104,7 +110,7 @@ for rec in manifest.get("records", []):
         state_column="magnet_state", time_column="capture_elapsed_s",
         transition_states=["moving_to_cuvette", "retracting"],
         steady_window_frames=25, bin_factor=2, smoothing_sigma=1.0,
-        auto_exclude_dense_fringes=True, stem=f"mmzi_{wf}")
+        auto_exclude_dense_fringes=True, stem=f"mmzi_{wf}", state_codes=STATE_CODES)
     # the tool measures and reports any excluded edge zone (sidecar interpretation_limits);
     # rerun with bin_factor=1 if the discontinuity fraction still trips the gate
     metrics[f"{wf}_map_discontinuity_fraction"] = d["cross_checks"]["steady_map_discontinuity_fraction"]
