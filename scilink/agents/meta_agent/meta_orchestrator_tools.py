@@ -654,12 +654,16 @@ class MetaOrchestratorTools:
         # -- delegate_to_analyses (parallel fan-out, full-mesh aux) ----------
         def delegate_to_analyses(branches: list,
                                  figure_style: str = None,
-                                 harmonize: bool = False) -> str:
+                                 harmonize: bool = False,
+                                 branch_time_budget_s: float = None,
+                                 allow_raw_branches: bool = False) -> str:
             print(f"  🔀 Parallel analysis over {len(branches or [])} dataset(s)"
                   + (" (harmonized pipeline replay)" if harmonize else "")
                   + "...")
             return self.orch._run_fanout(branches, figure_style=figure_style,
-                                         harmonize=harmonize)
+                                         harmonize=harmonize,
+                                         branch_time_budget_s=branch_time_budget_s,
+                                         allow_raw_branches=allow_raw_branches)
 
         self._register_tool(
             func=delegate_to_analyses,
@@ -682,8 +686,9 @@ class MetaOrchestratorTools:
                 "independent trajectories over ONE dataset; for that ensemble / "
                 "best-of-N, use a single `delegate_to_analysis` and state the "
                 "candidate count in its `task`. A RAW instrument container (needs "
-                "prepare_data) is REFUSED as a branch: prepare it first in a standalone "
-                "delegate_to_analysis, then fan out over its products. In AUTOPILOT the "
+                "prepare_data) is REFUSED as a branch by default: prepare it first in a "
+                "standalone delegate_to_analysis, then fan out over its products "
+                "(allow_raw_branches=true admits it with a scaled budget). In AUTOPILOT the "
                 "user is asked to confirm before launching; branches always run "
                 "AUTONOMOUSLY (no per-branch approval pauses — concurrent prompts "
                 "can't interleave). Each branch's `task` must be a complete, "
@@ -751,6 +756,26 @@ class MetaOrchestratorTools:
                         "data', 'use colorblind-safe colors'). Set it when "
                         "the user expresses any preference about how plots "
                         "should look; leave unset otherwise."
+                    ),
+                },
+                "branch_time_budget_s": {
+                    "type": "number",
+                    "description": (
+                        "Optional per-branch wall-clock budget in seconds (default "
+                        "3600; <= 0 disables). A branch that outruns it is cancelled "
+                        "and excluded from fusion. Raise it only when the user accepts "
+                        "a long branch (e.g. a raw-instrument container prepared inside "
+                        "the fan-out); an explicit value is never scaled."
+                    ),
+                },
+                "allow_raw_branches": {
+                    "type": "boolean",
+                    "description": (
+                        "Opt-in (default false): admit a RAW instrument container as a "
+                        "branch instead of declining the fan-out. The branch prepares "
+                        "the data itself and gets 3x the default wall-clock budget "
+                        "(unless branch_time_budget_s is explicit). Default path stays: "
+                        "prepare first in a standalone delegate_to_analysis, then fan out."
                     ),
                 },
                 "harmonize": {

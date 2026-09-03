@@ -233,3 +233,52 @@ def test_user_stop_is_terminal_not_retried(tmp_path):
                           out_dir=tmp_path / "p", scratch_dir=tmp_path / "s", context="c", skill=None,
                           max_attempts=3, llm_verify=False)
     assert res["status"] == "cancelled" and StoppingExecutor.calls == 1 and res["attempts"] == 1
+
+
+def test_branch_budget_scales_for_raw_and_respects_explicit(tmp_path):
+    from scilink.agents.meta_agent.fanout import (resolve_branch_budget, raw_branch_decline,
+                                                  FANOUT_RAW_INSTRUMENT_BUDGET_FACTOR)
+    b = _bundle(tmp_path)
+    plain = tmp_path / "plain"; plain.mkdir(); np.save(plain / "img.npy", np.zeros((64, 64)))
+    raw = {"data_path": str(b), "label": "raw", "task": "t"}
+    img = {"data_path": str(plain / "img.npy"), "label": "img", "task": "t"}
+    assert resolve_branch_budget(raw, 3600.0) == 3600.0 * FANOUT_RAW_INSTRUMENT_BUDGET_FACTOR
+    assert resolve_branch_budget(img, 3600.0) == 3600.0
+    assert resolve_branch_budget(raw, 7200.0, explicit=True) == 7200.0      # explicit never scaled
+    assert resolve_branch_budget(raw, 0.0) == 0.0                            # disabled stays disabled
+    assert raw_branch_decline([raw, img]) is not None
+    assert raw_branch_decline([raw, img], allow_raw_branches=True) is None
+    assert raw_branch_decline([img]) is None
+
+
+def test_overdue_check_uses_per_branch_budget():
+    import time
+    from scilink.agents.meta_agent.fanout import _cancel_overdue_branches
+    closed = []
+
+    class Orch:
+        def _close_delegation(self, entry, result):
+            entry["status"] = "error"; closed.append((entry["index"], result["error"]))
+
+    now = time.monotonic()
+    e_raw = {"index": 1, "status": "running", "_started_at": now - 100, "_budget_s": 300.0}
+    e_img = {"index": 2, "status": "running", "_started_at": now - 100}
+    f_raw, f_img = object(), object()
+    pending = {f_raw, f_img}
+    fut_entry = {f_raw: e_raw, f_img: e_img}
+    fut_stop = {f_raw: __import__("threading").Event(), f_img: __import__("threading").Event()}
+    fut_label = {f_raw: "raw", f_img: "img"}
+    _cancel_overdue_branches(Orch(), pending, fut_entry, fut_stop, fut_label, budget=60.0)
+    assert pending == {f_raw} and closed == [(2, "branch wall-clock budget exceeded (60s); branch abandoned")]
+    assert fut_stop[f_img].is_set() and not fut_stop[f_raw].is_set()
+    e_raw["_started_at"] = now - 400
+    _cancel_overdue_branches(Orch(), pending, fut_entry, fut_stop, fut_label, budget=60.0)
+    assert pending == set() and closed[-1][1] == "branch wall-clock budget exceeded (300s); branch abandoned"
+
+
+def test_delegate_to_analyses_schema_exposes_budget_and_opt_in(orch):
+    from scilink.agents.meta_agent.meta_orchestrator_tools import MetaOrchestratorTools  # noqa: F401
+    import inspect
+    from scilink.agents.meta_agent import fanout
+    sig = inspect.signature(fanout.run_fanout)
+    assert "allow_raw_branches" in sig.parameters and "branch_time_budget_s" in sig.parameters

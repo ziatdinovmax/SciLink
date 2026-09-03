@@ -158,6 +158,11 @@ stage on the analysis orchestrator, not by a fourth agent:
   bundle spent its full 3600 s on preparation and was cancelled). `run_fanout`
   therefore declines a raw-instrument branch with a directive to prepare it in
   a standalone delegation first; the fan-out then runs over the products.
+  A caller who accepts a long branch opts in with `allow_raw_branches`
+  (that branch gets `FANOUT_RAW_INSTRUMENT_BUDGET_FACTOR` × the default
+  budget) or sets `branch_time_budget_s` explicitly; budgets are resolved
+  per branch and persisted on the ledger entry (`_budget_s`) so a resumed
+  fan-out enforces the same value.
 
 Preparation skills follow the standard five-section vocabulary; their
 `implementation` recipe is code-in-markdown that calls the bundle's
