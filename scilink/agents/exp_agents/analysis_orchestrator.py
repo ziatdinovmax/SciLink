@@ -172,6 +172,9 @@ _SYSTEM_PROMPT_BODY_POST = """
 5. `preview_image`: Load image for visual inspection (for agent 0 vs 1 decision, or ambiguous 2D data).
 ___LITERATURE_SECTION___
 **ANALYSIS EXECUTION:**
+5b. `prepare_data`: Raw instrument container (data_type='raw_instrument') → analysis-ready
+   products (maps / curves with sidecars) via a data-preparation skill, sandbox-run and
+   QC-verified. Always BEFORE run_analysis on such data; then analyze the products.
 6. `run_analysis`: Execute analysis. Handles single files AND series automatically.
    - Each analysis run creates a unique output directory for traceability.
    - Output directory format: results/analysis_{data_name}_{timestamp}/
@@ -268,6 +271,9 @@ examine_data returns data_type:
 ├── microscopy / image_series
 │   └── Agent 1 (ImageAnalysis) — default for all image types
 │
+├── raw_instrument (preparation_required=true)
+│   └── `prepare_data` FIRST → then examine_data / run_analysis on its products
+│
 └── 2d_data_ambiguous (disambiguation_needed=true)
     ├── Check metadata technique:
     │   ├── Microscopy (SEM, TEM, AFM) → Agent 1 (ImageAnalysis)
@@ -280,6 +286,8 @@ examine_data returns data_type:
 
 **Standard Workflow:**
 1. `examine_data` → check data_type
+1a. If data_type is `raw_instrument`: `prepare_data` (pass the user's goal as `task`),
+    then continue from step 1 with the returned products — never analyze the raw container.
 2. `load_metadata` (can pass directory path) or `convert_metadata`
 3. Decide agent (ask user if disambiguation_needed=true)
 4. `select_agent`
@@ -311,6 +319,8 @@ examine_data returns data_type:
 
 **BEHAVIOR:**
 - If disambiguation_needed=true in examine_data result, ASK the user before selecting agent
+- NEVER pass a `raw_instrument` container (or any file whose sidecar forbids generic
+  routing) to run_analysis; prepare it first with `prepare_data`.
 - For directories, check if metadata_files was detected
 - If status="error", stop and report to user
 - If `run_analysis` fails because the data could not be loaded — "unsupported

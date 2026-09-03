@@ -1092,6 +1092,31 @@ def resume_fanout(orch) -> str:
     }, default=str)
 
 
+def raw_instrument_branches(branches: List[dict]) -> List[dict]:
+    """Branches whose data_path is a RAW instrument container (needs prepare_data).
+
+    Preparation does not belong inside a fan-out branch: every attempt
+    reconstructs the whole container, which alone can exceed the branch
+    wall-clock budget (observed live: a 9-run hologram bundle spent its entire
+    3600 s on preparation and was cancelled). Such data is prepared FIRST in a
+    standalone delegation; the fan-out then runs over the prepared products.
+    """
+    from ..exp_agents.data_preparation import detect_raw_instrument
+    hits = []
+    for b in branches or []:
+        p = b.get("data_path") if isinstance(b, dict) else None
+        if not p:
+            continue
+        try:
+            det = detect_raw_instrument(p)
+        except Exception:  # noqa: BLE001 - detection must never break a fan-out
+            det = None
+        if det:
+            hits.append({"label": b.get("label") or str(p), "data_path": str(p),
+                         "evidence": det.get("evidence", [])[:3]})
+    return hits
+
+
 def run_fanout(orch, branches: List[dict],
                branch_time_budget_s: Optional[float] = None,
                figure_style: Optional[str] = None,
@@ -1123,6 +1148,18 @@ def run_fanout(orch, branches: List[dict],
     criterion is enforced (datasets the gate calls unrelated are pruned);
     the non-redundancy criterion is waived by the caller's declaration.
     """
+    _raw = raw_instrument_branches(branches)
+    if _raw:
+        names = ", ".join(f"'{r['label']}'" for r in _raw)
+        msg = (f"Fan-out declined: {names} is a RAW instrument container that must be "
+               "prepared before analysis. Preparation reconstructs the whole container and "
+               "does not fit a branch's wall-clock budget. First run ONE standalone "
+               "delegate_to_analysis on it whose task says to `prepare_data` (the specialist "
+               "applies the matching preparation skill and returns product paths), then call "
+               "delegate_to_analyses again with the prepared products (maps / traces) as branches.")
+        print(f"  ⛔ {msg}")
+        return json.dumps({"status": "declined", "reason": "raw_instrument_branch",
+                           "raw_branches": _raw, "message": msg})
     # --- normalize input ---
     norm: List[dict] = []
     seen_dup: set = set()

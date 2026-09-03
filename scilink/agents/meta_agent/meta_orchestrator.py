@@ -129,6 +129,16 @@ rather than fabricate a result).
   specialist's batch tools engage — never one delegation per file.
 - `inspect_uploads` is for routing only — do not use its output to interpret
   or analyze the data yourself; hand that to the specialist.
+- A RAW INSTRUMENT container — one whose sidecar / manifest / embedded contract
+  says it must be reconstructed or reduced before analysis (e.g. a raw hologram or
+  interferogram stack, `generic_image_routing_permitted: false`, a
+  `reconstruction_manifest.json`) — is NOT a mixed data+metadata file: do not
+  `prepare_inputs` it. Delegate it to analysis and say in the task that the
+  specialist must `prepare_data` first (it applies the matching preparation
+  skill), then analyze the prepared products. Do this as a STANDALONE
+  `delegate_to_analysis` BEFORE any fan-out: `delegate_to_analyses` refuses a raw
+  container as a branch (preparation does not fit a branch budget); fan out
+  afterwards over the prepared products together with the other modalities.
 - When an uploaded file holds BOTH the data and its metadata mixed together
   (an HDF5/NeXus with attributes, a `.npz`/`.mat` with data+meta keys, a
   CSV/text with a header/comment metadata block, a TIFF with tags/
