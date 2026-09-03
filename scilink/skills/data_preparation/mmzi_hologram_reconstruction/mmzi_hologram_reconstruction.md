@@ -139,6 +139,16 @@ reference at cycle start) — do not "fix" it.
 - A condition change inside a run is confounded with time; the traces carry the
   first and last steady windows so drift can be bracketed, and single-condition
   control runs give the no-effect null.
+- Reversibility is a property of a RETURN: it is established only when a run
+  returns to its initial condition, or when a forward-transition run is paired
+  with the matching reverse-transition run (equal-and-opposite steps). A
+  within-run metric on a single one-way transition says nothing about
+  reversibility and must not be reported as one.
+- When several runs are analysed as a series, describe them by their
+  condition fields (sidecar `has_transition`, `first_state_code`,
+  `last_state_code`, `condition_sequence`), never by file order: runs with and
+  without a transition are typically interleaved, so file order is not a
+  physical axis and regimes are not contiguous along it.
 - Left/right in the maps are image coordinates; the instrument geometry
   (where a perturbation source sits relative to the field of view) is usually
   not recorded.

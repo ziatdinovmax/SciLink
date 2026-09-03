@@ -141,6 +141,11 @@ def test_derive_products_recover_step_and_map(tmp_path):
     side = json.loads(Path(res["roi_curve_sidecar"]).read_text())
     assert side["primary_columns"]["y"] == "phase_left_minus_right_rad" and "interpretation_limits" in side
     assert side["state_code_map"]["1.0"] == "at_cuvette" and side["state_code_map"]["0.0"] == "retracted"
+    # top-level numeric condition fields for the sidecar-series extraction
+    assert side["has_transition"] == 1 and side["first_state_code"] == 0.0 and side["last_state_code"] == 1.0
+    assert side["n_conditions"] == 2 and abs(side["transition_start_s"] - 28.0) < 1e-6
+    assert side["condition_sequence"] == "retracted -> moving -> at_cuvette"
+    mside = json.loads(Path(res["diff_map_sidecar"]).read_text()); assert mside["has_transition"] == 1
     assert Path(res["diff_map_sidecar"]).is_file() and Path(res["quicklook"]).is_file()
     assert res["cross_checks"]["steady_map_discontinuity_fraction"] < 0.02
 

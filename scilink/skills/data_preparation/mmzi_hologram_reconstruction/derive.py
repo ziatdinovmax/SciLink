@@ -262,7 +262,19 @@ def derive_phase_products(
               "source_phase_stack": str(wrapped_phase_npy), "n_frames": n, "conditions": uniq,
               "steady_windows_frames": {"A_first_state": [first_state, list(winA)], "B_last_state": [last_state, list(winB)]},
               "interpretation_limits": limits, "cross_checks": xcheck}
-    csv_meta = dict(common, measurement_type="relative_optical_phase_time_series", data_file=csv_path.name,
+    # Top-level NUMERIC condition fields: the orchestrator's sidecar-series extraction
+    # builds a physically meaningful series variable from numeric keys shared by all
+    # sidecars (has_transition / last_state_code ...), instead of falling back to a
+    # file-order index that says nothing about the conditions.
+    trans_frames = [i for i, s_ in enumerate(states) if s_ in trans]
+    cond_scalars = {
+        "n_frames": int(n), "n_conditions": len([u for u in uniq if u not in trans]),
+        "has_transition": 1 if first_state != last_state else 0,
+        "first_state_code": float(code.get(first_state, 0.5)), "last_state_code": float(code.get(last_state, 0.5)),
+        "transition_start_s": float(elapsed[trans_frames[0]]) if trans_frames else (float(elapsed[first_end + 1]) if first_state != last_state else -1.0),
+        "condition_sequence": " -> ".join(u for u in uniq),
+    }
+    csv_meta = dict(common, **cond_scalars, measurement_type="relative_optical_phase_time_series", data_file=csv_path.name,
         format="CSV, one header row, ALL NUMERIC (state labels are encoded in state_code; see state_code_map)",
         state_code_map={str(v): k for k, v in code.items()} | ({"0.5": "transition (" + ", ".join(sorted(trans)) + ")"} if trans else {}),
         columns={"elapsed_s": "time axis (x)",
@@ -276,7 +288,7 @@ def derive_phase_products(
         primary_columns={"x": "elapsed_s", "y": f"phase_{keys[0]}_minus_{ref}_rad" if keys else "template_amplitude_fraction"},
         steady_state_steps_rad=steps, sibling_diff_map=str(map_path))
     csv_path.with_suffix(".json").write_text(json.dumps(csv_meta, indent=2))
-    map_meta = dict(common, measurement_type="relative_optical_phase_difference_map", data_file=map_path.name,
+    map_meta = dict(common, **cond_scalars, measurement_type="relative_optical_phase_difference_map", data_file=map_path.name,
         format=f"2D float32 numpy array ({H}, {Wd}) = {b}x{b}-binned, smoothed (sigma {smoothing_sigma}) phase frame; radians; global piston removed (field median = 0); 0 outside the valid mask; NOT an intensity image",
         semantics=f"spatially unwrapped phase of (circular-mean field over the last steady window [{last_state}]) x conj(first steady window [{first_state}])",
         valid_mask=str(out / f"{stem}_valid_mask_x{b}.npy"), valid_fraction=float(valid.mean()),
