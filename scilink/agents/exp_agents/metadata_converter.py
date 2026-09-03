@@ -259,6 +259,13 @@ def _describes_spectral_imaging(metadata: dict) -> bool:
     blob = f"{metadata.get('experiment_type') or ''} {technique}".lower()
     if "hyperspectral" in blob or "datacube" in blob:
         return True
+    # A declared spectral_axis block IS a spectral-axis declaration — the
+    # metadata describes spectral data regardless of what the prose says
+    # (e.g. technique "Raman microscopy" for a mapping datacube). Without
+    # this, such a dict fast-paths through conformance and the axis-range
+    # synonym fold in normalize_metadata_dict never fires.
+    if isinstance(metadata.get("spectral_axis"), dict):
+        return True
     # "spectral/spectroscopy ... imaging/mapping/spectrum-image/cube/grid".
     # "grid" covers grid spectroscopy (STS/CITS-style spectra on an x-y
     # grid), which is a datacube even though nothing in its prose says so.
@@ -409,6 +416,26 @@ def normalize_metadata_dict(metadata: dict) -> tuple[dict, bool]:
         if val is not None:
             er["units"] = val
             er_modified = True
+    # Nested axis-range synonyms: externally-authored metadata often carries
+    # the signal-axis range as a nested dict — ``energy_range`` spelled with
+    # min/max, or a ``spectral_axis: {min, max, units}`` block (instrument
+    # sidecars). Fold the endpoints into canonical start/end. The source key
+    # is left in place (unrecognized keys are preserved, and it may carry
+    # extra context such as the axis name); canonical start/end always wins,
+    # so a dict that already resolves is untouched.
+    if er.get("start") is None or er.get("end") is None:
+        for source in (er, d.get("spectral_axis")):
+            if not isinstance(source, dict):
+                continue
+            lo = source.get("start", source.get("min"))
+            hi = source.get("end", source.get("max"))
+            if lo is None or hi is None:
+                continue
+            er["start"], er["end"] = lo, hi
+            if er.get("units") is None and source.get("units") is not None:
+                er["units"] = source["units"]
+            er_modified = True
+            break
     if er_modified:
         d["energy_range"] = er
         modified = True
