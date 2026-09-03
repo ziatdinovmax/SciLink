@@ -216,7 +216,9 @@ def derive_phase_products(
         rows.append({k: (round(v, 6) if isinstance(v, float) else v) for k, v in row.items()})
     # numeric state code for curve loaders
     uniq = [s for i, s in enumerate(states) if s not in states[:i]]
-    code = {s: (0.5 if s in trans else float(i)) for i, s in enumerate([u for u in uniq if u not in trans])}
+    # Codes are assigned by SORTED state name, not order of appearance, so runs of
+    # one experiment that start in different states share one encoding.
+    code = {s: float(i) for i, s in enumerate(sorted(u for u in uniq if u not in trans))}
     for t, row in enumerate(rows):
         row["state_code"] = code.get(states[t], 0.5)
     csv_path = out / f"{stem}_roi_phase_vs_time.csv"

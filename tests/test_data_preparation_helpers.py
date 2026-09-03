@@ -133,16 +133,16 @@ def test_derive_products_recover_step_and_map(tmp_path):
     assert len(rows) == n and "phase_left_minus_right_rad" in rows[0] and "template_amplitude_fraction" in rows[0]
     amp_tr = np.array([float(r["template_amplitude_fraction"]) for r in rows])
     assert abs(amp_tr[:20].mean()) < 0.1 and abs(amp_tr[-20:].mean() - 1.0) < 0.1
-    assert rows[29]["transition"] == "1" and rows[0]["state_code"] == "0.0" and rows[-1]["state_code"] == "1.0"
+    assert rows[29]["transition"] == "1" and rows[0]["state_code"] == "1.0" and rows[-1]["state_code"] == "0.0"   # sorted: at_cuvette=0, retracted=1
     assert "state" not in rows[0] and all(float(v) == float(v) or True for v in rows[0].values())   # all numeric
     for r in rows:
         for v in r.values():
             float(v)
     side = json.loads(Path(res["roi_curve_sidecar"]).read_text())
     assert side["primary_columns"]["y"] == "phase_left_minus_right_rad" and "interpretation_limits" in side
-    assert side["state_code_map"]["1.0"] == "at_cuvette" and side["state_code_map"]["0.0"] == "retracted"
+    assert side["state_code_map"]["0.0"] == "at_cuvette" and side["state_code_map"]["1.0"] == "retracted"
     # top-level numeric condition fields for the sidecar-series extraction
-    assert side["has_transition"] == 1 and side["first_state_code"] == 0.0 and side["last_state_code"] == 1.0
+    assert side["has_transition"] == 1 and side["first_state_code"] == 1.0 and side["last_state_code"] == 0.0
     assert side["n_conditions"] == 2 and abs(side["transition_start_s"] - 28.0) < 1e-6
     assert side["condition_sequence"] == "retracted -> moving -> at_cuvette"
     mside = json.loads(Path(res["diff_map_sidecar"]).read_text()); assert mside["has_transition"] == 1
