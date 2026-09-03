@@ -596,11 +596,19 @@ def _render_analyze_sidebar_uploads() -> None:
     )
     if extra_exts:
         st.caption("Vendor formats enabled via SciFiReaders MCP")
+    first_data, late_data = split_upload_arrivals(data_files or [], "sidebar_data")
     if data_files:
-        if len(data_files) == 1:
-            save_upload(data_files[0], "data")
-        else:
-            save_upload_batch(data_files, "data")
+        # Late additions (files the accumulating widget gained AFTER its
+        # first batch) are saved as independent uploads, never merged into
+        # a series with the earlier files — the orchestrator judges what
+        # belongs together (#114).
+        for f in late_data:
+            save_upload(f, "data")
+        if not late_data:
+            if len(first_data) == 1:
+                save_upload(first_data[0], "data")
+            else:
+                save_upload_batch(first_data, "data")
 
     meta_files = st.file_uploader(
         "Metadata file(s)",
@@ -1299,8 +1307,39 @@ def _reset_session() -> None:
     st.rerun()
 
 
-def save_upload(uploaded_file, kind: str, auto_dispatch: bool = True) -> None:
-    """Save an uploaded file and optionally queue an auto-examine/load."""
+def split_upload_arrivals(files, tracker_key: str, state=None):
+    """Partition an accumulating uploader value into (first_batch, late).
+
+    Streamlit's ``file_uploader`` ACCUMULATES files across reruns, so
+    ``len(files)`` alone cannot distinguish "dragged together" (series
+    intent plausible) from "added later, after working with the first"
+    (independent intent likely) — #114. The widget's first non-empty rerun
+    defines the first batch; any file appearing afterwards is a late
+    addition. The partition is stable across reruns, and resets when the
+    user clears the uploader.
+
+    ``state`` is injectable for tests; defaults to ``st.session_state``.
+    """
+    if state is None:
+        state = st.session_state
+    key = f"_upload_first_batch_{tracker_key}"
+    names = [f.name for f in files]
+    if not files:
+        state[key] = None
+        return [], []
+    if state.get(key) is None:
+        state[key] = list(names)
+        return list(files), []
+    first_names = set(state[key])
+    first = [f for f in files if f.name in first_names]
+    late = [f for f in files if f.name not in first_names]
+    return first, late
+
+
+def save_upload(uploaded_file, kind: str, auto_dispatch: bool = True) -> str:
+    """Save an uploaded file and optionally queue an auto-examine/load.
+
+    Returns the saved file's path."""
     session_dir = Path(st.session_state.session_dir)
     upload_dir = session_dir / "uploads"
     upload_dir.mkdir(exist_ok=True)
@@ -1325,6 +1364,7 @@ def save_upload(uploaded_file, kind: str, auto_dispatch: bool = True) -> None:
             else:
                 st.session_state.pending_auto_load_metadata = dest_str
         st.sidebar.success(f"Uploaded {kind} file: {uploaded_file.name}")
+    return dest_str
 
 
 _GLOBAL_META_NAMES = {"metadata.json", "meta.json", "info.json", "experiment.json"}
@@ -1362,8 +1402,9 @@ def save_metadata_to_series(uploaded_files: list, auto_dispatch: bool = True) ->
         )
 
 
-def save_upload_batch(uploaded_files: list, kind: str, auto_dispatch: bool = True) -> None:
-    """Save multiple uploaded files into a subdirectory for series/batch analysis."""
+def save_upload_batch(uploaded_files: list, kind: str, auto_dispatch: bool = True) -> str:
+    """Save multiple uploaded files into a subdirectory for series/batch
+    analysis. Returns the series directory path."""
     session_dir = Path(st.session_state.session_dir)
     upload_dir = session_dir / "uploads"
     upload_dir.mkdir(exist_ok=True)
@@ -1385,6 +1426,7 @@ def save_upload_batch(uploaded_files: list, kind: str, auto_dispatch: bool = Tru
         if auto_dispatch:
             st.session_state.pending_auto_examine = series_dir_str
         st.sidebar.success(f"Uploaded {len(uploaded_files)} files to series/")
+    return series_dir_str
 
 def _start_simulate_session(
     model: str,
