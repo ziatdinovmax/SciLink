@@ -37,6 +37,11 @@ _CONTROL_KEY_RE = re.compile(
     r"temperature|temp\b|_temp|time|pressure|voltage|potential|field|"
     r"concentration|dose|current", re.IGNORECASE)
 _N_GRID = 500
+# Axis-coherence test (see reduce_curves): a 'large' PC1 step is this fraction of
+# the score range; the axis is incoherent once large steps reverse direction this
+# many times (interleaved regimes along a label axis).
+_AXIS_LARGE_STEP_FRACTION = 0.3
+_AXIS_MAX_REVERSALS = 2
 _SHIFT_R_THRESHOLD = 0.7
 _DRIFT_R_THRESHOLD = 0.9
 
@@ -205,10 +210,33 @@ def reduce_curves(curves: list, controls=None, control_source: str = "index",
             "resampled_to_common_grid": not same_grid,
         }
 
+        # Axis coherence: does the control variable ORDER the curves into
+        # contiguous regimes? Along a physical monotone axis the PC1 score is
+        # (piecewise) monotone: at most a couple of large jumps, all in one
+        # direction. Along a mere label axis (file order, sample id) regimes
+        # interleave and the score jumps back and forth. Counted on large
+        # steps only (> 30 % of the score range) so noise never trips it.
+        steps = np.diff(score1)
+        large = np.where(np.abs(steps) > _AXIS_LARGE_STEP_FRACTION * rng)[0] if rng > 0 else np.array([], dtype=int)
+        signs = np.sign(steps[large])
+        n_reversals = int(np.sum(signs[1:] != signs[:-1])) if signs.size > 1 else 0
+        axis_coherence = {
+            "n_large_steps": int(large.size),
+            "n_reversals": n_reversals,
+            "coherent": n_reversals < _AXIS_MAX_REVERSALS,
+        }
+        scores_by_index = np.empty_like(score1)
+        scores_by_index[order] = score1          # back to the caller's input order
+        controls_by_index = np.empty_like(controls)
+        controls_by_index[order] = controls
+
         out = {
             "status": "success",
             "label": label,
             "n_points": int(len(curves)),
+            "axis_coherence": axis_coherence,
+            "scores_by_index": [round(float(v), 6) for v in scores_by_index],
+            "controls_by_index": [float(v) for v in controls_by_index],
             "n_channels": int(grid.size),
             "control_variable": {
                 "source": source,

@@ -1278,6 +1278,54 @@ class CurveFittingSkillSuggestionController:
         return state
 
 
+_MEMBERSHIP_MARGIN_FRACTION = 0.25   # of the PC1 score range: a "clear misfit" only
+
+
+def _correct_regime_membership(regimes: list, reduction) -> list:
+    """Move a spectrum to the regime whose PC1 scores it matches, when the
+    series axis is INCOHERENT (interleaved regimes) and the misfit is clear:
+    farther than ``_MEMBERSHIP_MARGIN_FRACTION`` of the score range from its
+    own regime's median than from another regime's. Returns
+    ``[(index, from_name, to_name), ...]`` and mutates ``spectrum_indices``.
+    No-op for a coherent axis, a single regime, or missing scores."""
+    if not isinstance(reduction, dict):
+        return []
+    ac = reduction.get("axis_coherence") or {}
+    scores = reduction.get("scores_by_index")
+    if ac.get("coherent", True) or not scores or len(regimes) < 2:
+        return []
+    import numpy as _np
+    scores = _np.asarray(scores, dtype=float)
+    rng = float(scores.max() - scores.min())
+    if rng <= 0:
+        return []
+    margin = _MEMBERSHIP_MARGIN_FRACTION * rng
+    members = {id(r): [i for i in r.get("spectrum_indices", []) if 0 <= i < scores.size] for r in regimes}
+    medians = {}
+    for r in regimes:
+        m = members[id(r)]
+        if m:
+            medians[id(r)] = float(_np.median(scores[m]))
+    moves = []
+    for r in regimes:
+        if id(r) not in medians:
+            continue
+        for idx in list(members[id(r)]):
+            own = abs(scores[idx] - medians[id(r)])
+            best, best_d = None, None
+            for o in regimes:
+                if o is r or id(o) not in medians:
+                    continue
+                d = abs(scores[idx] - medians[id(o)])
+                if best_d is None or d < best_d:
+                    best, best_d = o, d
+            if best is not None and best_d + margin < own:
+                moves.append((idx, r.get("name", "unnamed"), best.get("name", "unnamed")))
+                r["spectrum_indices"] = [i for i in r.get("spectrum_indices", []) if i != idx]
+                best["spectrum_indices"] = sorted(set(best.get("spectrum_indices", [])) | {idx})
+    return moves
+
+
 class SeriesScoutController:
     """Scout representative spectra across a series before planning.
 
@@ -1296,9 +1344,17 @@ class SeriesScoutController:
         self.logger = logger
         self.plot_fn = plot_fn
 
-    @staticmethod
-    def _select_scout_indices(num_spectra: int) -> list:
-        """Select evenly spaced representative indices, capped at 7."""
+    # When the series axis does not order the spectra into contiguous regimes
+    # (interleaved designs along a label axis), the planner must see every
+    # spectrum rather than a positional subsample — up to this many.
+    _SCOUT_ALL_MAX = 16
+
+    @classmethod
+    def _select_scout_indices(cls, num_spectra: int, scout_all: bool = False) -> list:
+        """Select evenly spaced representative indices, capped at 7 — or every
+        spectrum (capped at ``_SCOUT_ALL_MAX``) when ``scout_all`` is set."""
+        if scout_all and num_spectra <= cls._SCOUT_ALL_MAX:
+            return list(range(num_spectra))
         if num_spectra <= 3:
             return list(range(num_spectra))
         if num_spectra <= 6:
@@ -1449,7 +1505,20 @@ class SeriesScoutController:
 
         self.logger.info("\n🔭 --- Scouting Series ---\n")
 
-        scout_indices = self._select_scout_indices(num_spectra)
+        # Full-series change detection first (additive: the scouts below remain
+        # the visual evidence; this locates WHERE the series changes using every
+        # spectrum, which a <=7-spectrum subsample cannot) — and tells us whether
+        # the series axis orders the spectra into contiguous regimes at all.
+        self._run_series_reduction(state, num_spectra)
+        reduction = state.get("series_reduction") or {}
+        axis_coherent = (reduction.get("axis_coherence") or {}).get("coherent", True)
+        if not axis_coherent:
+            ac = reduction["axis_coherence"]
+            self.logger.info(
+                f"  Series axis is not coherent ({ac['n_large_steps']} large PC1 steps, "
+                f"{ac['n_reversals']} reversals along the axis): regimes interleave, "
+                "so every spectrum is scouted and membership is judged per spectrum.")
+        scout_indices = self._select_scout_indices(num_spectra, scout_all=not axis_coherent)
         series_metadata = state.get("series_metadata", {})
         values = series_metadata.get("values", [])
         variable = series_metadata.get("variable", "index")
@@ -1500,11 +1569,6 @@ class SeriesScoutController:
                 state["scout_overlay_plot"] = None
         else:
             state["scout_overlay_plot"] = None
-
-        # Full-series change detection (additive: the scouts above remain the
-        # visual evidence; this locates WHERE the series changes using every
-        # spectrum, which the <=7-spectrum subsample cannot).
-        self._run_series_reduction(state, num_spectra)
 
         state["scout_data"] = scout_data
         self.logger.info(f"  Scouted {len(scout_data)} of {num_spectra} spectra")
@@ -2332,11 +2396,29 @@ class CurveFittingPlanningController:
                 lines.append(f"- Flags: {', '.join(flag_names)}")
             if reduction.get("caution"):
                 lines.append(f"- Caution: {reduction['caution']}")
-            lines.append(
-                "Use this to place regime boundaries and to judge whether "
-                "the scouts straddle a transition; the plots remain the "
-                "evidence for WHAT changes."
-            )
+            ac = reduction.get("axis_coherence") or {}
+            if ac and not ac.get("coherent", True):
+                scores = reduction.get("scores_by_index") or []
+                lines.append(
+                    f"- AXIS NOT COHERENT: the PC1 score makes {ac.get('n_large_steps')} large "
+                    f"jumps with {ac.get('n_reversals')} direction reversals along "
+                    f"'{axis}', so this variable does NOT order the spectra into "
+                    "contiguous regimes (regimes interleave — e.g. controls and "
+                    "perturbed runs alternating in file order). Assign regime "
+                    "membership PER SPECTRUM from the data: every spectrum is "
+                    "scouted below, and its PC1 score is listed here. Spectra with "
+                    "similar scores and similar plots belong together; a regime's "
+                    "spectrum_indices may be NON-contiguous. Do not place boundaries "
+                    "by position along the axis."
+                )
+                lines.append("- PC1 score per spectrum index: "
+                             + ", ".join(f"{i}: {v:+.3g}" for i, v in enumerate(scores)))
+            else:
+                lines.append(
+                    "Use this to place regime boundaries and to judge whether "
+                    "the scouts straddle a transition; the plots remain the "
+                    "evidence for WHAT changes."
+                )
             prompt.append("\n".join(lines))
             if reduction.get("score_curve_png"):
                 prompt.append({
@@ -2453,6 +2535,18 @@ class CurveFittingPlanningController:
                 regime["fitting_strategy"] = series_plan.get("fitting_strategy")
             if not regime.get("parameters_to_extract"):
                 regime["parameters_to_extract"] = series_plan.get("parameters_to_extract", [])
+
+        # Data-space membership check for an incoherent axis: a spectrum whose
+        # PC1 score sits far from its regime-mates and close to another regime's
+        # is moved there (logged). Only runs when the axis was found incoherent,
+        # so a conventional monotone series keeps the planner's assignment.
+        corrections = _correct_regime_membership(regimes, state.get("series_reduction"))
+        for idx, src, dst in corrections:
+            self.logger.info(f"  Regime membership corrected from data: spectrum {idx} "
+                             f"'{src}' -> '{dst}' (PC1 score far from '{src}', close to '{dst}')")
+        if corrections:
+            series_plan["membership_corrections"] = [
+                {"index": i, "from": a, "to": b} for i, a, b in corrections]
 
         state["series_analysis_plan"] = series_plan
         self.logger.info(
