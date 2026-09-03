@@ -1890,17 +1890,28 @@ class AnalysisOrchestratorTools:
                                    **{k: v for k, v in res.items() if k != "status"}}, default=str)
             products = res["products"]
             files = [p["path"] for p in products]
+            groups = {}
+            for p in products:
+                groups.setdefault(p.get("group") or p.get("kind") or "other", []).append(p["path"])
+            analysis_groups = {g: paths for g, paths in groups.items()
+                               if any(Path(x).suffix.lower() in (".npy", ".csv") for x in paths)
+                               and not all(str(x).endswith("wrapped_phase.npy") for x in paths)}
             return json.dumps({
+                "product_groups": {g: len(v) for g, v in groups.items()},
+                "analysis_groups": analysis_groups,
                 "status": "success", "prepare_id": prep_id, "output_directory": str(out_dir),
                 "skill_used": loaded["name"] if loaded else None, "attempts": res["attempts"],
                 "summary": res.get("summary"), "qc": res.get("qc"),
                 "products": products, "files_produced": files,
                 "receipt": res.get("receipt"), "script_path": res.get("script_path"),
                 "next_steps": ("The products are ordinary analysis inputs with same-stem JSON "
-                               "sidecars: call examine_data / run_analysis on them (a series of "
-                               "curves via their directory or glob; maps via the .npy path). "
-                               "Load each sidecar with load_metadata. Do not analyze the raw "
-                               "container again."),
+                               "sidecars. Each ANALYSIS GROUP answers a different question and "
+                               "gets its OWN run_analysis: a time-series/curve group (WHEN and HOW "
+                               "MUCH — series via their directory or glob) and a map/image group "
+                               "(WHERE — spatial structure, localization, reversal between "
+                               "sibling maps). Analyze every group before concluding; do not stop "
+                               "after one. Load each sidecar with load_metadata. Do not analyze "
+                               "the raw container again."),
             }, default=str)
 
         self._register_tool(
