@@ -139,3 +139,24 @@ def test_membership_correction_converges_over_passes():
     moves = _correct_regime_membership(regimes, red)
     assert set(m[0] for m in moves) == {2, 3, 5}
     assert regimes[0]["spectrum_indices"] == [0, 1, 2] and regimes[1]["spectrum_indices"] == [3, 4, 5] and regimes[2]["spectrum_indices"] == [6, 7, 8]
+
+
+def test_cluster_consensus_repairs_a_scrambled_plan_and_leaves_gradual_and_mismatched_counts():
+    curves = [_curve(s) for s in (0, 0, 0, 25, 25, 25, -25, -25, -25)]
+    red = reduce_curves(curves, controls=[0, 0, 0, 1, 1, 1, 2, 2, 2], control_source="magnet_action")
+    regimes = [{"name": "ctl", "spectrum_indices": [0, 1, 7]}, {"name": "ins", "spectrum_indices": [2, 3]},
+               {"name": "ret", "spectrum_indices": [4, 5, 6, 8]}]
+    moves = _correct_regime_membership(regimes, red)
+    assert {m[0] for m in moves} == {2, 4, 5, 7}
+    assert regimes[0]["spectrum_indices"] == [0, 1, 2] and regimes[1]["spectrum_indices"] == [3, 4, 5] and regimes[2]["spectrum_indices"] == [6, 7, 8]
+    # conventional: 3 planned regimes but only 2 score clusters -> consensus not applicable, plan kept
+    curves, temps = _monotone()
+    red2 = reduce_curves(curves, controls=temps, control_source="temperature")
+    regimes2 = [{"name": "low", "spectrum_indices": [0, 1, 2, 3, 4]}, {"name": "coex", "spectrum_indices": [5, 6]},
+                {"name": "high", "spectrum_indices": [7, 8, 9, 10, 11]}]
+    assert _correct_regime_membership(regimes2, red2) == []
+    # gradual ramp: one cluster -> nothing
+    ramp = [_curve(20.0 * i / 11) for i in range(12)]
+    red3 = reduce_curves(ramp, controls=temps, control_source="temperature")
+    regimes3 = [{"name": "a", "spectrum_indices": [0, 1, 2, 3, 4, 5]}, {"name": "b", "spectrum_indices": [6, 7, 8, 9, 10, 11]}]
+    assert _correct_regime_membership(regimes3, red3) == []

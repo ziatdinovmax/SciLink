@@ -1327,6 +1327,7 @@ _MEMBERSHIP_MARGIN_FRACTION_COHERENT = 0.4    # coherent axis: only an UNAMBIGUO
 _MEMBERSHIP_RANGE_PAD_FRACTION = 0.1          # coherent axis: padding of the target regime's score range
 _MEMBERSHIP_MIN_SOURCE_COHERENT = 3           # coherent axis: a source regime needs this many members
 _MEMBERSHIP_MAX_PASSES = 3                    # correction passes (each pass re-evaluates medians)
+_CLUSTER_GAP_FRACTION = 0.3                   # 1-D score gap (of the range) that separates clusters
 
 
 def _correct_regime_membership(regimes: list, reduction) -> list:
@@ -1357,6 +1358,15 @@ def _correct_regime_membership(regimes: list, reduction) -> list:
         return []
     margin = (_MEMBERSHIP_MARGIN_FRACTION_COHERENT if coherent else _MEMBERSHIP_MARGIN_FRACTION) * rng
     moves = []
+    # Cluster consensus first: when the scores fall into well-separated 1-D
+    # clusters (gaps > _CLUSTER_GAP_FRACTION of the range) and there are exactly
+    # as many clusters as planned regimes, membership is read off the clusters
+    # (each regime keeps its name/model, matched to the cluster it overlaps most).
+    # This repairs a scrambled plan that per-spectrum medians cannot. A gradual
+    # series has no separated clusters and is never touched here.
+    consensus = _cluster_consensus(regimes, scores, rng)
+    if consensus:
+        return consensus
     # Iterate to convergence (bounded): moving a spectrum changes its old and new
     # regime's medians, which can expose a misfit that a single pass would miss.
     for _pass in range(_MEMBERSHIP_MAX_PASSES):
@@ -1364,6 +1374,67 @@ def _correct_regime_membership(regimes: list, reduction) -> list:
         moves.extend(_membership_pass(regimes, scores, rng, margin, coherent))
         if len(moves) == n_before:
             break
+    return moves
+
+
+def _cluster_scores_1d(scores, rng: float, gap_fraction: float):
+    """Labels of well-separated 1-D clusters: sort the scores and cut at every
+    gap larger than ``gap_fraction`` of the range. Returns an int label per
+    input index (0..k-1 in ascending score order)."""
+    import numpy as _np
+    order = _np.argsort(scores)
+    lab = _np.zeros(scores.size, dtype=int); k = 0
+    for i, idx in enumerate(order):
+        if i and scores[idx] - scores[order[i - 1]] > gap_fraction * rng:
+            k += 1
+        lab[idx] = k
+    return lab
+
+
+def _cluster_consensus(regimes: list, scores, rng: float) -> list:
+    """Membership from well-separated score clusters when their count equals
+    the number of planned regimes and the cluster->regime matching (by majority
+    overlap) is one-to-one. Returns the moves made ([] when not applicable)."""
+    import numpy as _np
+    labels = _cluster_scores_1d(scores, rng, _CLUSTER_GAP_FRACTION)
+    k = int(labels.max()) + 1
+    live = [r for r in regimes if r.get("spectrum_indices")]
+    if k < 2 or k != len(live):
+        return []
+    # match clusters to regimes by the distance between the cluster centre and
+    # the regime's current median score (overlap count only breaks ties): a
+    # regime's median survives a partly scrambled listing far better than a
+    # head count does.
+    assign = {}
+    used = set()
+    pairs = []
+    def _rmed(r):
+        m = [i for i in r.get("spectrum_indices", []) if i < scores.size]
+        return float(_np.median(scores[m])) if m else float("inf")
+    for c in range(k):
+        idxs = [int(i) for i in _np.where(labels == c)[0]]
+        centre = float(_np.median(scores[idxs]))
+        for r in live:
+            ov = len(set(idxs) & set(r.get("spectrum_indices", [])))
+            pairs.append((abs(centre - _rmed(r)), -ov, c, id(r)))
+    for dist, negov, c, rid in sorted(pairs):
+        if c in assign or rid in used:
+            continue
+        assign[c] = rid; used.add(rid)
+    # leftovers (a cluster no regime overlaps): pair by order — clusters by score,
+    # regimes by the median score of their current members
+    if len(assign) != k:
+        return []
+    by_id = {id(r): r for r in live}
+    old = {id(r): list(r.get("spectrum_indices", [])) for r in live}
+    moves = []
+    for c, rid in assign.items():
+        new_members = sorted(int(i) for i in _np.where(labels == c)[0])
+        for i in new_members:
+            src = next((r for r in live if i in old[id(r)]), None)
+            if src is not None and id(src) != rid:
+                moves.append((i, src.get("name", "unnamed"), by_id[rid].get("name", "unnamed")))
+        by_id[rid]["spectrum_indices"] = new_members
     return moves
 
 
