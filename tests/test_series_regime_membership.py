@@ -78,3 +78,29 @@ def test_planner_prompt_gets_membership_block_only_when_incoherent(tmp_path):
     assert "AXIS NOT COHERENT" in src and "PC1 score per spectrum index" in src
     i = src.index("AXIS NOT COHERENT"); j = src.index("Use this to place regime boundaries")
     assert i < j and 'if ac and not ac.get("coherent", True)' in src
+
+
+def test_missing_indices_join_nearest_neighbour_or_nearest_score():
+    from scilink.agents.exp_agents.controllers.curve_fitting_controllers import _assign_missing_indices
+    # coherent (value-sorted) axis: neighbours decide
+    regimes = [{"name": "ret", "spectrum_indices": [0, 2]}, {"name": "ctl", "spectrum_indices": [4]}, {"name": "ins", "spectrum_indices": [6, 8]}]
+    rule = _assign_missing_indices(regimes, {1, 3, 5, 7}, {"axis_coherence": {"coherent": True}})
+    assert "neighbour" in rule                      # no scores: ties (3, 5) go to the lower neighbour
+    assert regimes[0]["spectrum_indices"] == [0, 1, 2, 3] and regimes[1]["spectrum_indices"] == [4, 5] and regimes[2]["spectrum_indices"] == [6, 7, 8]
+    # with scores, an equidistant index follows the data: here 3 and 5 look like the control (score ~0)
+    curves = [_curve(s) for s in (-25, -25, -25, 0, 0, 0, 25, 25, 25)]
+    red = reduce_curves(curves, controls=[-1, -1, -1, 0, 0, 0, 1, 1, 1], control_source="magnet_condition")
+    assert red["axis_coherence"]["coherent"] is True
+    regimes = [{"name": "ret", "spectrum_indices": [0, 2]}, {"name": "ctl", "spectrum_indices": [4]}, {"name": "ins", "spectrum_indices": [6, 8]}]
+    _assign_missing_indices(regimes, {1, 3, 5, 7}, red)
+    assert regimes[0]["spectrum_indices"] == [0, 1, 2] and regimes[1]["spectrum_indices"] == [3, 4, 5] and regimes[2]["spectrum_indices"] == [6, 7, 8]
+    # incoherent axis: PC1 score decides
+    curves, steps = _interleaved()
+    red = reduce_curves(curves, controls=list(range(9)), control_source="role_index")
+    regimes = [{"name": "ctl", "spectrum_indices": [0, 8]}, {"name": "ins", "spectrum_indices": [4]}, {"name": "ret", "spectrum_indices": [2]}]
+    rule = _assign_missing_indices(regimes, {1, 3, 5, 6, 7}, red)
+    assert "PC1" in rule
+    assert regimes[0]["spectrum_indices"] == [0, 3, 8] and regimes[1]["spectrum_indices"] == [1, 4, 6] and regimes[2]["spectrum_indices"] == [2, 5, 7]
+    # nothing assigned at all: first regime, as before
+    regimes = [{"name": "a", "spectrum_indices": []}, {"name": "b", "spectrum_indices": []}]
+    assert "first regime" in _assign_missing_indices(regimes, {0, 1}, None) and regimes[0]["spectrum_indices"] == [0, 1]

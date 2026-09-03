@@ -1278,6 +1278,50 @@ class CurveFittingSkillSuggestionController:
         return state
 
 
+def _assign_missing_indices(regimes: list, missing: set, reduction) -> str:
+    """Place spectra the planner left out of every regime.
+
+    Coherent axis (or no reduction): each missing index joins the regime of its
+    NEAREST assigned neighbour along the series axis (spectra are value-sorted,
+    so index distance is axis distance; ties go to the lower neighbour).
+    Incoherent axis: it joins the regime whose members' median PC1 score is
+    closest. Falls back to the first regime only when nothing is assigned at
+    all. Mutates ``spectrum_indices``; returns the rule used (for the log)."""
+    assigned = {i: r for r in regimes for i in r.get("spectrum_indices", [])}
+    if not assigned:
+        regimes[0]["spectrum_indices"] = sorted(set(regimes[0].get("spectrum_indices", [])) | set(missing))
+        return "first regime (no index assigned anywhere)"
+    import numpy as _np
+    ac = (reduction or {}).get("axis_coherence") or {} if isinstance(reduction, dict) else {}
+    scores = (reduction or {}).get("scores_by_index") if isinstance(reduction, dict) else None
+    if ac and not ac.get("coherent", True) and scores:
+        scores = _np.asarray(scores, dtype=float)
+        medians = {id(r): float(_np.median(scores[[i for i in r.get("spectrum_indices", []) if i < scores.size]]))
+                   for r in regimes if r.get("spectrum_indices")}
+        for idx in sorted(missing):
+            if idx >= scores.size:
+                continue
+            best = min((r for r in regimes if id(r) in medians), key=lambda r: abs(scores[idx] - medians[id(r)]))
+            best["spectrum_indices"] = sorted(set(best["spectrum_indices"]) | {idx})
+        return "nearest regime in PC1-score space (axis not coherent)"
+    keys = sorted(assigned)
+    sc = _np.asarray(scores, dtype=float) if scores else None
+    for idx in sorted(missing):
+        d_min = min(abs(k - idx) for k in keys)
+        tied = [k for k in keys if abs(k - idx) == d_min]
+        if len(tied) > 1 and sc is not None and idx < sc.size:
+            # equidistant neighbours in different regimes: let the data decide
+            def _dist(k):
+                m = [i for i in assigned[k].get("spectrum_indices", []) if i < sc.size]
+                return abs(sc[idx] - float(_np.median(sc[m]))) if m else float("inf")
+            nearest = min(tied, key=_dist)
+        else:
+            nearest = tied[0]
+        r = assigned[nearest]
+        r["spectrum_indices"] = sorted(set(r["spectrum_indices"]) | {idx})
+    return "nearest assigned neighbour along the series axis"
+
+
 _MEMBERSHIP_MARGIN_FRACTION = 0.25   # of the PC1 score range: a "clear misfit" only
 
 
@@ -2498,12 +2542,10 @@ class CurveFittingPlanningController:
 
         missing = set(range(num_spectra)) - all_indices
         if missing:
+            rule = _assign_missing_indices(regimes, missing, state.get("series_reduction"))
             self.logger.warning(
                 f"  Series plan missing indices {sorted(missing)}, "
-                f"assigning to first regime"
-            )
-            regimes[0]["spectrum_indices"] = sorted(
-                set(regimes[0]["spectrum_indices"]) | missing
+                f"assigned by {rule}"
             )
 
         # Drop regimes that ended up fitting no spectra. The LLM sometimes names
