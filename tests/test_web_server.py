@@ -540,6 +540,49 @@ def test_reset_session(client, tmp_path):
     assert not session.turn.thread.is_alive()
 
 
+def test_analysis_image_events_during_turn(client, tmp_path):
+    """A figure written mid-turn must reach the SSE buffer as an
+    analysis_image event (with a session-relative path), plus a final sweep
+    at turn end for late figures."""
+    from scilink.server.session_manager import WebSession
+
+    sdir = tmp_path / "analysis_session_20260101_121212"
+    sdir.mkdir()
+    results = sdir / "results"
+    results.mkdir()
+
+    class PlottingAgent:
+        def chat(self, text):
+            time.sleep(0.3)  # realistic: some work precedes the first plot
+            (results / "fit_overlay.png").write_bytes(b"\x89PNG mid")
+            print("plot written")
+            time.sleep(2.6)  # let the watcher's 2s fs tick observe it
+            (results / "late_dashboard.png").write_bytes(b"\x89PNG late")
+            return "done"
+
+    mgr = client.app.state.manager
+    session = WebSession(id=sdir.name, session_dir=str(sdir), mode="analyze",
+                         model="gpt-5.4", autonomy="autonomous",
+                         agent=PlottingAgent())
+    mgr._sessions[sdir.name] = session
+    client.post(f"/api/v1/sessions/{sdir.name}/messages", json={"content": "go"})
+    session.turn.done.wait(15)
+
+    def emitted():
+        return [ev.data["path"] for ev in session.events._ring
+                if ev.type == "analysis_image"]
+    # The watcher's final sweep runs shortly after the turn thread finishes.
+    for _ in range(100):
+        if len(emitted()) >= 2:
+            break
+        time.sleep(0.05)
+    imgs = emitted()
+    assert "results/fit_overlay.png" in imgs
+    assert "results/late_dashboard.png" in imgs  # final turn-end sweep
+    # ...and the filmstrip rides the snapshot for mid-run reattach.
+    assert [i["path"] for i in session.turn.live_images] == imgs
+
+
 def test_stop_unblocks_pending_question(client, tmp_path):
     from scilink.server.session_manager import WebSession
 

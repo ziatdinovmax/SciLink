@@ -64,6 +64,7 @@ function reducer(state: SessionState, action: Action): SessionState {
         messages: action.snapshot.chat_messages,
         pendingQuestion: action.snapshot.pending_question,
         liveLog: action.snapshot.live_log ?? "",
+        liveImages: action.snapshot.live_images ?? [],
         name: action.snapshot.name,
       };
     case "session_closed":

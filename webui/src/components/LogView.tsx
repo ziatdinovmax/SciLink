@@ -81,57 +81,73 @@ export function currentActivity(log: string): string | null {
 
   const lines = stripAnsi(log.slice(-6000)).split("\n");
   for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].replaceAll(THOUGHT_MARK, "").trim();
+    let line = lines[i].replaceAll(THOUGHT_MARK, "").trim();
     if (!line) continue;
-    if (line.startsWith("🤖")) return "Writing response…";
-    if (line.startsWith("💭")) return clip(line);
-    if (HANDOFF_PREFIXES.some((p) => line.startsWith(p))) return clip(line);
+    // Best-of-N fan-out lines are tagged "[cand_NN] <milestone>": strip the
+    // tag, classify the milestone as usual, prefix the candidate back on —
+    // so parallel candidates narrate like "Candidate 2 · Verification 1/7…".
+    let candTag: string | null = null;
+    const cm = /^\[cand[_-]?0*(\d+)\]\s*(.*)$/.exec(line);
+    if (cm) {
+      candTag = `Candidate ${cm[1]}`;
+      line = cm[2].trim();
+      if (!line) continue;
+    }
+    const withTag = (s: string) => (candTag ? `${candTag} · ${s}` : s);
+    // Fan-out progress milestones.
+    let bm = /^Candidate\s+\d+\s+finished\s+\(\d+\/\d+\).*$/.exec(line);
+    if (bm) return withTag(clip(line));
+    bm = /escalating to (\d+) candidates/i.exec(line);
+    if (bm) return withTag(`Escalating to ${bm[1]} parallel candidates…`);
+    if (line.startsWith("🤖")) return withTag("Writing response…");
+    if (line.startsWith("💭")) return withTag(clip(line));
+    if (HANDOFF_PREFIXES.some((p) => line.startsWith(p))) return withTag(clip(line));
     // The step index is an internal pipeline position — show only the
     // stage name.
     let m = /STEP\s+\d+:\s*(\S.*)$/.exec(line);
-    if (m) return pretty(m[1]);
+    if (m) return withTag(pretty(m[1]));
     m = /^-{2,}\s*(.+?)\s*-{2,}$/.exec(line);
-    if (m) return clip(m[1]);
+    if (m) return withTag(clip(m[1]));
     m = /^(?:[^\w\s]\s*)?Analyzing:\s*(.+)$/.exec(line);
-    if (m) return clip(`Analyzing ${m[1]}`);
+    if (m) return withTag(clip(`Analyzing ${m[1]}`));
     m = /^(?:[^\w\s]\s*)?Delegating to\s+(.+)$/.exec(line);
-    if (m) return clip(`Delegating to ${m[1]}`);
+    if (m) return withTag(clip(`Delegating to ${m[1]}`));
     // ── inside the analysis agents (shared codegen/QC loop narration) ──
     m = /\(Attempt\s+(\d+)\)\s+Asking LLM to write code/.exec(line);
-    if (m) return `Writing analysis code (attempt ${m[1]})…`;
-    if (/Asking LLM to write code/.test(line)) return "Writing analysis code…";
-    if (/Executing generated code/.test(line)) return "Executing analysis code…";
+    if (m) return withTag(`Writing analysis code (attempt ${m[1]})…`);
+    if (/Asking LLM to write code/.test(line)) return withTag("Writing analysis code…");
+    if (/Executing generated code/.test(line)) return withTag("Executing analysis code…");
     m = /Executing (?:Python )?script\s*\(attempt\s+(\d+)\)/.exec(line);
-    if (m) return `Executing analysis script (attempt ${m[1]})…`;
-    if (/Executing (?:Python )?script/.test(line)) return "Executing analysis script…";
+    if (m) return withTag(`Executing analysis script (attempt ${m[1]})…`);
+    if (/Executing (?:Python )?script/.test(line)) return withTag("Executing analysis script…");
     m = /Execution attempt\s+(\d+)/.exec(line);
-    if (m) return `Executing analysis code (attempt ${m[1]})…`;
+    if (m) return withTag(`Executing analysis code (attempt ${m[1]})…`);
     m = /Performing Visual QC on\s+(.+?)\.*$/.exec(line);
-    if (m) return clip(`Visual QC · ${m[1]}`);
+    if (m) return withTag(clip(`Visual QC · ${m[1]}`));
     m = /Combined review on\s+(.+?)\.*$/.exec(line);
-    if (m) return clip(`Reviewing ${m[1]}`);
+    if (m) return withTag(clip(`Reviewing ${m[1]}`));
     m = /^Verification\s+(\d+)\/(\d+)(?:\s*\(annealing level\s+(\d+)\))?/.exec(line);
     if (m)
-      return m[3] && m[3] !== "0"
+      return withTag(m[3] && m[3] !== "0"
         ? `Verification ${m[1]}/${m[2]} · annealing level ${m[3]}…`
-        : `Verification ${m[1]}/${m[2]}…`;
+        : `Verification ${m[1]}/${m[2]}…`);
     m = /Attempting script correction \(attempt\s+(\d+)\)/.exec(line);
-    if (m) return `Correcting the script (attempt ${m[1]})…`;
+    if (m) return withTag(`Correcting the script (attempt ${m[1]})…`);
     if (/Applying user feedback to existing script/.test(line))
-      return "Applying your feedback to the script…";
-    if (/^Best-of-\d+/.test(line)) return clip(line);
+      return withTag("Applying your feedback to the script…");
+    if (/^Best-of-\d+/.test(line)) return withTag(clip(line));
     // Outcome/warning milestones read well as transient status too.
-    if (line.startsWith("✅") || line.startsWith("⚠️")) return clip(line);
+    if (line.startsWith("✅") || line.startsWith("⚠️")) return withTag(clip(line));
     // Generic fallbacks — catch the many phrasing variants of action lines
     // without a bespoke pattern per print statement. `bare` drops a leading
     // emoji/symbol ("🧠 LLM Step: …", "📄 Generating …").
     const bare = line.replace(/^[^\p{L}\p{N}]+\s*/u, "");
     m = /^-{2,}\s*(.+?)\s*-{2,}$/.exec(bare);
-    if (m) return clip(m[1]);
+    if (m) return withTag(clip(m[1]));
     m = /^Attempt\s+(\d+(?:\/\d+)?):\s*(.+)$/.exec(bare);
-    if (m) return clip(`Attempt ${m[1]} · ${m[2]}`);
+    if (m) return withTag(clip(`Attempt ${m[1]} · ${m[2]}`));
     m = /^(?:LLM Step:\s*)?((?:Executing|Generating|Running|Loading|Refitting|Preparing|Searching|Creating|Initializing|Hiring|Connecting)\b.+)$/.exec(bare);
-    if (m) return clip(m[1]);
+    if (m) return withTag(clip(m[1]));
   }
   return null;
 }

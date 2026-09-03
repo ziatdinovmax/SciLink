@@ -108,11 +108,22 @@ class TurnState:
     live_capture: Optional[OutputCapture] = None
     pending_question: Optional[PendingQuestion] = None
     done: threading.Event = field(default_factory=threading.Event)
+    # Figures already emitted this turn ({path,label,branch} dicts) — carried
+    # in the session snapshot so a mid-run page refresh keeps the inset.
+    live_images: list = field(default_factory=list)
+    # Baseline of images on disk at turn start (path -> mtime), seeded
+    # SYNCHRONOUSLY in start_turn so a figure written in the first
+    # milliseconds of the turn cannot race the watcher's seed pass.
+    seen_images: dict = field(default_factory=dict)
 
 
 def start_turn(session, user_input: str) -> TurnState:
     """Create a TurnState and launch the agent thread (daemon, like Streamlit)."""
     turn = TurnState(is_running=True)
+    try:
+        _scan_new_images(session.session_dir, turn.seen_images)
+    except Exception:
+        pass
     session.turn = turn
     session.turn_started_at = time.time()
     session.chat_messages.append({"role": "user", "content": user_input})
@@ -177,13 +188,7 @@ def _watch_log(session, turn, cap) -> None:
     sent = 0
     last_sig = None
     last_fs_check = 0.0
-    seen_images: dict = {}
-    # Seed with the images already on disk so the inset only streams figures
-    # THIS turn produces, not the whole prior session.
-    try:
-        _scan_new_images(session.session_dir, seen_images)
-    except Exception:
-        pass
+    seen_images = turn.seen_images  # seeded in start_turn, pre-thread
     while turn.is_running and turn.live_capture is cap:
         try:
             buf = cap.getvalue()
@@ -203,8 +208,10 @@ def _watch_log(session, turn, cap) -> None:
                     # this batch first, so the newest ends up "latest").
                     for rel, label, branch in reversed(
                             _scan_new_images(session.session_dir, seen_images)):
-                        session.events.emit("analysis_image", {
-                            "path": rel, "label": label, "branch": branch})
+                        img = {"path": rel, "label": label,
+                               "branch": branch}
+                        turn.live_images.append(img)
+                        session.events.emit("analysis_image", img)
                 last_sig = sig
             except Exception:
                 pass
@@ -222,8 +229,9 @@ def _watch_log(session, turn, cap) -> None:
     try:
         for rel, label, branch in reversed(
                 _scan_new_images(session.session_dir, seen_images)):
-            session.events.emit("analysis_image", {
-                "path": rel, "label": label, "branch": branch})
+            img = {"path": rel, "label": label, "branch": branch}
+            turn.live_images.append(img)
+            session.events.emit("analysis_image", img)
     except Exception:
         pass
 

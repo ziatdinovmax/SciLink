@@ -426,11 +426,14 @@ class SessionManager:
         # duplication) instead of being lost from a reattaching client.
         cursor = session.events.cursor
         live_log = ""
-        if turn is not None and turn.is_running and turn.live_capture is not None:
-            try:
-                live_log = turn.live_capture.getvalue()
-            except Exception:
-                pass
+        live_images: list = []
+        if turn is not None and turn.is_running:
+            live_images = list(turn.live_images)
+            if turn.live_capture is not None:
+                try:
+                    live_log = turn.live_capture.getvalue()
+                except Exception:
+                    pass
         return {
             "id": session.id,
             "mode": session.mode,
@@ -443,9 +446,10 @@ class SessionManager:
             # FastAPI serializes the snapshot outside the session lock.
             "chat_messages": list(session.chat_messages),
             "pending_question": pending,
-            # The narration captured so far this turn, so a reattaching
-            # client can show the verbose panel mid-run.
+            # The narration and figures captured so far this turn, so a
+            # reattaching client keeps the verbose panel and figure inset.
             "live_log": live_log,
+            "live_images": live_images,
             # Start the SSE stream with ?after=<event_cursor> so events
             # already reflected in this snapshot are not replayed.
             "event_cursor": cursor,
