@@ -78,6 +78,7 @@ scilink-mcp --mode both --transport sse --port 8000  # SSE
 | Tool | Description |
 |------|-------------|
 | `scilink_examine_data` | Inspect a data file (type, shape, suggested agents) |
+| `scilink_prepare_data` | Transform a raw instrument container (e.g. a hologram stack) into analysis-ready products with sidecars, via a data-preparation skill; run before `scilink_run_analysis` when `examine_data` reports `raw_instrument` |
 | `scilink_convert_metadata` | Convert a text description to structured metadata |
 | `scilink_load_metadata` | Load metadata from a JSON file or directory |
 | `scilink_select_agent` | Choose an analysis agent (FFT, SAM, Hyperspectral, CurveFitting) |

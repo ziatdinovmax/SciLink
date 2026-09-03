@@ -51,6 +51,7 @@ def _bounded_metadata_echo(metadata):
         f"metadata too large to echo in conversation ({len(s)} chars); it is "
         f"stored IN FULL for the analysis. Top-level keys: {keys}")}
 
+from .data_preparation import detect_raw_instrument as _detect_raw_instrument
 from .metadata_converter import (
     generate_metadata_json_from_text,
     METADATA_SCHEMA_DICT,
@@ -151,6 +152,8 @@ def _build_skill_description(agent_registry: dict = None,
     # Prefer the frontmatter `description` field when present; fall back
     # to the first line of the overview section.
     for domain, names in list_all_skills().items():
+        if domain == "data_preparation":
+            continue   # preparation skills belong to prepare_data, not run_analysis
         skill_descs = []
         for name in names:
             try:
@@ -508,6 +511,12 @@ def _llm_identify_control_variables(
         "(detector exposure per scan) is an acquisition setting, but 'total "
         "time' or 'elapsed time' (cumulative experiment duration) is a real "
         "control variable.\n\n"
+        "IDENTIFIERS are never control variables: a run / workflow / sample / "
+        "file number or index varies across files but encodes no condition, and "
+        "sorting by it does not order the measurements physically. When a "
+        "field that encodes the experimental STATE or CONDITION is present "
+        "(e.g. a state code, an applied field or position, has_transition, a "
+        "stimulus level), prefer it over any identifier.\n\n"
         "It is also possible that NONE of the listed fields is a true "
         "control variable — for example the real one was set manually and "
         "not recorded in the sidecar metadata.\n\n"
@@ -1423,6 +1432,24 @@ class AnalysisOrchestratorTools:
                         result["data_type"] = "unknown"
                         result["message"] = f"Directory contains unsupported file types: {extensions}"
                     
+                    # ---- raw-instrument override -------------------------------------
+                    # A container whose sidecar / manifest / embedded contract says it
+                    # must be reconstructed first (e.g. a raw hologram stack) is never
+                    # handed to an analysis agent: route it to prepare_data instead.
+                    _raw = _detect_raw_instrument(path)
+                    if _raw:
+                        result["data_type"] = "raw_instrument"
+                        result["suggested_agents"] = []
+                        result["primary_suggestion"] = None
+                        result["preparation_required"] = True
+                        result["next_tool"] = "prepare_data"
+                        result["raw_instrument_evidence"] = _raw.get("evidence")
+                        if _raw.get("manifest"):
+                            result["manifest"] = _raw["manifest"]
+                        result["note"] = ("Raw instrument container: it must be transformed into "
+                                          "analysis-ready products with `prepare_data` (which "
+                                          "applies the matching data-preparation skill) BEFORE any "
+                                          "run_analysis. Do NOT pass it to an analysis agent.")
                     # Store in orchestrator state
                     self.orch.current_data_path = str(path.absolute())
                     self.orch.current_data_type = result.get("data_type")
@@ -1627,6 +1654,24 @@ class AnalysisOrchestratorTools:
                             "dimensions, and metadata."
                         )
                 
+                # ---- raw-instrument override -------------------------------------
+                # A container whose sidecar / manifest / embedded contract says it
+                # must be reconstructed first (e.g. a raw hologram stack) is never
+                # handed to an analysis agent: route it to prepare_data instead.
+                _raw = _detect_raw_instrument(path)
+                if _raw:
+                    result["data_type"] = "raw_instrument"
+                    result["suggested_agents"] = []
+                    result["primary_suggestion"] = None
+                    result["preparation_required"] = True
+                    result["next_tool"] = "prepare_data"
+                    result["raw_instrument_evidence"] = _raw.get("evidence")
+                    if _raw.get("manifest"):
+                        result["manifest"] = _raw["manifest"]
+                    result["note"] = ("Raw instrument container: it must be transformed into "
+                                      "analysis-ready products with `prepare_data` (which "
+                                      "applies the matching data-preparation skill) BEFORE any "
+                                      "run_analysis. Do NOT pass it to an analysis agent.")
                 # Store in orchestrator state
                 self.orch.current_data_path = str(path.absolute())
                 self.orch.current_data_type = result.get("data_type")
@@ -1649,6 +1694,8 @@ class AnalysisOrchestratorTools:
                 "For directories, also detects per-file JSON sidecar metadata "
                 "(stem-matched to data files) and reports them separately from "
                 "global metadata files."
+                " Reports data_type='raw_instrument' (preparation_required=true) for a raw "
+                "container that must go through prepare_data before any analysis."
             ),
             parameters={
                 "data_path": {
@@ -1770,6 +1817,140 @@ class AnalysisOrchestratorTools:
                     "message": "Must provide either text_input or text_file_path"
                 })
         
+        # ------------------------------------------------------------------
+        # prepare_data — raw instrument container -> analysis-ready products
+        # ------------------------------------------------------------------
+        def prepare_data(data_path: str = None, task: str = None, skill=None,
+                         max_attempts: int = 3, timeout_s: int = 1800,
+                         llm_verify: bool = True) -> str:
+            """Transform a raw instrument container into analysis-ready products."""
+            from ...executors import ScriptExecutor, require_sandbox_approval
+            from ...skills.loader import load_skill, list_skills
+            from ...skills._shared._registry import format_tool_inventory
+            from .data_preparation import (build_prep_context, run_preparation,
+                                            DOMAIN as _PREP_DOMAIN)
+            data_path = data_path or self.orch.current_data_path
+            if not data_path:
+                return json.dumps({"status": "error",
+                                   "message": "No data_path given and none examined yet."})
+            path = Path(data_path)
+            if not path.exists():
+                return json.dumps({"status": "error", "message": f"Path not found: {data_path}"})
+            print(f"  🧰 Tool: Preparing raw data: {path.name}")
+            if not require_sandbox_approval(
+                    context="Data preparation (generated reconstruction / reduction script)"):
+                return json.dumps({"status": "aborted", "reason": "sandbox_declined",
+                                   "message": "Code execution declined; the raw data cannot be prepared."})
+            detection = _detect_raw_instrument(path)
+            task = task or ("Prepare this raw instrument data for analysis: reconstruct / "
+                            "reduce it into analysis-ready products with sidecars and QC.")
+            # --- skill: explicit (name or custom .md path) or auto-selected ---
+            skill_names = [skill] if isinstance(skill, str) else list(skill or [])
+            available = list_skills(domain=_PREP_DOMAIN)
+            context = build_prep_context(path, detection)
+            if not skill_names and available:
+                try:
+                    from ...skills._shared._skill_selector import select_relevant_skills
+                    from ...skills._shared._graduation import parse_json_response as _pjr
+                    _parse = lambda resp: (_pjr(getattr(resp, "raw_text", None) or getattr(resp, "text", None) or str(resp)), None)  # noqa: E731
+                    skill_names = select_relevant_skills(
+                        model=self._internal_model(), parse_fn=_parse, domain=_PREP_DOMAIN,
+                        context_parts=[f"TASK: {task}", context[:6000]],
+                        max_skills=1, exclusive=True,
+                        custom_skills=self.orch._custom_skills or None, logger=logging)
+                except Exception as e:  # noqa: BLE001
+                    logging.warning(f"prepare_data: skill auto-selection skipped: {e}")
+                    skill_names = []
+            loaded = None
+            for name in skill_names:
+                ref = self.orch._custom_skills.get(name, name) if self.orch._custom_skills else name
+                try:
+                    loaded = load_skill(ref, domain=_PREP_DOMAIN); break
+                except Exception as e:  # noqa: BLE001
+                    logging.warning(f"prepare_data: could not load skill '{name}': {e}")
+            active = [loaded["name"]] if loaded else []
+            inventory = format_tool_inventory(_PREP_DOMAIN, active_skills=active)
+            if loaded:
+                print(f"     Using preparation skill: {loaded['name']}")
+            # --- output dir (results/prepare_<stem>_<ts>_<n>) ---
+            stem = re.sub(r"[^\w\-]", "_", path.name if path.is_dir() else path.stem)[:30]
+            self.orch._analysis_run_counter += 1
+            prep_id = f"{stem}_prepare_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{self.orch._analysis_run_counter:03d}"
+            out_dir = self.orch.results_dir / f"prepare_{prep_id}"
+            scratch = out_dir / "_scratch"
+            executor = ScriptExecutor(timeout=int(timeout_s))
+            res = run_preparation(
+                model=self._internal_model(), executor=executor, data_path=str(path),
+                task=task, out_dir=out_dir, scratch_dir=scratch, context=context,
+                skill=loaded, tool_inventory=inventory, logger=logging,
+                max_attempts=int(max_attempts), llm_verify=bool(llm_verify),
+                parse_json=getattr(self.orch, "_parse_json_response", None))
+            record = {"analysis_id": prep_id, "timestamp": datetime.now().isoformat(),
+                      "data_path": str(path), "agent_id": "prepare", "agent_name": "DataPreparation",
+                      "status": res.get("status"), "output_directory": str(out_dir),
+                      "full_result": res, "novelty_assessment": None}
+            self.orch.analysis_results.append(record)
+            if res.get("status") != "success":
+                return json.dumps({"status": "error", "prepare_id": prep_id,
+                                   "output_directory": str(out_dir),
+                                   **{k: v for k, v in res.items() if k != "status"}}, default=str)
+            products = res["products"]
+            files = [p["path"] for p in products]
+            groups = {}
+            for p in products:
+                groups.setdefault(p.get("group") or p.get("kind") or "other", []).append(p["path"])
+            analysis_groups = {g: paths for g, paths in groups.items()
+                               if any(Path(x).suffix.lower() in (".npy", ".csv") for x in paths)
+                               and not all(str(x).endswith("wrapped_phase.npy") for x in paths)}
+            return json.dumps({
+                "product_groups": {g: len(v) for g, v in groups.items()},
+                "analysis_groups": analysis_groups,
+                "status": "success", "prepare_id": prep_id, "output_directory": str(out_dir),
+                "skill_used": loaded["name"] if loaded else None, "attempts": res["attempts"],
+                "summary": res.get("summary"), "qc": res.get("qc"),
+                "products": products, "files_produced": files,
+                "receipt": res.get("receipt"), "script_path": res.get("script_path"),
+                "next_steps": ("The products are ordinary analysis inputs with same-stem JSON "
+                               "sidecars. Each ANALYSIS GROUP answers a different question and "
+                               "gets its OWN run_analysis: a time-series/curve group (WHEN and HOW "
+                               "MUCH — series via their directory or glob) and a map/image group "
+                               "(WHERE — spatial structure, localization, reversal between "
+                               "sibling maps). Analyze every group before concluding; do not stop "
+                               "after one. Load each sidecar with load_metadata. Do not analyze "
+                               "the raw container again."),
+            }, default=str)
+
+        self._register_tool(
+            func=prepare_data,
+            name="prepare_data",
+            description=(
+                "Transform a RAW INSTRUMENT container into analysis-ready products BEFORE "
+                "analysis — e.g. reconstruct a raw off-axis hologram / interferogram stack "
+                "(HDF5, frame x y x) into phase maps and phase-vs-time curves, or reduce a "
+                "raw detector container that its sidecar/manifest says must not be routed "
+                "to an image or spectral agent. A data-preparation skill (auto-selected, or "
+                "given by name / custom .md path) supplies the recipe, its QC gate and its "
+                "helper tools; a script is generated, run in the sandbox, and verified "
+                "(products exist with sidecars, QC gate passed, skill validation rules met). "
+                "Products land in results/prepare_<id>/ with same-stem JSON sidecars; then "
+                "run examine_data / run_analysis on THEM. Use when examine_data reports "
+                "data_type='raw_instrument' (preparation_required=true), or when the user "
+                "says the data must be reconstructed / reduced first. Long-running."
+            ),
+            parameters={
+                "data_path": {"type": "string",
+                              "description": "Raw file or bundle directory (default: the path last examined). For a bundle, pass the directory that holds the manifest / raw files."},
+                "task": {"type": "string",
+                         "description": "What to prepare and for which downstream question — which runs, which products (maps, time traces), condition columns to join, QC to enforce. Quote the user's goal."},
+                "skill": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}],
+                          "description": "Preparation skill name (e.g. 'mmzi_hologram_reconstruction') or a custom .md path. Omit to auto-select from the container's evidence."},
+                "max_attempts": {"type": "integer", "description": "Generate-run-verify attempts before giving up (default 3)."},
+                "timeout_s": {"type": "integer", "description": "Wall-clock limit for one script execution in seconds (default 1800; raise for many large files)."},
+                "llm_verify": {"type": "boolean", "description": "Also verify against the skill's validation rules with the model (default true)."},
+            },
+            required=[],
+        )
+
         self._register_tool(
             func=convert_metadata,
             name="convert_metadata",

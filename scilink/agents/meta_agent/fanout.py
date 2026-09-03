@@ -211,6 +211,11 @@ FANOUT_HARD_CAP = 8             # refuse beyond this — cost/quality cliff
 # finish a long in-flight LLM call late, which is recorded for audit
 # without changing the verdict). <= 0 disables.
 FANOUT_BRANCH_TIME_BUDGET_S = 3600.0
+# A raw-instrument branch (needs prepare_data: every attempt reconstructs the
+# whole container) gets this multiple of the default budget when a caller
+# opts in to running it inside a fan-out (allow_raw_branches). An explicit
+# branch_time_budget_s is never scaled.
+FANOUT_RAW_INSTRUMENT_BUDGET_FACTOR = 3.0
 # In AUTONOMOUS mode there is no human to confirm, so the verdict IS the gate:
 # proceed only on a confident 'complementary' read.
 AUTONOMOUS_CONFIDENCE_THRESHOLD = 0.6
@@ -905,12 +910,18 @@ def _cancel_overdue_branches(orch, pending, fut_entry, fut_stop, fut_label,
     slot), then kills any subprocess it is currently waiting on, and stops
     waiting for its future. Mutates ``pending`` in place.
     """
+    def _budget_of(entry: dict) -> float:
+        try:
+            return float(entry.get("_budget_s") or budget)
+        except (TypeError, ValueError):
+            return budget
     overdue = [f for f in pending
                if fut_entry[f].get("_started_at") is not None
                and fut_entry[f].get("status") == "running"
-               and (time.monotonic() - fut_entry[f]["_started_at"] > budget)]
+               and (time.monotonic() - fut_entry[f]["_started_at"] > _budget_of(fut_entry[f]))]
     for f in overdue:
         e = fut_entry[f]
+        budget = _budget_of(e)      # per-branch value from here on (messages, ledger)
         e["timed_out"] = True
         print(f"  ⏱️  analysis branch '{fut_label[f]}' exceeded "
               f"its wall-clock budget ({int(budget)}s) — "
@@ -1152,10 +1163,67 @@ def resume_fanout(orch) -> str:
     }, default=str)
 
 
+def raw_instrument_branches(branches: List[dict]) -> List[dict]:
+    """Branches whose data_path is a RAW instrument container (needs prepare_data).
+
+    Preparation does not belong inside a fan-out branch: every attempt
+    reconstructs the whole container, which alone can exceed the branch
+    wall-clock budget (observed live: a 9-run hologram bundle spent its entire
+    3600 s on preparation and was cancelled). Such data is prepared FIRST in a
+    standalone delegation; the fan-out then runs over the prepared products.
+    """
+    from ..exp_agents.data_preparation import detect_raw_instrument
+    hits = []
+    for b in branches or []:
+        p = b.get("data_path") if isinstance(b, dict) else None
+        if not p:
+            continue
+        try:
+            det = detect_raw_instrument(p)
+        except Exception:  # noqa: BLE001 - detection must never break a fan-out
+            det = None
+        if det:
+            hits.append({"label": b.get("label") or str(p), "data_path": str(p),
+                         "evidence": det.get("evidence", [])[:3]})
+    return hits
+
+
+def resolve_branch_budget(branch: dict, base_budget: float, explicit: bool = False) -> float:
+    """Wall-clock budget for one branch: the base, scaled by
+    ``FANOUT_RAW_INSTRUMENT_BUDGET_FACTOR`` for a raw-instrument container
+    unless the caller set the budget explicitly (or budgets are disabled)."""
+    if explicit or base_budget <= 0:
+        return float(base_budget)
+    if raw_instrument_branches([branch]):
+        return float(base_budget) * FANOUT_RAW_INSTRUMENT_BUDGET_FACTOR
+    return float(base_budget)
+
+
+def raw_branch_decline(branches: List[dict], allow_raw_branches: bool = False) -> Optional[str]:
+    """JSON decline for a fan-out that includes raw-instrument branches, or
+    None when there are none or the caller opted in (allow_raw_branches)."""
+    _raw = raw_instrument_branches(branches)
+    if not _raw or allow_raw_branches:
+        return None
+    names = ", ".join(f"'{r['label']}'" for r in _raw)
+    msg = (f"Fan-out declined: {names} is a RAW instrument container that must be "
+           "prepared before analysis. Preparation reconstructs the whole container and "
+           "does not fit a branch's wall-clock budget. First run ONE standalone "
+           "delegate_to_analysis on it whose task says to `prepare_data` (the specialist "
+           "applies the matching preparation skill and returns product paths), then call "
+           "delegate_to_analyses again with the prepared products (maps / traces) as branches. "
+           "(To run it inside the fan-out anyway, pass allow_raw_branches=true: the branch then "
+           f"gets {FANOUT_RAW_INSTRUMENT_BUDGET_FACTOR:g}x the default wall-clock budget, or an "
+           "explicit branch_time_budget_s.)")
+    return json.dumps({"status": "declined", "reason": "raw_instrument_branch",
+                       "raw_branches": _raw, "message": msg})
+
+
 def run_fanout(orch, branches: List[dict],
                branch_time_budget_s: Optional[float] = None,
                figure_style: Optional[str] = None,
-               harmonize: bool = False) -> str:
+               harmonize: bool = False,
+               allow_raw_branches: bool = False) -> str:
     """Gate → confirm → run branches concurrently. Returns JSON.
 
     `branches` is a list of ``{"data_path", "task", "label", "metadata"?,
@@ -1183,6 +1251,13 @@ def run_fanout(orch, branches: List[dict],
     criterion is enforced (datasets the gate calls unrelated are pruned);
     the non-redundancy criterion is waived by the caller's declaration.
     """
+    _decline = raw_branch_decline(branches, allow_raw_branches)
+    if _decline:
+        print("  ⛔ " + json.loads(_decline)["message"])
+        return _decline
+    if allow_raw_branches and raw_instrument_branches(branches):
+        print(f"  ⏱️  raw-instrument branch(es) admitted: wall-clock budget x"
+              f"{FANOUT_RAW_INSTRUMENT_BUDGET_FACTOR:g} unless branch_time_budget_s is explicit")
     # --- normalize input ---
     norm: List[dict] = []
     seen_dup: set = set()
@@ -1514,6 +1589,8 @@ def run_fanout(orch, branches: List[dict],
     try:
         fut_label, fut_entry, fut_stop = {}, {}, {}
         for i in range(follower_start, n_total):
+            entries[i]["_budget_s"] = resolve_branch_budget(
+                run_branches[i], budget, explicit=branch_time_budget_s is not None)
             stop_ev = _threading.Event()
             fut = pool.submit(_run_one_branch, orch, run_branches[i],
                               branch_companions[i], entries[i],

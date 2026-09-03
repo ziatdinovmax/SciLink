@@ -47,7 +47,7 @@ def _require_mcp():
 # In co-pilot mode ALL of these pause; in autopilot mode only the
 # high-impact subset (run_analysis, run_optimization) pauses.
 _COPILOT_APPROVAL_TOOLS = {
-    "run_analysis", "select_agent", "assess_novelty",
+    "run_analysis", "prepare_data", "select_agent", "assess_novelty",
     "get_recommendations", "run_optimization", "generate_initial_plan",
     "generate_implementation_code", "run_economic_analysis",
     "discard_plan",
@@ -78,6 +78,7 @@ _AUTOPILOT_APPROVAL_TOOLS = {
 #   - orchestrate_analysis / orchestrate_planning: full orchestrator chat loop
 _BACKGROUND_CAPABLE_TOOLS = {
     "run_analysis",
+    "prepare_data",
     "run_optimization",
     "assess_novelty",
     "get_recommendations",

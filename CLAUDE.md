@@ -122,6 +122,56 @@ technique is, how to plan a use of it, how to write the code, how to
 read the output, and how to verify it. New skills should use this
 ordering; legacy `analysis` is accepted by the loader for backcompat.
 
+## Data preparation is a stage, not an agent
+
+Some instruments hand over a container that sits *upstream* of what the
+analysis agents take — a raw off-axis hologram stack, a raw detector
+container with a reconstruction contract. Such data must be **transformed**
+(reconstructed, reduced, calibrated, joined with a condition timeline) before
+any curve / image / hyperspectral agent may see it, and routing it as an
+image or a cube is wrong by construction. This is handled by a preparation
+stage on the analysis orchestrator, not by a fourth agent:
+
+- `examine_data` reports `data_type="raw_instrument"` (with
+  `preparation_required=true`) when a same-stem sidecar, a
+  `reconstruction_manifest.json`, or an embedded HDF5 contract carries
+  routing-denial / reconstruction markers (`generic_image_routing_permitted:
+  false`, `analysis_status: ready_for_..._reconstruction`, a hologram /
+  interferogram `measurement_type`, ...). Detection lives in
+  `scilink/agents/exp_agents/data_preparation.py`.
+- `prepare_data` (orchestrator tool) selects a skill from the
+  `scilink/skills/data_preparation/` domain (auto-selected or named), builds
+  an inventory of the container, and runs the shared shape: generate a
+  script from the skill's `planning` + `implementation` sections and the
+  skill's `TOOL_SPEC` inventory → sandbox run → deterministic gate (products
+  exist under `results/prepare_<id>/`, same-stem sidecars, `qc.passed`,
+  numeric metrics) → skill-guided LLM verification against the `validation`
+  section → retry with feedback. The approved script is kept as
+  `scripts/prepare_script.py`; `analysis_results.json` carries the QC
+  metrics as `extracted_features` so the feature table works unchanged.
+- Products are ordinary data files, so `run_analysis`, meta fan-out and
+  fusion consume them without special cases; the meta only needs to route a
+  raw container to analysis with "prepare first" in the task.
+- **Preparation happens before fan-out, never inside a branch.** Every
+  preparation attempt reconstructs the whole container, which alone can
+  exceed a branch's wall-clock budget (observed live: a nine-run hologram
+  bundle spent its full 3600 s on preparation and was cancelled). `run_fanout`
+  therefore declines a raw-instrument branch with a directive to prepare it in
+  a standalone delegation first; the fan-out then runs over the products.
+  A caller who accepts a long branch opts in with `allow_raw_branches`
+  (that branch gets `FANOUT_RAW_INSTRUMENT_BUDGET_FACTOR` × the default
+  budget) or sets `branch_time_budget_s` explicitly; budgets are resolved
+  per branch and persisted on the ledger entry (`_budget_s`) so a resumed
+  fan-out enforces the same value.
+
+Preparation skills follow the standard five-section vocabulary; their
+`implementation` recipe is code-in-markdown that calls the bundle's
+deterministic helpers (the reliability ladder applies: the contract-exact
+numerics live in `TOOL_SPEC` tools, the glue is generated). Preparation
+skills are excluded from `run_analysis`'s skill menu. The first skill is
+`mmzi_hologram_reconstruction` (contract-exact reconstruction with a
+producer-target QC gate, then piston-immune phase maps and ROI traces).
+
 ## Plan mode produces three kinds of thing, not one
 
 `generate_initial_plan` designs **lab experiments**. For a long time it was
