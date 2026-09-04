@@ -405,9 +405,9 @@ export function Sidebar({
         </div>
       )}
 
-      {liveSessions.some((s) => s.id !== session?.id) && (
+      {session && liveSessions.some((s) => s.id !== session.id) && (
         <div className="sidebar-section">
-          <h3>{session ? "Other live sessions" : "Live sessions"}</h3>
+          <h3>Other live sessions</h3>
           <div className="session-list">
             {liveSessions
               .filter((s) => s.id !== session?.id)
