@@ -17,10 +17,10 @@
       <stop offset="100%" stop-color="#22A55E"/>
     </radialGradient>
   </defs>
-  <line x1="50" y1="26" x2="25" y2="72" stroke="#8A98AA" stroke-width="7" stroke-linecap="round"/>
-  <line x1="50" y1="26" x2="75" y2="72" stroke="#8A98AA" stroke-width="7" stroke-linecap="round"/>
-  <line x1="25" y1="72" x2="75" y2="72" stroke="#8A98AA" stroke-width="7" stroke-linecap="round"/>
-  <circle cx="50" cy="26" r="22" fill="url(#b)"/>
-  <circle cx="25" cy="72" r="22" fill="url(#o)"/>
-  <circle cx="75" cy="72" r="22" fill="url(#g)"/>
+  <line x1="50" y1="28.3" x2="25" y2="71.6" stroke="#8A98AA" stroke-width="7" stroke-linecap="round"/>
+  <line x1="50" y1="28.3" x2="75" y2="71.6" stroke="#8A98AA" stroke-width="7" stroke-linecap="round"/>
+  <line x1="25" y1="71.6" x2="75" y2="71.6" stroke="#8A98AA" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="50" cy="28.3" r="22" fill="url(#b)"/>
+  <circle cx="25" cy="71.6" r="22" fill="url(#o)"/>
+  <circle cx="75" cy="71.6" r="22" fill="url(#g)"/>
 </svg>
