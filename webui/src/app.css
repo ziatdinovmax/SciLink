@@ -106,10 +106,46 @@ label.field > span { display: block; margin-bottom: 4px; }
   padding: 32px;
   text-align: center;
 }
-.welcome .logo-big { width: 300px; }
-.mode-row { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; }
-.mode-row button { min-width: 130px; font-size: 17px; padding: 12px 26px; }
-.welcome .mode-desc { font-size: 16px; color: var(--text-muted); margin: 0; }
+.welcome .logo-big { width: 380px; }
+.welcome .mode-desc {
+  font-size: 15px; color: var(--text-dim); margin: 0;
+  max-width: 520px;
+}
+
+/* Mode dropdown: emoji + name rows; the selected mode's description
+   shows once beneath the trigger. */
+.mode-select { position: relative; }
+.mode-trigger {
+  display: flex; align-items: center; gap: 12px;
+  font-size: 18px; padding: 12px 20px; min-width: 300px;
+  border-radius: 10px;
+}
+.mode-trigger .mode-name { flex: 1; text-align: left; }
+.mode-caret {
+  color: var(--text-dim); font-size: 13px;
+  transform: rotate(90deg); transition: transform 0.15s;
+}
+.mode-trigger[aria-expanded="true"] .mode-caret { transform: rotate(-90deg); }
+.mode-emoji { font-size: 22px; line-height: 1; flex: none; }
+.mode-name { font-weight: 600; white-space: nowrap; }
+.mode-name .beta-pill { margin-left: 8px; }
+
+.mode-menu {
+  position: absolute; top: calc(100% + 6px); left: 50%;
+  transform: translateX(-50%); z-index: 30;
+  min-width: 100%;
+  background: var(--bg-card); border: 1px solid var(--border-strong);
+  border-radius: 12px; padding: 6px;
+  box-shadow: 0 14px 40px -12px rgba(0, 0, 0, 0.55);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.mode-option {
+  display: flex; align-items: center; gap: 14px;
+  text-align: left; padding: 12px 14px; border: 1px solid transparent;
+  background: none; border-radius: 8px; font-size: 15px;
+}
+.mode-option:hover:not(:disabled) { background: var(--bg-panel); border-color: var(--border); }
+.mode-option.selected { border-color: var(--accent); }
 .welcome .tagline { color: var(--text-muted); font-size: 19px; margin: 0; }
 .welcome .hint { font-size: 14px; color: var(--text-dim); }
 .beta-pill {
