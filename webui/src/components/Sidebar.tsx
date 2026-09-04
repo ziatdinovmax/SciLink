@@ -39,6 +39,7 @@ export function Sidebar({
   onAttachSession,
   onCloseSession,
   onDetach,
+  onCollapse,
   theme,
   onToggleTheme,
 }: {
@@ -57,6 +58,7 @@ export function Sidebar({
   onAttachSession: (id: string) => void;
   onCloseSession: (id: string) => void;
   onDetach: () => void;
+  onCollapse: () => void;
   theme: "dark" | "light";
   onToggleTheme: () => void;
 }) {
@@ -144,13 +146,22 @@ export function Sidebar({
 
   return (
     <div className="sidebar">
-      <button
-        className="theme-toggle"
-        title="Toggle theme"
-        onClick={onToggleTheme}
-      >
-        {theme === "dark" ? "☀️" : "🌙"}
-      </button>
+      <div className="sidebar-top">
+        <button
+          className="icon-btn"
+          title="Hide sidebar"
+          onClick={onCollapse}
+        >
+          ⟨
+        </button>
+        <button
+          className="icon-btn"
+          title="Toggle theme"
+          onClick={onToggleTheme}
+        >
+          {theme === "dark" ? "☀️" : "🌙"}
+        </button>
+      </div>
       {session ? (
         <img
           className="logo"

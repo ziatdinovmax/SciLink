@@ -163,7 +163,23 @@ export default function App() {
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [attachRequest, setAttachRequest] = useState<string | null>(null);
   const [liveSessions, setLiveSessions] = useState<LiveSession[]>([]);
+  const [sidebarOpen, setSidebarOpen] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("scilink.sidebar") !== "hidden";
+    } catch {
+      return true;
+    }
+  });
   const [state, dispatch] = useReducer(reducer, emptyState);
+
+  const toggleSidebar = (open: boolean) => {
+    setSidebarOpen(open);
+    try {
+      localStorage.setItem("scilink.sidebar", open ? "shown" : "hidden");
+    } catch {
+      /* private mode */
+    }
+  };
 
   const refreshLiveSessions = useCallback(() => {
     api
@@ -343,6 +359,16 @@ export default function App() {
 
   return (
     <div className="layout">
+      {!sidebarOpen && (
+        <button
+          className="sidebar-reveal"
+          title="Show sidebar"
+          onClick={() => toggleSidebar(true)}
+        >
+          ☰
+        </button>
+      )}
+      {sidebarOpen && (
       <Sidebar
         config={config}
         mode={mode}
@@ -366,9 +392,11 @@ export default function App() {
             .then(refreshLiveSessions);
         }}
         onDetach={detachSession}
+        onCollapse={() => toggleSidebar(false)}
         theme={theme}
         onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
       />
+      )}
       <div className="main">
         {!session ? (
           <WelcomeScreen

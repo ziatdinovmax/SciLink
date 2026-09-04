@@ -528,7 +528,16 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
   flex: none; padding: 0 10px; font-size: 13px; color: var(--text-dim);
 }
 
-.theme-toggle { align-self: flex-end; border: none; background: none; font-size: 16px; padding: 2px 6px; }
+.sidebar-top { display: flex; justify-content: space-between; align-items: center; }
+.icon-btn {
+  border: none; background: none; font-size: 16px; padding: 2px 8px;
+  color: var(--text-muted);
+}
+.icon-btn:hover:not(:disabled) { color: var(--accent); border: none; }
+.sidebar-reveal {
+  position: fixed; top: 10px; left: 10px; z-index: 60;
+  padding: 6px 12px; font-size: 16px;
+}
 
 .reattach-banner {
   border: 1px solid var(--border-strong); border-radius: 10px;
