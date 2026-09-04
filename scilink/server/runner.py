@@ -251,7 +251,9 @@ def _run_turn(session, turn: TurnState, user_input: str) -> None:
     agent = session.agent
     original_input = builtins.input
 
-    cap = RoutedCapture()
+    # Console tag = the session dir's time suffix — attributes terminal
+    # lines to a session when several run at once.
+    cap = RoutedCapture(tag=session.id.rsplit("_", 1)[-1])
     turn.live_capture = cap
     channel = HTTPChannel(turn, cap, session)
 

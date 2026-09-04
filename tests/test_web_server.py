@@ -665,6 +665,32 @@ def test_analysis_image_events_during_turn(client, tmp_path):
     assert [i["path"] for i in session.turn.live_images] == imgs
 
 
+def test_console_tags_only_with_multiple_sessions():
+    """Terminal lines carry a [tag] prefix only when several sessions are
+    live; partial-line writes prefix at line starts only, and the session's
+    own capture buffer stays untagged."""
+    import io as _io
+
+    from scilink.server import stdout_router as sr
+
+    console = _io.StringIO()
+    stream = sr._RoutingStream(console)
+    cap = sr.RoutedCapture(tag="111111")
+    try:
+        with cap:
+            stream.write("solo line\n")           # one route -> no prefix
+            # A second live session appears:
+            sr._ROUTES[-1] = sr._Route(_io.StringIO(), threading.Lock(),
+                                       threading.Event(), "222222")
+            stream.write("hello\nwor")            # prefix at line starts
+            stream.write("ld\n")                  # continuation: no prefix
+        out = console.getvalue()
+        assert out == "solo line\n[111111] hello\n[111111] world\n"
+        assert cap.getvalue() == "solo line\nhello\nworld\n"  # buffer untagged
+    finally:
+        sr._ROUTES.pop(-1, None)
+
+
 def test_concurrent_sessions_do_not_cross_bleed_prints(tmp_path):
     """Two sessions running turns at once must each capture only their own
     print() narration (live failure: a detached session's analysis narrated

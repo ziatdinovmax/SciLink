@@ -30,8 +30,22 @@ from typing import Dict, Optional, TextIO, Tuple
 from scilink.ui.output_capture import AgentStoppedError
 from scilink.utils.log_context import effective_thread
 
-# chat thread id -> (buffer, buffer lock, stop event)
-_ROUTES: Dict[int, Tuple[io.StringIO, threading.Lock, threading.Event]] = {}
+class _Route:
+    """One turn's capture target + console-attribution state."""
+
+    __slots__ = ("buffer", "lock", "stop", "tag", "at_line_start")
+
+    def __init__(self, buffer: io.StringIO, lock: threading.Lock,
+                 stop: threading.Event, tag: str) -> None:
+        self.buffer = buffer
+        self.lock = lock
+        self.stop = stop
+        self.tag = tag
+        self.at_line_start = True  # guarded by ``lock``
+
+
+# chat thread id -> _Route
+_ROUTES: Dict[int, _Route] = {}
 _ROUTES_LOCK = threading.Lock()
 # Reentrancy guard: if something later wraps OUR proxy and install() adds a
 # second router around it, only the outermost may write to the buffer, or
@@ -46,19 +60,32 @@ class _RoutingStream:
         self._original = original
 
     def write(self, data: str) -> int:
+        out = data
         route = _ROUTES.get(effective_thread(threading.get_ident()))
         if route is not None:
-            buffer, lock, stop = route
-            if stop.is_set():
+            if route.stop.is_set():
                 raise AgentStoppedError("Agent stopped by user")
             if not getattr(_tls, "routing", False):
                 _tls.routing = True
                 try:
-                    with lock:
-                        buffer.write(data)
+                    with route.lock:
+                        route.buffer.write(data)
+                        # Console attribution: with several sessions live,
+                        # prefix each line with the session tag so the
+                        # terminal firehose stays readable. The session's
+                        # own buffer stays untagged. Single session: no
+                        # prefix noise.
+                        if route.tag and len(_ROUTES) > 1:
+                            parts = []
+                            for seg in data.splitlines(keepends=True):
+                                if route.at_line_start:
+                                    parts.append(f"[{route.tag}] ")
+                                parts.append(seg)
+                                route.at_line_start = seg.endswith("\n")
+                            out = "".join(parts)
                 finally:
                     _tls.routing = False
-        self._original.write(data)
+        self._original.write(out)
         return len(data)
 
     def flush(self) -> None:
@@ -86,11 +113,12 @@ class RoutedCapture:
     """Per-turn capture registered with the router instead of swapping the
     global streams — drop-in for the runner's use of ``OutputCapture``."""
 
-    def __init__(self) -> None:
+    def __init__(self, tag: str = "") -> None:
         self._buffer = io.StringIO()
         self._buffer_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._agent_thread_id: Optional[int] = None
+        self._tag = tag
 
     @property
     def stop_requested(self) -> bool:
@@ -110,8 +138,8 @@ class RoutedCapture:
         install()
         self._agent_thread_id = threading.get_ident()
         with _ROUTES_LOCK:
-            _ROUTES[self._agent_thread_id] = (
-                self._buffer, self._buffer_lock, self._stop_event)
+            _ROUTES[self._agent_thread_id] = _Route(
+                self._buffer, self._buffer_lock, self._stop_event, self._tag)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
