@@ -97,6 +97,14 @@ def _scan_new_images(session_dir: str, seen: dict) -> list:
             for m, rel in found[:_IMAGE_EMIT_CAP]]
 
 
+def _record_live_image(turn, img: dict) -> None:
+    """Snapshot filmstrip: one entry per figure path — a rewrite replaces the
+    entry and moves it to the latest slot (old bytes no longer exist, so
+    per-version entries would render identically)."""
+    turn.live_images = [i for i in turn.live_images
+                        if i["path"] != img["path"]] + [img]
+
+
 @dataclass
 class TurnState:
     """Server-side twin of the Streamlit ChatTask (scilink/ui/state.py:28)."""
@@ -212,7 +220,7 @@ def _watch_log(session, turn, cap) -> None:
                             _scan_new_images(session.session_dir, seen_images)):
                         img = {"path": rel, "label": label,
                                "branch": branch, "v": v}
-                        turn.live_images.append(img)
+                        _record_live_image(turn, img)
                         session.events.emit("analysis_image", img)
                 last_sig = sig
             except Exception:
@@ -232,7 +240,7 @@ def _watch_log(session, turn, cap) -> None:
         for rel, label, branch, v in reversed(
                 _scan_new_images(session.session_dir, seen_images)):
             img = {"path": rel, "label": label, "branch": branch, "v": v}
-            turn.live_images.append(img)
+            _record_live_image(turn, img)
             session.events.emit("analysis_image", img)
     except Exception:
         pass

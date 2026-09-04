@@ -110,15 +110,31 @@ function reducer(state: SessionState, action: Action): SessionState {
         case "files_changed":
           return { ...state, filesVersion: state.filesVersion + 1 };
         case "analysis_image": {
-          // De-dup an identical replay (same path AND version) from a
-          // reconnect — but let a genuine in-place rewrite (same path, newer
-          // version) through, so a refined figure updates the inset.
-          const prev = state.liveImages[state.liveImages.length - 1];
-          if (prev && prev.path === ev.path && prev.v === ev.v) return state;
-          const next = [
-            ...state.liveImages,
-            { path: ev.path, label: ev.label, branch: ev.branch, v: ev.v },
-          ];
+          // One filmstrip entry per FIGURE (path), not per version: the old
+          // bytes are gone after an in-place rewrite, so stacking versions
+          // just makes the arrows page through identical images. A rewrite
+          // updates the existing entry's version and moves it to the
+          // "latest" slot; an identical replay (same path+version) is a
+          // reconnect artifact and is dropped.
+          const existing = state.liveImages.findIndex(
+            (i) => i.path === ev.path,
+          );
+          if (existing >= 0 && state.liveImages[existing].v === ev.v)
+            return state;
+          const entry = {
+            path: ev.path,
+            label: ev.label,
+            branch: ev.branch,
+            v: ev.v,
+          };
+          const next =
+            existing >= 0
+              ? [
+                  ...state.liveImages.slice(0, existing),
+                  ...state.liveImages.slice(existing + 1),
+                  entry,
+                ]
+              : [...state.liveImages, entry];
           return {
             ...state,
             liveImages: next.slice(-LIVE_IMAGE_CAP),
