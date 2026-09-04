@@ -4,7 +4,7 @@ the Streamlit monitor fragment does (app.py:986-1050), which here runs at the
 end of the same thread since no UI rerun is needed.
 
 Additions over the Streamlit original:
-- a log-watcher thread that diffs the OutputCapture buffer (~2×/s) and emits
+- a log-watcher thread that diffs the turn's capture buffer (~2×/s) and emits
   incremental ``log`` SSE events, replacing the 1s full-buffer poll;
 - explicit ``status`` / ``assistant_message`` events at the transitions the
   Streamlit fragment inferred from ChatTask fields.
@@ -25,9 +25,10 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from scilink import hitl as _hitl
-from scilink.ui.output_capture import AgentStoppedError, OutputCapture
+from scilink.ui.output_capture import AgentStoppedError
 
 from .hitl_channel import HTTPChannel, PendingQuestion
+from .stdout_router import RoutedCapture
 
 _LOG_POLL_S = 0.5
 
@@ -115,7 +116,7 @@ class TurnState:
     result: Optional[str] = None
     error: Optional[str] = None
     verbose_log: str = ""
-    live_capture: Optional[OutputCapture] = None
+    live_capture: Optional[RoutedCapture] = None
     pending_question: Optional[PendingQuestion] = None
     done: threading.Event = field(default_factory=threading.Event)
     # Figures already emitted this turn ({path,label,branch} dicts) — carried
@@ -250,7 +251,9 @@ def _run_turn(session, turn: TurnState, user_input: str) -> None:
     agent = session.agent
     original_input = builtins.input
 
-    cap = OutputCapture()
+    # Console tag = the session dir's time suffix — attributes terminal
+    # lines to a session when several run at once.
+    cap = RoutedCapture(tag=session.id.rsplit("_", 1)[-1])
     turn.live_capture = cap
     channel = HTTPChannel(turn, cap, session)
 
@@ -259,7 +262,7 @@ def _run_turn(session, turn: TurnState, user_input: str) -> None:
         # bypass the thread-local channel (app.py:576-580).
         return channel.ask(_hitl.FeedbackRequest(prompt=prompt))
 
-    log_handler = logging.StreamHandler(cap._buffer)
+    log_handler = logging.StreamHandler(cap.log_stream)
     log_handler.setLevel(logging.INFO)
     log_handler.setFormatter(logging.Formatter("%(message)s"))
     _this_thread = threading.get_ident()

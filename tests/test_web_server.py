@@ -232,6 +232,35 @@ def test_discover_resumable(tmp_path):
 
 # ── events ───────────────────────────────────────────────────────
 
+def test_sse_generator_never_suspends_holding_the_lock():
+    """A stream idling at the heartbeat yield must NOT hold the condition:
+    a suspended generator that keeps the lock freezes every emit() when an
+    abandoned stream is finalized from another thread (live failure:
+    'cannot release un-acquired lock' + wedged session events)."""
+    from scilink.server import events as events_mod
+
+    buf = EventBuffer(ring_size=10)
+    orig = events_mod._HEARTBEAT_S
+    events_mod._HEARTBEAT_S = 0.05  # fast heartbeat for the test
+    try:
+        gen = buf.sse_stream()
+        frame = next(gen)  # suspends at the heartbeat yield
+        assert frame.startswith(":")
+        # The lock must be acquirable from this (different) context while
+        # the generator is suspended.
+        acquired = buf._cond.acquire(timeout=0.5)
+        assert acquired, "suspended SSE generator is holding the event lock"
+        buf._cond.release()
+        # ...and emit() from another thread must not block.
+        done = threading.Event()
+        threading.Thread(target=lambda: (buf.emit("log", {}), done.set()),
+                         daemon=True).start()
+        assert done.wait(1), "emit() blocked while a stream was suspended"
+        gen.close()  # finalization must not raise
+    finally:
+        events_mod._HEARTBEAT_S = orig
+
+
 def test_event_buffer_replay_and_stream():
     buf = EventBuffer(ring_size=10)
     for i in range(3):
@@ -554,6 +583,45 @@ def test_reset_session(client, tmp_path):
     assert not session.turn.thread.is_alive()
 
 
+def test_check_folders(client, tmp_path):
+    _, sdir = _fake_session(client, tmp_path)
+    folder = tmp_path / "measurements"
+    folder.mkdir()
+    (folder / "run2.csv").write_text("x")
+    (folder / "run10.csv").write_text("x")
+    (folder / "conditions.json").write_text("{}")
+    (folder / "notes.md").write_text("x")  # not a data/json file
+    r = client.post(f"/api/v1/sessions/{sdir.name}/folders",
+                    json={"paths": [str(folder), str(tmp_path / "gone")]})
+    good, missing = r.json()["results"]
+    assert good["is_dir"] is True
+    # natural sort: run2 before run10
+    assert [Path(p).name for p in good["data_files"]] == ["run2.csv", "run10.csv"]
+    assert [Path(p).name for p in good["json_files"]] == ["conditions.json"]
+    assert missing["is_dir"] is False
+
+
+def test_set_plan_dirs(client, tmp_path):
+    session, sdir = _fake_session(client, tmp_path)
+    kdir = tmp_path / "papers"
+    kdir.mkdir()
+    session.agent = SimpleNamespace(knowledge_dir=None, code_dir=None,
+                                    data_dir=None)
+    r = client.post(f"/api/v1/sessions/{sdir.name}/plan_dirs",
+                    json={"knowledge": str(kdir)})
+    assert r.json()["applied"] == {"knowledge_dir": str(kdir)}
+    assert session.agent.knowledge_dir == kdir
+    # missing folder rejected
+    r = client.post(f"/api/v1/sessions/{sdir.name}/plan_dirs",
+                    json={"code": str(tmp_path / "gone")})
+    assert r.status_code == 400
+    # non-plan agent rejected
+    session.agent = SimpleNamespace()
+    r = client.post(f"/api/v1/sessions/{sdir.name}/plan_dirs",
+                    json={"knowledge": str(kdir)})
+    assert r.status_code == 400
+
+
 def test_analysis_image_events_during_turn(client, tmp_path):
     """A figure written mid-turn must reach the SSE buffer as an
     analysis_image event (with a session-relative path), plus a final sweep
@@ -595,6 +663,75 @@ def test_analysis_image_events_during_turn(client, tmp_path):
     assert "results/late_dashboard.png" in imgs  # final turn-end sweep
     # ...and the filmstrip rides the snapshot for mid-run reattach.
     assert [i["path"] for i in session.turn.live_images] == imgs
+
+
+def test_console_tags_only_with_multiple_sessions():
+    """Terminal lines carry a [tag] prefix only when several sessions are
+    live; partial-line writes prefix at line starts only, and the session's
+    own capture buffer stays untagged."""
+    import io as _io
+
+    from scilink.server import stdout_router as sr
+
+    console = _io.StringIO()
+    stream = sr._RoutingStream(console)
+    cap = sr.RoutedCapture(tag="111111")
+    try:
+        with cap:
+            stream.write("solo line\n")           # one route -> no prefix
+            # A second live session appears:
+            sr._ROUTES[-1] = sr._Route(_io.StringIO(), threading.Lock(),
+                                       threading.Event(), "222222")
+            stream.write("hello\nwor")            # prefix at line starts
+            stream.write("ld\n")                  # continuation: no prefix
+        out = console.getvalue()
+        assert out == "solo line\n[111111] hello\n[111111] world\n"
+        assert cap.getvalue() == "solo line\nhello\nworld\n"  # buffer untagged
+    finally:
+        sr._ROUTES.pop(-1, None)
+
+
+def test_concurrent_sessions_do_not_cross_bleed_prints(tmp_path):
+    """Two sessions running turns at once must each capture only their own
+    print() narration (live failure: a detached session's analysis narrated
+    into the active session's verbose panel)."""
+    from scilink.server import runner
+    from scilink.server.session_manager import WebSession
+
+    class ChattyAgent:
+        def __init__(self, marker):
+            self.marker = marker
+
+        def chat(self, text):
+            for _ in range(5):
+                print(f"narration-{self.marker}")
+                time.sleep(0.1)
+            return f"done-{self.marker}"
+
+    sessions = []
+    for name, marker in (("analysis_session_20260101_131313", "alpha"),
+                         ("analysis_session_20260101_141414", "beta")):
+        d = tmp_path / name
+        d.mkdir()
+        sessions.append(WebSession(
+            id=name, session_dir=str(d), mode="analyze", model="m",
+            autonomy="autonomous", agent=ChattyAgent(marker)))
+
+    t_a = runner.start_turn(sessions[0], "go")
+    t_b = runner.start_turn(sessions[1], "go")
+    assert t_a.done.wait(15) and t_b.done.wait(15)
+    # _complete_turn appends the assistant message just after done fires.
+    for _ in range(100):
+        if all(s.chat_messages[-1].get("role") == "assistant"
+               for s in sessions):
+            break
+        time.sleep(0.05)
+    log_a = sessions[0].chat_messages[-1]["verbose"]
+    log_b = sessions[1].chat_messages[-1]["verbose"]
+    assert "narration-alpha" in log_a
+    assert "narration-beta" in log_b
+    assert "narration-beta" not in log_a, "session A captured session B's prints"
+    assert "narration-alpha" not in log_b, "session B captured session A's prints"
 
 
 def test_stop_unblocks_pending_question(client, tmp_path):

@@ -87,7 +87,8 @@ def generate_session_title(model, first_user_msg: str,
         prompt = (
             "Name this scientific-assistant session in 3-6 plain words "
             "(no quotes, no trailing period). Base it on the topic, not "
-            "the phrasing.\n\n"
+            "the phrasing. Reply with the title only — do not answer the "
+            "request itself.\n\n"
             f"First request: {first_user_msg[:600]}\n"
             f"Start of reply: {first_reply[:300]}"
         )
@@ -112,6 +113,16 @@ def generate_session_title(model, first_user_msg: str,
             r"(?:session|conversation|chat)?\s*"
             r"(?:name|title)\s*[:\-]\s*",
             "", raw, flags=re.IGNORECASE)
+        # Structural gate: a topic title never speaks in the first person.
+        # A model that answers the request instead of naming it ("I'll
+        # start by inspecting both uploaded files" — live) produces exactly
+        # that shape; reject and let the caller retry on the next completed
+        # turn (titling runs until a name is saved). Checked before the
+        # quote-strip below so contractions are still intact; ``^i\s`` (not
+        # ``\b``) keeps legitimate titles like "I-V curve analysis".
+        if re.search(r"(?i)\bi['’](?:ll|m|ve|d)\b|\blet['’]s\b|\blet me\b"
+                     r"|\bwe['’](?:ll|re)\b|^i\s", raw.strip()):
+            return None
         title = re.sub(r'["\'\n\r.]+', " ", raw)
         title = " ".join(title.split()).strip()
         # Backstop the 3-6-word instruction against one-line rambles.

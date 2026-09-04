@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type {
-  ChatMessage as Msg,
-  PresentedQuestion,
-  SessionSnapshot,
+import {
+  api,
+  type ChatMessage as Msg,
+  type PresentedQuestion,
+  type SessionSnapshot,
 } from "../api";
 import { ChatMessage } from "./ChatMessage";
 import { FeedbackPanel } from "./FeedbackPanel";
@@ -39,8 +40,55 @@ export function ChatPanel({
 }) {
   const [draft, setDraft] = useState("");
   const [showVerbose, setShowVerbose] = useState(false);
+  const [uploadNote, setUploadNote] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  // Mid-chat uploads: route each file to the mode's save convention (the
+  // same categories the pre-chat heroes use), then drop the saved paths
+  // into the draft so the user can add context before sending.
+  const categoryFor = (name: string): string => {
+    const e = name.slice(name.lastIndexOf(".") + 1).toLowerCase();
+    if (mode === "meta") return "meta";
+    if (mode === "analyze") return e === "json" ? "metadata" : "data";
+    // plan mode
+    if (["py", "yaml", "yml"].includes(e)) return "code";
+    if (["csv", "xlsx", "tsv", "npy", "json", "txt"].includes(e))
+      return "planning_data";
+    return "knowledge";
+  };
+
+  const handleUploads = async (list: FileList | null) => {
+    if (!list || list.length === 0) return;
+    setUploadNote("Uploading…");
+    const groups = new Map<string, File[]>();
+    for (const f of Array.from(list)) {
+      const cat = categoryFor(f.name);
+      groups.set(cat, [...(groups.get(cat) ?? []), f]);
+    }
+    const paths: string[] = [];
+    try {
+      for (const [cat, files] of groups) {
+        const r = await api.upload(session.id, cat, files);
+        paths.push(...r.paths);
+      }
+    } catch (e) {
+      setUploadNote(e instanceof Error ? e.message : String(e));
+      return;
+    }
+    setUploadNote(null);
+    const quoted = paths.map((p) => `\`${p}\``).join(", ");
+    setDraft((d) => {
+      const mention =
+        paths.length === 1 && mode === "analyze" && !d
+          ? `I uploaded a data file at ${quoted}. Please examine it.`
+          : `I uploaded ${paths.length} file(s): ${quoted}.`;
+      return d ? `${d.trimEnd()}\n\n${mention} ` : `${mention} `;
+    });
+    inputRef.current?.focus();
+    setTimeout(autosize, 0);
+  };
 
   // Auto-grow the input with the draft (44px single-line up to max-height),
   // so the send button stays vertically centered beside it.
@@ -148,7 +196,34 @@ export function ChatPanel({
         )}
       </div>
 
+      {uploadNote && (
+        <p className="caption" style={{ padding: "0 8%" }}>
+          {uploadNote}
+        </p>
+      )}
       <div className="chat-input-row">
+        <input
+          ref={fileRef}
+          type="file"
+          multiple
+          hidden
+          onChange={(e) => {
+            void handleUploads(e.target.files);
+            e.target.value = "";
+          }}
+        />
+        <button
+          className="attach"
+          title="Upload files into this session"
+          disabled={running}
+          onClick={() => fileRef.current?.click()}
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" strokeWidth="2" strokeLinecap="round"
+            aria-hidden="true">
+            <path d="M21.4 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.2-9.19a4 4 0 015.65 5.66l-9.2 9.19a2 2 0 01-2.82-2.83l8.49-8.48" />
+          </svg>
+        </button>
         <textarea
           ref={inputRef}
           rows={1}

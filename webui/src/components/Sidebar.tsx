@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   api,
   type AppConfig,
+  type LiveSession,
   type ResumableSession,
   type SessionSnapshot,
 } from "../api";
@@ -34,6 +35,11 @@ export function Sidebar({
   onRename,
   onReset,
   onQuit,
+  liveSessions,
+  onAttachSession,
+  onCloseSession,
+  onDetach,
+  onCollapse,
   theme,
   onToggleTheme,
 }: {
@@ -48,6 +54,11 @@ export function Sidebar({
   onRename: (name: string) => Promise<void>;
   onReset: () => void;
   onQuit: () => void;
+  liveSessions: LiveSession[];
+  onAttachSession: (id: string) => void;
+  onCloseSession: (id: string) => void;
+  onDetach: () => void;
+  onCollapse: () => void;
   theme: "dark" | "light";
   onToggleTheme: () => void;
 }) {
@@ -135,13 +146,22 @@ export function Sidebar({
 
   return (
     <div className="sidebar">
-      <button
-        className="theme-toggle"
-        title="Toggle theme"
-        onClick={onToggleTheme}
-      >
-        {theme === "dark" ? "☀️" : "🌙"}
-      </button>
+      <div className="sidebar-top">
+        <button
+          className="icon-btn"
+          title="Hide sidebar"
+          onClick={onCollapse}
+        >
+          ⟨
+        </button>
+        <button
+          className="icon-btn"
+          title="Toggle theme"
+          onClick={onToggleTheme}
+        >
+          {theme === "dark" ? "☀️" : "🌙"}
+        </button>
+      </div>
       {session ? (
         <img
           className="logo"
@@ -365,14 +385,68 @@ export function Sidebar({
           <p className="caption" style={{ wordBreak: "break-all" }}>
             {session.id} · {session.model} · {session.autonomy}
           </p>
-          <button
-            className="danger-hover"
-            style={{ width: "100%", marginTop: 8 }}
-            title="Stop the run, close this session, and return to the start screen (the session stays resumable)"
-            onClick={onReset}
-          >
-            Reset Session
-          </button>
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <button
+              style={{ flex: 1 }}
+              title="Leave this session running and return to the start screen (reattach any time)"
+              onClick={onDetach}
+            >
+              Detach
+            </button>
+            <button
+              className="danger-hover"
+              style={{ flex: 1 }}
+              title="Stop the run, close this session, and return to the start screen (the session stays resumable)"
+              onClick={onReset}
+            >
+              Reset Session
+            </button>
+          </div>
+        </div>
+      )}
+
+      {session && liveSessions.some((s) => s.id !== session.id) && (
+        <div className="sidebar-section">
+          <h3>Other live sessions</h3>
+          <div className="session-list">
+            {liveSessions
+              .filter((s) => s.id !== session?.id)
+              .map((s) => (
+                <div
+                  className="session-row"
+                  key={s.id}
+                  role="button"
+                  tabIndex={0}
+                  title={`${s.id} — click to attach`}
+                  onClick={() => onAttachSession(s.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") onAttachSession(s.id);
+                  }}
+                >
+                  <div className="session-info">
+                    {s.name ?? s.id}
+                    <span className="caption">
+                      {s.status === "awaiting_input"
+                        ? "🟠 awaiting input"
+                        : s.status === "running"
+                          ? "🟢 running"
+                          : "⚪ idle"}{" "}
+                      · {s.mode} · {s.n_messages} messages
+                    </span>
+                  </div>
+                  <button
+                    className="session-close"
+                    title="Close this session (stops any run; stays resumable from disk)"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onCloseSession(s.id);
+                    }}
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+          </div>
         </div>
       )}
 

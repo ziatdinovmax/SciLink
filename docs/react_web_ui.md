@@ -52,7 +52,17 @@ authenticating reverse proxy.
   the fan-out launch confirmation panel.
 - **Uploads**: per-mode pre-chat heroes (analyze data+metadata, plan
   knowledge/code/data, meta combined dropzone) writing to the same session
-  subdirectories as Streamlit, composing the same dispatch prompts.
+  subdirectories as Streamlit, composing the same dispatch prompts; a
+  paperclip button on the chat input uploads mid-conversation (files are
+  routed to the mode's category by extension and the saved paths dropped
+  into the draft); pasted folder paths on the plan/meta heroes are
+  validated server-side and enumerated into the dispatch prompt, with the
+  plan agent's resource dirs repointed at the stable folders so KB indexes
+  are reused across sessions.
+- **Sessions**: the server holds many live sessions; the sidebar lists the
+  others with one-click switching, Detach leaves a session running while
+  you start or join another, and the welcome screen offers reattach when
+  several are live (exactly one live session reattaches automatically).
 - **Live analysis inset**: a draggable, dismissible picture-in-picture
   panel that shows result figures (fit overlays, dashboards, trend plots)
   as the agent writes them mid-turn, with a filmstrip to page back and a
@@ -77,8 +87,7 @@ authenticating reverse proxy.
   - deep links: the tab and selected file live in the URL hash, so a
     refresh (or shared link) lands on the same file.
 
-Not yet ported: simulate mode, the Tools / Skills / Telemetry tabs, vibes,
-pasted-folder-path inputs on the plan/meta heroes.
+Not yet ported: simulate mode, the Tools / Skills / Telemetry tabs, vibes.
 
 ## Architecture
 
@@ -119,6 +128,8 @@ webui/ (Vite + React + TS)  ──REST + SSE──►  scilink/server/ (FastAPI)
 | POST | `/sessions/{id}/feedback` | answer the parked HITL question |
 | POST | `/sessions/{id}/stop` | stop the running turn |
 | POST | `/sessions/{id}/uploads` | multipart, `category` = data/metadata/knowledge/code/planning_data/meta |
+| POST | `/sessions/{id}/folders` | validate pasted local folder paths + enumerate tabular contents |
+| POST | `/sessions/{id}/plan_dirs` | repoint the plan agent's knowledge/code/data dirs at stable folders |
 | GET | `/sessions/{id}/files?path=` | serve a session file (traversal-fenced) |
 | GET | `/sessions/{id}/tree` | recursive listing with sizes/mtimes and per-file "new" flags |
 | GET | `/sessions/{id}/thumb?path=&size=&cmap=` | PNG thumbnail; NPY/TIFF rendered as normalized heatmaps |
@@ -141,9 +152,6 @@ turn/feedback/stop plumbing with fake agents).
 
 ## Known limitations
 
-- Concurrent turns in *different* sessions can cross-bleed `print()`
-  narration in the live log (process-global stdout capture — inherited from
-  the Streamlit design; the logging-path narration is per-session clean).
 - No token streaming: the agents expose a blocking `chat()`, so the live
   stream is console narration, with the full answer at turn end.
 - Single-process, in-memory session registry: a server restart drops live

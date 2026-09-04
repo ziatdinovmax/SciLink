@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- SciLink favicon: the logo's three linked nodes, sized for 16-32px. -->
+  <defs>
+    <radialGradient id="b" cx="35%" cy="30%" r="65%">
+      <stop offset="0%" stop-color="#7BB8F9"/>
+      <stop offset="60%" stop-color="#4A90E2"/>
+      <stop offset="100%" stop-color="#2E6BC9"/>
+    </radialGradient>
+    <radialGradient id="o" cx="35%" cy="30%" r="65%">
+      <stop offset="0%" stop-color="#FF9A7A"/>
+      <stop offset="60%" stop-color="#F06A45"/>
+      <stop offset="100%" stop-color="#D94E2A"/>
+    </radialGradient>
+    <radialGradient id="g" cx="35%" cy="30%" r="65%">
+      <stop offset="0%" stop-color="#5EEAA0"/>
+      <stop offset="60%" stop-color="#34C77B"/>
+      <stop offset="100%" stop-color="#22A55E"/>
+    </radialGradient>
+  </defs>
+  <line x1="50" y1="28.3" x2="25" y2="71.6" stroke="#8A98AA" stroke-width="7" stroke-linecap="round"/>
+  <line x1="50" y1="28.3" x2="75" y2="71.6" stroke="#8A98AA" stroke-width="7" stroke-linecap="round"/>
+  <line x1="25" y1="71.6" x2="75" y2="71.6" stroke="#8A98AA" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="50" cy="28.3" r="22" fill="url(#b)"/>
+  <circle cx="25" cy="71.6" r="22" fill="url(#o)"/>
+  <circle cx="75" cy="71.6" r="22" fill="url(#g)"/>
+</svg>
