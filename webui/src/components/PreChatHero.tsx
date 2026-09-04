@@ -121,21 +121,63 @@ function PlanHero({
   const [knowledge, setKnowledge] = useState<string[]>([]);
   const [code, setCode] = useState<string[]>([]);
   const [data, setData] = useState<string[]>([]);
+  const [kFolder, setKFolder] = useState("");
+  const [cFolder, setCFolder] = useState("");
+  const [dFolder, setDFolder] = useState("");
+  const [warnings, setWarnings] = useState<string[]>([]);
 
   const canStart =
     objective.trim().length > 0 ||
     knowledge.length > 0 ||
     code.length > 0 ||
-    data.length > 0;
+    data.length > 0 ||
+    Boolean(kFolder.trim() || cFolder.trim() || dFolder.trim());
 
-  const start = () => {
-    // Port of the uploaded-files branches of chat_uploads.py:196-267
-    // (pasted-folder paths are a follow-up).
+  const start = async () => {
+    // Port of chat_uploads.py:196-282, folder branches included.
     const parts: string[] = [];
     const quote = (ps: string[]) => ps.map((p) => `\`${p}\``).join(", ");
     if (objective.trim()) parts.push(`Research objective: ${objective.trim()}`);
     if (knowledge.length) parts.push(`Knowledge files: ${quote(knowledge)}`);
     if (code.length) parts.push(`Code files: ${quote(code)}`);
+
+    // Validate pasted folders server-side; warn on the missing ones and
+    // proceed with the valid ones (Streamlit behavior).
+    const wanted = [
+      ["knowledge", kFolder.trim()],
+      ["code", cFolder.trim()],
+      ["data", dFolder.trim()],
+    ].filter(([, p]) => p) as [string, string][];
+    const valid: Record<string, string> = {};
+    let dataInfo: { data_files: string[]; json_files: string[] } | null = null;
+    if (wanted.length) {
+      try {
+        const res = await api.checkFolders(sessionId, wanted.map(([, p]) => p));
+        const warn: string[] = [];
+        for (let i = 0; i < wanted.length; i++) {
+          const [label, p] = wanted[i];
+          const r = res.results[i];
+          if (r?.is_dir) {
+            valid[label] = p;
+            if (label === "data") dataInfo = r;
+          } else warn.push(`Folder not found: ${p}`);
+        }
+        setWarnings(warn);
+      } catch (e) {
+        setWarnings([e instanceof Error ? e.message : String(e)]);
+      }
+      // Repoint the agent's resource dirs at the stable source folders so
+      // KB indexes are reused across sessions instead of rebuilt.
+      if (Object.keys(valid).length) {
+        try {
+          await api.setPlanDirs(sessionId, valid);
+        } catch {
+          /* prompt still carries the paths */
+        }
+      }
+    }
+    if (valid.knowledge) parts.push(`Knowledge folder: \`${valid.knowledge}\``);
+    if (valid.code) parts.push(`Code folder: \`${valid.code}\``);
     if (data.length) {
       const dataPaths = data.filter((p) => !p.endsWith(".json"));
       const jsonPaths = data.filter((p) => p.endsWith(".json"));
@@ -157,6 +199,32 @@ function PlanHero({
       }
       if (jsonPaths.length && !dataPaths.length)
         parts.push(`Data/metadata files: ${quote(jsonPaths)}`);
+    }
+    // Pasted data folder: enumerate its tabular files the way the Streamlit
+    // hero did (chat_uploads.py:236-266) so multi-file sets get the
+    // analyze_batch guidance.
+    if (valid.data && dataInfo) {
+      const { data_files, json_files } = dataInfo;
+      if (data_files.length > 1) {
+        parts.push(`Data files: ${quote(data_files)}`);
+        if (json_files.length) {
+          parts.push(`Conditions/metadata JSON: ${quote(json_files)}`);
+          parts.push(
+            "Use `analyze_batch` to process these files together, using the " +
+              "JSON as the conditions source.",
+          );
+        } else {
+          parts.push(
+            "Use `analyze_batch` to process these files together. If these " +
+              "are measurement-only files (e.g., spectra), you will need " +
+              "experimental conditions for each file.",
+          );
+        }
+      } else if (data_files.length === 1) {
+        parts.push(`Data file: \`${data_files[0]}\``);
+      } else {
+        parts.push(`Data folder: \`${valid.data}\``);
+      }
     }
     onStart(parts.length ? parts.join("\n\n") : "Please help me plan my experiment.");
   };
@@ -187,6 +255,13 @@ function PlanHero({
         <div className="card-body">
           <Dropzone label="Drop files here or click to browse" accept={KNOWLEDGE_ACCEPT}
             onFiles={uploader("knowledge", setKnowledge)} />
+          <input
+            type="text"
+            className="folder-input"
+            placeholder="or paste folder path — /path/to/papers/"
+            value={kFolder}
+            onChange={(e) => setKFolder(e.target.value)}
+          />
         </div>
       </details>
       <details className="card hero-accordion">
@@ -194,6 +269,13 @@ function PlanHero({
         <div className="card-body">
           <Dropzone label="Drop files here or click to browse" accept={CODE_ACCEPT}
             onFiles={uploader("code", setCode)} />
+          <input
+            type="text"
+            className="folder-input"
+            placeholder="or paste folder path — /path/to/code/"
+            value={cFolder}
+            onChange={(e) => setCFolder(e.target.value)}
+          />
         </div>
       </details>
       <details className="card hero-accordion">
@@ -201,13 +283,23 @@ function PlanHero({
         <div className="card-body">
           <Dropzone label="Drop files here or click to browse" accept={PLANNING_DATA_ACCEPT}
             onFiles={uploader("planning_data", setData)} />
+          <input
+            type="text"
+            className="folder-input"
+            placeholder="or paste folder path — /path/to/data/"
+            value={dFolder}
+            onChange={(e) => setDFolder(e.target.value)}
+          />
         </div>
       </details>
+      {warnings.map((w) => (
+        <p key={w} className="caption warn">{w}</p>
+      ))}
       <button
         className="primary"
         style={{ width: "100%", marginTop: 8 }}
         disabled={!canStart}
-        onClick={start}
+        onClick={() => void start()}
       >
         Start Planning
       </button>
@@ -229,10 +321,13 @@ function MetaHero({
 }) {
   const [goal, setGoal] = useState("");
   const [uploads, setUploads] = useState<string[]>([]);
-  const canStart = goal.trim().length > 0 || uploads.length > 0;
+  const [folders, setFolders] = useState("");
+  const [warnings, setWarnings] = useState<string[]>([]);
+  const canStart =
+    goal.trim().length > 0 || uploads.length > 0 || folders.trim().length > 0;
 
-  const start = () => {
-    // Port of chat_uploads.py:358-380 (folder paths are a follow-up).
+  const start = async () => {
+    // Port of chat_uploads.py:339-380 (comma-separated folder paths).
     const parts: string[] = [];
     if (goal.trim()) parts.push(goal.trim());
     if (uploads.length) {
@@ -242,6 +337,33 @@ function MetaHero({
           "Inspect them to determine what each file is, then route them to " +
           "the right specialist.",
       );
+    }
+    const candidates = folders
+      .split(",")
+      .map((p) => p.trim())
+      .filter(Boolean);
+    if (candidates.length) {
+      try {
+        const res = await api.checkFolders(sessionId, candidates);
+        const valid = res.results.filter((r) => r.is_dir).map((r) => r.path);
+        setWarnings(
+          res.results.filter((r) => !r.is_dir).map((r) => `Folder not found: ${r.path}`),
+        );
+        if (valid.length === 1) {
+          parts.push(
+            `Additional resources are in the folder \`${valid[0]}\` — ` +
+              "inspect it as well.",
+          );
+        } else if (valid.length > 1) {
+          const listed = valid.map((p) => `  - \`${p}\``).join("\n");
+          parts.push(
+            `Additional resources are in ${valid.length} folders — ` +
+              `inspect them as well:\n${listed}`,
+          );
+        }
+      } catch (e) {
+        setWarnings([e instanceof Error ? e.message : String(e)]);
+      }
     }
     onStart(parts.length ? parts.join("\n\n") : "Please help with my research.");
   };
@@ -273,13 +395,23 @@ function MetaHero({
               return files.map((f) => f.name);
             }}
           />
+          <input
+            type="text"
+            className="folder-input"
+            placeholder="or paste folder path(s) — separate multiple with ','"
+            value={folders}
+            onChange={(e) => setFolders(e.target.value)}
+          />
         </div>
       </details>
+      {warnings.map((w) => (
+        <p key={w} className="caption warn">{w}</p>
+      ))}
       <button
         className="primary"
         style={{ width: "100%", marginTop: 8 }}
         disabled={!canStart}
-        onClick={start}
+        onClick={() => void start()}
       >
         Start
       </button>

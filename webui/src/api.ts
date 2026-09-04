@@ -259,6 +259,21 @@ export const api = {
   zipUrl: (id: string, relPath = "") =>
     `${BASE}/sessions/${id}/zip?path=${encodeURIComponent(relPath)}`,
 
+  checkFolders: (id: string, paths: string[]) =>
+    req<{
+      results: {
+        path: string;
+        is_dir: boolean;
+        data_files: string[];
+        json_files: string[];
+      }[];
+    }>(`/sessions/${id}/folders`, json({ paths })),
+
+  setPlanDirs: (
+    id: string,
+    dirs: { knowledge?: string; code?: string; data?: string },
+  ) => req<{ applied: Record<string, string> }>(`/sessions/${id}/plan_dirs`, json(dirs)),
+
   fetchFileText: async (id: string, relPath: string) => {
     const r = await fetch(api.fileUrl(id, relPath));
     if (!r.ok) throw new Error(`Could not load ${relPath}`);

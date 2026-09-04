@@ -554,6 +554,45 @@ def test_reset_session(client, tmp_path):
     assert not session.turn.thread.is_alive()
 
 
+def test_check_folders(client, tmp_path):
+    _, sdir = _fake_session(client, tmp_path)
+    folder = tmp_path / "measurements"
+    folder.mkdir()
+    (folder / "run2.csv").write_text("x")
+    (folder / "run10.csv").write_text("x")
+    (folder / "conditions.json").write_text("{}")
+    (folder / "notes.md").write_text("x")  # not a data/json file
+    r = client.post(f"/api/v1/sessions/{sdir.name}/folders",
+                    json={"paths": [str(folder), str(tmp_path / "gone")]})
+    good, missing = r.json()["results"]
+    assert good["is_dir"] is True
+    # natural sort: run2 before run10
+    assert [Path(p).name for p in good["data_files"]] == ["run2.csv", "run10.csv"]
+    assert [Path(p).name for p in good["json_files"]] == ["conditions.json"]
+    assert missing["is_dir"] is False
+
+
+def test_set_plan_dirs(client, tmp_path):
+    session, sdir = _fake_session(client, tmp_path)
+    kdir = tmp_path / "papers"
+    kdir.mkdir()
+    session.agent = SimpleNamespace(knowledge_dir=None, code_dir=None,
+                                    data_dir=None)
+    r = client.post(f"/api/v1/sessions/{sdir.name}/plan_dirs",
+                    json={"knowledge": str(kdir)})
+    assert r.json()["applied"] == {"knowledge_dir": str(kdir)}
+    assert session.agent.knowledge_dir == kdir
+    # missing folder rejected
+    r = client.post(f"/api/v1/sessions/{sdir.name}/plan_dirs",
+                    json={"code": str(tmp_path / "gone")})
+    assert r.status_code == 400
+    # non-plan agent rejected
+    session.agent = SimpleNamespace()
+    r = client.post(f"/api/v1/sessions/{sdir.name}/plan_dirs",
+                    json={"knowledge": str(kdir)})
+    assert r.status_code == 400
+
+
 def test_analysis_image_events_during_turn(client, tmp_path):
     """A figure written mid-turn must reach the SSE buffer as an
     analysis_image event (with a session-relative path), plus a final sweep

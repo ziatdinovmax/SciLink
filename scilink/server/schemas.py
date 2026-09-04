@@ -35,3 +35,19 @@ class FeedbackResponseRequest(BaseModel):
 
 class RenameSessionRequest(BaseModel):
     name: str
+
+
+class FolderCheckRequest(BaseModel):
+    """Local folder paths the user pasted into a hero form."""
+
+    paths: list[str]
+
+
+class PlanDirsRequest(BaseModel):
+    """Point the planning agent's resource dirs at existing local folders
+    (KB indexes key on source paths, so stable folders are reused across
+    sessions instead of rebuilt)."""
+
+    knowledge: Optional[str] = None
+    code: Optional[str] = None
+    data: Optional[str] = None

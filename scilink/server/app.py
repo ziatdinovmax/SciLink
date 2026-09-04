@@ -31,6 +31,8 @@ from . import runner
 from .schemas import (
     CreateSessionRequest,
     FeedbackResponseRequest,
+    FolderCheckRequest,
+    PlanDirsRequest,
     RenameSessionRequest,
     SendMessageRequest,
 )
@@ -208,6 +210,67 @@ def create_app(session_root: Path, serve_frontend: bool = True) -> FastAPI:
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache",
                      "X-Accel-Buffering": "no"})
+
+    # ── pasted local folders (hero forms) ────────────────────────
+
+    @app.post("/api/v1/sessions/{session_id}/folders")
+    def check_folders(session_id: str, body: FolderCheckRequest):
+        """Validate pasted local folder paths and enumerate their tabular
+        contents — the web twin of the Streamlit hero folder inputs
+        (chat_uploads.py:176-266), which read the local filesystem directly.
+        Local-tool posture: these are arbitrary machine paths, exactly as in
+        Streamlit; multi-user deployments gate this at the auth layer."""
+        _session_or_404(session_id)
+        _DATA_EXTS = {".csv", ".xlsx", ".tsv", ".txt"}
+
+        def _nat(f: Path):
+            import re
+            return [int(c) if c.isdigit() else c.lower()
+                    for c in re.split(r"(\d+)", f.name)]
+
+        results = []
+        for raw in body.paths[:20]:
+            p = Path(raw.strip()).expanduser()
+            entry: dict = {"path": str(p), "is_dir": p.is_dir(),
+                           "data_files": [], "json_files": []}
+            if entry["is_dir"]:
+                try:
+                    files = [f for f in p.iterdir() if f.is_file()]
+                    entry["data_files"] = [
+                        str(f) for f in sorted(
+                            (f for f in files if f.suffix.lower() in _DATA_EXTS),
+                            key=_nat)][:200]
+                    entry["json_files"] = [
+                        str(f) for f in sorted(
+                            (f for f in files if f.suffix.lower() == ".json"),
+                            key=lambda f: f.name)][:200]
+                except OSError:
+                    pass
+            results.append(entry)
+        return {"results": results}
+
+    @app.post("/api/v1/sessions/{session_id}/plan_dirs")
+    def set_plan_dirs(session_id: str, body: PlanDirsRequest):
+        """Repoint the planning agent's resource dirs at pasted folders (port
+        of chat_uploads.py:269-279): stable source paths let the KB reuse its
+        FAISS indexes across sessions instead of rebuilding."""
+        session = _session_or_404(session_id)
+        agent = session.agent
+        applied = {}
+        for attr, raw in (("knowledge_dir", body.knowledge),
+                          ("code_dir", body.code), ("data_dir", body.data)):
+            if not raw:
+                continue
+            if not hasattr(agent, attr):
+                raise HTTPException(
+                    400, f"This session's agent has no {attr} — folder "
+                         "sources apply to plan mode.")
+            p = Path(raw.strip()).expanduser()
+            if not p.is_dir():
+                raise HTTPException(400, f"Not a folder: {raw}")
+            setattr(agent, attr, p)
+            applied[attr] = str(p)
+        return {"applied": applied}
 
     # ── files ────────────────────────────────────────────────────
 

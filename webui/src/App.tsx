@@ -3,6 +3,7 @@ import {
   api,
   type AppConfig,
   type ChatMessage,
+  type LiveSession,
   type PresentedQuestion,
   type SessionSnapshot,
 } from "./api";
@@ -161,7 +162,37 @@ export default function App() {
   const [tab, setTab] = useState<"chat" | "files">("chat");
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [attachRequest, setAttachRequest] = useState<string | null>(null);
+  const [liveSessions, setLiveSessions] = useState<LiveSession[]>([]);
   const [state, dispatch] = useReducer(reducer, emptyState);
+
+  const refreshLiveSessions = useCallback(() => {
+    api
+      .listSessions("meta")
+      .then((r) => setLiveSessions(r.live))
+      .catch(() => {});
+  }, []);
+
+  const attachSession = useCallback(async (id: string) => {
+    try {
+      const snapshot = await api.getSession(id);
+      setMode(snapshot.mode);
+      dispatch({ type: "session_loaded", snapshot });
+      setTab("chat");
+      setSelectedFile(null);
+    } catch (e) {
+      setStartError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  // Detach: leave the session running on the server, return to the start
+  // screen (attach again any time from the live-session list).
+  const detachSession = useCallback(() => {
+    dispatch({ type: "session_closed" });
+    setTab("chat");
+    setSelectedFile(null);
+    window.history.replaceState(null, "", "#");
+    refreshLiveSessions();
+  }, [refreshLiveSessions]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -169,14 +200,15 @@ export default function App() {
 
   useEffect(() => {
     api.config().then(setConfig).catch((e) => setStartError(String(e)));
-    // Reattach on page load: if the server holds a live session (browser
-    // refresh, second tab), rejoin it instead of showing the welcome screen.
+    // Reattach on page load: exactly ONE live session (browser refresh,
+    // second tab) rejoins it; several live sessions show a picker on the
+    // welcome screen instead of guessing.
     api
       .listSessions("meta")
       .then(async (r) => {
-        const live = r.live[0];
-        if (!live) return;
-        const snapshot = await api.getSession(live.id);
+        setLiveSessions(r.live);
+        if (r.live.length !== 1) return;
+        const snapshot = await api.getSession(r.live[0].id);
         setMode(snapshot.mode);
         dispatch({ type: "session_loaded", snapshot });
         // Deep link: restore #files[:path] from before the refresh.
@@ -188,6 +220,12 @@ export default function App() {
       })
       .catch(() => {});
   }, []);
+
+  // Keep the live-session list current while attached (a second tab or a
+  // fresh session started elsewhere shows up in the sidebar switcher).
+  useEffect(() => {
+    refreshLiveSessions();
+  }, [state.snapshot?.id, state.status, refreshLiveSessions]);
 
   // Keep the URL hash in sync so a refresh (or a shared link) lands on the
   // same tab and file.
@@ -316,6 +354,9 @@ export default function App() {
         }}
         onReset={resetSession}
         onQuit={quitApp}
+        liveSessions={liveSessions}
+        onAttachSession={(id) => void attachSession(id)}
+        onDetach={detachSession}
         theme={theme}
         onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
       />
@@ -328,6 +369,8 @@ export default function App() {
             busy={busy}
             error={startError}
             theme={theme}
+            liveSessions={liveSessions}
+            onAttachSession={(id) => void attachSession(id)}
           />
         ) : (
           <UIContext.Provider value={uiActions}>

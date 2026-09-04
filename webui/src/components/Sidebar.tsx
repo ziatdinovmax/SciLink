@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import {
   api,
   type AppConfig,
+  type LiveSession,
   type ResumableSession,
   type SessionSnapshot,
 } from "../api";
@@ -34,6 +35,9 @@ export function Sidebar({
   onRename,
   onReset,
   onQuit,
+  liveSessions,
+  onAttachSession,
+  onDetach,
   theme,
   onToggleTheme,
 }: {
@@ -48,6 +52,9 @@ export function Sidebar({
   onRename: (name: string) => Promise<void>;
   onReset: () => void;
   onQuit: () => void;
+  liveSessions: LiveSession[];
+  onAttachSession: (id: string) => void;
+  onDetach: () => void;
   theme: "dark" | "light";
   onToggleTheme: () => void;
 }) {
@@ -365,14 +372,49 @@ export function Sidebar({
           <p className="caption" style={{ wordBreak: "break-all" }}>
             {session.id} · {session.model} · {session.autonomy}
           </p>
-          <button
-            className="danger-hover"
-            style={{ width: "100%", marginTop: 8 }}
-            title="Stop the run, close this session, and return to the start screen (the session stays resumable)"
-            onClick={onReset}
-          >
-            Reset Session
-          </button>
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <button
+              style={{ flex: 1 }}
+              title="Leave this session running and return to the start screen (reattach any time)"
+              onClick={onDetach}
+            >
+              Detach
+            </button>
+            <button
+              className="danger-hover"
+              style={{ flex: 1 }}
+              title="Stop the run, close this session, and return to the start screen (the session stays resumable)"
+              onClick={onReset}
+            >
+              Reset Session
+            </button>
+          </div>
+        </div>
+      )}
+
+      {session && liveSessions.some((s) => s.id !== session.id) && (
+        <div className="sidebar-section">
+          <h3>Other live sessions</h3>
+          <div className="session-list">
+            {liveSessions
+              .filter((s) => s.id !== session.id)
+              .map((s) => (
+                <button
+                  key={s.id}
+                  className="session-item"
+                  title={s.id}
+                  onClick={() => onAttachSession(s.id)}
+                >
+                  {s.name ?? s.id}
+                  <span className="caption">
+                    {s.status === "awaiting_input"
+                      ? "awaiting input"
+                      : s.status}{" "}
+                    · {s.mode} · {s.n_messages} messages
+                  </span>
+                </button>
+              ))}
+          </div>
         </div>
       )}
 
