@@ -120,6 +120,27 @@ t = generate_session_title(ramble, "x")
 print(f"     {t!r}")
 check(len(t.split()) <= 8, "one-line ramble capped at 8 words")
 
+print("\n=== conversational output is rejected, not shipped as a name ===")
+check(generate_session_title(
+          FakeModel(text="I'll start by inspecting both uploaded files"), "x")
+      is None, "live: first-person continuation -> None (retries next turn)")
+check(generate_session_title(
+          FakeModel(text="I’ll examine the data now"), "x")
+      is None, "curly-apostrophe contraction rejected too")
+check(generate_session_title(
+          FakeModel(text="Sure, let me examine the data first"), "x")
+      is None, "'let me' continuation -> None")
+check(generate_session_title(
+          FakeModel(text="I will inspect the uploads"), "x")
+      is None, "leading 'I ...' -> None")
+check(generate_session_title(
+          FakeModel(text="We'll map the polarization domains"), "x")
+      is None, "'we'll' continuation -> None")
+check(generate_session_title(
+          FakeModel(text="I-V curve analysis of MoS2 devices"), "x")
+      == "I-V curve analysis of MoS2 devices",
+      "legit 'I-V' title passes the gate")
+
 print("\n=== sidebar name box uses a per-session widget key ===")
 check('key=f"session_name_input:{_sdir}"' in sb,
       "per-session key (fixed key hid the agent title behind stale "
