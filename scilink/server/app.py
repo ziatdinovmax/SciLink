@@ -310,8 +310,16 @@ def create_app(session_root: Path, serve_frontend: bool = True) -> FastAPI:
     # ── static frontend (production) ─────────────────────────────
 
     if serve_frontend:
-        dist = Path(__file__).resolve().parents[2] / "webui" / "dist"
-        if dist.is_dir():
+        # Repo checkout: webui/dist (freshest, from `npm run build`).
+        # Installed package: the bundle shipped inside the wheel — refreshed
+        # at release time via `npm run build:package` in webui/.
+        candidates = [
+            Path(__file__).resolve().parents[2] / "webui" / "dist",
+            Path(__file__).resolve().parent / "static",
+        ]
+        dist = next((d for d in candidates if (d / "index.html").is_file()),
+                    None)
+        if dist is not None:
             from fastapi.staticfiles import StaticFiles
 
             class _SPAStaticFiles(StaticFiles):

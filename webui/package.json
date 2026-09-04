@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:package": "npm run build && rsync -a --delete dist/ ../scilink/server/static/",
     "preview": "vite preview"
   },
   "dependencies": {

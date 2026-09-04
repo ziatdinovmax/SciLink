@@ -154,4 +154,4 @@ where = ["."]
 include = ["scilink*"]
 
 [tool.setuptools.package-data]
-"scilink" = ["agents/sim_agents/docs/*.txt", "agents/sim_agents/docs/*.md", "ui/.streamlit/*.toml", "ui/assets/*.svg"]
+"scilink" = ["agents/sim_agents/docs/*.txt", "agents/sim_agents/docs/*.md", "ui/.streamlit/*.toml", "ui/assets/*.svg", "server/static/*", "server/static/assets/*"]
