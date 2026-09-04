@@ -359,6 +359,12 @@ export default function App() {
         onQuit={quitApp}
         liveSessions={liveSessions}
         onAttachSession={(id) => void attachSession(id)}
+        onCloseSession={(id) => {
+          void api
+            .resetSession(id)
+            .catch(() => {})
+            .then(refreshLiveSessions);
+        }}
         onDetach={detachSession}
         theme={theme}
         onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}

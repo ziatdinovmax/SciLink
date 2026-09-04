@@ -37,6 +37,7 @@ export function Sidebar({
   onQuit,
   liveSessions,
   onAttachSession,
+  onCloseSession,
   onDetach,
   theme,
   onToggleTheme,
@@ -54,6 +55,7 @@ export function Sidebar({
   onQuit: () => void;
   liveSessions: LiveSession[];
   onAttachSession: (id: string) => void;
+  onCloseSession: (id: string) => void;
   onDetach: () => void;
   theme: "dark" | "light";
   onToggleTheme: () => void;
@@ -399,22 +401,30 @@ export function Sidebar({
             {liveSessions
               .filter((s) => s.id !== session?.id)
               .map((s) => (
-                <button
-                  key={s.id}
-                  className="session-item"
-                  title={`${s.id} — click to attach`}
-                  onClick={() => onAttachSession(s.id)}
-                >
-                  {s.name ?? s.id}
-                  <span className="caption">
-                    {s.status === "awaiting_input"
-                      ? "🟠 awaiting input"
-                      : s.status === "running"
-                        ? "🟢 running"
-                        : "⚪ idle"}{" "}
-                    · {s.mode} · {s.n_messages} messages
-                  </span>
-                </button>
+                <div className="session-row" key={s.id}>
+                  <button
+                    className="session-item"
+                    title={`${s.id} — click to attach`}
+                    onClick={() => onAttachSession(s.id)}
+                  >
+                    {s.name ?? s.id}
+                    <span className="caption">
+                      {s.status === "awaiting_input"
+                        ? "🟠 awaiting input"
+                        : s.status === "running"
+                          ? "🟢 running"
+                          : "⚪ idle"}{" "}
+                      · {s.mode} · {s.n_messages} messages
+                    </span>
+                  </button>
+                  <button
+                    className="session-close danger-hover"
+                    title="Close this session (stops any run; stays resumable from disk)"
+                    onClick={() => onCloseSession(s.id)}
+                  >
+                    ✕
+                  </button>
+                </div>
               ))}
           </div>
         </div>
