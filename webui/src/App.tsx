@@ -408,6 +408,12 @@ export default function App() {
             theme={theme}
             liveSessions={liveSessions}
             onAttachSession={(id) => void attachSession(id)}
+            onCloseSession={(id) => {
+              void api
+                .resetSession(id)
+                .catch(() => {})
+                .then(refreshLiveSessions);
+            }}
           />
         ) : (
           <UIContext.Provider value={uiActions}>

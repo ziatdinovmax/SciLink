@@ -557,7 +557,8 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
   gap: 12px; padding: 6px 0;
 }
 .reattach-info { min-width: 0; }
-.reattach-row button { flex: none; padding: 6px 16px; }
+.reattach-actions { display: flex; align-items: center; gap: 4px; flex: none; }
+.reattach-actions button.primary { padding: 6px 16px; }
 
 /* ── Live analysis inset (picture-in-picture figure viewer) ─────────── */
 .analysis-inset {

@@ -120,6 +120,7 @@ export function WelcomeScreen({
   theme,
   liveSessions,
   onAttachSession,
+  onCloseSession,
 }: {
   config: AppConfig | null;
   mode: string;
@@ -129,6 +130,7 @@ export function WelcomeScreen({
   theme: "dark" | "light";
   liveSessions: LiveSession[];
   onAttachSession: (id: string) => void;
+  onCloseSession: (id: string) => void;
 }) {
   const modes = config?.modes ?? [];
   const current = modes.find((m) => m.key === mode);
@@ -165,9 +167,18 @@ export function WelcomeScreen({
                       {s.n_messages} messages
                     </span>
                   </span>
-                  <button className="primary" onClick={() => onAttachSession(s.id)}>
-                    Reattach
-                  </button>
+                  <span className="reattach-actions">
+                    <button className="primary" onClick={() => onAttachSession(s.id)}>
+                      Reattach
+                    </button>
+                    <button
+                      className="session-close"
+                      title="Close this session (stops any run; stays resumable from disk)"
+                      onClick={() => onCloseSession(s.id)}
+                    >
+                      ✕
+                    </button>
+                  </span>
                 </div>
               ))}
             </div>
