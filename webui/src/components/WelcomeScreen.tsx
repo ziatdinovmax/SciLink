@@ -108,7 +108,7 @@ function ModeSelect({
 const STATUS_LABEL: Record<string, string> = {
   running: "🟢 running",
   awaiting_input: "🟠 awaiting your input",
-  idle: "⚪ idle (in memory)",
+  idle: "⚪ idle",
 };
 
 export function WelcomeScreen({
@@ -160,13 +160,13 @@ export function WelcomeScreen({
               </p>
               {liveSessions.map((s) => (
                 <div className="reattach-row" key={s.id}>
-                  <span className="reattach-info">
-                    <strong>{s.name ?? s.id}</strong>{" "}
+                  <div className="reattach-info">
+                    <div className="reattach-name">{s.name ?? s.id}</div>
                     <span className="caption">
                       {STATUS_LABEL[s.status] ?? s.status} · {s.mode} ·{" "}
                       {s.n_messages} messages
                     </span>
-                  </span>
+                  </div>
                   <span className="reattach-actions">
                     <button className="primary" onClick={() => onAttachSession(s.id)}>
                       Reattach
