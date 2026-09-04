@@ -555,9 +555,13 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
   max-height: 38vh; overflow-y: auto; flex: none;
 }
 .reattach-row {
-  display: flex; align-items: center; gap: 12px;
+  position: relative; display: flex; align-items: center; gap: 12px;
   background: var(--bg-card); border: 1px solid var(--border);
-  border-radius: 8px; padding: 10px 12px; margin-top: 8px;
+  border-radius: 8px; padding: 10px 26px 10px 12px; margin-top: 8px;
+}
+.reattach-close {
+  position: absolute; top: 3px; right: 3px;
+  padding: 0 6px; font-size: 12px; line-height: 1.6;
 }
 .reattach-info { flex: 1; min-width: 0; }
 .reattach-name {

@@ -171,14 +171,14 @@ export function WelcomeScreen({
                     <button className="primary" onClick={() => onAttachSession(s.id)}>
                       Reattach
                     </button>
-                    <button
-                      className="session-close"
-                      title="Close this session (stops any run; stays resumable from disk)"
-                      onClick={() => onCloseSession(s.id)}
-                    >
-                      ✕
-                    </button>
                   </span>
+                  <button
+                    className="session-close reattach-close"
+                    title="Close this session (stops any run; stays resumable from disk)"
+                    onClick={() => onCloseSession(s.id)}
+                  >
+                    ✕
+                  </button>
                 </div>
               ))}
             </div>
