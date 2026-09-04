@@ -221,10 +221,13 @@ export default function App() {
       .catch(() => {});
   }, []);
 
-  // Keep the live-session list current while attached (a second tab or a
-  // fresh session started elsewhere shows up in the sidebar switcher).
+  // Keep the live-session list current: refresh on session/status changes
+  // and on a slow poll, so the sidebar's detached-session statuses (running
+  // → awaiting input → idle) stay truthful without a reload.
   useEffect(() => {
     refreshLiveSessions();
+    const t = setInterval(refreshLiveSessions, 10_000);
+    return () => clearInterval(t);
   }, [state.snapshot?.id, state.status, refreshLiveSessions]);
 
   // Keep the URL hash in sync so a refresh (or a shared link) lands on the

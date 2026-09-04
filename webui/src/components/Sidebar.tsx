@@ -392,24 +392,26 @@ export function Sidebar({
         </div>
       )}
 
-      {session && liveSessions.some((s) => s.id !== session.id) && (
+      {liveSessions.some((s) => s.id !== session?.id) && (
         <div className="sidebar-section">
-          <h3>Other live sessions</h3>
+          <h3>{session ? "Other live sessions" : "Live sessions"}</h3>
           <div className="session-list">
             {liveSessions
-              .filter((s) => s.id !== session.id)
+              .filter((s) => s.id !== session?.id)
               .map((s) => (
                 <button
                   key={s.id}
                   className="session-item"
-                  title={s.id}
+                  title={`${s.id} — click to attach`}
                   onClick={() => onAttachSession(s.id)}
                 >
                   {s.name ?? s.id}
                   <span className="caption">
                     {s.status === "awaiting_input"
-                      ? "awaiting input"
-                      : s.status}{" "}
+                      ? "🟠 awaiting input"
+                      : s.status === "running"
+                        ? "🟢 running"
+                        : "⚪ idle"}{" "}
                     · {s.mode} · {s.n_messages} messages
                   </span>
                 </button>
