@@ -518,14 +518,22 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 }
 
 .session-list { display: flex; flex-direction: column; gap: 6px; }
-.session-row { display: flex; gap: 6px; align-items: stretch; }
-.session-row .session-item { flex: 1; min-width: 0; }
-.session-item {
-  text-align: left; font-size: 13px; padding: 8px 10px;
+.session-row {
+  display: flex; align-items: center; gap: 4px;
+  background: var(--bg-card); border: 1px solid var(--border-strong);
+  border-radius: 8px; padding: 8px 6px 8px 10px; cursor: pointer;
+  transition: border-color 0.15s;
 }
-.session-item .caption { display: block; }
+.session-row:hover { border-color: var(--focus); }
+.session-info { flex: 1; min-width: 0; font-size: 13px; text-align: left; }
+.session-info .caption { display: block; }
 .session-close {
-  flex: none; padding: 0 10px; font-size: 13px; color: var(--text-dim);
+  flex: none; border: none; background: none; padding: 2px 7px;
+  font-size: 13px; color: var(--text-dim); border-radius: 6px;
+  align-self: flex-start;
+}
+.session-close:hover:not(:disabled) {
+  color: #fff; background: var(--danger); border: none;
 }
 
 .sidebar-top { display: flex; justify-content: space-between; align-items: center; }

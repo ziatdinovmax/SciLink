@@ -412,12 +412,18 @@ export function Sidebar({
             {liveSessions
               .filter((s) => s.id !== session?.id)
               .map((s) => (
-                <div className="session-row" key={s.id}>
-                  <button
-                    className="session-item"
-                    title={`${s.id} — click to attach`}
-                    onClick={() => onAttachSession(s.id)}
-                  >
+                <div
+                  className="session-row"
+                  key={s.id}
+                  role="button"
+                  tabIndex={0}
+                  title={`${s.id} — click to attach`}
+                  onClick={() => onAttachSession(s.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") onAttachSession(s.id);
+                  }}
+                >
+                  <div className="session-info">
                     {s.name ?? s.id}
                     <span className="caption">
                       {s.status === "awaiting_input"
@@ -427,11 +433,14 @@ export function Sidebar({
                           : "⚪ idle"}{" "}
                       · {s.mode} · {s.n_messages} messages
                     </span>
-                  </button>
+                  </div>
                   <button
-                    className="session-close danger-hover"
+                    className="session-close"
                     title="Close this session (stops any run; stays resumable from disk)"
-                    onClick={() => onCloseSession(s.id)}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onCloseSession(s.id);
+                    }}
                   >
                     ✕
                   </button>
