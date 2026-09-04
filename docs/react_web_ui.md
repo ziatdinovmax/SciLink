@@ -152,9 +152,6 @@ turn/feedback/stop plumbing with fake agents).
 
 ## Known limitations
 
-- Concurrent turns in *different* sessions can cross-bleed `print()`
-  narration in the live log (process-global stdout capture — inherited from
-  the Streamlit design; the logging-path narration is per-session clean).
 - No token streaming: the agents expose a blocking `chat()`, so the live
   stream is console narration, with the full answer at turn end.
 - Single-process, in-memory session registry: a server restart drops live

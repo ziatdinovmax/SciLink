@@ -665,6 +665,49 @@ def test_analysis_image_events_during_turn(client, tmp_path):
     assert [i["path"] for i in session.turn.live_images] == imgs
 
 
+def test_concurrent_sessions_do_not_cross_bleed_prints(tmp_path):
+    """Two sessions running turns at once must each capture only their own
+    print() narration (live failure: a detached session's analysis narrated
+    into the active session's verbose panel)."""
+    from scilink.server import runner
+    from scilink.server.session_manager import WebSession
+
+    class ChattyAgent:
+        def __init__(self, marker):
+            self.marker = marker
+
+        def chat(self, text):
+            for _ in range(5):
+                print(f"narration-{self.marker}")
+                time.sleep(0.1)
+            return f"done-{self.marker}"
+
+    sessions = []
+    for name, marker in (("analysis_session_20260101_131313", "alpha"),
+                         ("analysis_session_20260101_141414", "beta")):
+        d = tmp_path / name
+        d.mkdir()
+        sessions.append(WebSession(
+            id=name, session_dir=str(d), mode="analyze", model="m",
+            autonomy="autonomous", agent=ChattyAgent(marker)))
+
+    t_a = runner.start_turn(sessions[0], "go")
+    t_b = runner.start_turn(sessions[1], "go")
+    assert t_a.done.wait(15) and t_b.done.wait(15)
+    # _complete_turn appends the assistant message just after done fires.
+    for _ in range(100):
+        if all(s.chat_messages[-1].get("role") == "assistant"
+               for s in sessions):
+            break
+        time.sleep(0.05)
+    log_a = sessions[0].chat_messages[-1]["verbose"]
+    log_b = sessions[1].chat_messages[-1]["verbose"]
+    assert "narration-alpha" in log_a
+    assert "narration-beta" in log_b
+    assert "narration-beta" not in log_a, "session A captured session B's prints"
+    assert "narration-alpha" not in log_b, "session B captured session A's prints"
+
+
 def test_stop_unblocks_pending_question(client, tmp_path):
     from scilink.server.session_manager import WebSession
 
