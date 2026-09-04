@@ -268,3 +268,6 @@ packmol_test_output/
 claude_resume
 lammps_make_notes
 tests/_critic_lenses_fixtures/
+webui/node_modules/
+webui/dist/
+webui/tsconfig.tsbuildinfo

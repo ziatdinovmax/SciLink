@@ -59,6 +59,7 @@ from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .instruct import VALIDATOR_PROMPT_TEMPLATE
 from .utils import generate_structure_views
 from ._deprecation import normalize_params
+from scilink.utils.announce import announce_litellm
 
 
 class StructureValidatorAgent:
@@ -97,7 +98,7 @@ class StructureValidatorAgent:
             # message naming the missing vendor env var if not).
             if api_key is None:
                 require_vendor_credentials(model_name)
-            self.logger.info(f"StructureValidatorAgent using LiteLLM: {model_name}")
+            announce_litellm("StructureValidatorAgent", model_name, logger=self.logger)
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
                 api_key=api_key

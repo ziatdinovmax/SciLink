@@ -17,6 +17,7 @@ from ..wrappers.litellm_wrapper import LiteLLMEmbeddingModel
 from ._deprecation import normalize_params
 
 from openai import RateLimitError
+from scilink.utils.announce import announce_litellm
 
 
 class KnowledgeBase:
@@ -64,7 +65,7 @@ class KnowledgeBase:
                 base_url=base_url
             )
         elif use_litellm:
-            logging.info(f"🌐 KnowledgeBase using LiteLLM for embeddings: {embedding_model}")
+            announce_litellm("KnowledgeBase", embedding_model, embeddings=True)
             self.embedding_client = LiteLLMEmbeddingModel(
                 model=embedding_model,
                 api_key=api_key
@@ -193,7 +194,8 @@ class KnowledgeBase:
         sources_file = Path(sources_path)
 
         if not chunks_file.exists() or not sources_file.exists():
-            print("  - ⚠️  Cannot load: chunks or sources file missing.")
+            # Nothing on disk = a fresh KB, not an error; callers narrate the
+            # overall outcome (see _load_knowledge_bases / kb_store).
             return False
 
         try:

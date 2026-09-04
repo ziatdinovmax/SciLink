@@ -29,6 +29,7 @@ from ...wrappers.openai_wrapper import OpenAIAsGenerativeModel
 from ...wrappers.litellm_wrapper import LiteLLMGenerativeModel
 from .analysis_orchestrator_tools import AnalysisOrchestratorTools
 from ._deprecation import normalize_params
+from scilink.utils.announce import announce_litellm
 
 
 # Built-in agent registry seed — classes are lazy-loaded on first use.
@@ -723,7 +724,7 @@ class AnalysisOrchestratorAgent:
             self.use_openai = True
             self.tools_for_model = self.tools.openai_schemas
         else:
-            logging.info(f"🌐 Orchestrator using LiteLLM: {model_name}")
+            announce_litellm("Orchestrator", model_name)
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
                 api_key=api_key,

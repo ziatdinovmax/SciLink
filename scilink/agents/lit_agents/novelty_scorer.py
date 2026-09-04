@@ -18,6 +18,7 @@ import warnings
 from typing import Tuple
 
 from ._deprecation import _normalize_params
+from scilink.utils.announce import announce_litellm
 
 
 class NoveltyScorer:
@@ -104,7 +105,7 @@ class NoveltyScorer:
                     "Install with: pip install litellm"
                 )
             
-            self.logger.info(f"🌐 NoveltyScorer using LiteLLM: {model_name}")
+            announce_litellm("NoveltyScorer", model_name, logger=self.logger)
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
                 api_key=api_key

@@ -24,6 +24,7 @@ from ...executors import ScriptExecutor, DEFAULT_TIMEOUT
 from ...utils.codegen_parse import parse_codegen_response
 
 from ._deprecation import normalize_params
+from scilink.utils.announce import announce_litellm
 
 
 MAX_INTERNAL_SCRIPT_EXEC_CORRECTION_ATTEMPTS = 5
@@ -87,7 +88,7 @@ class StructureGenerator:
             # message naming the missing vendor env var if not).
             if api_key is None:
                 require_vendor_credentials(model_name)
-            self.logger.info(f"StructureGenerator using LiteLLM: {model_name}")
+            announce_litellm("StructureGenerator", model_name, logger=self.logger)
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
                 api_key=api_key

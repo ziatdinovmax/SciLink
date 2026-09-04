@@ -23,6 +23,7 @@ from .scalarizer_agent import ScalarizerAgent
 from .bo_agent import BOAgent
 from .orchestrator_tools import OrchestratorTools
 from ._deprecation import normalize_params
+from scilink.utils.announce import announce_litellm
 
 
 class AutonomyLevel(Enum):
@@ -851,7 +852,7 @@ class PlanningOrchestratorAgent:
             self.use_openai = True
             self.tools_for_model = self.tools.openai_schemas
         else:
-            logging.info(f"🌐 Orchestrator using LiteLLM: {model_name}")
+            announce_litellm("Orchestrator", model_name)
             self.model = LiteLLMGenerativeModel(
                 model=model_name,
                 api_key=api_key,
