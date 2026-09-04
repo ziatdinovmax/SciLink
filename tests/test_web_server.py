@@ -232,6 +232,35 @@ def test_discover_resumable(tmp_path):
 
 # ── events ───────────────────────────────────────────────────────
 
+def test_sse_generator_never_suspends_holding_the_lock():
+    """A stream idling at the heartbeat yield must NOT hold the condition:
+    a suspended generator that keeps the lock freezes every emit() when an
+    abandoned stream is finalized from another thread (live failure:
+    'cannot release un-acquired lock' + wedged session events)."""
+    from scilink.server import events as events_mod
+
+    buf = EventBuffer(ring_size=10)
+    orig = events_mod._HEARTBEAT_S
+    events_mod._HEARTBEAT_S = 0.05  # fast heartbeat for the test
+    try:
+        gen = buf.sse_stream()
+        frame = next(gen)  # suspends at the heartbeat yield
+        assert frame.startswith(":")
+        # The lock must be acquirable from this (different) context while
+        # the generator is suspended.
+        acquired = buf._cond.acquire(timeout=0.5)
+        assert acquired, "suspended SSE generator is holding the event lock"
+        buf._cond.release()
+        # ...and emit() from another thread must not block.
+        done = threading.Event()
+        threading.Thread(target=lambda: (buf.emit("log", {}), done.set()),
+                         daemon=True).start()
+        assert done.wait(1), "emit() blocked while a stream was suspended"
+        gen.close()  # finalization must not raise
+    finally:
+        events_mod._HEARTBEAT_S = orig
+
+
 def test_event_buffer_replay_and_stream():
     buf = EventBuffer(ring_size=10)
     for i in range(3):

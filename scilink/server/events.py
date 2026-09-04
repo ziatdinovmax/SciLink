@@ -72,18 +72,23 @@ class EventBuffer:
         """
         cursor = last_event_id or 0
         while True:
+            # NEVER yield while holding the condition: a generator suspended
+            # at a yield inside `with self._cond:` keeps the lock, and when an
+            # abandoned stream (client disconnect) is finalized from another
+            # thread, the release fails ("cannot release un-acquired lock")
+            # and the RLock stays owned by a dead context — freezing every
+            # emit() for the session.
             with self._cond:
                 pending = self._events_after(cursor)
-                if not pending:
-                    if self._closed:
-                        return
+                if not pending and not self._closed:
                     self._cond.wait(timeout=_HEARTBEAT_S)
                     pending = self._events_after(cursor)
-                    if not pending:
-                        if self._closed:
-                            return
-                        yield ": heartbeat\n\n"
-                        continue
+                closed = self._closed
+            if not pending:
+                if closed:
+                    return
+                yield ": heartbeat\n\n"
+                continue
             for ev in pending:
                 cursor = ev.id
                 payload = json.dumps(ev.data, ensure_ascii=False, default=str)
