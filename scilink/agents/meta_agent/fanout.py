@@ -1067,9 +1067,135 @@ _RESUME_NOTE = (
     "progress. Continue from the recorded results — do not redo completed "
     "steps.")
 
+_RETRY_NOTE = (
+    "\n\nRETRY NOTE: a previous attempt of this branch failed ({error}). "
+    "This is a fresh retry of the SAME task; if the failure came from the "
+    "approach, take a different one.")
 
-def resume_fanout(orch) -> str:
+
+def _branch_productive(e: dict) -> bool:
+    """A branch that reports success but yields neither findings nor files
+    did no usable work (e.g. codegen aborted with no sandbox). Mirrors the
+    'empty_but_successful' guard in _summarize_delegation_result."""
+    return (e.get("status") == "success"
+            and (bool(e.get("key_findings")) or bool(e.get("files_produced"))))
+
+
+def _branch_set_key(items) -> frozenset:
+    """Identity of a branch set for the 'already ran' / 'already declined'
+    checks: (data_path, pattern) pairs — the same datasets, however the
+    caller re-labels or re-words the tasks."""
+    return frozenset((str(b.get("data_path")), str(b.get("pattern") or ""))
+                     for b in items if b.get("data_path"))
+
+
+def _prior_group_for_set(orch, branches: List[dict]) -> Optional[dict]:
+    """The most recent COMPLETED fan-out group over exactly this dataset set
+    (issue #557 part 2), summarized as productive / failed branches — or
+    None when no such group exists or none of its branches produced output
+    (a full re-run is then legitimate)."""
+    want = _branch_set_key(branches)
+    groups: Dict[str, List[dict]] = {}
+    for e in orch._delegation_ledger:
+        if e.get("fanout") and e.get("parallel_group"):
+            groups.setdefault(e["parallel_group"], []).append(e)
+    for gid in sorted(groups, key=lambda g: max(x["index"] for x in groups[g]),
+                      reverse=True):
+        ents = groups[gid]
+        if _branch_set_key(ents) != want:
+            continue
+        if any(e.get("status") in ("running", "interrupted") for e in ents):
+            return None   # unfinished: resume_fanout's job, not a re-run
+        productive = [e for e in ents if _branch_productive(e)]
+        if not productive:
+            return None
+        failed = [e for e in ents if not _branch_productive(e)]
+        return {"parallel_group": gid,
+                "productive": [{"delegation_index": e["index"],
+                                "label": e.get("label")} for e in productive],
+                "failed": [{"delegation_index": e["index"],
+                            "label": e.get("label"),
+                            "status": e.get("status"),
+                            "timed_out": bool(e.get("timed_out")),
+                            "error": (str(e.get("error") or "")[:200] or None)}
+                           for e in failed]}
+    return None
+
+
+def _already_ran_decline(orch, items: List[dict]) -> Optional[str]:
+    """JSON refusal when ``items`` (a branch set) already ran as a fan-out
+    with productive branches (issue #557 part 2), else None."""
+    prior = _prior_group_for_set(orch, items)
+    if not prior:
+        return None
+    p_idx = [p["delegation_index"] for p in prior["productive"]]
+    f_lab = [f["label"] for f in prior["failed"]]
+    retryable = [f["label"] for f in prior["failed"] if not f["timed_out"]]
+    msg = (f"This dataset set already ran as {prior['parallel_group']}: "
+           f"{len(p_idx)} branch(es) produced output (delegation_index {p_idx})"
+           + (f" and {len(f_lab)} failed ({f_lab})" if f_lab else "")
+           + ". Do NOT re-run the whole fan-out. "
+           + (f"Fuse the productive branches with fuse_delegations("
+              f"delegation_indices={p_idx}) " if len(p_idx) >= 2 else
+              "Report the productive branch's findings ")
+           + ("and retry ONLY the failed branch(es) with "
+              "resume_fanout(retry_failed=true), then fuse. " if retryable else "")
+           + ("A branch abandoned on the wall-clock budget is not retried that "
+              "way; give it its own delegate_to_analysis with a larger budget. "
+              if len(retryable) < len(f_lab) else "")
+           + "To deliberately re-run everything (e.g. the data or the task "
+             "changed), pass force_rerun=true.")
+    print("  ⛔ " + msg)
+    return json.dumps({"status": "declined", "reason": "already_ran",
+                       **prior, "message": msg}, indent=2, default=str)
+
+
+def _declined_by_user_payload(fanout_set: List[str], reason: str,
+                              repeated: bool = False) -> str:
+    """The decline the LLM sees when the USER refused the launch gate (issue
+    #557 part 1). Deliberately carries NO complementarity verdict — the
+    positive verdict is what kept re-motivating the same proposal — and a
+    directive that ends the proposal for this turn."""
+    return json.dumps({
+        "status": "declined_by_user",
+        "reason": reason,
+        "fanout_set": fanout_set,
+        "message": (
+            ("The user already declined this parallel analysis in this turn; "
+             "the launch was refused without asking again. " if repeated else
+             "The user declined launching this parallel analysis. ")
+            + "Do NOT call delegate_to_analyses again for these datasets in "
+              "this turn. Either analyze them independently with "
+              "delegate_to_analysis, or end the turn and ask the user how to "
+              "proceed."),
+    }, indent=2, default=str)
+
+
+def _note_user_decline(orch, *sets) -> None:
+    declined = getattr(orch, "_fanout_declined_sets", None)
+    if declined is None:
+        declined = orch._fanout_declined_sets = []
+    for s in sets:
+        k = frozenset(s)
+        if k and k not in declined:
+            declined.append(k)
+
+
+def _user_already_declined(orch, ids) -> bool:
+    return frozenset(ids) in (getattr(orch, "_fanout_declined_sets", None) or [])
+
+
+
+def resume_fanout(orch, retry_failed: bool = False) -> str:
     """Re-run fan-out branches left unfinished by a dead or stopped session.
+
+    ``retry_failed=True`` (issue #557 part 2) additionally re-runs the
+    ERRORED / empty branches of the most recent fan-out group — the
+    targeted recovery after a mixed-outcome run, instead of re-issuing the
+    whole fan-out and discarding the branches that already produced output.
+    A retried branch runs in its original session dir (restored when it
+    left a checkpoint, fresh otherwise) with a retry note on its recorded
+    task; budget-degraded (timed_out) branches are still left alone.
 
     A coordinator death (or user stop) leaves a fan-out's provisional ledger
     entries 'running' — swept to 'interrupted' at the next turn start. Each
@@ -1090,32 +1216,68 @@ def resume_fanout(orch) -> str:
             e["resumed_from_interruption"] = True
             e["status"] = "running"
             e.pop("completed_at", None)
+        retried: List[dict] = []
+        if retry_failed:
+            fan = [e for e in orch._delegation_ledger
+                   if e.get("fanout") and e.get("parallel_group")]
+            if fan:
+                latest = max(fan, key=lambda e: e["index"])["parallel_group"]
+                retried = [e for e in fan
+                           if e.get("parallel_group") == latest
+                           and e not in stale
+                           and not e.get("timed_out")
+                           and not _branch_productive(e)
+                           and e.get("status") != "running"]
+            for e in retried:
+                e["retry_of_error"] = str(e.get("error") or "")[:300] or (
+                    "succeeded without findings or files")
+                e["retries"] = int(e.get("retries") or 0) + 1
+                e["status"] = "running"
+                e.pop("completed_at", None)
+                e.pop("error", None)
+        stale = stale + retried
     if not stale:
         return json.dumps({
             "status": "no_op",
-            "message": "No interrupted fan-out branches to resume."})
+            "message": ("No interrupted fan-out branches to resume"
+                        + (" and no failed branches to retry in the latest "
+                           "fan-out." if retry_failed else
+                           " (pass retry_failed=true to re-run the FAILED "
+                           "branches of the latest fan-out)."))})
 
     # Persist the reopened entries (and their audit stamps) NOW, so a crash
     # DURING the resume leaves them recoverable again — resume must converge
     # under repeated interruption, mirroring the launch-time persistence.
     orch._auto_checkpoint(verbose=False)
 
-    print(f"  🔁 Resuming {len(stale)} interrupted fan-out branch(es) in "
-          "their original sessions...")
+    print(f"  🔁 Resuming {len(stale)} fan-out branch(es) in their original "
+          "sessions"
+          + (f" ({len(retried)} failed branch(es) retried)" if retried else "")
+          + "...")
     _ensure_stop_guard_installed()
     budget = FANOUT_BRANCH_TIME_BUDGET_S
     pool = ThreadPoolExecutor(max_workers=min(len(stale), FANOUT_MAX_WORKERS))
     try:
         fut_entry, fut_stop, fut_label = {}, {}, {}
         for e in stale:
+            is_retry = e in retried
+            if is_retry:
+                note = _RETRY_NOTE.format(error=e.get("retry_of_error"))
+                # Restore only where the failed attempt left a checkpoint;
+                # a branch that died before its first tool call has none.
+                slug = _slug(e.get("label") or "branch")
+                has_ckpt = (orch.fanout_dir / f"{e['index']:02d}_{slug}"
+                            / "checkpoint.json").exists()
+            else:
+                note, has_ckpt = _RESUME_NOTE, True
             branch = {
-                "task": (e.get("task") or "") + _RESUME_NOTE,
+                "task": (e.get("task") or "") + note,
                 "label": e.get("label"),
                 "data_path": e.get("data_path"),
                 "pattern": e.get("pattern"),
                 "metadata": e.get("metadata"),
                 "_premeshed": True,
-                "_resume": True,
+                "_resume": has_ckpt,
             }
             stop_ev = _threading.Event()
             fut = pool.submit(_run_one_branch, orch, branch, [], e,
@@ -1152,7 +1314,8 @@ def resume_fanout(orch) -> str:
     ok = [r["delegation_index"] for r in results if r["status"] == "success"]
     return json.dumps({
         "status": "success" if ok else "error",
-        "branches_resumed": len(stale),
+        "branches_resumed": len(stale) - len(retried),
+        "branches_retried": len(retried),
         "results": results,
         "message": ("Resumed branches finished. Combine them with the "
                     "fan-out's already-completed branches and pass the "
@@ -1223,8 +1386,15 @@ def run_fanout(orch, branches: List[dict],
                branch_time_budget_s: Optional[float] = None,
                figure_style: Optional[str] = None,
                harmonize: bool = False,
-               allow_raw_branches: bool = False) -> str:
+               allow_raw_branches: bool = False,
+               force_rerun: bool = False) -> str:
     """Gate → confirm → run branches concurrently. Returns JSON.
+
+    Two refusals precede the gate (issue #557): a dataset set the user
+    already declined at the launch gate THIS TURN is refused without asking
+    again, and a set that already ran as a fan-out whose branches (some or
+    all) produced output is refused with the fuse-and-retry-the-failed
+    directive — ``force_rerun=True`` overrides the latter.
 
     `branches` is a list of ``{"data_path", "task", "label", "metadata"?,
     "context"?, "pattern"?, "steer"?}``. ``pattern`` is a filename glob
@@ -1325,6 +1495,22 @@ def run_fanout(orch, branches: List[dict],
             b["branch_id"] = f"{dp}#{nth[dp]}"
     by_id = {b["branch_id"]: b for b in norm}
 
+    # --- sticky user decline (issue #557 part 1) ---
+    if _user_already_declined(orch, by_id):
+        print("  ⛔ Fan-out over this dataset set was already declined by the "
+              "user this turn; not asking again.")
+        return _declined_by_user_payload(list(by_id), "user declined earlier "
+                                         "this turn", repeated=True)
+
+    # --- already ran (issue #557 part 2) ---
+    # A completed fan-out over exactly this set with at least one productive
+    # branch is not re-run: that discards finished work and re-pays the
+    # whole parallel cost for the branch(es) that failed.
+    if not force_rerun:
+        _ran = _already_ran_decline(orch, norm)
+        if _ran:
+            return _ran
+
     # --- entry gate (reuses cached verdict if assess_complementarity ran) ---
     datasets = [{"path": b["data_path"], "metadata": b.get("metadata"),
                  "id": b["branch_id"], "task": b["task"], "label": b["label"],
@@ -1362,10 +1548,26 @@ def run_fanout(orch, branches: List[dict],
             ),
         }, indent=2, default=str)
 
+    # The gate may have PRUNED the request down to a set that already ran.
+    if not force_rerun:
+        _ran = _already_ran_decline(orch, [by_id[i] for i in fanout_set])
+        if _ran:
+            return _ran
+
     # --- confirmation ---
+    if _user_already_declined(orch, fanout_set):
+        print("  ⛔ The pruned fan-out set was already declined by the user "
+              "this turn; not asking again.")
+        return _declined_by_user_payload(fanout_set, "user declined earlier "
+                                         "this turn", repeated=True)
     proceed, reason = _confirm_fanout(orch, verdict, fanout_set, by_id,
                                       harmonize=harmonize)
     if not proceed:
+        if reason.startswith(("user declined", "no confirmation received")):
+            # The refusal is the user's: make it stick for the turn and
+            # hand back a directive, not the verdict that motivated it.
+            _note_user_decline(orch, fanout_set, by_id)
+            return _declined_by_user_payload(fanout_set, reason)
         return json.dumps({"status": "declined", "reason": reason,
                            "verdict": verdict,
                            "fanout_set": fanout_set}, indent=2, default=str)
@@ -1639,12 +1841,7 @@ def run_fanout(orch, branches: List[dict],
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
 
-    def _productive(e):
-        # A branch that reports success but yields neither findings nor files
-        # did no usable work (e.g. codegen aborted with no sandbox). Mirrors the
-        # 'empty_but_successful' guard in _summarize_delegation_result.
-        return (e.get("status") == "success"
-                and (bool(e.get("key_findings")) or bool(e.get("files_produced"))))
+    _productive = _branch_productive
 
     results = [{
         "delegation_index": e["index"],
@@ -1675,9 +1872,15 @@ def run_fanout(orch, branches: List[dict],
             "Call fuse_delegations with delegation_indices="
             f"{[r['delegation_index'] for r in productive]} to reconcile these "
             "complementary findings into one cross-dataset interpretation."
+            + (" Then retry ONLY the failed branch(es) with "
+               "resume_fanout(retry_failed=true) — do NOT re-run the whole "
+               "fan-out." if degraded else "")
             if len(productive) >= 2 else
             "Fewer than two branches produced usable output — report what ran "
             "to the user; do NOT fuse empty branches into a synthesis."
+            + (" Retry ONLY the failed branch(es) with "
+               "resume_fanout(retry_failed=true) rather than re-running the "
+               "whole fan-out." if degraded and productive else "")
         ),
     }
     if degraded:
@@ -1691,7 +1894,19 @@ def run_fanout(orch, branches: List[dict],
             + f", {len(degraded) - n_err} succeeded-but-empty, "
             "e.g. analysis code could not execute). Do not treat these as "
             "completed analyses or fuse them; report the gap to the user."
+            + (" The productive branches' results are on disk and stay "
+               "valid: retry only the failed branch(es) "
+               "(resume_fanout(retry_failed=true)), never the whole fan-out."
+               if productive else "")
         )
+        # The targeted retry spec (issue #557 part 2): what failed and why,
+        # so the recovery is one resume_fanout(retry_failed=true) call.
+        out["failed_branches"] = [{
+            "delegation_index": e["index"], "label": e["label"],
+            "data_path": e.get("data_path"), "status": e.get("status"),
+            "timed_out": bool(e.get("timed_out")),
+            "error": (str(e.get("error") or "")[:300] or None),
+        } for e in entries if not _productive(e)]
         if n_timeout:
             out["branches_timed_out"] = n_timeout
     return json.dumps(out, indent=2, default=str)

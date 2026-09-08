@@ -725,14 +725,16 @@ class MetaOrchestratorTools:
                                  figure_style: str = None,
                                  harmonize: bool = False,
                                  branch_time_budget_s: float = None,
-                                 allow_raw_branches: bool = False) -> str:
+                                 allow_raw_branches: bool = False,
+                                 force_rerun: bool = False) -> str:
             print(f"  🔀 Parallel analysis over {len(branches or [])} dataset(s)"
                   + (" (harmonized pipeline replay)" if harmonize else "")
                   + "...")
             return self.orch._run_fanout(branches, figure_style=figure_style,
                                          harmonize=harmonize,
                                          branch_time_budget_s=branch_time_budget_s,
-                                         allow_raw_branches=allow_raw_branches)
+                                         allow_raw_branches=allow_raw_branches,
+                                         force_rerun=force_rerun)
 
         self._register_tool(
             func=delegate_to_analyses,
@@ -764,7 +766,12 @@ class MetaOrchestratorTools:
                 "self-contained instruction with the absolute data path; the "
                 "companions are wired in automatically. Returns the per-branch "
                 "delegation_index list and the indices to pass to "
-                "`fuse_delegations`."
+                "`fuse_delegations`. A set the user DECLINED at the gate this "
+                "turn is refused without asking again; a set that ALREADY RAN "
+                "is refused with a fuse-and-retry-the-failed directive "
+                "(recover a mixed-outcome fan-out with "
+                "`resume_fanout(retry_failed=true)`, not a re-run; "
+                "force_rerun=true overrides when the data or task changed)."
             ),
             parameters={
                 "branches": {
@@ -873,14 +880,25 @@ class MetaOrchestratorTools:
                         "approved script."
                     ),
                 },
+                "force_rerun": {
+                    "type": "boolean",
+                    "description": (
+                        "Default false: a dataset set that already ran as a "
+                        "fan-out with productive branches is refused (fuse "
+                        "those, retry the failed ones via resume_fanout). Set "
+                        "true only to deliberately re-run everything because "
+                        "the data or the task changed."
+                    ),
+                },
             },
             required=["branches"],
         )
 
         # -- resume_fanout (finish an interrupted parallel run) --------------
-        def resume_fanout() -> str:
-            print("  🔁 Resuming interrupted fan-out branches...")
-            return self.orch._resume_fanout()
+        def resume_fanout(retry_failed: bool = False) -> str:
+            print("  🔁 Resuming fan-out branches"
+                  + (" (retrying failed ones)" if retry_failed else "") + "...")
+            return self.orch._resume_fanout(retry_failed=retry_failed)
 
         self._register_tool(
             func=resume_fanout,
@@ -897,9 +915,22 @@ class MetaOrchestratorTools:
                 "interrupted fan-out branches or the user asks to resume/"
                 "finish an interrupted parallel analysis; afterwards fuse "
                 "the successful branches with `fuse_delegations` as usual. "
-                "No-op (with a message) when nothing is interrupted."
+                "No-op (with a message) when nothing is interrupted. With "
+                "retry_failed=true it ALSO re-runs the ERRORED / empty branches "
+                "of the latest fan-out — the way to recover a mixed-outcome "
+                "fan-out: keep the productive branches, redo only the failed "
+                "ones, then fuse. Never re-issue `delegate_to_analyses` for that."
             ),
-            parameters={},
+            parameters={
+                "retry_failed": {
+                    "type": "boolean",
+                    "description": (
+                        "Default false. True: also retry the failed (errored "
+                        "or no-output) branches of the most recent fan-out in "
+                        "their original sessions."
+                    ),
+                },
+            },
             required=[],
         )
 
