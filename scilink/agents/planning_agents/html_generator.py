@@ -458,7 +458,7 @@ class HTMLReportGenerator:
                     raw_input = matching_result.get('raw_input', '')
                     html_content += f"""
                     <div class="result-box">
-                        <div>📊 <strong>Results received:</strong> <code>{html.escape(str(raw_input))}</code></div>
+                        <div>📊 <strong>Results / feedback received:</strong> <code>{html.escape(str(raw_input))}</code></div>
                     </div>
                     """
 
