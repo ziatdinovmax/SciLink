@@ -168,18 +168,15 @@ def convert_chat_history_for_display(history: list) -> list:
 
 
 def collect_restored_deliverables(session_path: Path) -> tuple:
-    """(md_paths, html_paths) — only the most recent marked deliverable."""
-    from scilink.agents.planning_agents.user_interface import load_deliverables
-    candidates = []
-    for entry in load_deliverables(session_path):
-        if not entry.get("deliverable"):
-            continue
-        p = Path(entry.get("path", ""))
-        if p.exists() and p.suffix.lower() in (".md", ".html", ".htm"):
-            candidates.append(p)
-    if not candidates:
+    """(md_paths, html_paths) — the session's headline marked deliverable:
+    ranked by kind (white paper > other documents > ideation report /
+    portfolio), newest by mtime within a rank. Shared with the Streamlit
+    sidebar through ``select_headline_deliverable``."""
+    from scilink.agents.planning_agents.user_interface import (
+        load_deliverables, select_headline_deliverable)
+    latest = select_headline_deliverable(load_deliverables(session_path))
+    if latest is None:
         return [], []
-    latest = max(candidates, key=lambda p: p.stat().st_mtime)
     if latest.suffix.lower() == ".md":
         return [str(latest)], []
     return [], [str(latest)]

@@ -62,6 +62,54 @@ def load_deliverables(base_dir: Any) -> List[Dict[str, Any]]:
     return out
 
 
+# Resume-card ranking of marked deliverables. "Most recently modified" is
+# not "the deliverable": a late delegation that refines the ideation report
+# bumps its mtime above the white paper the session actually exists to
+# produce (issue #533). Rank by kind first, mtime only as the tiebreak.
+_HEADLINE_STEMS = ("white_paper",)
+_HEADLINE_TITLES = ("white paper",)
+_SECONDARY_STEMS = ("ideation_report", "portfolio")
+_SECONDARY_TITLES = ("ideation report", "portfolio", "candidate directions")
+_EMBEDDABLE_SUFFIXES = (".md", ".html", ".htm")
+
+
+def deliverable_rank(entry: Dict[str, Any]) -> int:
+    """0 = headline document (white paper), 1 = any other document (technical
+    document, memo, roadmap, plan report, user-named files), 2 = secondary /
+    working artifacts that get refined late (ideation report, portfolio).
+    Classified from the filename stem and the recorded title, since the
+    manifest carries no kind field."""
+    stem = Path(str(entry.get("path", ""))).stem.lower()
+    title = str(entry.get("title", "")).lower()
+    if stem.startswith(_HEADLINE_STEMS) or any(t in title for t in _HEADLINE_TITLES):
+        return 0
+    if stem.startswith(_SECONDARY_STEMS) or any(t in title for t in _SECONDARY_TITLES):
+        return 2
+    return 1
+
+
+def select_headline_deliverable(entries: List[Dict[str, Any]]) -> Optional[Path]:
+    """The one marked deliverable a resumed chat should re-embed: the
+    best-ranked kind (see ``deliverable_rank``), newest by mtime within that
+    rank. Only existing markdown / HTML files qualify (PDF and DOCX twins are
+    recorded but not embeddable). ``None`` when nothing qualifies."""
+    best: Optional[tuple] = None
+    for entry in entries:
+        if not entry.get("deliverable"):
+            continue
+        p = Path(str(entry.get("path", "")))
+        if not p.exists() or p.suffix.lower() not in _EMBEDDABLE_SUFFIXES:
+            continue
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            continue
+        key = (deliverable_rank(entry), -mtime)
+        if best is None or key < best[0]:
+            best = (key, p)
+    return best[1] if best else None
+
+
 def display_files_produced(paths: List[str], base_dir: Any = None) -> None:
     """Print the turn's output files as absolute, pasteable paths.
 

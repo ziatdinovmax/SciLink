@@ -1061,24 +1061,19 @@ def _collect_restored_deliverables(session_path: Path) -> tuple:
     are the durable record of what the session produced, so a resumed
     chat re-embeds from them.
     """
-    from scilink.agents.planning_agents.user_interface import load_deliverables
+    from scilink.agents.planning_agents.user_interface import (
+        load_deliverables, select_headline_deliverable)
 
-    # Only the most recent deliverable is re-embedded: a session may hold
-    # several revisions under the same title (a revision inherits the
-    # document's name), and embedding all of them repeats near-identical
-    # documents. Manifest entries carry no timestamp, so recency = file
-    # mtime, which also orders correctly across per-child manifests.
+    # Only one deliverable is re-embedded: a session may hold several
+    # revisions under the same title (a revision inherits the document's
+    # name), and embedding all of them repeats near-identical documents.
+    # Which one: ranked by kind (white paper > other documents > ideation
+    # report / portfolio), newest by mtime within a rank — pure recency
+    # surfaced a late-refined ideation report over the white paper (#533).
     # Older versions stay reachable in the Files tab.
-    candidates = []
-    for entry in load_deliverables(session_path):
-        if not entry.get("deliverable"):
-            continue
-        p = Path(entry.get("path", ""))
-        if p.exists() and p.suffix.lower() in (".md", ".html", ".htm"):
-            candidates.append(p)
-    if not candidates:
+    latest = select_headline_deliverable(load_deliverables(session_path))
+    if latest is None:
         return [], []
-    latest = max(candidates, key=lambda p: p.stat().st_mtime)
     if latest.suffix.lower() == ".md":
         return [str(latest)], []
     return [], [str(latest)]
