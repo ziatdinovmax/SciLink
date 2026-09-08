@@ -96,13 +96,25 @@ Required discipline:
   the physically-scaled image and do measurements on that copy.
 
 **Deliverable when the goal is to characterize orientations of domains
-or patches.** A histogram or table of orientation angles is not enough on
-its own — where each domain/patch sits and which way it points is the
-result. At least one results subplot must be a spatially-resolved,
-color-coded map or overlay in which each domain/patch is colored by its
-measured orientation (a cyclic colormap for angles), so the spatial
-arrangement of orientations is legible at a glance alongside any summary
-statistics.
+or patches.** "Quantify *its* orientation" means every identified
+domain/patch gets its own reported orientation angle — not just aggregate
+class counts or a dominant-orientation summary. Deliver all three:
+1. **A per-domain angle value.** `features.csv` (or the saved table) must
+   have one row per domain with its orientation angle in degrees, keyed to
+   the same domain id used in the label map — so each domain's orientation
+   is a readable number, not only a color. Aggregate-only statistics
+   (n_classes, dominant angle) do not satisfy "quantify each domain's
+   orientation."
+2. **Angle labels on the overlay.** Print each domain's angle (e.g.
+   "143°") at its centroid on the spatially-resolved map, so the number
+   and its location are legible together.
+3. **A spatially-resolved, color-coded orientation map/overlay** — each
+   domain/patch colored by its measured orientation (cyclic colormap),
+   distinct from a domain-*identity* map (which colors domains to tell
+   them apart, not by angle).
+State the angle's reliability honestly: if the values are grid-snapped or
+FFT-quantized, report them as relative/class labels with that caveat
+rather than as precise crystallographic angles.
 
 ## validation
 ### foundational
@@ -141,11 +153,13 @@ science.
   components as "domains" without corroboration from the physical-
   unit image.
 - If the objective was to characterize domain/patch orientations,
-  confirm the results include a spatially-resolved, color-coded
-  orientation map/overlay — not orientation statistics alone. A run
-  that reports an angle distribution without showing where those
-  orientations are on the image has not delivered the spatial result
-  the objective asked for.
+  confirm the results deliver each domain's orientation as a value, not
+  just aggregate classes: a per-domain row in the saved table carrying its
+  orientation angle, angle labels printed on the map at each domain, and a
+  color-coded orientation overlay. A run that reports only class counts /
+  a dominant orientation, colors domains by identity rather than angle, or
+  shows a colorbar with no per-domain numbers has NOT met "quantify each
+  domain's orientation" — even if it segmented the domains correctly.
 
 Do not penalize an analysis for having preserved the raw line-to-line
 baseline only when the features are genuinely row-correlated and the
