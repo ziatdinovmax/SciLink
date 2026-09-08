@@ -25,3 +25,20 @@ jobs:
     - name: Test import
       run: |
         python -c "import scilink; print('✓ Package imports successfully')"
+
+  webui:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+        cache: npm
+        cache-dependency-path: webui/package-lock.json
+
+    - name: Typecheck and build the web UI
+      working-directory: webui
+      run: |
+        npm ci
+        npm run build

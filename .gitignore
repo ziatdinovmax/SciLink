@@ -271,3 +271,7 @@ tests/_critic_lenses_fixtures/
 webui/node_modules/
 webui/dist/
 webui/tsconfig.tsbuildinfo
+
+# Built React bundle: produced by `cd webui && npm run build:package` (or
+# scripts/build_webui.sh) at release time, never committed.
+scilink/server/static/

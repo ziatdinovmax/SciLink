@@ -75,7 +75,12 @@ sim = [
 ui = []
 # React web frontend's backend server (scilink-web). uvicorn/starlette were
 # previously only implied by the MCP SSE transport; the web server declares
-# them explicitly.
+# them explicitly. The React bundle itself (scilink/server/static/) is NOT in
+# git: scripts/build_webui.sh produces it and the release workflow runs that
+# before `python -m build`, so release wheels carry it and a checkout builds
+# it once. Direction: once the web UI reaches daily-use parity these deps
+# move into the core list and scilink-web supersedes the Streamlit app as
+# the default UI.
 web = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",

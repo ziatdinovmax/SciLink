@@ -16,8 +16,17 @@ cd /path/to/your/data           # session dirs are created here
 scilink-web                     # http://127.0.0.1:8422
 ```
 
-The server serves the pre-built React bundle when `webui/dist` exists (repo
-checkouts: `cd webui && npm install && npm run build`). Options:
+Release wheels ship the built React bundle. From a **repository checkout**
+the bundle is not in git — build it once (Node 20+):
+
+```bash
+scripts/build_webui.sh          # npm ci + build → scilink/server/static/
+```
+
+The server serves `webui/dist` when present (freshest, from `npm run build`
+in `webui/`), else the bundle in `scilink/server/static/`; with neither it
+answers `/` with a 503 that says how to build, while the API stays up.
+Options:
 
 ```
 scilink-web --host 127.0.0.1 --port 8422 --session-root .
@@ -161,6 +170,18 @@ webui/ (Vite + React + TS)  ──REST + SSE──►  scilink/server/ (FastAPI)
 scilink-web --port 8422          # backend
 cd webui && npm run dev          # Vite dev server on :5173, proxies /api
 ```
+
+### Releasing
+
+`.github/workflows/release.yml` runs on a `v*` tag (or manually): it builds
+the bundle with `scripts/build_webui.sh`, then `python -m build`, verifies
+`scilink/server/static/index.html` is inside the wheel, uploads `dist/` as a
+run artifact and attaches it to the GitHub release. Publishing to PyPI is a
+separate job that only runs when the repository variable `PYPI_PUBLISH` is
+`true` and PyPI trusted publishing is configured for the `pypi` environment;
+until then, upload the downloaded artifacts with `twine`. CI (`test.yml`)
+also typechecks and builds the frontend on every push and PR, so a broken
+`webui/` fails fast without anyone committing a bundle.
 
 Backend tests: `pytest tests/test_web_server.py` (presenter classification,
 artifact sweeps, upload conventions, traversal guard, discovery, SSE ring,

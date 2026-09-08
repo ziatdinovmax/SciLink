@@ -47,12 +47,16 @@ def main(argv=None) -> int:
               "instead of a raw public bind.", file=sys.stderr)
         print("=" * 70, file=sys.stderr)
 
-    from .app import create_app
+    from .app import NO_BUNDLE_MESSAGE, create_app
     app = create_app(session_root)
     url = f"http://127.0.0.1:{args.port}"
     print(f"SciLink web backend on http://{args.host}:{args.port} "
           f"(sessions in {session_root})")
-    if not args.no_open:
+    if not getattr(app.state, "frontend_dir", None):
+        print("=" * 70, file=sys.stderr)
+        print(NO_BUNDLE_MESSAGE.rstrip(), file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+    if not args.no_open and getattr(app.state, "frontend_dir", None):
         # Open the UI once the server is up (matches scilink-ui/Streamlit).
         # Loopback URL regardless of --host: the browser is on this machine.
         import threading
