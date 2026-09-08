@@ -1,7 +1,9 @@
 """generate_session_title must work through whatever transport the agent has."""
 import sys, types
+from pathlib import Path
 from types import SimpleNamespace
-sys.path.insert(0, "/Users/maxim.ziatdinov/Code/SciLink")
+_REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_REPO))
 from scilink.ui.session_meta import generate_session_title
 
 fails = []
@@ -50,7 +52,7 @@ check(generate_session_title(FakeModel(text=""), "x") is None, "empty completion
 check(generate_session_title(FakeModel(text="   ...  "), "x") is None, "punctuation-only -> None")
 
 print("\n=== agent_config no longer carries credentials ===")
-sb = open("/Users/maxim.ziatdinov/Code/SciLink/scilink/ui/components/sidebar.py").read()
+sb = (_REPO / "scilink/ui/components/sidebar.py").read_text()
 import re
 blocks = re.findall(r'st\.session_state\.agent_config = \{[^}]*\}', sb, re.S)
 # the third assignment predates this PR (carries fh_api_key); scope to the two it touched
@@ -58,7 +60,7 @@ blocks = [b for b in blocks if "fh_api_key" not in b]
 check(len(blocks) >= 2, f"found {len(blocks)} agent_config assignments")
 check(all("api_key" not in b and "base_url" not in b for b in blocks),
       "no agent_config assignment carries api_key/base_url")
-app = open("/Users/maxim.ziatdinov/Code/SciLink/scilink/ui/app.py").read()
+app = (_REPO / "scilink/ui/app.py").read_text()
 check("_cfg.get(\"api_key\")" not in app, "call site no longer reads credentials from agent_config")
 check("getattr(st.session_state.agent, \"model\", None)" in app, "call site passes the agent's model")
 
@@ -148,4 +150,14 @@ check('key=f"session_name_input:{_sdir}"' in sb,
 check('key="session_name_input"' not in sb, "no fixed widget key remains")
 
 print("\n" + ("ALL PASSED" if not fails else f"{len(fails)} FAILURE(S): {fails}"))
-sys.exit(1 if fails else 0)
+
+
+def test_session_title_checks():
+    """pytest entry point over the script-style checks above."""
+    assert not fails, fails
+
+
+if __name__ == "__main__":
+    # Script mode keeps the exit code; under pytest a module-level sys.exit
+    # would abort the whole collection run.
+    sys.exit(1 if fails else 0)

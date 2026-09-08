@@ -157,6 +157,19 @@ def test_artifact_tracker_md_rules(tmp_path):
     assert [d["name"] for d in out["md_reports"]] == ["brief.md"]
 
 
+def test_artifact_tracker_md_newest_first(tmp_path):
+    import os
+    tracker = ArtifactTracker(str(tmp_path))
+    (tmp_path / "sub").mkdir()
+    t = 1_700_000_000
+    for rel, mt in (("zz_old.md", t), ("sub/mid.md", t + 10), ("aa_new.md", t + 20)):
+        f = tmp_path / rel
+        f.write_text("# d")
+        os.utime(f, (mt, mt))
+    out = tracker.sweep_turn("autonomous")
+    assert [d["name"] for d in out["md_reports"]] == ["aa_new.md", "mid.md", "zz_old.md"]
+
+
 def test_artifact_tracker_debug_subsampling(tmp_path):
     tracker = ArtifactTracker(str(tmp_path))
     for i in range(1, 6):

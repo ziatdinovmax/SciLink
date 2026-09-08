@@ -154,6 +154,15 @@ class ArtifactTracker:
                     continue
             self.known.add(key)
             new.append(s)
+        # Newest first: rglob yields filesystem-walk order, so a turn that
+        # wrote several documents listed them arbitrarily and the one the
+        # user most likely wants (the last written) could land at the bottom.
+        def _mtime(path: str) -> float:
+            try:
+                return Path(path).stat().st_mtime
+            except OSError:
+                return 0.0
+        new.sort(key=_mtime, reverse=True)
         return new
 
     def sweep_turn(self, autonomy: Optional[str] = None) -> Dict[str, Any]:
