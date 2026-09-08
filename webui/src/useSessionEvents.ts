@@ -3,7 +3,7 @@
  * and replays via Last-Event-ID (the server keeps a bounded ring). */
 
 import { useEffect } from "react";
-import type { ChatMessage, PresentedQuestion } from "./api";
+import type { ChatMessage, DelegationView, PresentedQuestion } from "./api";
 
 export type SessionEvent =
   | { type: "log"; chunk: string }
@@ -20,6 +20,7 @@ export type SessionEvent =
       branch: string | null;
       v?: number;
     }
+  | { type: "delegations"; view: DelegationView }
   | { type: "error"; message: string };
 
 export function useSessionEvents(
@@ -65,6 +66,9 @@ export function useSessionEvents(
         v: d.v,
       });
     });
+    src.addEventListener("delegations", (e) =>
+      onEvent({ type: "delegations", view: parse(e) }),
+    );
     src.addEventListener("error", (e) => {
       // Only our payload-carrying errors; EventSource transport errors have
       // no data and are handled by its auto-reconnect.

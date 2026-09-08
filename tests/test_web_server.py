@@ -882,3 +882,106 @@ def test_check_folders_reports_subdirs(client, tmp_path):
     assert good["data_files"] == []                     # top level unchanged
     assert [(Path(d["path"]).name, d["n_files"]) for d in good["subdirs"]] == \
         [("s2", 2), ("s10", 1)]                          # natural order, .git skipped
+
+
+# ── meta delegation view (Delegations tab) ────────────────────────
+
+def _ledger_entry(index, mode, status, **extra):
+    e = {"index": index, "timestamp": "2026-09-07T10:00:00", "mode": mode,
+         "task": f"task {index}", "label": f"label {index}", "context_keys": [],
+         "context_from": [], "status": status, "summary": "", "key_findings": [],
+         "files_produced": [], "feature_tables": [], "suggested_followups": [],
+         "warnings": [], "error": None}
+    e.update(extra)
+    return e
+
+
+def test_delegation_view_shapes_the_ledger(tmp_path):
+    from scilink.server.delegations import delegation_view, ledger_signature
+    (tmp_path / "analysis" / "results").mkdir(parents=True)
+    out_file = tmp_path / "analysis" / "results" / "fit.png"
+    out_file.write_bytes(b"x")
+    (tmp_path / "analysis" / "curve_fitting_state.json").write_text(json.dumps(
+        {"agent_type": "curve_fitting", "action_history": [{"action": "fit"}]}))
+    agent = SimpleNamespace(_delegation_ledger=[
+        _ledger_entry(1, "analysis", "success", summary="Fitted two peaks. " * 200,
+                      key_findings=["peak at 400", "peak at 600"],
+                      files_produced=[str(out_file), "/elsewhere/x.csv"],
+                      completed_at="2026-09-07T10:03:30", feature_tables=["ft"]),
+        _ledger_entry(2, "planning", "running", context_from=[1, "x"]),
+        _ledger_entry(3, "fusion", "success", labels=["a", "b"], context_from=[1]),
+    ])
+    view = delegation_view(agent, str(tmp_path))
+    rows = view["delegations"]
+    assert [r["index"] for r in rows] == [1, 2, 3]
+    assert rows[0]["files_produced"] == ["analysis/results/fit.png", "/elsewhere/x.csv"]
+    assert rows[0]["n_feature_tables"] == 1
+    assert len(rows[0]["summary"]) <= 1200 and rows[0]["summary"].endswith("…")
+    assert rows[1]["context_from"] == [1]            # non-numeric dropped
+    assert rows[2]["labels"] == ["a", "b"]
+    assert view["sub_agents"] == {"analysis": ["Curve Fitting"]}
+    # signature moves when a delegation closes
+    s1 = ledger_signature(agent)
+    agent._delegation_ledger[1]["status"] = "success"
+    agent._delegation_ledger[1]["completed_at"] = "2026-09-07T10:05:00"
+    assert ledger_signature(agent) != s1
+    # non-meta agent → empty view, never an error
+    assert delegation_view(SimpleNamespace(), str(tmp_path))["delegations"] == []
+
+
+def test_delegations_endpoint_and_snapshot(client, tmp_path):
+    from scilink.server.session_manager import WebSession
+    sdir = tmp_path / "meta_session_20260101_101010"
+    sdir.mkdir()
+    agent = SimpleNamespace(_delegation_ledger=[_ledger_entry(1, "analysis", "success")])
+    session = WebSession(id=sdir.name, session_dir=str(sdir), mode="meta",
+                         model="gpt-5.4", autonomy="autonomous", agent=agent)
+    client.app.state.manager._sessions[sdir.name] = session
+    d = client.get(f"/api/v1/sessions/{sdir.name}/delegations").json()
+    assert [r["label"] for r in d["delegations"]] == ["label 1"]
+    snap = client.get(f"/api/v1/sessions/{sdir.name}").json()
+    assert snap["delegations"]["delegations"][0]["index"] == 1
+    # an analyze session carries no ledger: empty payload, null on snapshot
+    _, adir = _fake_session(client, tmp_path)
+    assert client.get(f"/api/v1/sessions/{adir.name}/delegations").json() == {
+        "delegations": [], "sub_agents": {}}
+    assert client.get(f"/api/v1/sessions/{adir.name}").json()["delegations"] is None
+    # telemetry reader is reachable and never raises on a bare agent
+    t = client.get(f"/api/v1/sessions/{sdir.name}/telemetry").json()
+    assert t["meta"]["delegations_total"] == 1
+
+
+def test_delegation_events_during_turn(client, tmp_path):
+    """Opening and closing a delegation mid-turn must reach the SSE buffer
+    as `delegations` events, plus a final push at turn end."""
+    from scilink.server.session_manager import WebSession
+    sdir = tmp_path / "meta_session_20260101_111111"
+    sdir.mkdir()
+
+    class DelegatingMeta:
+        def __init__(self):
+            self._delegation_ledger = []
+
+        def chat(self, text):
+            time.sleep(0.3)
+            self._delegation_ledger.append(_ledger_entry(1, "analysis", "running"))
+            time.sleep(2.6)                      # watcher tick sees "running"
+            self._delegation_ledger[0]["status"] = "success"
+            self._delegation_ledger[0]["completed_at"] = "2026-09-07T10:01:00"
+            return "done"                        # closed right before the end
+
+    session = WebSession(id=sdir.name, session_dir=str(sdir), mode="meta",
+                         model="gpt-5.4", autonomy="autonomous",
+                         agent=DelegatingMeta())
+    client.app.state.manager._sessions[sdir.name] = session
+    client.post(f"/api/v1/sessions/{sdir.name}/messages", json={"content": "go"})
+    session.turn.done.wait(15)
+
+    def statuses():
+        return [ev.data["delegations"][0]["status"] for ev in session.events._ring
+                if ev.type == "delegations" and ev.data["delegations"]]
+    for _ in range(100):
+        if "success" in statuses():
+            break
+        time.sleep(0.05)
+    assert "running" in statuses() and statuses()[-1] == "success"

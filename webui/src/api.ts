@@ -74,6 +74,34 @@ export interface PresentedQuestion {
   default: string;
 }
 
+export interface DelegationRow {
+  index: number;
+  mode: string; // analysis | planning | simulation | fusion | ...
+  label: string;
+  task: string;
+  status: string; // running | success | error | interrupted | cancelled
+  context_from: number[];
+  informed_by: string[];
+  fanout: boolean;
+  fanout_group: string | null;
+  labels: string[]; // fusion: the fused branch labels
+  timestamp: string | null;
+  completed_at: string | null;
+  summary: string;
+  key_findings: string[];
+  files_produced: string[]; // session-relative when inside the session
+  n_feature_tables: number;
+  warnings: string[];
+  error: string | null;
+  timed_out: boolean;
+  resumed: boolean;
+}
+
+export interface DelegationView {
+  delegations: DelegationRow[];
+  sub_agents: Record<string, string[]>; // specialist -> worker agents used
+}
+
 export interface SessionSnapshot {
   id: string;
   mode: string;
@@ -91,6 +119,7 @@ export interface SessionSnapshot {
     branch: string | null;
     v?: number;
   }[];
+  delegations: DelegationView | null; // meta sessions only
   event_cursor: number;
 }
 
@@ -284,6 +313,8 @@ export const api = {
 
   tree: (id: string) =>
     req<{ entries: TreeEntry[]; truncated: boolean }>(`/sessions/${id}/tree`),
+
+  delegations: (id: string) => req<DelegationView>(`/sessions/${id}/delegations`),
 
   provenance: (id: string) =>
     req<{ events: ProvenanceEvent[] }>(`/sessions/${id}/provenance`),

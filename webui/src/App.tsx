@@ -3,6 +3,7 @@ import {
   api,
   type AppConfig,
   type ChatMessage,
+  type DelegationView,
   type LiveSession,
   type PresentedQuestion,
   type SessionSnapshot,
@@ -15,6 +16,7 @@ import { ChatPanel } from "./components/ChatPanel";
 import { FilesPanel } from "./components/FilesPanel";
 import { PreChatHero } from "./components/PreChatHero";
 import { AnalysisInset } from "./components/AnalysisInset";
+import { DelegationsPanel } from "./components/DelegationsPanel";
 
 interface SessionState {
   snapshot: SessionSnapshot | null;
@@ -26,6 +28,7 @@ interface SessionState {
   lastError: string | null;
   filesVersion: number; // bumped on files_changed → the Files tab refetches
   liveImages: LiveImage[]; // figures streamed during the turn (newest last)
+  delegations: DelegationView | null; // meta: the delegation ledger, live
 }
 
 export interface LiveImage {
@@ -47,6 +50,7 @@ const emptyState: SessionState = {
   lastError: null,
   filesVersion: 0,
   liveImages: [],
+  delegations: null,
 };
 
 type Action =
@@ -67,6 +71,7 @@ function reducer(state: SessionState, action: Action): SessionState {
         pendingQuestion: action.snapshot.pending_question,
         liveLog: action.snapshot.live_log ?? "",
         liveImages: action.snapshot.live_images ?? [],
+        delegations: action.snapshot.delegations ?? null,
         name: action.snapshot.name,
       };
     case "session_closed":
@@ -141,6 +146,8 @@ function reducer(state: SessionState, action: Action): SessionState {
             liveImages: next.slice(-LIVE_IMAGE_CAP),
           };
         }
+        case "delegations":
+          return { ...state, delegations: ev.view };
         case "error":
           return { ...state, lastError: ev.message };
         default:
@@ -159,7 +166,7 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>(null); // init overlay text
   const [startError, setStartError] = useState<string | null>(null);
   const [serverStopped, setServerStopped] = useState(false);
-  const [tab, setTab] = useState<"chat" | "files">("chat");
+  const [tab, setTab] = useState<"chat" | "files" | "delegations">("chat");
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [attachRequest, setAttachRequest] = useState<string | null>(null);
   const [liveSessions, setLiveSessions] = useState<LiveSession[]>([]);
@@ -430,6 +437,19 @@ export default function App() {
               >
                 Files
               </button>
+              {mode === "meta" && (
+                <button
+                  className={tab === "delegations" ? "active" : ""}
+                  onClick={() => setTab("delegations")}
+                >
+                  Delegations
+                  {state.delegations?.delegations.length ? (
+                    <span className="tab-count">
+                      {state.delegations.delegations.length}
+                    </span>
+                  ) : null}
+                </button>
+              )}
             </div>
             {/* Both tab bodies stay MOUNTED and toggle visibility: switching
                 tabs must not destroy the hero's upload/objective state, a
@@ -443,6 +463,14 @@ export default function App() {
                 onSelect={setSelectedFile}
               />
             </div>
+            {mode === "meta" && (
+              <div className="tab-body" hidden={tab !== "delegations"}>
+                <DelegationsPanel
+                  view={state.delegations}
+                  running={state.status === "running"}
+                />
+              </div>
+            )}
             <div className="tab-body" hidden={tab !== "chat"}>
               {state.messages.length === 0 && state.status === "idle" ? (
                 <PreChatHero

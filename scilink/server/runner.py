@@ -200,6 +200,33 @@ def _watch_log(session, turn, cap) -> None:
     last_sig = None
     last_fs_check = 0.0
     seen_images = turn.seen_images  # seeded in start_turn, pre-thread
+    # Meta sessions: push the delegation ledger to the Delegations tab
+    # whenever it changes (a delegation opened / closed) — polled on the
+    # same tick as the fs signature; the view is only rebuilt on change.
+    is_meta = getattr(session, "mode", None) == "meta"
+    last_ledger_sig = None
+    if is_meta:
+        from .delegations import ledger_signature
+        try:
+            last_ledger_sig = ledger_signature(session.agent)
+        except Exception:  # noqa: BLE001
+            last_ledger_sig = None
+
+    def _push_delegations(force: bool = False) -> None:
+        nonlocal last_ledger_sig
+        if not is_meta:
+            return
+        try:
+            from .delegations import delegation_view, ledger_signature
+            sig = ledger_signature(session.agent)
+            if force or sig != last_ledger_sig:
+                last_ledger_sig = sig
+                session.events.emit(
+                    "delegations",
+                    delegation_view(session.agent, session.session_dir))
+        except Exception:  # noqa: BLE001 - never break the watcher
+            pass
+
     while turn.is_running and turn.live_capture is cap:
         try:
             buf = cap.getvalue()
@@ -211,6 +238,7 @@ def _watch_log(session, turn, cap) -> None:
         now = time.time()
         if now - last_fs_check >= 2.0:
             last_fs_check = now
+            _push_delegations()
             try:
                 sig = _fs_signature(session.session_dir)
                 if last_sig is not None and sig != last_sig:
@@ -234,6 +262,8 @@ def _watch_log(session, turn, cap) -> None:
     except Exception:
         pass
     session.events.emit("files_changed", {})
+    # The closing delegation of a turn lands after the last in-loop tick.
+    _push_delegations(force=True)
     # Final figure sweep: catch anything written after the last in-loop tick
     # (and the first-window case where nothing else changed the signature) —
     # otherwise the LAST figure of a turn is exactly the one the inset misses.
