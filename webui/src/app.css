@@ -804,3 +804,48 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 .skill-viewer-body { overflow: auto; padding: 12px 16px; font-size: 13px; }
 .skill-front { white-space: pre-wrap; margin: 0 0 12px; padding: 8px 10px; border-left: 3px solid var(--border-strong); background: var(--bg-panel); border-radius: 4px; font-family: inherit; }
 
+/* ── Persistent memory (Skills tab) ─────────────────────────────── */
+.mem-panel h4 { font-size: 14px; margin: 18px 0 4px; }
+.mem-switch { display: flex; align-items: center; gap: 8px; margin: 8px 0; font-size: 13px; flex-wrap: wrap; }
+.mem-info { padding: 8px 10px; border-left: 3px solid var(--border-strong); background: var(--bg-panel); border-radius: 4px; }
+.mem-pipeline { font-size: 13px; margin: 8px 0 4px; color: var(--text); }
+.mem-notice { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); margin: 8px 0; }
+.mem-notice.ok { border-color: #3fb95055; color: #3fb950; }
+.mem-notice.warn { border-color: #d2992255; color: #d29922; }
+.mem-stage { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); }
+.mem-subhead { font-size: 13px; font-weight: 600; margin: 10px 0 4px; }
+.mem-group { margin: 6px 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; }
+.mem-group > summary { cursor: pointer; display: flex; align-items: baseline; gap: 8px; font-size: 13px; flex-wrap: wrap; }
+.mem-card { margin: 8px 0; padding: 8px 10px; border: 1px dashed var(--border-strong); border-radius: 6px; font-size: 13px; }
+.mem-row { padding: 6px 0 6px 6px; border-top: 1px solid var(--border); font-size: 13px; }
+.mem-row.related { opacity: 0.85; padding-left: 14px; }
+.mem-row-main { display: flex; flex-direction: column; gap: 2px; }
+.mem-label { word-break: break-word; }
+.mem-row-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 4px; }
+.mem-row-actions input[type="text"] { max-width: 260px; }
+.mem-check { display: inline-flex; align-items: baseline; gap: 6px; cursor: pointer; }
+.mem-check input { margin: 0; position: relative; top: 1px; }
+.mem-detail { margin: 6px 0 4px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; }
+.mem-fields { margin: 0 0 6px; font-size: 12px; }
+.mem-fields > div { display: grid; grid-template-columns: 140px 1fr; gap: 8px; padding: 2px 0; }
+.mem-fields dt { color: var(--text-dim); }
+.mem-fields dd { margin: 0; word-break: break-word; white-space: pre-wrap; }
+.mem-script { max-height: 400px; }
+.mem-distill { margin-top: 8px; padding: 8px 10px; background: var(--bg-panel); border-radius: 6px; font-size: 13px; }
+.mem-dest { display: flex; gap: 16px; margin: 6px 0; }
+.mem-dest label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.mem-job { display: flex; align-items: center; gap: 8px; margin: 8px 0 0; color: #d29922; font-size: 13px; }
+.mem-job .spinner { width: 12px; height: 12px; border: 2px solid #d2992255; border-top-color: #d29922; border-radius: 50%; animation: mem-spin 0.9s linear infinite; }
+@keyframes mem-spin { to { transform: rotate(360deg); } }
+.mem-review { margin-top: 10px; padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: 6px; font-size: 13px; }
+.mem-editor { width: 100%; box-sizing: border-box; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; margin: 6px 0; }
+.mem-diff { margin: 6px 0; padding: 8px 10px; max-height: 360px; overflow: auto; font-size: 12px; background: var(--code-bg); border: 1px solid var(--code-border); border-radius: 4px; white-space: pre; }
+.mem-diff .add { color: #3fb950; }
+.mem-diff .del { color: #f85149; }
+.mem-diff .hunk { color: #58a6ff; }
+.mem-desc { margin: 4px 0; font-size: 13px; }
+.mem-skill .md-body { font-size: 13px; }
+.link-btn.danger { color: var(--danger); }
+.link-btn.armed { font-weight: 600; text-decoration: underline; }
+button.primary.small { padding: 4px 10px; font-size: 13px; width: auto; }
+

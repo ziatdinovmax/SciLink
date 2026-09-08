@@ -15,7 +15,7 @@ from typing import Optional
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 
 from scilink.providers import provider_for
 from scilink.ui.config import (
@@ -35,6 +35,13 @@ from .schemas import (
     FolderCheckRequest,
     LoginRequest,
     MCPConnectRequest,
+    MemoryApplyRequest,
+    MemoryCheckRequest,
+    MemoryConsolidateRequest,
+    MemoryEditRequest,
+    MemoryEnabledRequest,
+    MemoryIdsRequest,
+    MemoryUpgradeRequest,
     PlanDirsRequest,
     RenameSessionRequest,
     SendMessageRequest,
@@ -439,7 +446,6 @@ def create_app(session_root: Path, serve_frontend: bool = True,
     @app.get("/api/v1/sessions/{session_id}/skills/{domain}/{name}")
     def get_skill_markdown(request: Request, session_id: str, domain: str, name: str):
         """A skill's markdown — `domain` is a catalog domain, or `custom`."""
-        from fastapi.responses import PlainTextResponse
 
         from .skills_api import SkillError, skill_markdown
         session = _session_or_404(request, session_id)
@@ -462,6 +468,117 @@ def create_app(session_root: Path, serve_frontend: bool = True,
             return register_uploaded_skills(session.agent, session.session_dir, payload)
         except SkillError as exc:
             raise HTTPException(exc.status, str(exc))
+
+    # ── persistent memory ────────────────────────────────────────
+    # One store per server host ($SCILINK_HOME or ~/.scilink), shared by
+    # every session and — on a multi-user server — every user: it is the
+    # host's curated knowledge, the same thing `scilink memory` manages.
+
+    from .memory_api import MemoryError
+
+    def _mem(fn, *args, **kw):
+        try:
+            return fn(*args, **kw)
+        except MemoryError as exc:
+            raise HTTPException(exc.status, exc.message) from exc
+
+    @app.get("/api/v1/memory")
+    def memory_overview():
+        """The switch, the pipeline strip, the bank, the inbox, the skills."""
+        from .memory_api import memory_overview as _overview
+        return _overview()
+
+    @app.post("/api/v1/memory/enabled")
+    def memory_set_enabled(body: MemoryEnabledRequest):
+        from .memory_api import set_enabled
+        return set_enabled(body.enabled)
+
+    @app.get("/api/v1/memory/skills/{domain}/{name}")
+    def memory_skill_text(domain: str, name: str):
+        from .memory_api import skill_text
+        return PlainTextResponse(_mem(skill_text, domain, name), media_type="text/markdown; charset=utf-8")
+
+    @app.put("/api/v1/memory/skills/{domain}/{name}")
+    def memory_skill_edit(domain: str, name: str, body: MemoryEditRequest):
+        from .memory_api import skill_edit
+        return _mem(skill_edit, domain, name, body.content)
+
+    @app.post("/api/v1/memory/skills/{domain}/{name}/{action}")
+    def memory_skill_action(domain: str, name: str, action: str):
+        """promote · demote · prune · diff (a fork against its built-in) ·
+        fork (copy a built-in into the store, shadowing it)."""
+        from .memory_api import fork_builtin, skill_action
+        if action == "fork":
+            return _mem(fork_builtin, domain, name)
+        return _mem(skill_action, domain, name, action)
+
+    @app.get("/api/v1/memory/bank/{domain}/{rid}")
+    def memory_bank_record(domain: str, rid: str):
+        from .memory_api import bank_record
+        return _mem(bank_record, domain, rid)
+
+    @app.delete("/api/v1/memory/bank/{domain}/{rid}")
+    def memory_bank_delete(domain: str, rid: str):
+        from .memory_api import bank_delete
+        return _mem(bank_delete, domain, rid)
+
+    @app.post("/api/v1/memory/bank/{domain}/{rid}/nominate")
+    def memory_bank_nominate(domain: str, rid: str):
+        from .memory_api import bank_nominate
+        return _mem(bank_nominate, domain, rid)
+
+    @app.post("/api/v1/memory/bank/{domain}/nominate-group")
+    def memory_bank_nominate_group(domain: str, body: MemoryIdsRequest):
+        from .memory_api import bank_nominate_group
+        return _mem(bank_nominate_group, domain, body.ids, body.technique)
+
+    @app.get("/api/v1/memory/inbox/{domain}/{sid}")
+    def memory_inbox_record(domain: str, sid: str):
+        from .memory_api import inbox_record
+        return _mem(inbox_record, domain, sid)
+
+    @app.delete("/api/v1/memory/inbox/{domain}/{sid}")
+    def memory_inbox_discard(domain: str, sid: str):
+        from .memory_api import inbox_discard
+        return _mem(inbox_discard, domain, sid)
+
+    @app.post("/api/v1/memory/inbox/{domain}/targets")
+    def memory_upgrade_targets(domain: str, body: MemoryIdsRequest):
+        from .memory_api import upgrade_targets
+        return {"targets": _mem(upgrade_targets, domain, body.ids)}
+
+    @app.post("/api/v1/memory/inbox/{domain}/consolidate")
+    def memory_consolidate(request: Request, domain: str, body: MemoryConsolidateRequest):
+        """Start the distillation job (1-3 min); poll /memory/jobs/{id}."""
+        from .memory_api import llm_call_for, start_consolidate
+        session = _session_or_404(request, body.session_id)
+        return _mem(start_consolidate, domain, body.ids, body.label,
+                    _mem(llm_call_for, session.agent))
+
+    @app.post("/api/v1/memory/inbox/{domain}/propose-upgrade")
+    def memory_propose_upgrade(request: Request, domain: str, body: MemoryUpgradeRequest):
+        """Start the upgrade-preview job (writes nothing); poll /memory/jobs/{id}."""
+        from .memory_api import llm_call_for, start_propose_upgrade
+        session = _session_or_404(request, body.session_id)
+        return _mem(start_propose_upgrade, domain, body.ids, body.target_domain,
+                    body.target_name, _mem(llm_call_for, session.agent))
+
+    @app.post("/api/v1/memory/inbox/{domain}/apply-upgrade")
+    def memory_apply_upgrade(domain: str, body: MemoryApplyRequest):
+        from .memory_api import apply_upgrade
+        return _mem(apply_upgrade, domain, body.ids, body.target_domain,
+                    body.target_name, body.content, body.fork_builtin)
+
+    @app.post("/api/v1/memory/check-upgrade")
+    def memory_check_upgrade(body: MemoryCheckRequest):
+        """Additivity warnings + diff for an edited proposal."""
+        from .memory_api import upgrade_check
+        return upgrade_check(body.existing, body.proposed)
+
+    @app.get("/api/v1/memory/jobs/{job_id}")
+    def memory_job(job_id: str):
+        from .memory_api import job_status
+        return _mem(job_status, job_id)
 
     # ── tools / MCP ──────────────────────────────────────────────
 
@@ -617,7 +734,6 @@ def create_app(session_root: Path, serve_frontend: bool = True,
             # The bundle is built at release time (release wheels carry it)
             # and is not in git — a checkout must build it once. Say so at
             # "/" instead of serving a bare 404 next to a working API.
-            from fastapi.responses import PlainTextResponse
 
             @app.get("/", include_in_schema=False)
             def _no_frontend():

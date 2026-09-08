@@ -89,8 +89,8 @@ restart, resume).
    sequence, worker agents and analysis reports from `/telemetry` under
    the delegation detail, plus the dependency graph as plain SVG and a
    per-layer history download); Skills (browse/upload DONE 2026-09-08,
-   PR #561; the persistent-memory pipeline UI is a separate, bigger
-   design, next).
+   PR #561; persistent-memory pipeline DONE 2026-09-08 — bank / inbox /
+   skills with the distill jobs, over the same store as `scilink memory`).
 7. **Parity for the switch to default** (see "Standing decisions"):
    simulate mode in the web UI (HPC connection, wizards) is the largest
    gap; after it the web UI covers everything Streamlit does.
