@@ -242,6 +242,10 @@ rather than fabricate a result).
 - Sequential `delegate_to_analysis` calls threaded through `context` remain the
   fallback when fan-out is not appropriate; still end with ONE correlated
   interpretation across modalities — not N separate reports.
+- A fan-out with MIXED outcomes is recovered by fusing the branches that produced
+  output and retrying ONLY the failed ones (`resume_fanout(retry_failed=true)`),
+  never by re-issuing the whole fan-out. When the user DECLINES the launch gate,
+  that proposal is over for the turn: analyze independently or ask, do not re-propose.
 
 **ENSEMBLE / BEST-OF-N ON ONE DATASET (distinct from the above):**
 - Several INDEPENDENT analysis trajectories over the SAME single dataset,
@@ -1678,19 +1682,22 @@ class MetaOrchestratorAgent:
                     branch_time_budget_s: Optional[float] = None,
                     figure_style: Optional[str] = None,
                     harmonize: bool = False,
-                    allow_raw_branches: bool = False) -> str:
+                    allow_raw_branches: bool = False,
+                    force_rerun: bool = False) -> str:
         """Gate, confirm, then run analysis branches concurrently."""
         from .fanout import run_fanout
         return run_fanout(self, branches,
                           branch_time_budget_s=branch_time_budget_s,
                           figure_style=figure_style,
                           harmonize=harmonize,
-                          allow_raw_branches=allow_raw_branches)
+                          allow_raw_branches=allow_raw_branches,
+                          force_rerun=force_rerun)
 
-    def _resume_fanout(self) -> str:
-        """Re-run fan-out branches left unfinished by a dead/stopped session."""
+    def _resume_fanout(self, retry_failed: bool = False) -> str:
+        """Re-run fan-out branches left unfinished by a dead/stopped session
+        (and, with ``retry_failed``, the failed branches of the latest one)."""
         from .fanout import resume_fanout
-        return resume_fanout(self)
+        return resume_fanout(self, retry_failed=retry_failed)
 
     def _fuse_delegations(self, indices: list, focus: Optional[str] = None) -> str:
         """Reconcile finished complementary branch findings into one narrative."""
@@ -1917,6 +1924,10 @@ class MetaOrchestratorAgent:
 
         # Close out any delegation a mid-run Stop left dangling as 'running'.
         self._sweep_interrupted_delegations()
+        # A user's decline of the fan-out launch gate is sticky for ONE turn
+        # (#557): the same set is refused without asking again until the
+        # user speaks — their next message may well be "go ahead".
+        self._fanout_declined_sets = []
 
         # Auto-checkpoint every N messages.
         if self.message_count - self.last_checkpoint_message_count >= self.CHECKPOINT_INTERVAL:
