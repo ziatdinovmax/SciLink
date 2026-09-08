@@ -430,8 +430,8 @@ def create_app(session_root: Path, serve_frontend: bool = True,
 
     @app.get("/api/v1/sessions/{session_id}/tools")
     def get_tools(request: Request, session_id: str):
-        """What the session's agent can call: built-in tools, external
-        (MCP) tools, and the connected MCP servers."""
+        """The connected MCP servers and the external tools they (or
+        anything else) registered with the session's agent."""
         from .tools_api import tool_inventory
         return tool_inventory(_session_or_404(request, session_id).agent)
 

@@ -1037,7 +1037,7 @@ def test_tools_inventory_and_mcp_lifecycle(client, tmp_path):
     session.agent = _FakeMcpAgent()
     base = f"/api/v1/sessions/{sdir.name}"
     inv = client.get(f"{base}/tools").json()
-    assert [t["name"] for t in inv["builtin"]] == ["examine_data", "run_analysis"]
+    assert "builtin" not in inv                      # meta-only view would mislead
     assert inv["external"] == [] and inv["mcp_servers"] == [] and inv["mcp_supported"]
     # stdio connect: command split into argv
     r = client.post(f"{base}/mcp", json={"name": "calc", "transport": "stdio",
@@ -1047,7 +1047,6 @@ def test_tools_inventory_and_mcp_lifecycle(client, tmp_path):
     inv = r.json()["inventory"]
     assert inv["mcp_servers"] == [{"name": "calc", "transport": "stdio", "tools": ["calc_add"]}]
     assert inv["external"] == [{"name": "calc_add", "description": "Add."}]
-    assert [t["name"] for t in inv["builtin"]] == ["examine_data", "run_analysis"]
     # duplicate name → 409; http transport with headers; failure → 400
     assert client.post(f"{base}/mcp", json={"name": "calc", "transport": "stdio", "command": "x"}).status_code == 409
     r = client.post(f"{base}/mcp", json={"name": "remote", "transport": "http",
@@ -1065,7 +1064,7 @@ def test_tools_inventory_and_mcp_lifecycle(client, tmp_path):
     # an agent without MCP support
     session.agent = SimpleNamespace()
     inv = client.get(f"{base}/tools").json()
-    assert inv["mcp_supported"] is False and inv["builtin"] == []
+    assert inv["mcp_supported"] is False and inv["mcp_servers"] == []
     assert client.post(f"{base}/mcp", json={"name": "a", "transport": "stdio", "command": "x"}).status_code == 400
 
 

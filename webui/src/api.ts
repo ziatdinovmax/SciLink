@@ -209,7 +209,6 @@ export interface FolderCheck {
 }
 
 export interface ToolInventory {
-  builtin: { name: string; description: string }[];
   external: { name: string; description: string }[];
   mcp_servers: { name: string; transport: string; tools: string[] }[];
   mcp_supported: boolean;

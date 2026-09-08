@@ -1,11 +1,13 @@
 """Tool inventory + MCP server management for the web UI's Tools tab.
 
-Read-only over what the orchestrators already expose — ``tools.openai_schemas``
-(the registered tool surface), ``_external_tools`` (tools registered from
-outside, today MCP), ``_mcp_connections`` (name -> MCPConnection) — plus
-thin wrappers over ``connect_mcp_server`` / ``disconnect_mcp_server``.
-Every orchestrator (analysis, planning, meta) has the same three methods;
-a session whose agent lacks them reports ``mcp_supported: False``.
+Read-only over what the orchestrators already expose — ``_external_tools``
+(tools registered from outside, today MCP) and ``_mcp_connections`` (name
+-> MCPConnection) — plus thin wrappers over ``connect_mcp_server`` /
+``disconnect_mcp_server``. Every orchestrator (analysis, planning, meta)
+has the same methods; a session whose agent lacks them reports
+``mcp_supported: False``. The agent's own built-in tools are deliberately
+not listed: in a meta session they would be only the meta's routing
+tools, not what the specialists and sub-agents can do, which misleads.
 """
 
 from __future__ import annotations
@@ -22,20 +24,10 @@ def _clip(text: Any) -> str:
 
 
 def tool_inventory(agent: Any) -> Dict[str, Any]:
-    """``{builtin, external, mcp_servers, mcp_supported}`` for one agent."""
+    """``{external, mcp_servers, mcp_supported}`` for one agent."""
     external = [{"name": str(t.get("name", "")), "description": _clip(t.get("description"))}
                 for t in (getattr(agent, "_external_tools", None) or [])
                 if isinstance(t, dict) and t.get("name")]
-    external_names = {t["name"] for t in external}
-
-    builtin: List[Dict[str, str]] = []
-    tools = getattr(agent, "tools", None)
-    for td in (getattr(tools, "openai_schemas", None) or []):
-        fn = td.get("function", {}) if isinstance(td, dict) else {}
-        name = fn.get("name")
-        if name and name not in external_names:
-            builtin.append({"name": name, "description": _clip(fn.get("description"))})
-    builtin.sort(key=lambda t: t["name"])
 
     servers: List[Dict[str, Any]] = []
     for name, conn in (getattr(agent, "_mcp_connections", None) or {}).items():
@@ -50,7 +42,6 @@ def tool_inventory(agent: Any) -> Dict[str, Any]:
         servers.append({"name": str(name), "transport": transport,
                         "tools": tool_names})
     return {
-        "builtin": builtin,
         "external": external,
         "mcp_servers": servers,
         "mcp_supported": callable(getattr(agent, "connect_mcp_server", None)),

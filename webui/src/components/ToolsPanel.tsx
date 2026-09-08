@@ -1,12 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, type ToolInventory } from "../api";
 
-/** MCP tab — connect MCP servers to the session's agent, and (collapsed,
- * as a reference) see what the agent can already call: the servers'
- * tools, other registered external tools, and the built-in orchestrator
- * tools. Read-only apart from MCP connect / disconnect. There is deliberately no tool-file uploader: users hand
- * code to the agents as scripts attached in chat (adapted by codegen) or
- * as MCP servers (run verbatim, any language). */
+/** MCP tab — connect MCP servers to the session's agent and disconnect
+ * them; each server card lists the tools it registered. Nothing else: the
+ * agent's own built-in tools are not listed (in a meta session that would
+ * be only the meta's routing tools, not what the specialists can do), and
+ * there is deliberately no tool-file uploader — users hand code to the
+ * agents as scripts attached in chat (adapted by codegen) or as MCP
+ * servers (run verbatim, any language). */
 
 type Transport = "stdio" | "sse" | "http";
 
@@ -26,8 +27,6 @@ export function ToolsPanel({
   const [name, setName] = useState("");
   const [addr, setAddr] = useState("");
   const [headers, setHeaders] = useState("");
-  const [filter, setFilter] = useState("");
-  const [showBuiltin, setShowBuiltin] = useState(false);
 
   const refresh = useCallback(() => {
     api.tools(sessionId).then(setInv).catch((e) => setError(String(e)));
@@ -83,14 +82,6 @@ export function ToolsPanel({
     }
   };
 
-  const q = filter.trim().toLowerCase();
-  const builtin = useMemo(
-    () =>
-      (inv?.builtin ?? []).filter(
-        (t) => !q || t.name.toLowerCase().includes(q) || t.description.toLowerCase().includes(q),
-      ),
-    [inv, q],
-  );
   const mcpToolNames = new Set((inv?.mcp_servers ?? []).flatMap((s) => s.tools));
   const otherExternal = (inv?.external ?? []).filter((t) => !mcpToolNames.has(t.name));
 
@@ -224,33 +215,6 @@ export function ToolsPanel({
         </section>
       )}
 
-      <section className="tools-section">
-        <h3>
-          <button type="button" className="link-btn tools-toggle" onClick={() => setShowBuiltin((v) => !v)}>
-            {showBuiltin ? "▾" : "▸"} What the agent can already call
-          </button>
-          <span className="caption"> ({inv?.builtin.length ?? 0})</span>
-        </h3>
-        {showBuiltin && (
-          <>
-            <input
-              type="text"
-              placeholder="Filter tools…"
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-            />
-            <ul className="tool-list">
-              {builtin.map((t) => (
-                <li key={t.name}>
-                  <code>{t.name}</code>
-                  <span className="caption"> — {t.description}</span>
-                </li>
-              ))}
-              {builtin.length === 0 && <li className="caption">No match.</li>}
-            </ul>
-          </>
-        )}
-      </section>
     </div>
   );
 }

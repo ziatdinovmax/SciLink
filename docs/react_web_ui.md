@@ -162,9 +162,9 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
   histories (already served by `/telemetry`) are the tab's next content.
 - **MCP tab** (all modes): connect MCP servers — a `stdio` command, an
   SSE URL, or a streamable-HTTP URL with optional JSON headers — and
-  disconnect them. Below, collapsed as a reference, what the session's
-  agent can already call: each server's tools, other registered external
-  tools, and the built-in orchestrator tools with a filter. There is deliberately no tool-file
+  disconnect them; each server card lists the tools it registered. The
+  agent's own built-in tools are not listed: in a meta session that would
+  be only the meta's routing tools, not what the specialists can do. There is deliberately no tool-file
   uploader (the Streamlit `tool_schemas` / `create_tool_functions` contract
   is not ported): users hand code to the agents as scripts attached in
   chat, adapted by codegen, or as MCP servers, run verbatim in any
@@ -252,7 +252,7 @@ webui/ (Vite + React + TS)  ──REST + SSE──►  scilink/server/ (FastAPI)
 | GET | `/sessions/{id}/thumb?path=&size=&cmap=` | PNG thumbnail; NPY/TIFF rendered as normalized heatmaps |
 | GET | `/sessions/{id}/table?path=&limit=` | CSV/TSV/XLSX head as JSON columns+rows |
 | GET | `/sessions/{id}/zip?path=` | zip a session subdirectory (or the whole session) |
-| GET | `/sessions/{id}/tools` | built-in tools, external (MCP) tools, connected MCP servers, `mcp_supported` |
+| GET | `/sessions/{id}/tools` | connected MCP servers with their tools, other external tools, `mcp_supported` |
 | POST | `/sessions/{id}/mcp` | connect an MCP server (`name`, `transport` stdio/sse/http, `command` or `url`, `headers`) |
 | DELETE | `/sessions/{id}/mcp/{name}` | disconnect it |
 | GET | `/sessions/{id}/delegations` | meta: the delegation ledger shaped for the sidebar tree and Telemetry tab (empty for other modes) |
