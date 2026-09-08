@@ -168,8 +168,42 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
   summary and findings, the produced files (opening in the Files tab),
   warnings and error. Both surfaces are fed by the session snapshot and
   `delegations` SSE events as the ledger changes mid-turn, and survive
-  refresh and resume. The per-agent tool sequence and worker action
-  histories (already served by `/telemetry`) are the tab's next content.
+  refresh and resume. Below the ledger, from the `/telemetry` snapshot:
+  the **tool sequence** (every tool call each layer's LLM made — meta,
+  analysis specialist, planning specialist — with the input/output shape
+  in the table and the actual arguments and result on click — a failed
+  call shows its error message inline in red instead of the shape — plus
+  a link to the full chat history in Files), the **worker agents** (each
+  sub-agent's action history with outcomes; a row expands to its actions,
+  an action to its input, result and rationale) and the **analysis
+  reports** (each analysis's claims and reasoning). Polled every 3 s while
+  a turn runs, since the tool sequence reads the agents' live message
+  lists, and refreshed on every ledger change otherwise. Each layer's
+  full chat history can be opened in Files or downloaded as JSON. Above
+  the ledger sits the **dependency graph** from the Streamlit tab, drawn
+  as plain SVG (no graphviz): the meta-agent root, one box per delegation
+  colored by status and annotated with its sub-agents, grey dispatch
+  edges, blue context edges; boxes are layered by context depth, a layer
+  wider than six wraps into rows, the parallel branches of one fan-out
+  collapse into a single stacked box with their outcome counts (30
+  branches are one node, not 30 boxes and 60 edges), every edge is routed
+  around the boxes it does not connect (straight when nothing is in the
+  way, else a sweep inside the free band between rows into the nearest
+  vertical lane that clears every box — a column gap, the strip beside a
+  row, or the canvas edge; sources in a wrapped layer sit in its last row
+  so their edges never cross a sibling row), and clicking a box expands
+  its ledger row (a fan-out box opens its first failed branch). Layout
+  and routing are a pure module (`webui/src/delegationGraph.ts`) checked
+  by `npm run check:graph` (`webui/scripts/graph_check.ts`): sixteen
+  ledger scenarios — chains, diamonds, skip edges, fan-outs with fusion
+  and a non-member consumer, two fan-outs, wide layers, a 40-deep chain,
+  20 sources into one fusion, out-of-order indices, unknown / self /
+  duplicate sources, a cycle, 45 delegations — each asserting the drawn
+  context edges equal the ledger's `context_from` relations, one
+  dispatch edge per node, endpoints on the right boxes, no edge through
+  a third box, downward flow, no overlapping boxes. Edge paths carry
+  `data-from` / `data-to` and node groups `data-node`, so the same audit
+  can be run against the rendered SVG in a browser.
 - **Skills tab** (all modes): upload custom skill `.md` files (saved under
   the session's `custom_skills/`, registered with the agent for this
   session, auto-selectable like built-ins) and browse the catalog — every
@@ -216,8 +250,7 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
   - deep links: the tab and selected file live in the URL hash, so a
     refresh (or shared link) lands on the same file.
 
-Not yet ported: simulate mode, the Skills tab's persistent-memory section, the
-Telemetry tab's per-agent tool sequence (the `/telemetry` endpoint already serves it), vibes.
+Not yet ported: simulate mode, the Skills tab's persistent-memory section, vibes.
 
 ## Architecture
 

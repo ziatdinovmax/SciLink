@@ -19,6 +19,7 @@ import { FilesPanel } from "./components/FilesPanel";
 import { PreChatHero } from "./components/PreChatHero";
 import { AnalysisInset } from "./components/AnalysisInset";
 import { DelegationsPanel } from "./components/DelegationsPanel";
+import { TelemetryDetails } from "./components/TelemetryDetails";
 import { LoginScreen } from "./components/LoginScreen";
 import { ToolsPanel } from "./components/ToolsPanel";
 import { SkillsPanel } from "./components/SkillsPanel";
@@ -547,7 +548,7 @@ export default function App() {
                 <button
                   className={tab === "telemetry" ? "active" : ""}
                   onClick={() => setTab("telemetry")}
-                  title="Delegation details (the sidebar tree is the live overview)"
+                  title="Delegation details, tool sequence, worker agents (the sidebar tree is the live overview)"
                 >
                   Telemetry
                 </button>
@@ -577,11 +578,20 @@ export default function App() {
             </div>
             {mode === "meta" && (
               <div className="tab-body" hidden={tab !== "telemetry"}>
-                <DelegationsPanel
-                  view={state.delegations}
-                  running={state.status === "running"}
-                  focus={focusDelegation}
-                />
+                <div className="telemetry-scroll">
+                  <DelegationsPanel
+                    view={state.delegations}
+                    running={state.status === "running"}
+                    focus={focusDelegation}
+                    metaMode={session.autonomy}
+                  />
+                  <TelemetryDetails
+                    sessionId={session.id}
+                    active={tab === "telemetry"}
+                    running={state.status === "running"}
+                    ledgerVersion={state.delegations}
+                  />
+                </div>
               </div>
             )}
             <div className="tab-body" hidden={tab !== "chat"}>

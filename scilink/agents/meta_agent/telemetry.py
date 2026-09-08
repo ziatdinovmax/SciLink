@@ -156,7 +156,16 @@ def _analysis_reports(base_dir: Path) -> List[Dict[str, Any]]:
 
 
 def _maybe_json(value: Any) -> Any:
-    """Parse a JSON string into a dict/list; leave anything else as-is."""
+    """Parse a JSON string into a dict/list; leave anything else as-is.
+
+    A multimodal tool message (an image-bearing result on Claude / Gemini)
+    carries ``content`` as a list of parts; its text part is the tool's
+    JSON, so that is what gets parsed — the image bytes are dropped.
+    """
+    if isinstance(value, list) and value and all(isinstance(v, dict) for v in value):
+        texts = [v.get("text") for v in value if v.get("type") == "text"]
+        if texts:
+            return _maybe_json("\n".join(str(t) for t in texts))
     if isinstance(value, str):
         try:
             return json.loads(value)

@@ -111,6 +111,61 @@ export interface DelegationView {
   sub_agents: Record<string, string[]>; // specialist -> worker agents used
 }
 
+/** GET /sessions/{id}/telemetry — the meta session's read-only snapshot
+ * (scilink.agents.meta_agent.telemetry.collect_session_telemetry). */
+export interface ToolCall {
+  tool: string;
+  args: Record<string, unknown>;
+  result: unknown;
+  status: string; // success | ok | error | pending | …
+}
+
+export interface WorkerAction {
+  timestamp: string | null;
+  action: string;
+  status: string;
+  rationale: string | null;
+  input: unknown;
+  result: unknown;
+  feedback: unknown;
+}
+
+export interface WorkerAgent {
+  specialist: string; // analysis | planning | other
+  name: string;
+  status: string | null;
+  action_count: number;
+  actions_by_type: Record<string, number>;
+  outcomes: { success: number; error: number; other: number };
+  first_timestamp: string | null;
+  last_timestamp: string | null;
+  actions: WorkerAction[];
+  source_file: string;
+}
+
+export interface AnalysisReport {
+  analysis_id: string;
+  status: string | null;
+  detailed_analysis: string;
+  claims: { claim: string | null; impact: string | null }[];
+  output_dir: string;
+  report_file: string;
+}
+
+export interface TelemetrySnapshot {
+  meta: {
+    meta_mode: string;
+    session_dir: string;
+    delegations_total: number;
+    delegations: unknown[];
+  };
+  specialists: Record<string, Record<string, unknown>>;
+  agents: WorkerAgent[];
+  sub_agents: Record<string, string[]>;
+  analysis_reports: AnalysisReport[];
+  tool_sequence: Record<string, { calls: ToolCall[]; source: string }>;
+}
+
 export interface SessionSnapshot {
   id: string;
   mode: string;
@@ -345,6 +400,7 @@ export const api = {
     req<{ entries: TreeEntry[]; truncated: boolean }>(`/sessions/${id}/tree`),
 
   delegations: (id: string) => req<DelegationView>(`/sessions/${id}/delegations`),
+  telemetry: (id: string) => req<TelemetrySnapshot>(`/sessions/${id}/telemetry`),
 
   skills: (id: string) => req<SkillCatalog>(`/sessions/${id}/skills`),
   skillMarkdown: async (id: string, domain: string, name: string) => {

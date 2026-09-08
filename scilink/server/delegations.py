@@ -113,8 +113,11 @@ def delegation_view(agent: Any, session_dir: Optional[str] = None
                                  if str(x).isdigit()],
                 "informed_by": list(e.get("informed_by") or []),
                 "fanout": bool(fan),
-                "fanout_group": (fan.get("id") or fan.get("group")
-                                 if isinstance(fan, dict) else None),
+                # run_fanout stamps ``fanout=True`` + ``parallel_group``
+                # ("fanout_<n>"); a dict-shaped marker is accepted too.
+                "fanout_group": e.get("parallel_group")
+                or (fan.get("id") or fan.get("group")
+                    if isinstance(fan, dict) else None),
                 "labels": list(e.get("labels") or []),   # fusion inputs
                 "timestamp": e.get("timestamp"),
                 "completed_at": e.get("completed_at"),
