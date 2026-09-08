@@ -2441,6 +2441,7 @@ class AnalysisOrchestratorTools:
             script_edits: List[dict] = None,
             profile: str = None,
             literature_file: str = None,
+            reference_scripts: List[str] = None,
             r2_threshold: float = None,
             max_verification_iterations: int = None,
             max_series_refits: int = None,
@@ -3068,6 +3069,25 @@ class AnalysisOrchestratorTools:
                     analyze_kwargs["prior_knowledge"] = self.orch.active_knowledge
                 if prior_analysis_paths:
                     analyze_kwargs["prior_analysis_paths"] = prior_analysis_paths
+                if reference_scripts:
+                    # User-attached scripts to ADAPT (the script-bank
+                    # semantics, but for a bare file the user handed over).
+                    # Forwarded by signature introspection like the other
+                    # optional knobs; resolved against the session dir.
+                    import inspect as _inspect
+                    _paths = [reference_scripts] if isinstance(reference_scripts, str) else list(reference_scripts)
+                    _resolved = []
+                    for _rp in _paths:
+                        _pp = Path(str(_rp))
+                        if not _pp.is_absolute():
+                            _pp = Path(self.orch.base_dir) / _pp
+                        _resolved.append(str(_pp))
+                    if "reference_scripts" in _inspect.signature(agent.analyze).parameters:
+                        analyze_kwargs["reference_scripts"] = _resolved
+                    else:
+                        self.logger.info(
+                            f"   reference_scripts ignored: "
+                            f"{self.AGENT_NAMES.get(agent_id, 'agent')} does not take them.")
                 if reuse_locked_script:
                     analyze_kwargs["reuse_locked_script"] = True
                 if script_edits:
@@ -3494,6 +3514,22 @@ class AnalysisOrchestratorTools:
                         "asserting a single answer. Leave unset (defaults to 'fitting') "
                         "for standard analyses where the sample is known."
                     )
+                },
+                "reference_scripts": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Path(s) to script(s) the USER attached and asked to be "
+                        "used (e.g. an uploaded .py under the session's scripts/ "
+                        "folder). Pass them whenever the user says to use, "
+                        "follow, or adapt their script. The agent treats each "
+                        "as a proven implementation to ADAPT — same semantics "
+                        "as a script-bank hit — keeping its method and "
+                        "parameters, conforming its I/O to the run, and "
+                        "verifying the result in its normal QC loop; it is "
+                        "never run verbatim. Absolute, or relative to the "
+                        "session directory."
+                    ),
                 },
                 "prior_analysis_paths": {
                     "type": "array",

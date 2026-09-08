@@ -72,6 +72,8 @@ _SKILL_STRICTNESS_FRAMES = (
 )
 
 
+from .._reference_scripts import reference_script_block as _reference_script_block
+
 def _skill_annealing_level(state: dict) -> int:
     """Effective skill-strictness temperature for skill injection.
 
@@ -1496,6 +1498,9 @@ class GetInitialComponentParamsController:
                 f"Prioritize these suggestions but also report any other significant features you discover.\n"
                 f"{state['analysis_hints']}"
             )
+        _ref_block = _reference_script_block(state, heading="---")
+        if _ref_block:
+            prompt_parts.append(_ref_block)
 
         _append_skill_context(prompt_parts, state, "planning")
         _append_prior_knowledge_context(prompt_parts, state)
@@ -1754,6 +1759,9 @@ class GetFinalComponentSelectionController:
                 f"Prioritize these suggestions but also report any other significant features you discover.\n"
                 f"{state['analysis_hints']}"
             )
+        _ref_block = _reference_script_block(state, heading="---")
+        if _ref_block:
+            prompt_parts.append(_ref_block)
 
         _append_auxiliary_context(prompt_parts, state)
 
@@ -2340,6 +2348,9 @@ refinement targets are meaningful here — do not request `spatial` or
                 f"Prioritize these suggestions but also report any other significant features you discover.\n"
                 f"{state['analysis_hints']}"
             )
+        _ref_block = _reference_script_block(state, heading="---")
+        if _ref_block:
+            prompt_parts.append(_ref_block)
 
         _append_skill_context(prompt_parts, state, "planning")
         _append_prior_knowledge_context(prompt_parts, state)
@@ -2449,6 +2460,9 @@ class BuildHolisticSynthesisPromptController:
                 f"Prioritize these suggestions but also report any other significant features you discover.\n"
                 f"{state['analysis_hints']}"
             )
+        _ref_block = _reference_script_block(state, heading="---")
+        if _ref_block:
+            prompt_parts.append(_ref_block)
 
         # 2. Build Context for Each Iteration
         all_images = []

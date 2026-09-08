@@ -6,6 +6,7 @@ where they expect them:
   analyze data/metadata, several   -> <session>/uploads/series/<name> (sidebar.py:1333,1365)
   plan knowledge|code|data         -> <session>/<category>/<name>    (chat_uploads.py:388)
   meta (combined dropzone)         -> <session>/uploads/<name>       (chat_uploads.py:411)
+  analyze scripts (.py etc.)       -> <session>/scripts/<name>       (attach-a-script)
 
 Folder uploads (``preserve_paths=True``) keep the client's relative layout
 under the same category root — ``uploads/<folder>/<sub>/<name>`` — so a
@@ -38,6 +39,10 @@ _CATEGORY_EXTENSIONS: Dict[str, tuple] = {
     "code": SUPPORTED_CODE_EXTENSIONS,
     "planning_data": SUPPORTED_PLANNING_DATA_EXTENSIONS,
     "meta": SUPPORTED_META_EXTENSIONS,
+    # A script the user attaches in chat to be ADAPTED by the analysis
+    # agents (run_analysis reference_scripts) — analyze mode's home for
+    # code, which its data / metadata categories rightly reject.
+    "scripts": SUPPORTED_CODE_EXTENSIONS,
 }
 
 
@@ -96,7 +101,7 @@ def _category_root(root: Path, category: str) -> Path:
     if category in ("data", "metadata", "meta"):
         return root / "uploads"
     sub = "data" if category == "planning_data" else category
-    return root / sub
+    return root / sub          # knowledge | code | scripts
 
 
 def save_folder_upload(session_dir: str, category: str,
@@ -195,7 +200,7 @@ def save_uploads(session_dir: str, category: str,
             target = root / "uploads"
     elif category == "meta":
         target = root / "uploads"
-    else:  # knowledge | code | planning_data
+    else:  # knowledge | code | planning_data | scripts
         sub = "data" if category == "planning_data" else category
         target = root / sub
     target.mkdir(parents=True, exist_ok=True)

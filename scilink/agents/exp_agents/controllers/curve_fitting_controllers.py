@@ -49,6 +49,8 @@ from ....hitl import request_human_feedback
 FIT_NAME = "fit.npy"
 
 
+from .._reference_scripts import reference_script_block as _reference_script_block
+
 def _robust_noise_sigma(residual: np.ndarray) -> float:
     """Per-point noise sigma from successive differences — robust to systematic
     structure in the residual (a trend/oscillation barely affects neighbour diffs)."""
@@ -2323,6 +2325,9 @@ class CurveFittingPlanningController:
 
         if state.get("analysis_hints"):
             prompt.append(f"\n## User Guidance\n{state['analysis_hints']}")
+        _ref_block = _reference_script_block(state, heading="##")
+        if _ref_block:
+            prompt.append(_ref_block)
 
         _append_auxiliary_context(prompt, state)
         _append_skill_context(prompt, state, "planning")
@@ -2798,6 +2803,9 @@ class CurveFittingPlanningController:
 
         if state.get("analysis_hints"):
             prompt.append(f"\n## Original Guidance\n{state['analysis_hints']}")
+        _ref_block = _reference_script_block(state, heading="##")
+        if _ref_block:
+            prompt.append(_ref_block)
 
         _append_auxiliary_context(prompt, state)
         _append_skill_context(prompt, state, "planning")
@@ -3298,6 +3306,9 @@ Your guidance: '''
         if state.get("analysis_hints"):
             context_parts.append(
                 "## User Guidance\n" + str(state["analysis_hints"]))
+        _ref_block = _reference_script_block(state, heading="##")
+        if _ref_block:
+            context_parts.append(_ref_block)
         # Identification mode is literature-free in-run (issue #323, D2):
         # literature must not shape the code that writes the fit, matching
         # the planner gates. Covers hand-supplied literature_file too.
@@ -3509,9 +3520,14 @@ Your guidance: '''
         # Keep user guidance (incl. figure-presentation preferences) visible
         # during corrections so a fix doesn't silently undo it. Injected
         # before the response footer — appended after it, guidance loses.
-        if state.get("analysis_hints"):
-            _guidance = ("\n## User Guidance\n"
-                         + str(state["analysis_hints"]) + "\n")
+        if state.get("analysis_hints") or state.get("reference_scripts"):
+            _guidance = ""
+            if state.get("analysis_hints"):
+                _guidance += ("\n## User Guidance\n"
+                              + str(state["analysis_hints"]) + "\n")
+            # The user's reference script stays visible during corrections
+            # too, so a fix does not drift away from the method they asked for.
+            _guidance += _reference_script_block(state, heading="##")
             _marker = "**Response:**"
             if _marker in prompt:
                 prompt = prompt.replace(_marker, _guidance + "\n" + _marker, 1)

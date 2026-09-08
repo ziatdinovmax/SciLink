@@ -30,6 +30,8 @@ from ...utils.text_io import read_text_utf8
 from ._deprecation import normalize_params
 
 
+from ._reference_scripts import load_reference_scripts as _load_reference_scripts
+
 def _empty_auxiliary_state() -> dict:
     """Default auxiliary state — no companion datasets loaded. ``auxiliary_items``
     is the list of per-dataset dicts (label / array / axis / plot_bytes /
@@ -213,6 +215,8 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # accepted when the task succeeds; higher => more retries. None
         # falls back to the construction default.
         max_verification_iterations: int | None = None,
+        # User-attached scripts to ADAPT (reference, like a script-bank hit).
+        reference_scripts: list | None = None,
         # Locked-script replay (harmonized re-run across sibling datasets):
         # prior_analysis_paths + reuse_locked_script=True replays the prior
         # run's APPROVED dynamic-analysis script(s) verbatim on THIS cube —
@@ -446,6 +450,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             structure_image_path=structure_image_path,
             structure_system_info=structure_system_info,
             hints=hints,
+            reference_scripts=reference_scripts,
             objective=objective,
             skill_state=skill_state,
             prior_knowledge=prior_knowledge or [],
@@ -1283,6 +1288,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         structure_system_info: Dict[str, Any] | None = None,
         objective: str | None = None,
         hints: str | None = None,
+        reference_scripts: list | None = None,
         skill_state: Dict[str, Any] | None = None,
         prior_knowledge: list | None = None,
         auxiliary_state: Dict[str, Any] | None = None,
@@ -1361,6 +1367,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "structure_image_blob": structure_image_blob,
                 "analysis_hints": hints,
                 "analysis_objective": objective,
+                "reference_scripts": _load_reference_scripts(reference_scripts),
                 "prior_knowledge": prior_knowledge or [],
                 "literature_context": literature_context,
                 # Locked-script replay: SelectRefinementTarget builds the plan
@@ -1402,6 +1409,7 @@ class HyperspectralAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
                 "instruction_prompt": instruction_prompt,
                 "analysis_hints": hints,
                 "analysis_objective": objective,
+                "reference_scripts": _load_reference_scripts(reference_scripts),
                 "prior_knowledge": prior_knowledge or [],
                 "literature_context": literature_context,
                 "result_json": None,
