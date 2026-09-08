@@ -20,6 +20,7 @@ import { PreChatHero } from "./components/PreChatHero";
 import { AnalysisInset } from "./components/AnalysisInset";
 import { DelegationsPanel } from "./components/DelegationsPanel";
 import { LoginScreen } from "./components/LoginScreen";
+import { ToolsPanel } from "./components/ToolsPanel";
 
 interface SessionState {
   snapshot: SessionSnapshot | null;
@@ -175,7 +176,7 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>(null); // init overlay text
   const [startError, setStartError] = useState<string | null>(null);
   const [serverStopped, setServerStopped] = useState(false);
-  const [tab, setTab] = useState<"chat" | "files" | "telemetry">("chat");
+  const [tab, setTab] = useState<"chat" | "files" | "telemetry" | "tools">("chat");
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   // Delegation the sidebar tree asked the Telemetry tab to expand.
   const [focusDelegation, setFocusDelegation] = useState<number | null>(null);
@@ -527,6 +528,13 @@ export default function App() {
               >
                 Files
               </button>
+              <button
+                className={tab === "tools" ? "active" : ""}
+                onClick={() => setTab("tools")}
+                title="Connect MCP servers; see what the agent can call"
+              >
+                MCP
+              </button>
               {mode === "meta" && (
                 <button
                   className={tab === "telemetry" ? "active" : ""}
@@ -547,6 +555,13 @@ export default function App() {
                 active={tab === "files"}
                 selectedPath={selectedFile}
                 onSelect={setSelectedFile}
+              />
+            </div>
+            <div className="tab-body" hidden={tab !== "tools"}>
+              <ToolsPanel
+                sessionId={session.id}
+                active={tab === "tools"}
+                localFiles={auth.local_files}
               />
             </div>
             {mode === "meta" && (

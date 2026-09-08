@@ -998,3 +998,83 @@ def test_delegation_events_during_turn(client, tmp_path):
             break
         time.sleep(0.05)
     assert "running" in statuses() and statuses()[-1] == "success"
+
+
+# ── Tools tab: inventory + MCP connect / disconnect ───────────────
+
+class _FakeMcpAgent:
+    """Mimics the orchestrators' MCP surface: openai_schemas on .tools,
+    _external_tools, _mcp_connections, connect/disconnect methods."""
+
+    def __init__(self):
+        self.tools = SimpleNamespace(openai_schemas=[
+            {"type": "function", "function": {"name": "run_analysis", "description": "Run it."}},
+            {"type": "function", "function": {"name": "examine_data", "description": "Look."}},
+        ])
+        self._external_tools = []
+        self._mcp_connections = {}
+        self.calls = []
+
+    def connect_mcp_server(self, name, command=None, url=None, env=None,
+                           transport=None, headers=None):
+        self.calls.append((name, command, url, transport, headers))
+        if url == "http://bad":
+            raise RuntimeError("connection refused")
+        schemas = [{"type": "function", "function": {"name": f"{name}_add", "description": "Add."}}]
+        self._mcp_connections[name] = SimpleNamespace(
+            tool_schemas=schemas, command=command, transport=transport or "sse")
+        self._external_tools.append({"name": f"{name}_add", "description": "Add."})
+        return 1
+
+    def disconnect_mcp_server(self, name):
+        conn = self._mcp_connections.pop(name)
+        names = {s["function"]["name"] for s in conn.tool_schemas}
+        self._external_tools = [t for t in self._external_tools if t["name"] not in names]
+
+
+def test_tools_inventory_and_mcp_lifecycle(client, tmp_path):
+    session, sdir = _fake_session(client, tmp_path)
+    session.agent = _FakeMcpAgent()
+    base = f"/api/v1/sessions/{sdir.name}"
+    inv = client.get(f"{base}/tools").json()
+    assert "builtin" not in inv                      # meta-only view would mislead
+    assert inv["external"] == [] and inv["mcp_servers"] == [] and inv["mcp_supported"]
+    # stdio connect: command split into argv
+    r = client.post(f"{base}/mcp", json={"name": "calc", "transport": "stdio",
+                                          "command": "python -m calc_server --x 1"})
+    assert r.status_code == 200 and r.json()["registered"] == 1
+    assert session.agent.calls[-1][1] == ["python", "-m", "calc_server", "--x", "1"]
+    inv = r.json()["inventory"]
+    assert inv["mcp_servers"] == [{"name": "calc", "transport": "stdio", "tools": ["calc_add"]}]
+    assert inv["external"] == [{"name": "calc_add", "description": "Add."}]
+    # duplicate name → 409; http transport with headers; failure → 400
+    assert client.post(f"{base}/mcp", json={"name": "calc", "transport": "stdio", "command": "x"}).status_code == 409
+    r = client.post(f"{base}/mcp", json={"name": "remote", "transport": "http",
+                                          "url": "https://h/mcp", "headers": {"Authorization": "Bearer t"}})
+    assert r.status_code == 200 and session.agent.calls[-1][3] == "http"
+    assert session.agent.calls[-1][4] == {"Authorization": "Bearer t"}
+    r = client.post(f"{base}/mcp", json={"name": "bad", "transport": "sse", "url": "http://bad"})
+    assert r.status_code == 400 and "connection refused" in r.json()["detail"]
+    assert client.post(f"{base}/mcp", json={"name": "", "transport": "stdio", "command": "x"}).status_code == 400
+    assert client.post(f"{base}/mcp", json={"name": "z", "transport": "carrier-pigeon"}).status_code == 400
+    # disconnect
+    r = client.delete(f"{base}/mcp/calc")
+    assert r.status_code == 200 and [s["name"] for s in r.json()["inventory"]["mcp_servers"]] == ["remote"]
+    assert client.delete(f"{base}/mcp/calc").status_code == 404
+    # an agent without MCP support
+    session.agent = SimpleNamespace()
+    inv = client.get(f"{base}/tools").json()
+    assert inv["mcp_supported"] is False and inv["mcp_servers"] == []
+    assert client.post(f"{base}/mcp", json={"name": "a", "transport": "stdio", "command": "x"}).status_code == 400
+
+
+def test_mcp_header_env_expansion_only_when_local(tmp_path, monkeypatch):
+    from scilink.server.tools_api import connect_mcp
+    monkeypatch.setenv("MY_TOK", "s3cret")
+    agent = _FakeMcpAgent()
+    connect_mcp(agent, name="a", transport="http", url="https://h",
+                headers={"Authorization": "Bearer ${MY_TOK}"}, expand_env=True)
+    assert agent.calls[-1][4]["Authorization"] == "Bearer s3cret"
+    connect_mcp(agent, name="b", transport="http", url="https://h",
+                headers={"Authorization": "Bearer ${MY_TOK}"}, expand_env=False)
+    assert agent.calls[-1][4]["Authorization"] == "Bearer ${MY_TOK}"

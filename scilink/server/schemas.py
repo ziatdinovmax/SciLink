@@ -57,3 +57,14 @@ class LoginRequest(BaseModel):
     """Access token → session cookie (POST /auth/login)."""
 
     token: str
+
+
+
+class MCPConnectRequest(BaseModel):
+    """Connect an MCP server to the session's agent (POST /mcp)."""
+
+    name: str
+    transport: str = "stdio"            # stdio | sse | http
+    command: str = ""                   # stdio: "npx -y @scope/server /path"
+    url: str = ""                       # sse / http
+    headers: Optional[Dict[str, str]] = None
