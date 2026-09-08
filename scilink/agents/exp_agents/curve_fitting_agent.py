@@ -55,6 +55,8 @@ from .instruct import (
 logger = logging.getLogger(__name__)
 
 
+from ._reference_scripts import load_reference_scripts as _load_reference_scripts
+
 def _empty_auxiliary_state() -> dict:
     """Default auxiliary state — no companion datasets loaded. ``auxiliary_items``
     is the list of per-dataset dicts (label / array / axis / plot_bytes /
@@ -314,6 +316,8 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         max_model_retries: Optional[int] = None,
         outlier_sigma: Optional[float] = None,
         max_verification_iterations: Optional[int] = None,
+        # User-attached scripts to ADAPT (reference, like a script-bank hit).
+        reference_scripts: Optional[List[str]] = None,
         max_series_refits: Optional[int] = None,
         # Annealing schedule start level for THIS run (None/0 = current
         # behavior: start frozen at T=0 and escalate adaptively). A re-run may
@@ -860,6 +864,7 @@ class CurveFittingAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
 
             # Prior curve-fit runs — artifacts surfaced to planner / script-gen
             "prior_analysis_paths": prior_analysis_paths or [],
+            "reference_scripts": _load_reference_scripts(reference_scripts),
             # Opt-in: force verbatim reuse of the prior locked script (#172).
             # Default False — prior runs are agent-judged reference material.
             "reuse_locked_script": bool(reuse_locked_script),

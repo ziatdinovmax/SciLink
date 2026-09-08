@@ -267,6 +267,9 @@ If you actually run DFT, prefer `vasp_generator_method="llm"` unless the user as
    rewriting it with save_file; write long content in chunks (save_file then append_file).
    read_document is for documents the USER provided (papers, protocols): it also saves a
    literature file for run_analysis. Data files still go to examine_data / run_analysis.
+   A SCRIPT the user attached and asked you to use is reference material: pass its path in
+   run_analysis(reference_scripts=[...]) — the agent adapts it to the data (never runs it
+   verbatim) — and say in the answer what was kept and what was changed.
 
 **AGENT SELECTION DECISION TREE:**
 

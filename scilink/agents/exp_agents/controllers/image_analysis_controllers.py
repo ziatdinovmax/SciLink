@@ -52,6 +52,8 @@ from ....hitl import request_human_feedback
 _VERIFICATION_IMAGE_CAP_BYTES = int(4.5 * 1024 * 1024)
 
 
+from .._reference_scripts import reference_script_block as _reference_script_block
+
 def _fit_image_under_api_cap(
     image_bytes: bytes, cap: int = _VERIFICATION_IMAGE_CAP_BYTES
 ) -> tuple[bytes, str]:
@@ -1232,6 +1234,9 @@ class ImagePlanningController:
 
         if state.get("analysis_hints"):
             prompt.append(f"\n## User Guidance\n{state['analysis_hints']}")
+        _ref_block = _reference_script_block(state, heading="##")
+        if _ref_block:
+            prompt.append(_ref_block)
 
         _append_auxiliary_context(prompt, state)
         _append_tool_inventory(prompt, agent="image_analysis", active_skills=_active_skill_names(state))
@@ -1616,6 +1621,9 @@ class ImagePlanningController:
 
         if state.get("analysis_hints"):
             prompt.append(f"\n## Original Guidance\n{state['analysis_hints']}")
+        _ref_block = _reference_script_block(state, heading="##")
+        if _ref_block:
+            prompt.append(_ref_block)
 
         _append_auxiliary_context(prompt, state)
         _append_tool_inventory(prompt, agent="image_analysis", active_skills=_active_skill_names(state))
@@ -2088,6 +2096,9 @@ Your guidance: '''
         if state.get("analysis_hints"):
             context_parts.append(
                 "## User Guidance\n" + str(state["analysis_hints"]))
+        _ref_block = _reference_script_block(state, heading="##")
+        if _ref_block:
+            context_parts.append(_ref_block)
         # Authoritative calibration: when the caller supplied spatial metadata it
         # is staged as ``metadata.json`` in the working directory (see
         # stage_and_run). Point the generated script at it so pixel size and the
@@ -2362,9 +2373,14 @@ Your guidance: '''
         # Keep user guidance (incl. figure-presentation preferences) visible
         # during corrections so a fix doesn't silently undo it. Injected
         # before the response footer — appended after it, guidance loses.
-        if state.get("analysis_hints"):
-            _guidance = ("\n## User Guidance\n"
-                         + str(state["analysis_hints"]) + "\n")
+        if state.get("analysis_hints") or state.get("reference_scripts"):
+            _guidance = ""
+            if state.get("analysis_hints"):
+                _guidance += ("\n## User Guidance\n"
+                              + str(state["analysis_hints"]) + "\n")
+            # The user's reference script stays visible during corrections
+            # too, so a fix does not drift away from the method they asked for.
+            _guidance += _reference_script_block(state, heading="##")
             _marker = "**Response:**"
             if _marker in prompt:
                 prompt = prompt.replace(_marker, _guidance + "\n" + _marker, 1)

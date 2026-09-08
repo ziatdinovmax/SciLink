@@ -56,7 +56,10 @@ export function ChatPanel({
   const categoryFor = (name: string): string => {
     const e = name.slice(name.lastIndexOf(".") + 1).toLowerCase();
     if (mode === "meta") return "meta";
-    if (mode === "analyze") return e === "json" ? "metadata" : "data";
+    if (mode === "analyze")
+      return e === "json" ? "metadata"
+        : ["py", "yaml", "yml", "md"].includes(e) ? "scripts"
+        : "data";
     // plan mode
     if (["py", "yaml", "yml"].includes(e)) return "code";
     if (["csv", "xlsx", "tsv", "npy", "json", "txt"].includes(e))
@@ -84,11 +87,18 @@ export function ChatPanel({
     }
     setUploadNote(null);
     const quoted = paths.map((p) => `\`${p}\``).join(", ");
+    // A script attached in chat is reference material the agent adapts —
+    // the draft says so, so the user's next words are about what to do
+    // with it rather than about how it was uploaded.
+    const scripts = paths.filter((p) => /\.(py|jl|r|m)$/i.test(p));
     setDraft((d) => {
       const mention =
-        paths.length === 1 && mode === "analyze" && !d
-          ? `I uploaded a data file at ${quoted}. Please examine it.`
-          : `I uploaded ${paths.length} file(s): ${quoted}.`;
+        scripts.length === paths.length && paths.length > 0 && mode !== "meta"
+          ? `I attached my script ${quoted} — use it as the reference implementation ` +
+            `(adapt it to the data as needed) and tell me what you kept and changed.`
+          : paths.length === 1 && mode === "analyze" && !d
+            ? `I uploaded a data file at ${quoted}. Please examine it.`
+            : `I uploaded ${paths.length} file(s): ${quoted}.`;
       return d ? `${d.trimEnd()}\n\n${mention} ` : `${mention} `;
     });
     inputRef.current?.focus();

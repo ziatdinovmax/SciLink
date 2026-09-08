@@ -63,6 +63,8 @@ from .instruct import (
 logger = logging.getLogger(__name__)
 
 
+from ._reference_scripts import load_reference_scripts as _load_reference_scripts
+
 def _empty_auxiliary_state() -> dict:
     """Default auxiliary state — no companion datasets loaded. ``auxiliary_items``
     is the list of per-dataset dicts (label / array / axis / plot_bytes /
@@ -261,6 +263,8 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
         # verification loop; higher => more refinement passes. None
         # falls back to the construction default.
         max_verification_iterations: Optional[int] = None,
+        # User-attached scripts to ADAPT (reference, like a script-bank hit).
+        reference_scripts: Optional[List[str]] = None,
         # Number of independent anchor-analysis attempts run in parallel;
         # an LLM judge compares finished attempts (scores + visualizations)
         # and locks the winner. Default 1 = no fan-out.
@@ -532,6 +536,7 @@ class ImageAnalysisAgent(SimpleFeedbackMixin, BaseAnalysisAgent):
             "series_metadata": series_metadata or {},
             "analysis_hints": hints,
             "analysis_objective": objective,
+            "reference_scripts": _load_reference_scripts(reference_scripts),
             # Annealing schedule start level (None/0 = start frozen at T=0).
             "_starting_annealing_level": starting_annealing_level,
             # Auxiliary reference data

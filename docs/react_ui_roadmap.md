@@ -66,7 +66,11 @@ restart, resume).
    read / edit / write surface it lacks. Prerequisite for anything
    script-shaped in analyze mode (next item) and it folds three
    diverging copies back onto one.
-5. **Attach a script in chat.** Accept `.py` through the paperclip in
+5. ~~**Attach a script in chat**~~ — DONE 2026-09-08: `.py` via the
+   paperclip → `scripts/`; `run_analysis(reference_scripts=[...])`;
+   `_reference_scripts.py` renders the script wherever the agents show the
+   user's guidance (planning, codegen, refinement, correction) with
+   script-bank semantics (adapt, never verbatim). Was: Accept `.py` through the paperclip in
    every mode. Plan mode then already closes the loop (read → edit →
    `generate_implementation_code`). Analyze mode gets a
    `reference_script` argument on `run_analysis` that injects the file's

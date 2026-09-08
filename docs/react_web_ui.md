@@ -130,6 +130,16 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
   validated server-side and enumerated into the dispatch prompt, with the
   plan agent's resource dirs repointed at the stable folders so KB indexes
   are reused across sessions.
+- **Attach a script** (beyond Streamlit): a `.py` (or `.yaml` / `.md`)
+  dropped on the paperclip in analyze mode lands in the session's
+  `scripts/` folder and the draft says "use it as the reference
+  implementation". The orchestrator passes it to `run_analysis(
+  reference_scripts=[...])`; the analysis agent treats it like a script-bank
+  hit — adapts it to the data (method and parameters kept, I/O conformed
+  to the run's contract), verifies the result in its normal QC loop, and
+  reports what it kept and changed. It is never run verbatim; for verbatim
+  execution use MCP. Plan mode already reads and edits uploaded code
+  (`code/`); meta hands the path through to the analysis child.
 - **Folder uploads** (beyond Streamlit): every dropzone takes a dropped
   directory (walked recursively via the FileSystem entry API), and a click
   on the dropzone or the chat paperclip opens a two-item menu, "Upload
@@ -244,7 +254,7 @@ webui/ (Vite + React + TS)  ──REST + SSE──►  scilink/server/ (FastAPI)
 | GET | `/sessions/{id}/events` | SSE: `log`, `status`, `question`, `question_cleared`, `assistant_message`, `session_named`, `files_changed`, `analysis_image`, `delegations`, `error` |
 | POST | `/sessions/{id}/feedback` | answer the parked HITL question |
 | POST | `/sessions/{id}/stop` | stop the running turn |
-| POST | `/sessions/{id}/uploads` | multipart, `category` = data/metadata/knowledge/code/planning_data/meta; optional `paths` (JSON list of relative paths, one per file) makes it a layout-preserving folder upload |
+| POST | `/sessions/{id}/uploads` | multipart, `category` = data/metadata/knowledge/code/planning_data/meta/scripts; optional `paths` (JSON list of relative paths, one per file) makes it a layout-preserving folder upload |
 | POST | `/sessions/{id}/folders` | validate pasted local folder paths + enumerate tabular contents and immediate subfolders |
 | POST | `/sessions/{id}/plan_dirs` | repoint the plan agent's knowledge/code/data dirs at stable folders |
 | GET | `/sessions/{id}/files?path=` | serve a session file (traversal-fenced) |
