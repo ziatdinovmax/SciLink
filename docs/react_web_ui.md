@@ -75,6 +75,14 @@ authenticating reverse proxy.
   the agent subfolder by subfolder with absolute paths, since the agents'
   own directory listings are one level deep. The meta's `inspect_uploads`
   now reports subfolders and takes `recursive=true`.
+- **Delegations tab** (meta sessions): a live mission-control view of the
+  delegation ledger — grouped by specialist with the worker agents each
+  used, rows colored by status with start time and elapsed/duration,
+  context-flow edges ("← #1"), fan-out / timed-out / resumed tags, and a
+  click that expands the task, the specialist's summary and findings, the
+  produced files (opening in the Files tab), warnings and error. Fed by
+  the session snapshot and `delegations` SSE events as the ledger changes
+  mid-turn; survives refresh and resume.
 - **Sessions**: the server holds many live sessions; the sidebar lists the
   others with one-click switching, Detach leaves a session running while
   you start or join another, and the welcome screen offers reattach when
@@ -103,7 +111,8 @@ authenticating reverse proxy.
   - deep links: the tab and selected file live in the URL hash, so a
     refresh (or shared link) lands on the same file.
 
-Not yet ported: simulate mode, the Tools / Skills / Telemetry tabs, vibes.
+Not yet ported: simulate mode, the Tools / Skills tabs, the Telemetry tab's
+per-agent tool sequence (the `/telemetry` endpoint already serves it), vibes.
 
 ## Architecture
 
@@ -140,7 +149,7 @@ webui/ (Vite + React + TS)  ──REST + SSE──►  scilink/server/ (FastAPI)
 | POST | `/sessions` | create, or resume with `resume_dir` |
 | GET/PATCH | `/sessions/{id}` | snapshot / rename |
 | POST | `/sessions/{id}/messages` | start a turn (409 while one runs) |
-| GET | `/sessions/{id}/events` | SSE: `log`, `status`, `question`, `question_cleared`, `assistant_message`, `session_named`, `files_changed`, `analysis_image`, `error` |
+| GET | `/sessions/{id}/events` | SSE: `log`, `status`, `question`, `question_cleared`, `assistant_message`, `session_named`, `files_changed`, `analysis_image`, `delegations`, `error` |
 | POST | `/sessions/{id}/feedback` | answer the parked HITL question |
 | POST | `/sessions/{id}/stop` | stop the running turn |
 | POST | `/sessions/{id}/uploads` | multipart, `category` = data/metadata/knowledge/code/planning_data/meta; optional `paths` (JSON list of relative paths, one per file) makes it a layout-preserving folder upload |
@@ -151,6 +160,8 @@ webui/ (Vite + React + TS)  ──REST + SSE──►  scilink/server/ (FastAPI)
 | GET | `/sessions/{id}/thumb?path=&size=&cmap=` | PNG thumbnail; NPY/TIFF rendered as normalized heatmaps |
 | GET | `/sessions/{id}/table?path=&limit=` | CSV/TSV/XLSX head as JSON columns+rows |
 | GET | `/sessions/{id}/zip?path=` | zip a session subdirectory (or the whole session) |
+| GET | `/sessions/{id}/delegations` | meta: the delegation ledger shaped for the Delegations tab (empty for other modes) |
+| GET | `/sessions/{id}/telemetry` | meta: full read-only telemetry snapshot (ledger, worker action histories, analysis reasoning, tool sequence) |
 | GET | `/sessions/{id}/provenance` | tool-call timeline from every `events.jsonl` under the session |
 | DELETE | `/sessions/{id}` | reset: stop and drop the live session (dir stays resumable) |
 | POST | `/quit` | shut the server down |
