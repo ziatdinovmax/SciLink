@@ -7,8 +7,8 @@ from .. import auth
 
 MODEL_OPTIONS = [
     "claude-opus-4-6",
-    "gemini-3.1-pro-preview",
-    "gpt-5.4",
+    "gemini-3.8-flash",
+    "gpt-5.6-sol",
     # Amazon Bedrock (Claude Opus 4.8) via the US geo cross-region inference
     # profile (exact ID from the AWS model card; Opus 4.8 has no date stamp and
     # no version suffix). Invoke-able only through an inference profile, hence
