@@ -84,14 +84,20 @@ authenticating reverse proxy.
   the agent subfolder by subfolder with absolute paths, since the agents'
   own directory listings are one level deep. The meta's `inspect_uploads`
   now reports subfolders and takes `recursive=true`.
-- **Delegations tab** (meta sessions): a live mission-control view of the
-  delegation ledger — grouped by specialist with the worker agents each
-  used, rows colored by status with start time and elapsed/duration,
-  context-flow edges ("← #1"), fan-out / timed-out / resumed tags, and a
-  click that expands the task, the specialist's summary and findings, the
-  produced files (opening in the Files tab), warnings and error. Fed by
-  the session snapshot and `delegations` SSE events as the ledger changes
-  mid-turn; survives refresh and resume.
+- **Mission-control tree** (meta sessions, sidebar — as in Streamlit): a
+  compact live tree of the delegation ledger under the session section —
+  specialist branches, one line per delegation with status glyph, index,
+  short label and context-flow edges ("←#1"), colored by status, pulsing
+  while running, in a bounded scroll box. Always visible while you chat.
+- **Telemetry tab** (meta sessions): the detail behind the tree — grouped
+  by specialist with the worker agents each used, rows with start time and
+  elapsed/duration, fan-out / timed-out / resumed tags, and a click (or a
+  click on a sidebar tree row) that expands the task, the specialist's
+  summary and findings, the produced files (opening in the Files tab),
+  warnings and error. Both surfaces are fed by the session snapshot and
+  `delegations` SSE events as the ledger changes mid-turn, and survive
+  refresh and resume. The per-agent tool sequence and worker action
+  histories (already served by `/telemetry`) are the tab's next content.
 - **Sessions**: the server holds many live sessions; the sidebar lists the
   others with one-click switching, Detach leaves a session running while
   you start or join another, and the welcome screen offers reattach when
@@ -169,7 +175,7 @@ webui/ (Vite + React + TS)  ──REST + SSE──►  scilink/server/ (FastAPI)
 | GET | `/sessions/{id}/thumb?path=&size=&cmap=` | PNG thumbnail; NPY/TIFF rendered as normalized heatmaps |
 | GET | `/sessions/{id}/table?path=&limit=` | CSV/TSV/XLSX head as JSON columns+rows |
 | GET | `/sessions/{id}/zip?path=` | zip a session subdirectory (or the whole session) |
-| GET | `/sessions/{id}/delegations` | meta: the delegation ledger shaped for the Delegations tab (empty for other modes) |
+| GET | `/sessions/{id}/delegations` | meta: the delegation ledger shaped for the sidebar tree and Telemetry tab (empty for other modes) |
 | GET | `/sessions/{id}/telemetry` | meta: full read-only telemetry snapshot (ledger, worker action histories, analysis reasoning, tool sequence) |
 | GET | `/sessions/{id}/provenance` | tool-call timeline from every `events.jsonl` under the session |
 | DELETE | `/sessions/{id}` | reset: stop and drop the live session (dir stays resumable) |

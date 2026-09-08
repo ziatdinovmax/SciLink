@@ -46,12 +46,17 @@ function elapsed(start?: string | null, end?: string | null): string {
 export function DelegationsPanel({
   view,
   running,
+  focus = null,
 }: {
   view: DelegationView | null;
   running: boolean;
+  focus?: number | null; // a delegation the sidebar tree asked to expand
 }) {
   const ui = useContext(UIContext);
   const [open, setOpen] = useState<number | null>(null);
+  useEffect(() => {
+    if (focus != null) setOpen(focus);
+  }, [focus]);
   const rows = view?.delegations ?? [];
   const subAgents = view?.sub_agents ?? {};
 
