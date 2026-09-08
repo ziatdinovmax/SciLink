@@ -323,6 +323,27 @@ def create_app(session_root: Path, serve_frontend: bool = True) -> FastAPI:
         return build_tree(session.session_dir,
                           new_since=session.turn_started_at)
 
+    @app.get("/api/v1/sessions/{session_id}/delegations")
+    def get_delegations(session_id: str):
+        """The meta session's delegation ledger for the Delegations tab
+        (same payload as the `delegations` SSE event). Empty for other
+        modes rather than an error, so the client can call it blindly."""
+        session = _session_or_404(session_id)
+        from .delegations import delegation_view
+        if session.mode != "meta":
+            return {"delegations": [], "sub_agents": {}}
+        return delegation_view(session.agent, session.session_dir)
+
+    @app.get("/api/v1/sessions/{session_id}/telemetry")
+    def get_telemetry(session_id: str):
+        """Full read-only telemetry snapshot (ledger, worker action
+        histories, analysis reasoning, per-agent tool sequence) — the
+        reader behind the Streamlit Telemetry tab, exposed for the web
+        UI's future Telemetry view."""
+        session = _session_or_404(session_id)
+        from scilink.agents.meta_agent.telemetry import collect_session_telemetry
+        return collect_session_telemetry(session.agent)
+
     @app.get("/api/v1/sessions/{session_id}/provenance")
     def get_provenance(session_id: str):
         session = _session_or_404(session_id)

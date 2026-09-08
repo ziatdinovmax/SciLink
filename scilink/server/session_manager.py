@@ -431,12 +431,23 @@ class SessionManager:
                     live_log = turn.live_capture.getvalue()
                 except Exception:
                     pass
+        delegations = None
+        if session.mode == "meta":
+            from .delegations import delegation_view
+            try:
+                delegations = delegation_view(session.agent, session.session_dir)
+            except Exception:  # noqa: BLE001 - the tab degrades, the snapshot must not
+                delegations = None
         return {
             "id": session.id,
             "mode": session.mode,
             "model": session.model,
             "autonomy": session.autonomy,
             "status": session.status,
+            # Meta sessions: the delegation ledger shaped for the
+            # Delegations tab (None for the other modes). Kept in sync
+            # mid-turn by `delegations` SSE events from the turn watcher.
+            "delegations": delegations,
             "name": load_session_name(session.session_dir),
             "session_dir": session.session_dir,
             # Copy: the runner thread appends to this list mid-turn, and

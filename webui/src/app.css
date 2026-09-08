@@ -650,3 +650,61 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 .inset-count { font-size: 11.5px; color: var(--text-dim); font-variant-numeric: tabular-nums; min-width: 76px; text-align: center; }
 
 .inset-figure { cursor: pointer; }
+
+/* ── Delegations tab (meta) ─────────────────────────────────── */
+.tab-count {
+  margin-left: 6px; padding: 0 6px; border-radius: 9px; font-size: 11px;
+  background: var(--bg-card); border: 1px solid var(--border); color: var(--text-muted);
+}
+.deleg-panel { flex: 1; overflow: auto; padding: 16px 8%; }
+.deleg-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; }
+.deleg-title { font-weight: 600; font-size: 15px; }
+.deleg-empty { margin-top: 24px; text-align: center; }
+.deleg-group { margin-bottom: 14px; }
+.deleg-group-head {
+  display: flex; align-items: center; gap: 8px; padding: 6px 0;
+  font-weight: 600; text-transform: capitalize; color: var(--text-muted);
+}
+.deleg-group-name { text-transform: capitalize; }
+.deleg-subagents { text-transform: none; font-weight: 400; }
+.deleg-row {
+  border: 1px solid var(--border); border-left: 3px solid var(--text-dim);
+  border-radius: 8px; margin: 4px 0 4px 18px; background: var(--bg-card);
+}
+.deleg-row.status-success { border-left-color: #3fb950; }
+.deleg-row.status-error { border-left-color: #f85149; }
+.deleg-row.status-running { border-left-color: #d29922; }
+.deleg-row.status-interrupted, .deleg-row.status-cancelled { border-left-color: #8893a5; }
+.deleg-row-main {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  border: none; background: none; padding: 8px 10px; color: var(--text);
+  font-size: 13px; cursor: pointer; border-radius: 8px;
+}
+.deleg-row-main:hover { background: var(--bg-panel); border: none; }
+.deleg-glyph { width: 16px; text-align: center; }
+.status-success .deleg-glyph { color: #3fb950; }
+.status-error .deleg-glyph { color: #f85149; }
+.status-running .deleg-glyph { color: #d29922; animation: deleg-pulse 1.2s ease-in-out infinite; }
+@keyframes deleg-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+.deleg-idx { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.deleg-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.deleg-ctx { color: #58a6ff; font-size: 12px; white-space: nowrap; }
+.deleg-tag {
+  font-size: 11px; padding: 0 6px; border-radius: 9px;
+  border: 1px solid var(--border); color: var(--text-muted);
+}
+.deleg-tag.warn { color: #d29922; border-color: #d29922; }
+.deleg-meta { white-space: nowrap; }
+.deleg-detail { padding: 4px 12px 10px 34px; font-size: 13px; }
+.deleg-field { display: grid; grid-template-columns: 96px 1fr; gap: 8px; margin: 6px 0; }
+.deleg-k { color: var(--text-dim); }
+.deleg-summary { white-space: pre-wrap; }
+.deleg-list { margin: 0; padding-left: 18px; }
+.deleg-list.warn { color: #d29922; }
+.deleg-files { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.deleg-chip {
+  display: inline-block; margin: 0 6px 4px 0; padding: 0 8px; border-radius: 9px;
+  border: 1px solid var(--border); font-size: 12px;
+}
+.deleg-error { color: #f85149; white-space: pre-wrap; }
+
