@@ -160,6 +160,18 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
   `delegations` SSE events as the ledger changes mid-turn, and survive
   refresh and resume. The per-agent tool sequence and worker action
   histories (already served by `/telemetry`) are the tab's next content.
+- **Tools tab** (all modes): connect MCP servers — a `stdio` command, an
+  SSE URL, or a streamable-HTTP URL with optional JSON headers — and see
+  what the session's agent can call: each server's tools, other registered
+  external tools, and the built-in orchestrator tools with a filter.
+  Disconnect from the same panel. There is deliberately no tool-file
+  uploader (the Streamlit `tool_schemas` / `create_tool_functions` contract
+  is not ported): users hand code to the agents as scripts attached in
+  chat, adapted by codegen, or as MCP servers, run verbatim in any
+  language. A `stdio` command runs on the server's machine — the same
+  trust as the agents' own code execution, which every session consents
+  to; on a shared server `${VAR}` in header values is not expanded from
+  the server environment.
 - **Sessions**: the server holds many live sessions; the sidebar lists the
   others with one-click switching, Detach leaves a session running while
   you start or join another, and the welcome screen offers reattach when
@@ -188,8 +200,8 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
   - deep links: the tab and selected file live in the URL hash, so a
     refresh (or shared link) lands on the same file.
 
-Not yet ported: simulate mode, the Tools / Skills tabs, the Telemetry tab's
-per-agent tool sequence (the `/telemetry` endpoint already serves it), vibes.
+Not yet ported: simulate mode, the Skills tab, the Telemetry tab's per-agent
+tool sequence (the `/telemetry` endpoint already serves it), vibes.
 
 ## Architecture
 
@@ -240,6 +252,9 @@ webui/ (Vite + React + TS)  ──REST + SSE──►  scilink/server/ (FastAPI)
 | GET | `/sessions/{id}/thumb?path=&size=&cmap=` | PNG thumbnail; NPY/TIFF rendered as normalized heatmaps |
 | GET | `/sessions/{id}/table?path=&limit=` | CSV/TSV/XLSX head as JSON columns+rows |
 | GET | `/sessions/{id}/zip?path=` | zip a session subdirectory (or the whole session) |
+| GET | `/sessions/{id}/tools` | built-in tools, external (MCP) tools, connected MCP servers, `mcp_supported` |
+| POST | `/sessions/{id}/mcp` | connect an MCP server (`name`, `transport` stdio/sse/http, `command` or `url`, `headers`) |
+| DELETE | `/sessions/{id}/mcp/{name}` | disconnect it |
 | GET | `/sessions/{id}/delegations` | meta: the delegation ledger shaped for the sidebar tree and Telemetry tab (empty for other modes) |
 | GET | `/sessions/{id}/telemetry` | meta: full read-only telemetry snapshot (ledger, worker action histories, analysis reasoning, tool sequence) |
 | GET | `/sessions/{id}/provenance` | tool-call timeline from every `events.jsonl` under the session |

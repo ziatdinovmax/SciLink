@@ -208,6 +208,13 @@ export interface FolderCheck {
   subdirs: { path: string; n_files: number }[];
 }
 
+export interface ToolInventory {
+  builtin: { name: string; description: string }[];
+  external: { name: string; description: string }[];
+  mcp_servers: { name: string; transport: string; tools: string[] }[];
+  mcp_supported: boolean;
+}
+
 export interface CreateSessionBody {
   mode: string;
   model: string;
@@ -333,6 +340,17 @@ export const api = {
     req<{ entries: TreeEntry[]; truncated: boolean }>(`/sessions/${id}/tree`),
 
   delegations: (id: string) => req<DelegationView>(`/sessions/${id}/delegations`),
+
+  tools: (id: string) => req<ToolInventory>(`/sessions/${id}/tools`),
+  connectMcp: (
+    id: string,
+    body: { name: string; transport: string; command?: string; url?: string; headers?: Record<string, string> },
+  ) => req<{ registered: number; inventory: ToolInventory }>(`/sessions/${id}/mcp`, json(body)),
+  disconnectMcp: (id: string, server: string) =>
+    req<{ ok: boolean; inventory: ToolInventory }>(
+      `/sessions/${id}/mcp/${encodeURIComponent(server)}`,
+      { method: "DELETE" },
+    ),
 
   provenance: (id: string) =>
     req<{ events: ProvenanceEvent[] }>(`/sessions/${id}/provenance`),

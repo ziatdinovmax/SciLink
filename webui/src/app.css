@@ -737,3 +737,21 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 .login-form input { flex: 1; }
 .signed-in { margin: 0 0 8px; }
 
+
+
+/* ── Tools tab ───────────────────────────────────────────────── */
+.tools-panel { flex: 1; overflow: auto; padding: 16px 8%; }
+.tools-section { margin-bottom: 22px; }
+.tools-section h3 { font-size: 15px; margin: 0 0 6px; }
+.tools-toggle { font-size: 15px; font-weight: 600; color: var(--text); }
+.mcp-form { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
+.mcp-transport { display: flex; gap: 14px; align-items: center; font-size: 13px; }
+.mcp-row { display: flex; gap: 8px; }
+.mcp-row input { flex: 0 0 180px; }
+.mcp-row input.mcp-addr { flex: 1; }
+.mcp-server { border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; margin-top: 8px; background: var(--bg-card); }
+.mcp-server-head { display: flex; align-items: center; gap: 4px; }
+.mcp-server-head .icon-btn { margin-left: auto; }
+.tool-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.tool-list { margin: 6px 0 0; padding-left: 18px; font-size: 13px; }
+.tool-list li { margin: 3px 0; }

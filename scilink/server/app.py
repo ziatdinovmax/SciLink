@@ -34,6 +34,7 @@ from .schemas import (
     FeedbackResponseRequest,
     FolderCheckRequest,
     LoginRequest,
+    MCPConnectRequest,
     PlanDirsRequest,
     RenameSessionRequest,
     SendMessageRequest,
@@ -424,6 +425,44 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         from .tree import build_tree
         return build_tree(session.session_dir,
                           new_since=session.turn_started_at)
+
+    # ── tools / MCP ──────────────────────────────────────────────
+
+    @app.get("/api/v1/sessions/{session_id}/tools")
+    def get_tools(request: Request, session_id: str):
+        """What the session's agent can call: built-in tools, external
+        (MCP) tools, and the connected MCP servers."""
+        from .tools_api import tool_inventory
+        return tool_inventory(_session_or_404(request, session_id).agent)
+
+    @app.post("/api/v1/sessions/{session_id}/mcp")
+    def connect_mcp_server(request: Request, session_id: str,
+                           body: MCPConnectRequest):
+        """Connect an MCP server (stdio command, SSE or streamable-HTTP
+        URL) and register its tools with the agent. A stdio command runs
+        on the server's machine — the same trust as the agents' own code
+        execution, which every session already consents to."""
+        from .tools_api import MCPError, connect_mcp, tool_inventory
+        session = _session_or_404(request, session_id)
+        try:
+            n = connect_mcp(session.agent, name=body.name,
+                            transport=body.transport, command=body.command,
+                            url=body.url, headers=body.headers,
+                            expand_env=local_files)
+        except MCPError as exc:
+            raise HTTPException(exc.status, str(exc))
+        return {"registered": n, "inventory": tool_inventory(session.agent)}
+
+    @app.delete("/api/v1/sessions/{session_id}/mcp/{server_name}")
+    def disconnect_mcp_server(request: Request, session_id: str,
+                              server_name: str):
+        from .tools_api import MCPError, disconnect_mcp, tool_inventory
+        session = _session_or_404(request, session_id)
+        try:
+            disconnect_mcp(session.agent, server_name)
+        except MCPError as exc:
+            raise HTTPException(exc.status, str(exc))
+        return {"ok": True, "inventory": tool_inventory(session.agent)}
 
     @app.get("/api/v1/sessions/{session_id}/delegations")
     def get_delegations(request: Request, session_id: str):
