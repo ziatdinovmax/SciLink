@@ -780,3 +780,9 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 .tel-report .tel-json { margin: 8px 0; }
 .tel-report .file-chip-btn { margin-top: 4px; }
 
+/* Delegation dependency graph (SVG twin of the Streamlit graphviz chart) */
+.deleg-graph-wrap { margin: 4px 0 18px; overflow-x: auto; }
+.deleg-graph { display: block; max-width: 100%; height: auto; }
+.deleg-graph-node:hover rect { filter: brightness(1.12); }
+.link-btn[download] { text-decoration: none; }
+

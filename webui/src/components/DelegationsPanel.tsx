@@ -1,6 +1,7 @@
 import { useContext, useEffect, useMemo, useState } from "react";
 import type { DelegationRow, DelegationView } from "../api";
 import { UIContext } from "../UIContext";
+import { DelegationGraph } from "./DelegationGraph";
 
 /** Mission-control view of the meta session's delegation ledger — the web
  * twin of the Streamlit sidebar tree + telemetry graph. Grouped by
@@ -47,10 +48,12 @@ export function DelegationsPanel({
   view,
   running,
   focus = null,
+  metaMode = null,
 }: {
   view: DelegationView | null;
   running: boolean;
   focus?: number | null; // a delegation the sidebar tree asked to expand
+  metaMode?: string | null; // autopilot | autonomous, for the graph's root label
 }) {
   const ui = useContext(UIContext);
   const [open, setOpen] = useState<number | null>(null);
@@ -100,6 +103,14 @@ export function DelegationsPanel({
           specialist. Delegations appear here as they start.
         </p>
       ) : (
+        <>
+        <DelegationGraph
+          rows={rows}
+          subAgents={subAgents}
+          metaMode={metaMode}
+          selected={open}
+          onSelect={(i) => setOpen(open === i ? null : i)}
+        />
         <div className="deleg-tree">
           {groups.map(([mode, list]) => (
             <div key={mode} className="deleg-group">
@@ -239,6 +250,7 @@ export function DelegationsPanel({
             </div>
           ))}
         </div>
+        </>
       )}
     </div>
   );

@@ -87,8 +87,8 @@ restart, resume).
    contract is dropped: the attach-a-script path replaces it for
    adaptation, MCP for verbatim); ~~Telemetry~~ DONE 2026-09-08 (tool
    sequence, worker agents and analysis reports from `/telemetry` under
-   the delegation detail; the graphviz graph is not ported — the sidebar
-   tree carries the same edges); Skills (browse/upload DONE 2026-09-08,
+   the delegation detail, plus the dependency graph as plain SVG and a
+   per-layer history download); Skills (browse/upload DONE 2026-09-08,
    PR #561; the persistent-memory pipeline UI is a separate, bigger
    design, next).
 7. **Parity for the switch to default** (see "Standing decisions"):

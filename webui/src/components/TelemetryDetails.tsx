@@ -123,6 +123,8 @@ export function TelemetryDetails({
           layers.map(([key, label]) => (
             <ToolSequence
               key={key}
+              sessionId={sessionId}
+              layerKey={key}
               label={label}
               calls={seq[key].calls}
               source={seq[key].source ? relativeTo(root, seq[key].source) : null}
@@ -198,11 +200,15 @@ export function TelemetryDetails({
 }
 
 function ToolSequence({
+  sessionId,
+  layerKey,
   label,
   calls,
   source,
   onOpenSource,
 }: {
+  sessionId: string;
+  layerKey: string;
   label: string;
   calls: ToolCall[];
   source: string | null;
@@ -217,14 +223,24 @@ function ToolSequence({
           {calls.length} tool call{calls.length === 1 ? "" : "s"}
         </span>
         {source && (
-          <button
-            type="button"
-            className="link-btn"
-            title="The full chat history this sequence was read from"
-            onClick={() => onOpenSource(source)}
-          >
-            full history
-          </button>
+          <>
+            <button
+              type="button"
+              className="link-btn"
+              title="Open the chat history this sequence was read from in Files"
+              onClick={() => onOpenSource(source)}
+            >
+              full history
+            </button>
+            <a
+              className="link-btn"
+              href={api.fileUrl(sessionId, source)}
+              download={`${layerKey}_chat_history.json`}
+              title="Download the full chat history (JSON)"
+            >
+              ⬇ download
+            </a>
+          </>
         )}
       </div>
       <table className="tel-table">

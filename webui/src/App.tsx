@@ -572,6 +572,7 @@ export default function App() {
                     view={state.delegations}
                     running={state.status === "running"}
                     focus={focusDelegation}
+                    metaMode={session.autonomy}
                   />
                   <TelemetryDetails
                     sessionId={session.id}

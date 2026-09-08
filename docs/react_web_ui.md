@@ -177,9 +177,14 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
   an action to its input, result and rationale) and the **analysis
   reports** (each analysis's claims and reasoning). Polled every 3 s while
   a turn runs, since the tool sequence reads the agents' live message
-  lists, and refreshed on every ledger change otherwise. The Streamlit
-  tab's graphviz dependency graph is not ported: the sidebar tree and the
-  ledger rows already show the same dispatch and context-flow edges.
+  lists, and refreshed on every ledger change otherwise. Each layer's
+  full chat history can be opened in Files or downloaded as JSON. Above
+  the ledger sits the **dependency graph** from the Streamlit tab, drawn
+  as plain SVG (no graphviz): the meta-agent root, one box per delegation
+  colored by status and annotated with its sub-agents, grey dispatch
+  edges, blue context edges; boxes are layered by context depth, edges
+  that skip a layer bow around the boxes between, and clicking a box
+  expands its ledger row.
 - **MCP tab** (all modes): connect MCP servers — a `stdio` command, an
   SSE URL, or a streamable-HTTP URL with optional JSON headers — and
   disconnect them; each server card lists the tools it registered. The
