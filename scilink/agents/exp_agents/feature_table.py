@@ -12,10 +12,81 @@ analysis pipeline already persisted and writes a deterministic flatten.
 import csv
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# Trailing name tokens that carry no identity: ``metric`` and ``metric_value``
+# are the same quantity. Kept deliberately small — statistics suffixes (mean,
+# std, err) and single-letter fit-parameter names are NOT variants.
+_VARIANT_SUFFIX_TOKENS = ("value", "val")
+
+
+def _variant_key(name: str) -> str:
+    """Column name reduced to its identity: lower-cased tokens with trailing
+    ``value`` / ``val`` stripped, so ``Metric_value`` and ``metric`` collide."""
+    toks = [t for t in re.split(r"[^a-z0-9]+", str(name).lower()) if t]
+    while toks and toks[-1] in _VARIANT_SUFFIX_TOKENS:
+        toks.pop()
+    return "_".join(toks)
+
+
+def _present(value: Any) -> bool:
+    return value is not None and value != "" and not (
+        isinstance(value, float) and value != value)
+
+
+def merge_variant_columns(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Collapse per-unit key-name variants of one quantity into one column
+    (issue #534).
+
+    Per-unit scripts are generated independently, so one unit may report a
+    derived scalar as ``metric`` while the rest report ``metric_value``. Left
+    alone, the flatten writes two sibling columns, each partially populated,
+    and a BO keyed on one of them silently drops the other units. Two names
+    are merged only when they reduce to the same :func:`_variant_key` AND no
+    unit populates both (complementary sets) — a unit carrying both is
+    evidence they are distinct quantities and they are left untouched. The
+    survivor is the name populated by the most units (first seen on a tie),
+    so a target name a caller already chose stays valid. Mutates ``rows`` in
+    place; returns the merge notes (``column``, ``merged_from``, ``units``).
+    """
+    order: List[str] = []
+    for row in rows:
+        for key in row:
+            if key not in order:
+                order.append(key)
+    groups: Dict[str, List[str]] = {}
+    for key in order:
+        groups.setdefault(_variant_key(key), []).append(key)
+    notes: List[Dict[str, Any]] = []
+    for names in groups.values():
+        if len(names) < 2:
+            continue
+        # Complementary: no unit carries more than one of the variants.
+        if any(sum(_present(row.get(n)) for n in names) > 1 for row in rows):
+            continue
+        counts = {n: sum(_present(row.get(n)) for row in rows) for n in names}
+        canonical = max(names, key=lambda n: (counts[n], -names.index(n)))
+        moved_units: List[str] = []
+        for row in rows:
+            for n in names:
+                if n == canonical or n not in row:
+                    continue
+                val = row.pop(n)
+                if _present(val):
+                    row[canonical] = val
+                    moved_units.append(str(row.get("unit", "?")))
+        merged_from = [n for n in names if n != canonical]
+        notes.append({"column": canonical, "merged_from": merged_from,
+                      "units": moved_units})
+        logger.warning(
+            f"feature table: merged variant column(s) {merged_from} into "
+            f"'{canonical}' for unit(s) {moved_units} — the same quantity was "
+            f"reported under different names (#534)")
+    return notes
 
 
 def _flatten_scalars(obj: Any, prefix: str = "") -> Dict[str, Any]:
@@ -161,11 +232,65 @@ def _extracted_feature_rows(output_dir: Path) -> List[Dict[str, Any]]:
     return [row]
 
 
+_WARN_MAX_UNITS = 6  # unit names listed per warning before eliding
+
+
+def _feature_table_warnings(header: List[str], rows: List[List[str]]
+                            ) -> List[str]:
+    """Human-readable hazards a consumer keying a BO on this table must see
+    (issue #534): a column empty for SOME units (those units would be
+    silently excluded from an optimization keyed on it), and a pair of
+    partially populated columns whose populated unit sets are complementary
+    (the signature of one quantity reported under two names)."""
+    n = len(rows)
+    if n == 0 or not header:
+        return []
+    unit_idx = next((i for i, c in enumerate(header)
+                     if str(c).lower() == "unit"), None)
+
+    def _unit(r_i: int) -> str:
+        r = rows[r_i]
+        if unit_idx is not None and unit_idx < len(r) and r[unit_idx] != "":
+            return r[unit_idx]
+        return f"row {r_i + 1}"
+
+    def _elide(names: List[str]) -> str:
+        shown = ", ".join(names[:_WARN_MAX_UNITS])
+        extra = len(names) - _WARN_MAX_UNITS
+        return shown + (f", … (+{extra})" if extra > 0 else "")
+
+    populated: Dict[int, set] = {}
+    for i in range(len(header)):
+        populated[i] = {r_i for r_i, r in enumerate(rows)
+                        if i < len(r) and r[i] != "" and r[i].lower() != "nan"}
+    partial = [i for i in range(len(header)) if 0 < len(populated[i]) < n]
+    warnings: List[str] = []
+    for i in partial:
+        holes = sorted(set(range(n)) - populated[i])
+        warnings.append(
+            f"Column '{header[i]}' is empty for {len(holes)} of {n} units "
+            f"({_elide([_unit(h) for h in holes])}); an optimization keyed "
+            f"on it would exclude those units.")
+    for a_pos, i in enumerate(partial):
+        for j in partial[a_pos + 1:]:
+            pi, pj = populated[i], populated[j]
+            if pi & pj or len(pi | pj) != n:
+                continue
+            warnings.append(
+                f"Columns '{header[i]}' ({len(pi)} units) and '{header[j]}' "
+                f"({len(pj)} units) are populated for complementary unit sets "
+                f"— likely the same quantity reported under two names. Keying "
+                f"a BO on either one drops the other's units; pick one name "
+                f"and re-report the other units under it.")
+    return warnings
+
+
 def describe_feature_table(path) -> Optional[Dict[str, Any]]:
     """Schema summary of a feature CSV for callers that cannot open the file
     (a remote MCP client, an LLM deciding inputs/targets): column names, row
-    count, and per-column missing counts (only columns with any missing).
-    Never raises."""
+    count, per-column missing counts (only columns with any missing), and
+    ``warnings`` — the partial-population / split-column hazards a BO
+    handoff must not proceed past silently (#534). Never raises."""
     try:
         with open(path, newline="", encoding="utf-8") as fh:
             reader = csv.reader(fh)
@@ -173,9 +298,9 @@ def describe_feature_table(path) -> Optional[Dict[str, Any]]:
             if header is None:
                 return None
             missing = [0] * len(header)
-            n = 0
+            rows: List[List[str]] = []
             for row in reader:
-                n += 1
+                rows.append(row)
                 for i, v in enumerate(row[:len(header)]):
                     if v == "" or v.lower() == "nan":
                         missing[i] += 1
@@ -184,8 +309,9 @@ def describe_feature_table(path) -> Optional[Dict[str, Any]]:
                         missing[i] += 1
         return {
             "columns": header,
-            "n_rows": n,
+            "n_rows": len(rows),
             "missing": {c: m for c, m in zip(header, missing) if m},
+            "warnings": _feature_table_warnings(header, rows),
         }
     except Exception:  # noqa: BLE001 - descriptive only
         return None
@@ -211,6 +337,9 @@ def write_feature_table(output_dir) -> Optional[str]:
         )
         if not rows:
             return None
+        # One quantity under two per-unit names would otherwise become two
+        # half-empty sibling columns (#534).
+        merge_variant_columns(rows)
         columns: List[str] = []
         for row in rows:
             for key in row:

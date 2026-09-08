@@ -72,6 +72,24 @@ def main():
           and r["metrics"]["temperature_C"] == [15.18, 15.45])
     check("column_roles carried from schema",
           r["column_roles"]["targets"] == ["product_area"])
+    check("no 'unit' column -> no units on the result", "units" not in r)
+    sib = _csv(d, "siblings.csv",
+               "unit,metric_value,metric\nu0,0.5,\nu1,,0.9\n")
+    r_sib = h._try_table_passthrough(
+        h._load_flat_table(sib), "x",
+        {"_schema_requirements": {"target_columns": ["metric"]}}, None)
+    check("exact column name wins over a token-subset sibling (#534)",
+          r_sib is not None and r_sib["metrics"]["metric"] == [None, 0.9])
+    r_sib2 = h._try_table_passthrough(
+        h._load_flat_table(sib), "x",
+        {"_schema_requirements": {"target_columns": ["Metric_Value"]}}, None)
+    check("case-insensitive exact match",
+          r_sib2 is not None and r_sib2["metrics"]["Metric_Value"] == [0.5, None])
+    r_hs = h._try_table_passthrough(
+        h._load_flat_table(hs), "x",
+        {"_schema_requirements": {"target_columns": ["Peak_FWHM_mean"]}}, None)
+    check("feature table -> row identities carried as 'units' (#534)",
+          r_hs is not None and r_hs["units"] == ["emission_map"])
     ctx2 = {"_schema_requirements": {"input_columns": ["temperature_C", "pH"],
                                      "target_columns": ["selectivity"]}}
     check("derived target (no matching column) -> codegen path",
@@ -99,6 +117,23 @@ def main():
           h._try_table_passthrough(h._load_flat_table(img),
                                    "ratio of particle count to area",
                                    None, None) is None)
+    # #535: an objective NAMED after a derivation term ('yield',
+    # 'selectivity', 'rate', ...) that is a literal column is read, not
+    # vetoed — a column that exists is read regardless of its name.
+    camp = _csv(d, "campaign_features.csv",
+                "unit,temperature_C,yield\nrun_07,62.5,0.81\n")
+    r = h._try_table_passthrough(
+        h._load_flat_table(camp),
+        "Research objective: maximize yield of the coupling step.\n\n"
+        "Extract the temperature and yield for this run.", None, None)
+    check("goal naming a literal 'yield' column -> pass-through fires",
+          r is not None and r["metrics"]["yield"] == 0.81
+          and r["metrics"]["temperature_C"] == 62.5)
+    check("derivation term absent from the columns still vetoes",
+          h._try_table_passthrough(
+              h._load_flat_table(camp),
+              "Research objective: maximize yield.\n\nCompute the rate of "
+              "yield change with temperature", None, None) is None)
 
     print("4) row-count trap:")
     df1 = h._load_flat_table(img)

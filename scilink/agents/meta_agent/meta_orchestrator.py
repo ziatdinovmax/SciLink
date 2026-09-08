@@ -304,7 +304,11 @@ rather than fabricate a result).
   the feature-table file PATH to `delegate_to_planning` (in `context`, and name
   it in `task`). `feature_tables_schema` lists each table's columns, row count
   and any columns with missing values — use it to name the input/target
-  columns instead of opening the file.
+  columns instead of opening the file. Its `warnings` (also in the result's
+  `warnings`) flag a column that is empty for some units or one quantity split
+  across two sibling columns: a BO keyed on such a column silently drops those
+  units, so tell the user which units are affected instead of calling the
+  table BO-ready.
 - Do NOT re-summarize the numbers as prose for the planning specialist to
   retype — that loses precision and risks transcription errors. The planning
   specialist ingests the file directly with its `analyze_file` tool.

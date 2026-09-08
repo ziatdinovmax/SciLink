@@ -333,7 +333,13 @@ class ScalarizerAgent(BaseAgent):
             goal = str(objective_query or "").lower()
             if not is_feature_table:
                 return None
-            if any(t in goal for t in self._DERIVATION_TERMS):
+            # A derivation term that is itself a column of the table (a
+            # 'yield' or 'selectivity' column) names a quantity to READ, not
+            # to derive — the veto is for terms the table cannot satisfy
+            # (#535).
+            col_tok_union = set().union(*col_tokens.values()) if col_tokens else set()
+            if any(t in goal and t.strip() not in col_tok_union
+                   for t in self._DERIVATION_TERMS):
                 return None
             goal_toks = self._norm_tokens(goal)
             requested = [c for c in cols
@@ -348,8 +354,14 @@ class ScalarizerAgent(BaseAgent):
             rt = self._norm_tokens(req)
             if not rt:
                 return None
-            hit = next((c for c in cols
-                        if rt <= col_tokens[c] or col_tokens[c] <= rt), None)
+            # An exact (case-insensitive) column name wins over a token-subset
+            # match: with sibling columns 'metric' and 'metric_value' both
+            # present, a request for 'metric' must read 'metric', not
+            # whichever sibling comes first in the header (#534).
+            hit = next((c for c in cols if str(c).lower() == req.lower()), None)
+            if hit is None:
+                hit = next((c for c in cols
+                            if rt <= col_tokens[c] or col_tokens[c] <= rt), None)
             if hit is None or not _np_is_numeric(df[hit]):
                 return None
             matched[req] = hit
@@ -376,6 +388,11 @@ class ScalarizerAgent(BaseAgent):
         result = {"status": "success", "metrics": metrics,
                   "source_script": None, "column_roles": roles,
                   "passthrough": True, "error": None}
+        # Row identities travel alongside the requested columns so the caller
+        # can name a unit it has to skip (#534).
+        unit_col = next((c for c in cols if str(c).lower() == "unit"), None)
+        if unit_col is not None:
+            result["units"] = [str(u) for u in df[unit_col].tolist()]
         self._log_action(
             action="table_passthrough",
             input_ctx={"requested": requested},
