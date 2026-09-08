@@ -187,11 +187,23 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
   wider than six wraps into rows, the parallel branches of one fan-out
   collapse into a single stacked box with their outcome counts (30
   branches are one node, not 30 boxes and 60 edges), every edge is routed
-  around the boxes it does not connect (the smallest sideways bow that
-  clears them; sources in a wrapped layer sit in its last row so their
-  edges never cross a sibling row), and clicking a box expands its
-  ledger row (a fan-out box opens its first failed branch). Checked at 45
-  delegations.
+  around the boxes it does not connect (straight when nothing is in the
+  way, else a sweep inside the free band between rows into the nearest
+  vertical lane that clears every box — a column gap, the strip beside a
+  row, or the canvas edge; sources in a wrapped layer sit in its last row
+  so their edges never cross a sibling row), and clicking a box expands
+  its ledger row (a fan-out box opens its first failed branch). Layout
+  and routing are a pure module (`webui/src/delegationGraph.ts`) checked
+  by `npm run check:graph` (`webui/scripts/graph_check.ts`): sixteen
+  ledger scenarios — chains, diamonds, skip edges, fan-outs with fusion
+  and a non-member consumer, two fan-outs, wide layers, a 40-deep chain,
+  20 sources into one fusion, out-of-order indices, unknown / self /
+  duplicate sources, a cycle, 45 delegations — each asserting the drawn
+  context edges equal the ledger's `context_from` relations, one
+  dispatch edge per node, endpoints on the right boxes, no edge through
+  a third box, downward flow, no overlapping boxes. Edge paths carry
+  `data-from` / `data-to` and node groups `data-node`, so the same audit
+  can be run against the rendered SVG in a browser.
 - **MCP tab** (all modes): connect MCP servers — a `stdio` command, an
   SSE URL, or a streamable-HTTP URL with optional JSON headers — and
   disconnect them; each server card lists the tools it registered. The
