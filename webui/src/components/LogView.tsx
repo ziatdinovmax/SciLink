@@ -83,6 +83,9 @@ export function currentActivity(log: string): string | null {
   for (let i = lines.length - 1; i >= 0; i--) {
     let line = lines[i].replaceAll(THOUGHT_MARK, "").trim();
     if (!line) continue;
+    // Bare rules ("-" * 60, "=" * 60) frame headers in the CLI narration;
+    // the "--- title ---" pattern below would read one as a title of "-".
+    if (/^[-=_*—─═]+$/.test(line)) continue;
     // Best-of-N fan-out lines are tagged "[cand_NN] <milestone>": strip the
     // tag, classify the milestone as usual, prefix the candidate back on —
     // so parallel candidates narrate like "Candidate 2 · Verification 1/7…".
@@ -142,11 +145,19 @@ export function currentActivity(log: string): string | null {
     // without a bespoke pattern per print statement. `bare` drops a leading
     // emoji/symbol ("🧠 LLM Step: …", "📄 Generating …").
     const bare = line.replace(/^[^\p{L}\p{N}]+\s*/u, "");
+    // Human-in-the-loop pauses: the narration ends on the prompt banner, and
+    // the last action line ("Reasoning over results...") would otherwise
+    // keep showing as if still in progress.
+    if (/^(REQUESTING FEEDBACK|SELECT A PLAN CANDIDATE|CODE REVIEW REQUIRED)\b/.test(bare))
+      return withTag("Waiting for your input…");
+    if (/^FILES PRODUCED THIS TURN\b/.test(bare)) return withTag("Wrapping up…");
     m = /^-{2,}\s*(.+?)\s*-{2,}$/.exec(bare);
     if (m) return withTag(clip(m[1]));
     m = /^Attempt\s+(\d+(?:\/\d+)?):\s*(.+)$/.exec(bare);
     if (m) return withTag(clip(`Attempt ${m[1]} · ${m[2]}`));
-    m = /^(?:LLM Step:\s*)?((?:Executing|Generating|Running|Loading|Refitting|Preparing|Searching|Creating|Initializing|Hiring|Connecting)\b.+)$/.exec(bare);
+    // "LLM Step:" / "Tool:" announce a stage; the verbs cover the analysis
+    // loop and the planning narration (refine / critique / synthesis).
+    m = /^(?:(?:LLM Step|Tool):\s*)?((?:Executing|Generating|Running|Loading|Refitting|Preparing|Searching|Creating|Initializing|Hiring|Connecting|Refining|Reasoning|Processing|Saving|Verifying|Updating|Building|Synthesizing|Retrieving|Querying|Inspecting|Reviewing|Drafting|Writing|Analyzing)\b.+)$/.exec(bare);
     if (m) return withTag(clip(m[1]));
   }
   return null;
