@@ -1083,3 +1083,53 @@ def test_mcp_header_env_expansion_only_when_local(tmp_path, monkeypatch):
     connect_mcp(agent, name="b", transport="http", url="https://h",
                 headers={"Authorization": "Bearer ${MY_TOK}"}, expand_env=False)
     assert agent.calls[-1][4]["Authorization"] == "Bearer ${MY_TOK}"
+
+
+# ── Skills tab: catalog, markdown, upload + register ──────────────
+
+class _FakeSkillAgent:
+    def __init__(self):
+        self._custom_skills = {}
+        self.registered = []
+
+    def register_skill(self, path):
+        p = Path(path)
+        if p.stat().st_size == 0:
+            raise ValueError(f"Skill file is empty: {p}")
+        self._custom_skills[p.stem] = str(p)
+        self.registered.append(str(p))
+        return p.stem
+
+
+def test_skills_catalog_view_and_upload(client, tmp_path):
+    session, sdir = _fake_session(client, tmp_path)
+    session.agent = _FakeSkillAgent()
+    base = f"/api/v1/sessions/{sdir.name}"
+    cat = client.get(f"{base}/skills").json()
+    assert cat["skills_supported"] and cat["custom"] == []
+    domains = {d["domain"]: d for d in cat["builtin"]}
+    assert "curve_fitting" in domains and domains["curve_fitting"]["label"] == "Curve Fitting"
+    first = domains["curve_fitting"]["skills"][0]
+    assert first["name"] and isinstance(first["description"], str)
+    # built-in markdown is served as text/markdown
+    r = client.get(f"{base}/skills/curve_fitting/{first['name']}")
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/markdown")
+    assert r.text.strip()
+    assert client.get(f"{base}/skills/curve_fitting/no_such_skill").status_code == 404
+    assert client.get(f"{base}/skills/custom/nope").status_code == 404
+    # upload: .md saved under custom_skills/ and registered; bad files reported
+    md = b"---\ndescription: My XRD rules\n---\n## Overview\nMine.\n## Planning\nDo X.\n"
+    r = client.post(f"{base}/skills", files=[
+        ("files", ("my_xrd.md", md)), ("files", ("empty.md", b"")),
+        ("files", ("notes.txt", b"x"))])
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["registered"] == ["my_xrd"]
+    assert {e["file"] for e in body["errors"]} == {"empty.md", "notes.txt"}
+    assert (sdir / "custom_skills" / "my_xrd.md").read_bytes() == md
+    assert body["catalog"]["custom"] == [{"name": "my_xrd", "path": str(sdir / "custom_skills" / "my_xrd.md")}]
+    assert client.get(f"{base}/skills/custom/my_xrd").text == md.decode()
+    # an agent without register_skill: catalog still works, upload refused
+    session.agent = SimpleNamespace()
+    assert client.get(f"{base}/skills").json()["skills_supported"] is False
+    assert client.post(f"{base}/skills", files=[("files", ("a.md", b"# a"))]).status_code == 400

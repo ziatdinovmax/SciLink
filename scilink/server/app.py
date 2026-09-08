@@ -426,6 +426,43 @@ def create_app(session_root: Path, serve_frontend: bool = True,
         return build_tree(session.session_dir,
                           new_since=session.turn_started_at)
 
+    # ── skills ───────────────────────────────────────────────────
+
+    @app.get("/api/v1/sessions/{session_id}/skills")
+    def get_skills(request: Request, session_id: str):
+        """The skill catalog: built-in bundles by domain (with their
+        one-line descriptions) and the custom skills registered on this
+        session's agent."""
+        from .skills_api import skill_catalog
+        return skill_catalog(_session_or_404(request, session_id).agent)
+
+    @app.get("/api/v1/sessions/{session_id}/skills/{domain}/{name}")
+    def get_skill_markdown(request: Request, session_id: str, domain: str, name: str):
+        """A skill's markdown — `domain` is a catalog domain, or `custom`."""
+        from fastapi.responses import PlainTextResponse
+
+        from .skills_api import SkillError, skill_markdown
+        session = _session_or_404(request, session_id)
+        try:
+            text = skill_markdown(session.agent, domain, name)
+        except SkillError as exc:
+            raise HTTPException(exc.status, str(exc))
+        return PlainTextResponse(text, media_type="text/markdown; charset=utf-8")
+
+    @app.post("/api/v1/sessions/{session_id}/skills")
+    def upload_skills(request: Request, session_id: str,
+                      files: list[UploadFile] = File(...)):
+        """Upload `.md` skill files: saved under the session's custom_skills/
+        and registered with the agent for the rest of the session (the
+        agents' selectors treat them like built-ins)."""
+        from .skills_api import SkillError, register_uploaded_skills
+        session = _session_or_404(request, session_id)
+        payload = [(f.filename or "", f.file.read()) for f in files]
+        try:
+            return register_uploaded_skills(session.agent, session.session_dir, payload)
+        except SkillError as exc:
+            raise HTTPException(exc.status, str(exc))
+
     # ── tools / MCP ──────────────────────────────────────────────
 
     @app.get("/api/v1/sessions/{session_id}/tools")

@@ -22,6 +22,7 @@ import { DelegationsPanel } from "./components/DelegationsPanel";
 import { TelemetryDetails } from "./components/TelemetryDetails";
 import { LoginScreen } from "./components/LoginScreen";
 import { ToolsPanel } from "./components/ToolsPanel";
+import { SkillsPanel } from "./components/SkillsPanel";
 
 interface SessionState {
   snapshot: SessionSnapshot | null;
@@ -177,7 +178,7 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>(null); // init overlay text
   const [startError, setStartError] = useState<string | null>(null);
   const [serverStopped, setServerStopped] = useState(false);
-  const [tab, setTab] = useState<"chat" | "files" | "telemetry" | "tools">("chat");
+  const [tab, setTab] = useState<"chat" | "files" | "telemetry" | "tools" | "skills">("chat");
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   // Delegation the sidebar tree asked the Telemetry tab to expand.
   const [focusDelegation, setFocusDelegation] = useState<number | null>(null);
@@ -530,6 +531,13 @@ export default function App() {
                 Files
               </button>
               <button
+                className={tab === "skills" ? "active" : ""}
+                onClick={() => setTab("skills")}
+                title="Upload custom skills; browse the skill catalog"
+              >
+                Skills
+              </button>
+              <button
                 className={tab === "tools" ? "active" : ""}
                 onClick={() => setTab("tools")}
                 title="Connect MCP servers; see what the agent can call"
@@ -557,6 +565,9 @@ export default function App() {
                 selectedPath={selectedFile}
                 onSelect={setSelectedFile}
               />
+            </div>
+            <div className="tab-body" hidden={tab !== "skills"}>
+              <SkillsPanel sessionId={session.id} active={tab === "skills"} />
             </div>
             <div className="tab-body" hidden={tab !== "tools"}>
               <ToolsPanel
