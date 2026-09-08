@@ -255,7 +255,26 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
   border-radius: 12px; padding: 2px 10px; font-size: 12px; color: var(--text-muted);
 }
 .hero-accordion { margin-bottom: 10px; }
-.folder-input { margin-top: 8px; font-size: 13px; }
+.folder-input { margin-top: 8px; }
+.dropzone-wrap { position: relative; }
+.attach-wrap { position: relative; display: flex; flex-shrink: 0; }
+
+/* files / folder chooser behind a single upload control */
+.upload-menu {
+  position: absolute; left: 0; z-index: 20; min-width: 260px; white-space: nowrap;
+  background: var(--bg-card); border: 1px solid var(--border-strong);
+  border-radius: 8px; padding: 4px; box-shadow: 0 6px 20px rgba(0,0,0,0.25);
+  display: flex; flex-direction: column; gap: 2px; text-align: left;
+}
+.upload-menu.below { top: calc(100% + 4px); left: 50%; transform: translateX(-50%); }
+.upload-menu.above { bottom: calc(100% + 6px); }
+.upload-menu button {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  border: none; background: none; border-radius: 6px; padding: 8px 10px;
+  font-size: 13px; color: var(--text); cursor: pointer; text-align: left;
+}
+.upload-menu button:hover { background: var(--bg-hover, rgba(127,127,127,0.12)); color: var(--accent); }
+.upload-menu-hint { margin-left: auto; font-size: 11px; color: var(--text-dim); }
 .caption.warn { color: var(--danger); }
 
 /* ── live turn / spinner / log ──────────────────────────────

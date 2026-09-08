@@ -100,7 +100,11 @@ rather than fabricate a result).
 - When the user refers to uploaded files — or points you at a folder — call
   `inspect_uploads` FIRST, before delegating. It returns a content probe of
   each file (array shape/dtype, table columns, document text, JSON keys) so
-  you route from evidence rather than guessing from filenames.
+  you route from evidence rather than guessing from filenames. Its listing is
+  one level deep but names every subfolder; when a folder is nested (one
+  subfolder per sample, condition, or run), inspect with `recursive=true` or
+  per subfolder, and delegate each subfolder as its own dataset unless the
+  probes show they form one series.
 - Match each piece of work to the specialist whose capabilities — listed
   under SPECIALIST CAPABILITIES above — cover it. That inventory, generated
   from each mode's live tool registry, is the source of truth: reason from

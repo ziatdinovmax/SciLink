@@ -22,7 +22,14 @@ about *what's next and why*. Updated 2026-09-04.
   session-title conversational-output gate, favicon, landing-page mode
   dropdown, collapsible sidebar, inset filmstrip de-dup.
 
-Validation posture: ~40 offline tests across
+- **Folder uploads + subfolder-aware meta** (2026-09-07, branch
+  `feature-folder-upload-subfolder-inspect`) — dropzones and the chat
+  input take whole directories (recursive walk, layout preserved
+  server-side, strays skipped), heroes describe nested layouts to the
+  agent, and `inspect_uploads` lists subfolders and can recurse. Closes
+  the gap where a nested drop was invisible to the meta.
+
+Validation posture: ~45 offline tests across
 `tests/test_web_server.py`, `test_artifact_image_rewrite.py`,
 `test_capabilities_cache.py`, `test_session_title.py`; live E2E on
 Bedrock (analyze co-pilot end-to-end incl. HITL over the API, stop,
