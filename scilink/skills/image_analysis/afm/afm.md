@@ -95,6 +95,15 @@ Required discipline:
   for a downstream task (e.g. feeding SAM), keep a parallel copy of
   the physically-scaled image and do measurements on that copy.
 
+**Deliverable when the goal is to characterize orientations of domains
+or patches.** A histogram or table of orientation angles is not enough on
+its own — where each domain/patch sits and which way it points is the
+result. At least one results subplot must be a spatially-resolved,
+color-coded map or overlay in which each domain/patch is colored by its
+measured orientation (a cyclic colormap for angles), so the spatial
+arrangement of orientations is legible at a glance alongside any summary
+statistics.
+
 ## validation
 ### foundational
 Validate that the preprocessing was correct before validating the
@@ -131,6 +140,12 @@ science.
   abundance maps on the square-pixel image. Do not over-interpret
   components as "domains" without corroboration from the physical-
   unit image.
+- If the objective was to characterize domain/patch orientations,
+  confirm the results include a spatially-resolved, color-coded
+  orientation map/overlay — not orientation statistics alone. A run
+  that reports an angle distribution without showing where those
+  orientations are on the image has not delivered the spatial result
+  the objective asked for.
 
 Do not penalize an analysis for having preserved the raw line-to-line
 baseline only when the features are genuinely row-correlated and the
