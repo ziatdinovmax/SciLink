@@ -656,7 +656,9 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
   margin-left: 6px; padding: 0 6px; border-radius: 9px; font-size: 11px;
   background: var(--bg-card); border: 1px solid var(--border); color: var(--text-muted);
 }
-.deleg-panel { flex: 1; overflow: auto; padding: 16px 8%; }
+.telemetry-scroll { flex: 1; overflow: auto; }
+.deleg-panel { padding: 16px 8%; }
+.tel-details { padding: 0 8% 24px; }
 .deleg-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; }
 .deleg-title { font-weight: 600; font-size: 15px; }
 .deleg-empty { margin-top: 24px; text-align: center; }
@@ -754,3 +756,27 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 .tool-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .tool-list { margin: 6px 0 0; padding-left: 18px; font-size: 13px; }
 .tool-list li { margin: 3px 0; }
+
+/* Telemetry details — tool sequence, worker agents, analysis reports */
+.tel-layer { margin: 10px 0 16px; }
+.tel-layer-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+.tel-table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: auto; }
+.tel-table th { text-align: left; font-weight: 500; color: var(--text-dim); padding: 4px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.tel-table td { padding: 5px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.tel-row { cursor: pointer; }
+.tel-row:hover td { background: var(--bg-panel); }
+.tel-row.open td { background: var(--bg-panel); border-bottom: none; }
+.tel-row-detail td { padding: 4px 8px 12px 24px; }
+.tel-shape { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--text-dim); word-break: break-word; }
+.tel-json { margin: 0; padding: 8px 10px; max-height: 320px; overflow: auto; font-size: 12px; white-space: pre-wrap; word-break: break-word; background: var(--code-bg); border: 1px solid var(--code-border); border-radius: 4px; }
+.tel-status { font-size: 12px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--border); color: var(--text-dim); white-space: nowrap; }
+.tel-status.status-success, .tel-status.status-ok, .tel-status.status-completed { color: #3fb950; border-color: #3fb95055; }
+.tel-status.status-error, .tel-status.status-failed { color: #f85149; border-color: #f8514955; }
+.tel-status.status-running, .tel-status.status-pending { color: #d29922; border-color: #d2992255; }
+.tel-by-type { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }
+.tel-actions { margin-top: 4px; }
+.tel-report { margin: 8px 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; }
+.tel-report summary { cursor: pointer; display: flex; align-items: baseline; gap: 10px; }
+.tel-report .tel-json { margin: 8px 0; }
+.tel-report .file-chip-btn { margin-top: 4px; }
+

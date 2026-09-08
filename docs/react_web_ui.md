@@ -168,8 +168,18 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
   summary and findings, the produced files (opening in the Files tab),
   warnings and error. Both surfaces are fed by the session snapshot and
   `delegations` SSE events as the ledger changes mid-turn, and survive
-  refresh and resume. The per-agent tool sequence and worker action
-  histories (already served by `/telemetry`) are the tab's next content.
+  refresh and resume. Below the ledger, from the `/telemetry` snapshot:
+  the **tool sequence** (every tool call each layer's LLM made — meta,
+  analysis specialist, planning specialist — with the input/output shape
+  in the table and the actual arguments and result on click, plus a link
+  to the full chat history in Files), the **worker agents** (each
+  sub-agent's action history with outcomes; a row expands to its actions,
+  an action to its input, result and rationale) and the **analysis
+  reports** (each analysis's claims and reasoning). Polled every 3 s while
+  a turn runs, since the tool sequence reads the agents' live message
+  lists, and refreshed on every ledger change otherwise. The Streamlit
+  tab's graphviz dependency graph is not ported: the sidebar tree and the
+  ledger rows already show the same dispatch and context-flow edges.
 - **MCP tab** (all modes): connect MCP servers — a `stdio` command, an
   SSE URL, or a streamable-HTTP URL with optional JSON headers — and
   disconnect them; each server card lists the tools it registered. The
@@ -210,8 +220,7 @@ rate limiting on sign-in (put the proxy's in front if internet-facing).
   - deep links: the tab and selected file live in the URL hash, so a
     refresh (or shared link) lands on the same file.
 
-Not yet ported: simulate mode, the Skills tab, the Telemetry tab's per-agent
-tool sequence (the `/telemetry` endpoint already serves it), vibes.
+Not yet ported: simulate mode, the Skills tab, vibes.
 
 ## Architecture
 

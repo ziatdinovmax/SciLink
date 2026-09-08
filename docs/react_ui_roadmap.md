@@ -85,11 +85,12 @@ restart, resume).
    connect + the read-only tool inventory, without the Streamlit
    tool-file uploader, whose `tool_schemas` / `create_tool_functions`
    contract is dropped: the attach-a-script path replaces it for
-   adaptation, MCP for verbatim); Telemetry (the tab exists with the
-   per-delegation detail; the `/telemetry` endpoint already serves the
-   full reader, so what is left is the per-agent tool sequence and worker
-   action histories); Skills (browse/upload first; the persistent-memory
-   pipeline UI is a separate, bigger design). Build when actually missed.
+   adaptation, MCP for verbatim); ~~Telemetry~~ DONE 2026-09-08 (tool
+   sequence, worker agents and analysis reports from `/telemetry` under
+   the delegation detail; the graphviz graph is not ported — the sidebar
+   tree carries the same edges); Skills (browse/upload DONE 2026-09-08,
+   PR #561; the persistent-memory pipeline UI is a separate, bigger
+   design, next).
 7. **Parity for the switch to default** (see "Standing decisions"):
    simulate mode in the web UI (HPC connection, wizards) is the largest
    gap; after it the web UI covers everything Streamlit does.
