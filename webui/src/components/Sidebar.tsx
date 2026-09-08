@@ -80,7 +80,16 @@ export function Sidebar({
   const [providerInfo, setProviderInfo] = useState(config?.provider ?? null);
   const [credInfo, setCredInfo] = useState(config?.credentials ?? null);
 
-  const effectiveModel = model === "__custom__" ? customModel : model;
+  // While a session is live the fields are locked and must show THAT
+  // session's model and autonomy (a reattached or resumed session did not
+  // come from this form), not the form's defaults. Credentials are never
+  // echoed by the server, so those stay blank.
+  const shownModel = session
+    ? models.includes(session.model) ? session.model : "__custom__"
+    : model;
+  const shownCustomModel = session ? session.model : customModel;
+  const shownAutonomy = session ? session.autonomy : autonomy;
+  const effectiveModel = shownModel === "__custom__" ? shownCustomModel : shownModel;
   const autonomyOptions = config?.autonomy_options[mode] ?? [];
 
   useEffect(() => {
@@ -176,7 +185,7 @@ export function Sidebar({
       <label className="field">
         <span>Model</span>
         <select
-          value={model}
+          value={shownModel}
           disabled={locked}
           onChange={(e) => setModel(e.target.value)}
         >
@@ -188,12 +197,12 @@ export function Sidebar({
           <option value="__custom__">Custom</option>
         </select>
       </label>
-      {model === "__custom__" && (
+      {shownModel === "__custom__" && (
         <label className="field">
           <span>Custom model name</span>
           <input
             type="text"
-            value={customModel}
+            value={shownCustomModel}
             disabled={locked}
             onChange={(e) => setCustomModel(e.target.value)}
           />
@@ -305,7 +314,7 @@ export function Sidebar({
       <label className="field">
         <span>Autonomy mode</span>
         <select
-          value={autonomy}
+          value={shownAutonomy}
           disabled={locked}
           onChange={(e) => setAutonomy(e.target.value)}
         >
