@@ -1808,7 +1808,9 @@ class MetaOrchestratorTools:
                 if pp.suffix.lower() not in _DOCUMENT_EXTS:
                     errors.append(
                         f"Not a supported document: {p} "
-                        f"(handles {', '.join(sorted(_DOCUMENT_EXTS))})"
+                        f"(handles {', '.join(sorted(_DOCUMENT_EXTS))}) — "
+                        "for a script, log, config or any other text file "
+                        "use read_file."
                     )
                     continue
                 try:
@@ -1943,4 +1945,65 @@ class MetaOrchestratorTools:
                 },
             },
             required=["paths"],
+        )
+
+        # -- read_file ----------------------------------------------------
+        # The plain reader the meta lacked (#397's last phase): a script the
+        # user attached, a session log, a config, a specialist's report.
+        # view_document is the document reader (PDF / DOCX figures, tables);
+        # this is the shared engine every specialist's read_file already
+        # uses (#481), so windowing and truncation notices are identical.
+        _FULL_READ_STEMS = ("report", "summary", "white_paper", "literature")
+        _FULL_READ_MAX_CHARS = 250_000
+
+        def read_file(file_path: str, max_lines: int = 200,
+                      tail: bool = False, search: str = None,
+                      offset: int = None) -> str:
+            print(f"  ⚡ Tool: Reading file '{file_path}'...")
+            path = Path(str(file_path)).expanduser()
+            if not path.is_absolute():
+                path = Path(self.orch.base_dir) / path
+            from ...utils.file_io import read_file_content
+            return json.dumps(read_file_content(
+                path, max_lines=max_lines, tail=tail, search=search,
+                offset=offset, full_read_stems=_FULL_READ_STEMS,
+                full_read_max_chars=_FULL_READ_MAX_CHARS,
+                ocr_model=getattr(self.orch, "model", None),
+                display_path=str(file_path)))
+
+        self._register_tool(
+            func=read_file,
+            name="read_file",
+            description=(
+                "Read a text, code, JSON, CSV or log file — a script the "
+                "user attached (.py etc.), a session or specialist log, a "
+                "config, a report a delegation wrote — without delegating "
+                "anything. Use it to see what an uploaded script does "
+                "before routing it, or to answer a question about a file. "
+                "PDF and Word documents are extracted to text too, but "
+                "view_document is the better reader for those (figures, "
+                "tables). Reads from the TOP by default; reports and "
+                "summaries are returned WHOLE. For a long file do not read "
+                "it repeatedly hoping to see more — a truncated read lists "
+                "the section headings with line numbers: use offset=<line> "
+                "to jump, search='<pattern>' to find where something is, or "
+                "tail=true to read the END. Path is absolute or relative to "
+                "the meta session directory."
+            ),
+            parameters={
+                "file_path": {"type": "string",
+                              "description": "Path to the file to read."},
+                "max_lines": {"type": "integer",
+                              "description": "Maximum lines to return (default: 200)."},
+                "tail": {"type": "boolean", "description": (
+                    "Read the LAST max_lines lines instead of the first.")},
+                "search": {"type": "string", "description": (
+                    "Case-insensitive regex: returns matching lines with line "
+                    "numbers and one line of context, plus the match count, "
+                    "instead of the file body.")},
+                "offset": {"type": "integer", "description": (
+                    "1-based line to start reading from — the way to read the "
+                    "MIDDLE of a file.")},
+            },
+            required=["file_path"],
         )
