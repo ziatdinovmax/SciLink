@@ -62,6 +62,14 @@ input[type="text"], input[type="password"], textarea, select {
   padding: 8px 10px;
   font: inherit;
 }
+/* A live session locks the model / credential fields (they cannot change
+   mid-session) — grey them out so the lock is visible, as in Streamlit. */
+input:disabled, textarea:disabled, select:disabled {
+  opacity: 0.45; cursor: not-allowed; color: var(--text-dim);
+}
+label.field:has(:disabled) > span { color: var(--text-dim); opacity: 0.7; }
+label.field:has(:disabled) { cursor: not-allowed; }
+
 input:focus, textarea:focus, select:focus {
   outline: none;
   border-color: var(--focus);
