@@ -33,11 +33,73 @@ scilink-web --host 127.0.0.1 --port 8422 --session-root .
 ```
 
 `--session-root` is where sessions are created, where the resume list is
-discovered, and the fence for file serving. Binding a non-loopback `--host`
-prints a loud warning: there is **no authentication** in this first cut —
-anyone who can reach the port can execute code through the agents. For
-remote use, tunnel (`ssh -L 8422:127.0.0.1:8422 host`) or front it with an
-authenticating reverse proxy.
+discovered, and the fence for file serving. The default is the local
+single-user tool: loopback bind, no sign-in. To reach it from another
+machine either tunnel (`ssh -L 8422:127.0.0.1:8422 host`) or share it
+properly — see "Sharing on a lab server" below. A non-loopback `--host`
+without authentication is refused.
+
+## Sharing on a lab server
+
+```bash
+# per-user tokens: each user gets <session-root>/users/<name>/
+cat > users.json <<'JSON'
+{"alice": "<token>", "bob": "<token>"}
+JSON
+python -c 'import secrets; print(secrets.token_urlsafe(32))'   # make tokens
+scilink-web --host 0.0.0.0 --port 8422 --session-root /data/scilink --users users.json
+
+# or one shared token (single user, sessions stay in --session-root)
+scilink-web --host 0.0.0.0 --token "$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+# (SCILINK_WEB_TOKEN in the environment works too)
+```
+
+Give each person a sign-in link — `https://host/?token=<their token>` — or
+they paste the token on the sign-in screen. The page exchanges it for an
+HttpOnly cookie and scrubs it from the URL; the sidebar shows who is
+signed in and offers sign-out. Scripts use `Authorization: Bearer <token>`.
+
+What a shared server changes, and only a shared server:
+
+- every `/api/v1` call needs a token (bearer header or the login cookie);
+  `/auth/*` is public so the sign-in screen can load;
+- with `--users`, each user has an isolated session root and live-session
+  registry — another user's session id is a 404, and the resume list only
+  shows their own;
+- "Use a folder on this machine…" disappears from the upload menu and the
+  endpoints behind it (`/folders`, `/plan_dirs`) answer 403: the server is
+  not on the browser's machine, so upload the folder instead;
+- "Quit App" is disabled with `--users` (one person must not stop the
+  server for everyone);
+- cookie sessions live in memory, so a restart signs everyone out.
+
+TLS is the reverse proxy's job. Caddy:
+
+```
+scilink.lab.example.org {
+    reverse_proxy 127.0.0.1:8422
+}
+```
+
+nginx (the `X-Forwarded-Proto` header is what makes the cookie `Secure`;
+`proxy_buffering off` keeps the SSE stream live):
+
+```
+location / {
+    proxy_pass         http://127.0.0.1:8422;
+    proxy_set_header   Host $host;
+    proxy_set_header   X-Forwarded-Proto $scheme;
+    proxy_http_version 1.1;
+    proxy_buffering    off;
+    proxy_read_timeout 3600s;
+    client_max_body_size 2g;
+}
+```
+
+If the proxy itself authenticates every request (SSO, mTLS), run with
+`--insecure-no-auth` behind it. Not covered yet: per-user LLM credentials
+(entered per session in the sidebar as before; the server stores none),
+rate limiting on sign-in (put the proxy's in front if internet-facing).
 
 ## What's included (first cut)
 
@@ -159,7 +221,10 @@ webui/ (Vite + React + TS)  ──REST + SSE──►  scilink/server/ (FastAPI)
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/config` | modes, models, autonomy options, provider fields, credential availability, consent text |
+| GET | `/auth/me` | public: whether sign-in is required, who is signed in, `local_files` |
+| POST | `/auth/login` | access token → HttpOnly session cookie |
+| POST | `/auth/logout` | drop the cookie session |
+| GET | `/config` | modes, models, autonomy options, provider fields, credential availability, consent text, `auth`, `local_files` |
 | GET | `/sessions?mode=` | live sessions + resumable session dirs |
 | POST | `/sessions` | create, or resume with `resume_dir` |
 | GET/PATCH | `/sessions/{id}` | snapshot / rename |

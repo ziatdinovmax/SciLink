@@ -732,3 +732,8 @@ details.card iframe { width: 100%; height: 600px; border: none; background: #fff
 .dtree-ctx { color: #58a6ff; font-size: 11px; white-space: nowrap; }
 .dtree-time { white-space: nowrap; }
 
+/* ── sign-in ────────────────────────────────────────────────── */
+.login-form { display: flex; gap: 8px; width: min(480px, 90%); margin: 12px auto 0; }
+.login-form input { flex: 1; }
+.signed-in { margin: 0 0 8px; }
+

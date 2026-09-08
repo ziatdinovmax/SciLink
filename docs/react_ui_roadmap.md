@@ -48,12 +48,12 @@ restart, resume).
    the workflow by hand) and confirm the wheel on the release page carries
    the bundle; decide whether to enable PyPI trusted publishing
    (`PYPI_PUBLISH=true`) or keep uploading with twine.
-3. **Multi-user hardening** — the gate to sharing a lab-server URL:
-   token auth or documented reverse-proxy setup, per-user session
-   roots, and hide the "Use a folder on this machine…" menu item on a
-   non-loopback bind (it cannot work for a remote user). Per-session
-   isolation is already done; only authn/authz is missing. Until then:
-   SSH tunnel.
+3. ~~**Multi-user hardening**~~ — DONE 2026-09-08: `--token` /
+   `--users FILE` bearer + cookie auth, per-user session roots and
+   registries, a refused unauthenticated public bind, the local-folder
+   route hidden and refused on a remote bind, quit disabled on a shared
+   server, reverse-proxy docs. The single-user default is unchanged.
+   Remaining, on demand: per-user LLM credentials, sign-in rate limiting.
 4. **Shared file I/O + analysis-mode adoption (#481, on #397).** Extract
    `read_file` / `save_file` / `append_file` / `read_document` into one
    engine in `scilink/utils` (the `file_edit.py` pattern), land the JSON

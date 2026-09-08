@@ -13,9 +13,9 @@ import mimetypes
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from scilink.providers import provider_for
 from scilink.ui.config import (
@@ -28,10 +28,12 @@ from scilink.ui.session_meta import save_session_name
 
 from . import files as files_mod
 from . import runner
+from .auth import COOKIE_NAME, DEFAULT_USER, AuthConfig, AuthMiddleware, user_root
 from .schemas import (
     CreateSessionRequest,
     FeedbackResponseRequest,
     FolderCheckRequest,
+    LoginRequest,
     PlanDirsRequest,
     RenameSessionRequest,
     SendMessageRequest,
@@ -50,34 +52,119 @@ CONSENT_TEXT = ("I understand that the agent will execute generated "
                 "Python code on my machine")
 
 
-def create_app(session_root: Path, serve_frontend: bool = True) -> FastAPI:
+def create_app(session_root: Path, serve_frontend: bool = True,
+               auth: Optional[AuthConfig] = None,
+               local_files: bool = True) -> FastAPI:
+    """``auth=None`` is the local tool: no authentication, one implicit
+    user whose sessions live in ``session_root``. With an ``AuthConfig``
+    every ``/api/v1`` call must carry a token (bearer header or the login
+    cookie); with per-user tokens each user gets ``<root>/users/<name>/``
+    and an isolated live-session registry. ``local_files=False`` (the CLI
+    sets it for a non-loopback bind) disables the endpoints that read
+    arbitrary paths on the server's machine (pasted folders, plan dirs)
+    — they only make sense when the browser and the server share a host."""
     app = FastAPI(title="SciLink Web", docs_url="/api/docs")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-        allow_methods=["*"], allow_headers=["*"],
+        allow_methods=["*"], allow_headers=["*"], allow_credentials=True,
         expose_headers=["X-Preview-Kind"],
     )
-    manager = SessionManager(session_root)
-    app.state.manager = manager
+    app.add_middleware(AuthMiddleware, auth=auth)
+    app.state.auth = auth
+    app.state.local_files = local_files
+    # One SessionManager per user root (a single shared one when auth is
+    # off or a single token is used) — the isolation boundary.
+    managers: dict = {}
+    session_root = session_root.resolve()
 
-    def _session_or_404(session_id: str) -> WebSession:
-        session = manager.get(session_id)
+    def _user(request: Request) -> str:
+        user = getattr(request.state, "user", None)
+        return user or DEFAULT_USER
+
+    def _mgr(request: Request) -> SessionManager:
+        user = _user(request)
+        mgr = managers.get(user)
+        if mgr is None:
+            mgr = SessionManager(user_root(session_root, auth, user))
+            managers[user] = mgr
+        return mgr
+    app.state.manager_for_user = lambda user: managers.get(user)
+    # Single-user deployments (auth off, or one shared token) have exactly
+    # one manager; expose it eagerly under the historical attribute so
+    # tests and tooling that reach for `app.state.manager` keep working.
+    # Multi-user servers have none to single out.
+    if auth is None or not auth.multi_user:
+        managers[DEFAULT_USER] = SessionManager(
+            user_root(session_root, auth, DEFAULT_USER))
+        app.state.manager = managers[DEFAULT_USER]
+    else:
+        app.state.manager = None
+
+    def _session_or_404(request: Request, session_id: str) -> WebSession:
+        session = _mgr(request).get(session_id)
         if session is None:
             raise HTTPException(404, f"No live session {session_id!r} — "
                                      "create or resume it first.")
         return session
 
+    def _require_local_files() -> None:
+        if not local_files:
+            raise HTTPException(
+                403, "Folders on the server's machine are not available on a "
+                     "remote deployment — upload the folder instead.")
+
+    # ── auth ─────────────────────────────────────────────────────
+
+    @app.get("/api/v1/auth/me")
+    def auth_me(request: Request):
+        """Who am I: whether sign-in is required and, if signed in, who."""
+        if auth is None:
+            return {"auth_required": False, "user": DEFAULT_USER,
+                    "multi_user": False, "local_files": local_files}
+        return {"auth_required": True, "user": auth.user_for_request(request),
+                "multi_user": auth.multi_user, "local_files": local_files}
+
+    @app.post("/api/v1/auth/login")
+    def auth_login(request: Request, body: LoginRequest):
+        """Exchange an access token for the HttpOnly session cookie the
+        browser needs (EventSource / <img> / downloads cannot send headers)."""
+        if auth is None:
+            return {"user": DEFAULT_USER}
+        cookie = auth.login(body.token)
+        if cookie is None:
+            raise HTTPException(401, "Invalid access token.")
+        user = auth.user_for_cookie(cookie)
+        resp = JSONResponse({"user": user})
+        secure = (request.headers.get("x-forwarded-proto", request.url.scheme)
+                  == "https")
+        resp.set_cookie(COOKIE_NAME, cookie, httponly=True, samesite="lax",
+                        secure=secure, path="/")
+        return resp
+
+    @app.post("/api/v1/auth/logout")
+    def auth_logout(request: Request):
+        if auth is not None:
+            auth.logout(request.cookies.get(COOKIE_NAME))
+        resp = JSONResponse({"ok": True})
+        resp.delete_cookie(COOKIE_NAME, path="/")
+        return resp
+
     # ── config ───────────────────────────────────────────────────
 
     @app.get("/api/v1/config")
-    def get_config(model: str = "", base_url: str = ""):
+    def get_config(request: Request, model: str = "", base_url: str = ""):
         """Static UI config + credential AVAILABILITY (never values)."""
         modes = [m for m in APP_MODES if m["key"] != "simulate"]
         model_q = model or MODEL_OPTIONS[0]
         prefill = resolve_prefill(model_q, existing_base_url=base_url)
         spec = provider_for(model_q)
         return {
+            "auth": {"required": auth is not None,
+                     "user": _user(request) if auth is None
+                     else auth.user_for_request(request),
+                     "multi_user": bool(auth and auth.multi_user)},
+            "local_files": local_files,
             "modes": modes,
             "models": MODEL_OPTIONS,
             "embedding_models": EMBEDDING_MODEL_OPTIONS,
@@ -106,18 +193,20 @@ def create_app(session_root: Path, serve_frontend: bool = True) -> FastAPI:
     # ── sessions ─────────────────────────────────────────────────
 
     @app.get("/api/v1/sessions")
-    def list_sessions(mode: str = "meta"):
-        return {"live": manager.list_live(),
-                "resumable": manager.discover_resumable(mode)}
+    def list_sessions(request: Request, mode: str = "meta"):
+        mgr = _mgr(request)
+        return {"live": mgr.list_live(),
+                "resumable": mgr.discover_resumable(mode)}
 
     @app.post("/api/v1/sessions")
-    def create_session(body: CreateSessionRequest):
+    def create_session(request: Request, body: CreateSessionRequest):
         if not body.consent:
             raise HTTPException(400, "Consent to code execution is required "
                                      "to start a session.")
+        mgr = _mgr(request)
         try:
             if body.resume_dir:
-                session = manager.resume(
+                session = mgr.resume(
                     resume_dir=body.resume_dir, mode=body.mode,
                     model=body.model, autonomy=body.autonomy,
                     api_key=body.api_key, base_url=body.base_url,
@@ -126,7 +215,7 @@ def create_app(session_root: Path, serve_frontend: bool = True) -> FastAPI:
                     embedding_model=body.embedding_model,
                     embedding_api_key=body.embedding_api_key)
             else:
-                session = manager.create(
+                session = mgr.create(
                     mode=body.mode, model=body.model, autonomy=body.autonomy,
                     api_key=body.api_key, base_url=body.base_url,
                     provider_fields=body.provider_fields,
@@ -136,23 +225,26 @@ def create_app(session_root: Path, serve_frontend: bool = True) -> FastAPI:
                     embedding_api_key=body.embedding_api_key)
         except SessionError as exc:
             raise HTTPException(400, str(exc))
-        return manager.snapshot(session)
+        return mgr.snapshot(session)
 
     @app.get("/api/v1/sessions/{session_id}")
-    def get_session(session_id: str):
-        return manager.snapshot(_session_or_404(session_id))
+    def get_session(request: Request, session_id: str):
+        return _mgr(request).snapshot(_session_or_404(request, session_id))
 
     @app.delete("/api/v1/sessions/{session_id}")
-    def reset_session(session_id: str):
+    def reset_session(request: Request, session_id: str):
         """Reset: stop and drop the live session (its dir stays resumable)."""
-        if not manager.remove(session_id):
+        if not _mgr(request).remove(session_id):
             raise HTTPException(404, f"No live session {session_id!r}.")
         return {"ok": True}
 
     @app.post("/api/v1/quit")
-    def quit_server():
+    def quit_server(request: Request):
         """Port of the Streamlit Quit App button (sidebar.py:550): reply
-        first, then terminate the server process."""
+        first, then terminate the server process. Refused on a shared
+        multi-user server — one user must not shut everyone down."""
+        if auth is not None and auth.multi_user:
+            raise HTTPException(403, "Quit is disabled on a shared server.")
         import os
         import signal
         import threading
@@ -161,8 +253,8 @@ def create_app(session_root: Path, serve_frontend: bool = True) -> FastAPI:
         return {"ok": True}
 
     @app.patch("/api/v1/sessions/{session_id}")
-    def rename_session(session_id: str, body: RenameSessionRequest):
-        session = _session_or_404(session_id)
+    def rename_session(request: Request, session_id: str, body: RenameSessionRequest):
+        session = _session_or_404(request, session_id)
         if not save_session_name(session.session_dir, body.name,
                                  named_by="user"):
             raise HTTPException(400, "Could not save the session name.")
@@ -172,8 +264,8 @@ def create_app(session_root: Path, serve_frontend: bool = True) -> FastAPI:
     # ── turns ────────────────────────────────────────────────────
 
     @app.post("/api/v1/sessions/{session_id}/messages", status_code=202)
-    def send_message(session_id: str, body: SendMessageRequest):
-        session = _session_or_404(session_id)
+    def send_message(request: Request, session_id: str, body: SendMessageRequest):
+        session = _session_or_404(request, session_id)
         content = body.content.strip()
         if not content:
             raise HTTPException(400, "Empty message.")
@@ -184,14 +276,14 @@ def create_app(session_root: Path, serve_frontend: bool = True) -> FastAPI:
         return {"status": "running"}
 
     @app.post("/api/v1/sessions/{session_id}/stop")
-    def stop(session_id: str):
-        session = _session_or_404(session_id)
+    def stop(request: Request, session_id: str):
+        session = _session_or_404(request, session_id)
         stopped = runner.request_stop(session)
         return {"stopped": stopped}
 
     @app.post("/api/v1/sessions/{session_id}/feedback")
-    def feedback(session_id: str, body: FeedbackResponseRequest):
-        session = _session_or_404(session_id)
+    def feedback(request: Request, session_id: str, body: FeedbackResponseRequest):
+        session = _session_or_404(request, session_id)
         turn = session.turn
         pending = turn.pending_question if turn is not None else None
         if pending is None or pending.hreq.id != body.request_id:
@@ -203,11 +295,11 @@ def create_app(session_root: Path, serve_frontend: bool = True) -> FastAPI:
     # ── SSE ──────────────────────────────────────────────────────
 
     @app.get("/api/v1/sessions/{session_id}/events")
-    def events(session_id: str, after: Optional[int] = None,
+    def events(request: Request, session_id: str, after: Optional[int] = None,
                last_event_id: Optional[str] = Header(default=None)):
         """SSE stream. ``Last-Event-ID`` (reconnects) wins over ``after``
         (initial attach from a snapshot's ``event_cursor``)."""
-        session = _session_or_404(session_id)
+        session = _session_or_404(request, session_id)
         try:
             cursor = int(last_event_id) if last_event_id else after
         except ValueError:
@@ -221,13 +313,15 @@ def create_app(session_root: Path, serve_frontend: bool = True) -> FastAPI:
     # ── pasted local folders (hero forms) ────────────────────────
 
     @app.post("/api/v1/sessions/{session_id}/folders")
-    def check_folders(session_id: str, body: FolderCheckRequest):
+    def check_folders(request: Request, session_id: str, body: FolderCheckRequest):
         """Validate pasted local folder paths and enumerate their tabular
         contents — the web twin of the Streamlit hero folder inputs
         (chat_uploads.py:176-266), which read the local filesystem directly.
         Local-tool posture: these are arbitrary machine paths, exactly as in
-        Streamlit; multi-user deployments gate this at the auth layer."""
-        _session_or_404(session_id)
+        Streamlit — refused (403) when the server is not on the browser's
+        machine (``local_files=False``)."""
+        _require_local_files()
+        _session_or_404(request, session_id)
         _DATA_EXTS = {".csv", ".xlsx", ".tsv", ".txt"}
 
         def _nat(f: Path):
@@ -270,11 +364,12 @@ def create_app(session_root: Path, serve_frontend: bool = True) -> FastAPI:
         return {"results": results}
 
     @app.post("/api/v1/sessions/{session_id}/plan_dirs")
-    def set_plan_dirs(session_id: str, body: PlanDirsRequest):
+    def set_plan_dirs(request: Request, session_id: str, body: PlanDirsRequest):
         """Repoint the planning agent's resource dirs at pasted folders (port
         of chat_uploads.py:269-279): stable source paths let the KB reuse its
         FAISS indexes across sessions instead of rebuilding."""
-        session = _session_or_404(session_id)
+        _require_local_files()
+        session = _session_or_404(request, session_id)
         agent = session.agent
         applied = {}
         for attr, raw in (("knowledge_dir", body.knowledge),
@@ -295,7 +390,7 @@ def create_app(session_root: Path, serve_frontend: bool = True) -> FastAPI:
     # ── files ────────────────────────────────────────────────────
 
     @app.post("/api/v1/sessions/{session_id}/uploads")
-    def upload(session_id: str, category: str = Form(...),
+    def upload(request: Request, session_id: str, category: str = Form(...),
                files: list[UploadFile] = File(...),
                paths: str = Form("")):
         """Multipart upload. ``paths`` (optional) is a JSON list of relative
@@ -303,7 +398,7 @@ def create_app(session_root: Path, serve_frontend: bool = True) -> FastAPI:
         preserved. It travels as its own field rather than in the part
         filenames because browsers are free to strip directory components
         from a Content-Disposition filename."""
-        session = _session_or_404(session_id)
+        session = _session_or_404(request, session_id)
         try:
             if paths:
                 import json as _json
@@ -324,43 +419,43 @@ def create_app(session_root: Path, serve_frontend: bool = True) -> FastAPI:
             raise HTTPException(400, str(exc))
 
     @app.get("/api/v1/sessions/{session_id}/tree")
-    def get_tree(session_id: str):
-        session = _session_or_404(session_id)
+    def get_tree(request: Request, session_id: str):
+        session = _session_or_404(request, session_id)
         from .tree import build_tree
         return build_tree(session.session_dir,
                           new_since=session.turn_started_at)
 
     @app.get("/api/v1/sessions/{session_id}/delegations")
-    def get_delegations(session_id: str):
+    def get_delegations(request: Request, session_id: str):
         """The meta session's delegation ledger for the Delegations tab
         (same payload as the `delegations` SSE event). Empty for other
         modes rather than an error, so the client can call it blindly."""
-        session = _session_or_404(session_id)
+        session = _session_or_404(request, session_id)
         from .delegations import delegation_view
         if session.mode != "meta":
             return {"delegations": [], "sub_agents": {}}
         return delegation_view(session.agent, session.session_dir)
 
     @app.get("/api/v1/sessions/{session_id}/telemetry")
-    def get_telemetry(session_id: str):
+    def get_telemetry(request: Request, session_id: str):
         """Full read-only telemetry snapshot (ledger, worker action
         histories, analysis reasoning, per-agent tool sequence) — the
         reader behind the Streamlit Telemetry tab, exposed for the web
         UI's future Telemetry view."""
-        session = _session_or_404(session_id)
+        session = _session_or_404(request, session_id)
         from scilink.agents.meta_agent.telemetry import collect_session_telemetry
         return collect_session_telemetry(session.agent)
 
     @app.get("/api/v1/sessions/{session_id}/provenance")
-    def get_provenance(session_id: str):
-        session = _session_or_404(session_id)
+    def get_provenance(request: Request, session_id: str):
+        session = _session_or_404(request, session_id)
         from .tree import load_provenance
         return {"events": load_provenance(session.session_dir)}
 
     @app.get("/api/v1/sessions/{session_id}/thumb")
-    def get_thumb(session_id: str, path: str, size: int = 256,
+    def get_thumb(request: Request, session_id: str, path: str, size: int = 256,
                   cmap: str = "viridis"):
-        session = _session_or_404(session_id)
+        session = _session_or_404(request, session_id)
         from fastapi.responses import Response
 
         from . import previews
@@ -379,8 +474,8 @@ def create_app(session_root: Path, serve_frontend: bool = True) -> FastAPI:
                                  "X-Preview-Kind": kind})
 
     @app.get("/api/v1/sessions/{session_id}/table")
-    def get_table(session_id: str, path: str, limit: int = 500):
-        session = _session_or_404(session_id)
+    def get_table(request: Request, session_id: str, path: str, limit: int = 500):
+        session = _session_or_404(request, session_id)
         from . import previews
         try:
             target = files_mod.resolve_safe(session.session_dir, path)
@@ -394,8 +489,8 @@ def create_app(session_root: Path, serve_frontend: bool = True) -> FastAPI:
             raise HTTPException(422, f"Could not read table {path}: {exc}")
 
     @app.get("/api/v1/sessions/{session_id}/zip")
-    def get_zip(session_id: str, path: str = ""):
-        session = _session_or_404(session_id)
+    def get_zip(request: Request, session_id: str, path: str = ""):
+        session = _session_or_404(request, session_id)
         from fastapi.responses import Response
 
         from .tree import zip_directory
@@ -413,8 +508,8 @@ def create_app(session_root: Path, serve_frontend: bool = True) -> FastAPI:
             headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
     @app.get("/api/v1/sessions/{session_id}/files")
-    def get_file(session_id: str, path: str):
-        session = _session_or_404(session_id)
+    def get_file(request: Request, session_id: str, path: str):
+        session = _session_or_404(request, session_id)
         try:
             target = files_mod.resolve_safe(session.session_dir, path)
         except PermissionError as exc:
